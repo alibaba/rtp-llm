@@ -27,6 +27,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_la
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
+from rtp_llm.models_py.quant_methods.base import (
+    QuantizationConfig as RuntimeQuantizationConfig,
+)
 from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig, SpeculativeType
 
 
@@ -197,6 +200,65 @@ class TestMoeConfigResolver(unittest.TestCase):
         )
 
         self.assertEqual(capacity, 16)
+
+    def test_fused_gate_up_exclusion_matches_both_logical_projections(self):
+        prefix = "layers.0.mlp.experts"
+        ignored_layers = [
+            f"{prefix}.gate_up_proj",
+            f"{prefix}.down_proj",
+        ]
+        checkpoint_quant = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=ignored_layers,
+        )
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=checkpoint_quant,
+            use_deepep_low_latency=True,
+        )
+        runtime_quant = RuntimeQuantizationConfig(
+            "FP8_DYNAMIC_PER_TENSOR",
+            source_config=checkpoint_quant,
+        )
+        layer = SimpleNamespace(PROJ_NAMES=("gate_proj", "up_proj", "down_proj"))
+
+        self.assertTrue(runtime_quant.is_moe_layer_ignored(layer, prefix))
+        self.assertEqual(
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+                17,
+                2,
+                checkpoint_quant,
+                config.model_config,
+            ),
+            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(17, 2, None),
+        )
+
+    def test_partial_fused_gate_up_exclusion_is_rejected(self):
+        prefix = "layers.0.mlp.experts"
+        checkpoint_quant = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=[f"{prefix}.gate_up_proj"],
+        )
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=checkpoint_quant,
+            use_deepep_low_latency=True,
+        )
+        runtime_quant = RuntimeQuantizationConfig(
+            "FP8_DYNAMIC_PER_TENSOR",
+            source_config=checkpoint_quant,
+        )
+        layer = SimpleNamespace(PROJ_NAMES=("gate_proj", "up_proj", "down_proj"))
+
+        with self.assertRaisesRegex(ValueError, "partially match fused MoE"):
+            runtime_quant.is_moe_layer_ignored(layer, prefix)
+        with self.assertRaisesRegex(ValueError, "partially match fused MoE"):
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+                17,
+                2,
+                checkpoint_quant,
+                config.model_config,
+            )
 
     def test_deepep_low_latency_capacity_matches_dispatch_partition_under_cp(self):
         config = create_config_adapter(

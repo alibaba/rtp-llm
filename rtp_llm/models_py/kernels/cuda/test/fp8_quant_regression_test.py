@@ -108,6 +108,51 @@ class Fp8QuantRegressionTest(TestCase):
         self.assertEqual(static_output.shape, input_tensor.shape)
         self.assertIs(returned_scale, static_scale)
 
+    def test_per_tensor_quantizes_non_vector_aligned_tail(self):
+        for dtype, shape in (
+            (torch.float16, (2, 5)),
+            (torch.bfloat16, (2, 5)),
+            (torch.float32, (2, 3)),
+        ):
+            with self.subTest(dtype=dtype, shape=shape):
+                input_tensor = (
+                    torch.linspace(
+                        -2.5,
+                        3.0,
+                        shape[0] * shape[1],
+                        dtype=torch.float32,
+                        device="cuda",
+                    )
+                    .reshape(shape)
+                    .to(dtype)
+                )
+                output, scale = scaled_fp8_per_tensor_quant(input_tensor)
+                expected_scale = (
+                    input_tensor.float().abs().amax() / torch.finfo(output.dtype).max
+                ).reshape(1)
+                expected = (
+                    input_tensor.float()
+                    .div(expected_scale)
+                    .clamp(
+                        torch.finfo(output.dtype).min,
+                        torch.finfo(output.dtype).max,
+                    )
+                    .to(output.dtype)
+                )
+
+                torch.testing.assert_close(
+                    scale,
+                    expected_scale,
+                    rtol=1e-5,
+                    atol=1e-7,
+                )
+                torch.testing.assert_close(
+                    output.float(),
+                    expected.float(),
+                    rtol=0,
+                    atol=0,
+                )
+
     def test_per_token_empty_input_does_not_resolve_kernel(self):
         input_tensor = torch.empty((0, 128), dtype=torch.bfloat16, device="cuda")
         with mock.patch(

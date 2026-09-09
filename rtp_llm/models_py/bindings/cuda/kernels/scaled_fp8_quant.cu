@@ -379,7 +379,6 @@ void per_tensor_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch::Te
 
     const int block_size   = 256;
     const int num_elements = input.numel();
-    assert(num_elements % (16 / input.element_size()) == 0);
     const int num_blocks = min((num_elements + block_size - 1) / block_size, 1024);
 
     dim3 grid(num_blocks);

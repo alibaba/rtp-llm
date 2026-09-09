@@ -9,6 +9,7 @@ TEST(MropeConfigValidationTest, AcceptsCapacityBoundaries) {
     EXPECT_TRUE(validateInterleavedMropeConfig(3, 128, 128, 24, 20, 20).empty());
     EXPECT_TRUE(validateInterleavedMropeConfig(3, 66, 128, 11, 11, 11).empty());
     EXPECT_TRUE(validateInterleavedMropeConfig(3, 64, 128, 11, 11, 10).empty());
+    EXPECT_TRUE(validateInterleavedMropeConfig(3, 64, 128, 22, 0, 10).empty());
 }
 
 TEST(MropeConfigValidationTest, RejectsInvalidShapeContracts) {
@@ -16,7 +17,7 @@ TEST(MropeConfigValidationTest, RejectsInvalidShapeContracts) {
     EXPECT_NE(validateInterleavedMropeConfig(3, 63, 128, 11, 11, 10).find("positive even"), std::string::npos);
     EXPECT_NE(validateInterleavedMropeConfig(3, 130, 128, 23, 21, 21).find("size_per_head"), std::string::npos);
     EXPECT_NE(validateInterleavedMropeConfig(3, 64, 128, 10, 10, 10).find("section sum"), std::string::npos);
-    EXPECT_NE(validateInterleavedMropeConfig(3, 64, 128, 0, 16, 16).find("positive"), std::string::npos);
+    EXPECT_NE(validateInterleavedMropeConfig(3, 64, 128, -1, 23, 10).find("non-negative"), std::string::npos);
 }
 
 TEST(MropeConfigValidationTest, RejectsInterleavedCapacityOverflow) {

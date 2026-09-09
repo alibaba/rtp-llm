@@ -206,20 +206,11 @@ class RtpModule(nn.Module):
                     f"{previous_source!r} and {source!r}"
                 )
             assigned_targets[target_id] = source
-        if tuple(target.shape) != tuple(tensor.shape):
-            raise ValueError(
-                f"Shape mismatch for {module.__class__.__name__}.{name}: "
-                f"expected {tuple(target.shape)}, got {tuple(tensor.shape)}"
-            )
-        if target.dtype != tensor.dtype and not (
-            target.is_floating_point() and tensor.is_floating_point()
-        ):
-            raise TypeError(
-                f"Dtype mismatch for {module.__class__.__name__}.{name}: "
-                f"expected {target.dtype}, got {tensor.dtype}"
-            )
-        with torch.no_grad():
-            target.copy_(tensor)
+        copy_weight_(
+            target,
+            tensor,
+            f"{module.__class__.__name__}.{name}",
+        )
         _mark_loaded(module, name)
         return True
 

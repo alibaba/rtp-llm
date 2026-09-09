@@ -563,14 +563,24 @@ class _BertNewLoaderBase(GptModelBase):
         return f"layers.{layer_idx}.{mapped_suffix}"
 
     def _load_mapped_weight(
-        self, target: str, tensor: torch.Tensor, checkpoint_name: str
+        self,
+        target: str,
+        tensor: torch.Tensor,
+        checkpoint_name: str,
+        assigned_targets: Dict[int, str],
     ) -> None:
         if target in self._loaded_checkpoint_targets:
             raise RuntimeError(
                 f"Duplicate BERT checkpoint tensor for {target!r}: "
                 f"latest source={checkpoint_name!r}"
             )
-        if not self._dispatch(self, target, tensor):
+        if not self._dispatch(
+            self,
+            target,
+            tensor,
+            checkpoint_name=checkpoint_name,
+            assigned_targets=assigned_targets,
+        ):
             raise RuntimeError(
                 f"BERT checkpoint mapping target {target!r} for "
                 f"{checkpoint_name!r} is unavailable"
@@ -585,6 +595,7 @@ class _BertNewLoaderBase(GptModelBase):
         loaded = 0
         custom_loaded = 0
         dropped = []
+        assigned_targets: Dict[int, str] = {}
         for name, tensor in _as_iter(weights):
             if not isinstance(name, str) or not isinstance(tensor, torch.Tensor):
                 raise TypeError("Weights must be (str, torch.Tensor) pairs")
@@ -603,7 +614,7 @@ class _BertNewLoaderBase(GptModelBase):
             if target is None:
                 dropped.append(name)
                 continue
-            self._load_mapped_weight(target, tensor, name)
+            self._load_mapped_weight(target, tensor, name, assigned_targets)
             loaded += 1
 
         token_type = self.embeddings.token_type_embeddings
@@ -616,6 +627,7 @@ class _BertNewLoaderBase(GptModelBase):
                 token_type_target,
                 torch.zeros_like(token_type.weight),
                 "<BERT default token-type embedding>",
+                assigned_targets,
             )
 
         missing_custom = self._expected_custom_weight_names - set(

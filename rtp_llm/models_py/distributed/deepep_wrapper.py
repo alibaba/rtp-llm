@@ -58,6 +58,7 @@ except ImportError as _deep_ep_import_err:
 from rtp_llm.models_py.quantization_exclusion import (
     collect_quantization_exclusions,
     is_module_ignored,
+    moe_projection_exclusion_states,
 )
 
 if TYPE_CHECKING:
@@ -293,14 +294,13 @@ class DeepepWrapperConfig:
             moe_layer_indices = list(getattr(model_config, "moe_layer_index", ()))
             if not moe_layer_indices and model_config.expert_num > 0:
                 moe_layer_indices = list(range(model_config.num_layers))
-            projections = ("gate_proj", "up_proj", "down_proj")
             for layer_idx in moe_layer_indices:
                 prefix = f"layers.{layer_idx}.mlp.experts"
                 root_ignored = is_module_ignored(prefix, exclusion_patterns)
-                projection_ignored = [
-                    is_module_ignored(f"{prefix}.{projection}", exclusion_patterns)
-                    for projection in projections
-                ]
+                projection_ignored = moe_projection_exclusion_states(
+                    prefix,
+                    exclusion_patterns,
+                )
                 if root_ignored or all(projection_ignored):
                     has_unquantized_moe_layer = True
                     break
