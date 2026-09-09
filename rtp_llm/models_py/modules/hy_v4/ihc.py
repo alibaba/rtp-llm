@@ -231,6 +231,114 @@ class Hy4IHCUnit(nn.Module):
             return reads[0], post_gates[0]
         return torch.cat(reads, dim=0), torch.cat(post_gates, dim=0)
 
+    def pre_normed_mxfp8(
+        self, channels: torch.Tensor, norm: nn.Module
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return BF16 iHC input plus its exact MXFP8 representation.
+
+        The DeepGEMM iHC epilogue emits both representations in one launch.
+        Unsupported shapes retain the numerically identical two-launch path.
+        """
+        channels = self.prepare_input(channels)
+        if channels.size(0) > 0:
+            result = maybe_fused_ihc_pre_normed_grouped(
+                channels,
+                self.fn_weight,
+                self.scale,
+                self.base,
+                norm.weight.data,
+                magnitude=self.magnitude,
+                hc_eps=self.hc_eps,
+                ihc_norm_eps=self.norm_eps,
+                read_norm_eps=norm.variance_epsilon,
+                chunk_size=self.chunk_size,
+                emit_mxfp8=True,
+            )
+            if result is not None:
+                read, post_gate, read_fp8, read_scale = result
+                return read, post_gate, read_fp8, read_scale
+
+        read, post_gate = self.pre_normed(channels, norm)
+        from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+            mxfp8_quant_act_packed,
+        )
+
+        read_fp8, read_scale = mxfp8_quant_act_packed(read.contiguous())
+        return read, post_gate, read_fp8, read_scale
+
+    def pre_normed_mxfp8_with_fp32(
+        self, channels: torch.Tensor, norm: nn.Module
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """Also publish the exact FP32 view consumed by HY4 head-gate GEMM."""
+        channels = self.prepare_input(channels)
+        if channels.size(0) > 0:
+            result = maybe_fused_ihc_pre_normed_grouped(
+                channels,
+                self.fn_weight,
+                self.scale,
+                self.base,
+                norm.weight.data,
+                magnitude=self.magnitude,
+                hc_eps=self.hc_eps,
+                ihc_norm_eps=self.norm_eps,
+                read_norm_eps=norm.variance_epsilon,
+                chunk_size=self.chunk_size,
+                emit_mxfp8=True,
+                emit_fp32=True,
+            )
+            if result is not None:
+                read, post_gate, read_fp8, read_scale, read_fp32 = result
+                return read, post_gate, read_fp8, read_scale, read_fp32
+
+        read, post_gate, read_fp8, read_scale = self.pre_normed_mxfp8(
+            channels, norm
+        )
+        return read, post_gate, read_fp8, read_scale, read.float()
+
+    def pre_normed_mxfp8_to_mega_moe(
+        self,
+        channels: torch.Tensor,
+        norm: nn.Module,
+        mega_mxfp8_out: torch.Tensor,
+        mega_mxfp8_scale_out: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Emit dense-MXFP8 and MegaMoE inputs from one iHC epilogue.
+
+        The two scale tensors intentionally use different layouts and zero
+        handling.  ``read_scale`` is the column-major/TMA view consumed by
+        CudaMxfp8Linear; the caller-owned MegaMoE scale is contiguous and uses
+        MegaMoE's 1e-4 absmax floor.  Unsupported calls return ``None`` before
+        launching work so the decoder can use the existing production path.
+        """
+        channels = self.prepare_input(channels)
+        if channels.size(0) == 0:
+            return None
+        result = maybe_fused_ihc_pre_normed_grouped(
+            channels,
+            self.fn_weight,
+            self.scale,
+            self.base,
+            norm.weight.data,
+            magnitude=self.magnitude,
+            hc_eps=self.hc_eps,
+            ihc_norm_eps=self.norm_eps,
+            read_norm_eps=norm.variance_epsilon,
+            chunk_size=self.chunk_size,
+            emit_mxfp8=True,
+            mega_mxfp8_out=mega_mxfp8_out,
+            mega_mxfp8_scale_out=mega_mxfp8_scale_out,
+        )
+        if result is None:
+            return None
+        read, post_gate, read_fp8, read_scale = result
+        return read, post_gate, read_fp8, read_scale
+
 
 class Hy4IHCHead(nn.Module):
     """Merge the four residual channels before the final RMSNorm."""

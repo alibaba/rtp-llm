@@ -5,14 +5,11 @@ small FP32 projection plus square sum. Triton reduces those split-K partials and
 fuses gate activation, four-channel mixing, and the following RMSNorm. Other
 CUDA devices use an FP32 GEMM surrounded by Triton cast/reduction epilogues.
 
-Set ``RTP_LLM_HY4_IHC_TRITON=0`` to force eager execution, or set
-``RTP_LLM_HY4_IHC_PRE_BACKEND=triton`` to bypass the TF32 DeepGEMM path.
 Unsupported inputs return ``None`` so callers preserve the eager fallback.
 """
 
 from __future__ import annotations
 
-import os
 from functools import cache
 from typing import Tuple
 
@@ -21,9 +18,13 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+    MX_BLOCK,
+    _float_to_ue8m0,
+    _ue8m0_to_inv_scale,
+)
 
-_IHC_TRITON_ENV = "RTP_LLM_HY4_IHC_TRITON"
-_IHC_PRE_BACKEND_ENV = "RTP_LLM_HY4_IHC_PRE_BACKEND"
+
 _HC_MULT = 4
 _PRE_BLOCK_K = 4096
 _EPILOGUE_BLOCK_H = 1024
@@ -32,24 +33,7 @@ _POST_BLOCK_H = 512
 
 
 def _triton_enabled() -> bool:
-    return os.environ.get(_IHC_TRITON_ENV, "1").strip().lower() not in (
-        "0",
-        "false",
-        "off",
-        "no",
-    )
-
-
-def _requested_pre_backend() -> str:
-    requested = os.environ.get(_IHC_PRE_BACKEND_ENV, "auto").strip().lower()
-    aliases = {"": "auto", "dg": "deepgemm"}
-    requested = aliases.get(requested, requested)
-    if requested not in ("auto", "deepgemm", "triton"):
-        raise ValueError(
-            f"invalid {_IHC_PRE_BACKEND_ENV}={requested!r}; expected auto, "
-            "deepgemm, or triton"
-        )
-    return requested
+    return True
 
 
 @cache
@@ -68,9 +52,6 @@ def _device_num_sms(device_index: int) -> int:
 
 
 def _use_deepgemm_prenorm(channels: torch.Tensor) -> bool:
-    requested = _requested_pre_backend()
-    if requested == "triton":
-        return False
     device_index = channels.device.index
     if device_index is None:
         device_index = torch.cuda.current_device()
@@ -78,6 +59,15 @@ def _use_deepgemm_prenorm(channels: torch.Tensor) -> bool:
     flat_size = _HC_MULT * channels.shape[2]
     available = is_sm100 and flat_size % 64 == 0 and _has_deepgemm_prenorm()
     return available
+
+
+def _allocate_mxfp8_scale(m: int, k: int, device: torch.device) -> torch.Tensor:
+    import deep_gemm
+
+    k_packed = k // (4 * MX_BLOCK)
+    aligned_m = deep_gemm.get_tma_aligned_size(m, 4)
+    storage = torch.empty((k_packed, aligned_m), device=device, dtype=torch.int32)
+    return storage.transpose(0, 1)[:m, :]
 
 
 def _deepgemm_num_splits(m: int, k: int, device_index: int) -> int:
@@ -395,8 +385,19 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
     base_ptr,
     norm_weight_ptr,
     read_ptr,
+    read_fp32_ptr,
     post_gate_ptr,
+    mxfp8_ptr,
+    mxfp8_scale_ptr,
+    mega_mxfp8_ptr,
+    mega_mxfp8_scale_ptr,
     M,
+    stride_mxfp8_m,
+    stride_mxfp8_scale_m,
+    stride_mxfp8_scale_k,
+    stride_mega_mxfp8_m,
+    stride_mega_mxfp8_scale_m,
+    stride_mega_mxfp8_scale_k,
     HC: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -407,6 +408,10 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
     HC_EPS: tl.constexpr,
     MAGNITUDE: tl.constexpr,
     BLOCK_H: tl.constexpr,
+    MX_GROUP_SIZE: tl.constexpr,
+    HAS_MXFP8_OUTPUT: tl.constexpr,
+    HAS_MEGA_MOE_OUTPUT: tl.constexpr,
+    HAS_FP32_OUTPUT: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     split_offsets = tl.arange(0, BLOCK_SPLITS)
@@ -470,8 +475,105 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
         norm_weight_ptr + hidden_offsets, mask=hidden_mask, other=0.0
     ).to(tl.float32)
     normalized = rounded_read * read_inv_rms * norm_weight
-    tl.store(read_ptr + row * H + hidden_offsets, normalized, mask=hidden_mask)
+    # The downstream Linear sees a BF16 RMSNorm output.  Keep that rounding
+    # boundary explicit before deriving the optional MXFP8 representation.
+    normalized_bf16 = normalized.to(tl.bfloat16)
+    tl.store(
+        read_ptr + row * H + hidden_offsets, normalized_bf16, mask=hidden_mask
+    )
+    if HAS_FP32_OUTPUT:
+        tl.store(
+            read_fp32_ptr + row * H + hidden_offsets,
+            normalized_bf16.to(tl.float32),
+            mask=hidden_mask,
+        )
     tl.store(post_gate_ptr + row * HC + channel_offsets, post_gate)
+
+    if HAS_MXFP8_OUTPUT or HAS_MEGA_MOE_OUTPUT:
+        normalized_fp32 = normalized_bf16.to(tl.float32)
+        num_groups: tl.constexpr = BLOCK_H // MX_GROUP_SIZE
+        actual_num_groups: tl.constexpr = H // MX_GROUP_SIZE
+        values_2d = tl.reshape(normalized_fp32, (num_groups, MX_GROUP_SIZE))
+        absmax = tl.max(tl.abs(values_2d), axis=1)
+
+    if HAS_MXFP8_OUTPUT:
+        normalized_max = absmax * tl.full(
+            absmax.shape, 1.0 / 448.0, tl.float32
+        )
+        scale_exponent = _float_to_ue8m0(normalized_max)
+        inv_scale = _ue8m0_to_inv_scale(scale_exponent)
+        scaled = values_2d * tl.broadcast_to(
+            tl.reshape(inv_scale, (num_groups, 1)),
+            (num_groups, MX_GROUP_SIZE),
+        )
+        quantized = tl.clamp(scaled, -448.0, 448.0).to(
+            mxfp8_ptr.dtype.element_ty
+        )
+        tl.store(
+            mxfp8_ptr + row * stride_mxfp8_m + hidden_offsets,
+            tl.reshape(quantized, (BLOCK_H,)),
+            mask=hidden_mask,
+        )
+
+        num_packed: tl.constexpr = num_groups // 4
+        actual_num_packed: tl.constexpr = actual_num_groups // 4
+        group_offsets = tl.arange(0, num_groups)
+        shifted = tl.where(
+            group_offsets < actual_num_groups,
+            scale_exponent << ((group_offsets % 4) * 8),
+            0,
+        )
+        packed = tl.sum(tl.reshape(shifted, (num_packed, 4)), axis=1)
+        packed_offsets = tl.arange(0, num_packed)
+        tl.store(
+            mxfp8_scale_ptr
+            + row * stride_mxfp8_scale_m
+            + packed_offsets * stride_mxfp8_scale_k,
+            packed,
+            mask=packed_offsets < actual_num_packed,
+        )
+
+    if HAS_MEGA_MOE_OUTPUT:
+        # MegaMoE's activation ABI is also group-32 E4M3 + four packed UE8M0
+        # bytes, but it deliberately clamps absmax to 1e-4 and stores scales
+        # row-major.  Keep it separate from the dense DeepGEMM MXFP8 output,
+        # whose zero-group scale byte is exactly zero and whose logical scale
+        # view is column-major/TMA aligned.
+        mega_absmax = tl.maximum(absmax, 1.0e-4)
+        mega_scale_exponent = _float_to_ue8m0(mega_absmax / 448.0)
+        mega_inv_scale = _ue8m0_to_inv_scale(mega_scale_exponent)
+        mega_scaled = values_2d * tl.broadcast_to(
+            tl.reshape(mega_inv_scale, (num_groups, 1)),
+            (num_groups, MX_GROUP_SIZE),
+        )
+        mega_quantized = tl.clamp(mega_scaled, -448.0, 448.0).to(
+            mega_mxfp8_ptr.dtype.element_ty
+        )
+        tl.store(
+            mega_mxfp8_ptr + row * stride_mega_mxfp8_m + hidden_offsets,
+            tl.reshape(mega_quantized, (BLOCK_H,)),
+            mask=hidden_mask,
+        )
+
+        mega_num_packed: tl.constexpr = num_groups // 4
+        mega_actual_num_packed: tl.constexpr = actual_num_groups // 4
+        mega_group_offsets = tl.arange(0, num_groups)
+        mega_shifted = tl.where(
+            mega_group_offsets < actual_num_groups,
+            mega_scale_exponent << ((mega_group_offsets % 4) * 8),
+            0,
+        )
+        mega_packed = tl.sum(
+            tl.reshape(mega_shifted, (mega_num_packed, 4)), axis=1
+        )
+        mega_packed_offsets = tl.arange(0, mega_num_packed)
+        tl.store(
+            mega_mxfp8_scale_ptr
+            + row * stride_mega_mxfp8_scale_m
+            + mega_packed_offsets * stride_mega_mxfp8_scale_k,
+            mega_packed,
+            mask=mega_packed_offsets < mega_actual_num_packed,
+        )
 
 
 @triton.jit(do_not_specialize=["M"])
@@ -626,7 +728,12 @@ def _maybe_deepgemm_ihc_pre(
     read_norm_eps: float | None = None,
     split_reference_m: int | None = None,
     read_out: torch.Tensor | None = None,
+    read_fp32_out: torch.Tensor | None = None,
     post_gate_out: torch.Tensor | None = None,
+    mxfp8_out: torch.Tensor | None = None,
+    mxfp8_scale_out: torch.Tensor | None = None,
+    mega_mxfp8_out: torch.Tensor | None = None,
+    mega_mxfp8_scale_out: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor] | None:
     if not _use_deepgemm_prenorm(channels):
         return None
@@ -661,6 +768,52 @@ def _maybe_deepgemm_ihc_pre(
         if post_gate_out is None
         else post_gate_out
     )
+    emit_mxfp8 = mxfp8_out is not None or mxfp8_scale_out is not None
+    if emit_mxfp8:
+        if mxfp8_out is None or mxfp8_scale_out is None:
+            raise ValueError("mxfp8_out and mxfp8_scale_out must be provided together")
+        if norm_weight is None:
+            raise ValueError("MXFP8 output requires the fused read RMSNorm path")
+        if hidden_size % (4 * MX_BLOCK) != 0:
+            raise ValueError(
+                f"MXFP8 packed output requires hidden_size divisible by "
+                f"{4 * MX_BLOCK}, got {hidden_size}"
+            )
+    emit_fp32 = read_fp32_out is not None
+    if emit_fp32:
+        if norm_weight is None:
+            raise ValueError("FP32 output requires the fused read RMSNorm path")
+        if (
+            tuple(read_fp32_out.shape) != (m, hidden_size)
+            or read_fp32_out.dtype != torch.float32
+            or not read_fp32_out.is_contiguous()
+            or read_fp32_out.device != channels.device
+        ):
+            raise ValueError("invalid HY4 iHC FP32 read output ABI")
+    emit_mega_moe = (
+        mega_mxfp8_out is not None or mega_mxfp8_scale_out is not None
+    )
+    if emit_mega_moe:
+        if mega_mxfp8_out is None or mega_mxfp8_scale_out is None:
+            raise ValueError(
+                "mega_mxfp8_out and mega_mxfp8_scale_out must be provided together"
+            )
+        if norm_weight is None:
+            raise ValueError("MegaMoE output requires the fused read RMSNorm path")
+        expected_activation = (m, hidden_size)
+        expected_scale = (m, hidden_size // (4 * MX_BLOCK))
+        if (
+            hidden_size % (4 * MX_BLOCK) != 0
+            or tuple(mega_mxfp8_out.shape) != expected_activation
+            or mega_mxfp8_out.dtype != torch.float8_e4m3fn
+            or not mega_mxfp8_out.is_contiguous()
+            or tuple(mega_mxfp8_scale_out.shape) != expected_scale
+            or mega_mxfp8_scale_out.dtype != torch.int32
+            or not mega_mxfp8_scale_out.is_contiguous()
+            or mega_mxfp8_out.device != channels.device
+            or mega_mxfp8_scale_out.device != channels.device
+        ):
+            raise ValueError("invalid HY4 MegaMoE activation/scale output ABI")
 
     with torch.cuda.device(device_index):
         deep_gemm.tf32_hc_prenorm_gemm(
@@ -704,8 +857,29 @@ def _maybe_deepgemm_ihc_pre(
                 base,
                 norm_weight,
                 read,
+                read_fp32_out if emit_fp32 else read,
                 post_gate,
+                mxfp8_out if emit_mxfp8 else read,
+                mxfp8_scale_out if emit_mxfp8 else read,
+                mega_mxfp8_out if emit_mega_moe else read,
+                mega_mxfp8_scale_out if emit_mega_moe else read,
                 M=m,
+                stride_mxfp8_m=(mxfp8_out.stride(0) if emit_mxfp8 else 0),
+                stride_mxfp8_scale_m=(
+                    mxfp8_scale_out.stride(0) if emit_mxfp8 else 0
+                ),
+                stride_mxfp8_scale_k=(
+                    mxfp8_scale_out.stride(1) if emit_mxfp8 else 0
+                ),
+                stride_mega_mxfp8_m=(
+                    mega_mxfp8_out.stride(0) if emit_mega_moe else 0
+                ),
+                stride_mega_mxfp8_scale_m=(
+                    mega_mxfp8_scale_out.stride(0) if emit_mega_moe else 0
+                ),
+                stride_mega_mxfp8_scale_k=(
+                    mega_mxfp8_scale_out.stride(1) if emit_mega_moe else 0
+                ),
                 HC=_HC_MULT,
                 H=hidden_size,
                 K=flat_size,
@@ -716,6 +890,10 @@ def _maybe_deepgemm_ihc_pre(
                 HC_EPS=hc_eps,
                 MAGNITUDE=magnitude,
                 BLOCK_H=triton.next_power_of_2(hidden_size),
+                MX_GROUP_SIZE=MX_BLOCK,
+                HAS_MXFP8_OUTPUT=emit_mxfp8,
+                HAS_MEGA_MOE_OUTPUT=emit_mega_moe,
+                HAS_FP32_OUTPUT=emit_fp32,
                 num_warps=8,
                 num_stages=2,
             )
@@ -734,7 +912,23 @@ def maybe_fused_ihc_pre_normed_grouped(
     ihc_norm_eps: float,
     read_norm_eps: float,
     chunk_size: int,
-) -> Tuple[torch.Tensor, torch.Tensor] | None:
+    emit_mxfp8: bool = False,
+    emit_fp32: bool = False,
+    mega_mxfp8_out: torch.Tensor | None = None,
+    mega_mxfp8_scale_out: torch.Tensor | None = None,
+) -> (
+    Tuple[torch.Tensor, torch.Tensor]
+    | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    | Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    | Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]
+    | None
+):
     """Coalesce adjacent DeepGEMM chunks without changing split-K signatures.
 
     The historical path selected split-K independently for each ``chunk_size``
@@ -746,6 +940,27 @@ def maybe_fused_ihc_pre_normed_grouped(
     if not ihc_pre_is_supported(channels, fn_weight, scale, base):
         return None
     hidden_size = channels.shape[2]
+    emit_mega_moe = (
+        mega_mxfp8_out is not None or mega_mxfp8_scale_out is not None
+    )
+    if emit_mega_moe:
+        m = int(channels.shape[0])
+        expected_activation = (m, hidden_size)
+        expected_scale = (m, hidden_size // (4 * MX_BLOCK))
+        if (
+            mega_mxfp8_out is None
+            or mega_mxfp8_scale_out is None
+            or hidden_size % (4 * MX_BLOCK) != 0
+            or tuple(mega_mxfp8_out.shape) != expected_activation
+            or mega_mxfp8_out.dtype != torch.float8_e4m3fn
+            or not mega_mxfp8_out.is_contiguous()
+            or tuple(mega_mxfp8_scale_out.shape) != expected_scale
+            or mega_mxfp8_scale_out.dtype != torch.int32
+            or not mega_mxfp8_scale_out.is_contiguous()
+            or mega_mxfp8_out.device != channels.device
+            or mega_mxfp8_scale_out.device != channels.device
+        ):
+            return None
     if (
         tuple(norm_weight.shape) != (hidden_size,)
         or norm_weight.dtype not in (torch.bfloat16, torch.float32)
@@ -753,6 +968,7 @@ def maybe_fused_ihc_pre_normed_grouped(
         or norm_weight.device != channels.device
         or hidden_size > 8192
         or not _use_deepgemm_prenorm(channels)
+        or (emit_mxfp8 and hidden_size % (4 * MX_BLOCK) != 0)
     ):
         return None
 
@@ -760,6 +976,23 @@ def maybe_fused_ihc_pre_normed_grouped(
     chunk_size = max(int(chunk_size), 1)
     read = torch.empty((m, hidden_size), dtype=channels.dtype, device=channels.device)
     post_gate = torch.empty((m, _HC_MULT), dtype=torch.float32, device=channels.device)
+    mxfp8_out = (
+        torch.empty(
+            (m, hidden_size), dtype=torch.float8_e4m3fn, device=channels.device
+        )
+        if emit_mxfp8
+        else None
+    )
+    mxfp8_scale = (
+        _allocate_mxfp8_scale(m, hidden_size, channels.device)
+        if emit_mxfp8
+        else None
+    )
+    read_fp32 = (
+        torch.empty((m, hidden_size), dtype=torch.float32, device=channels.device)
+        if emit_fp32
+        else None
+    )
 
     full_chunk_tokens = (m // chunk_size) * chunk_size
     groups = []
@@ -781,10 +1014,28 @@ def maybe_fused_ihc_pre_normed_grouped(
             read_norm_eps,
             split_reference_m=split_reference_m,
             read_out=read[start:end],
+            read_fp32_out=(read_fp32[start:end] if emit_fp32 else None),
             post_gate_out=post_gate[start:end],
+            mxfp8_out=(mxfp8_out[start:end] if emit_mxfp8 else None),
+            mxfp8_scale_out=(mxfp8_scale[start:end] if emit_mxfp8 else None),
+            mega_mxfp8_out=(
+                mega_mxfp8_out[start:end] if emit_mega_moe else None
+            ),
+            mega_mxfp8_scale_out=(
+                mega_mxfp8_scale_out[start:end] if emit_mega_moe else None
+            ),
         )
         if result is None:
             return None
+    if emit_mxfp8:
+        assert mxfp8_out is not None and mxfp8_scale is not None
+        if emit_fp32:
+            assert read_fp32 is not None
+            return read, post_gate, mxfp8_out, mxfp8_scale, read_fp32
+        return read, post_gate, mxfp8_out, mxfp8_scale
+    if emit_fp32:
+        assert read_fp32 is not None
+        return read, post_gate, read_fp32
     return read, post_gate
 
 

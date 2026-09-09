@@ -5,6 +5,7 @@ from unittest import mock
 import torch
 
 from rtp_llm.models_py.model_desc.hy_v4_model import Hy4DecoderLayer
+from rtp_llm.models_py.modules.hy_v4 import ihc_triton
 from rtp_llm.models_py.modules.hy_v4.ihc import Hy4IHCHead, Hy4IHCUnit
 from rtp_llm.models_py.modules.hy_v4.ihc_triton import (
     maybe_fused_ihc_head,
@@ -93,6 +94,8 @@ class _MlpOracleStub(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.block(hidden_states)
+
+
 
 
 class Hy4IhcTest(unittest.TestCase):
@@ -205,13 +208,12 @@ class Hy4IhcTest(unittest.TestCase):
 
         channels = torch.randn(tokens, hc, hidden, dtype=torch.bfloat16)
         prev_topk_indices = torch.arange(tokens * 2).reshape(tokens, 2)
-        with mock.patch.dict(os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}):
-            actual = layer(
-                channels,
-                fmha_impl=object(),
-                kv_cache=object(),
-                prev_topk_indices=prev_topk_indices,
-            )
+        actual = layer(
+            channels,
+            fmha_impl=object(),
+            kv_cache=object(),
+            prev_topk_indices=prev_topk_indices,
+        )
 
         attn_read, attn_post = self._vllm_pre_oracle(
             channels,
@@ -273,6 +275,7 @@ class Hy4IhcTest(unittest.TestCase):
             )
         )
         torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
+
 
     def test_pre_post_match_fp32_reference(self):
         torch.manual_seed(7)
@@ -479,17 +482,13 @@ class Hy4IhcTest(unittest.TestCase):
             7, hidden, dtype=torch.bfloat16, device=device
         )
 
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}
+        with torch.no_grad(), mock.patch.object(
+            ihc_triton, "_triton_enabled", return_value=False
         ):
             eager_read, eager_gate = unit.pre(channels)
             eager_post = unit.post(block_output, channels, eager_gate)
-        with torch.no_grad(), mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_HY4_IHC_TRITON": "1",
-                "RTP_LLM_HY4_IHC_PRE_BACKEND": "triton",
-            },
+        with torch.no_grad(), mock.patch.object(
+            ihc_triton, "_use_deepgemm_prenorm", return_value=False
         ):
             fused_read, fused_gate = unit.pre(channels)
             fused_post = unit.post(block_output, channels, fused_gate)
@@ -529,18 +528,12 @@ class Hy4IhcTest(unittest.TestCase):
             7, hc, hidden, dtype=torch.bfloat16, device=device
         )
 
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}
+        with torch.no_grad(), mock.patch.object(
+            ihc_triton, "_triton_enabled", return_value=False
         ):
             eager_read, eager_gate = unit.pre(channels)
             eager_normed = norm(eager_read)
-        with torch.no_grad(), mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_HY4_IHC_TRITON": "1",
-                "RTP_LLM_HY4_IHC_PRE_BACKEND": "deepgemm",
-            },
-        ):
+        with torch.no_grad():
             fused_normed, fused_gate = unit.pre_normed(channels, norm)
 
         self.assertEqual(fused_normed.dtype, torch.bfloat16)
@@ -549,6 +542,152 @@ class Hy4IhcTest(unittest.TestCase):
             fused_normed, eager_normed, rtol=2e-2, atol=2e-2
         )
         torch.testing.assert_close(fused_gate, eager_gate, rtol=5e-4, atol=5e-5)
+
+    @unittest.skipUnless(
+        _deepgemm_prenorm_available(), "requires SM100 DeepGEMM prenorm"
+    )
+    def test_deepgemm_pre_rmsnorm_mxfp8_is_bitwise_equal(self):
+        from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+            mxfp8_quant_act_packed,
+        )
+
+        torch.manual_seed(20260903)
+        device = torch.device("cuda")
+        hidden, hc, tokens = 6144, 4, 4
+        weights = {
+            key: value.to(device)
+            for key, value in self._unit_weights(hidden, hc).items()
+        }
+        unit = Hy4IHCUnit(
+            weights,
+            hidden_size=hidden,
+            hc_mult=hc,
+            magnitude=2.0,
+            hc_eps=1e-6,
+            norm_eps=1e-5,
+            kind="attn",
+        )
+        norm = _TorchRMSNorm(
+            torch.randn(hidden, dtype=torch.bfloat16, device=device), 1e-5
+        )
+        channels = torch.randn(
+            tokens, hc, hidden, dtype=torch.bfloat16, device=device
+        )
+        with torch.no_grad():
+            ref_read, ref_gate = unit.pre_normed(channels, norm)
+            ref_fp8, ref_scale = mxfp8_quant_act_packed(ref_read)
+            read, gate, fp8, scale = unit.pre_normed_mxfp8(channels, norm)
+
+        self.assertTrue(torch.equal(read, ref_read))
+        self.assertTrue(torch.equal(gate, ref_gate))
+        self.assertTrue(
+            torch.equal(fp8.view(torch.uint8), ref_fp8.view(torch.uint8))
+        )
+        self.assertEqual(scale.stride(), ref_scale.stride())
+        self.assertTrue(torch.equal(scale, ref_scale))
+
+    @unittest.skipUnless(
+        _deepgemm_prenorm_available(), "requires SM100 DeepGEMM prenorm"
+    )
+    def test_deepgemm_pre_writes_mega_moe_quant_abi_bitwise(self):
+        from rtp_llm.models_py.modules.glm5_mega_moe.quant_layouts import (
+            per_token_cast_to_fp8_packed_ue8m0,
+        )
+
+        torch.manual_seed(20260907)
+        device = torch.device("cuda")
+        hidden, hc, tokens = 6144, 4, 4
+        weights = {
+            key: value.to(device)
+            for key, value in self._unit_weights(hidden, hc).items()
+        }
+        unit = Hy4IHCUnit(
+            weights,
+            hidden_size=hidden,
+            hc_mult=hc,
+            magnitude=2.0,
+            hc_eps=1e-6,
+            norm_eps=1e-5,
+            kind="attn",
+        )
+        norm_weight = torch.randn(hidden, dtype=torch.bfloat16, device=device)
+        # Exercise the semantic difference from canonical MXFP8: MegaMoE uses
+        # an absmax floor, including for all-zero and tiny normalized groups.
+        norm_weight[:32] = 0
+        norm_weight[32:64] = 1e-6
+        norm = _TorchRMSNorm(norm_weight, 1e-5)
+        channels = torch.randn(
+            tokens, hc, hidden, dtype=torch.bfloat16, device=device
+        )
+        mega_fp8 = torch.empty(
+            tokens, hidden, dtype=torch.float8_e4m3fn, device=device
+        )
+        mega_scale = torch.empty(
+            tokens, hidden // 128, dtype=torch.int32, device=device
+        )
+        with torch.no_grad():
+            expected_read, _ = unit.pre_normed(channels, norm)
+            expected_fp8, expected_scale = per_token_cast_to_fp8_packed_ue8m0(
+                expected_read, gran_k=32
+            )
+            result = unit.pre_normed_mxfp8_to_mega_moe(
+                channels, norm, mega_fp8, mega_scale
+            )
+
+        self.assertIsNotNone(result)
+        read, _, _, _ = result
+        self.assertTrue(torch.equal(read, expected_read))
+        self.assertTrue(
+            torch.equal(mega_fp8.view(torch.uint8), expected_fp8.view(torch.uint8))
+        )
+        self.assertTrue(torch.equal(mega_scale, expected_scale))
+
+    @unittest.skipUnless(
+        _deepgemm_prenorm_available(), "requires SM100 DeepGEMM prenorm"
+    )
+    def test_deepgemm_pre_rmsnorm_mxfp8_cuda_graph_replay(self):
+        torch.manual_seed(20260904)
+        device = torch.device("cuda")
+        hidden, hc, tokens = 6144, 4, 4
+        weights = {
+            key: value.to(device)
+            for key, value in self._unit_weights(hidden, hc).items()
+        }
+        unit = Hy4IHCUnit(
+            weights,
+            hidden_size=hidden,
+            hc_mult=hc,
+            magnitude=2.0,
+            hc_eps=1e-6,
+            norm_eps=1e-5,
+            kind="attn",
+        )
+        norm = _TorchRMSNorm(
+            torch.randn(hidden, dtype=torch.bfloat16, device=device), 1e-5
+        )
+        static_channels = torch.randn(
+            tokens, hc, hidden, dtype=torch.bfloat16, device=device
+        )
+        replay_channels = torch.randn_like(static_channels)
+        with torch.no_grad():
+            for _ in range(3):
+                unit.pre_normed_mxfp8(static_channels, norm)
+            expected = tuple(
+                value.clone()
+                for value in unit.pre_normed_mxfp8(replay_channels, norm)
+            )
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = unit.pre_normed_mxfp8(static_channels, norm)
+
+            static_channels.copy_(replay_channels)
+            graph.replay()
+            torch.cuda.synchronize()
+
+        for actual, reference in zip(captured, expected):
+            self.assertTrue(torch.equal(actual, reference))
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA and Triton")
     def test_triton_head_matches_eager_path(self):
@@ -578,13 +717,11 @@ class Hy4IhcTest(unittest.TestCase):
             7, hc, hidden, dtype=torch.bfloat16, device=device
         )
 
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}
+        with torch.no_grad(), mock.patch.object(
+            ihc_triton, "_triton_enabled", return_value=False
         ):
             eager = head(channels)
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "1"}
-        ):
+        with torch.no_grad():
             fused = head(channels)
 
         self.assertEqual(fused.dtype, torch.bfloat16)
@@ -638,18 +775,14 @@ class Hy4IhcTest(unittest.TestCase):
             tokens, hidden, dtype=torch.bfloat16, device=device
         )
 
-        with torch.no_grad(), mock.patch.dict(
-            os.environ, {"RTP_LLM_HY4_IHC_TRITON": "0"}
+        with torch.no_grad(), mock.patch.object(
+            ihc_triton, "_triton_enabled", return_value=False
         ):
             eager_read, eager_gate = unit.pre_normed(channels, norm)
             eager_post = unit.post(block_output, channels, eager_gate)
             eager_head = head(eager_post)
-        with torch.no_grad(), mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_HY4_IHC_TRITON": "1",
-                "RTP_LLM_HY4_IHC_PRE_BACKEND": "triton",
-            },
+        with torch.no_grad(), mock.patch.object(
+            ihc_triton, "_use_deepgemm_prenorm", return_value=False
         ):
             fused_read, fused_gate = unit.pre_normed(channels, norm)
             fused_post = unit.post(block_output, channels, fused_gate)
