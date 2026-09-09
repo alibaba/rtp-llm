@@ -95,6 +95,11 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_BUDGET_FILL_RATIO;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_PREFILL_TOKENS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_TOKEN_BUDGET;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
@@ -147,6 +152,11 @@ public class EngineHealthReporter {
 
     @PostConstruct
     public void init() {
+        monitor.register(ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        monitor.register(ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        monitor.register(ENGINE_WORKER_STEP_PREFILL_TOKENS, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        monitor.register(ENGINE_WORKER_STEP_TOKEN_BUDGET, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        monitor.register(ENGINE_WORKER_STEP_BUDGET_FILL_RATIO, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
 
         this.monitor.register(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_STATUS_AVAILABLE_CONCURRENCY, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -319,6 +329,20 @@ public class EngineHealthReporter {
                 telemetry.runningEnteredTimeMs(), telemetry.waitingEnteredTimeMs());
         reportDuration(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS, tags,
                 telemetry.waitingEnteredTimeMs(), telemetry.requestReceivedTimeMs());
+    }
+
+    public void reportWorkerStepMetrics(String modelName, WorkerStatus worker, WorkerStatus.StepMetrics step) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", worker.getMetricIpPort(),
+                "role", worker.getRole().name(),
+                "group", worker.topologySnapshot().group(),
+                "phase", step.prefillRequestCount() > 0 ? "prefill" : "decode");
+        monitor.report(ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS, tags, step.totalScheduledTokens());
+        monitor.report(ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT, tags, step.prefillRequestCount());
+        monitor.report(ENGINE_WORKER_STEP_PREFILL_TOKENS, tags, step.prefillTokens());
+        monitor.report(ENGINE_WORKER_STEP_TOKEN_BUDGET, tags, step.tokenBudget());
+        monitor.report(ENGINE_WORKER_STEP_BUDGET_FILL_RATIO, tags, step.budgetFillRatio());
     }
 
     public void reportPrefillWorkerStatusTask(String modelName,

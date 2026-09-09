@@ -273,6 +273,17 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX =
             "app.engine.worker.status.prefill.nonfinal.chunk.tokens.max";
 
+    public static final String ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS =
+            "app.engine.worker.step.total.scheduled.tokens";
+    public static final String ENGINE_WORKER_STEP_PREFILL_REQUEST_COUNT =
+            "app.engine.worker.step.prefill.request.count";
+    public static final String ENGINE_WORKER_STEP_PREFILL_TOKENS =
+            "app.engine.worker.step.prefill.tokens";
+    public static final String ENGINE_WORKER_STEP_TOKEN_BUDGET =
+            "app.engine.worker.step.token.budget";
+    public static final String ENGINE_WORKER_STEP_BUDGET_FILL_RATIO =
+            "app.engine.worker.step.budget.fill.ratio";
+
     /* ------------------------ Routing Observability -------------------------- */
 
     /** Failed KVCM query attempts after the configured retry budget is exhausted. */

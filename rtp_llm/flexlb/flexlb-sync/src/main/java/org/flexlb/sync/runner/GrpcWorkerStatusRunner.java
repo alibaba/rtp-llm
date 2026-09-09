@@ -162,6 +162,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
             WorkerEndpoint ep;
+            WorkerStatus.StepMetrics previousStep;
             WorkerStatus.StatusObservation committedObservation;
             Runnable statusProjection = NO_STATUS_PROJECTION;
             Runnable activityProjection = NO_STATUS_PROJECTION;
@@ -201,6 +202,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                     + observation.role());
                 }
                 committedObservation = observation;
+                previousStep = workerStatus.committedEngineObservation().lastStepMetrics();
 
                 WorkerStatus.AppliedStatusCursor cursor =
                         workerStatus.appliedStatusCursor();
@@ -290,7 +292,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             reportSuccessfulStatus(
                     committedObservation,
                     startTime,
-                    ep);
+                    ep,
+                    previousStep);
 
             reportCacheFeedback(committedObservation);
             logWorkerStatusUpdate(startTime, workerStatus);
@@ -399,7 +402,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private void reportSuccessfulStatus(WorkerStatus.StatusObservation observation,
                                         long startTime,
-                                        WorkerEndpoint endpoint) {
+                                        WorkerEndpoint endpoint,
+                                        WorkerStatus.StepMetrics previousStep) {
         try {
             engineHealthReporter.reportStatusCheckRemoteInfo(
                     modelName, workerStatus.getMetricIpPort(),
@@ -410,6 +414,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     endpoint,
                     observation.runningTasks().size(),
                     observation.finishedTasks().size());
+            WorkerStatus.StepMetrics step = observation.engine().lastStepMetrics();
+            if (step != null && (previousStep == null || step.stepId() != previousStep.stepId())) {
+                engineHealthReporter.reportWorkerStepMetrics(modelName, workerStatus, step);
+            }
             for (WorkerStatus.TaskObservation task : observation.finishedTasks().values()) {
                 if (task.telemetry().firstTokenTimeMs() > 0) {
                     engineHealthReporter.reportFinishedWorkerTask(modelName, workerStatus, task);

@@ -499,6 +499,17 @@ enum KvCacheGroupModePB {
     KV_CACHE_GROUP_MODE_WITH_MAMBA = 2;
 }
 
+// Latest completed nonempty scheduler step.
+message WorkerStepMetricsPB {
+    int64 step_id = 2;
+    int64 completed_time_ms = 3;
+    int64 total_scheduled_tokens = 4;
+    int64 prefill_request_count = 5;
+    int64 prefill_tokens = 6;
+    int64 token_budget = 7;
+    double budget_fill_ratio = 8;
+}
+
 message WorkerStatusPB {
     string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
@@ -533,6 +544,7 @@ message WorkerStatusPB {
     KvCacheGroupModePB kv_cache_group_mode = 25;
     // Number of matched cache blocks that must be recomputed by the engine.
     int32 cache_match_rollback_blocks = 26;
+    WorkerStepMetricsPB last_step_metrics = 27;
 }
 
 message EmbeddingInputPB {

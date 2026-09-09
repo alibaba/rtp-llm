@@ -28,6 +28,50 @@ import static org.mockito.Mockito.when;
 class GrpcWorkerStatusRunnerTest {
 
     @Test
+    void reportsEachObservedStepOnceAcrossPolls() {
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
+        String ipPort = status.getLogicalIpPort();
+        WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        WorkerDirectory directory = directory(registry, status);
+        when(registry.publishPreparedEndpoint(anyString(), any(), any())).thenAnswer(invocation -> {
+            status.publishPreparedStatus(invocation.getArgument(2));
+            return new EndpointRegistry.EndpointPublication(endpoint, () -> { });
+        });
+        when(registry.get(RoleType.DECODE, ipPort, status)).thenReturn(endpoint);
+        when(endpoint.applyPreparedStatus(any(), any())).thenAnswer(invocation -> {
+            status.publishPreparedStatus(invocation.getArgument(1));
+            return (Runnable) () -> { };
+        });
+        when(endpoint.observeStatusHeartbeat(any(), any())).thenReturn(() -> { });
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+        long[] versions = {1, 2, 2, 3, 4};
+        long[] steps = {0, 42, 42, 42, 43};
+        for (int i = 0; i < versions.length; i++) {
+            var response = EngineRpcService.WorkerStatusPB.newBuilder()
+                    .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .setStatusVersion(versions[i]).setAlive(true);
+            if (steps[i] > 0) {
+                response.setLastStepMetrics(EngineRpcService.WorkerStepMetricsPB.newBuilder()
+                        .setStepId(steps[i]).setTotalScheduledTokens(64).setTokenBudget(32000)
+                        .setBudgetFillRatio(0.002));
+            }
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.completedFuture(response.build()));
+            new GrpcWorkerStatusRunner("test-model", ipPort, "test-site", RoleType.DECODE, null,
+                    status, status.tryBeginStatusPoll(), directory, reporter, grpc, 5000L,
+                    mock(CacheAwareService.class), Runnable::run).run();
+        }
+        var observed = ArgumentCaptor.forClass(WorkerStatus.StepMetrics.class);
+        verify(reporter, org.mockito.Mockito.times(2)).reportWorkerStepMetrics(
+                org.mockito.Mockito.eq("test-model"), org.mockito.Mockito.eq(status), observed.capture());
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(42L, 43L),
+                observed.getAllValues().stream().map(WorkerStatus.StepMetrics::stepId).toList());
+    }
+
+    @Test
     void newGenerationProjectionRunsOutsideWorkerStatusLock() {
         WorkerStatus status = RunnerTestSupport.discovered(
                 RoleType.DECODE, null, "127.0.0.1",

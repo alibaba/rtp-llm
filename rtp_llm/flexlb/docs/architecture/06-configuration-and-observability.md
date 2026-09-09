@@ -295,3 +295,17 @@ N=1 沿用 discovery 的 legacy gRPC port，因而兼容未配置 `worker_status
 经 `WorkerStatus` 或 `ServerStatus` 归属的引擎与 cache 指标的 `engineIp` 在 N=1 使用 physical
 `ip:http_port`，在 N>1 使用完整 logical identity `ip:http_port@engineIndex`。网络连接仍使用
 物理地址。schedule 在 N=1 时省略 `engine_index`，内部 identity 仍保留 index 0。
+
+### Scheduler step 采样
+
+WorkerStatus 的 `last_step_metrics` 表示最近完成的非空 scheduler step，包含 step ID、完成时间、
+总调度 Token 数、Prefill 请求数、Prefill Token 数、Token 预算及预算填充率。
+字段缺失表示引擎尚无可用 step 观测；纯 Decode step 的 Prefill 请求数和 Token 数为 0。
+FlexLB 按逻辑 Worker 和 step ID 去重后，通过 `app.engine.worker.step.*` 上报五项数值。
+`phase=prefill` 表示该 step 含 Prefill，`phase=decode` 表示纯 Decode；模型、角色、组和
+`engineIp` 标签沿用 Worker 身份。预算填充率为总调度 Token 数 / Token 预算，包含 Decode Token。
+
+这些指标是 WorkerStatus 轮询采样，轮询之间完成的中间 step 不会全部保留。KMonitor 使用
+GAUGE + SUMMARY 聚合实际采样值；Micrometer provider 只暴露最近上报值，不提供逐 step 分布。
+指标标签不包含 step ID 或完成时间。凑批比较应筛选 `phase=prefill`，避免纯 Decode step
+稀释 Prefill 预算填充率。Turbo 转发后的指标前缀为 `dashscope_turbo_backend_flexlb_app_engine_worker_step_`。
