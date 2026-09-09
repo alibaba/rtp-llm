@@ -202,10 +202,11 @@ class WeightConverter:
                 f"tp_size={pc.tp_size}, dp_size={pc.dp_size}"
             )
 
-        coord = RankLayout.from_parallelism_config(pc).coord_of_unchecked(pc.world_rank)
+        layout = RankLayout.from_parallelism_config(pc)
+        coord = layout.coord_of_unchecked(pc.world_rank)
         pc.tp_rank = _env_int("TP_RANK", coord.tp)
         pc.dp_rank = _env_int("DP_RANK", coord.dp)
-        pc.ep_rank = pc.world_rank % pc.ep_size
+        pc.ep_rank = layout.ep_rank_of(pc.world_rank, pc.ep_size)
         pc.local_rank = pc.world_rank % pc.local_world_size
         pc.ffn_tp_size = pc.tp_size // pc.ffn_sp_size
         pc.ffn_tp_rank = pc.tp_rank % pc.ffn_tp_size if pc.ffn_tp_size else 0

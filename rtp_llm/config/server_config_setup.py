@@ -306,14 +306,13 @@ def set_parallelism_config(
     )
     # Unchecked: the world may contain ranks outside the pp*dp*tp lattice
     # (e.g. FFN-disaggregate replicas/service ranks); derivation is tolerant.
-    coord = RankLayout.from_parallelism_config(parallelism_config).coord_of_unchecked(
-        parallelism_config.world_rank
-    )
+    layout = RankLayout.from_parallelism_config(parallelism_config)
+    coord = layout.coord_of_unchecked(parallelism_config.world_rank)
     parallelism_config.tp_rank = coord.tp
     parallelism_config.dp_rank = coord.dp
     parallelism_config.pp_rank = coord.pp
-    parallelism_config.ep_rank = (
-        parallelism_config.world_rank % parallelism_config.ep_size
+    parallelism_config.ep_rank = layout.ep_rank_of(
+        parallelism_config.world_rank, parallelism_config.ep_size
     )
     parallelism_config.ffn_tp_rank = (
         parallelism_config.tp_rank % parallelism_config.ffn_tp_size

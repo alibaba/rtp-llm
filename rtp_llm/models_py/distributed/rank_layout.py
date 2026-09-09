@@ -182,6 +182,33 @@ class RankLayout:
             Group.WORLD: world_rank,
         }[group]
 
+    def ep_rank_of(self, world_rank: int, ep_size: int) -> int:
+        """Expert-shard number: lane-local rank modulo ep_size. At pp=1 this
+        equals the legacy `world_rank % ep_size` (lane_rank == world_rank).
+        ep_size must divide the per-stage rank count; ep_size <= 1 means no EP."""
+        ep_size = int(ep_size)
+        if ep_size <= 1:
+            return 0
+        stride = self.lane_stride()
+        if stride % ep_size != 0:
+            raise ValueError(
+                f"ep_size {ep_size} must divide the per-stage rank count "
+                f"{stride} for layout {self}"
+            )
+        return int(world_rank) % stride % ep_size
+
+    def ep_groups(self) -> List[List[int]]:
+        """EP communication rosters: one group per PP stage holding all its
+        dp*tp ranks (WORLD narrowed per stage; equals [WORLD] at pp=1)."""
+        return [
+            [
+                self.world_rank_of(Coord(tp=t, dp=d, pp=pp))
+                for d in range(self._dp_size)
+                for t in range(self._tp_size)
+            ]
+            for pp in range(self._pp_size)
+        ]
+
     def __repr__(self) -> str:
         return (
             f"RankLayout(pp_size={self._pp_size}, dp_size={self._dp_size}, "

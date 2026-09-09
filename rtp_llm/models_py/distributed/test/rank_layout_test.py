@@ -239,5 +239,45 @@ class RankLayoutGroupsTest(unittest.TestCase):
         self.assertEqual(layout.groups(Group.PP), [[0], [1], [2], [3]])
 
 
+# Legacy ep_rank oracle: test reference only, never import from production code.
+def _legacy_ep_rank(world_rank: int, ep_size: int) -> int:
+    return world_rank % ep_size
+
+
+class RankLayoutEpViewTest(unittest.TestCase):
+    def test_ep_rank_matches_legacy_at_pp1_exhaustive(self):
+        for dp_size, tp_size in itertools.product((1, 2, 3), repeat=2):
+            layout = RankLayout(pp_size=1, dp_size=dp_size, tp_size=tp_size)
+            for ep_size in (1, tp_size, dp_size, dp_size * tp_size):
+                for r in range(layout.world_size()):
+                    self.assertEqual(
+                        layout.ep_rank_of(r, ep_size),
+                        _legacy_ep_rank(r, ep_size),
+                        msg=f"layout={layout}, ep_size={ep_size}, rank={r}",
+                    )
+
+    def test_ep_rank_is_lane_local_under_pp(self):
+        layout = RankLayout(pp_size=2, dp_size=2, tp_size=2)
+        stride = layout.lane_stride()
+        for ep_size in (2, 4):
+            for r in range(layout.world_size()):
+                self.assertEqual(layout.ep_rank_of(r, ep_size), (r % stride) % ep_size)
+
+    def test_ep_groups_are_per_stage_exhaustive(self):
+        for pp_size, dp_size, tp_size in _SWEEP:
+            layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
+            stride = dp_size * tp_size
+            expected = [
+                list(range(p * stride, (p + 1) * stride)) for p in range(pp_size)
+            ]
+            self.assertEqual(layout.ep_groups(), expected, msg=f"layout={layout}")
+
+    def test_ep_rank_rejects_non_divisible_ep_size(self):
+        layout = RankLayout(pp_size=1, dp_size=2, tp_size=2)  # stride 4
+        with self.assertRaises(ValueError):
+            layout.ep_rank_of(0, 3)
+        self.assertEqual(layout.ep_rank_of(3, 1), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
