@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from functools import reduce
 from operator import mul
 from typing import TYPE_CHECKING, Sequence
@@ -22,7 +23,74 @@ if TYPE_CHECKING:
     )
 
 
+MEGA_MOE_FRONT_CAPACITY = MAX_BATCH
+_ABI_VERSION = 1
+_KERNEL_CONTRACT_VERSION = 3
 _TOPK = 6
+
+
+def _parse_arches(value: object) -> set[str]:
+    return {item.strip() for item in str(value).split(",") if item.strip()}
+
+
+def _validate_extension_contract(
+    dsv4_mega, dim: int, experts: int, topk: int, device: torch.device
+) -> dict:
+    geometry = dsv4_mega.geometry_moe_front(dim)
+    expected = {
+        "abi_version": _ABI_VERSION,
+        "kernel_contract_version": _KERNEL_CONTRACT_VERSION,
+        "hidden": dim,
+        "hc_mult": HC,
+        "hc_width": HC_MIX,
+        "experts": experts,
+        "topk": topk,
+        "max_m": MEGA_MOE_FRONT_CAPACITY,
+        "scale_cols": dim // 128,
+        "collapse_ssq_bits": 32,
+    }
+    mismatches = {
+        name: (geometry.get(name), value)
+        for name, value in expected.items()
+        if geometry.get(name) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"DSV4 MoE-front geometry mismatch: {mismatches}")
+
+    capability = tuple(torch.cuda.get_device_capability(device))
+    arch = {(10, 0): "sm_100a", (10, 3): "sm_103a"}.get(capability)
+    if arch is None:
+        raise RuntimeError(
+            "DSV4 MoE front requires sm_100a or sm_103a, "
+            f"got compute capability {capability}"
+        )
+
+    build_info = dsv4_mega.build_info_moe_front()
+    if not isinstance(build_info, dict):
+        raise RuntimeError("DSV4 MoE-front build info must be a dictionary")
+    for field in ("target_arches", "production_arch"):
+        if arch not in _parse_arches(build_info.get(field, "")):
+            raise RuntimeError(
+                f"DSV4 MoE-front build does not contain {arch} in {field}: "
+                f"{build_info.get(field)!r}"
+            )
+    if build_info.get("kernel_count") != 4:
+        raise RuntimeError(
+            "DSV4 MoE-front build must publish four kernels, got "
+            f"{build_info.get('kernel_count')!r}"
+        )
+
+    source_commit = str(build_info.get("source_commit", ""))
+    source_sha256 = str(build_info.get("source_sha256", ""))
+    if not re.fullmatch(r"[0-9a-f]{8,40}", source_commit):
+        raise RuntimeError(
+            f"DSV4 MoE-front build has invalid source commit {source_commit!r}"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        raise RuntimeError(
+            f"DSV4 MoE-front build has invalid source SHA256 {source_sha256!r}"
+        )
+    return geometry
 
 
 def _capture_tokens_for_batches(
@@ -84,33 +152,26 @@ class MegaMoeFrontAdapter:
         self.ffn_norm = ffn_norm
         self._dsv4_mega = dsv4_mega
 
-        geometry = dsv4_mega.geometry_moe_front(self.dim)
-        expected = {
-            "hidden": self.dim,
-            "hc_mult": HC,
-            "hc_width": HC_MIX,
-            "experts": int(self.gate.weight.shape[0]),
-            "topk": int(self.gate.topk),
-            "max_m": MAX_BATCH,
-        }
-        mismatches = {
-            name: (geometry.get(name), value)
-            for name, value in expected.items()
-            if geometry.get(name) != value
-        }
-        if mismatches:
-            raise RuntimeError(
-                f"DSV4 MoE-front geometry mismatch for layer {self.layer_id}: "
-                f"{mismatches}; extension={geometry}"
-            )
-        if expected["topk"] != _TOPK:
-            raise RuntimeError(
-                f"DSV4 MoE front requires TopK-{_TOPK}, got {expected['topk']}"
-            )
+        experts = int(self.gate.weight.shape[0])
+        topk = int(self.gate.topk)
+        if topk != _TOPK:
+            raise RuntimeError(f"DSV4 MoE front requires TopK-{_TOPK}, got {topk}")
 
         device = self.gate.weight.device
         if device.type != "cuda":
             raise RuntimeError(f"DSV4 MoE front requires CUDA weights, got {device}")
+        try:
+            geometry = _validate_extension_contract(
+                dsv4_mega,
+                self.dim,
+                experts,
+                topk,
+                device,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"DSV4 MoE-front validation failed for layer {self.layer_id}: {exc}"
+            ) from exc
         if tuple(ffn_hc.fn.shape) != (HC_MIX, HC * self.dim):
             raise RuntimeError(
                 f"DSV4 MoE-front hc_fn shape mismatch: {tuple(ffn_hc.fn.shape)}"
@@ -132,7 +193,7 @@ class MegaMoeFrontAdapter:
         )
         self.normalized = torch.empty_like(self.collapsed)
         self.router_logits = torch.empty(
-            (MAX_BATCH, expected["experts"]),
+            (MAX_BATCH, experts),
             dtype=torch.float32,
             device=device,
         )
@@ -322,4 +383,4 @@ class MegaMoeFrontAdapter:
         )
 
 
-__all__ = ["MegaMoeFrontAdapter"]
+__all__ = ["MEGA_MOE_FRONT_CAPACITY", "MegaMoeFrontAdapter"]
