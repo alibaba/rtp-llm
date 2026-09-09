@@ -207,6 +207,41 @@ TEST(NumaMemoryPolicyTest, RegisteredHostBlockPoolSupportsDisabledInterleave) {
     EXPECT_EQ(mappingStart(reinterpret_cast<void*>(pool_address)), 0u);
 }
 
+TEST(NumaMemoryPolicyTest, MemfdRegisteredHostBlockPoolUsesSharedMapping) {
+    ScopedEnvVar pin_mode("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE", "memfd_register");
+    ScopedEnvVar interleave("RTP_LLM_HOST_BLOCK_POOL_INTERLEAVE", "0");
+
+    uintptr_t pool_address = 0;
+    {
+        auto      config = BlockPoolConfigHelper::createConfig(1, 4, 4 * kMiB, rtp_llm::TYPE_INT8);
+        BlockPool pool(config, AllocationType::HOST);
+        ASSERT_TRUE(pool.init());
+        ASSERT_EQ(pool.where(), MemoryType::MEMORY_CPU_PINNED);
+#if USING_CUDA
+        cudaPointerAttributes attributes{};
+        ASSERT_EQ(cudaPointerGetAttributes(&attributes, pool.getBaseAddress()), cudaSuccess);
+        EXPECT_EQ(attributes.type, cudaMemoryTypeHost);
+#endif
+        std::ifstream maps("/proc/self/maps");
+        std::string   line;
+        const auto    target = reinterpret_cast<uintptr_t>(pool.getBaseAddress());
+        bool          found_shared_memfd = false;
+        while (std::getline(maps, line)) {
+            uintptr_t begin = 0;
+            uintptr_t end   = 0;
+            char      perms[5]{};
+            if (std::sscanf(line.c_str(), "%lx-%lx %4s", &begin, &end, perms) == 3 && target >= begin
+                && target < end) {
+                found_shared_memfd = perms[3] == 's' && line.find("memfd:rtp_llm_host_block_pool") != std::string::npos;
+                break;
+            }
+        }
+        EXPECT_TRUE(found_shared_memfd);
+        pool_address = target;
+    }
+    EXPECT_EQ(mappingStart(reinterpret_cast<void*>(pool_address)), 0u);
+}
+
 TEST(NumaMemoryPolicyTest, StrictInterleaveFailsWhenNumaPolicySyscallsAreBlocked) {
     constexpr size_t probe_size = 4 * kMiB;
     void*            probe = ::mmap(nullptr, probe_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

@@ -18,7 +18,10 @@
 #include <utility>
 
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+#include <linux/memfd.h>
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -30,6 +33,7 @@ namespace {
 
 bool shouldPinHostBlockPool();
 bool shouldRegisterHostBlockPool();
+bool shouldUseMemfdHostBlockPool();
 bool shouldInterleaveRegisteredHostBlockPool();
 void validateHostBlockPoolSettings(bool pin_host_pool, bool use_registered_host, bool interleave_numa_nodes);
 
@@ -70,6 +74,9 @@ requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing
         if (!shouldPinHostBlockPool()) {
             return "CPU";
         }
+        if (shouldUseMemfdHostBlockPool()) {
+            return "CPU_REGISTERED_MEMFD_SHARED";
+        }
         return shouldRegisterHostBlockPool() ? "CPU_REGISTERED_PRIVATE" : "CPU_PINNED_ALLOCATOR_OR_CPU_FALLBACK";
     }
     if (use_cuda_malloc_backing) {
@@ -84,14 +91,19 @@ bool shouldPinHostBlockPool() {
 
 bool shouldRegisterHostBlockPool() {
     const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE");
-    if (value != nullptr && std::string(value) == "register") {
+    if (value != nullptr && (std::string(value) == "register" || std::string(value) == "memfd_register")) {
         return true;
     }
     if (value == nullptr || std::string(value) == "allocator") {
         return false;
     }
     throw std::invalid_argument(std::string("invalid RTP_LLM_HOST_BLOCK_POOL_PIN_MODE='") + value
-                                + "', expected 'register' or 'allocator'");
+                                + "', expected 'register', 'memfd_register', or 'allocator'");
+}
+
+bool shouldUseMemfdHostBlockPool() {
+    const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE");
+    return value != nullptr && std::string(value) == "memfd_register";
 }
 
 bool shouldInterleaveRegisteredHostBlockPool() {
@@ -142,11 +154,32 @@ void releaseRegisteredCpuMapping(void* ptr, size_t size_bytes) noexcept {
 }
 #endif
 
-torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes) {
+torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, bool use_memfd) {
 #if USING_CUDA
-    void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int fd = -1;
+    if (use_memfd) {
+        fd = static_cast<int>(::syscall(SYS_memfd_create, "rtp_llm_host_block_pool", MFD_CLOEXEC));
+        if (fd < 0) {
+            throw std::runtime_error(std::string("memfd_create failed: ") + std::strerror(errno));
+        }
+        if (::ftruncate(fd, static_cast<off_t>(size_bytes)) != 0) {
+            const int saved_errno = errno;
+            (void)::close(fd);
+            throw std::runtime_error(std::string("memfd ftruncate failed: ") + std::strerror(saved_errno));
+        }
+    }
+    void* ptr = mmap(nullptr,
+                     size_bytes,
+                     PROT_READ | PROT_WRITE,
+                     use_memfd ? MAP_SHARED : (MAP_PRIVATE | MAP_ANONYMOUS),
+                     fd,
+                     0);
+    if (fd >= 0) {
+        (void)::close(fd);
+    }
     if (ptr == MAP_FAILED) {
-        throw std::runtime_error(std::string("anonymous mmap failed: ") + std::strerror(errno));
+        throw std::runtime_error(std::string(use_memfd ? "memfd mmap failed: " : "anonymous mmap failed: ")
+                                 + std::strerror(errno));
     }
     if (interleave_numa_nodes) {
         const auto numa_result = applyAllowedNumaInterleavePolicy(ptr, size_bytes);
@@ -272,16 +305,19 @@ void BlockPool::initializeCacheBuffer() {
     if (allocation_type_ == AllocationType::HOST) {
         const bool pin_host_pool         = shouldPinHostBlockPool();
         const bool use_registered_host   = shouldRegisterHostBlockPool();
+        const bool use_memfd_host        = shouldUseMemfdHostBlockPool();
         const bool interleave_numa_nodes = shouldInterleaveRegisteredHostBlockPool();
         validateHostBlockPoolSettings(pin_host_pool, use_registered_host, interleave_numa_nodes);
         if (pin_host_pool) {
             if (use_registered_host) {
                 // The registered path is strict: falling back would silently lose the
                 // requested NUMA placement and can reproduce single-node OOMs.
-                RTP_LLM_LOG_INFO("registered host block pool allocation requested: policy=%s size=%zu",
+                RTP_LLM_LOG_INFO("registered host block pool allocation requested: backing=%s policy=%s size=%zu",
+                                 use_memfd_host ? "memfd_shared" : "anonymous_private",
                                  interleave_numa_nodes ? "interleave" : "none",
                                  config_.total_size_bytes);
-                cache_aligned_buffer_ = allocateRegisteredCpuTensor(config_.total_size_bytes, interleave_numa_nodes);
+                cache_aligned_buffer_ =
+                    allocateRegisteredCpuTensor(config_.total_size_bytes, interleave_numa_nodes, use_memfd_host);
                 cache_buffer_registered_host_ = true;
             } else {
                 try {
