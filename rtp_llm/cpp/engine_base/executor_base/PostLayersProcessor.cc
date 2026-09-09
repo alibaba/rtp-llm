@@ -54,6 +54,7 @@ void PostLayersProcessor::setHandler(py::object handler) {
         handler_args_  = HandlerArgs::Flag{};
         has_handler_   = false;
         wants_context_ = false;
+        uses_pre_final_norm_ = false;
         return;
     }
 
@@ -114,9 +115,19 @@ void PostLayersProcessor::setHandler(py::object handler) {
                                  + "\" is not implemented; only Trigger.CONTEXT is supported");
     }
 
+    // Older duck-typed handlers need not implement the new optional method.
+    const auto stage = py::hasattr(handler_, "hidden_state_stage") ?
+                           py::cast<std::string>(handler_.attr("hidden_state_stage")()) :
+                           std::string("post_final_norm");
+    if (stage != "post_final_norm" && stage != "pre_final_norm") {
+        throw std::runtime_error("unsupported post-layers hidden_state_stage \"" + stage
+                                 + "\"; expected post_final_norm or pre_final_norm");
+    }
+    uses_pre_final_norm_ = stage == "pre_final_norm";
     wants_context_ = true;
     has_handler_   = true;
-    RTP_LLM_LOG_INFO("post-layers handler registered, trigger=%s", trigger.c_str());
+    RTP_LLM_LOG_INFO(
+        "post-layers handler registered, trigger=%s, hidden_state_stage=%s", trigger.c_str(), stage.c_str());
 }
 
 torch::Tensor PostLayersProcessor::invokeHandler(const torch::Tensor& context_rows) const {

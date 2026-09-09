@@ -3,6 +3,12 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "custom_output_hidden_stage_test",
+    srcs = ["custom_output_hidden_stage_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "generic_moe_allreduce_test",
     srcs = ["generic_moe_allreduce_test.py"],
     deps = py_test_deps + [
