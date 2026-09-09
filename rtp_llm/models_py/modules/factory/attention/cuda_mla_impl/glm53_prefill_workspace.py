@@ -43,7 +43,8 @@ class Glm53PrefillWorkspace:
             self._storage = torch.empty(shape, dtype=dtype, device=device)
             self._rows, self._heads, self._width = shape
             if not self._allocation_logged:
-                logging.info(
+                # A new workspace is created for every prefill forward.
+                logging.debug(
                     "GLM53_PREFILL_WORKSPACE_ALLOCATED: shape=%s dtype=%s bytes=%d",
                     shape,
                     dtype,
