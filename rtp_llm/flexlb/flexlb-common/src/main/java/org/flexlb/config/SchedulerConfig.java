@@ -19,8 +19,6 @@ public final class SchedulerConfig {
     private QueueOrderingConfig ordering = new QueueOrderingConfig();
     /** How queued requests form decision groups. */
     private DecisionPolicyConfig decision = new DecisionPolicyConfig();
-    private QueueCapacityConfig capacity = new QueueCapacityConfig();
-    private RequestLifecycleConfig lifecycle = new RequestLifecycleConfig();
 
     public static SchedulerConfig direct() {
         SchedulerConfig config = new SchedulerConfig();

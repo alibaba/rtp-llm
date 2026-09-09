@@ -57,11 +57,11 @@ final class BlockedRequestIndex {
 
     Conflict conflict(
             GlobalQueueEntry entry,
-            QueueRouteAdmission admission) {
-        Conflict conflict = conflict(entry, admission.selectedPrefillEndpoint());
+            RouteAdmission admission) {
+        Conflict conflict = conflict(entry, admission.prefillEndpoint());
         return conflict != null
                 ? conflict
-                : conflict(entry, admission.selectedDecodeEndpoint());
+                : conflict(entry, admission.decodeEndpoint());
     }
 
     void parkExact(
@@ -133,7 +133,7 @@ final class BlockedRequestIndex {
      */
     void routeCommitted(
             GlobalQueueEntry entry,
-            QueueRouteAdmission admission) {
+            RouteAdmission admission) {
         EndpointWaiters waiters = membership.get(entry);
         if (waiters == null) {
             clearEntry(entry);
@@ -215,10 +215,10 @@ final class BlockedRequestIndex {
     }
 
     private static boolean selects(
-            QueueRouteAdmission admission,
+            RouteAdmission admission,
             WorkerEndpoint endpoint) {
-        return admission.selectedPrefillEndpoint() == endpoint
-                || admission.selectedDecodeEndpoint() == endpoint;
+        return admission.prefillEndpoint() == endpoint
+                || admission.decodeEndpoint() == endpoint;
     }
 
     private EndpointWaiters register(EndpointWaiters waiters) {

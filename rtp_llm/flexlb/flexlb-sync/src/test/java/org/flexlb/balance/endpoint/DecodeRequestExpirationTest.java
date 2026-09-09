@@ -57,7 +57,8 @@ class DecodeRequestExpirationTest {
         DecodeEndpoint.ReservationHandle reservation = reserve(1L, 500, 700, 0);
         markQueued(1L);
         DecodeEndpoint.EngineDispatchPermitAcquisition acquired =
-                endpoint.acquireEngineDispatchPermit(reservation.requestId(), 1L, 100L);
+                endpoint.acquireEngineDispatchPermit(reservation,
+                        new DecodeEndpoint.AdmissionCapacity(1, 100L));
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
         assertEquals(1, endpoint.layeredAdmissionView().activeDispatchPermits());
 
@@ -73,7 +74,8 @@ class DecodeRequestExpirationTest {
         DecodeEndpoint.ReservationHandle reservation = reserve(1L, 500, 700, 0);
         markQueued(1L);
         DecodeEndpoint.EngineDispatchPermitAcquisition acquired =
-                endpoint.acquireEngineDispatchPermit(reservation.requestId(), 1L, 100L);
+                endpoint.acquireEngineDispatchPermit(reservation,
+                        new DecodeEndpoint.AdmissionCapacity(1, 100L));
         assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                 acquired.permit().transferToEngineLifecycle());
         assertEquals(1, endpoint.routingView().engineLoad());

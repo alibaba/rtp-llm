@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -28,13 +27,13 @@ public final class EndpointEventProjector {
             PrefillEndpoint source,
             RoleType role,
             List<PrefillState.WorkerStatusFact> facts) {
-        projectPrefillStatus(source, role, facts, System.currentTimeMillis());
+        projectPrefillStatus(source, role, facts);
     }
 
     public void onDecodeStatus(
             DecodeEndpoint source,
             List<DecodeEndpoint.WorkerStatusFact> facts) {
-        projectDecodeStatus(source, facts, System.currentTimeMillis());
+        projectDecodeStatus(source, facts);
     }
 
     public void onPrefillGenerationRetired(
@@ -69,6 +68,14 @@ public final class EndpointEventProjector {
         scheduler.onQueuedItemExpired(exactItem);
     }
 
+    public void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
+        try {
+            scheduler.onQueuedItemPreempted(victim, incoming);
+        } catch (Throwable failure) {
+            logErrorNoFail("Queued preemption projection failed: request_id={}", victim.requestId(), failure);
+        }
+    }
+
     public void onQueueOfferFailure(
             ScheduledRequest exactItem, Throwable cause) {
         scheduler.onQueueOfferFailure(exactItem, cause);
@@ -82,16 +89,10 @@ public final class EndpointEventProjector {
     private void projectPrefillStatus(
             PrefillEndpoint source,
             RoleType role,
-            List<PrefillState.WorkerStatusFact> facts,
-            long observedAtMs) {
+            List<PrefillState.WorkerStatusFact> facts) {
         for (PrefillState.WorkerStatusFact fact : facts) {
             try {
-                switch (fact.kind()) {
-                    case ACTIVE -> projectPrefillActive(
-                            source, fact, observedAtMs);
-                    case COMPLETED, FAILED, PRIORITY_CANCELED ->
-                            projectPrefillTerminal(source, role, fact);
-                }
+                scheduler.onPrefillFact(source, role, fact);
             } catch (Throwable failure) {
                 logErrorNoFail(
                         "Prefill status fact projection isolated: request_id={} engine={}",
@@ -101,89 +102,12 @@ public final class EndpointEventProjector {
         }
     }
 
-    private void projectPrefillActive(
-            PrefillEndpoint source,
-            PrefillState.WorkerStatusFact fact,
-            long observedAtMs) {
-        ScheduledRequest item = fact.item();
-        RequestSlot slot = scheduler.requestSlot(item.requestId());
-        if (slot == null) {
-            return;
-        }
-        Runnable work;
-        synchronized (slot) {
-            if (!scheduler.isCurrentSlot(slot)
-                    || !slot.ownsPrefillFact(source, item)) {
-                return;
-            }
-            slot.observeWorkerStatus(observedAtMs);
-            work = scheduler.materializePostLockActionLocked(
-                    slot,
-                    slot.reducePrefillActive(source, item),
-                    null);
-        }
-        scheduler.runPostLock(work);
-    }
-
-    private void projectPrefillTerminal(
-            PrefillEndpoint source,
-            RoleType role,
-            PrefillState.WorkerStatusFact fact) {
-        if (fact.kind() == PrefillState.WorkerStatusFact.Kind.COMPLETED
-                && role != RoleType.PDFUSION) {
-            logWarnNoFail(
-                    "Ignoring Prefill-stage successful terminal projection: request_id={} engine={}",
-                    fact.item().requestId(), source.getIp());
-            return;
-        }
-
-        ScheduledRequest item = fact.item();
-        RequestSlot slot = scheduler.requestSlot(item.requestId());
-        if (slot == null) {
-            return;
-        }
-        Runnable work;
-        synchronized (slot) {
-            if (!scheduler.isCurrentSlot(slot)
-                    || !slot.ownsPrefillFact(source, item)) {
-                return;
-            }
-            DeferredTerminal terminal = DeferredTerminal.worker(
-                    WorkerTerminalSource.PREFILL_BACKED,
-                    fact.kind()
-                            == PrefillState.WorkerStatusFact.Kind.COMPLETED,
-                    fact.errorCode());
-            if (fact.kind()
-                    == PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED) {
-                work = scheduler.materializePostLockActionLocked(
-                        slot,
-                        slot.reducePriorityCanceled(
-                                source, item),
-                        null);
-            } else {
-                work = scheduler.materializePostLockActionLocked(
-                        slot,
-                        slot.reduceWorkerTerminal(item, terminal),
-                        null);
-            }
-        }
-        scheduler.runPostLock(work);
-    }
-
     private void projectDecodeStatus(
             DecodeEndpoint source,
-            List<DecodeEndpoint.WorkerStatusFact> facts,
-            long observedAtMs) {
+            List<DecodeEndpoint.WorkerStatusFact> facts) {
         for (DecodeEndpoint.WorkerStatusFact fact : facts) {
             try {
-                switch (fact.kind()) {
-                    case ACTIVE -> projectDecodeActive(
-                            source, fact, observedAtMs);
-                    case ACCEPTED -> projectDecodeAccepted(
-                            source, fact, observedAtMs);
-                    case TERMINAL -> projectDecodeTerminal(
-                            source, fact);
-                }
+                scheduler.onDecodeFact(source, fact);
             } catch (Throwable failure) {
                 logErrorNoFail(
                         "Decode status fact projection isolated: request_id={} engine={}",
@@ -193,92 +117,13 @@ public final class EndpointEventProjector {
         }
     }
 
-    private void projectDecodeActive(
-            DecodeEndpoint source,
-            DecodeEndpoint.WorkerStatusFact fact,
-            long observedAtMs) {
-        RequestSlot slot = scheduler.requestSlot(fact.reservation().requestId());
-        if (slot == null) {
-            return;
-        }
-        synchronized (slot) {
-            if (scheduler.isCurrentSlot(slot)
-                    && slot.ownsDecodeFact(source, fact.reservation())) {
-                slot.observeWorkerStatus(observedAtMs);
-            }
-        }
-    }
-
-    private void projectDecodeAccepted(
-            DecodeEndpoint source,
-            DecodeEndpoint.WorkerStatusFact fact,
-            long observedAtMs) {
-        RequestSlot slot = scheduler.requestSlot(fact.reservation().requestId());
-        if (slot == null) {
-            return;
-        }
-        DecodeAcceptance acceptance;
-        synchronized (slot) {
-            if (!scheduler.isCurrentSlot(slot)
-                    || !slot.ownsDecodeFact(source, fact.reservation())) {
-                return;
-            }
-            slot.observeWorkerStatus(observedAtMs);
-            acceptance = slot.markDecodeAccepted();
-        }
-        releaseDecodeAcceptance(acceptance, fact.reservation().requestId());
-    }
-
-    private void releaseDecodeAcceptance(
-            DecodeAcceptance acceptance,
-            long requestId) {
-        Throwable failure = null;
-        try {
-            scheduler.releaseAdmissionCleanup(acceptance.admissionCleanup());
-        } catch (Throwable cleanupFailure) {
-            failure = RequestRegistry.appendFailure(
-                    failure, cleanupFailure);
-        }
-        if (failure != null) {
-            logErrorNoFail(
-                    "Decode acceptance cleanup isolated: request_id={}",
-                    requestId, failure);
-        }
-    }
-
-    private void projectDecodeTerminal(
-            DecodeEndpoint source,
-            DecodeEndpoint.WorkerStatusFact fact) {
-        RequestSlot slot = scheduler.requestSlot(fact.reservation().requestId());
-        if (slot == null) {
-            return;
-        }
-        Runnable work;
-        synchronized (slot) {
-            if (!scheduler.isCurrentSlot(slot)
-                    || !slot.ownsDecodeFact(source, fact.reservation())) {
-                return;
-            }
-            slot.markDecodeTerminalOwned();
-            DeferredTerminal terminal = DeferredTerminal.worker(
-                    WorkerTerminalSource.DECODE_ENDPOINT_SETTLED,
-                    fact.errorCode() == 0L,
-                    fact.errorCode());
-            work = scheduler.materializePostLockActionLocked(
-                    slot,
-                    slot.reduceWorkerTerminal(slot.activeItem(), terminal),
-                    null);
-        }
-        scheduler.runPostLock(work);
-    }
-
     private void projectPrefillRetirementFacts(
             PrefillEndpoint retiredEndpoint,
             List<ScheduledRequest> ownedItems) {
         for (int index = 0; index < ownedItems.size(); index++) {
             ScheduledRequest exactItem = ownedItems.get(index);
             try {
-                projectPrefillRetirementItem(
+                scheduler.projectPrefillRetirementItem(
                         retiredEndpoint, exactItem);
             } catch (Throwable failure) {
                 logErrorNoFail(
@@ -289,38 +134,6 @@ public final class EndpointEventProjector {
         }
     }
 
-    private void projectPrefillRetirementItem(
-            PrefillEndpoint retiredEndpoint,
-            ScheduledRequest exactItem) {
-        if (exactItem == null || exactItem.prefillEp() != retiredEndpoint) {
-            logErrorNoFail(
-                    "Ignoring Prefill retirement item from another generation: request_id={}",
-                    exactItem == null ? -1 : exactItem.requestId());
-            return;
-        }
-        ScheduledRequest item = exactItem;
-        RequestSlot slot = scheduler.requestSlot(item.requestId());
-        if (slot == null) {
-            return;
-        }
-        String detail = "Prefill endpoint generation retired: "
-                + retiredEndpoint.ipPort() + "#"
-                + retiredEndpoint.getStatus().getGenerationId();
-        TerminalAction action;
-        synchronized (slot) {
-            if (!scheduler.isCurrentSlot(slot)) {
-                return;
-            }
-            action = slot.beginPrefillRetirementTerminal(
-                    retiredEndpoint,
-                    item,
-                    owner -> owner.fail(detail),
-                    RequestRegistry.buildErrorResponse(
-                            StrategyErrorType.BATCH_DISPATCH_FAILED, detail));
-        }
-        scheduler.submitTerminal(action);
-    }
-
     private void projectDecodeRetirementFacts(
             DecodeEndpoint retiredEndpoint,
             List<DecodeEndpoint.ReservationHandle> ownedReservations) {
@@ -328,7 +141,7 @@ public final class EndpointEventProjector {
             DecodeEndpoint.ReservationHandle reservation =
                     ownedReservations.get(index);
             try {
-                projectDecodeRetirementReservation(
+                scheduler.projectDecodeRetirementReservation(
                         retiredEndpoint, reservation);
             } catch (Throwable failure) {
                 logErrorNoFail(
@@ -341,29 +154,6 @@ public final class EndpointEventProjector {
         }
     }
 
-    private void projectDecodeRetirementReservation(
-            DecodeEndpoint retiredEndpoint,
-            DecodeEndpoint.ReservationHandle reservation) {
-        RequestSlot slot = scheduler.requestSlot(reservation.requestId());
-        if (slot == null) {
-            return;
-        }
-        String detail = "Decode endpoint generation retired: generation="
-                + reservation.endpointGenerationId();
-        Runnable work;
-        synchronized (slot) {
-            if (!scheduler.isCurrentSlot(slot)) {
-                return;
-            }
-            work = scheduler.materializePostLockActionLocked(
-                    slot,
-                    slot.reduceDecodeGenerationRetired(
-                            retiredEndpoint, reservation, detail),
-                    null);
-        }
-        scheduler.runPostLock(work);
-    }
-
     private static void logErrorNoFail(String format, Object... arguments) {
         try {
             Logger.error(format, arguments);
@@ -372,11 +162,4 @@ public final class EndpointEventProjector {
         }
     }
 
-    private static void logWarnNoFail(String format, Object... arguments) {
-        try {
-            Logger.warn(format, arguments);
-        } catch (Throwable ignoredDiagnosticFailure) {
-            // This diagnostic cannot change endpoint-event reduction.
-        }
-    }
 }

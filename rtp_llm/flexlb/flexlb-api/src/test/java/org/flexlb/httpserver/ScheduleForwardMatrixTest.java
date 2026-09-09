@@ -110,7 +110,7 @@ class ScheduleForwardMatrixTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
 
         activeRequestCounter = mock(ActiveRequestCounter.class);
         requestToken = mock(ActiveRequestCounter.RequestToken.class);
@@ -430,7 +430,7 @@ class ScheduleForwardMatrixTest {
         when(consistencyView.getMasterHostIpPort()).thenReturn(masterHostIpPort);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
 
         channelEventLoop = new NioEventLoopGroup(1);

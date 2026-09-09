@@ -6,9 +6,11 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * Mock implementation of {@link RpcServiceGrpc.RpcServiceImplBase}.
@@ -29,6 +31,37 @@ import java.util.concurrent.atomic.AtomicLong;
 public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     private static final Logger log = LoggerFactory.getLogger(MockRpcService.class);
+
+    private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) { }
+
+    private final List<FinishedTask> finishedTasks = new ArrayList<>();
+    private volatile Consumer<EngineRpcService.EnqueueBatchRequestPB> acceptedBatchListener;
+
+    /** Optional execution bridge for tests that exercise repeated delivery and status polling. */
+    public void onAcceptedBatch(Consumer<EngineRpcService.EnqueueBatchRequestPB> listener) {
+        acceptedBatchListener = listener;
+    }
+
+    /** Publish authoritative, versioned completion facts through GetWorkerStatus. */
+    public void completeBatch(EngineRpcService.EnqueueBatchRequestPB batch) {
+        synchronized (finishedTasks) {
+            for (var slot : batch.getDpSlotsList()) {
+                for (var external : slot.getRequestsList()) {
+                    var input = external.getInput();
+                    var task = EngineRpcService.TaskInfoPB.newBuilder()
+                            .setRequestId(input.getRequestId())
+                            .setInputLength(input.getTokenIdsCount())
+                            .setBatchId(batch.getBatchId())
+                            .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                            .setEndTimeMs(System.currentTimeMillis())
+                            .setExecutionTimeMs(1)
+                            .setIterateCount(1)
+                            .build();
+                    finishedTasks.add(new FinishedTask(finishedTasks.size() + 1L, task));
+                }
+            }
+        }
+    }
 
     // ==================== Call records (thread-safe, for assertions) ====================
 
@@ -137,6 +170,10 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
         responseObserver.onNext(responseBuilder.build());
         responseObserver.onCompleted();
+        Consumer<EngineRpcService.EnqueueBatchRequestPB> listener = acceptedBatchListener;
+        if (!beh.isFailOnEnqueue() && listener != null) {
+            listener.accept(request);
+        }
     }
 
     @Override
@@ -157,6 +194,18 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 .setTpSize(1)
                 .setDpRank(0);
 
+        synchronized (finishedTasks) {
+            if (!finishedTasks.isEmpty()) {
+                long version = finishedTasks.getLast().version();
+                builder.setStatusVersion(Math.max(request.getLatestCacheVersion() + 1L, version + 1L))
+                        .setLatestFinishedVersion(version);
+                for (FinishedTask finished : finishedTasks) {
+                    if (finished.version() > request.getLatestFinishedVersion()) {
+                        builder.addFinishedTaskList(finished.task());
+                    }
+                }
+            }
+        }
         responseObserver.onNext(builder.build());
         responseObserver.onCompleted();
     }

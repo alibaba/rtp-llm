@@ -73,160 +73,65 @@ The following Maven Wrapper files are included in the project (do not delete):
 
 ### Configuration
 
-`FLEXLB_CONFIG` is the single public configuration document for FlexLB scheduling,
-dispatch, routing, worker-state synchronization, and observability. It is JSON carried
-directly in the environment variable; a file-path form is not supported.
+`FLEXLB_CONFIG` is a required JSON environment variable. It configures scheduling,
+delivery, routing, worker synchronization, and observability; file paths are not accepted.
+The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fields,
+`null`, scalar coercion, numeric enums, and trailing JSON fail startup.
 
-The parser is strict: duplicate keys, unknown fields, fields from inactive tagged
-variants, `null`, scalar coercion, numeric enum values, and trailing JSON are rejected at
-startup. Optional fields must be omitted rather than set to `null`. If the environment
-variable is absent, schema v2 defaults directly to
-`QUEUE + FIFO + FIXED_WINDOW + BATCH` and the remaining model defaults.
+| Setting | Schema 3 behavior |
+| --- | --- |
+| `dispatcher.maxInflightPerPrefillWorker` | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests. |
+| Prefill ownership | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
+| `requestLifecycle.request.timeoutMs` | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default. |
+| `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`. |
+| `requestLifecycle.decision.lifetime` | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age. |
+| `scheduler.queueTimeoutMs` | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field. |
+| Removed capacity controls | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected. |
+| Removed routing controls | Prefill candidate randomization/LRU and outlier filters, Decode weights/outlier filters, and output-estimate truncation are rejected. |
+| Transport timeout | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON. |
+| `scheduler.ordering.preemption.timeoutMs` | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms. |
+| `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults. |
 
-Only priority preemption may send an Engine Cancel RPC. Uncertain delivery,
-ordinary client cancellation, and inactivity expiry never send Engine Cancel.
-A request with no matching Engine status for
-`scheduler.lifecycle.staleInflightTimeoutMs` is removed from Master tracking,
-and its exact Prefill/Decode accounting is released locally. Matching Engine
-status renews this inactivity deadline; delivery acknowledgements do not.
-Cleanup does not wait for Engine cancellation or terminal evidence.
-
-The following example activates every major configuration section:
+The request timeout below is an explicit workload value; decision lifetime 2.0 is the default:
 
 ```bash
 export FLEXLB_CONFIG='{
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "scheduler": {
     "type": "QUEUE",
     "queueTimeoutMs": 3600000,
-    "ordering": {
-      "type": "PRIORITY",
-      "defaultPriority": 50,
-      "preemption": {
-        "allowedVictimStages": [
-          "PREFILL_QUEUED",
-          "DECODE_RESERVED",
-          "DECODE_ENGINE_OWNED"
-        ],
-        "engineCancellation": {
-          "ackTimeoutMs": 50,
-          "completionTimeoutMs": 1000
-        }
-      }
-    },
-    "decision": {
-      "type": "FIXED_WINDOW",
-      "maxRequests": 8,
-      "maxCollectionWaitMs": 300,
-      "maxPredictedExecutionMs": 100
-    },
-    "capacity": {
-      "maxOutstandingRequestsGlobal": 100000,
-      "maxWaitingRequestsPerPrefillWorker": 1024
-    },
-    "lifecycle": {
-      "staleInflightTimeoutMs": 300000,
-      "deliveredNotAcceptedTimeoutMs": 30000,
-      "maxDeliveredNotAcceptedRequestsGlobal": 200
-    }
+    "ordering": {"type": "FIFO"},
+    "decision": {"type": "FIXED_WINDOW", "maxRequests": 8, "maxCollectionWaitMs": 300}
   },
-  "dispatcher": {
-    "type": "BATCH",
-    "maxInflightBatchesPerPrefillWorker": 2,
-    "enqueueRpcTimeoutMs": 5000
+  "dispatcher": {"type": "BATCH", "maxInflightPerPrefillWorker": 2},
+  "requestLifecycle": {
+    "request": {"timeoutMs": 60000},
+    "decision": {"lifetime": 2.0}
   },
   "router": {
-    "groupSelector": {
-      "defaultTargets": [
-        {"group": "default-group", "weight": 1}
-      ],
-      "rules": [
-        {
-          "name": "long-context",
-          "match": {"inputTokens": {"min": 8192}},
-          "targets": [
-            {"group": "long-context-group", "weight": 1}
-          ]
-        }
-      ]
-    },
     "roles": {
-      "prefill": {
-        "executionTimeEstimator": {
-          "type": "FORMULA",
-          "expression": "sum(computeTokens) + 0.3*sum(hitCacheTokens)"
-        },
-        "candidateChoice": {
-          "type": "RANDOM_WITHIN_TOLERANCE",
-          "relativeTolerance": 0.1,
-          "minimumToleranceMs": 20,
-          "outlierRejection": {
-            "maxPendingVsAverageMultiplier": 3.0,
-            "maxProjectedDrainVsAverageMultiplier": 3.0
-          }
-        },
-        "cacheAffinity": {
-          "maxExtraTtftMs": 100,
-          "minPrefixHitPercent": 5
-        }
-      },
-      "decode": {
-        "availability": {
-          "maxKvUsagePercent": 90,
-          "maxEngineRequests": 128
-        },
-        "kvReservation": {
-          "maxOutputTokensForEstimate": 1000
-        },
-        "decayPerToken": 0.001,
-        "loadDecayPerRequest": 1.0,
-        "outlierRejection": {
-          "maxEngineLoadVsAverageMultiplier": 3.0,
-          "maxKvUsedVsAverageMultiplier": 3.0
-        }
-      }
-    }
-  },
-  "workerRegistry": {
-    "health": {
-      "statusPollIntervalMs": 20,
-      "statusRpcTimeoutMs": 5000,
-      "statusStaleAfterMs": 10000
-    },
-    "cacheStatus": {
-      "targetDiffSize": 30,
-      "minRefreshIntervalMs": 50,
-      "maxRefreshIntervalMs": 3000,
-      "fullSnapshotDebugMode": false
-    }
-  },
-  "observability": {
-    "cacheHit": {
-      "recentKeyWindow": {
-        "writeEnabled": true,
-        "durationMs": 1800000,
-        "maxKeyOccurrences": 10000000
-      },
-      "metricsEnabled": true,
-      "requestTraceLogEnabled": false,
-      "theoryLog": {
-        "path": "/home/admin/ai-whale/logs/master_theory_hit.log"
-      }
+      "prefill": {},
+      "decode": {"availability": {"maxKvUsagePercent": 90, "maxEngineRequests": 128}}
     }
   }
 }'
 ```
 
-`maxProjectedDrainVsAverageMultiplier` limits estimated-TTFT outliers by the
-endpoint's known projected drain time. Candidates whose drain cannot be modeled
-are excluded from this particular outlier axis.
+`workerRegistry`, `observability.cacheHit`, and `router.groupSelector` remain available.
+Only schema 3 is accepted. Write the configuration directly with explicit values for
+`requestLifecycle.request.timeoutMs`, which has no default. A matching Engine request
+status renews this deadline. Once it expires, FlexLB releases the exact local
+request and its reservations even if delivery acknowledgement or Engine request status is missing.
+Only priority preemption may send an Engine Cancel RPC. Delivery uncertainty,
+request inactivity expiry, and client-cancellation bookkeeping remain local to the Master.
+`requestLifecycle.decision.lifetime` defaults to 2.0. There is no legacy-schema conversion layer.
 
 `MODEL_SERVICE_CONFIG` still describes service discovery and endpoint topology; it is
 not a second FlexLB behavior configuration:
 
 ```bash
 export MODEL_SERVICE_CONFIG='{
-    "service_id": "model.service",
+    "service_id": "aigc.text-generation.generation.engine_service",
     "load_balance": true,
     "role_endpoints": [
         {
@@ -259,6 +164,42 @@ export MODEL_SERVICE_CONFIG='{
 }'
 ```
 
+Static IP lists use `MODEL_SERVICE_CONFIG.hosts`:
+
+```json
+"hosts": {
+  "com.blue.prefill": ["10.0.0.1:8000", "10.0.0.2:8000"],
+  "com.blue.decode": ["10.0.0.3:9000"]
+}
+```
+
+The key matches the endpoint's `address`; ports follow its `protocol`.
+Use `hosts` or `discovery_file`, not both.
+
+Local file discovery uses `MODEL_SERVICE_CONFIG.discovery_file`, pointing to a
+JSON mapping of service domains to HTTP host:port lists. Production discovery
+providers continue to resolve their service domains.
+
+Master configuration uses `FLEXLB_CONFIG`, `MODEL_SERVICE_CONFIG`,
+`FLEXLB_SYNC_CONSISTENCY_CONFIG`, and `LOG_LEVEL`. Spring does not bind environment
+variables. Configure ports, RPC transport and logging with their standard
+command-line properties, such as `--server.port` and
+`--flexlb.engine-grpc.enqueue-timeout-ms`.
+HA currently retains `HIPPO_ROLE` as its existing election group identifier.
+
+The gRPC server executor is configured in `FLEXLB_CONFIG`:
+
+```json
+"grpcServer": {
+  "executorCoreSize": 1000,
+  "executorMaxSize": 1000,
+  "executorQueueSize": 1000
+}
+```
+
+All three default to 1000. Core size may be 0; maximum size and queue size
+must be positive, and maximum size must be at least core size.
+
 ### Scheduler, ordering, decision, and dispatcher
 
 Under `QUEUE`, ordering, decision formation, and delivery are three independent
@@ -278,105 +219,52 @@ request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests fo
 one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
 sends them.
 
-`FIXED_WINDOW` is bounded by `maxRequests` (1–1024),
-`maxCollectionWaitMs`, and the optional
-inclusive group-growth cap `maxPredictedExecutionMs`: reaching the cap dispatches
-the group without waiting for the collection window; another request is not
-added when it would exceed the cap, although an indivisible singleton may
-exceed it. A zero collection window skips waiting but still groups requests that
-are already available, so it is not equivalent to `SINGLE`.
-`SINGLE` has no collection parameters. In schema v2 every setting has one owner:
-decision-group limits live only under `scheduler.decision`, waiting-queue limits
-live only under `scheduler.capacity`, and `dispatcher` contains only delivery and
-delivery-backpressure settings. Omitting `scheduler.decision` uses
-`FIXED_WINDOW`; select `SINGLE` explicitly when that behavior is required.
+`FIXED_WINDOW` uses `maxRequests` (positive integer, default 8),
+`maxCollectionWaitMs` (default 300 ms), and optional `maxPredictedExecutionMs`.
+Reaching the predicted-time cap dispatches the group; an indivisible singleton may
+exceed it. A zero collection window can still group already-waiting requests.
+`SINGLE` has no collection parameters. Omitting `scheduler.decision` selects
+`FIXED_WINDOW`.
 
-The online loader accepts only schema v2. Convert v1 documents offline with
-`org.flexlb.config.FlexlbConfigMigration` (its `main` method reads v1 JSON from
-standard input, writes v2 JSON to standard output, and reports behavior changes
-to standard error), review the output, and deploy the resulting v2 document. A
-v1 `NON_BATCH` queue with no decision becomes `SINGLE`; a v1 `BATCH` queue with
-no decision becomes `FIXED_WINDOW`. Its `maxRequests`, `maxCollectionWaitMs`,
-`earlyDispatchPredictedExecutionMs`, and
-`maxWaitingRequestsPerPrefillWorker` fields move to their v2 owners. The
-prediction threshold keeps its inclusive equality boundary during conversion.
-Fields that were not part of v1, including an explicit v1
-`maxPredictedExecutionMs`, are rejected rather than guessed. Omitting
-`schemaVersion` means v2; every explicit version other than 2 is rejected by the
-online loader.
-
-Former field-level FlexLB environment variables are not compatibility aliases.
-Their presence aborts startup with migration guidance instead of silently using
-v2 defaults; move those values into `FLEXLB_CONFIG`. Replace the removed
-`FLEXLB_MONITOR_MODE` with `FLEXLB_MONITOR_METRIC_WHITELIST`: use the default
-whitelist for the former `critical-only` behavior or the bare `flexlb_` prefix
-for the former `all` behavior.
-
-Production-style examples migrated from the former field-level environment variables:
+Configuration examples:
 
 - [QUEUE + PRIORITY + NON_BATCH](docs/config-examples/flexlb-queue-priority-non-batch.json)
 - [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
 
-DIRECT uses the same role routing configuration as QUEUE. For example, a compact
-DIRECT configuration that selects only the best projected Prefill candidate is:
+DIRECT uses `dispatcher.maxInflightPerPrefillWorker` as its per-worker request limit. Example:
 
 ```bash
 export FLEXLB_CONFIG='{
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "scheduler": {"type": "DIRECT"},
-  "dispatcher": {"type": "NON_BATCH"},
-  "router": {
-    "roles": {
-      "prefill": {
-        "candidateChoice": {
-          "type": "BEST_ONLY",
-          "outlierRejection": {
-            "maxPendingVsAverageMultiplier": 3.0,
-            "maxProjectedDrainVsAverageMultiplier": 3.0
-          }
-        }
-      }
-    }
+  "dispatcher": {"type": "NON_BATCH", "maxInflightPerPrefillWorker": 2},
+  "requestLifecycle": {
+    "request": {"timeoutMs": 60000},
+    "decision": {"lifetime": 2.0}
   }
 }'
 ```
 
-PREFILL and PDFUSION share the Prefill routing policy. Execution-time estimator
-types are `FORMULA` and `LEARNING`. Candidate choice is tagged as `BEST_ONLY`,
-`RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL`. The candidate pool
-for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
-`{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
-`{"type":"FIXED","workers":2}`. Fields belonging to another estimator,
-candidate-choice, or pool variant are rejected.
+PREFILL and PDFUSION use fixed BEST_ONLY selection. With `cacheAffinity` configured,
+a cache leader is preferred when its reusable prefix meets `minPrefixHitPercent`
+and projected TTFT stays within `maxExtraTtftMs` of the best candidate; otherwise
+the best projected TTFT wins. Equal cache hits preserve the best-TTFT candidate.
+The prefix percentage uses predictor-effective reusable tokens; the final cache block
+remains compute work. Omit `cacheAffinity` to disable that preference.
+The projection uses a frozen snapshot of current work and cannot predict future arrivals.
 
-Projected Prefill TTFT is a deterministic frozen-snapshot projection, not a
-promise about future wall-clock latency. It inserts the incoming request using
-the live FIFO/PRIORITY order, reuses the production decision-group planner,
-overlaps collection deadlines with already committed work, and assumes no later
-arrivals, cancellations, predictor revisions, or resource changes. An exact
-admission block observed on the current head is represented as a structured
-blocked state. The model does not invent a release time for delivery capacity
-that is currently unobservable; otherwise its service timeline is conditional
-on later admission.
+Decode freezes each route attempt's request identity, priority, complete prompt-plus-output
+demand, capacity limits and admission mode before selecting workers. DIRECT requires
+immediately available dispatch capacity. QUEUE without reclamation can retain a physically
+feasible route while Decode is busy and wait for a permit at delivery. With Decode reclamation
+enabled, placement also counts queued reservations and can reclaim allowed lower-priority owners.
+Selection rotates among eligible workers; reservation and delivery always recheck current
+inventory under the selected generation's lock. `maxKvUsagePercent` defaults to 90.
+Optional `maxEngineRequests` covers the ownership scope of the current admission stage,
+including dispatch shadows and permits; it is not the Engine's physical RUNNING concurrency.
 
-Cache affinity is enabled by including `router.roles.prefill.cacheAffinity`. A
-cache leader is preferred only when its endpoint-specific reusable prefix meets
-`minPrefixHitPercent` and its frozen projected TTFT is no more than
-`maxExtraTtftMs` above the best candidate. The
-percentage uses predictor-effective reusable tokens (the final cache block remains
-compute work), not the raw routing-prefix match. Omit the object to disable it.
-Decode admission is controlled by the optional positive
-`router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
-request-count cap. The cap covers all Engine-facing ownership: engine-confirmed
-`KV_ALLOCATED` and `RUNNING` requests, dispatched shadows, and active dispatch
-permits. It is not the Engine's physical `RUNNING` concurrency. For example, an
-Engine running cap of 128 plus roughly one 128-request accepted pipeline buffer
-normally starts with `maxEngineRequests=256`; the split is observable through
-`/rtp_llm/inflight_status` and the `auto_tpm.decode.*` gauges.
-
-See [QUEUE ordering, decision, and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
-for the QUEUE lifecycle, accounting invariants, complete configuration parameter
-reference, and mode matrix.
+See [FlexLB scheduling and configuration](docs/priority-scheduler-delivery-modes.md)
+for lifecycle behavior, capacity accounting, configuration defaults, and the mode matrix.
 
 ### Run
 
@@ -424,10 +312,11 @@ Authorization: Bearer <token>
 - **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
 - **Prefill execution formula**:
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
-  `FORMULA`. Omitting the estimator applies the code default:
-  `sum(computeTokens) + 0.3*sum(hitCacheTokens)`.
-- **Routing strategy parameters**: the tagged selector objects under
-  `router.roles.prefill` and `router.roles.decode`.
+  `FORMULA`. The default expression is
+  `sum(computeTokens) + 0.3*sum(hitCacheTokens)`, returning predicted milliseconds.
+- **Prefill concurrency**: `dispatcher.maxInflightPerPrefillWorker`.
+- **Routing parameters**: Prefill execution-time estimation/cache affinity and Decode
+  admission thresholds under `router.roles`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
 - **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.

@@ -90,7 +90,7 @@ public class BalanceContext {
 
     /**
      * priority scheduling plan type that finally placed the request:
-     * normal / prefill_evict / decode_evict. Empty when not applicable.
+     * normal / decode_evict. Empty when not applicable.
      */
     private String planType = "";
 

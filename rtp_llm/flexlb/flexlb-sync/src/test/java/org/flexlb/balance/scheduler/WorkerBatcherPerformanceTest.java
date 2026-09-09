@@ -84,7 +84,7 @@ class WorkerBatcherPerformanceTest {
                         RouteProjection.Inputs inputs =
                                 runtime.captureRouteProjectionInputs();
                         checksum += inputs.queue().activeItems().size();
-                        checksum += inputs.pendingRequestCount();
+                        checksum += inputs.ownershipVersion();
                     }
                     elapsedRounds[round] =
                             (System.nanoTime() - started) / operations;
@@ -131,11 +131,9 @@ class WorkerBatcherPerformanceTest {
 
     private static WorkerBatcher runtimeWithDepth(int depth)
             throws InterruptedException {
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
-        SchedulingTestConfig.useQueueCapacity(config)
-                .setMaxWaitingRequestsPerPrefillWorker(1_024);
         PrefillEndpoint endpoint = stablePrefillEndpoint();
         BlockingDeliveryStrategy delivery = new BlockingDeliveryStrategy();
         WorkerBatcher runtime = new WorkerBatcher(
@@ -202,13 +200,14 @@ class WorkerBatcherPerformanceTest {
         when(predictor.evaluator()).thenReturn(evaluator);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
-        when(endpoint.getStatus()).thenReturn(WorkerStatus.createDiscovered(
+        WorkerStatus status = WorkerStatus.createDiscovered(
                 RoleType.PREFILL,
                 "perf",
                 "127.0.0.1",
                 8080,
                 8090,
-                "perf-site"));
+                "perf-site");
+        when(endpoint.getStatus()).thenReturn(status);
         return endpoint;
     }
 
