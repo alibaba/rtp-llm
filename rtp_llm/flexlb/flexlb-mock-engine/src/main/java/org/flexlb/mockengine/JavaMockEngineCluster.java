@@ -1288,7 +1288,7 @@ public final class JavaMockEngineCluster {
                         }
                         shapes.add(shape);
                         if (!autoFetch || !prefillSessions.containsKey(requestId)) {
-                            responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
+                            responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
                         }
                         requestStates.put(requestId, "running");
                     }
@@ -1668,7 +1668,7 @@ public final class JavaMockEngineCluster {
             recordEventArrival(requestId);
 
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                    responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
+                    responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
 
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
                 if (!scheduleDecodeCompletion(shape, -1, queue)) {
@@ -1865,7 +1865,7 @@ public final class JavaMockEngineCluster {
                             .asRuntimeException());
                     return;
                 }
-                queue = responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
+                queue = responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
             } else {
                 queue = responseQueues.get(requestId);
                 if (queue == null || downstreamDecodeOwners.containsKey(requestId)) {
@@ -2134,11 +2134,30 @@ public final class JavaMockEngineCluster {
             // (A cancelled running slot's top-up ran under decodeQueueLock inside
             // the decode branch above — nothing to schedule outside the lock.)
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
-                FastRpcService prefill = upstreamPrefillOwners.get(requestId);
-                if (prefill != null && prefill.prefillSessions.containsKey(requestId)) {
-                    prefill.cancel(requestId, false, false);
+                synchronized (decodeQueueLock) {
+                    FastRpcService prefill = upstreamPrefillOwners.get(requestId);
+                    if (prefill != null) {
+                        if (prefill.prefillSessions.containsKey(requestId)) {
+                            prefill.cancel(requestId, false, false);
+                        } else {
+                            // After handoff the client queue still belongs to P.
+                            // A cancel winning against link death must close it
+                            // before removing the last propagation route.
+                            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> upstreamQueue =
+                                    prefill.responseQueues.get(requestId);
+                            if (upstreamQueue != null) {
+                                upstreamQueue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                                        .setRequestId(requestId)
+                                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                                .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED)
+                                                .setErrorMessage("cancelled by client"))
+                                        .build());
+                                prefill.responseQueues.remove(requestId, upstreamQueue);
+                            }
+                        }
+                    }
+                    clearUpstreamOwnership(requestId);
                 }
-                clearUpstreamOwnership(requestId);
             }
             return cancelledPhase;
         }
@@ -2335,6 +2354,10 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("decode ownership requires Prefill -> Decode");
             }
             synchronized (decode.decodeQueueLock) {
+                if (decode.stopped || decode.shuttingDown) {
+                    decode.deliverLinkBreak(requestId, this);
+                    return;
+                }
                 FastRpcService previousDecode = downstreamDecodeOwners.put(requestId, decode);
                 if (previousDecode != null && previousDecode != decode) {
                     previousDecode.upstreamPrefillOwners.remove(requestId, this);
@@ -3631,6 +3654,9 @@ public final class JavaMockEngineCluster {
                 return false;
             }
             synchronized (decodeQueueLock) {
+                if (stopped || shuttingDown) {
+                    return false;
+                }
                 // Cancel raced ahead of scheduling: bail out before claiming
                 // anything. The cancel path has already surfaced the CANCELLED
                 // completion/response, so treat the request as accepted-and-
@@ -4836,7 +4862,7 @@ public final class JavaMockEngineCluster {
          */
         void drainAndShutdown() {
             shuttingDown = true;
-            stopped = true;
+            setStopped(true);
             for (Long requestId : List.copyOf(prefillSessions.keySet())) {
                 cancel(requestId, false, false);
             } // same rejection semantics as the control-plane /stop_engine
@@ -4920,14 +4946,14 @@ public final class JavaMockEngineCluster {
          * </ol>
          *
          * <p>Contrast: {@code stop_engine} (MockControlServer.handleStopEngine)
-         * closes the port but deliberately KEEPS every pool and queue, so the
-         * engine resumes in place once restarted — a network-level outage, not
-         * a process death. {@link #drainAndShutdown()} is the graceful process
+         * closes the port and its P->D streams, releasing their request resources,
+         * but retains the engine incarnation and cache for an in-place restart
+         * — a network-level outage, not a process death. {@link #drainAndShutdown()} is the graceful process
          * EXIT path and cancels everything through the normal terminal
          * machinery instead of discarding it.
          */
         void crashNow() {
-            stopped = true;
+            setStopped(true);
             crashEpoch.incrementAndGet();
 
             for (Long requestId : List.copyOf(prefillSessions.keySet())) {
@@ -5076,7 +5102,41 @@ public final class JavaMockEngineCluster {
             }
         }
         void resetEnqueueCount() { this.enqueueCount.set(0); }
-        void setStopped(boolean s) { this.stopped = s; }
+        void setStopped(boolean s) {
+            synchronized (decodeQueueLock) {
+                this.stopped = s;
+                if (s && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                    // The mock has no P->D socket: explicitly model the broken
+                    // RemoteGenerate stream before teardown discards its owners.
+                    // Normal completion and downstream cancellation claim the
+                    // same ownership under this lock, so only the winner emits.
+                    for (Long requestId : List.copyOf(upstreamPrefillOwners.keySet())) {
+                        FastRpcService prefill = upstreamPrefillOwners.get(requestId);
+                        if (prefill != null) {
+                            deliverLinkBreak(requestId, prefill);
+                            // Closing the stream also releases a prepared D
+                            // allocation: otherwise closing P's deferred context
+                            // strands waiting_for_kv until its lease timeout.
+                            cancel(requestId, false, false);
+                            clearUpstreamOwnership(requestId);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void deliverLinkBreak(long requestId, FastRpcService prefill) {
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
+                    prefill.responseQueues.get(requestId);
+            if (queue != null) {
+                queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                .setErrorCodeValue(8209) // REMOTE_GENERATE_FAILED (C++ ErrorCode)
+                                .setErrorMessage("P->D link closed: decode engine " + grpcPort + " stopped"))
+                        .build());
+            }
+        }
         void setGrpcServer(Server server) { this.grpcServer = server; }
         long getCrashEpoch() { return crashEpoch.get(); }
         boolean isStopped() { return stopped; }

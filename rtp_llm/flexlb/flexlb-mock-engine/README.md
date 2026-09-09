@@ -705,3 +705,11 @@ counting) is now faithful — since the Java mock implements gRPC `Cancel`,
 cancels issued on the master's active-eviction path really reach the engine
 and are counted. Historical "undercounted PASS" baselines will turn red;
 that is a semantic alignment, not a regression.
+
+### P→D 断链
+
+Mock 的 P→D 数据通道使用进程内队列。停止 Decode 端口、崩溃或强制移除时，
+通过已有请求所有权向 Prefill 响应队列即时投递 `8209 REMOTE_GENERATE_FAILED`，
+附带断链说明；不等待客户端 deadline，不通过 Master Cancel。正常排空不产生断链错误。
+响应队列只接受一个终态，后续取消、完成或输出帧不再写入。此错误以现有
+`error_info` 数据帧传递，模拟业务错误语义，不模拟真实 gRPC trailing status 或 keepalive 时延。
