@@ -20,26 +20,18 @@ export LD_LIBRARY_PATH=/opt/conda310/lib:${LD_LIBRARY_PATH:-}
 
 BENCH_DIR=rtp_llm/cpp/cache/block_tree_cache/benchmark
 BINARY=./bazel-bin/$BENCH_DIR/block_tree_cache_gpu_benchmark
-TRANSFER_PROFILE=$BENCH_DIR/profiles/deepseek_v4_pro_fp8_descriptor_sizes.json
+TRANSFER_PROFILE=$BENCH_DIR/profiles/deepseek_v4_pro_fp8_tp1_cp1.json
 TREE_PROFILE=$BENCH_DIR/profiles/deepseek_v4_pro_fp8_tp1_cp1.json
 OUT_DIR=/tmp/block_tree_cache_nsys
 
 mkdir -p "$OUT_DIR"
 test -x "$BINARY"
+test -r "$TRANSFER_PROFILE"
+test -r "$TREE_PROFILE"
 nsys --version
 ```
 
-Transfer binary 的公共参数仍名为 `--model-profile`，但应传入 descriptor-size profile：
-
-```text
-deepseek_v4_pro_fp8_descriptor_sizes.json
-```
-
-Tree binary 才使用完整 model profile：
-
-```text
-deepseek_v4_pro_fp8_tp1_cp1.json
-```
+Tree 和 Transfer binary 均通过 `--model-profile` 加载完整 model profile；Transfer 从其中的 group 布局计算 descriptor 大小。这里两者使用仓库已有的 `deepseek_v4_pro_fp8_tp1_cp1.json`。
 
 建议把以下信息与报告一起记录：代码 commit、binary SHA256、profile SHA256、GPU/Driver/CUDA/Nsight Systems 版本，以及完整 benchmark 命令。
 

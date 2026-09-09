@@ -3,7 +3,7 @@
 本目录提供 BlockTreeCache 的 Tree 在线生命周期 microbenchmark 与 Device/Host/Disk transfer benchmark。当前实现以 workload 可核对、失败可传播、repetition 相互独立为前提；整改前的 buffered 大工作集与 round-trip 数值不能作为基线。
 
 > [!IMPORTANT]
-> 运行本 benchmark 前必须先阅读并遵循本 README。不建议参考或套用 benchmark 目录外的通用 skill、测试流程或构建参数；除非本文明确引用，构建配置、运行方式、case 定义和结果判定均以本目录文档为准。外部说明与本文冲突时，以本文为准。
+> 运行本 benchmark 前必须先阅读并遵循本 README。case 定义、指标语义和结果判定以本目录文档及实现为准。容器用户、构建预检、缓存与共享 GPU 锁遵循仓库 AGENTS.md 和 `test-execution` 技能；下方 Bazel 命令列出目标与平台参数，执行时通过该技能的 wrapper 补齐环境参数。
 
 ## 设计边界
 
@@ -19,8 +19,8 @@
 ## Case 矩阵
 
 - smoke：2 个，只运行最小在线 Tree lifecycle 与 D2H Transfer 端到端路径。
-- profile：active Tree 1 个（`tree_online_high_variation_c32`，task pool 4）+ Transfer 12 个（4 个 Device↔Host copy-strategy 对照、4 个 Device↔Disk、4 个 Host↔Disk）。
-- representative perf case 共 5 个：1 个在线 Tree + 4 个 Transfer（host CUDA-batch strategy、host staged-sm、device-disk direct、host-disk direct）。
+- profile：包含 Tree、mixed Transfer（含 Device↔Host 并发变体）、单方向 batch API matrix 和 e2e business matrix。`--suite profile` 默认选择全部已注册家族；只跑专项时用 `--case` 指定完整名称列表，详见 case 文档。
+- 整套 suite 的 perf 采集由 registry 的 `is_representative_perf` 标记选择代表 case（Tree、host 两种 copy strategy 及并发变体、device-disk direct、host-disk direct）；显式 `--case` 选择时 driver 对所选 case 采集。
 - buffered profile working set：`full_context=32768` blocks，`swa=4096` blocks。每次 measured window 至少完整访问一轮 addressable working set。
 - task-pool 对照（tp4/tp8）不是常驻 case：driver 对同一 case 重复传 `--task-pool-size 4 --task-pool-size 8` 展开专项矩阵。每个 repetition 的两组除 pool size 外 profile、seed、repetition identity、workload definition/trace hash、capacity 与固定 100ms forward sleep 必须一致。tp32 不在正式对照矩阵内，但 runner/driver 保留任意正整数参数能力。
 
@@ -41,12 +41,12 @@ bazelisk build -c opt --config=cuda13 --config=sm8x \
 
 产物在 `bazel-bin/rtp_llm/cpp/cache/block_tree_cache/benchmark/`。
 
-只修改 Python case、driver 或报告时，可构建 source-only 的 `:benchmark_driver_sources`，不会分析或准备 GPU binary 的庞大 runfiles；Tree/Transfer runner 与公共 fixture 也已拆成独立 C++ library，缩小 benchmark 自身的增量重编面。
+只修改 Python case 或 driver 时，可构建 source-only 的 `:benchmark_driver_sources`，不会分析或准备 GPU binary 的庞大 runfiles；Tree/Transfer runner 与公共 fixture 也已拆成独立 C++ library，缩小 benchmark 自身的增量重编面。
 
 **常见坑**：
 - base 配置已经使用 `-O2 -g --strip=never`；driver 通过 `perf --call-graph dwarf,16384` 展开栈，不再维护会使传递 C++ action 全部失效的 frame-pointer perf 配置。
 - 修改 C++ runner 后必须重新构建 gpu_benchmark 才能生效；修改 `benchmark_cases.py` 后需重新构建 driver（py_binary 从 runfiles 加载 registry），否则新 case 参数不生效。
-- 构建缓存：本仓库只配置了 `fetch:downloader --remote_cache`（拉取外部依赖用），**没有 build 级远程/磁盘缓存**。rebase/改代码后波及的 CUDA 模板库（flashinfer/xqa/cutlass）会整段重编，单文件可达数分钟，属正常现象。
+- 构建缓存：通过 `--config=daily_aone_bazel_cache --remote_header=x-aone-bazel-api-key=ai-infra-cicd` 启用 build 级远程缓存，默认本地执行。`fetch:downloader` 仅配置依赖下载，不能代替 build 缓存。复用当前工作区的平台缓存目录；未命中缓存的 CUDA 模板库编译可能耗时数分钟。
 
 ## 运行
 
@@ -68,8 +68,9 @@ find ~/.cache/bazel -name "libpython3.10.so" -path "*/block_tree_cache*" 2>/dev/
 ### 测试与 smoke
 
 ```bash
-# 纯逻辑最小看护（无需 GPU）
+# Driver/registry/文档与 C++ workload 看护（统一使用 GPU 锁）
 bazelisk test -c opt --config=cuda13 --config=sm8x \
+  //rtp_llm/cpp/cache/block_tree_cache/benchmark:benchmark_driver_profile_test \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:transfer_benchmark_workload_test \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:tree_workload_generator_test
 
@@ -78,19 +79,35 @@ bazelisk test -c opt --config=cuda13 --config=sm8x \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:block_tree_cache_benchmark_smoke_test
 ```
 
-最小看护矩阵只保留三个 target：两个纯逻辑测试分别验证 Tree trace 和 Transfer 调度的基础不变量；GPU smoke 覆盖 binary/driver 启动、case registry、profile 加载以及最小在线 Tree lifecycle 与 D2H Transfer 的真实端到端路径。
+最小看护矩阵包含四个 test target：driver 测试验证 registry 数量/名称、文档中的模型配置文件引用与进程退出处理（其中 perf 使用假进程，不做真实采样）；两个 C++ 测试验证 Tree trace/scheduler 和 Transfer 调度；GPU smoke 覆盖 binary/driver 启动、case registry、模型配置加载、最小在线 Tree lifecycle 与 D2H Transfer。`benchmark_driver_profile_test` 的名字不表示它会运行 profile suite。
+
+只做快速回归时运行以上测试即可，不需要 profile、perf、off-CPU 或 nsys。需要保留原始结果并验证打包后的 driver 入口时，在构建 driver 并完成上述测试（同时构建 `gpu_lock`）后运行：
+
+```bash
+# 在开发容器的 github-opensource 目录内执行
+# --run_under 构建的 gpu_lock 使用 smoke test 的 runfiles
+RUNFILES_DIR="$PWD/bazel-bin/rtp_llm/cpp/cache/block_tree_cache/benchmark/block_tree_cache_benchmark_smoke_test.runfiles" \
+BLOCK_TREE_CACHE_BENCHMARK_TEST_CONFIG=1 \
+  ./bazel-bin/rtp_llm/test/utils/gpu_lock \
+  env -u RUNFILES_DIR -u RUNFILES_MANIFEST_FILE \
+  ./bazel-bin/rtp_llm/cpp/cache/block_tree_cache/benchmark/block_tree_cache_benchmark_driver \
+  --suite smoke --perf off --output-dir /tmp/btc_smoke
+```
+
+`gpu_lock` 选择并锁定 GPU；`env -u` 让后续 driver 从自身 runfiles 加载 binary 和模型配置，避免继承 GPU 锁的 runfiles。手动 smoke 必须设置上述 test-only 环境变量，否则 Tree 会采用正式的大型 workload。结果位于 `/tmp/btc_smoke/smoke/suite_manifest.json` 和各 case 的 `rep_0000/result.json`；两个 case 均应 completed，repetition 均应 valid。smoke 不覆盖磁盘、全部 copy strategy 或 matrix/e2e 性能。
 
 ### 用 driver 跑 suite（推荐）
 
 ```bash
 export LD_LIBRARY_PATH=/opt/conda310/lib:$LD_LIBRARY_PATH
 
-# 正式 profile；默认每 case 只运行 1 次，约 25-35 分钟
+# 完整 profile 指标（包括 matrix/e2e，不采样）；默认每 case 运行 1 次
 ./bazel-bin/rtp_llm/cpp/cache/block_tree_cache/benchmark/block_tree_cache_benchmark_driver \
   --suite profile \
   --process-repetitions 1 \
   --output-dir /tmp/btc_profile \
-  --disk-root /path/to/benchmark_disk
+  --disk-root /path/to/benchmark_disk \
+  --perf off
 
 # profile + perf 收集（与普通指标共用同一 binary；自动发现 ~/FlameGraph-master）
 ./bazel-bin/rtp_llm/cpp/cache/block_tree_cache/benchmark/block_tree_cache_benchmark_driver \
@@ -114,7 +131,7 @@ export LD_LIBRARY_PATH=/opt/conda310/lib:$LD_LIBRARY_PATH
 
 在线 Tree case 的 native process timeout 来自 case metadata（180s，覆盖 setup + 15s warmup + 60s measured + drain + profiler teardown），driver 不再有含义歧义的顶层 `--min-measured-seconds`；Transfer binary 自己的 duration option 不受影响。
 
-CPU perf 的宿主/容器执行边界，以及 off-CPU 的 fallback/skip 规则见后文能力矩阵。
+`--perf` 默认是 `record`；仅测指标或跑 smoke 时显式传 `--perf off`。CPU perf 的宿主/容器执行边界，以及 off-CPU 的 fallback/skip 规则见后文能力矩阵。
 
 默认是严格 suite：任一 failed、partial、skipped 或 required perf 失败都会返回非零。仅调试时可显式传 `--allow-incomplete`。缺少 `--disk-root` 时 disk case 仍保留在 manifest，并记为 `skipped_no_disk`。
 
@@ -181,7 +198,7 @@ result 还记录每个 tier 的 capacity/allocated/addressable blocks、每方�
 - load-before-forward：ticket 未完成不能进 forward；一个 ticket pending 不阻塞其他请求 admission。ticket 完成后只有 success 进 READY，failed/cancelled 走 cleanup。
 - 每个 READY batch 只 sleep 一次固定 100ms（模拟 forward），不按 batch 大小、长度或 token 缩放；sleep 期间 batch 内请求继续持有 REQUEST refs，scheduler 不发起新 match/insert。`simulated_forward_sleep_ns == forward_batches × 100ms` 是硬性 closure。
 - forward 后对 batch 串行执行一次且仅一次 full-path insert，然后释放 matched/load-target/suffix 的 request refs。
-- warmup 15s 完整生命周期 → quiesce + pressure check（每个 device pool used ≥ 75%、host used > 0、device heap > 0、warmup completed ≥ 256）→ measured ≥ 60s → deadline 后停止 admission 但 drain 全部已 admission request → finalize 验证 active contexts / pending tickets / task pool / REQUEST ref 全部归零。
+- warmup 15s 完整生命周期 → quiesce + pressure observation（每个 device pool used ≥ 75%、host used > 0、device heap > 0、warmup completed ≥ 256；记录 `pressure_ready`，不单独判失败）→ measured ≥ 60s → deadline 后停止 admission 但 drain 全部已 admission request → finalize 验证 active contexts / pending tickets / task pool / REQUEST ref 全部归零。
 - 单 request lifecycle 超过 60s 时 case 失败，进入有界 cancel/drain，仍写出失败结果与资源 snapshot。
 - 路径/RNG trace（20k 条）在 setup 前确定性生成，timed region 内不进行 RNG 或 path 生成；workload definition hash 覆盖除 task-pool size 外的固定协议配置，trace hash 覆盖完整请求元数据与 path。正式 tp4/tp8 对照按 `(seed, repetition identity)` 逐组校验唯一变量。
 
@@ -191,10 +208,10 @@ result 还记录每个 tier 的 capacity/allocated/addressable blocks、每方�
 
 | 指标 | 含义 |
 | --- | --- |
-| `tree_lifecycle.completed_request_transactions` | 完整 match→forward→insert 请求数（driver 校验 > 0） |
-| `tree_lifecycle.completed_base_requests` / `completed_continuation_requests` / `continuation_families_completed` | BASE/CONTINUATION 完成数及完成 continuation 的 family 数；正式 workload 必须覆盖全部 32 个 family |
+| `tree_lifecycle.completed_request_transactions` | 完整 match→forward→insert 请求数（native runner 校验 > 0） |
+| `metrics.completed_base_transactions` / `completed_continuation_transactions` / `completed_continuation_family_count` | BASE/CONTINUATION 完成数及完成 continuation 的 family 数；正式 workload 必须覆盖全部 32 个 family |
 | `tree_lifecycle.forward_batches` / `forward_requests` | 固定 sleep 的 batch 数 / batch 内请求总数；`forward_requests == completed_request_transactions` 是硬性 closure |
-| `tree_lifecycle.simulated_forward_sleep_ns` | `forward_batches × 100ms`；与 `forward_batches` 的 closure 由 driver 校验 |
+| `tree_lifecycle.simulated_forward_sleep_ns` | `forward_batches × 100ms`；与 `forward_batches` 的 closure 由 native runner 校验 |
 | `tree_lifecycle.pressure_ready` | warmup 后压力观察值；不作为 repetition 的硬 PASS 条件 |
 | `tree_lifecycle.failed_requests` / `final_active_requests` / `final_pending_load_tickets` / `final_pending_tasks` / `final_request_ref_blocks` | 失败请求数；finalize 后四类运行态/资源残留必须全为 0 |
 | `tree_lifecycle.drain_timeouts` | setup/warmup/measured/finalize 有界 drain 的超时次数；必须为 0 |
@@ -212,9 +229,9 @@ result 还记录每个 tier 的 capacity/allocated/addressable blocks、每方�
 | `ready_batch_size_avg/max`、`scheduler_no_ready_wait_ns`、`held_request_blocks_peak`、`forward_batches`、`completed_request_transactions` | batch 形状、无 READY 时的 load 轮询等待、跨 forward 持有的 REQUEST blocks 峰值 |
 | `benchmark_request_transactions_per_second` | completed transactions / 实际 `measured_ns`；**是 benchmark 口径，不是线上 wall TPS** |
 | `pressure_ready`、`warmup.*`、`final.*`、`pool.<name>.*` | warmup 后压力快照与 finalize 快照（含 REQUEST ref 清零） |
-| `phases_ns.setup/warmup/measured/finalize` | 各阶段实际时长；measured ≥ 60s（由 driver 按 resolved config 校验） |
+| `phases_ns.setup/warmup/measured/finalize` | 各阶段实际时长；measured ≥ 60s（由 native runner 校验，smoke 使用小型配置） |
 
-**tree 场景 transaction/s**（同固定配置比较用）：`metrics.completed_request_transactions / phases_ns.measured * 1e9`。报告表由 `generate_report.py` 自动计算；任务池对照只比较 load readiness、scheduler no-ready wait、cache 时延与 transaction/s，不推导线上 TPS。
+**tree 场景 transaction/s**（同固定配置比较用）：`metrics.completed_request_transactions / phases_ns.measured * 1e9`。分析时可据此计算；任务池对照只比较 load readiness、scheduler no-ready wait、cache 时延与 transaction/s，不推导线上 TPS。
 
 transfer 场景额外输出 `operations_per_second`、`logical_throughput_bytes_per_second`、`total_bytes_transferred`、每方向明细（见 cases 文档）。
 
@@ -222,12 +239,12 @@ transfer 场景额外输出 `operations_per_second`、`logical_throughput_bytes_
 
 正式 profile 默认每个 case 只运行 1 个 repetition，以控制整套测试耗时；driver 的 `--process-repetitions` 默认值也是 `1`。只有明确需要稳定性或统计分布分析时，才手工提高该参数。
 
-`--perf record` 不增加 repetition 数，但会为每个代表 case 额外启动 1 个 profiling process。Tree/Transfer runner 使用同一 marker 协议：`PROFILE_ATTACH_READY`（driver 在此 attach perf）→ 预留 2s attach 窗口（不计入 measured）→ `MEASURE_START`（measured timer 才开始）。perf 使用 DWARF call graph，生成 `perf.data`、`perf.folded`、`flamegraph.svg`、`perf_summary.txt` 和栈质量摘要 `stack_quality.txt`；工具目录可用 `--flamegraph-tools-dir` 指定，也可通过 `FLAMEGRAPH_DIR`、`~/FlameGraph` 或 `~/FlameGraph-master` 自动发现。正式 HTML 报告必须链接这些产物，不能只显示 perf 状态。
+`--perf record` 不增加 repetition 数，但会为每个代表 case 额外启动 1 个 profiling process。Tree/Transfer runner 使用同一 marker 协议：`PROFILE_ATTACH_READY`（driver 在此 attach perf）→ 预留 2s attach 窗口（不计入 measured）→ `MEASURE_START`（measured timer 才开始）。perf 使用 DWARF call graph，生成 `perf.data`、`perf.folded`、`flamegraph.svg`、`perf_summary.txt` 和栈质量摘要 `stack_quality.txt`；工具目录可用 `--flamegraph-tools-dir` 指定，也可通过 `FLAMEGRAPH_DIR`、`~/FlameGraph` 或 `~/FlameGraph-master` 自动发现。报告中提供与分析相关的产物位置或链接，便于复核采样结果。
 
 需要离线手工复现火焰图时（例如拿到 `perf.data` 后重新出图），步骤与 driver 内部完全一致：
 
 ```bash
-wget http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/xingyu/FlameGraph-master.zip
+wget -O FlameGraph-master.zip https://github.com/brendangregg/FlameGraph/archive/refs/heads/master.zip
 unzip FlameGraph-master.zip
 
 perf script -i perf.data &> perf.unfold
@@ -466,7 +483,7 @@ test -s "$OFFCPU_DIR/offcpu_flamegraph.svg"
 
 闭源 CUDA driver 或系统库中少量 `[unknown]` 可以接受，前提是业务栈和 missed 比例达标。宿主 Perl 缺 module 时，可在共享同一 `/home` 的 benchmark 容器内执行相同的 `flamegraph.pl` 命令。
 
-正式报告在“火焰图与采样质量”中链接：
+报告可在 profiling 分析附近提供产物链接，例如：
 
 ```text
 profile/tree_online_high_variation_c32/offcpu_<RUN_ID>/offcpu_flamegraph.svg
@@ -478,27 +495,23 @@ profile/tree_online_high_variation_c32/offcpu_<RUN_ID>/offcpu_manifest.json
 
 driver 为每个 repetition 创建独立 result 目录、disk 目录和 vmstat 窗口。buffered case 在 measured process 退出后单独执行 filesystem drain、记录 drain 时间，再采样 after 并清理该 repetition 文件。
 
-`result.json` 在启动 native process 前删除；只有本次生成、`status=completed` 且 component 对应的 closure invariants 通过的结果才标记 `valid=true`：Tree 校验 lifecycle/transaction closure、BASE/CONTINUATION family 覆盖、hard-failure/drain 与 final-zero；Transfer 校验 operation/working-set/strategy closure。
+`result.json` 在启动 native process 前删除。driver 检查本次文件的新鲜度、schema/component/binary/runner/status、非空 measured window、进程退出码及 buffered drain 状态，据此标记 repetition 的 `valid`。Tree lifecycle/transaction、BASE/CONTINUATION family 覆盖、hard-failure/drain/final-zero，以及 Transfer operation/working-set/strategy 等内部不变量由 native runner 判定，driver 不再重复计算。
 
-HTML 报告只读取 `profile/suite_manifest.json` 中的 valid repetitions，输出 median、MAD、min/max 和样本数；数值一律 human-readable：时延按 `ns`/`us`/`ms`/`s` 自适应单位、整数加千分位、禁用科学计数法，n=1 时只输出单值（格式约定见 [docs/report_template.md](docs/report_template.md) 文首）：
+### 编写分析报告
 
-```bash
-python3 rtp_llm/cpp/cache/block_tree_cache/benchmark/generate_report.py \
-  --output-dir /tmp/btc_profile \
-  --output /tmp/btc_profile/index.html
-```
+benchmark 负责产出结构化结果和运行状态，报告由人工或 agent 按实验目的编写。参考 [case 家族说明](docs/benchmark_cases.md) 理解负载，参考 [报告指南](docs/report_template.md) 选择展示方式。可以使用 Markdown、HTML 等格式，自由调整章节、表格和图形，无需固定生成器或为新增 case 修改渲染逻辑。
 
-Tree 报告先解释 block/token/payload、20 档请求长度及 BASE（新会话）/CONTINUATION（续写）构造，再用用户口径展示完整请求生命周期数量与 req/s、请求组成、命中深度、关键时延和结束清理。`pressure_ready`、dependency skip 等内部诊断字段只在“主要观察”中翻译说明，不作为抽象表头，也不把非失败的水位观察显示成红色失败状态。tp4/tp8 专项结果按 `task_pool_size_resolved` 显式分组，并逐 repetition 校验除 pool size 外的 resolved config、profile、seed/repetition、trace、binary SHA 与代码 commit，不一致则拒绝比较。火焰图表只列实际生成 profiling artifact 的 case；off-CPU 产物以独立 artifact 行展示，不计入 repetition 聚合。
+从本次 `<output-dir>/<suite>/suite_manifest.json` 确认实际执行范围、状态和 repetition 结果路径，聚合时只使用 manifest 标记 valid 且 completed、对应 result 也 completed 的样本。报告交代实验目的、关键环境与实际配置、指标口径和样本数、观察及限制，并提供原始结果位置。多 repetition 可展示 median 和离散程度；单次结果标明 n=1。
 
-最终报告以 `index.html` 呈现；[报告模板](docs/report_template.md) 是仓库内的格式规范，不是另一份 Markdown 交付物。HTML 必须遵循该模板的章节顺序与信息边界，结论和 suite 完整性状态放在最前面，不得为了展示效果自行删减模板要求的关键内容。
+允许按家族汇总或只展开与主题相关的 case；说明筛选条件和未展示结果的位置，区分未运行、失败/跳过与已完成但未展开，不把子集成功描述为整个 suite 完整。matrix/e2e 可以单独成篇，case 名字不决定报告分区。Tree、Transfer 与并发对照的口径和比较条件见上述两份文档。
 
-GPU、PCIe、磁盘、binary/profile SHA 和代码 commit 来自 suite manifest 的实际采集。磁盘配置按 benchmark 进程 mount namespace 采集；raw manifest 保留容器内可见的 target/source/fstype 与容量，HTML 环境表把它们压成一行，不输出完整 overlay lowerdir/upperdir，也不推测宿主机物理块设备。要测宿主指定磁盘，先将该目录 bind mount 到 benchmark 容器，再把 `--disk-root` 指向容器内路径。未配置同机硬件基线阈值时，自动报告只展示事实并标记“待分析”，不会输出“接近硬件上限”等因果结论。没有 off-CPU 产物时，报告会显式展示 manifest 或 `report_metadata.offcpu_status` 中的跳过原因，不再静默省略该小节。
+环境和结论依据实际采集的数据：磁盘信息反映 benchmark 进程的 mount namespace，不由容器 overlay 推断宿主物理盘；缺少同机基线时，不直接声称接近硬件上限。profiling 采集情况、缺项原因和样本质量按实际情况披露；独立采集的 off-CPU/perf 进程不计入 repetition 聚合，正式 profile 的采集要求见前文。
 
 `pgpgin`/`pgpgout` 是系统累计量在单 repetition 窗口内的差值，只能作为 ancillary signal，不能精确归因到单进程、单方向或单次 IO。
 
 ## 结果上传 OSS（可选）
 
-跑完 suite 并生成 `index.html` 后，把 `index.html` + `profile/` 一起上传，路径带时间戳前缀，多人多次互不冲突：
+完成分析后，可将自选格式的报告与原始结果目录一起上传，路径带时间戳前缀。下面以报告保存为 `index.html`、结果位于 `profile/` 为例；使用其他文件名或 suite 时相应调整：
 
 ```bash
 PREFIX="$(whoami)/$(date +%Y%m%d_%H%M%S)"

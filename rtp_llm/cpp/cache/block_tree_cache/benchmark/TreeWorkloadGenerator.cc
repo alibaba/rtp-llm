@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -14,12 +15,9 @@ namespace {
 // Key spaces are disjoint by construction: shared base, background tree and
 // request-unique suffixes can never collide, so a request can never match
 // beyond its planned reuse prefix unless the key space layout is broken.
-constexpr int64_t kSharedBaseKeyBase    = 1;
-constexpr int64_t kBackgroundKeyBase    = 1'000'000;
-constexpr int64_t kRequestSuffixKeyBase = 1'000'000'000'000;
-// ceil(950000 / 256) = 3711 maximum input blocks; per-request stride leaves
-// slack so every request gets its own contiguous suffix key range.
-constexpr int64_t kRequestSuffixStride   = 4'096;
+constexpr int64_t kSharedBaseKeyBase     = 1;
+constexpr int64_t kBackgroundKeyBase     = 1'000'000;
+constexpr int64_t kRequestSuffixKeyBase  = 1'000'000'000'000;
 constexpr size_t  kBackgroundBranchCount = 8;
 
 uint64_t fnv1a64(const void* data, size_t length, uint64_t hash = 1469598103934665603ULL) {
@@ -48,7 +46,7 @@ uint64_t hashVector(const std::vector<size_t>& values, uint64_t hash) {
 }
 
 size_t inputBlocksForTokens(size_t tokens, size_t tokens_per_block) {
-    return (tokens + tokens_per_block - 1) / tokens_per_block;
+    return tokens / tokens_per_block + (tokens % tokens_per_block != 0);
 }
 
 void validateConfig(const OnlineTreeWorkloadConfig& config) {
@@ -63,13 +61,31 @@ void validateConfig(const OnlineTreeWorkloadConfig& config) {
         throw std::invalid_argument("online tree workload distributions are malformed");
     }
     for (size_t i = 0; i < config.length_buckets_tokens.size(); ++i) {
-        if (config.length_weights[i] == 0) {
+        if (config.length_weights[i] == 0 || config.length_buckets_tokens[i] == 0) {
             throw std::invalid_argument("online tree length weights must be positive");
         }
     }
 }
 
 }  // anonymous namespace
+
+void OnlineTreeWorkloadConfig::setTokensPerBlock(size_t value) {
+    if (value == 0 || length_buckets_tokens.empty()) {
+        throw std::invalid_argument("tokens_per_block and request lengths must be positive");
+    }
+    const size_t max_tokens = *std::max_element(length_buckets_tokens.begin(), length_buckets_tokens.end());
+    const size_t max_blocks = inputBlocksForTokens(max_tokens, value);
+    if (max_blocks > shared_base_nodes) {
+        const size_t extra = max_blocks - shared_base_nodes;
+        if (extra >= background_tree_nodes) {
+            throw std::invalid_argument(
+                "profile tokens_per_block requires a shared prefix beyond the initial node budget");
+        }
+        background_tree_nodes -= extra;
+        shared_base_nodes += extra;
+    }
+    tokens_per_block = value;
+}
 
 OnlineTreeWorkloadConfig OnlineTreeWorkloadConfig::smokeTestConfig() {
     OnlineTreeWorkloadConfig config;
@@ -93,6 +109,17 @@ OnlineTreeWorkloadConfig OnlineTreeWorkloadConfig::smokeTestConfig() {
 TreeWorkloadGenerator::TreeWorkloadGenerator(uint64_t seed, const OnlineTreeWorkloadConfig& config):
     seed_(seed), config_(config) {
     validateConfig(config_);
+    const size_t max_tokens =
+        *std::max_element(config_.length_buckets_tokens.begin(), config_.length_buckets_tokens.end());
+    const size_t max_blocks = inputBlocksForTokens(max_tokens, config_.tokens_per_block);
+    if (max_blocks > config_.shared_base_nodes) {
+        throw std::invalid_argument("shared base is shorter than the largest request; resolve tokens_per_block first");
+    }
+    suffix_stride_ = std::max<size_t>(4096, max_blocks);
+    if (suffix_stride_ > static_cast<size_t>(std::numeric_limits<int64_t>::max() - kRequestSuffixKeyBase)
+                             / config_.operation_trace_count) {
+        throw std::invalid_argument("request suffix key range overflows");
+    }
 }
 
 int64_t TreeWorkloadGenerator::nextTopologyKey() {
@@ -100,7 +127,7 @@ int64_t TreeWorkloadGenerator::nextTopologyKey() {
 }
 
 int64_t TreeWorkloadGenerator::nextSuffixKey(size_t request_index, size_t suffix_index) {
-    return kRequestSuffixKeyBase + static_cast<int64_t>(request_index) * kRequestSuffixStride
+    return kRequestSuffixKeyBase + static_cast<int64_t>(request_index * suffix_stride_)
            + static_cast<int64_t>(suffix_index);
 }
 

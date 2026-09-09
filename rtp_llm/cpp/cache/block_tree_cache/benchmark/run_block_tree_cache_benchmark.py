@@ -860,7 +860,7 @@ def run_case(
         "status": "unknown",
         "repetitions": [],
         "perf": {"status": "skipped"},
-        "start_time": datetime.now().isoformat(),
+        "start_time": datetime.now().astimezone().isoformat(),
         "end_time": None,
         "process_timeout_seconds": process_timeout,
     }
@@ -868,7 +868,7 @@ def run_case(
     # Check disk requirement
     if case.requires_disk and not disk_root:
         manifest["status"] = "skipped_no_disk"
-        manifest["end_time"] = datetime.now().isoformat()
+        manifest["end_time"] = datetime.now().astimezone().isoformat()
         with open(os.path.join(case_dir, "manifest.json"), "w") as f:
             json.dump(manifest, f, indent=2)
         return manifest
@@ -888,6 +888,16 @@ def run_case(
             manifest["resolved_transfer_operation_count"] = scaled
             manifest["min_logical_bytes_target"] = case.min_logical_bytes
             manifest["group_payload_bytes"] = payload
+
+    # Align the final workload to complete business requests after byte scaling.
+    descriptors_per_business = int(params.get("--descriptors-per-business", "0"))
+    if descriptors_per_business > 0 and params.get("--transfer-operation-count"):
+        requested = int(params["--transfer-operation-count"])
+        aligned = (
+            (requested + descriptors_per_business - 1) // descriptors_per_business
+        ) * descriptors_per_business
+        params["--transfer-operation-count"] = str(aligned)
+        manifest["resolved_transfer_operation_count"] = aligned
 
     # Run repetitions
     for rep in range(repetitions if case.suite == "profile" else 1):
@@ -1080,7 +1090,7 @@ def run_case(
     else:
         manifest["status"] = "failed"
 
-    manifest["end_time"] = datetime.now().isoformat()
+    manifest["end_time"] = datetime.now().astimezone().isoformat()
 
     # Write case manifest
     manifest_path = os.path.join(case_dir, "manifest.json")
