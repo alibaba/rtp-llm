@@ -21,6 +21,7 @@ deepseek_cpu_test_deps = [
 })
 
 deepseek_gpu_test_deps = [
+    "//rtp_llm:models",
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
     "//rtp_llm/models_py:new_weight_loader",
 ]

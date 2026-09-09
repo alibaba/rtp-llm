@@ -45,6 +45,7 @@ class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
             ),
             device_resource_config=types.SimpleNamespace(enable_layer_micro_batch=0),
             parallelism_config=None,
+            moe_config=None,
         )
         mixin_cls = mock.Mock(return_value=object())
 
@@ -90,6 +91,7 @@ class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
             ),
             device_resource_config=types.SimpleNamespace(enable_layer_micro_batch=0),
             parallelism_config=None,
+            moe_config=None,
         )
 
         mixin_cls = mock.Mock(return_value=object())
