@@ -3,14 +3,13 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionManager;
-import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -73,7 +72,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 new DecodePreemptionCoordinator(cancelChannel, lifecycle),
                 lifecycle,
                 batchReporter);
-        this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService);
+        this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
         this.scheduler = new RequestScheduler(
                 configService,
                 router,
@@ -84,6 +83,10 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 placementAvailability);
         this.runtime = new SchedulerRuntime(
                 lifecycle, registry, batchReporter, requestReporter, scheduler);
+    }
+
+    public RequestRegistry requestRegistry() {
+        return lifecycle;
     }
 
     public RequestScheduler scheduler() {
@@ -103,7 +106,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Translate fixture response metadata into an exact queue admission. */
-    public PlacementResult<QueueRouteAdmission, PlacementKey> routeResult(
+    public PlacementResult<RouteAdmission, PlacementKey> routeResult(
             BalanceContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
@@ -133,7 +136,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 selections.add(selected);
             }
             return PlacementResult.success(
-                    QueueRouteAdmission.prepare(context, selections, response));
+                    RouteAdmission.prepare(context, selections, response));
         } finally {
             for (SelectedRole selection : selections) {
                 selection.close();
@@ -141,7 +144,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
     }
 
-    /** Apply and project one exact, strictly newer worker-status response. */
+    /** Apply a newer worker status or refresh liveness from a same-version heartbeat. */
     public void applyStatus(
             WorkerStatus status, WorkerStatusResponse response) {
         Objects.requireNonNull(status, "status");
@@ -166,14 +169,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         "worker status version regressed: committed="
                                 + committedVersion + ", response=" + responseVersion);
             }
-            if (responseVersion == committedVersion) {
-                return;
-            }
             WorkerStatus.StatusObservation observation =
                     status.freezeStatusResponse(response);
-            WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(observation);
-            projection = endpoint.applyPreparedStatus(status, prepared);
+            if (responseVersion == committedVersion) {
+                projection = endpoint.observeStatusHeartbeat(status, observation);
+            } else {
+                WorkerStatus.PreparedStatus prepared =
+                        status.prepareNewStatus(observation);
+                projection = endpoint.applyPreparedStatus(status, prepared);
+            }
         } finally {
             status.lock.unlock();
         }
@@ -186,10 +190,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             return switch (status.getRole()) {
                 case PREFILL, PDFUSION -> SelectedRole.prefill(
                         pin, status, Math.max(0L, status.getPrefillTime()));
-                case DECODE -> SelectedRole.decode(
-                        pin,
-                        status,
-                        ((DecodeEndpoint) pin.endpoint()).realKvTotal());
+                case DECODE -> SelectedRole.decode(pin, status);
                 case VIT -> SelectedRole.stateless(pin, status);
                 case FRONTEND -> throw new IllegalArgumentException(
                         "FRONTEND cannot be a worker route");
@@ -209,13 +210,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private static final class BindingRouter extends DefaultRouter {
         private DefaultRouter delegate;
 
-        private BindingRouter(org.flexlb.sync.status.WorkerDirectory workers, ConfigService configs) {
+        private BindingRouter(org.flexlb.sync.status.WorkerDirectory workers, ConfigService configs, RequestRegistry lifecycle) {
             // Real constructor dependencies keep Mockito instrumentation out of
             // the selector classes exercised by the bound production router.
             super(new CostBasedPrefillStrategy(workers,
                             org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
                             org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
-                    new CostBasedDecodeStrategy(workers),
+                    new DecodeSelector(workers),
                     new RandomStrategy(workers),
                     configs,
                     emptyModelMeta());
@@ -230,14 +231,14 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public Response routeDirect(BalanceContext context) {
-            return requireBound().routeDirect(context);
+        public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
+            return requireBound().select(context);
         }
 
         @Override
-        public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
+        public PlacementResult<RouteAdmission, PlacementKey> select(
                 BalanceContext context, String policyGroup) {
-            return requireBound().routeForQueue(context, policyGroup);
+            return requireBound().select(context, policyGroup);
         }
 
         private synchronized DefaultRouter requireBound() {

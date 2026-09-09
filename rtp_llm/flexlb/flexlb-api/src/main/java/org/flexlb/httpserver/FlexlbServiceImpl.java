@@ -806,7 +806,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         var config = configService.loadBalanceConfig();
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
         // admission through delivery acknowledgement. DIRECT never queues and
-        // therefore has no scheduling timeout.
+        // therefore has no scheduling timeout. RequestRegistry separately installs
+        // inactivity tracking from requestLifecycle.request.timeoutMs in both modes.
         long requestExpiresAtMs = config.isQueue()
                 ? config.queueScheduler().resolveExpiresAtMs(ctx.getStartTime())
                 : Long.MAX_VALUE;

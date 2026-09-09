@@ -826,10 +826,8 @@ class EnvSpec:
     master_env: dict = field(default_factory=dict)  # extra/override env vars
     spring_profile: str = "default"
     master_debug_log: bool = False
-    # file (static endpoints.json → env vars, NoOpServiceDiscovery)
-    # | domain (explicit DOMAIN_ADDRESS)
-    # | discovery_file (dynamic: mock --discovery-file, master FLEXLB_DISCOVERY_FILE
-    #   → FileServiceDiscovery; /add_engine + /remove_engine keep it in sync)
+    # domain uses MODEL_SERVICE_CONFIG.hosts; file/discovery_file use
+    # the mock-maintained MODEL_SERVICE_CONFIG.discovery_file.
     discovery: str = "file"
     domain_addrs: dict = field(default_factory=dict)  # {prefill: "a,b", decode: "a,b"}
     prefill_cache_blocks: int = DEFAULT_PREFILL_CACHE_BLOCKS
@@ -889,7 +887,7 @@ class EnvSpec:
 
 
 # ---------------------------------------------------------------------------
-# Scheduling profiles (schema-v2 FLEXLB_CONFIG axes)
+# Scheduling profiles (schema-v3 FLEXLB_CONFIG axes)
 # ---------------------------------------------------------------------------
 #
 # v2 exposes four behaviour axes through the single strict FLEXLB_CONFIG
@@ -967,15 +965,8 @@ def profile_dispatches_batch(profile: str) -> bool:
     return PROFILE_SPECS[profile]["dispatcher"] == "batch"
 
 
-# Production DSv4 prefill execution-time fit (the intake3 test-line value
-# formerly carried by the master-side
-# RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION constant, which the
-# codex schema migration removed — the Java default is now the inline
-# upstream legacy expression). The harness injects it EXPLICITLY into every
-# generated FLEXLB_CONFIG instead of relying on the Java code default: the
-# production default is the upstream legacy "1 ms/token" sum, which
-# overpredicts a 32k all-miss prefill by ~96x (32.8 s vs the fitted ~342 ms)
-# and would poison every ledger-driven routing decision in these suites.
+# Explicit DSv4 simulation fit; the production formula default is not a
+# calibration for this mock workload.
 DSV4_PREFILL_EXPRESSION = (
     "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 *"
     " batchSize + 0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 *"
@@ -1005,77 +996,18 @@ DSV4_PREFILL_EXPRESSION = (
 
 # scheduler.ordering.preemption.allowedVictimStages enum values
 # (flexlb-common VictimStage.java; see _build_preemption_cfg).
-VICTIM_STAGES = ("PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED")
+VICTIM_STAGES = ("DECODE_RESERVED", "DECODE_ENGINE_OWNED")
 
 
 def _build_preemption_cfg(preemption: dict) -> dict:
-    """snake_case preemption spec → strict schema-v2 preemption JSON block.
-
-    Schema (docs/priority-scheduler-delivery-modes.md lines 206-213):
-
-        {
-            "allowedVictimStages": ["PREFILL_QUEUED", ..., "DECODE_ENGINE_OWNED"],
-            "engineCancellation": {        # required iff DECODE_ENGINE_OWNED
-                "ackTimeoutMs": 50,        #     is allowed; rejected
-                "completionTimeoutMs": 1000 #     otherwise
-            },
-        }
-
-    Input keys (snake_case, mirroring the generator's parameter style):
-    ``allowed_victim_stages`` (list of VICTIM_STAGES values) and optional
-    ``engine_cancellation`` ``{"ack_timeout_ms": int, "completion_timeout_ms": int}``.
-    The Java-side cross-field contract (FlexlbConfigValidator.validateQueue)
-    is mirrored here so a malformed block fails fast in Python instead of
-    aborting master startup:
-
-      * allowedVictimStages must be a non-empty subset of VICTIM_STAGES;
-      * engineCancellation is REQUIRED when DECODE_ENGINE_OWNED is allowed
-        and REJECTED otherwise (both timeouts positive integers);
-      * no JSON nulls are ever emitted (ConfigService.rejectJsonNull).
-    """
+    """Convert allowed victim stages to the schema-v3 policy."""
+    unknown_fields = set(preemption) - {"allowed_victim_stages"}
+    if unknown_fields:
+        raise ValueError(f"unsupported preemption settings: {sorted(unknown_fields)}")
     stages = list(preemption.get("allowed_victim_stages") or [])
-    unknown = [s for s in stages if s not in VICTIM_STAGES]
-    if unknown:
-        raise ValueError(
-            f"preemption.allowed_victim_stages: unknown stages {unknown}; "
-            f"valid values: {list(VICTIM_STAGES)}"
-        )
-    if not stages:
-        raise ValueError(
-            "preemption.allowed_victim_stages must be a non-empty subset of "
-            f"{list(VICTIM_STAGES)} when preemption is configured"
-        )
-    cancellation = preemption.get("engine_cancellation")
-    if "DECODE_ENGINE_OWNED" not in stages:
-        if cancellation is not None:
-            raise ValueError(
-                "preemption.engine_cancellation is allowed only when "
-                "DECODE_ENGINE_OWNED is an allowed victim stage"
-            )
-        return {"allowedVictimStages": stages}
-    if cancellation is None:
-        raise ValueError(
-            "preemption.engine_cancellation is required when "
-            "DECODE_ENGINE_OWNED is an allowed victim stage"
-        )
-    ack_ms = cancellation.get("ack_timeout_ms")
-    completion_ms = cancellation.get("completion_timeout_ms")
-    for name, value in (
-        ("ack_timeout_ms", ack_ms),
-        ("completion_timeout_ms", completion_ms),
-    ):
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ValueError(
-                f"preemption.engine_cancellation.{name} must be a positive "
-                "integer (ms)"
-            )
-    return {
-        "allowedVictimStages": stages,
-        "engineCancellation": {
-            "ackTimeoutMs": ack_ms,
-            "completionTimeoutMs": completion_ms,
-        },
-    }
+    if not stages or any(stage not in VICTIM_STAGES for stage in stages):
+        raise ValueError(f"allowed_victim_stages must be a non-empty subset of {VICTIM_STAGES}")
+    return {"allowedVictimStages": stages}
 
 
 def _build_ordering_cfg(
@@ -1083,7 +1015,7 @@ def _build_ordering_cfg(
     default_priority: Optional[int],
     preemption: Optional[dict],
 ) -> dict:
-    """scheduler.ordering block (strict schema-v2).
+    """scheduler.ordering block (strict schema-v3).
 
     FIFO carries only ``{"type": "FIFO"}`` — FifoOrderingConfig has no other
     fields and the strict parser (ConfigService STRICT_MAPPER enables
@@ -1122,169 +1054,76 @@ def _build_ordering_cfg(
 
 def build_flexlb_config(
     *,
-    ordering: str = "fifo",  # fifo | priority
-    decision: str = "fixed_window",  # fixed_window | single
-    dispatcher: str = "batch",  # batch | non_batch
-    # scheduler.ordering (PRIORITY only — the strict parser rejects these
-    # keys under FIFO; see _build_ordering_cfg):
-    #   scheduler.ordering.defaultPriority (None → keep the Java default 50)
+    ordering: str = "fifo",
+    decision: str = "fixed_window",
+    dispatcher: str = "batch",
     default_priority: Optional[int] = None,
-    #   scheduler.ordering.preemption block (None → omit the whole block =
-    #   preemption disabled); snake_case shape: see _build_preemption_cfg
     preemption: Optional[dict] = None,
-    # scheduler.decision (FIXED_WINDOW only; ignored for SINGLE)
     max_requests: int = 32,
     max_collection_wait_ms: int = 10,
     max_predicted_execution_ms: int = 550,
-    # scheduler knobs (None → omit the key, keep the Java default)
     queue_timeout_ms: Optional[int] = None,
-    max_outstanding: int = 5_000,
-    stale_inflight_ms: int = 30_000,
-    delivered_not_accepted_timeout_ms: int = 30_000,
-    max_delivered_not_accepted: int = 200,
-    # Admission-family capacity passthrough (admission wave-2 triggers,
-    # 2026-09): None → omit the key, keep the Java default (waiting queue
-    # 1024); only an explicit value reaches FLEXLB_CONFIG.  Harness is a
-    # pipe — no default changes.
-    max_waiting_requests_per_prefill_worker: Optional[int] = None,
-    # RETIRED by the codex strict schema: router.roles.prefill.availability
-    # (with its maxPendingRequests) no longer parses — ConfigServiceTest
-    # rejects prefill.availability, and prefill admission now parks in
-    # placementWaiters via the Blocked path instead of an availability
-    # reject.  Kept as a documented no-op so admission_config callers don't
-    # TypeError; no config key is emitted for any value.
-    prefill_max_pending_requests: Optional[int] = None,
-    # dispatcher knobs
-    max_inflight_batches: int = 4,  # BATCH
-    enqueue_rpc_timeout_ms: Optional[int] = None,  # BATCH; None → Java default 5000
-    max_inflight_requests_per_worker: Optional[
-        int
-    ] = None,  # NON_BATCH; None → unlimited
-    # workerRegistry.health
+    # Explicit functional-test workload values; these are not Java defaults.
+    max_inflight_per_prefill_worker: int = 2,
+    request_timeout_ms: int = 60_000,
+    decision_lifetime: float = 2.0,
     status_rpc_ms: int = 1_000,
 ) -> str:
-    """Unified strict schema-v2 FLEXLB_CONFIG generator.
-
-    One template for every environment the framework boots: the four
-    built-in profiles (via :func:`flexlb_config_for_profile`), the fault
-    families (harness.fault_env_config) and the admission-gate cases
-    (harness.admission_config) all delegate here.  The router gets
-    the FORMULA execution-time estimator with the production DSv4 fit
-    injected EXPLICITLY (:data:`DSV4_PREFILL_EXPRESSION`): the online
-    LEARNING estimator only trains from completed EnqueueBatch groups, so a
-    stable prediction cap for FIXED_WINDOW + NON_BATCH requires FORMULA —
-    and the test line must not depend on the Java code default, which is the
-    upstream legacy 1 ms/token expression.
-
-    Priority ordering: *default_priority* maps to
-    ``scheduler.ordering.defaultPriority`` and *preemption* to
-    ``scheduler.ordering.preemption`` — both PRIORITY-only (schema reference:
-    docs/priority-scheduler-delivery-modes.md lines 191-213; Java parsing:
-    PriorityOrderingConfig/PreemptionConfig/EngineCancellationConfig in
-    flexlb-common).  ``ordering="priority"`` with ``preemption=None`` emits
-    no preemption block — preemption disabled by omission.
-    """
-    if decision == "single":
-        decision_cfg: dict = {"type": "SINGLE"}
-    else:
+    """Generate schema-v3 JSON from scheduling policy and workload budgets."""
+    if decision not in ("single", "fixed_window") or dispatcher not in ("batch", "non_batch"):
+        raise ValueError("unsupported decision or dispatcher")
+    for name, value in (("max_inflight_per_prefill_worker", max_inflight_per_prefill_worker),
+                        ("queue_timeout_ms", queue_timeout_ms),
+                        ("request_timeout_ms", request_timeout_ms)):
+        if value is None and name == "queue_timeout_ms":
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    import math
+    if max_inflight_per_prefill_worker > 2_147_483_647:
+        raise ValueError("max_inflight_per_prefill_worker exceeds the Java integer limit")
+    if isinstance(decision_lifetime, bool) or not math.isfinite(decision_lifetime) or decision_lifetime < 1:
+        raise ValueError("decision_lifetime must be finite and at least 1")
+    decision_cfg: dict = {"type": "SINGLE"}
+    if decision == "fixed_window":
         decision_cfg = {
             "type": "FIXED_WINDOW",
             "maxRequests": max_requests,
             "maxCollectionWaitMs": max_collection_wait_ms,
             "maxPredictedExecutionMs": max_predicted_execution_ms,
         }
-    if dispatcher == "batch":
-        dispatcher_cfg: dict = {
-            "type": "BATCH",
-            "maxInflightBatchesPerPrefillWorker": max_inflight_batches,
-        }
-        if enqueue_rpc_timeout_ms is not None:
-            dispatcher_cfg["enqueueRpcTimeoutMs"] = enqueue_rpc_timeout_ms
-    else:
-        dispatcher_cfg = {"type": "NON_BATCH"}
-        if max_inflight_requests_per_worker is not None:
-            dispatcher_cfg["maxInflightRequestsPerPrefillWorker"] = (
-                max_inflight_requests_per_worker
-            )
-    capacity_cfg: dict = {"maxOutstandingRequestsGlobal": max_outstanding}
-    if max_waiting_requests_per_prefill_worker is not None:
-        capacity_cfg["maxWaitingRequestsPerPrefillWorker"] = (
-            max_waiting_requests_per_prefill_worker
-        )
+    dispatcher_cfg: dict = {
+        "type": dispatcher.upper(),
+        "maxInflightPerPrefillWorker": max_inflight_per_prefill_worker,
+    }
     scheduler_cfg: dict = {
         "type": "QUEUE",
         "ordering": _build_ordering_cfg(ordering, default_priority, preemption),
         "decision": decision_cfg,
-        "capacity": capacity_cfg,
-        "lifecycle": {
-            "staleInflightTimeoutMs": stale_inflight_ms,
-            "deliveredNotAcceptedTimeoutMs": delivered_not_accepted_timeout_ms,
-            "maxDeliveredNotAcceptedRequestsGlobal": max_delivered_not_accepted,
-        },
     }
     if queue_timeout_ms is not None:
         scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
-    return json.dumps(
-        {
-            "schemaVersion": 2,
-            "scheduler": scheduler_cfg,
-            "dispatcher": dispatcher_cfg,
-            "router": {
-                # codex strict schema: RouterConfig carries only groupSelector
-                # + roles — router-level availabilityHysteresisPercent and the
-                # prefill-side availability/selector wrappers are retired
-                # (ConfigServiceTest rejects them on parse).
-                "roles": {
-                    "prefill": {
-                        # Production DSv4 prefill fit injected explicitly
-                        # (see DSV4_PREFILL_EXPRESSION above): the test line
-                        # stays on the production-fit caliber regardless of
-                        # the Java code default.
-                        "executionTimeEstimator": {
-                            "type": "FORMULA",
-                            "expression": DSV4_PREFILL_EXPRESSION,
-                        },
-                        # Candidate choice, flattened from the retired
-                        # selector{type: ESTIMATED_TTFT} wrapper — the codex
-                        # PrefillConfig keeps only executionTimeEstimator /
-                        # candidateChoice / cacheAffinity, so the nested block
-                        # moved up to the prefill level unchanged.
-                        "candidateChoice": {
-                            "type": "RANDOM_WITHIN_TOLERANCE",
-                            "relativeTolerance": 0.1,
-                            "minimumToleranceMs": 20,
-                            "outlierRejection": {
-                                "maxPendingVsAverageMultiplier": 1.5,
-                                "maxProjectedDrainVsAverageMultiplier": 3.0,
-                            },
-                        },
-                        # Bounded cache affinity, aligned with the production
-                        # master template (data/config/master_fixed_window.json):
-                        # a cache leader is preferred while its projected TTFT
-                        # stays within maxExtraTtftMs of the best candidate and
-                        # its reusable prefix covers >= minPrefixHitPercent.
-                        # Without this key the affinity gate is disabled and
-                        # prefix reuse degrades to tie-window randomness.
-                        "cacheAffinity": {
-                            "maxExtraTtftMs": 20,
-                            "minPrefixHitPercent": 20,
-                        },
-                    },
-                    # decode-side availability is still legal in the codex
-                    # schema (DecodeAvailabilityConfig) — kept as-is.
-                    "decode": {"availability": {"maxEngineRequests": 132}},
-                },
-            },
-            "workerRegistry": {
-                "health": {
-                    "statusPollIntervalMs": 20,
-                    "statusRpcTimeoutMs": status_rpc_ms,
-                    "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
-                }
-            },
+    return json.dumps({
+        "schemaVersion": 3,
+        "scheduler": scheduler_cfg,
+        "dispatcher": dispatcher_cfg,
+        "requestLifecycle": {
+            "request": {"timeoutMs": request_timeout_ms},
+            "decision": {"lifetime": decision_lifetime},
         },
-        separators=(",", ":"),
-    )
+        "router": {"roles": {
+            "prefill": {
+                "executionTimeEstimator": {"type": "FORMULA", "expression": DSV4_PREFILL_EXPRESSION},
+                "cacheAffinity": {"maxExtraTtftMs": 20, "minPrefixHitPercent": 20},
+            },
+            "decode": {"availability": {"maxEngineRequests": 132}},
+        }},
+        "workerRegistry": {"health": {
+            "statusPollIntervalMs": 20,
+            "statusRpcTimeoutMs": status_rpc_ms,
+            "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
+        }},
+    }, separators=(",", ":"))
 
 
 def flexlb_config_for_profile(profile: str, **overrides) -> str:
@@ -1302,19 +1141,6 @@ def flexlb_config_for_profile(profile: str, **overrides) -> str:
     }
     kwargs.update(overrides)
     return build_flexlb_config(**kwargs)
-
-
-# Master env that is actually consumed by the v2 code:
-#   FLEXLB_CONFIG          — set per spec from the profile generator below
-#   HIPPO_ROLE             — flexlb-sync (zookeeper elect / LB status)
-#   OTEL_TRACE_SKIP_PATTERN — flexlb-api application.yml (spring tracing)
-#   OTEL_EXPORTER_OTLP_ENDPOINT — OpenTelemetry SDK exporter ("none" disables)
-# Every other legacy v1 var previously exported here had zero consumers in
-# the v2 Java code and was removed (task #54 dead-env sweep).
-BASE_MASTER_ENV = {
-    "OTEL_TRACE_SKIP_PATTERN": ".*",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "none",
-}
 
 
 class FlexEnv:
@@ -1540,12 +1366,7 @@ class EnvManager:
             "--env-file",
             str(env.run_dir / "flexlb_env.txt"),
         ]
-        if spec.discovery == "discovery_file":
-            # Dynamic file discovery: the mock maintains the domain→hosts
-            # mapping (kept in sync by /add_engine + /remove_engine) and the
-            # master re-reads it via FLEXLB_DISCOVERY_FILE → FileServiceDiscovery
-            # (mirrors run_online_eval.sh FLEXLB_DISCOVERY_FILE=auto wiring).
-            argv += ["--discovery-file", str(env.discovery_file)]
+        argv += ["--discovery-file", str(env.discovery_file)]
         proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / "mock_engine.log")
         env.mock = proc
         if not wait_for_port("127.0.0.1", env.mock_http_port, 60):
@@ -1561,7 +1382,7 @@ class EnvManager:
             raise RuntimeError(
                 f"mock engine did not write endpoint file: {env.endpoint_file}"
             )
-        if spec.discovery == "discovery_file" and not wait_for(
+        if not wait_for(
             lambda: env.discovery_file.exists()
             and env.discovery_file.stat().st_size > 0,
             10,
@@ -1575,34 +1396,19 @@ class EnvManager:
     # -- master ------------------------------------------------------------
 
     def _master_env(self, env: FlexEnv, mspec: Optional[MasterSpec] = None) -> dict:
-        """Master JVM env.
-
-        *mspec* is None on the single-master legacy path (byte-identical
-        behaviour).  A MasterSpec layers the per-instance keys on top of
-        the shared base: HIPPO_ROLE (default = the shared label role, the
-        mutual-backup pairing), FLEXLB_ADVERTISED_IP (Tier-2/3),
-        FLEXLB_SYNC_CONSISTENCY_CONFIG (Tier-2/3, built from the live ZK
-        helper connectString) and the per-instance extra_env.
-        """
+        """Build master configuration documents and the existing HA deployment identity."""
         spec = env.spec
-        menv = dict(BASE_MASTER_ENV)
+        menv = {}
         if spec.master_profile != "none":
             menv["FLEXLB_CONFIG"] = flexlb_config_for_profile(spec.master_profile)
-        menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
         if spec.discovery == "file":
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
-            for key, value in payload.get("env", {}).items():
-                menv[key] = str(value)
+            menv["MODEL_SERVICE_CONFIG"] = payload["env"]["MODEL_SERVICE_CONFIG"]
         elif spec.discovery == "discovery_file":
-            # Dynamic file discovery: MODEL_SERVICE_CONFIG (domain endpoints)
-            # comes from the mock's endpoint-file env section; host resolution
-            # itself goes through FileServiceDiscovery reading the discovery
-            # file the mock keeps in sync (DOMAIN_ADDRESS env vars unused).
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
-            service_config = payload.get("env", {}).get("MODEL_SERVICE_CONFIG")
-            if service_config:
-                menv["MODEL_SERVICE_CONFIG"] = str(service_config)
-            menv["FLEXLB_DISCOVERY_FILE"] = str(env.discovery_file)
+            service_config = json.loads(payload["env"]["MODEL_SERVICE_CONFIG"])
+            service_config["discovery_file"] = str(env.discovery_file)
+            menv["MODEL_SERVICE_CONFIG"] = json.dumps(service_config)
         elif spec.discovery == "domain":
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(
                 {
@@ -1626,21 +1432,18 @@ class EnvManager:
                 },
                 separators=(",", ":"),
             )
-            menv["DOMAIN_ADDRESS:mock.prefill.hosts.address"] = spec.domain_addrs[
-                "prefill"
-            ]
-            menv["DOMAIN_ADDRESS:mock.decode.hosts.address"] = spec.domain_addrs[
-                "decode"
-            ]
+            service_config = json.loads(menv["MODEL_SERVICE_CONFIG"])
+            service_config["hosts"] = {
+                f"mock.{role}.hosts.address": [host.strip() for host in spec.domain_addrs[role].split(",") if host.strip()]
+                for role in ("prefill", "decode")
+            }
+            menv["MODEL_SERVICE_CONFIG"] = json.dumps(service_config)
         menv.update(spec.master_env)  # spec overrides come last
         if mspec is not None:
             # Per-instance layer (HA dual-master path only — the legacy
             # single-master path keeps mspec None and never reaches here).
-            if mspec.hippo_role:
-                menv["HIPPO_ROLE"] = mspec.hippo_role
-            if mspec.advertised_ip:
-                menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
             if spec.zk_consistency is not None:
+                menv["HIPPO_ROLE"] = mspec.hippo_role or f"flexlb_ft_{spec.label}"
                 if not env.zk_connect_string:
                     # Fail-closed: a master must never boot with
                     # needConsistency=true against a missing/dead ZK —
@@ -2376,23 +2179,10 @@ class ClientOps:
 
 
 # ---------------------------------------------------------------------------
-# TTL-settle drain window (shared by every case whose leaked inflight slots
-# settle via the master's stale-inflight TTL path)
-# ---------------------------------------------------------------------------
-
-# Worst-case master-side TTL settle: staleInflightTimeoutMs (30s) + the
-# ExpirationTimer @Scheduled(60s) sweep + 5s margin.  A leaked slot's TTL
-# expires at t+30s, but the sweeper only visits on its 60s period, so with
-# worst-phase alignment the ledger entry survives until ~t+90s after its
-# last touch.  Drain windows shorter than this (the legacy TTL+margin=60s
-# or the 90s caps) let the residue bleed into the NEXT case on the shared
-# env — the integration-round cascade (2026-09-01 task #87: 16 false
-# FAILs with scheduler=4/8/5 constant residue and an all-zero engine
-# side; every affected case was solo-PASS on a clean env).  Waiting longer
-# is "wait for the settle", NOT a weaker assertion: the target stays
-# all-zero and a true leak (a slot that is never released) still times
-# out and fails the caller.
-TTL_DRAIN_TIMEOUT_S = 95.0
+# Fault fixtures use a 30-second complete request lifetime. Allow 15 seconds
+# for cancellation/status convergence after expiry or generation retirement.
+# Protected Engine ownership must still be settled by authoritative evidence.
+REQUEST_CLEANUP_TIMEOUT_S = 45.0
 
 
 # ---------------------------------------------------------------------------
@@ -2654,23 +2444,17 @@ DECODE_DOMAIN = "mock.decode.hosts.address"
 
 
 def fault_env_config(
-    stale_inflight_ms: int = 30_000,
-    max_inflight_batches: int = 4,
+    request_timeout_ms: int = 30_000,
+    max_inflight_per_prefill_worker: int = 4,
     status_rpc_ms: int = 1_000,
 ) -> str:
-    """Fault-family FLEXLB_CONFIG (QUEUE + PRIORITY + FIXED_WINDOW + BATCH —
-    the legacy fault axes), generated through the unified
-    harness.build_flexlb_config template.
-
-    Shorter staleInflightTimeoutMs (30s vs the na130 default 300s) so the TTL
-    cleanup cases finish within their 90s caps.
-    """
+    """Fault cases use an explicit full-request timeout and the shared v3 generator."""
     return build_flexlb_config(
         ordering="priority",
         decision="fixed_window",
         dispatcher="batch",
-        stale_inflight_ms=stale_inflight_ms,
-        max_inflight_batches=max_inflight_batches,
+        request_timeout_ms=request_timeout_ms,
+        max_inflight_per_prefill_worker=max_inflight_per_prefill_worker,
         status_rpc_ms=status_rpc_ms,
     )
 
@@ -2694,48 +2478,15 @@ def fault_env_perf() -> dict:
 
 def admission_config(
     queue_timeout_ms: int = 60_000,
-    max_outstanding: int = 5_000,
-    stale_inflight_ms: int = 30_000,
-    max_delivered_not_accepted: Optional[int] = None,
-    max_waiting_requests_per_prefill_worker: Optional[int] = None,
-    prefill_max_pending_requests: Optional[int] = None,
+    request_timeout_ms: int = 60_000,
+    decision_lifetime: float = 2.0,
 ) -> str:
-    """FLEXLB_CONFIG for the admission-gate cases: the legacy fault axes
-    (QUEUE + PRIORITY + FIXED_WINDOW + BATCH) via the unified
-    harness.build_flexlb_config template, with the admission knobs
-    parameterised.
-
-    The three admission wave-2 capacity triggers are optional passthrough
-    (None → not emitted, keeping the current template values — lifecycle
-    maxDeliveredNotAcceptedRequestsGlobal=200, Java defaults for the other
-    two); only an explicit value overrides:
-
-      * max_waiting_requests_per_prefill_worker — scheduler.capacity
-        (batcher waiting-queue capacity; Java default 1024)
-      * max_delivered_not_accepted — scheduler.lifecycle
-        maxDeliveredNotAcceptedRequestsGlobal (acceptance global limit)
-      * prefill_max_pending_requests — RETIRED no-op (the codex schema
-        removed router.roles.prefill.availability; prefill admission now
-        parks via Blocked placementWaiters): accepted for caller
-        compatibility, emits no config key
-    """
-    kwargs = dict(
-        ordering="priority",
-        decision="fixed_window",
-        dispatcher="batch",
+    """Admission cases keep per-Prefill concurrency separate from queue/request deadlines."""
+    return build_flexlb_config(
+        ordering="priority", decision="fixed_window", dispatcher="batch",
         queue_timeout_ms=queue_timeout_ms,
-        max_outstanding=max_outstanding,
-        stale_inflight_ms=stale_inflight_ms,
+        request_timeout_ms=request_timeout_ms, decision_lifetime=decision_lifetime,
     )
-    if max_delivered_not_accepted is not None:
-        kwargs["max_delivered_not_accepted"] = max_delivered_not_accepted
-    if max_waiting_requests_per_prefill_worker is not None:
-        kwargs["max_waiting_requests_per_prefill_worker"] = (
-            max_waiting_requests_per_prefill_worker
-        )
-    if prefill_max_pending_requests is not None:
-        kwargs["prefill_max_pending_requests"] = prefill_max_pending_requests
-    return build_flexlb_config(**kwargs)
 
 
 def elastic_spec(ctx: "CaseContext") -> EnvSpec:
@@ -2751,23 +2502,10 @@ def elastic_spec(ctx: "CaseContext") -> EnvSpec:
     )
 
 
-def ttl_spec(ctx: "CaseContext") -> EnvSpec:
-    """Inflight-TTL env (S1): 2P+2D, TTL=30s."""
-    return EnvSpec(
-        label=f"fault_ttl_{ctx.profile}",
-        n_prefill=2,
-        n_decode=2,
-        perf=fault_env_perf(),
-        master_profile=ctx.profile,
-        discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config()},
-    )
 
 
 def quota_spec(ctx: "CaseContext") -> EnvSpec:
-    """Quota-block env (S3): 1P+1D, maxInflightBatches=1 via FLEXLB_CONFIG
-    (dispatcher.maxInflightBatchesPerPrefillWorker — the v1 env var
-    FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES has no v2 consumer)."""
+    """1P+1D batch-credit fixture, with one concurrent batch per Prefill worker."""
     return EnvSpec(
         label=f"fault_quota_{ctx.profile}",
         n_prefill=1,
@@ -2775,7 +2513,7 @@ def quota_spec(ctx: "CaseContext") -> EnvSpec:
         perf=fault_env_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
-        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_batches=1)},
+        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_per_prefill_worker=1)},
     )
 
 
@@ -2794,20 +2532,14 @@ def coldstart_spec(ctx: "CaseContext") -> EnvSpec:
 
 
 def _fault_spec(ctx: "CaseContext") -> EnvSpec:
-    """Env for fault cases whose requests die mid-flight (fetch_error,
-    crash_after): short staleInflightTimeoutMs (30s vs the na130 default
-    300s) because the VERIFIED contract is that a request already
-    accepted by an engine but whose client stream dies is cleaned by the
-    stale-inflight TTL, not by an immediate terminal (engine-side inflight
-    DOES drain immediately; the master ledger entry lingers).  With the
-    default env's 300s TTL the case would have to wait 5 minutes."""
+    """2P+2D fault fixture with an explicit 30-second complete request lifetime."""
     return EnvSpec(
         label=f"inject_fault_{ctx.profile}",
         n_prefill=2,
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config(stale_inflight_ms=30_000)},
+        master_env={"FLEXLB_CONFIG": admission_config(request_timeout_ms=30_000)},
     )
 
 
@@ -2899,7 +2631,7 @@ def _wait_master_topology(ops, role: str, expected: int, timeout_s: float) -> bo
     alone is NOT a safe convergence signal: the health 3-strike demotion
     lands well before the eviction removes the endpoint from the routable
     set, so waiting on alive lets traffic hit a dead-but-still-routable
-    port (see elastic_rebalance baseline).
+    port.
     """
 
     def converged() -> bool:

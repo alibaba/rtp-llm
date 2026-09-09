@@ -9,13 +9,19 @@ import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -31,22 +37,9 @@ class DecodePreemptionCoordinatorTest {
 
     @Test
     void commitsOnlyAfterEveryExactVictimIsTerminal() throws Exception {
-        RequestRegistry requests = mock(RequestRegistry.class);
-        DecodeEndpoint endpoint = mock(DecodeEndpoint.class);
-        WorkerStatus status = mock(WorkerStatus.class);
-        when(endpoint.getStatus()).thenReturn(status);
-        when(status.getGenerationId()).thenReturn(9L);
-        when(endpoint.beginPriorityPreemption(
-                anyLong(), anyList(), anyLong(), anyLong(), anyLong(),
-                anyInt(), any(DecodeEndpoint.AdmissionCapacity.class)))
-                .thenReturn(DecodeEndpoint.PreemptionBeginResult.SUCCESS);
-        when(endpoint.markPriorityCancelInFlight(anyLong())).thenReturn(true);
-        when(endpoint.recordPriorityCancelPhase(anyLong(), anyLong(), any()))
-                .thenReturn(true);
-        when(endpoint.commitPriorityPreemption(anyLong())).thenReturn(true);
-        when(requests.findCancelTarget(anyLong(), anyLong())).thenReturn(
-                Optional.of(new CancelTarget("10.0.0.1", 9090)));
-        when(requests.tryApplyPreemptionPhase(any(), any())).thenReturn(true);
+        Fixture fixture = fixture();
+        RequestRegistry requests = fixture.requests();
+        DecodeEndpoint endpoint = fixture.endpoint();
 
         CompletableFuture<VictimTerminal> firstTerminal = new CompletableFuture<>();
         CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
@@ -80,6 +73,66 @@ class DecodePreemptionCoordinatorTest {
         verify(endpoint).commitPriorityPreemption(1L);
         verify(endpoint, never()).abortPriorityPreemption(anyLong());
     }
+
+    @ParameterizedTest
+    @EnumSource(value = EngineCancelChannel.CancelAck.class, names = {"ACCEPTED", "FAILED"})
+    void timeoutBeginsAfterAckAndLateTerminalCannotReopenIncoming(
+            EngineCancelChannel.CancelAck acknowledgement) throws Exception {
+        Fixture fixture = fixture();
+        CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
+        PreemptionRegistration victimClaim = claim(11L, terminal);
+        when(fixture.requests().tryClaim(anyLong(), anyLong(), anyLong(), any()))
+                .thenReturn(Optional.of(victimClaim));
+        EngineCancelChannel channel = mock(EngineCancelChannel.class);
+        CompletableFuture<EngineCancelChannel.CancelAck> ack = new CompletableFuture<>();
+        when(channel.cancel(any(), anyLong(), anyLong())).thenReturn(ack);
+        DecodePreemptionCoordinator coordinator =
+                new DecodePreemptionCoordinator(channel, fixture.requests());
+        CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> outcome =
+                coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
+                        fixture.endpoint(), 20L, 64L, 64L, 70,
+                        new DecodeEndpoint.AdmissionCapacity(1L, 100L),
+                        List.of(victim(11L, 101L)),
+                        50L, 20L, () -> true, "test"));
+
+        // Transport owns the ACK deadline. The terminal-wait budget starts
+        // only when that phase resolves, even if the transport outcome is unknown.
+        assertThrows(TimeoutException.class, () -> outcome.get(60L, TimeUnit.MILLISECONDS));
+        ack.complete(acknowledgement);
+        var timedOut = outcome.get(1L, TimeUnit.SECONDS);
+        assertFalse(timedOut.committed());
+        assertTrue(timedOut.controlFailure());
+        assertEquals("cancel_terminal_unknown", timedOut.detail());
+        verify(fixture.endpoint()).abortPriorityPreemption(1L);
+        verify(fixture.requests(), never()).tryReleasePreemption(victimClaim);
+        assertFalse(terminal.isDone(), "timing out admission must retain the victim terminal observation");
+
+        terminal.complete(new VictimTerminal(11L));
+        assertSame(timedOut, outcome.join());
+        verify(fixture.endpoint(), never()).commitPriorityPreemption(anyLong());
+    }
+
+    private static Fixture fixture() {
+        RequestRegistry requests = mock(RequestRegistry.class);
+        DecodeEndpoint endpoint = mock(DecodeEndpoint.class);
+        WorkerStatus status = mock(WorkerStatus.class);
+        when(endpoint.getStatus()).thenReturn(status);
+        when(status.getGenerationId()).thenReturn(9L);
+        when(endpoint.beginPriorityPreemption(
+                anyLong(), anyList(), anyLong(), anyLong(), anyLong(),
+                anyInt(), any(DecodeEndpoint.AdmissionCapacity.class)))
+                .thenReturn(DecodeEndpoint.PreemptionBeginResult.SUCCESS);
+        when(endpoint.markPriorityCancelInFlight(anyLong())).thenReturn(true);
+        when(endpoint.recordPriorityCancelPhase(anyLong(), anyLong(), any()))
+                .thenReturn(true);
+        when(endpoint.commitPriorityPreemption(anyLong())).thenReturn(true);
+        when(requests.findCancelTarget(anyLong(), anyLong())).thenReturn(
+                Optional.of(new CancelTarget("10.0.0.1", 9090)));
+        when(requests.tryApplyPreemptionPhase(any(), any())).thenReturn(true);
+        return new Fixture(requests, endpoint);
+    }
+
+    private record Fixture(RequestRegistry requests, DecodeEndpoint endpoint) { }
 
     private static PreemptionRegistration claim(
             long requestId,

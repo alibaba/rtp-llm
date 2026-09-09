@@ -47,7 +47,7 @@ class RequestCompletionPublicationRaceTest {
     void inactivityWinsWhileAcknowledgementReportingAndTerminalCleanupAreBothPaused() throws Exception {
         var config = spy(SchedulingTestConfig.batchConfig());
         long timeoutMs = TimeUnit.HOURS.toMillis(1L);
-        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(timeoutMs);
+        config.getRequestLifecycle().getRequest().setTimeoutMs(timeoutMs);
         var runtime = spy(config.getInternalRuntime());
         when(runtime.getBatchDispatchCompletionThreads()).thenReturn(1);
         when(config.getInternalRuntime()).thenReturn(runtime);
@@ -63,7 +63,7 @@ class RequestCompletionPublicationRaceTest {
         CountDownLatch resumeCleanup = new CountDownLatch(1);
         try {
             BalanceContext context = RequestLifecycleTestSupport.context(config, 501L);
-            CompletableFuture<Response> future = registry.register(context, 0);
+            CompletableFuture<Response> future = registry.register(context);
             RequestSlot slot = registry.requestSlot(501L);
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             when(prefill.getIp()).thenReturn("prefill");
@@ -73,7 +73,8 @@ class RequestCompletionPublicationRaceTest {
                     prefill, decode, reservation, slot.createdAtMs());
             RequestLifecycleTestSupport.bind(registry,
                     new RequestLifecycleTestSupport.Registered(item, future));
-            RequestRegistry.DeliveryClaim claim = registry.tryClaimBatchDelivery(item, 601L, () -> true);
+            RequestRegistry.DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(
+                    registry, item, 601L, () -> true);
             assertNotNull(claim);
 
             doAnswer(invocation -> {
@@ -97,14 +98,14 @@ class RequestCompletionPublicationRaceTest {
             assertFalse(future.isDone());
 
             Future<?> expiry = operations.submit(() ->
-                    registry.cancelForRequestInactivity(slot, slot.createdAtMs() + timeoutMs));
+                    registry.expireInactiveRequest(slot, slot.createdAtMs() + timeoutMs));
             assertTrue(cleanupEntered.await(2L, TimeUnit.SECONDS));
             resumeReporting.countDown();
             acknowledgement.get(2L, TimeUnit.SECONDS);
 
             // A second response on the single publisher worker proves the old ACK's
             // queued publication has run while the TTL response is still withheld.
-            var barrier = registry.register(RequestLifecycleTestSupport.context(config, 502L), 0);
+            var barrier = registry.register(RequestLifecycleTestSupport.context(config, 502L));
             registry.cancelRequest(502L, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(barrier.get(2L, TimeUnit.SECONDS).isSuccess());
             assertFalse(future.isDone(), "an obsolete success permit cannot win after TTL claims cleanup");
@@ -141,7 +142,7 @@ class RequestCompletionPublicationRaceTest {
         CompletableFuture<Void> callback = fixture.slot().future().thenAccept(response ->
                 assertFalse(Thread.holdsLock(fixture.slot())));
         synchronized (fixture.slot()) {
-            fixture.slot().rememberCancellation(CancelReason.DEADLINE_EXCEEDED, "request inactive");
+            fixture.slot().markCancellationRequested(CancelReason.DEADLINE_EXCEEDED, "request inactive");
             TerminalAction terminal = fixture.slot().beginTerminalizing(true, false, false, null,
                     owner -> owner.timeout("request inactive"), new Response());
             assertNotNull(terminal);
@@ -194,7 +195,7 @@ class RequestCompletionPublicationRaceTest {
 
     private static Fixture fixture() {
         RequestCompletionPublisher publisher = mock(RequestCompletionPublisher.class);
-        RequestSlot slot = new RequestSlot(publisher, 701L, new java.util.concurrent.atomic.AtomicInteger(1), 0, slotToRemove -> { });
+        RequestSlot slot = new RequestSlot(publisher, 701L);
         when(publisher.tryReservePublication(eq(slot), any())).thenAnswer(invocation ->
                 new RequestSlot.PublicationPermit(publisher, slot, invocation.getArgument(1)));
         var config = SchedulingTestConfig.batchConfig();

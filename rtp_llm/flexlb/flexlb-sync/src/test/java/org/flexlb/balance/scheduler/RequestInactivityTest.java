@@ -49,16 +49,16 @@ class RequestInactivityTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        FlexlbConfig config = new org.flexlb.config.FlexlbConfig();
+        FlexlbConfig config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useNonBatchDispatcher(config);
-        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(TIMEOUT_MS);
+        config.getRequestLifecycle().getRequest().setTimeoutMs(TIMEOUT_MS);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
                 mock(RequestSchedulerReporter.class));
 
         BalanceContext context = RequestLifecycleTestSupport.context(config, REQUEST_ID);
-        CompletableFuture<Response> future = registry.register(context, 0);
+        CompletableFuture<Response> future = registry.register(context);
         slot = registry.requestSlot(REQUEST_ID);
         registeredAtMs = slot.createdAtMs();
         prefill = mock(PrefillEndpoint.class);
@@ -71,8 +71,8 @@ class RequestInactivityTest {
         item = new ScheduledRequest(context, future, new Response(), prefillStatus, null,
                 prefill, decode, reservation, registeredAtMs);
         var registered = new RequestLifecycleTestSupport.Registered(item, future);
-        RequestLifecycleTestSupport.bindRoute(registry, registered, 0, TIMEOUT_MS);
-        claim = registry.tryClaimRouteDelivery(item, () -> true);
+        RequestLifecycleTestSupport.bindRoute(registry, registered);
+        claim = RequestLifecycleTestSupport.claimRoute(registry, item, () -> true);
         assertNotNull(claim);
     }
 
@@ -92,7 +92,7 @@ class RequestInactivityTest {
         for (int observation = 1; observation <= 6; observation++) {
             long observedAt = registeredAtMs + observation * (TIMEOUT_MS / 2L);
             observeActive(source, observedAt);
-            registry.cancelForRequestInactivity(slot, observedAt + TIMEOUT_MS / 2L - 1L);
+            registry.expireInactiveRequest(slot, observedAt + TIMEOUT_MS / 2L - 1L);
             assertLiveAndCharged();
         }
         assertTrue(item.future().isDone(), "the public route response does not end activity tracking");
@@ -104,30 +104,27 @@ class RequestInactivityTest {
         acknowledgeDelivery();
         long lastStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
         observeActive(source, lastStatusAt);
-        registry.cancelForRequestInactivity(slot, lastStatusAt + TIMEOUT_MS - 1L);
+        registry.expireInactiveRequest(slot, lastStatusAt + TIMEOUT_MS - 1L);
         assertLiveAndCharged();
 
-        registry.cancelForRequestInactivity(slot, lastStatusAt + TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, lastStatusAt + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
 
         // A delayed status or timer callback cannot reopen or double-release this generation.
-        new EndpointEventProjector(registry).onPrefillStatus(prefill, RoleType.PREFILL,
-                java.util.List.of(PrefillState.WorkerStatusFact.active(item)));
-        new EndpointEventProjector(registry).onDecodeStatus(decode,
-                java.util.List.of(DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation())));
-        new EndpointEventProjector(registry).onDecodeStatus(decode,
-                java.util.List.of(DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L)));
-        registry.cancelForRequestInactivity(slot, lastStatusAt + 2L * TIMEOUT_MS);
+        registry.onPrefillFact(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+        registry.onDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()));
+        registry.onDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
+        registry.expireInactiveRequest(slot, lastStatusAt + 2L * TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
 
     @Test
     void missingDeliveryReplyExpiresPurelyLocally() throws Exception {
-        registry.cancelForRequestInactivity(slot, registeredAtMs + TIMEOUT_MS - 1L);
+        registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS - 1L);
         assertFalse(item.future().isDone(), "no transport callback has confirmed delivery");
         assertLiveAndCharged();
 
-        registry.cancelForRequestInactivity(slot, registeredAtMs + TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
         assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
 
@@ -141,7 +138,7 @@ class RequestInactivityTest {
     void uncertainDeliveryKeepsOnlyABoundedConfirmationWait(DeliveryResult.Status outcome) throws Exception {
         registry.complete(claim, new DeliveryResult(outcome, new IllegalStateException("reply was lost")));
         assertLiveAndCharged();
-        registry.cancelForRequestInactivity(slot, registeredAtMs + TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
         assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
     }
@@ -156,37 +153,35 @@ class RequestInactivityTest {
         synchronized (slot) {
             assertEquals(CancelReason.CLIENT_CANCELLED, slot.requireCancellationFirstCause());
         }
-        registry.cancelForRequestInactivity(slot, registeredAtMs + TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, registeredAtMs + TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.CANCELLED);
-        registry.cancelForRequestInactivity(slot, registeredAtMs + 2L * TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, registeredAtMs + 2L * TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.CANCELLED);
     }
 
     @ParameterizedTest
     @EnumSource(StaleFact.class)
-    void staleEndpointOrRequestGenerationCannotRenewInactivity(StaleFact source) throws Exception {
-        var projector = new EndpointEventProjector(registry);
-        RequestLifecycleTestSupport.awaitCondition(() -> System.currentTimeMillis() > registeredAtMs);
-        switch (source) {
-            case PREFILL_ENDPOINT -> projector.onPrefillStatus(mock(PrefillEndpoint.class), RoleType.PREFILL,
-                    java.util.List.of(PrefillState.WorkerStatusFact.active(item)));
-            case PREFILL_ITEM -> projector.onPrefillStatus(prefill, RoleType.PREFILL,
-                    java.util.List.of(PrefillState.WorkerStatusFact.active(new ScheduledRequest(item.ctx(), item.future(),
-                            item.routeResponse(), item.prefill(), null, prefill, decode,
-                            item.decodeReservation(), registeredAtMs))));
-            case DECODE_ENDPOINT -> projector.onDecodeStatus(mock(DecodeEndpoint.class),
-                    java.util.List.of(DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation())));
-            case DECODE_GENERATION -> projector.onDecodeStatus(decode,
-                    java.util.List.of(DecodeEndpoint.WorkerStatusFact.active(
-                            new DecodeEndpoint.ReservationHandle(2L, REQUEST_ID, 1L))));
-            case DECODE_RESERVATION -> projector.onDecodeStatus(decode,
-                    java.util.List.of(DecodeEndpoint.WorkerStatusFact.active(
-                            new DecodeEndpoint.ReservationHandle(1L, REQUEST_ID, 2L))));
-        }
+    void staleEndpointOrRequestGenerationCannotRenewInactivity(StaleFact source) {
+        long lateStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
         synchronized (slot) {
-            assertEquals(registeredAtMs, slot.lastWorkerStatusAtMs());
+            RequestSlot.EngineObservation observation = switch (source) {
+                case PREFILL_ENDPOINT -> slot.observePrefillFact(mock(PrefillEndpoint.class), RoleType.PREFILL,
+                        PrefillState.WorkerStatusFact.active(item), lateStatusAt);
+                case PREFILL_ITEM -> slot.observePrefillFact(prefill, RoleType.PREFILL,
+                        PrefillState.WorkerStatusFact.active(new ScheduledRequest(item.ctx(), item.future(),
+                                item.routeResponse(), item.prefill(), null, prefill, decode,
+                                item.decodeReservation(), registeredAtMs)), lateStatusAt);
+                case DECODE_ENDPOINT -> slot.observeDecodeFact(mock(DecodeEndpoint.class),
+                        DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
+                case DECODE_GENERATION -> slot.observeDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(
+                        new DecodeEndpoint.ReservationHandle(2L, REQUEST_ID, 1L)), lateStatusAt);
+                case DECODE_RESERVATION -> slot.observeDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(
+                        new DecodeEndpoint.ReservationHandle(1L, REQUEST_ID, 2L)), lateStatusAt);
+            };
+            assertSame(RequestSlot.EngineObservation.STALE, observation);
+            assertTrue(slot.requestInactive(lateStatusAt));
         }
-        registry.cancelForRequestInactivity(slot, registeredAtMs + TIMEOUT_MS);
+        registry.expireInactiveRequest(slot, lateStatusAt);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
 
@@ -199,7 +194,7 @@ class RequestInactivityTest {
         }
 
         observeActive(source, originalDeadline - 1L);
-        registry.cancelForRequestInactivity(slot, originalDeadline);
+        registry.expireInactiveRequest(slot, originalDeadline);
 
         assertLiveAndCharged();
         synchronized (slot) {
@@ -210,10 +205,13 @@ class RequestInactivityTest {
 
     private void observeActive(RoleType source, long nowMs) {
         synchronized (slot) {
-            assertTrue(source == RoleType.PREFILL
-                    ? slot.ownsPrefillFact(prefill, item)
-                    : slot.ownsDecodeFact(decode, item.decodeReservation()));
-            slot.observeWorkerStatus(nowMs);
+            if (source == RoleType.PREFILL) {
+                slot.observePrefillFact(prefill, RoleType.PREFILL,
+                        PrefillState.WorkerStatusFact.active(item), nowMs);
+            } else {
+                slot.observeDecodeFact(decode,
+                        DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), nowMs);
+            }
         }
     }
 

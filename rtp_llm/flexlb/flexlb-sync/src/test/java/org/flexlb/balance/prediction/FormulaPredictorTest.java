@@ -150,6 +150,13 @@ class FormulaPredictorTest {
         assertTrue(result >= 0, "Should not overflow or produce negative values");
     }
 
+    @Test
+    void batchPredictionPreservesFractionalMilliseconds() {
+        FormulaPredictor predictor = new FormulaPredictor("0.5");
+        assertEquals(0.5, predictor.evaluator().predictBatchMs(
+                new PrefillBatchFeatures(List.of(new PrefillBatchFeatures.Item(1L, 0L)))));
+    }
+
     // ---- predictBatchMs ----
 
     @Test
@@ -272,10 +279,10 @@ class FormulaPredictorTest {
             fullHitBatch.add(item(102400, 101376));
         }
 
-        assertEquals(187, p.evaluator().predictBatchMs(batchFeatures(fullHitBatch.subList(0, 1))));
-        assertEquals(246, p.evaluator().predictBatchMs(batchFeatures(fullHitBatch.subList(0, 5))));
-        assertEquals(383, p.evaluator().predictBatchMs(batchFeatures(fullHitBatch)));
-        assertEquals(886, p.evaluator().predictBatchMs(batchFeatures(item(102400, 0))));
+        assertEquals(187, (long) p.evaluator().predictBatchMs(batchFeatures(fullHitBatch.subList(0, 1))));
+        assertEquals(246, (long) p.evaluator().predictBatchMs(batchFeatures(fullHitBatch.subList(0, 5))));
+        assertEquals(383, (long) p.evaluator().predictBatchMs(batchFeatures(fullHitBatch)));
+        assertEquals(886, (long) p.evaluator().predictBatchMs(batchFeatures(item(102400, 0))));
     }
 
     @Test

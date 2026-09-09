@@ -3,7 +3,6 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -27,7 +26,7 @@ class EndpointRetirementLinearizationTest {
     void detachClosesEveryStatefulAdmissionGateBeforeFinalDrain()
             throws Exception {
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
         EndpointRegistry registry = new EndpointRegistry(

@@ -52,7 +52,7 @@ During the load window the script also runs three per-second collectors (see
 master Prometheus business metrics, and CPU/RSS sampling of the three JVM
 groups. `JAVA_MOCK_STATS_INTERVAL_MS` defaults to
 `1000` (1s mock stats cadence; was 5000) for fine-grained timelines, and
-`FLEXLB_MONITOR_METRIC_WHITELIST` defaults to the analyzer-consumed series
+`--flexlb.monitor.metric-whitelist` selects the analyzer-consumed series
 so the master trims its exposition at the source (see the note under
 **Run output layout**).
 After completion, the important outputs are (see the **Run output layout**
@@ -129,16 +129,19 @@ REPLAY_SPEED=20 \
 N_PREFILL=4 \
 N_DECODE=16 \
 SLA_TTFT_MS=800 \
-FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":200}},"dispatcher":{"type":"BATCH"},"router":{"roles":{"prefill":{"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"LEAST_RECENTLY_USED_IN_POOL","pool":{"type":"RATIO","ratio":0.3,"minimumWorkers":1}}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":64},"selector":{"type":"KV_USAGE_WEIGHTED_RANDOM"}}}}}' \
+FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":200}},"dispatcher":{"type":"BATCH"},"requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2.0}},"router":{"roles":{"prefill":{},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":64}}}}}' \
 rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
 ```
 
 `FLEXLB_CONFIG` is the only FlexLB behavior document. In particular, the
 prefill performance formula is
 `router.roles.prefill.executionTimeEstimator.expression`; there is no separate
-formula environment variable. Omitting the estimator applies the code default
-(production DSv4 prefill fit, `RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION`),
-which is also what the shipped `master_fixed_window.json` now relies on.
+formula environment variable. Omitting the estimator uses
+`sum(computeTokens) + 0.3*sum(hitCacheTokens)`; the shipped `master_fixed_window.json`
+sets its DSv4 fit explicitly. Schema 3 requires request `timeoutMs`; decision `lifetime` defaults to 2.0.
+`dispatcher.maxInflightPerPrefillWorker` defaults to 2: batches for BATCH, requests
+for NON_BATCH / DIRECT. Values in this benchmark's templates are workload
+settings, not Java defaults; set them through `FLEXLB_CONFIG` or `PROCESS_CONFIG_FILE`.
 
 If `flexlb-api` is already running, use:
 
@@ -286,12 +289,11 @@ zero observation overhead for A/B comparisons. (The retired Mac-local
 their scenarios are now covered by the `flexlb_ft/` framework and the remote
 skill eval chain.)
 
-### FLEXLB_MONITOR_METRIC_WHITELIST
+### Metric whitelist
 
 The master trims its `flexlb_*` exposition with a metric whitelist — the
-single filtering mechanism, there is no mode switch. `FLEXLB_MONITOR_METRIC_WHITELIST`
-is a comma-separated list of prometheus-form prefixes or full names, passed
-to the master as `flexlb.monitor.metric-whitelist`. The script default pins
+single filtering mechanism, there is no mode switch. `--flexlb.monitor.metric-whitelist`
+accepts comma-separated Prometheus prefixes or full names. The script pins
 the 13 prefixes the per-second master collector consumes — trimming at the
 source instead of exposing ~100 unconsumed series — and MUST stay in sync
 with `MASTER_PROMETHEUS_PREFIXES` in `eval_collectors.py` (the collector
@@ -370,9 +372,8 @@ lifecycle helpers `start_java_mock_cluster <run_dir>` / `wait_mock_cluster_ready
 variables) — prefer those over hand-rolled `java -jar` invocations.
 
 Use the `env ... <your-flexlb-api-start-command>` snippet from
-`flexlb_env.txt` when starting `flexlb-api`. The `DOMAIN_ADDRESS:*`
-environment keys contain `:`, so they must be passed through `env`; bash cannot
-`export` them directly.
+`flexlb_env.txt` when starting `flexlb-api`. It supplies `MODEL_SERVICE_CONFIG`;
+local discovery uses its `discovery_file` path.
 
 ### 2. Start flexlb-api
 
@@ -407,15 +408,10 @@ frontend behavior: it calls `FetchResponse` on the selected prefill engine. For
 frontend-sent requests (NON_BATCH dispatcher), it calls `GenerateStreamCall`
 directly on the routed prefill engine.
 
-Migration note (2026-08, task #55): the legacy v1 `--mode batch|direct|queue`
-axis no longer exists — all three v1 modes mapped to the same v2 configuration,
-so the mode axis was dead. The functional-test runner now selects a scheduling
-profile (`--profile batch-window|single-nonbatch|single-batch|window-nonbatch`:
+The functional-test runner selects a scheduling profile
+(`--profile batch-window|single-nonbatch|single-batch|window-nonbatch`):
 QUEUE + FIFO ordering × SINGLE/FIXED_WINDOW decision × BATCH/NON_BATCH
-dispatcher, injected as the schema-v2 `FLEXLB_CONFIG` document). The v1
-"direct" mode name was doubly misleading: v1 direct still routed through the
-master (only the delivery leg was frontend-sent), and in v2 frontend-sending
-is a dispatcher axis (`non_batch`), not a scheduling mode.
+dispatcher, emitted as a schema-3 `FLEXLB_CONFIG` document.
 
 Outputs:
 

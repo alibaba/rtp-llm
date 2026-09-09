@@ -10,7 +10,6 @@ import org.flexlb.util.Logger;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 /**
  * Shared endpoint-capability mechanics for the two delivery transactions.
@@ -39,34 +38,24 @@ final class PrefillAdmissionResources {
 
     static final class Member {
         final ScheduledRequest item;
-        final Optional<DecodeResources> decode;
+        final DecodeEndpoint.EngineDispatchPermit decode;
         MemberOwnership ownership = MemberOwnership.ADMISSION_OWNED;
 
         Member(
                 ScheduledRequest item,
-                DecodeEndpoint.EngineDispatchPermit permit,
-                RequestRegistry.DeliveryAdmission acceptance) {
+                DecodeEndpoint.EngineDispatchPermit permit) {
             this.item = Objects.requireNonNull(item, "item");
-            this.decode = permit == null ? Optional.empty()
-                    : Optional.of(new DecodeResources(permit, acceptance));
-        }
-    }
-
-    private record DecodeResources(DecodeEndpoint.EngineDispatchPermit permit,
-                                   RequestRegistry.DeliveryAdmission acceptance) {
-        private DecodeResources {
-            Objects.requireNonNull(permit, "permit");
-            Objects.requireNonNull(acceptance, "acceptance");
+            this.decode = permit;
         }
     }
 
     static CapacityBoundary.Attempt<Member> prepareMember(
-            ScheduledRequest item, RequestRegistry requests) {
+            ScheduledRequest item) {
         ScheduledRequest.DecodeBinding binding = item.decodeBinding();
         if (binding.isAbsent()) {
             // The committed topology has no independent Decode resource.
             // Its Prefill/PDFUSION reservation still follows the same handoff.
-            return captureMember(item, null, null);
+            return captureMember(item, null);
         }
         DecodeEndpoint decode = binding.endpoint();
         if (decode == null || binding.reservation() == null) {
@@ -74,15 +63,12 @@ final class PrefillAdmissionResources {
         }
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition;
         try {
-            acquisition = decode.acquireEngineDispatchPermit(
-                    item.requestId(),
-                    item.maxDecodeEngineRequests(),
-                    item.maxDecodeKvUsagePercent());
+            acquisition = decode.acquireEngineDispatchPermit(binding.reservation(), binding.capacity());
         } catch (RuntimeException | Error failure) {
             return failed(failure);
         }
         return switch (acquisition.status()) {
-            case ACQUIRED -> prepareAcceptance(item, acquisition.permit(), requests);
+            case ACQUIRED, ALREADY_ACCEPTED -> captureMember(item, acquisition.permit());
             case CAPACITY_FULL -> decodeCapacityFull(item);
             case NOT_OWNED, NOT_QUEUED -> rejected(
                     CapacityBoundary.OWNERSHIP_LOST);
@@ -91,21 +77,6 @@ final class PrefillAdmissionResources {
                     "Decode dispatch permit already acquired: request_id="
                             + item.requestId()));
         };
-    }
-
-    private static CapacityBoundary.Attempt<Member> prepareAcceptance(
-            ScheduledRequest item, DecodeEndpoint.EngineDispatchPermit permit, RequestRegistry requests) {
-        try {
-            CapacityBoundary.Attempt<RequestRegistry.DeliveryAdmission> attempt =
-                    requests.prepareDecodeAcceptance(item);
-            if (attempt.accepted()) {
-                return captureMember(item, permit, attempt.value());
-            }
-            Throwable rollback = rollbackPermit(permit, null);
-            return rollback == null ? rejected(attempt.boundary()) : failed(rollback);
-        } catch (Throwable failure) {
-            return failed(rollbackPermit(permit, failure));
-        }
     }
 
     private static CapacityBoundary.Attempt<Member> decodeCapacityFull(
@@ -122,15 +93,14 @@ final class PrefillAdmissionResources {
      */
     private static CapacityBoundary.Attempt<Member> captureMember(
             ScheduledRequest item,
-            DecodeEndpoint.EngineDispatchPermit permit,
-            RequestRegistry.DeliveryAdmission acceptance) {
+            DecodeEndpoint.EngineDispatchPermit permit) {
         Member member = null;
         try {
-            member = new Member(item, permit, acceptance);
+            member = new Member(item, permit);
             return accepted(member);
         } catch (Throwable captureFailure) {
             Throwable failure = member == null
-                    ? rollbackAcceptance(acceptance, rollbackPermit(permit, captureFailure))
+                    ? rollbackPermit(permit, captureFailure)
                     : rollbackMember(member, captureFailure);
             return failed(failure);
         }
@@ -218,27 +188,9 @@ final class PrefillAdmissionResources {
                 || member.ownership != MemberOwnership.ADMISSION_OWNED) {
             return priorFailure;
         }
-        Throwable failure = priorFailure;
-        if (member.decode.isPresent()) {
-            DecodeResources resources = member.decode.get();
-            failure = rollbackAcceptance(resources.acceptance(),
-                    rollbackPermit(resources.permit(), failure));
-        }
+        Throwable failure = rollbackPermit(member.decode, priorFailure);
         member.ownership = MemberOwnership.OWNERSHIP_LOST;
         return failure;
-    }
-
-    private static Throwable rollbackAcceptance(
-            RequestRegistry.DeliveryAdmission admission, Throwable prior) {
-        if (admission == null) {
-            return prior;
-        }
-        try {
-            admission.close();
-            return prior;
-        } catch (Throwable failure) {
-            return combine(prior, failure);
-        }
     }
 
     static void preserveRejectedCause(
@@ -276,10 +228,8 @@ final class PrefillAdmissionResources {
     }
 
     static CommittedAdmissionOwner createCommittedOwner(
-            List<Member> exactMembers,
-            int committedHandoffCount) {
-        return new CommittedAdmissionOwner(
-                exactMembers, committedHandoffCount);
+            List<Member> exactMembers) {
+        return new CommittedAdmissionOwner(exactMembers);
     }
 
     private static void releaseCommittedHandoff(
@@ -309,26 +259,23 @@ final class PrefillAdmissionResources {
 
     /**
      * Fully allocated before the ledger crosses its canonical commit point.
-     * Binding a returned handoff writes only preallocated reference slots.
+     * Binding the returned handoff only assigns its reference.
      */
     static final class CommittedAdmissionOwner implements AutoCloseable {
         private final IdentityHashMap<ScheduledRequest, Member> membersByIdentity;
         private final Member[] members;
-        private final PrefillState.CommittedHandoff[] handoffs;
+        private PrefillState.CommittedHandoff handoff;
         private boolean bound;
         private boolean closed;
 
         private CommittedAdmissionOwner(
-                List<Member> exactMembers,
-                int committedHandoffCount) {
-            if (exactMembers.isEmpty() || committedHandoffCount <= 0) {
+                List<Member> exactMembers) {
+            if (exactMembers.isEmpty()) {
                 throw new IllegalArgumentException(
-                        "committed admission requires members and handoffs");
+                        "committed admission requires members");
             }
             membersByIdentity = new IdentityHashMap<>(exactMembers.size());
             members = exactMembers.toArray(Member[]::new);
-            handoffs = new PrefillState.CommittedHandoff[
-                    committedHandoffCount];
             for (int index = 0; index < members.length; index++) {
                 Member member = members[index];
                 if (member.ownership != MemberOwnership.ADMISSION_OWNED) {
@@ -342,7 +289,7 @@ final class PrefillAdmissionResources {
         /** No-throw bind after one Prefill group has committed. */
         synchronized void bindPrefillHandoff(
                 PrefillState.CommittedHandoff exactHandoff) {
-            handoffs[0] = exactHandoff;
+            handoff = exactHandoff;
             bound = true;
         }
 
@@ -365,15 +312,12 @@ final class PrefillAdmissionResources {
                 throw new IllegalStateException(
                         "committed item was already transferred");
             }
-            if (member.decode.isEmpty()) {
+            if (member.decode == null) {
                 member.ownership = MemberOwnership.ENDPOINT_OWNED;
                 return true;
             }
-            if (!member.decode.get().acceptance().transferTo(exactItem)) {
-                return false;
-            }
             DecodeEndpoint.EngineDispatchPermitTransferStatus transfer =
-                    member.decode.get().permit().transferToEngineLifecycle();
+                    member.decode.transferToEngineLifecycle();
             return switch (transfer) {
                 case TRANSFERRED -> {
                     member.ownership = MemberOwnership.ENDPOINT_OWNED;
@@ -406,32 +350,24 @@ final class PrefillAdmissionResources {
                     }
                 }
             }
-            for (PrefillState.CommittedHandoff handoff
-                    : handoffs) {
-                releaseCommittedHandoff(handoff);
-            }
+            releaseCommittedHandoff(handoff);
         }
     }
 
     /** Decode is the exact event source for its request-scoped permit. */
     private static final class DecodeAvailability
             implements CapacityBoundary.Availability {
-        private final ScheduledRequest item;
-        private final DecodeEndpoint endpoint;
+        private final ScheduledRequest.DecodeBinding binding;
         private Runnable subscribedListener;
 
         private DecodeAvailability(ScheduledRequest item) {
-            this.item = item;
-            ScheduledRequest.DecodeBinding binding = item.decodeBinding();
-            this.endpoint = binding.endpoint();
+            this.binding = item.decodeBinding();
         }
 
         @Override
         public boolean isAvailable() {
-            return endpoint.isEngineDispatchPermitAvailable(
-                    item.requestId(),
-                    item.maxDecodeEngineRequests(),
-                    item.maxDecodeKvUsagePercent());
+            return binding.endpoint().isEngineDispatchPermitAvailable(
+                    binding.requestId(), binding.capacity());
         }
 
         @Override
@@ -444,7 +380,7 @@ final class PrefillAdmissionResources {
                 return;
             }
             subscribedListener = listener;
-            endpoint.addEngineDispatchCapacityListener(listener);
+            binding.endpoint().addEngineDispatchCapacityListener(listener);
         }
 
         @Override
@@ -452,7 +388,7 @@ final class PrefillAdmissionResources {
             if (subscribedListener != listener) {
                 return;
             }
-            endpoint.removeEngineDispatchCapacityListener(listener);
+            binding.endpoint().removeEngineDispatchCapacityListener(listener);
             subscribedListener = null;
         }
     }

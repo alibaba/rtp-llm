@@ -44,22 +44,13 @@ public record PlacementResult<V, B>(
     }
 
     public static <V, B> PlacementResult<V, B> closed() {
-        return status(Status.CLOSED);
-    }
-
-    public static <V, B> PlacementResult<V, B> limitReached() {
-        return status(Status.LIMIT_REACHED);
-    }
-
-    private static <V, B> PlacementResult<V, B> status(Status status) {
-        return new PlacementResult<>(status, null, null, null);
+        return new PlacementResult<>(Status.CLOSED, null, null, null);
     }
 
     public enum Status {
         SUCCESS,
         REJECTED,
         BLOCKED,
-        CLOSED,
-        LIMIT_REACHED
+        CLOSED
     }
 }

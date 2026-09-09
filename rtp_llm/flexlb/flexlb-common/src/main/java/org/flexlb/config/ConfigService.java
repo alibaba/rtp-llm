@@ -33,12 +33,15 @@ public class ConfigService {
     private final FlexlbConfig flexlbConfig;
 
     public ConfigService() {
-        this(System.getenv());
+        this(System.getenv(FLEXLB_CONFIG_ENV));
     }
 
-    ConfigService(Map<String, String> environment) {
-        String document = environment.get(FLEXLB_CONFIG_ENV);
-        this.flexlbConfig = document == null ? new FlexlbConfig() : parse(document);
+    ConfigService(String document) {
+        if (document == null || document.isBlank()) {
+            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
+                    "is required; configure requestLifecycle.request.timeoutMs");
+        }
+        this.flexlbConfig = parse(document);
         FlexlbConfigValidator.validate(flexlbConfig);
         logEffectiveConfig(flexlbConfig);
     }
@@ -99,10 +102,8 @@ public class ConfigService {
                 : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
         String dispatcher = config.getDispatcher().typeName();
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
-                        + "dispatcher={}, prefillCandidateChoice={}, groupRules={}",
+                        + "dispatcher={}, prefillSelection=BEST_ONLY, groupRules={}",
                 config.getSchemaVersion(), scheduler, ordering, decision, dispatcher,
-                config.getRouter().getRoles().getPrefill()
-                        .getCandidateChoice().getType(),
                 config.getRouter().getGroupSelector() == null ? 0
                         : config.getRouter().getGroupSelector().getRules().size());
     }

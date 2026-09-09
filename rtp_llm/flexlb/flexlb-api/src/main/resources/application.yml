@@ -6,7 +6,7 @@ spring:
   main:
     web-application-type: reactive
   codec:
-    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:5MB}
+    max-in-memory-size: 5MB
 logging:
   level:
     root: info
@@ -32,14 +32,13 @@ trace:
   otel:
     web:
       filter-order: 0x7fffffff
-      skip-pattern: ${OTEL_TRACE_SKIP_PATTERN}
+      skip-pattern: ".*"
     config:
       service-name: flexlb
       instrumentation-name: trace
     exporter:
       otlp:
-        enabled: true
-        endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+        enabled: false
       logging:
         enabled: true
         format: json
@@ -50,13 +49,6 @@ otel:
 
 flexlb:
   monitor:
-    # Default on. Set FLEXLB_MONITOR_ENABLED=false env var to disable.
-    # When enabled with 750+ engines, /prometheus returns 23MB (139K series).
     enabled: true
-    # Set to false to aggregate per-engine metrics (reduces ~139K series to ~250)
-    # Default: per-engine tags retained (high cardinality with many engines)
     per-engine-tags: true
-    # flexlb.* exposure is filtered by flexlb.monitor.metric-whitelist
-    # (env FLEXLB_MONITOR_METRIC_WHITELIST); unset defaults to the built-in
-    # critical preset (~6 core link latency series). Set the whitelist to
-    # the bare "flexlb_" prefix to expose every flexlb_* series.
+    # Use --flexlb.monitor.metric-whitelist to select exposed metric prefixes.

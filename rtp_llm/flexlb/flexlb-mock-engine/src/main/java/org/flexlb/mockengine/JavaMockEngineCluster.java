@@ -149,7 +149,7 @@ public final class JavaMockEngineCluster {
             }
             writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
-            // domain→hosts mapping consumed by FileServiceDiscovery on the master,
+            // domain→hosts mapping consumed by LocalServiceDiscovery on the master,
             // kept in sync by /add_engine + /remove_engine at runtime.
             DiscoveryFileStore discoveryFileStore = config.discoveryFile != null
                     ? new DiscoveryFileStore(config.discoveryFile, config.prefillDomain, config.decodeDomain)
@@ -443,10 +443,6 @@ public final class JavaMockEngineCluster {
     }
 
     static void writeDiscoveryFiles(Config config) throws IOException {
-        String prefillAddresses = addressList(config, 0, config.baseGrpcPort, config.nPrefill);
-        String decodeAddresses = addressList(
-                config, config.nPrefill, config.baseGrpcPort + config.nPrefill, config.nDecode);
-
         Map<String, Object> prefillEndpoint = new LinkedHashMap<>();
         prefillEndpoint.put("address", config.prefillDomain);
         prefillEndpoint.put("protocol", "http");
@@ -464,10 +460,9 @@ public final class JavaMockEngineCluster {
         serviceConfig.put("load_balance", true);
         serviceConfig.put("role_endpoints", List.of(roleEndpoint));
 
-        Map<String, String> env = new LinkedHashMap<>();
-        env.put("MODEL_SERVICE_CONFIG", OBJECT_MAPPER.writeValueAsString(serviceConfig));
-        env.put("DOMAIN_ADDRESS:" + config.prefillDomain, prefillAddresses);
-        env.put("DOMAIN_ADDRESS:" + config.decodeDomain, decodeAddresses);
+        serviceConfig.put("discovery_file", config.discoveryFile);
+        Map<String, String> env = Map.of(
+                "MODEL_SERVICE_CONFIG", OBJECT_MAPPER.writeValueAsString(serviceConfig));
 
         List<Map<String, Object>> engines = new ArrayList<>(config.nPrefill + config.nDecode);
         addEngineRecords(engines, config, 0, config.nPrefill, "prefill");
@@ -541,18 +536,6 @@ public final class JavaMockEngineCluster {
         }
         throw new IllegalArgumentException(
                 "Invalid boolean value for " + flag + ": " + value + " (expected true|false)");
-    }
-
-    private static String addressList(Config config, int firstEngineIndex, int firstGrpcPort, int count) {
-        StringBuilder addresses = new StringBuilder(count * 20);
-        for (int i = 0; i < count; i++) {
-            if (i > 0) {
-                addresses.append(',');
-            }
-            addresses.append(declaredHost(config, firstEngineIndex + i))
-                    .append(':').append(firstGrpcPort + i - 1);
-        }
-        return addresses.toString();
     }
 
     private static void addEngineRecords(List<Map<String, Object>> engines,
@@ -5709,6 +5692,10 @@ public final class JavaMockEngineCluster {
                     || config.masterConfigFile == null) {
                 throw new IllegalArgumentException(
                         "--endpoint-file, --performance, and --master-config are required");
+            }
+            if (config.discoveryFile == null) {
+                config.discoveryFile = Path.of(config.endpointFile).toAbsolutePath()
+                        .resolveSibling("discovery.json").toString();
             }
             // Single-role clusters are allowed (e.g. engine_kill_restart_test victim JVMs
             // hosting only prefill or only decode engines), but at least one engine is required.

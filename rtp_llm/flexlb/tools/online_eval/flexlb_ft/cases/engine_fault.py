@@ -65,7 +65,7 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
-    TTL_DRAIN_TIMEOUT_S,
+    REQUEST_CLEANUP_TIMEOUT_S,
     AssertUtils,
     EnvSpec,
     _BackgroundFlow,
@@ -218,8 +218,6 @@ def _anomaly_error_case(
         finally:
             _clear_all_prefill_inject(ops, injected_names)
 
-        # Explicitly cancel the failed request to clean up server-side
-        # inflight (scheduler keeps the entry until TTL eviction otherwise).
         if response is not None and response.success:
             try:
                 ops.cancel(rid, response)
@@ -232,14 +230,8 @@ def _anomaly_error_case(
             response is not None and response.success and response.enqueued_by_master
         )
         if batch_delivered:
-            # Window-insufficient instability fix (no_respond family): the
-            # failed request's ledger settle after the explicit cancel can
-            # ride the stale-TTL + ExpirationTimer drain (worst ~90s) —
-            # the 10s window let a normal slow drain read as a FAIL.
-            # Aligned to the TTL_DRAIN_TIMEOUT_S standard; the all-zero
-            # assertion itself is unchanged (a true leak still fails).
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-                _master_http(ops), TTL_DRAIN_TIMEOUT_S
+                _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
             )
         else:
             # NON_BATCH: see cancel_anomaly_path — client Cancel cannot
@@ -278,13 +270,7 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
     try:
         _cleanup_dynamic(ops, env)
 
-        # Integration-round cascade hygiene (task #87): residues from the
-        # preceding elastic cases on this shared env settle via the
-        # stale-TTL + ExpirationTimer path (worst ~90s).  Drain them
-        # BEFORE the baseline batch so an earlier case's TTL settle cannot
-        # fail this case's Phase-1 gate (best-effort — a true leak is
-        # caught by the case's own end-of-run drain assertion below).
-        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
 
         def master_up() -> bool:
             return (
@@ -348,7 +334,7 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
         # leak its residue into engine_fault_flap/master_kill on the same
         # env; a slot that never settles still FAILs this case here.
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
 
         passed = (
@@ -403,8 +389,7 @@ def engine_flap(ctx: CaseContext):
       * after the flapping stops: the engine is re-discovered
         (discovered == alive == initial topology), routing and requests
         recover (>=95% batch), and no inflight leaks (global drain to zero
-        within the TTL_DRAIN_TIMEOUT_S cap that covers the 30s
-        stale-inflight TTL plus the 60s ExpirationTimer sweep).
+        within REQUEST_CLEANUP_TIMEOUT_S after restoring normal status).
 
     The per-cycle alive count is observational evidence of the eviction vs
     re-discovery race: dipping below 2 means the 3-strike demotion landed,
@@ -451,19 +436,15 @@ def engine_flap(ctx: CaseContext):
 
         # Post-flap convergence: full re-discovery of the flapped engine
         # (discovered count covers the eviction side of the race — see
-        # elastic_rebalance for why alive alone is not a safe signal).
+        # wait until the discovered and alive topology both converge).
         topology_ok = _wait_master_topology(
             ops, "PREFILL", env.spec.n_prefill, MASTER_EVICT_S
         )
         # Routing/request recovery: 20 requests, >=95%.
         ok_batch, _, _ = _run_batch(ops, base, 20)
         recovery_ok = ok_batch >= 19
-        # No inflight leak: global drain to zero (covers the 30s TTL plus
-        # the 60s ExpirationTimer sweep — task #87: the legacy 90s cap sat
-        # below the worst-phase settle and let residue poison the next
-        # case on this shared env).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
 
         passed = (
@@ -661,7 +642,7 @@ def inject_enqueue_delay(ctx: CaseContext):
     """enqueue_delay defers the whole enqueue runnable (admission + ack) by
     delay_ms, so the BATCH-dispatch schedule() — which waits for the enqueue
     ack — grows by roughly delay_ms.  delay_ms must stay well below
-    dispatcher.enqueueRpcTimeoutMs (default 5000) or the RPC deadline
+    flexlb.engine-grpc.enqueue-timeout-ms (default 5000) or the RPC deadline
     fires first.
 
     Assertions: end-to-end latency delta >= 1.2s at delay_ms=1500, the
@@ -702,13 +683,7 @@ def inject_enqueue_delay(ctx: CaseContext):
         recovered_total = time.monotonic() - t2
 
         delta = delayed_total - baseline_total
-        # Integration-round cascade hygiene (task #87): residue from
-        # earlier cases on this shared env settles via the stale-TTL +
-        # ExpirationTimer path (worst ~90s); drain it BEFORE the clean
-        # assertion so another case's TTL settle cannot fail this one.
-        # Best-effort on purpose — a true leak never drains and the 10s
-        # assertion below still catches it.
-        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), 10.0
         )
@@ -769,7 +744,7 @@ def inject_generate_delay(ctx: CaseContext):
             # cases' TTL-settling residue before the clean assertion (see
             # inject_enqueue_delay) — best-effort, the 10s assertion below
             # keeps the real leak detection.
-            AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+            AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )
@@ -793,33 +768,6 @@ def inject_generate_delay(ctx: CaseContext):
         return False, f"exception: {exc!r}"
     finally:
         clear_type_all(ops, names, "generate_delay")
-
-
-# ===========================================================================
-# Elastic/fault recovery contracts (E1-E6) — expected-behavior assertions
-# ===========================================================================
-#
-# Assertion policy (task E1-E6 mandate): every assertion below states the
-# CORRECT contract for engine recovery, never the current behaviour.  A
-# failing case is a FINDING on the master (or, where the observation is the
-# mock's own self-report, on the mock's restart fidelity) and is recorded,
-# not worked around.  Observation surfaces used:
-#
-#   * master log lifecycle lines — "Created WorkerStatus generation {} for
-#     worker: {ipPort}" (INFO, EngineSyncRunner), "worker {ipPort} marked
-#     dead after 3 consecutive gRPC failures" (ERROR, GrpcWorkerStatusRunner
-#     — the transport-failure retire path), "[remove]/[replace] retiring ..."
-#     (INFO — discovery-driven retires);
-#   * /rtp_llm/inflight_status per-endpoint ledger (inflight_requests /
-#     inflight_batches per prefill ip_port);
-#   * /rtp_llm/master/info worker_summary (discovered / alive per role);
-#   * routing landing points + mock /snapshot (cache_key_set,
-#     kv_tokens_used) for the KV-view contracts.
-#
-# The six cases share a DEDICATED env (recovery_{profile}, 2P+2D, file
-# discovery, fault axes, 30s stale-inflight TTL) so the stop/start/
-# injection cycles cannot leak state into — or inherit residue from — the
-# shared fault_/kv_ family envs (the task-#87 family-env leakage lesson).
 
 
 # Retire wait cap: connection-refused failures accumulate one per status
@@ -1073,7 +1021,7 @@ def recovery_generation_bump(ctx: CaseContext):
     try:
         _cleanup_dynamic(ops, env)
         # Cascade hygiene (task #87): drain earlier residue on this env.
-        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
 
         ip = _engine_ip_port(ops, "prefill-0")
         log_offset = _master_log_offset(env)
@@ -1167,7 +1115,7 @@ def recovery_kv_resync(ctx: CaseContext):
     base = rid_base(ctx, "engine_fault")
     try:
         _cleanup_dynamic(ops, env)
-        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
         names = _prefill_names(ops)
         if len(names) < 2:
             return False, "need >=2 prefill engines"
@@ -1301,15 +1249,15 @@ def recovery_no_resurrect(ctx: CaseContext):
     bookkeeping:
 
       * the master's per-endpoint ledger for the recovered engines must
-        read zero inflight (old entries fenced or TTL-settled), and the
-        global inflight must drain to zero within the TTL cap;
+        read zero inflight (old entries settled by cancellation or retirement), and the
+        global inflight must drain to zero within the cleanup window;
       * the engine side must come back EMPTY — a true crash wipes the
         process memory, so after /start_engine the engine has no running
         tasks, no held blocks and an empty KV cache (recovery == a reboot
         from zero, not an in-place resume);
       * the pre-outage rids must never complete — their engine-side state
         is gone (no resurrection); they settle through the master's
-        fence/TTL paths, and fresh traffic must schedule normally on the
+        cancellation/retirement paths, and fresh traffic must schedule normally on the
         recovered engines.
 
     Mechanism: crash_after with TRUE-CRASH semantics — each target engine
@@ -1330,7 +1278,7 @@ def recovery_no_resurrect(ctx: CaseContext):
     names = ["prefill-0", "prefill-1"]
     try:
         _cleanup_dynamic(ops, env)
-        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
 
         # Widen the in-flight window so the outage lands mid-execution:
         # slow prefills keep requests waiting/running on the engines while
@@ -1434,7 +1382,7 @@ def recovery_no_resurrect(ctx: CaseContext):
         # crash their engine-side state is GONE, so NONE may complete — a
         # completion would be a resurrection (asserted, no longer just an
         # observation).  Their client streams fail against the wiped
-        # engine and settle through the master's fence/TTL.
+        # engine and settle through the master's cancellation/retirement.
         outcomes = _consume_fired(ops, fired, wait_s=2.0)
         resurrected = [
             (rid, name)
@@ -1445,9 +1393,9 @@ def recovery_no_resurrect(ctx: CaseContext):
         # Engine side must not keep the old rids registered.
         engine_clean, engine_detail = engine_inflight_clean(ops, targets)
 
-        # Master global ledger drains within the TTL cap (fence or TTL).
+        # Master global ledger drains within the cleanup window (fence or TTL).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
 
         recovery_ok, recovery_msg = ops.verify_recovery()
@@ -1519,7 +1467,7 @@ def status_gap_no_bump(ctx: CaseContext):
     base = rid_base(ctx, "engine_fault")
     try:
         _cleanup_dynamic(ops, env)
-        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
 
         ip = _engine_ip_port(ops, "prefill-0")
         log_offset = _master_log_offset(env)
@@ -1587,14 +1535,14 @@ def status_gap_long_retire(ctx: CaseContext):
         failures") and a fresh generation is created once reporting
         resumes;
       * the fenced engine's master ledger/inflight settles to zero within
-        the TTL cap (fence or stale-TTL — an entry that never settles is
+        the cleanup window (fence or complete request lifetime — an entry that never settles is
         the F7 pending-drain gap);
       * once reporting resumes, the new generation serves fresh traffic.
 
     In-flight requests fired BEFORE the gap are the fence payload: their
     engine-side execution completes but the master's status channel is
     dead, so their ledger release must come from the retire fence (or the
-    stale-TTL), never from a stale post-recovery resurrection.
+    complete request lifetime), never from a stale post-recovery resurrection.
 
     FINDING if it fails: no retire on a long gap, or an unfenced ledger
     that neither the retire nor the TTL ever clears.
@@ -1604,7 +1552,7 @@ def status_gap_long_retire(ctx: CaseContext):
     names = ["prefill-0", "prefill-1"]
     try:
         _cleanup_dynamic(ops, env)
-        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
 
         ip = _engine_ip_port(ops, "prefill-0")
         log_offset = _master_log_offset(env)
@@ -1639,9 +1587,9 @@ def status_gap_long_retire(ctx: CaseContext):
         # Consume the fence payload to terminal states.
         outcomes = _consume_fired(ops, fired, wait_s=5.0)
 
-        # Fenced ledger/inflight must settle within the TTL cap.
+        # Fenced ledger/inflight must settle within the cleanup window.
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
 
         # New generation serves fresh traffic.
@@ -1707,7 +1655,7 @@ def recovery_kv_usage_reset(ctx: CaseContext):
     base = rid_base(ctx, "engine_fault")
     try:
         _cleanup_dynamic(ops, env)
-        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
 
         name = "prefill-0"
         ip = _engine_ip_port(ops, name)

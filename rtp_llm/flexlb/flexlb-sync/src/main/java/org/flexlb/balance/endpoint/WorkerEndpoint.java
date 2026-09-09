@@ -35,18 +35,6 @@ public class WorkerEndpoint {
     private final WorkerStatus status;
     private final EndpointGenerationLifecycle generationLifecycle;
 
-    /**
-     * Last time this endpoint was selected by a scheduling strategy.
-     * Used for live-LRU fairness across concurrent requests.
-     * Lives on the endpoint (not WorkerStatus) because it belongs to the
-     * endpoint generation rather than to an Engine status payload.
-     */
-    protected final AtomicLong lastSelectedTime = new AtomicLong(-1);
-
-    public AtomicLong getLastSelectedTime() {
-        return lastSelectedTime;
-    }
-
     public WorkerEndpoint(WorkerStatus status) {
         this.status = Objects.requireNonNull(status, "status");
         this.generationLifecycle = new EndpointGenerationLifecycle(

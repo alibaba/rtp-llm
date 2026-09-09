@@ -74,7 +74,7 @@ class FlexlbServiceImplTest {
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
 
         configService = mock(ConfigService.class);
-        FlexlbConfig flexlbConfig = new FlexlbConfig();
+        FlexlbConfig flexlbConfig = org.flexlb.mock.TestFlexlbConfigs.create();
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
         requestToken = mock(ActiveRequestCounter.RequestToken.class);
@@ -626,7 +626,8 @@ class FlexlbServiceImplTest {
                 {
                   "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
                     "ordering":{"type":"FIFO"}},
-                  "dispatcher":{"type":"NON_BATCH"}
+                  "dispatcher":{"type":"NON_BATCH"},
+                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(queueConfig);
@@ -653,7 +654,8 @@ class FlexlbServiceImplTest {
         FlexlbConfig directConfig = ConfigService.parse("""
                 {
                   "scheduler":{"type":"DIRECT"},
-                  "dispatcher":{"type":"NON_BATCH"}
+                  "dispatcher":{"type":"NON_BATCH"},
+                  "requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2}}
                 }
                 """);
         when(configService.loadBalanceConfig()).thenReturn(directConfig);
