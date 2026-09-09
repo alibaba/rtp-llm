@@ -53,6 +53,12 @@ _GROUPED_ALIGNMENT = 128
 # sf_offsets.item() per layer per forward (each was a pipeline drain).
 # Default off = the host-counts path.
 _GROUPED_FP4_ASYNC = os.environ.get("DSV4_GROUPED_FP4_ASYNC", "0") == "1"
+# W2: the SM120 grouped-GEMM N-tile was never autotuned (flashinfer default
+# 128). Single-GPU sweep at the production shape (256 experts, 48 rows each,
+# GEMM1 [.,4096]x[4096,4096] + GEMM2 [.,2048]x[4096,2048], swap_ab=True):
+# tile_n=64 reached 1168/1096 GB/s vs 947/852 at 128 = -0.77 ms/layer.
+# 32 is legal but slower; anything else raises inside flashinfer.
+_MOE_TILE_N = int(os.environ.get("DSV4_MOE_TILE_N", "128"))
 # Base layout -> stable-address power-of-two generations. Older generations
 # stay alive because already-captured CUDA graphs may still reference them.
 _SM120_FUSED_MOE_WORKSPACES: dict[tuple, list[tuple[int, torch.Tensor]]] = {}
@@ -490,7 +496,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                 pack_scale(inp_scale),
                 expert_scale,
                 indptr,
-                tile_n=128,
+                tile_n=_MOE_TILE_N,
                 out_dtype=torch.bfloat16,
             )
 
