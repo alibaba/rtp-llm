@@ -2196,8 +2196,18 @@ def decode_reserved_live_single(case):
         ),
     )
     case.step(
+        "pressure",
+        "preemption_live_pressure",
+        params=case.value("decode_reserved_live_single.pressure"),
+    )
+    case.step(
+        "pressure_sync",
+        "balance_pause",
+        params=case.value("decode_reserved_live_single.pressure_sync"),
+    )
+    case.step(
         "wave",
-        "preemption_live_start",
+        "preemption_live_reserved_start",
         timeout_s=case.value("decode_reserved_live_single.wave_timeout_s"),
         params=case.value("decode_reserved_live_single.wave"),
     )
@@ -2233,6 +2243,16 @@ def decode_reserved_live_single(case):
         "engine_clean",
         "preemption_live_engine_clean",
         timeout_s=case.value("decode_reserved_live_single.engine_clean_timeout_s"),
+    )
+    case.step(
+        "pressure_clear",
+        "preemption_live_pressure",
+        params=case.value("decode_reserved_live_single.pressure_clear"),
+    )
+    case.step(
+        "pressure_clear_sync",
+        "balance_pause",
+        params=case.value("decode_reserved_live_single.pressure_sync"),
     )
     case.step(
         "recovery_prepare",
@@ -2358,8 +2378,18 @@ def decode_reserved_live_window(case):
         ),
     )
     case.step(
+        "pressure",
+        "preemption_live_pressure",
+        params=case.value("decode_reserved_live_window.pressure"),
+    )
+    case.step(
+        "pressure_sync",
+        "balance_pause",
+        params=case.value("decode_reserved_live_window.pressure_sync"),
+    )
+    case.step(
         "wave",
-        "preemption_live_start",
+        "preemption_live_reserved_start",
         timeout_s=case.value("decode_reserved_live_window.wave_timeout_s"),
         params=case.value("decode_reserved_live_window.wave"),
     )
@@ -2395,6 +2425,16 @@ def decode_reserved_live_window(case):
         "engine_clean",
         "preemption_live_engine_clean",
         timeout_s=case.value("decode_reserved_live_window.engine_clean_timeout_s"),
+    )
+    case.step(
+        "pressure_clear",
+        "preemption_live_pressure",
+        params=case.value("decode_reserved_live_window.pressure_clear"),
+    )
+    case.step(
+        "pressure_clear_sync",
+        "balance_pause",
+        params=case.value("decode_reserved_live_window.pressure_sync"),
     )
     case.step(
         "recovery_prepare",

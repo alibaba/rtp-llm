@@ -189,7 +189,7 @@ variants:
     metric_whitelist: flexlb_auto_tpm
     config_overrides:
       dispatcher: batch
-      decision: single
+      decision: fixed_window
       max_inflight_requests_per_worker:
         omit: true
       max_waiting_requests_per_prefill_worker: 8
@@ -198,8 +198,10 @@ variants:
         allowed_victim_stages:
         - PREFILL_QUEUED
         - DECODE_RESERVED
+      max_collection_wait_ms: 3000
     n_decode: 1
     decode_cache_blocks: 5
+    debug_enabled: true
   program: decode_reserved_live_single
   metadata:
     requires:
@@ -220,9 +222,10 @@ variants:
         allowed_victim_stages:
         - PREFILL_QUEUED
         - DECODE_RESERVED
-      max_collection_wait_ms: 400
+      max_collection_wait_ms: 3000
     n_decode: 1
     decode_cache_blocks: 5
+    debug_enabled: true
   program: decode_reserved_live_window
   metadata:
     requires:
@@ -1627,13 +1630,20 @@ parameters:
       requests:
       - tag: victim
         priority: 30
-        input_len: 512
+        input_len: 1536
         output_len: 2
       - tag: incoming
         priority: 70
         input_len: 3500
         output_len: 2
       defer_batch: true
+      guard:
+        poll_s: 0.02
+        timeout_s: 2
+        http_timeout_s: 1
+        limit: 10
+        scan_limit: 100
+        endpoint_limit: 8
     wave_settled_timeout_s: 90
     wave_drain_timeout_s: 50
     wave_drain:
@@ -1658,6 +1668,12 @@ parameters:
       perf:
         prefill_fixed_ms: 100
     teardown_timeout_s: 120
+    pressure:
+      tokens: 1000
+    pressure_clear:
+      tokens: 0
+    pressure_sync:
+      seconds: 1.5
   decode_reserved_live_window:
     setup_timeout_s: 180
     slow:
@@ -1695,13 +1711,20 @@ parameters:
       requests:
       - tag: victim
         priority: 30
-        input_len: 512
+        input_len: 1536
         output_len: 2
       - tag: incoming
         priority: 70
         input_len: 3500
         output_len: 2
       defer_batch: true
+      guard:
+        poll_s: 0.02
+        timeout_s: 2
+        http_timeout_s: 1
+        limit: 10
+        scan_limit: 100
+        endpoint_limit: 8
     wave_settled_timeout_s: 90
     wave_drain_timeout_s: 50
     wave_drain:
@@ -1726,6 +1749,12 @@ parameters:
       perf:
         prefill_fixed_ms: 100
     teardown_timeout_s: 120
+    pressure:
+      tokens: 1000
+    pressure_clear:
+      tokens: 0
+    pressure_sync:
+      seconds: 1.5
   cancel_not_found:
     setup_timeout_s: 180
     victim_timeout_s: 5

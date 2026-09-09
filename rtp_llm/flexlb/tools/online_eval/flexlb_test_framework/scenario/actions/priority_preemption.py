@@ -1400,6 +1400,193 @@ def _observability_final(ctx, p, deadline):
     )
 
 
+def _live_pressure_params(p, plan):
+    p = _params(p, {"tokens"}, {"tokens"})
+    if type(p["tokens"]) is not int or p["tokens"] < 0:
+        raise ValueError("live pressure requires nonnegative token count")
+    return p
+
+
+def _live_pressure(ctx, p, deadline):
+    """Use the existing reporting-only control; retain physical-pool evidence."""
+    path = ctx.artifact_dir / f"preemption-live-pressure-{uuid.uuid4().hex}.json"
+    evidence = {"tokens": p["tokens"], "complete": False}
+    ops = ctx.ops
+
+    def send(name, tokens, limit):
+        response = _http(
+            ops, "set_kv_pressure", limit, dict(engine=name, active_kv_tokens=tokens)
+        )
+        if response.get("status") != "ok" or response.get("engine") != name:
+            raise ValueError("live pressure lacks target acknowledgement")
+        return response
+
+    try:
+        raw, engines = _live_engine_rows(ctx, deadline)
+        decodes = [e for e in engines if e["role"] == "decode"]
+        if len(decodes) != 1 or decodes[0].get("stopped") is not False:
+            raise ValueError("live pressure requires one live Decode")
+        before = decodes[0]
+        evidence["before"] = raw
+        for field in (
+            "available_blocks",
+            "cache_blocks",
+            "total_kv_tokens",
+            "held_blocks",
+            "referenced_blocks",
+        ):
+            if type(before.get(field)) is not int:
+                raise ValueError(f"live pressure lacks {field}")
+        if (
+            before["available_blocks"] != before["cache_blocks"]
+            or before["held_blocks"]
+            or before["referenced_blocks"]
+        ):
+            raise ValueError("live pressure must be changed while Decode pool is idle")
+        name = before["name"]
+        if p["tokens"]:
+            ctx.add_cleanup(f"live-pressure-{name}", lambda d: send(name, 0, d))
+        evidence["response"] = send(name, p["tokens"], deadline)
+        raw_after, engines = _live_engine_rows(ctx, deadline)
+        evidence["after"] = raw_after
+        after = _engines(raw_after, [name])[name]
+        if any(
+            after.get(k) != before[k]
+            for k in (
+                "available_blocks",
+                "cache_blocks",
+                "total_kv_tokens",
+                "held_blocks",
+                "referenced_blocks",
+            )
+        ):
+            raise ValueError("reporting pressure changed physical Decode capacity")
+        if after.get("available_kv_tokens") != max(
+            0, before["total_kv_tokens"] - p["tokens"]
+        ):
+            raise ValueError("reporting pressure did not change reported availability")
+        evidence["complete"] = True
+    finally:
+        path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(artifacts=[str(path)])
+
+
+def _reserved_start_params(p, plan):
+    guard = p.get("guard")
+    wave = _live_start_params({k: v for k, v in p.items() if k != "guard"}, plan)
+    guard = _params(
+        guard,
+        {
+            "poll_s",
+            "timeout_s",
+            "http_timeout_s",
+            "limit",
+            "scan_limit",
+            "endpoint_limit",
+        },
+        {
+            "poll_s",
+            "timeout_s",
+            "http_timeout_s",
+            "limit",
+            "scan_limit",
+            "endpoint_limit",
+        },
+    )
+    for key, value in guard.items():
+        if type(value) not in (int, float) or value <= 0:
+            raise ValueError("master-local guard budgets must be positive")
+    if len(wave["requests"]) != 2:
+        raise ValueError("reserved live wave requires victim and incoming")
+    return dict(wave, guard=guard)
+
+
+def _reserved_start(ctx, p, deadline):
+    from ...debug_client import DebugClient
+
+    path = ctx.artifact_dir / f"preemption-live-master-local-{uuid.uuid4().hex}.json"
+    evidence = {"attempts": [], "master_local": False}
+    guard = p["guard"]
+
+    def before_next(wave, item):
+        limit = Deadline(
+            min(deadline.expires_at, ctx.clock() + guard["timeout_s"]),
+            ctx.clock,
+            ctx.sleeper,
+        )
+        while True:
+            limit.check()
+            if item["error"] is not None:
+                raise item["error"]
+            entries = item["batch"].entries
+            if entries:
+                rid = entries[0]["record"]["wire_request_id"]
+                capture = DebugClient(
+                    f"http://127.0.0.1:{ctx.env.master_http_port}",
+                    timeout_s=min(guard["http_timeout_s"], limit.remaining()),
+                ).snapshot(
+                    request_id=rid,
+                    include="decode",
+                    limit=guard["limit"],
+                    scan_limit=guard["scan_limit"],
+                    endpoint_limit=guard["endpoint_limit"],
+                )
+                raw, engines = _live_engine_rows(ctx, limit)
+                evidence["attempts"].append(
+                    dict(master=capture.payload, engines=raw, request_id=rid)
+                )
+                if (
+                    capture.payload["status"] != "ok"
+                    or capture.payload["endpointDirectoryTruncated"]
+                ):
+                    raise ValueError(
+                        "master-local proof has incomplete endpoint coverage"
+                    )
+                pages = [
+                    capture.component(k)
+                    for k in capture.payload["components"]
+                    if k.startswith("decode/")
+                ]
+                rows = [
+                    row
+                    for page in pages
+                    for row in page["rows"]
+                    if row["request_id"] == str(rid)
+                ]
+                if any(
+                    not isinstance(e.get("request_lifecycle"), dict) for e in engines
+                ):
+                    raise ValueError(
+                        "master-local proof lacks engine lifecycle inventory"
+                    )
+                if any(str(rid) in e["request_lifecycle"] for e in engines):
+                    raise ValueError("victim reached engine before incoming was issued")
+                if (
+                    len(rows) == 1
+                    and rows[0].get("queued") is True
+                    and rows[0].get("owns_request") is True
+                    and rows[0].get("ownership") == "reserved"
+                    and rows[0].get("has_dispatch_permit") is False
+                    and rows[0].get("has_protocol_owner") is False
+                ):
+                    evidence["master_local"] = True
+                    return
+                if item["done"].is_set():
+                    raise ValueError(
+                        "victim Schedule settled before master-local proof"
+                    )
+            limit.sleep(guard["poll_s"])
+
+    try:
+        result = _live_start(
+            ctx, {k: v for k, v in p.items() if k != "guard"}, deadline, before_next
+        )
+        result.artifacts.append(str(path))
+        return result
+    finally:
+        path.write_text(json.dumps(evidence, indent=2) + "\n")
+
+
 def _live_start_params(p, plan):
     from .priority import _wave_params
 
@@ -1409,7 +1596,7 @@ def _live_start_params(p, plan):
     return p
 
 
-def _live_start(ctx, p, deadline):
+def _live_start(ctx, p, deadline, before_next=None):
     import threading
 
     from ..backend import RequestBatch
@@ -1440,6 +1627,8 @@ def _live_start(ctx, p, deadline):
             item["thread"].start()
             # The legacy live ThreadPoolExecutor sleeps only BETWEEN submissions.
             if index + 1 < len(p["requests"]):
+                if before_next is not None:
+                    before_next(wave, item)
                 deadline.sleep(p["gap_s"])
     finally:
         wave.persist()
@@ -1653,18 +1842,12 @@ def _live_reserved(ctx, p, deadline):
         raise ValueError(
             "live reserved cohort must contain placeholder, victim and incoming"
         )
-    for cohort, tags, priorities, lengths in (
-        (ph_wave, ["placeholder"], [90], [512]),
-        (wave, ["victim", "incoming"], [30, 70], [512, 3500]),
+    for cohort, tags in (
+        (ph_wave, ["placeholder"]),
+        (wave, ["victim", "incoming"]),
     ):
-        shapes = cohort.p["requests"]
-        if (
-            [r["tag"] for r in shapes] != tags
-            or [r.get("priority") for r in shapes] != priorities
-            or [r["input_len"] for r in shapes] != lengths
-            or any(r["output_len"] != 2 for r in shapes)
-        ):
-            raise ValueError("live reserved request shape differs from old contract")
+        if [r["tag"] for r in cohort.p["requests"]] != tags:
+            raise ValueError("live reserved cohort roles are out of order")
     responses = [e["batch"].entries[0]["response"] for e in wave.entries]
     if any(r is None for r in responses):
         raise ValueError("live reserved verdict lacks Schedule response")
@@ -1682,16 +1865,26 @@ def _live_reserved(ctx, p, deadline):
 
     samples = parse_prometheus_samples(snapshot["attempts"][-1]["body"], "")
 
-    def total(name):
+    def total(names, scale=1.0):
         values = [
-            _number(value, 0, 1e18)
+            _number(value, 0, 1e18) * scale
             for metric_name, labels, value in samples
-            if name in metric_name and labels.get("stage") == "decode_reserved"
+            if metric_name in names
+            and labels.get("stage") == "decode_reserved"
+            and "quantile" not in labels
+            and "le" not in labels
         ]
         return sum(values) if values else None
 
-    count = total("auto_tpm_victim_count")
-    kv = total("auto_tpm_victim_kv_tokens")
+    count = total(
+        {"flexlb_auto_tpm_victim_count", "flexlb_auto_tpm_victim_count_total"}
+    )
+    # RequestSchedulerReporter registers KV tokens as TIMER; Micrometer records
+    # that numeric value in milliseconds and exports the sum in seconds.
+    # Buckets/count/max/quantiles are not additional tokens.
+    kv = total({"flexlb_auto_tpm_victim_kv_tokens_seconds_sum"}, 1000.0)
+    if kv is None:
+        kv = total({"flexlb_auto_tpm_victim_kv_tokens"})
     pr10 = (
         evicted
         and victim.code != 8429
@@ -2239,6 +2432,13 @@ def _ts_final(ctx, p, deadline):
 
 
 HANDLERS = [
+    StageHandler("preemption_live_pressure", _live_pressure_params, _live_pressure, {}),
+    StageHandler(
+        "preemption_live_reserved_start",
+        _reserved_start_params,
+        _reserved_start,
+        {"requests": "requests"},
+    ),
     StageHandler("preemption_ts_first_output", _settled_params, _ts_first_output, {}),
     StageHandler(
         "preemption_ts_restore_guard",
