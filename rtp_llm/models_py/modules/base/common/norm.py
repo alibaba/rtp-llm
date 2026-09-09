@@ -128,11 +128,20 @@ class LayerNormTorch(BaseLayerNorm):
 
 
 class LayerNorm(BaseLayerNorm):
+    supports_out = True
+
     def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, beta, eps)
 
-    def forward(self, hidden_states: torch.Tensor):
-        output = torch.empty_like(hidden_states)
+    def forward(self, hidden_states: torch.Tensor, *, out: torch.Tensor | None = None):
+        if out is not None and (
+            out.shape != hidden_states.shape
+            or out.dtype != hidden_states.dtype
+            or out.device != hidden_states.device
+            or not out.is_contiguous()
+        ):
+            raise ValueError("invalid LayerNorm output buffer")
+        output = torch.empty_like(hidden_states) if out is None else out
         rtp_llm_ops.layernorm(
             output,
             hidden_states,

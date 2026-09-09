@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 class CudaMxfp8Linear(LinearBase):
     # The unfused path quantizes and packs UE8M0 scales internally. Upstream
     # fused kernels can emit DeepGEMM-ready packed UE8M0 scales directly.
+    supports_out: bool = True
     scale_ue8m0: bool = True
     input_quant_group_size: int = MX_BLOCK
     input_quant_scale_ue8m0: bool = True
@@ -95,19 +96,36 @@ class CudaMxfp8Linear(LinearBase):
         self,
         input: torch.Tensor,
         input_scales: Optional[torch.Tensor] = None,
+        *,
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         orig_shape = input.shape
         x = input.reshape(-1, orig_shape[-1])
+        supplied_out = out is not None
+        if supplied_out and (
+            out.shape != (*orig_shape[:-1], self.N)
+            or out.dtype != torch.bfloat16
+            or out.device != input.device
+            or not out.is_contiguous()
+        ):
+            raise ValueError("invalid MXFP8 Linear output buffer")
+        if supplied_out:
+            out = out.view(-1, self.N)
         if input_scales is not None:
             from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
 
             M = x.shape[0]
             if M == 0:
-                return torch.empty(
-                    *orig_shape[:-1], self.N, device=x.device, dtype=torch.bfloat16
+                return (
+                    out.reshape(*orig_shape[:-1], self.N)
+                    if supplied_out
+                    else torch.empty(
+                        *orig_shape[:-1], self.N, device=x.device, dtype=torch.bfloat16
+                    )
                 )
             input_scales = self._packed_input_scale(input_scales, M, x.shape[1])
-            out = torch.empty(M, self.N, device=x.device, dtype=torch.bfloat16)
+            if out is None:
+                out = torch.empty(M, self.N, device=x.device, dtype=torch.bfloat16)
             with torch.cuda.device(x.device):
                 fp8_fp4_gemm_nt(
                     (x, input_scales),
@@ -118,10 +136,17 @@ class CudaMxfp8Linear(LinearBase):
                     disable_ue8m0_cast=True,
                 )
             if self.bias is not None:
-                out = out + self.bias.to(out.dtype)
+                if supplied_out:
+                    out.add_(self.bias.to(out.dtype))
+                else:
+                    out = out + self.bias.to(out.dtype)
         else:
             out = mxfp8_linear(
-                x, self.weight, self._packed_weight_scale(), self.bias,
+                x,
+                self.weight,
+                self._packed_weight_scale(),
+                self.bias,
                 out_dtype=torch.bfloat16,
+                out=out,
             )
         return out.reshape(*orig_shape[:-1], out.shape[-1])

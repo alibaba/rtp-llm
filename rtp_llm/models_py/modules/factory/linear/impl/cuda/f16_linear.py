@@ -19,6 +19,8 @@ _MXFP4_ONLINE = os.environ.get("USE_ONLINE_FP4GEMM", "0") == "1"
 class CudaF16Linear(LinearBase):
     """CUDA F16 (non-quantized) Linear"""
 
+    supports_out: bool = True
+
     @classmethod
     def can_handle(
         cls,
@@ -51,5 +53,19 @@ class CudaF16Linear(LinearBase):
         self.weight = weight.T
         self.bias = bias
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return F.linear(input, self.weight, self.bias)
+    def forward(
+        self, input: torch.Tensor, *, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        if out is None:
+            return F.linear(input, self.weight, self.bias)
+        if (
+            input.dim() != 2
+            or out.shape != (input.shape[0], self.weight.shape[0])
+            or out.device != input.device
+            or out.dtype != input.dtype
+            or not out.is_contiguous()
+        ):
+            raise ValueError("invalid F16 Linear output buffer")
+        if self.bias is not None:
+            return torch.addmm(self.bias, input, self.weight.t(), out=out)
+        return torch.mm(input, self.weight.t(), out=out)

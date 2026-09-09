@@ -150,11 +150,22 @@ def mxfp8_linear(
     weight_scale_packed: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     out_dtype: torch.dtype = torch.bfloat16,
+    *,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute ``x @ weight.T`` with MXFP8 activations and weights."""
     m, n = x.shape[0], weight_e4m3.shape[0]
     a_q, a_s_packed = mxfp8_quant_act_packed(x)
-    out = torch.empty(m, n, device=x.device, dtype=out_dtype)
+    supplied_out = out is not None
+    if out is None:
+        out = torch.empty(m, n, device=x.device, dtype=out_dtype)
+    elif (
+        out.shape != (m, n)
+        or out.dtype != out_dtype
+        or out.device != x.device
+        or not out.is_contiguous()
+    ):
+        raise ValueError("invalid MXFP8 GEMM output buffer")
     with torch.cuda.device(x.device):
         fp8_fp4_gemm_nt(
             (a_q, a_s_packed),
@@ -165,5 +176,8 @@ def mxfp8_linear(
             disable_ue8m0_cast=True,
         )
     if bias is not None:
-        out = out + bias.to(out.dtype)
+        if supplied_out:
+            out.add_(bias.to(out.dtype))
+        else:
+            out = out + bias.to(out.dtype)
     return out

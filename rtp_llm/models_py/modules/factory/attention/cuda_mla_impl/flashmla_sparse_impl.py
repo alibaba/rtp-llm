@@ -959,6 +959,7 @@ class SparseMlaImpl(MlaImplBase):
         attn_sink: Optional[torch.Tensor] = None,
         kv_norm_weight: Optional[torch.Tensor] = None,
         kv_norm_eps: float = 0.0,
+        q_transformed: Optional[torch.Tensor] = None,
     ) -> _SparseMlaPreparedForward:
         """Submit RoPE/cache write and absorbed-Q BMM before Top-K is ready."""
         assert kv_cache is not None
@@ -977,15 +978,23 @@ class SparseMlaImpl(MlaImplBase):
 
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
-        q_transformed = None
+        if q_transformed is not None and (
+            q_transformed.shape
+            != (q.shape[0], self.num_heads, self.kv_lora_rank + self.rope_head_dim)
+            or q_transformed.dtype != q.dtype
+            or q_transformed.device != q.device
+            or not q_transformed.is_contiguous()
+        ):
+            raise ValueError("invalid absorbed-query output buffer")
         if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
-            q_transformed = torch.empty(
-                q.shape[0],
-                self.num_heads,
-                self.kv_lora_rank + self.rope_head_dim,
-                dtype=q.dtype,
-                device=q.device,
-            )
+            if q_transformed is None:
+                q_transformed = torch.empty(
+                    q.shape[0],
+                    self.num_heads,
+                    self.kv_lora_rank + self.rope_head_dim,
+                    dtype=q.dtype,
+                    device=q.device,
+                )
             fused_qk_rope_cat_cache_mla(
                 q=q,
                 compressed_kv=compressed_kv,
@@ -1004,6 +1013,8 @@ class SparseMlaImpl(MlaImplBase):
             )
         else:
             self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+            if q_transformed is not None:
+                strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
             self.kv_cache_write_op.forward(
                 compressed_kv,
                 k_pe,
@@ -1013,9 +1024,7 @@ class SparseMlaImpl(MlaImplBase):
             )
 
         # 2. Project q via W_kc into the absorbed kv_lora_rank space
-        q_transformed = self._apply_input_bmm(
-            q, layer_id, q_transformed=q_transformed
-        )
+        q_transformed = self._apply_input_bmm(q, layer_id, q_transformed=q_transformed)
 
         physical_indices = None
         if working_entry is not None:

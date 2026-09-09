@@ -368,6 +368,8 @@ def fused_strided_rmsnorm_per_token_fp8_quant(
     group_size: int = 128,
     scale_ue8m0: bool = False,
     mxfp8_semantics: bool = False,
+    *,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """RMSNorm + per-token-group fp8 quant on a strided input.
 
@@ -389,23 +391,42 @@ def fused_strided_rmsnorm_per_token_fp8_quant(
 
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H or x.stride(-1) != 1:
+        if out is not None:
+            raise ValueError("output buffers require the fused strided RMSNorm path")
         return _baseline_strided_rmsnorm_fp8_quant(
             x, weight, eps, group_size, scale_ue8m0, mxfp8_semantics
         )
 
-    fp8_out = torch.empty((T, H), dtype=torch.float8_e4m3fn, device=x.device)
-    scale_out = (
-        _allocate_mxfp8_scale(T, H, x.device)
-        if mxfp8_semantics
-        else create_per_token_group_quant_fp8_output_scale(
-            x_shape=(T, H),
-            device=x.device,
-            group_size=group_size,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=scale_ue8m0,
+    if out is None:
+        fp8_out = torch.empty((T, H), dtype=torch.float8_e4m3fn, device=x.device)
+        scale_out = (
+            _allocate_mxfp8_scale(T, H, x.device)
+            if mxfp8_semantics
+            else create_per_token_group_quant_fp8_output_scale(
+                x_shape=(T, H),
+                device=x.device,
+                group_size=group_size,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=scale_ue8m0,
+            )
         )
-    )
+    else:
+        fp8_out, scale_out = out
+        groups = H // group_size
+        packed_groups = groups // 4 if scale_ue8m0 else groups
+        if (
+            fp8_out.shape != (T, H)
+            or fp8_out.dtype != torch.float8_e4m3fn
+            or fp8_out.device != x.device
+            or not fp8_out.is_contiguous()
+            or scale_out.shape != (T, packed_groups)
+            or scale_out.dtype != (torch.int32 if scale_ue8m0 else torch.float32)
+            or scale_out.device != x.device
+            or scale_out.stride(0) != 1
+            or scale_out.stride(1) < T
+        ):
+            raise ValueError("invalid strided RMSNorm FP8 output buffers")
     if T == 0:
         return fp8_out, scale_out
 
