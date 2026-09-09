@@ -1,97 +1,47 @@
-# BlockTreeCache Benchmark Report Template
+# BlockTreeCache Benchmark 报告指南
 
-## 1. 测试环境
+本文是写作参考，供人工或 agent 根据实验目的组织报告。章节顺序、表头、图形、篇幅和输出格式均可调整；可以使用 Markdown、HTML 或其他方便分享的形式。仓库不提供固定报告生成器，新增 case 不需要修改渲染代码。case 家族和选择方式见 [benchmark_cases.md](benchmark_cases.md)。
 
-GPU、CPU、内存、kernel、binary/profile SHA 与代码 commit 均来自 suite manifest 的实际采集。原始 manifest 保留 `disk_target`、mount source/fstype、容量和 mount namespace 口径；HTML 环境表将这些信息压成一行 `disk`，不重复展示 target，也不再追加整段磁盘说明。
+## 基本信息
 
-Docker 中该行只标记为 `container-visible mount namespace`，不输出完整 overlay `lowerdir/upperdir`，也不猜测宿主物理块设备。若目标是测宿主某块实际磁盘，先 bind mount 对应目录，再把 `--disk-root` 指向容器内路径；详细信息由 suite manifest 和复现命令承载。
+一份可理解、可复核的报告应交代以下内容，表达方式不限：
 
-## 2. Tree 在线生命周期场景
+- **实验目的与范围**：想回答什么问题，实际选择了哪些 suite/case/矩阵维度，是否只展示部分结果；说明完成、失败、跳过或缺失情况。可以按家族汇总并链接完整清单，无需逐个展示全部 case，但不要把部分成功描述为整个 suite 或全部 profiling 完整。
+- **环境与配置**：与结论有关的 GPU、CPU、磁盘和软件版本，代码 commit、binary/profile 指纹，以及关键实际参数和运行命令。信息来自本次 manifest/result；容器可见的磁盘信息不足以推断宿主物理盘。
+- **结果与口径**：关键指标、单位、测量窗口、有效样本数，以及必要的比较条件。聚合使用本次 manifest 标记 valid 且 completed 的 repetition，并确认对应 result completed；失败、跳过、旧文件和独立 profiler 进程不混入有效样本。
+- **观察与限制**：哪些是数据直接支持的观察，哪些是推测；比较中还有哪些变量发生变化，哪些证据尚未采集。没有同机硬件基线时，不直接断言接近硬件上限。
+- **数据来源**：提供 suite manifest、原始 result 和相关日志/图形的位置或链接，让读者能追溯汇总和未展开的数据。
 
-### 测试构造
+单次测量可以直接展示数值并标注 n=1；多次测量建议给出 median 和离散程度（如 MAD 或 min/max），不要只挑最好的一次。数值建议使用易读的单位。上述要求约束数据解释，不规定页面布局。
 
-- C32 表示 32 个逻辑会话 context（数据对象，不是线程），由 1 个前台 scheduler 推进；task pool size 只控制后台 cache load/evict/store 线程。
-- Tree 固定每个逻辑 path block 为 256 tokens。fixture 使用 scaled payload：报告必须列出每个 GroupSet 的 `scaled_payload_bytes`，并说明这不是线上模型每 block 的实际显存占用。
-- 初始 topology 是 3,711-block shared base + 16,289-block background tree；每个 GroupSet 的 device/host pool 各 32,768 blocks。
-- trace 有两种请求：BASE（新 epoch，从 shared base 选择计划命中前缀后追加唯一 suffix）和 CONTINUATION（继承同 family 的父 path，只追加更长的唯一 tail）。每个 family 首次请求或抽样长度不大于当前 leaf 时开始新的 BASE；只有抽样长度更大时才生成 CONTINUATION。
-- 请求长度从 20 个 token 桶按权重抽样；报告用几句话概括长度与逻辑 block 范围、主要长度桶及其合计占比，不再展开 20 行明细表。BASE 的计划前缀命中率从 `0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99%` 这 13 个等概率档位抽样。
-- 完整请求生命周期为 `match → async load（如需要）→ READY batch forward → insert full path → release refs`。每个 READY batch 固定 100ms 模拟 forward；warmup 15s，measured 60s。
+## 按实验选择展示方式
 
-### Tree 表
-
-| Case | 状态 | 后台 cache 任务线程 | 测量窗口 | 已完成请求生命周期（数量 / 每秒） | 请求组成（新会话 / 续写） | 命中深度（计划 / 实际） | cache 查找时延 | 路径发布时延 | 查找到可 forward 时延 | READY batch | 结束清理 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-
-表内“每秒”是完整请求生命周期数除以 measured 墙钟时间，单位写作 `req/s`，不是线上模型 TPS。水位快照、依赖跳过等诊断项移到“主要观察”，不使用红色失败徽标展示非失败观察值。
-
-### Tree 主要观察
-
-- `tree_online_high_variation_c32`：C32 逻辑 context，前台 scheduler 1 线程，task pool 4/8。trace hash `<code>`。forward N batch / M requests。模拟 forward sleep = batches × 100ms。
-- 生命周期：active peak ≤ C32，loading peak，load tickets pending peak，request-held blocks peak（跨 forward 持有），unexpected extra match；后三类压力/匹配量是观察项。
-- 请求组成：用“新会话/续写”解释 BASE/CONTINUATION；用“因前序请求尚未发布而暂缓 admission 的扫描次数”解释 dependency skip，不把内部字段名当作表头。
-- warmup 后水位是负载形态观察值，不是 PASS 条件；若未满足，应写明具体阈值及边界，不能显示为红色 `fail/not ready`。
-- finalize 的 active requests、pending tickets、pending tasks、REQUEST refs 全部为 0，drain timeout 为 0。
-
-### On-CPU 热点
-
-- BlockTreeCache match/insert 锁竞争
-- eviction 淘汰路径 CPU 占比
-- load 异步流水线效率
-
-### Off-CPU
-
-- 正式 profile 默认必须采集 `tree_online_high_variation_c32` 的 15 秒 BCC off-CPU；它不是用户额外点名后才添加的可选项。
-- 只有 README 规定的 sidecar、namespace、内核能力、权限、BCC smoke 或符号质量预检失败时才允许 skip，并必须展示具体失败项。`not requested`、`用户未单独要求` 或 `只要求 benchmark` 不是合法 skip 原因。
-- 环境预检通过但没有有效 folded、SVG 和 manifest 时，报告必须标记为 profiling 不完整，不得以“canonical suite completed”掩盖缺失产物。
-- 固定 100ms forward sleep（sleep_for/nanosleep）是预期 off-CPU 时间，不归因成 BlockTreeCache 退化
-- task-pool idle 时 condition-variable wait 是预期背景
-- load/evict transfer 的 futex/IO 等待
-
-## 3. Transfer 场景
-
-"混合总吞吐"是同一 measured window 内各方向成功字节数之和除以墙钟时间，不是两个单方向峰值相加。
-
-`descriptor batch` 表示一次 transfer-engine `submit(vector<TransferDescriptor>)` 携带的 descriptor 数；`strategy=batch` 表示 Device↔Host 执行器使用 CUDA batch copy。二者必须分列，不能互相替代。Device→Disk 目前只支持 singleton，因此该方向实际 avg/max 应为 `1 / 1`；另外五个方向应展示真实批量值。
-
-### Device↔Host 介质对
-
-| Case | 状态 | duration | mode | 混合总吞吐（含各方向） | ops/s | 总传输 | requested → actual strategy | descriptor batch API requested → resolved；各方向 avg / max | working set | failed |
-
-### Device↔Disk 介质对
-
-| Case | 状态 | duration | mode | 混合总吞吐（含各方向） | ops/s | 总传输 | requested → actual strategy | descriptor batch API requested → resolved；各方向 avg / max | working set | failed |
-
-### Host↔Disk 介质对
-
-| Case | 状态 | duration | mode | 混合总吞吐（含各方向） | ops/s | 总传输 | requested → actual strategy | descriptor batch API requested → resolved；各方向 avg / max | working set | failed |
-
-### 带宽判断
-
-| 路径 | 硬件理论/实测极限 | benchmark 实测 | 结论 |
-| --- | --- | --- | --- |
-| Device↔Host | PCIe Gen4 x16 理论单向 ~32 GB/s、双向 ~64 GB/s | - | 待分析 |
-| Host↔Disk (direct) | 云盘 O_DIRECT 实测带宽 | - | 待分析 |
-| Device↔Disk (direct) | 云盘 O_DIRECT 实测带宽 | - | 待分析 |
-| Host↔Disk (buffered) | page cache 吸收后受 host 内存带宽约束 | - | 待分析 |
-| Device↔Disk (buffered) | page cache + CUDA copy 组合路径 | - | 待分析 |
-
-## 4. 火焰图与采样质量
-
-表格只列出实际生成 profiling artifact 的 case。`skipped`、`not collected` 或没有 SVG/perf.data/folded 的 case 不占表格行，但 Off-CPU 小节始终存在：无产物时必须展示 manifest 或 `report_metadata.offcpu_status` 提供的**环境预检失败原因**，不允许静默隐藏。正式 profile 若既无有效 off-CPU 产物、又无合规的环境 preflight skip 证据，报告状态必须写成“profiling 不完整，不可发布”。
-
-| Case | 状态 | 模式 | CPU 火焰图 | 原始数据 | 文本摘要 |
-| --- | --- | --- | --- | --- | --- |
-
-| Case | 状态 | raw folded | Off-CPU SVG | manifest | 质量摘要 |
-| --- | --- | --- | --- | --- | --- |
-
-## 5. 产物与可复核性
-
-| Case | 位置 | 完整性/校验 |
+| 实验 | 可选展示方式 | 理解结果所需的背景 |
 | --- | --- | --- |
-| HTML 报告 | index.html | 检查所有相对链接 |
-| Suite manifest | profile/suite_manifest.json | 记录 case、repetition 与环境指纹 |
-| 原始 repetition 结果 | profile/<case>/rep_*/result.json | 只使用 valid repetitions |
-| stdout/stderr | profile/<case>/rep_*/ | stdout、stderr、vmstat/nvidia-smi |
-| perf 产物 | profile/<case>/perf/ | perf.data、folded、SVG、summary |
-| off-CPU 产物 | profile/<case>/offcpu/ | folded、SVG、manifest |
+| Tree 在线生命周期 | 请求完成数/req/s、关键时延表，或 task-pool 对照图 | C32 是逻辑 context；单 foreground scheduler；固定模拟 forward sleep；block/token 与 scaled payload；BASE/CONTINUATION 请求构造 |
+| Mixed Transfer | 按介质、group set、strategy 展示吞吐和 batch 信息 | 混合总吞吐是同一窗口各方向成功字节之和除以墙钟时间，不是单方向峰值相加 |
+| Batch API matrix | 按方向和 group set 比较 C/D 提交粒度及 copy strategy | transfer-engine descriptor batch 与 CUDA batch copy strategy 是两层概念；以实际参数为准 |
+| E2E business matrix | 上层业务并发 × 下层 worker 数的表格或热力图 | 标明单方向、group set、每业务 descriptor 数和 batch；不等同于模型推理 e2e |
+| 专项子集或新增 case | 围绕问题自选表格、图形和分析 | 说明选择范围、负载语义、变量与指标口径即可 |
+
+Tree 的 req/s 可由 `completed_request_transactions / phases_ns.measured * 1e9` 计算，表示含模拟 forward 的 benchmark 生命周期速率，不是线上模型 TPS。任务池对照应核对除 pool size 外的配置、profile、seed/repetition、trace、binary SHA 和代码 commit；有差异时说明可比性的限制。水位观察和 dependency skip 等诊断项可以按需解释，不应被当作未发生的运行失败。
+
+Transfer 可以按需展示各方向吞吐、ops/s、传输字节、requested/actual strategy、实际 descriptor batch、working set 与失败数。无需固定三个介质分表；case 的方向与介质依据实际配置和结果，不靠名称子串猜测。
+
+## Profiling 与原始产物
+
+根据分析问题链接有关的 perf、off-CPU、nsys 或其他产物，交代独立采集的配置和采样质量。正式 profile 的采集流程及有效性条件见 [README](../README.md) 的 profiling 说明；专项可按目的选择采集范围，并说明缺项和原因。suite completed 与 profiling 完整是不同概念，未采集不能写成“无热点”。
+
+固定 forward sleep 和 task-pool idle 是 Tree 的预期行为；额外锁等待、load/evict 等待或 scheduler no-ready wait 才是需要结合证据分析的线索。`pgpgin`/`pgpgout` 是系统窗口差值，不能精确归因到单进程或单方向 IO。
+
+常见产物位置供参考，实际以本次 manifest 和采集记录为准：
+
+| 产物 | 常见位置 |
+| --- | --- |
+| Suite manifest | `profile/suite_manifest.json`（smoke 对应 `smoke/`） |
+| Repetition 结果和日志 | `profile/<case>/rep_*/` |
+| perf 数据和火焰图 | `profile/<case>/perf/` |
+| off-CPU 数据和采集记录 | 独立采集目录，如 `profile/<case>/offcpu_<RUN_ID>/` |
+| 分析报告 | 自选文件名和格式，与原始数据一起保存或链接 |
+
+可以先给结论，再解释实验和证据，也可以按多个实验问题分别展开。共享报告时保留有效的数据链接即可，不要求生成 `index.html` 或采用本文的章节顺序。

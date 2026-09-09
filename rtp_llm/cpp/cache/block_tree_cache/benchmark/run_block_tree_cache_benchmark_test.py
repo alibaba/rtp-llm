@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -11,6 +12,52 @@ import unittest
 from unittest import mock
 
 import run_block_tree_cache_benchmark as driver
+from benchmark_cases import ALL_CASES, PROFILE_CASES, SMOKE_CASES
+
+
+class BenchmarkRegistryDocumentationTest(unittest.TestCase):
+    def test_canonical_case_counts_and_unique_names(self):
+        self.assertEqual(len(SMOKE_CASES), 2)
+        self.assertEqual(len(PROFILE_CASES), 81)
+        names = [case.name for case in ALL_CASES]
+        self.assertEqual(len(names), len(set(names)))
+        families = {
+            "tree_": 1,
+            "transfer_": 16,
+            "matrix_": 16,
+            "e2e_": 48,
+        }
+        for prefix, expected in families.items():
+            with self.subTest(prefix=prefix):
+                self.assertEqual(
+                    sum(case.name.startswith(prefix) for case in PROFILE_CASES),
+                    expected,
+                )
+        path = driver.resolve_runfile_path("docs/benchmark_cases.md")
+        self.assertIsNotNone(path)
+        with open(path) as source:
+            documentation = source.read()
+        self.assertIn(
+            "当前 profile 共 81 个 case：1 个 Tree、16 个 mixed Transfer"
+            "（含 4 个并发变体）、16 个 batch API matrix 和 48 个 e2e case。",
+            documentation,
+        )
+
+    def test_nsys_documented_profiles_exist(self):
+        path = driver.resolve_runfile_path("docs/nsys_collection_guide.md")
+        self.assertIsNotNone(path)
+        with open(path) as source:
+            references = re.findall(
+                r"\$BENCH_DIR/(profiles/[\w.-]+\.json)", source.read()
+            )
+        self.assertEqual(len(references), 2)
+        for reference in references:
+            with self.subTest(profile=reference):
+                profile_path = driver.resolve_runfile_path(reference)
+                self.assertIsNotNone(profile_path)
+                with open(profile_path) as source:
+                    profile = json.load(source)
+                self.assertTrue(profile["groups"])
 
 
 class BenchmarkDriverProfileTest(unittest.TestCase):
@@ -33,11 +80,17 @@ class BenchmarkDriverProfileTest(unittest.TestCase):
 
         groups = {group["tag"]: group for group in profile["groups"]}
         self.assertEqual(
-            [(tag, groups[tag]["layer_count"]) for tag in ("csa_kv", "hca_kv", "indexer_kv")],
+            [
+                (tag, groups[tag]["layer_count"])
+                for tag in ("csa_kv", "hca_kv", "indexer_kv")
+            ],
             [("csa_kv", 21), ("hca_kv", 20), ("indexer_kv", 21)],
         )
         self.assertEqual(
-            [(tag, groups[tag]["layer_count"]) for tag in ("csa_state", "indexer_state", "swa_kv")],
+            [
+                (tag, groups[tag]["layer_count"])
+                for tag in ("csa_state", "indexer_state", "swa_kv")
+            ],
             [("csa_state", 21), ("indexer_state", 21), ("swa_kv", 43)],
         )
         self.assertEqual(profile["device_only_groups"], ["hca_state"])

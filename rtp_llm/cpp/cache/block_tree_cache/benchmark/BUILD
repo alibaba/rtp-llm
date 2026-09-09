@@ -192,21 +192,10 @@ py_library(
     name = "benchmark_driver_sources",
     srcs = [
         "benchmark_cases.py",
-        "generate_report.py",
         "run_block_tree_cache_benchmark.py",
     ],
     tags = ["manual"],
     visibility = ["//visibility:public"],
-)
-
-py_test(
-    name = "generate_report_test",
-    srcs = [
-        "generate_report.py",
-        "generate_report_test.py",
-    ],
-    main = "generate_report_test.py",
-    tags = ["manual"],
 )
 
 py_test(
@@ -219,6 +208,9 @@ py_test(
     main = "run_block_tree_cache_benchmark_test.py",
     tags = ["manual"],
     data = [
+        "docs/benchmark_cases.md",
+        "docs/nsys_collection_guide.md",
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
         "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
     ],
 )
