@@ -2,6 +2,7 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.List;
@@ -41,11 +42,12 @@ public interface DeliveryStrategy {
 
         CapacityBoundary blockedResult();
 
-        /** Cross the canonical queue commit while its lock is held. */
-        void commitUnderLock();
+        /** Commit ownership and capture preceding work under the same endpoint lock. */
+        WorkSnapshot commitUnderLock();
 
         /** Transfer committed ownership to the configured delivery mode. */
-        void handoff(String decisionReason, int remainingQueueDepth);
+        void handoff(String decisionReason, int remainingQueueDepth,
+                     WorkSnapshot precedingWork);
 
         /** Resolve any committed ownership that handoff did not transfer. */
         void abort(Throwable cause);

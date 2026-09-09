@@ -115,7 +115,7 @@ PY
 )
 
 # -- 2. Start FlexLB master (queue + priority ordering, batch dispatch) --
-DEFAULT_FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxInflightBatchesPerPrefillWorker":4},"router":{"roles":{"prefill":{"candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxProjectedDrainVsAverageMultiplier":3.0}}},"decode":{"availability":{"maxEngineRequests":132}}}}}'
+DEFAULT_FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"decode":{"availability":{"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 echo "[2/4] Starting FlexLB master (BATCH / COST_BASED_PREFILL) ..."
 env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
@@ -123,7 +123,6 @@ env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
   "OTEL_TRACE_SKIP_PATTERN=.*" \
   "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
   "HIPPO_ROLE=flexlb_batch_smoke" \
-  "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
   java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
   --server.port="${FLEXLB_HTTP_PORT}" \
   --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \

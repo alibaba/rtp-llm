@@ -7,8 +7,8 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
-import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
@@ -110,8 +110,8 @@ class PdfusionSchedulingTest {
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         DefaultRouter router = new DefaultRouter(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class)),
-                new CostBasedDecodeStrategy(directory), new RandomStrategy(directory), service, model);
-        RequestScheduler scheduler = direct ? null : new RequestScheduler(service, router, endpoints, reporter,
+                new DecodeSelector(directory), new RandomStrategy(directory), service, model);
+        RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, reporter,
                 mock(EvictionManager.class), lifecycle, availability);
         SchedulerRuntime runtime = direct
                 ? new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter)
@@ -119,15 +119,14 @@ class PdfusionSchedulingTest {
         try {
             long requestId = 920001L;
             var context = RequestLifecycleTestSupport.context(config, requestId);
-            Response response = direct ? router.routeDirect(context)
-                    : scheduler.submit(context).get(3, TimeUnit.SECONDS);
+            Response response = scheduler.submit(context).get(3, TimeUnit.SECONDS);
             assertTrue(response.isSuccess(), "PDFUSION route failed: " + response.getErrorMessage());
             assertEquals(List.of(RoleType.PDFUSION), response.getServerStatus().stream()
                     .map(ServerStatus::getRole).toList());
             assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
-            assertEquals(0, lifecycle.decodeAcceptanceCount());
+            assertEquals(1, lifecycle.liveRequestCount());
             PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getIpPort());
-            assertEquals(1, endpoint.admissionPendingRequestCount());
+            assertEquals(1, endpoint.observedRequestCount());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
             assertTrue(committedWork.containsRequest(requestId));
             TaskInfo finished = new TaskInfo();
@@ -147,7 +146,7 @@ class PdfusionSchedulingTest {
                 worker.lock.unlock();
             }
             projection.run();
-            assertEquals(0, endpoint.admissionPendingRequestCount());
+            assertEquals(0, endpoint.observedRequestCount());
             assertEquals(0, endpoint.getInflightBatchCount());
             assertTrue(committedWork.containsRequest(requestId), "published snapshots stay immutable");
             assertTrue(!endpoint.captureRouteProjectionInputs().work().containsRequest(requestId));

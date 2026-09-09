@@ -213,17 +213,17 @@ set_group_config() {
   case "$1" in
     batch)
       SCHEDULING_PROFILE="queue-priority-batch"
-      FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"capacity":{"maxOutstandingRequestsGlobal":5000,"maxWaitingRequestsPerPrefillWorker":1024}},"dispatcher":{"type":"BATCH","maxInflightBatchesPerPrefillWorker":4,"enqueueRpcTimeoutMs":5000},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"},"candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxProjectedDrainVsAverageMultiplier":3.0}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132},"kvReservation":{"maxOutputTokensForEstimate":1000}}}}}'
+      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
       TEST_RID_BASES=(10000 20000 30000)
       ;;
     direct)
       SCHEDULING_PROFILE="direct-non-batch"
-      FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH"},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"},"candidateChoice":{"type":"LEAST_RECENTLY_USED_IN_POOL","pool":{"type":"RATIO","ratio":0.3,"minimumWorkers":1}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132},"kvReservation":{"maxOutputTokensForEstimate":1000}}}}}'
+      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":2},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
       TEST_RID_BASES=(40000 50000 60000)
       ;;
     queue)
       SCHEDULING_PROFILE="queue-fifo-non-batch"
-      FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"decision":{"type":"SINGLE"},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"NON_BATCH"},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"},"candidateChoice":{"type":"LEAST_RECENTLY_USED_IN_POOL","pool":{"type":"RATIO","ratio":0.3,"minimumWorkers":1}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132},"kvReservation":{"maxOutputTokensForEstimate":1000}}}}}'
+      FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"decision":{"type":"SINGLE"}},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":2},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
       TEST_RID_BASES=(70000 80000 90000)
       ;;
     *)
@@ -243,10 +243,10 @@ start_master() {
     "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
     "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \
-    "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \
     --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
+    --flexlb.engine-grpc.enqueue-timeout-ms=5000 \
     --spring.profiles.active="${SPRING_PROFILE:-default}" \
     >"${group_dir}/flexlb.log" 2>&1 &
   FLEXLB_PID="$!"

@@ -42,7 +42,11 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private final Executor executor;
     @Getter
     private final EventLoopGroup eventLoopGroup;
+    public static final String ENQUEUE_TIMEOUT_PROPERTY =
+            "flexlb.engine-grpc.enqueue-timeout-ms";
+    private static final long DEFAULT_ENQUEUE_TIMEOUT_MILLIS = 5000L;
     private final int connectTimeoutMillis;
+    private final long enqueueTimeoutMillis;
 
     @Autowired
     public EngineGrpcClient(CustomNameResolver nameResolver,
@@ -51,8 +55,15 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                             GrpcReporter grpcReporter,
                             @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":"
                                     + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}")
-                            int connectTimeoutMillis) {
+                            int connectTimeoutMillis,
+                            @Value("${" + ENQUEUE_TIMEOUT_PROPERTY + ":"
+                                    + DEFAULT_ENQUEUE_TIMEOUT_MILLIS + "}")
+                            long enqueueTimeoutMillis) {
         super(grpcReporter);
+        if (enqueueTimeoutMillis <= 0L) {
+            throw new IllegalArgumentException("enqueueTimeoutMillis must be positive");
+        }
+        this.enqueueTimeoutMillis = enqueueTimeoutMillis;
         if (connectTimeoutMillis <= 0) {
             throw new IllegalArgumentException(
                     "connectTimeoutMillis must be positive");
@@ -238,6 +249,11 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     /**
      * Submit a batch of already-routed requests to a Prefill worker (async)
      */
+    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
+            String ip, int port, EngineRpcService.EnqueueBatchRequestPB request) {
+        return batchEnqueueAsync(ip, port, request, enqueueTimeoutMillis);
+    }
+
     public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(String ip, int port, EngineRpcService.EnqueueBatchRequestPB request, long requestTimeoutMs) {
         // EnqueueBatch is not safe to replay after an ambiguous connection
         // failure: the Engine may have accepted the first invocation even

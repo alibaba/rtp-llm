@@ -106,7 +106,7 @@ fi
 # Cluster allocates ports sequentially: prefill-0, prefill-1, ..., decode-0, ...
 CLUSTER_PREFILL_ADDRS=""
 CLUSTER_DECODE_ADDRS=""
-# DOMAIN_ADDRESS must contain HTTP ports; FlexLB Master computes gRPC port
+# MODEL_SERVICE_CONFIG.hosts must contain HTTP ports; FlexLB Master computes gRPC port
 # via toGrpcPort(httpPort) = httpPort + 1.
 _port=${MOCK_BASE_GRPC_PORT}
 for ((i = 0; i < CLUSTER_N_PREFILL; i++)); do
@@ -126,7 +126,7 @@ for ((i = 0; i < CLUSTER_N_DECODE; i++)); do
   _port=$((_port + 1))
 done
 
-# -- Combine addresses for DOMAIN_ADDRESS ----------------------------------
+# -- Combine addresses for service discovery -------------------------------
 VICTIM_ADDR="127.0.0.1:${VICTIM_HTTP_PORT}"
 if [[ "${KILL_TARGET}" == "prefill" ]]; then
   if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
@@ -144,8 +144,28 @@ else
   fi
 fi
 
-# -- Model service config (constant JSON) ----------------------------------
-readonly MODEL_SERVICE_CONFIG_JSON='{"service_id":"aigc.text-generation.generation.engine_service","load_balance":true,"role_endpoints":[{"group":"mock","prefill_endpoint":{"address":"mock.prefill.hosts.address","protocol":"http","path":"/"},"decode_endpoint":{"address":"mock.decode.hosts.address","protocol":"http","path":"/"}}]}'
+# -- Model service config --------------------------------------------------
+MODEL_SERVICE_CONFIG_JSON="$(python3 - "${PREFILL_DOMAIN_ADDR}" "${DECODE_DOMAIN_ADDR}" <<'PY_MODEL'
+import json
+import sys
+
+model = {
+    "service_id": "aigc.text-generation.generation.engine_service",
+    "load_balance": True,
+    "role_endpoints": [{
+        "group": "mock",
+        "prefill_endpoint": {"address": "mock.prefill.hosts.address", "protocol": "http", "path": "/"},
+        "decode_endpoint": {"address": "mock.decode.hosts.address", "protocol": "http", "path": "/"},
+    }],
+    "hosts": {
+        "mock.prefill.hosts.address": sys.argv[1].split(",") if sys.argv[1] else [],
+        "mock.decode.hosts.address": sys.argv[2].split(",") if sys.argv[2] else [],
+    },
+}
+print(json.dumps(model, separators=(",", ":")))
+PY_MODEL
+)"
+readonly MODEL_SERVICE_CONFIG_JSON
 
 # -- Load client parameters ------------------------------------------------
 LOAD_CLIENT_LIMIT="${LOAD_CLIENT_LIMIT:-0}"
@@ -280,15 +300,12 @@ start_victim_engine() {
 
 start_master() {
   local log_file="$1"
-  local default_flexlb_config='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxInflightBatchesPerPrefillWorker":4},"router":{"roles":{"prefill":{"candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxProjectedDrainVsAverageMultiplier":3.0}}},"decode":{"availability":{"maxEngineRequests":132}}}}}'
+  local default_flexlb_config='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{},"decode":{"availability":{"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
   local flexlb_config="${FLEXLB_CONFIG:-${default_flexlb_config}}"
   echo "  starting master ..."
   env \
     "MODEL_SERVICE_CONFIG=${MODEL_SERVICE_CONFIG_JSON}" \
-    "DOMAIN_ADDRESS:mock.prefill.hosts.address=${PREFILL_DOMAIN_ADDR}" \
-    "DOMAIN_ADDRESS:mock.decode.hosts.address=${DECODE_DOMAIN_ADDR}" \
     "FLEXLB_CONFIG=${flexlb_config}" \
-    "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
     "OTEL_TRACE_SKIP_PATTERN=.*" \
     "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
     "HIPPO_ROLE=flexlb_engine_kill_test" \

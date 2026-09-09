@@ -36,7 +36,7 @@ Key classes:
 - `Request`/`Response`: API request/response models
 - `RoleType`: Enum defining worker roles (PREFILL, DECODE, PDFUSION, VIT, FRONTEND)
 - `RoutingConfig`: Role-specific Prefill/Decode selection configuration
-- `ConfigService`: Strict schema-v2 configuration loader and validator
+- `ConfigService`: Strict schema-v3 configuration loader and validator
 
 Role-derived routing policy lives in `RoutingConfig.PrefillConfig` and
 `RoutingConfig.DecodeConfig`. Their selection pipelines read role-specific availability
@@ -51,7 +51,7 @@ gRPC client implementation for model service communication. Contains protocol bu
 Core load balancing logic, scheduling strategies, and worker status synchronization. This is the heart of the load balancing system.
 
 Key concepts:
-- **Routing**: `DefaultRouter` composes the cost-based Prefill/Decode selectors and the VIT random selector for multi-role requests
+- **Routing**: `DefaultRouter` composes the Prefill cost and Decode capacity selectors and the VIT random selector for multi-role requests
 - **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
 - **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
@@ -106,6 +106,7 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 # - FLEXLB_CONFIG: Load balance strategy, timeouts, batch settings
 # - MODEL_SERVICE_CONFIG: Backend worker endpoints
 # - FLEXLB_SYNC_CONSISTENCY_CONFIG: ZooKeeper configuration (optional)
+# - LOG_LEVEL: Runtime log level (optional)
 ```
 
 ### Testing
@@ -163,18 +164,18 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 ### Load Balancing Strategies
 
 `DefaultRouter` uses explicit role selectors: `CostBasedPrefillStrategy` for
-PREFILL/PDFUSION, `CostBasedDecodeStrategy` for DECODE, and `RandomStrategy`
-for VIT. Both cost-based selectors evaluate the complete live fleet before
-reducing to one configured-policy winner. Prefill candidate choice controls
-best-only, TTFT tolerance, or LRU within the shortest-TTFT pool. Optional cache
-affinity is configured with `router.roles.prefill.cacheAffinity`.
+PREFILL/PDFUSION, `DecodeSelector` for DECODE, and `RandomStrategy`
+for VIT. Both selectors evaluate the complete live fleet before
+reducing to one generation-fenced winner. Prefill uses fixed BEST_ONLY with
+optional cache affinity under `router.roles.prefill.cacheAffinity`. Decode rotates
+among workers that pass KV/request admission.
 
 ### Queue-Based Request Scheduling
 
 Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
 - `scheduler.type=DIRECT`: Routes immediately through `DefaultRouter`.
-- `scheduler.type=QUEUE`: Uses `RequestScheduler` and `GlobalQueueCoordinator` for ordered placement; `RequestRegistry` owns capacity, cancellation, and timeout lifecycle. Queue ordering is `FIFO` or `PRIORITY`.
+- `scheduler.type=QUEUE`: Uses `RequestScheduler` and `GlobalQueueCoordinator` for ordered placement; `RequestRegistry` owns cancellation and request/decision lifetimes. Queue ordering is `FIFO` or `PRIORITY`.
 - `scheduler.decision.type=SINGLE`: Forms one-request decision groups.
 - `scheduler.decision.type=FIXED_WINDOW`: Forms groups bounded by request count, collection window, and an optional predicted-execution cap.
 - `dispatcher.type=NON_BATCH`: The frontend delivers requests from the formed group.
@@ -229,18 +230,30 @@ FlexLB reads configuration from environment variables:
 ### FLEXLB_CONFIG (single public behavior document)
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "scheduler": {
     "type": "QUEUE",
     "ordering": {"type": "FIFO"},
     "decision": {"type": "SINGLE"}
   },
-  "dispatcher": {"type": "NON_BATCH"}
+  "dispatcher": {"type": "NON_BATCH"},
+  "requestLifecycle": {
+    "request": {"timeoutMs": 60000},
+    "decision": {"lifetime": 2.0}
+  }
 }
 ```
 
 The parser is strict: fields belonging to an inactive scheduler, ordering, or dispatcher
-variant are rejected instead of being silently ignored.
+variant are rejected. Missing `FLEXLB_CONFIG` fails startup. The online loader
+accepts only schema 3; no legacy-schema converter or old-field aliases are provided.
+`dispatcher.maxInflightPerPrefillWorker` is a positive integer, default 2 in every
+mode. It counts batches in BATCH and requests in NON_BATCH / DIRECT.
+`scheduler.ordering.preemption.timeoutMs` defaults to 1000 ms and must be positive.
+It bounds the wait for a real Engine terminal after the Cancel ACK phase; explicit
+configuration requires `DECODE_ENGINE_OWNED`. ACK timeout remains internal, 50 ms.
+On timeout, the incoming request fails with `RESOURCE_EXHAUSTED`; the victim
+reservation remains tracked until authoritative terminal/retirement evidence or request inactivity expiry.
 
 ### MODEL_SERVICE_CONFIG (required)
 ```json
@@ -277,8 +290,11 @@ routing threads. Readers use immutable snapshots and exact generation-fenced
 captures; writers publish status through the endpoint lifecycle transaction.
 
 ### Queue Concurrency
-`RequestRegistry` owns request lifecycle and global capacity. Each prefill
-generation owns a bounded `WorkerBatcher` delivery runtime. Reservation and release paths must remain idempotent across
+`RequestRegistry` owns request lifecycle. `dispatcher.maxInflightPerPrefillWorker`
+limits batches in BATCH and requests in NON_BATCH / DIRECT, default 2.
+`decision.maxRequests` only controls group size. DIRECT has no queue timer.
+The global queue has no request-count cap; TTL bounds queue residence.
+Reservation and release paths must remain idempotent across
 completion, timeout, and cancellation races.
 
 ### BalanceContext Extensions
@@ -308,7 +324,8 @@ FlexLB provides comprehensive monitoring through Spring Boot Actuator:
 - `/actuator/prometheus`: Prometheus metrics
 - `/actuator/info`: Application information
 
-OpenTelemetry integration for distributed tracing (configured via `OTEL_EXPORTER_OTLP_ENDPOINT`).
+OpenTelemetry export is disabled by default. Enable it with the `trace.otel.exporter.otlp`
+Spring command-line properties. Spring does not bind environment variables.
 
 Monitoring enhancements:
 - `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics
@@ -318,7 +335,6 @@ Monitoring enhancements:
 ## Error Types
 
 ### Queue Errors
-- `QUEUE_FULL`: Request rejected because queue is at capacity (maxQueueSize)
 - `QUEUE_TIMEOUT`: Request waited in queue longer than configured timeout
 - `REQUEST_CANCELLED`: Request cancelled by client or system during queue wait
 

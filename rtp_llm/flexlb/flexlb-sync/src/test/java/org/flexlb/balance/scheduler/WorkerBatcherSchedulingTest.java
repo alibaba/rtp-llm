@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -82,8 +83,6 @@ class WorkerBatcherSchedulingTest {
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     void projectionCacheTracksCapacityBlockAndWake() {
         FlexlbConfig config = singleConfig();
-        SchedulingTestConfig.useBatchDispatcher(config)
-                .setMaxInflightBatchesPerPrefillWorker(1);
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         ProjectionCacheBlock delivery = new ProjectionCacheBlock();
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
@@ -112,6 +111,40 @@ class WorkerBatcherSchedulingTest {
             delivery.allowFirstPrepare.countDown();
             delivery.allowSecondPrepare.countDown();
         }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void deliveryOnlyWaitKeepsBacklogSelectable() throws Exception {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        EventDrivenBlock delivery = new EventDrivenBlock(true);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        long now = System.currentTimeMillis();
+        ScheduledRequest head = item(config, endpoint, 21L, 50, now);
+
+        assertTrue(runtime.offer(head));
+        await(delivery.firstCapacity.subscribed);
+        RouteProjection.Inputs inputs = runtime.captureRouteProjectionInputs();
+        assertNotNull(inputs.queue().admissionBlock());
+        assertNull(inputs.queue().admissionBlock().semantics(),
+                "batch capacity waits must not impose publication restrictions");
+        RouteProjection.DeliveryProjection projection = new BatchDeliveryStrategy(
+                () -> { throw new AssertionError("projection cannot prepare delivery"); },
+                () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
+                .projectionPolicy();
+        RouteProjection.Candidate candidate = RouteProjection.project(
+                inputs, 22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L,
+                endpoint.getPredictor().evaluator(), projection, now);
+        assertTrue(candidate.selectable(),
+                "a delivery-only wait must leave incoming backlog selectable");
+
+        ScheduledRequest backlog = item(config, endpoint, 22L, 50, now + 1L);
+        assertTrue(runtime.offer(backlog));
+        TimeUnit.MILLISECONDS.sleep(100L);
+        assertEquals(1, delivery.attempts.get(),
+                "publishing backlog must not retry the capacity-blocked head");
+        assertEquals(List.of(head, backlog), runtime.captureQueueSnapshot().items());
     }
 
     @Test
@@ -167,7 +200,7 @@ class WorkerBatcherSchedulingTest {
     }
 
     private static FlexlbConfig singleConfig() {
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useFifoQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
         SchedulingTestConfig.useBatchDispatcher(config);
@@ -175,7 +208,7 @@ class WorkerBatcherSchedulingTest {
     }
 
     private static FlexlbConfig fixedConfig() {
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useFifoQueue(config);
         DecisionPolicyConfig decision =
                 SchedulingTestConfig.useFixedWindowDecision(config);
@@ -302,11 +335,26 @@ class WorkerBatcherSchedulingTest {
 
     private static final class EventDrivenBlock extends BoundaryDelivery {
 
+        private final boolean deliveryOnly;
         private final TestAvailability firstCapacity = new TestAvailability();
         private final TestAvailability parkedCapacity = new TestAvailability();
         private final AtomicInteger attempts = new AtomicInteger();
         private final CountDownLatch firstAttempt = new CountDownLatch(1);
         private final CountDownLatch secondAttempt = new CountDownLatch(1);
+
+        private EventDrivenBlock() {
+            this(false);
+        }
+
+        private EventDrivenBlock(boolean deliveryOnly) {
+            this.deliveryOnly = deliveryOnly;
+        }
+
+        private CapacityBoundary boundary(TestAvailability availability) {
+            return deliveryOnly
+                    ? CapacityBoundary.deliveryUnavailable(availability)
+                    : unavailable(availability);
+        }
 
         @Override
         public Transaction prepare(
@@ -317,11 +365,11 @@ class WorkerBatcherSchedulingTest {
             if (attempt == 1) {
                 firstAttempt.countDown();
                 return WorkerBatcherTestSupport.boundaryOnly(
-                        candidates.getFirst(), unavailable(firstCapacity));
+                        candidates.getFirst(), boundary(firstCapacity));
             }
             secondAttempt.countDown();
             return WorkerBatcherTestSupport.boundaryOnly(
-                    candidates.getFirst(), unavailable(parkedCapacity));
+                    candidates.getFirst(), boundary(parkedCapacity));
         }
     }
 

@@ -18,12 +18,11 @@ public enum StrategyErrorType {
     INVALID_REQUEST(8406, false),
 
     // queue error
-    QUEUE_FULL(8502, false, "TooManyRequests"),
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
     REQUEST_CANCELLED(8504, false),
 
-    // batch dispatch error
-    BATCH_DISPATCH_FAILED(8510, true),
+    // routing and dispatch error
+    DISPATCH_FAILED(8510, true),
     BATCH_SLO_EXPIRED(8511, false),
     BATCH_BUILD_FAILED(8512, false),
     // worker (decode engine) execution failure — non-retryable to prevent retry storms

@@ -1,16 +1,13 @@
 package org.flexlb.engine.grpc.nameresolver;
 
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.lang3.StringUtils;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.enums.BackendServiceProtocolEnum;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -19,7 +16,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -40,9 +36,9 @@ public class EngineAddressNameResolver implements CustomNameResolver {
 
     public EngineAddressNameResolver(
             ServiceDiscovery serviceDiscovery,
-            @Value("${MODEL_SERVICE_CONFIG:}") String modelConfig) {
+            ModelMetaConfig modelConfig) {
         this.serviceDiscovery = serviceDiscovery;
-        this.serviceAddressList = initServiceAddressList(modelConfig);
+        this.serviceAddressList = initServiceAddressList(modelConfig.getServiceRoute());
         log.info("EngineAddressNameResolver start subscribe clusters:{} ", serviceAddressList);
         fetchAllDomainsHosts();
         setupListeners(serviceDiscovery, serviceAddressList);
@@ -81,21 +77,15 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         }
     }
 
-    private List<String> initServiceAddressList(String modelConfigJson) {
-        return Optional.ofNullable(modelConfigJson)
-                .filter(StringUtils::isNotBlank)
-                .map(json -> JsonUtils.toObject(modelConfigJson, ServiceRoute.class))
-                .map(serviceRoute -> serviceRoute.getAllEndpoints().stream()
-                        .map(endpoint -> {
-                            // Keep address -> protocol mapping for port correction in updateDomainHosts
-                            if (endpoint.getAddress() != null && endpoint.getProtocol() != null) {
-                                addressProtocolMap.put(endpoint.getAddress(), endpoint.getProtocol());
-                            }
-                            return endpoint.getAddress();
-                        })
-                        .collect(Collectors.toList()))
-                .filter(CollectionUtils::isNotEmpty)
-                .orElseThrow(() -> new IllegalArgumentException("serviceAddressList cannot be null, please config 'MODEL_SERVICE_CONFIG' environment variable, modelConfigJson=" + modelConfigJson));
+    private List<String> initServiceAddressList(ServiceRoute serviceRoute) {
+        return serviceRoute.getAllEndpoints().stream()
+                .map(endpoint -> {
+                    if (endpoint.getAddress() != null && endpoint.getProtocol() != null) {
+                        addressProtocolMap.put(endpoint.getAddress(), endpoint.getProtocol());
+                    }
+                    return endpoint.getAddress();
+                })
+                .collect(Collectors.toList());
     }
 
     @Override

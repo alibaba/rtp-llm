@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -28,6 +29,7 @@ final class RequestLifecycleTestSupport {
         request.setSeqLen(16L);
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
+        SchedulingTestConfig.configureRequiredValues(config);
         context.setConfig(config);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
@@ -45,39 +47,38 @@ final class RequestLifecycleTestSupport {
         }
     }
 
-    static void bindRoute(
-            RequestRegistry lifecycle,
-            Registered registered,
-            int limit,
-            long acceptanceTimeoutMs) {
+    static void bindRoute(RequestRegistry lifecycle, Registered registered) {
         assertEquals(PlacementResult.Status.SUCCESS,
-                commitRoute(lifecycle, registered, limit, acceptanceTimeoutMs));
-        prepareAcceptance(lifecycle, registered);
-    }
-
-    /** Simulate the existing delivery preparation/handoff boundary. */
-    static void prepareAcceptance(RequestRegistry lifecycle, Registered registered) {
-        try (RequestRegistry.DeliveryAdmission admission =
-                     lifecycle.prepareDecodeAcceptance(registered.item()).value()) {
-            assertNotNull(admission);
-            assertTrue(admission.transferTo(registered.item()));
-        }
+                commitRoute(lifecycle, registered));
     }
 
     static PlacementResult.Status commitRoute(
-            RequestRegistry lifecycle,
-            Registered registered,
-            int limit,
-            long acceptanceTimeoutMs) {
-        var policy = registered.item().ctx().getConfig().queueScheduler().getLifecycle();
-        policy.setMaxDeliveredNotAcceptedRequestsGlobal(limit);
-        policy.setDeliveredNotAcceptedTimeoutMs(acceptanceTimeoutMs);
-        try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(
-                             registered.item().requestId(), registered.future())) {
+            RequestRegistry lifecycle, Registered registered) {
+        try (AdmissionMutation admission = lifecycle.claimAdmissionMutation(
+                registered.item().requestId(), registered.future())) {
             assertNotNull(admission);
             return lifecycle.commitRoute(registered.item(), () -> true);
         }
+    }
+
+    static RequestRegistry.DeliveryClaim claimRoute(RequestRegistry lifecycle,
+                                                     ScheduledRequest item,
+                                                     BooleanSupplier endpointHandoff) {
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(item, endpointHandoff);
+        if (claim != null) {
+            lifecycle.beginDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+        }
+        return claim;
+    }
+
+    static RequestRegistry.DeliveryClaim claimBatch(RequestRegistry lifecycle,
+                                                     ScheduledRequest item, long batchId,
+                                                     BooleanSupplier endpointHandoff) {
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(item, batchId, endpointHandoff);
+        if (claim != null) {
+            lifecycle.beginDelivery(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+        }
+        return claim;
     }
 
     static void await(CountDownLatch latch) {

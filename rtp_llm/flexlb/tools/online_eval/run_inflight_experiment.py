@@ -50,7 +50,7 @@ PREFILL_EXECUTION_TIME_EXPRESSION = (
 
 DEFAULT_FLEXLB_CONFIG = json.dumps(
     {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "scheduler": {
             "type": "QUEUE",
             "ordering": {"type": "PRIORITY", "defaultPriority": 50},
@@ -60,15 +60,10 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
                 "maxCollectionWaitMs": 220,
                 "maxPredictedExecutionMs": 550,
             },
-            "capacity": {
-                "maxOutstandingRequestsGlobal": 1000000,
-                "maxWaitingRequestsPerPrefillWorker": 1024,
-            },
         },
         "dispatcher": {
             "type": "BATCH",
-            "maxInflightBatchesPerPrefillWorker": 2,
-            "enqueueRpcTimeoutMs": 5000,
+            "maxInflightPerPrefillWorker": 2,
         },
         "router": {
             "roles": {
@@ -77,16 +72,18 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
                         "type": "FORMULA",
                         "expression": PREFILL_EXECUTION_TIME_EXPRESSION,
                     },
-                    "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"},
                 },
                 "decode": {
                     "availability": {
                         "maxKvUsagePercent": 90,
                         "maxEngineRequests": 132,
                     },
-                    "kvReservation": {"maxOutputTokensForEstimate": 1000},
                 },
             },
+        },
+        "requestLifecycle": {
+            "request": {"timeoutMs": 300000},
+            "decision": {"lifetime": 2.0},
         },
         "observability": {
             "cacheHit": {
@@ -277,6 +274,7 @@ def start_flexlb_master(experiment_dir: Path) -> subprocess.Popen:
         FLEXLB_JAR,
         f"--server.port={FLEXLB_HTTP_PORT}",
         f"--management.server.port={FLEXLB_MGMT_PORT}",
+        "--flexlb.engine-grpc.enqueue-timeout-ms=5000",
     ]
 
     proc = subprocess.Popen(

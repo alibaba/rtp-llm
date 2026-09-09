@@ -50,7 +50,7 @@ PERF_CONFIG_FILE="${PERF_CONFIG_DIR}/cancel_smoke_perf.json"
 
 # FlexLB has one strict JSON configuration surface. Callers may replace this
 # document wholesale through FLEXLB_CONFIG.
-DEFAULT_FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50,"preemption":{"allowedVictimStages":["DECODE_RESERVED","DECODE_ENGINE_OWNED"],"engineCancellation":{"ackTimeoutMs":50,"completionTimeoutMs":1000}}},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxInflightBatchesPerPrefillWorker":4,"enqueueRpcTimeoutMs":5000},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"},"candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":1},"kvReservation":{"maxOutputTokensForEstimate":1000}}}}}'
+DEFAULT_FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50,"preemption":{"allowedVictimStages":["DECODE_RESERVED","DECODE_ENGINE_OWNED"],"timeoutMs":1000}},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA"}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":1}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 
 OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
@@ -252,10 +252,10 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
     "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \
-    "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \
     --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
+    --flexlb.engine-grpc.enqueue-timeout-ms=5000 \
     --spring.profiles.active="${SPRING_PROFILE:-default}" \
     >"${RUN_DIR}/flexlb.log" 2>&1 &
   FLEXLB_PID="$!"

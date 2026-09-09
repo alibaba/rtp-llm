@@ -19,13 +19,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 /**
- * Task35 场景 E：基线对照 —— Auto-TPM 开关全部关闭（默认值）时行为与旧逻辑
- * 完全一致：priority 对派发次序无任何影响（严格 FIFO），无任何抢占/victim，
+ * Task35 场景 E：FIFO 基线，priority 不影响排队次序，且没有抢占/victim。
  * 与场景 B 同流量（P70/P50/P30 各 50，轮转提交）。
  *
- * <p>注意：旧逻辑 fixed_window 的排序键是毫秒级 enqueuedAtMs，同毫秒并列时
- * 队列不保证稳定序（这是旧逻辑真实行为，非缺陷）。为使严格 FIFO 断言
- * 良定义，提交时保证每个请求拿到唯一的 enqueuedAtMs（间隔 ≥2ms）。
+ * <p>每个 Prefill 仅允许一个在途批次，以引擎到达顺序验证 FIFO 排队顺序。
  */
 class BaselineParityE2ETest {
 
@@ -36,15 +33,14 @@ class BaselineParityE2ETest {
     @Test
     @Timeout(90)
     void e_switches_off_priority_has_no_effect_and_dispatch_is_fifo() throws Exception {
-        // autoTpm=false：批队列用 LEGACY 序（构造时冻结），全部开关保持默认关闭
+        // autoTpm=false：构造时选择 FIFO 排队，不启用抢占。
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false)) {
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.fixedWindowDecision().setMaxRequests(2);
-            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
+            h.config.getDispatcher().setMaxInflightPerPrefillWorker(1);
             h.startAutoPump(10);
 
-            // 预热：首笔请求走冷 gRPC 通道 + JIT，异步发送可能被后续批次超越
-            // （传输层竞态，非被测行为）。先发一笔不计入断言的请求压热链路。
+            // 预热请求不计入顺序和延迟断言。
             h.scheduler.submit(h.context(1999, 50)).get(10, TimeUnit.SECONDS);
             AutoTpmE2EHarness.await(() -> !h.engineArrivalOrder.isEmpty(), 5_000,
                     "warm-up request must reach the engine");
@@ -59,7 +55,7 @@ class BaselineParityE2ETest {
             long lastSubmitMs = 0;
             for (int i = 0; i < PER_PRIORITY; i++) {
                 for (int priority : PRIORITIES) {
-                    // 唯一 enqueuedAtMs：等待时钟前进 ≥2ms 再提交
+                    // 各优先级按相同的 2ms 间隔轮转提交。
                     while (System.currentTimeMillis() - lastSubmitMs < 2) {
                         Thread.onSpinWait();
                     }
@@ -79,13 +75,13 @@ class BaselineParityE2ETest {
             for (CompletableFuture<Response> future : futures) {
                 Response response = future.get(1, TimeUnit.SECONDS);
                 assertTrue(response.isSuccess(),
-                        "baseline must behave like legacy — every request succeeds, got "
+                        "every FIFO baseline request must succeed, got "
                                 + response.getCode() + ": " + response.getErrorMessage());
             }
 
-            // 旧逻辑 = 严格 FIFO：引擎到达顺序与提交顺序逐位相同，priority 无影响
+            // 单批次并发下，引擎到达顺序与 FIFO 提交顺序逐位相同。
             assertEquals(submissionOrder, new ArrayList<>(h.engineArrivalOrder),
-                    "with all switches off the dispatch order must be exactly FIFO");
+                    "with one in-flight batch, engine arrivals must preserve FIFO regardless of priority");
 
             // 无任何抢占痕迹
             verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),

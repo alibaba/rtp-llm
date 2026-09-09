@@ -166,51 +166,41 @@ SLO_BATCH_DRAIN_SECONDS="${SLO_BATCH_DRAIN_SECONDS:-0}"
 FLEXLB_PV_LOG="${FLEXLB_PV_LOG:-off}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
-FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
-# Metric exposure is controlled by a single configurable whitelist — there
-# is no mode switch. The master registers/reports only the series matching
-# the comma-separated prometheus-form prefixes below — the master-side
-# counterpart of the G3 collector whitelist (the collector re-filters on
-# top of this; the whitelist trims at the source, ~100 unconsumed series
-# down to the consumed set). MUST stay in sync with
-# MASTER_PROMETHEUS_PREFIXES in eval_collectors.py (bidirectional
-# reference: the collector-side comment points back here); env ->
-# flexlb.monitor.metric-whitelist via relaxed binding (see
-# WhitelistMetricsFilterConfig). An explicitly empty/blank value fails
-# closed (no flexlb_* series at all); use the bare "flexlb_" prefix to
-# expose everything flexlb_*.
-FLEXLB_MONITOR_METRIC_WHITELIST="${FLEXLB_MONITOR_METRIC_WHITELIST:-flexlb_app_cache_,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_inflight_max_age_ms,flexlb_app_flexlb_inflight_ttl,flexlb_app_engine_balancing_master_dispatch_reason_total,flexlb_app_engine_balancing_master_batch_size,flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_flexlb_scheduler_inflight_size,flexlb_app_flexlb_inflight_batch_count,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count}"
-HIPPO_ROLE="${HIPPO_ROLE:-test}"
+MASTER_METRIC_WHITELIST="flexlb_app_cache_,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_inflight_max_age_ms,flexlb_app_flexlb_inflight_ttl,flexlb_app_engine_balancing_master_dispatch_reason_total,flexlb_app_engine_balancing_master_batch_size,flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_flexlb_scheduler_inflight_size,flexlb_app_flexlb_inflight_batch_count,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count"
 
+# Benchmark workload values below are examples, not Java defaults. Override with
+# FLEXLB_CONFIG or PROCESS_CONFIG_FILE to size tokens and request lifetimes.
 DEFAULT_FLEXLB_CONFIG='{
-  "schemaVersion": 2,
+  "schemaVersion": 3,
+  "grpcServer": {"executorCoreSize": 128, "executorMaxSize": 128, "executorQueueSize": 1000},
   "scheduler": {
     "type": "QUEUE",
-    "ordering": {"type": "PRIORITY", "defaultPriority": 50},
+    "ordering": {
+      "type": "PRIORITY",
+      "defaultPriority": 50
+    },
     "decision": {
       "type": "FIXED_WINDOW",
       "maxRequests": 32,
       "maxCollectionWaitMs": 10,
       "maxPredictedExecutionMs": 550
-    },
-    "capacity": {
-      "maxOutstandingRequestsGlobal": 1000000,
-      "maxWaitingRequestsPerPrefillWorker": 1024
     }
   },
   "dispatcher": {
-    "type": "BATCH",
-    "enqueueRpcTimeoutMs": 5000
+    "type": "BATCH"
   },
   "router": {
     "roles": {
       "prefill": {
-        "executionTimeEstimator": {"type": "FORMULA"},
-        "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"}
+        "executionTimeEstimator": {
+          "type": "FORMULA"
+        }
       },
       "decode": {
-        "availability": {"maxKvUsagePercent": 90, "maxEngineRequests": 132},
-        "kvReservation": {"maxOutputTokensForEstimate": 1000}
+        "availability": {
+          "maxKvUsagePercent": 90,
+          "maxEngineRequests": 132
+        }
       }
     }
   },
@@ -224,26 +214,16 @@ DEFAULT_FLEXLB_CONFIG='{
       "metricsEnabled": true,
       "requestTraceLogEnabled": false
     }
+  },
+  "requestLifecycle": {
+    "request": {
+      "timeoutMs": 3600000
+    },
+    "decision": {
+      "lifetime": 2.0
+    }
   }
 }'
-OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
-OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
-HIPPO_ROLE="${HIPPO_ROLE:-flexlb_eval_master}"
-
-# Optional file-based service discovery (dynamic engine add/remove).
-# Empty (default) = disabled: mock engine keeps the env-file (NoOp discovery)
-# path, master falls back to NoOpServiceDiscovery — behavior unchanged.
-# Set to a path (or "auto"/"1" = ${RUN_DIR}/discovery.json when START_MOCK=1)
-# to enable: the mock engine writes the domain→hosts mapping via
-# --discovery-file (kept in sync by /add_engine + /remove_engine) and the
-# master consumes it via FLEXLB_DISCOVERY_FILE (→ flexlb.discovery.file).
-FLEXLB_DISCOVERY_FILE="${FLEXLB_DISCOVERY_FILE:-}"
-
-# These are independent transport settings, not FLEXLB_CONFIG fields.
-export FLEXLB_GRPC_EXECUTOR_CORE_SIZE="${FLEXLB_GRPC_EXECUTOR_CORE_SIZE:-128}"
-export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
-# FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE: no script default — code default (1000) applies
-# unless the caller exports it explicitly (still forwarded via the environment).
 
 MOCK_PID=""
 FLEXLB_PID=""
@@ -640,7 +620,7 @@ start_mock_per_engine_poller() {
 # batcher and routing queue gauges, inflight max age, dispatch reason
 # counters, the auto_tpm request-count / all_qps counters and the inflight
 # gauge quintet) before appending. The master-side whitelist
-# (FLEXLB_MONITOR_METRIC_WHITELIST above) already trims the exposition at
+# (MASTER_METRIC_WHITELIST above) already trims the exposition at
 # the source down to the same set; this collector-side whitelist re-filters
 # and stays in sync by convention.
 # Same "# ts=" grouped layout as G1.
@@ -815,20 +795,10 @@ ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 FLEXLB_ENV_FILE="${RUN_DIR}/flexlb_env.txt"
 
 JAVA_MOCK_DISCOVERY_ARGS=()
-MASTER_DISCOVERY_ENV=()
-FLEXLB_DISCOVERY_FILE_PATH=""
-if [[ -n "${FLEXLB_DISCOVERY_FILE}" ]]; then
-  if [[ "${FLEXLB_DISCOVERY_FILE}" == "auto" || "${FLEXLB_DISCOVERY_FILE}" == "1" ]]; then
-    if [[ "${START_MOCK}" != "1" ]]; then
-      echo "FLEXLB_DISCOVERY_FILE=auto requires START_MOCK=1 (mock engine writes the file); set an explicit path instead" >&2
-      exit 1
-    fi
-    FLEXLB_DISCOVERY_FILE_PATH="${RUN_DIR}/discovery.json"
-  else
-    FLEXLB_DISCOVERY_FILE_PATH="${FLEXLB_DISCOVERY_FILE}"
-  fi
-  JAVA_MOCK_DISCOVERY_ARGS=(--discovery-file "${FLEXLB_DISCOVERY_FILE_PATH}")
-  MASTER_DISCOVERY_ENV=("FLEXLB_DISCOVERY_FILE=${FLEXLB_DISCOVERY_FILE_PATH}")
+MOCK_DISCOVERY_FILE=""
+if [[ "${START_MOCK}" == "1" ]]; then
+  MOCK_DISCOVERY_FILE="${RUN_DIR}/discovery.json"
+  JAVA_MOCK_DISCOVERY_ARGS=(--discovery-file "${MOCK_DISCOVERY_FILE}")
 fi
 
 if [[ "${START_MOCK}" == "1" ]]; then
@@ -870,8 +840,8 @@ if [[ "${START_MOCK}" == "1" ]]; then
   MOCK_PID="$!"
   echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
   echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
-  if [[ -n "${FLEXLB_DISCOVERY_FILE_PATH}" ]]; then
-    echo "File service discovery: engine maintains ${FLEXLB_DISCOVERY_FILE_PATH} (add_engine/remove_engine keep it in sync)"
+  if [[ -n "${MOCK_DISCOVERY_FILE}" ]]; then
+    echo "File service discovery: engine maintains ${MOCK_DISCOVERY_FILE} (add_engine/remove_engine keep it in sync)"
   fi
   # The Java process writes discovery files only after every gRPC port is bound.
   wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
@@ -907,8 +877,7 @@ import json
 import sys
 
 payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-for key, value in payload["env"].items():
-    print(f"{key}={value}")
+print("MODEL_SERVICE_CONFIG=" + payload["env"]["MODEL_SERVICE_CONFIG"])
 PY
 )
 
@@ -925,7 +894,8 @@ envs = payload.get("zone_process_setting", {}).get("process_info", {}).get("envs
 for item in envs:
     if not isinstance(item, list) or len(item) != 2:
         continue
-    sys.stdout.write(f"{str(item[0])}={str(item[1])}\0")
+    if item[0] in {"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG", "FLEXLB_SYNC_CONSISTENCY_CONFIG", "LOG_LEVEL", "HIPPO_ROLE"}:
+        sys.stdout.write(f"{str(item[0])}={str(item[1])}\0")
 PY
   )
 fi
@@ -975,20 +945,6 @@ PY
 )"
 fi
 
-RUNTIME_OVERRIDE_ENV_ARGS=()
-OVERRIDE_ENV_KEYS=(
-  FLEXLB_GRPC_EXECUTOR_CORE_SIZE
-  FLEXLB_GRPC_EXECUTOR_MAX_SIZE
-  FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
-  FLEXLB_MONITOR_ENABLED
-  FLEXLB_MONITOR_METRIC_WHITELIST
-)
-for key in "${OVERRIDE_ENV_KEYS[@]}"; do
-  if declare -p "${key}" >/dev/null 2>&1; then
-    RUNTIME_OVERRIDE_ENV_ARGS+=("${key}=${!key}")
-  fi
-done
-
 JAVA_HEAP_OPTS=()
 JVM_HEAP_SIZE=""
 if [[ -f "${PROCESS_CONFIG_FILE}" ]]; then
@@ -1020,13 +976,8 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     exit 1
   fi
   if [[ -n "${FLEXLB_START_CMD:-}" ]]; then
-    env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
-      "${MASTER_DISCOVERY_ENV[@]}" \
+    env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-      "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
-      "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
-      "HIPPO_ROLE=${HIPPO_ROLE}" \
-      "FLEXLB_LOG_PATH=${FLEXLB_LOG_PATH}" \
       bash -lc "${FLEXLB_START_CMD}" >"${RUN_DIR}/flexlb.log" 2>&1 &
   else
     if [[ ! -f "${FLEXLB_JAR}" ]]; then
@@ -1038,18 +989,14 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     if [[ "${FLEXLB_PV_LOG}" != "on" ]]; then
       MASTER_LOG_ARGS+=(--logging.level.pvLogger=WARN)
     fi
-    env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
-      "${MASTER_DISCOVERY_ENV[@]}" \
+    env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-      "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
-      "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
-      "HIPPO_ROLE=${HIPPO_ROLE}" \
-      "FLEXLB_LOG_PATH=${FLEXLB_LOG_PATH}" \
       java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
       --server.port="${FLEXLB_HTTP_PORT}" \
       --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
       --spring.profiles.active="${SPRING_PROFILE:-default}" \
       --flexlb.log.path="${FLEXLB_LOG_PATH}" \
+      --flexlb.monitor.metric-whitelist="${MASTER_METRIC_WHITELIST}" \
       ${MASTER_LOG_ARGS[@]+"${MASTER_LOG_ARGS[@]}"} \
       >"${RUN_DIR}/flexlb.log" 2>&1 &
   fi
