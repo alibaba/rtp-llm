@@ -215,6 +215,53 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerHistoryMatchesEachCausalPrefix) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types    = {CacheGroupType::FULL};
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 32;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    ResourceContext resource_context;
+
+    auto stream1 = createContextStream(model_config, runtime_config, resource_context, {4, 5}, 1);
+    auto stream2 = createContextStream(model_config, runtime_config, resource_context, {12, 13, 14}, 2);
+    for (auto& stream : {stream1, stream2}) {
+        stream->setScoreLen(4);
+        stream->generateConfig()->repetition_penalty = 2.0f;
+    }
+    StreamGroups            stream_groups({stream1, stream2});
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    // Each verify row predicts the next token after the corresponding input.
+    // Include a repeated proposal to distinguish token counts from set equality.
+    model_input.combo_tokens = torch::tensor({5, 7, 7, 9, 14, 16, 17, 18}, torch::kInt32);
+    model_output.logits = torch::zeros({8, 32}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto result         = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output);
+    ASSERT_TRUE(result.ok());
+    const auto&                             sampler  = result.value();
+    const std::vector<std::vector<int32_t>> expected = {{4, 5},
+                                                        {4, 5, 7},
+                                                        {4, 5, 7, 7},
+                                                        {4, 5, 7, 7, 9},
+                                                        {12, 13, 14},
+                                                        {12, 13, 14, 16},
+                                                        {12, 13, 14, 16, 17},
+                                                        {12, 13, 14, 16, 17, 18}};
+    for (int64_t row = 0; row < static_cast<int64_t>(expected.size()); ++row) {
+        SCOPED_TRACE(row);
+        EXPECT_EQ(sampler.sequence_lengths[row].item<int32_t>(), expected[row].size());
+        EXPECT_EQ(toVec<int32_t>(sampler.token_ids[row].narrow(0, 0, expected[row].size())), expected[row]);
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
