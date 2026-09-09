@@ -40,7 +40,9 @@ size_t alignUp(size_t value, size_t alignment) {
 DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_stride_bytes,
                                                       size_t             layer_num,
                                                       size_t             usable_count,
-                                                      const std::string& pool_name) {
+                                                      const std::string& pool_name,
+                                                      size_t             tokens_per_block) {
+    RTP_LLM_CHECK(tokens_per_block > 0);
     const size_t physical_block_count = usable_count + 1;
     const size_t block_stride_bytes   = layer_stride_bytes * layer_num;
 
@@ -61,7 +63,7 @@ DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_s
     layout.block_stride_bytes         = block_stride_bytes;
     layout.total_size_bytes           = layout.kv_block_pool_size_bytes;
     layout.local_head_num_kv          = 1;
-    layout.seq_size_per_block         = 1;
+    layout.seq_size_per_block         = tokens_per_block;
     layout.kernel_blocks_per_kv_block = 1;
     config->memory_layouts.push_back(layout);
 
@@ -125,8 +127,10 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
                                                 size_t                               group_set_id,
                                                 std::shared_ptr<const CacheTopology> topology,
                                                 const std::vector<size_t>&           group_ids,
-                                                size_t                               sliding_window_size) {
-    auto group_set = std::make_shared<SWAGroupSet>(sliding_window_size, 1, device_pools, host_pool, disk_pool);
+                                                size_t                               sliding_window_size,
+                                                size_t                               tokens_per_block) {
+    auto group_set =
+        std::make_shared<SWAGroupSet>(sliding_window_size, tokens_per_block, device_pools, host_pool, disk_pool);
     group_set->initialize(group_set_id, std::move(topology), group_ids);
     return group_set;
 }
@@ -134,8 +138,10 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
 std::shared_ptr<const CacheTopology>
 BenchmarkFixture::createTopology(const std::vector<std::pair<std::string, rtp_llm::CacheGroupType>>& group_specs,
                                  const std::vector<size_t>& layer_stride_bytes_per_group,
+                                 size_t                     tokens_per_block,
                                  const std::vector<size_t>& layer_counts_per_group,
                                  const std::vector<size_t>& sliding_windows) {
+    RTP_LLM_CHECK(tokens_per_block > 0);
     RTP_LLM_CHECK(group_specs.size() == layer_stride_bytes_per_group.size());
     RTP_LLM_CHECK(layer_counts_per_group.empty() || layer_counts_per_group.size() == group_specs.size());
     RTP_LLM_CHECK(sliding_windows.empty() || sliding_windows.size() == group_specs.size());
@@ -162,8 +168,8 @@ BenchmarkFixture::createTopology(const std::vector<std::pair<std::string, rtp_ll
         }
         group_base.block_num                 = 0;
         group_base.local_kv_head_num         = 1;
-        group_base.seq_size_per_block        = 1;
-        group_base.kernel_seq_size_per_block = 1;
+        group_base.seq_size_per_block        = tokens_per_block;
+        group_base.kernel_seq_size_per_block = tokens_per_block;
         group_base.kv_block_stride_bytes     = layer_stride_bytes_per_group[i];
         group_base.kv_scale_stride_bytes     = 0;
         for (size_t l = 0; l < layer_count; ++l) {

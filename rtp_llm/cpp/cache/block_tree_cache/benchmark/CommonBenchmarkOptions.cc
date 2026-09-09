@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkArgumentParser.h"
 
 #include <cmath>
-#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 
@@ -23,10 +22,7 @@ BenchmarkOptions BenchmarkOptions::parse(int& argc, char**& argv) {
             opts.output_json_path = next();
         else if (key == "max-device-memory-fraction")
             opts.max_device_memory_fraction = parseDouble(key, next);
-        else if (key == "help") {
-            printHelp();
-            std::exit(0);
-        } else
+        else
             return false;
         return true;
     });

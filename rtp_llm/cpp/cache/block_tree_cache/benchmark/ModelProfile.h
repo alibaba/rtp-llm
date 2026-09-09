@@ -35,6 +35,7 @@ struct GroupSetInfo {
 
 struct ModelProfile {
     std::string               profile_id;
+    size_t                    tokens_per_block{0};
     std::vector<GroupInfo>    groups;
     std::vector<GroupSetInfo> group_sets;
     std::string               sha256_hex;

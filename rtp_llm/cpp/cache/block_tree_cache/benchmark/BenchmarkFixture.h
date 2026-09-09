@@ -34,8 +34,11 @@ class BenchmarkFixture {
 public:
     // Pool builders (static, no test utility dependency). layer_stride_bytes
     // is the per-layer stride; a block holds layer_num consecutive layers.
-    static std::shared_ptr<DeviceBlockPool>
-    createDevicePool(size_t layer_stride_bytes, size_t layer_num, size_t usable_count, const std::string& pool_name);
+    static std::shared_ptr<DeviceBlockPool> createDevicePool(size_t             layer_stride_bytes,
+                                                             size_t             layer_num,
+                                                             size_t             usable_count,
+                                                             const std::string& pool_name,
+                                                             size_t             tokens_per_block);
 
     static std::shared_ptr<HostBlockPool>
     createHostPool(size_t payload_bytes, size_t usable_count, const std::string& pool_name = "benchmark_host");
@@ -62,7 +65,8 @@ public:
                                                        size_t                                        group_set_id,
                                                        std::shared_ptr<const CacheTopology>          topology,
                                                        const std::vector<size_t>&                    group_ids,
-                                                       size_t sliding_window_size);
+                                                       size_t sliding_window_size,
+                                                       size_t tokens_per_block);
 
     // Build a shared CacheTopology: one group per entry with a unique tag.
     // layer_stride_bytes_per_group is the per-layer stride; each group gets
@@ -70,6 +74,7 @@ public:
     static std::shared_ptr<const CacheTopology>
     createTopology(const std::vector<std::pair<std::string, rtp_llm::CacheGroupType>>& group_specs,
                    const std::vector<size_t>&                                          layer_stride_bytes_per_group,
+                   size_t                                                              tokens_per_block,
                    const std::vector<size_t>&                                          layer_counts_per_group = {},
                    const std::vector<size_t>&                                          sliding_windows        = {});
 

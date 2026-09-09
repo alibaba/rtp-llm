@@ -369,8 +369,9 @@ TreeBenchmarkRunner::TreeBenchmarkRunner(const ModelProfile& profile,
 }
 
 bool TreeBenchmarkRunner::run() {
-    const OnlineTreeWorkloadConfig config       = resolvedConfig();
-    const bool                     benchmark_ok = runOnlineBenchmark(config);
+    OnlineTreeWorkloadConfig config = resolvedConfig();
+    config.setTokensPerBlock(profile_.tokens_per_block);
+    const bool benchmark_ok = runOnlineBenchmark(config);
     writer_.setStatus(benchmark_ok ? "completed" : "failed");
 
     bool output_ok = true;
@@ -404,13 +405,17 @@ std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(const Online
         group_payloads.push_back(BenchmarkFixture::computeScaledPayload(gs_info.payload_bytes));
         sliding_windows.push_back(gs_info.sliding_window_size);
     }
-    auto topology = BenchmarkFixture::createTopology(group_specs, group_payloads, {}, sliding_windows);
+    auto topology =
+        BenchmarkFixture::createTopology(group_specs, group_payloads, profile_.tokens_per_block, {}, sliding_windows);
 
     std::vector<GroupSetPtr> group_sets;
     for (size_t gs_idx = 0; gs_idx < profile_.group_sets.size(); ++gs_idx) {
-        auto device_pool = BenchmarkFixture::createDevicePool(
-            group_payloads[gs_idx], 1, config.device_pool_blocks, "device_" + profile_.group_sets[gs_idx].name);
-        auto host_pool = BenchmarkFixture::createHostPool(
+        auto device_pool = BenchmarkFixture::createDevicePool(group_payloads[gs_idx],
+                                                              1,
+                                                              config.device_pool_blocks,
+                                                              "device_" + profile_.group_sets[gs_idx].name,
+                                                              profile_.tokens_per_block);
+        auto host_pool   = BenchmarkFixture::createHostPool(
             group_payloads[gs_idx], config.host_pool_blocks, "host_" + profile_.group_sets[gs_idx].name);
         const std::vector<size_t> group_ids = {gs_idx};
 
@@ -421,7 +426,8 @@ std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(const Online
                                                                      gs_idx,
                                                                      topology,
                                                                      group_ids,
-                                                                     profile_.group_sets[gs_idx].sliding_window_size));
+                                                                     profile_.group_sets[gs_idx].sliding_window_size,
+                                                                     profile_.tokens_per_block));
         } else {
             group_sets.push_back(
                 BenchmarkFixture::createFullGroupSet({device_pool}, host_pool, nullptr, gs_idx, topology, group_ids));
@@ -556,8 +562,8 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     writer_.addResolvedConfigInt("warmup_seconds", static_cast<int64_t>(config.warmup_seconds));
     writer_.addResolvedConfigInt("measured_seconds", static_cast<int64_t>(config.measured_seconds));
     writer_.addResolvedConfigInt("task_pool_size_resolved", static_cast<int64_t>(options_.task_pool_size));
-    writer_.addResolvedConfigInt(
-        "shared_transfer_worker_count", static_cast<int64_t>(BlockTreeCacheConfig{}.transfer_worker_count));
+    writer_.addResolvedConfigInt("shared_transfer_worker_count",
+                                 static_cast<int64_t>(BlockTreeCacheConfig{}.transfer_worker_count));
     writer_.addResolvedConfig("completion_queue_policy", "unbounded_priority_fifo");
     writer_.addResolvedConfigInt("foreground_scheduler_threads", 1);
     writer_.addResolvedConfigInt("repetition_identity", static_cast<int64_t>(repetition_id_));

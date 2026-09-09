@@ -50,6 +50,7 @@ struct OnlineTreeWorkloadConfig {
     // request shape (shared base + unique suffix, load-before-forward, fixed
     // batch sleep) but runs in seconds instead of minutes.
     static OnlineTreeWorkloadConfig smokeTestConfig();
+    void                            setTokensPerBlock(size_t value);
 };
 
 // One deterministic trace entry. Paths are pre-generated before setup; the
@@ -132,6 +133,7 @@ private:
     int64_t nextTopologyKey();
     int64_t nextSuffixKey(size_t request_index, size_t suffix_index);
 
+    size_t                               suffix_stride_{0};
     uint64_t                             seed_;
     OnlineTreeWorkloadConfig             config_;
     std::vector<PathKeys>                topology_paths_;

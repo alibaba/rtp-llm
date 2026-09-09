@@ -24,10 +24,13 @@ void consumeOptions(int& argc, char**& argv, Handler&& handler) {
         const std::string key          = argument.substr(2, equal == std::string::npos ? equal : equal - 2);
         const std::string inline_value = equal == std::string::npos ? "" : argument.substr(equal + 1);
         auto              next         = [&]() {
-            if (!inline_value.empty()) {
+            if (equal != std::string::npos) {
+                if (inline_value.empty()) {
+                    throw std::runtime_error("Missing value for --" + key);
+                }
                 return inline_value;
             }
-            if (++index < argc) {
+            if (++index < argc && std::string(argv[index]).rfind("--", 0) != 0) {
                 return std::string(argv[index]);
             }
             throw std::runtime_error("Missing value for --" + key);

@@ -1,5 +1,10 @@
 load("//:def.bzl", "copts")
 
+CUDA_ONLY = select({
+    "@//:using_cuda": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 cc_library(
     name = "transfer_benchmark_workload",
     srcs = ["TransferBenchmarkWorkload.cc"],
@@ -58,6 +63,7 @@ cc_library(
 
 cc_library(
     name = "benchmark_fixture",
+    target_compatible_with = CUDA_ONLY,
     srcs = [
         "BenchmarkFixture.cc",
     ],
@@ -89,6 +95,7 @@ cc_library(
 
 cc_library(
     name = "tree_benchmark_runner",
+    target_compatible_with = CUDA_ONLY,
     srcs = [
         "TreeBenchmarkRunner.cc",
     ],
@@ -110,6 +117,7 @@ cc_library(
 
 cc_library(
     name = "transfer_benchmark_runner",
+    target_compatible_with = CUDA_ONLY,
     srcs = [
         "TransferBenchmarkRunner.cc",
     ],
@@ -141,7 +149,6 @@ cc_test(
     name = "transfer_benchmark_workload_test",
     srcs = ["TransferBenchmarkWorkloadTest.cc"],
     copts = copts(),
-    tags = ["manual"],
     deps = [
         ":transfer_benchmark_workload",
         "@com_google_googletest//:gtest",
@@ -150,12 +157,14 @@ cc_test(
 )
 
 cc_test(
-    name = "tree_workload_generator_test",
+    name = "online_tree_scheduler_test",
+    target_compatible_with = CUDA_ONLY,
     exec_properties = {"gpu": "A10"},
-    srcs = ["TreeWorkloadGeneratorTest.cc"],
+    srcs = ["OnlineTreeSchedulerTest.cc"],
     copts = copts() + ["-fno-access-control"],
     deps = [
         ":online_tree_scheduler",
+        ":benchmark_fixture",
         ":tree_benchmark_runner",
         ":tree_workload_generator",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
@@ -169,6 +178,7 @@ cc_test(
 
 cc_binary(
     name = "block_tree_cache_gpu_benchmark",
+    target_compatible_with = CUDA_ONLY,
     srcs = [
         "BlockTreeCacheBenchmarkMain.cc",
     ],
@@ -176,7 +186,7 @@ cc_binary(
     tags = ["manual", "local", "no-remote"],
     exec_properties = {"gpu": "H20"},
     deps = [
-        ":benchmark_common",
+        ":benchmark_cli",
         ":transfer_benchmark_runner",
         ":tree_benchmark_runner",
     ] + select({
@@ -206,7 +216,6 @@ py_test(
         "run_block_tree_cache_benchmark_test.py",
     ],
     main = "run_block_tree_cache_benchmark_test.py",
-    tags = ["manual"],
     data = [
         "docs/benchmark_cases.md",
         "docs/nsys_collection_guide.md",
@@ -217,6 +226,7 @@ py_test(
 
 py_binary(
     name = "block_tree_cache_benchmark_driver",
+    target_compatible_with = CUDA_ONLY,
     srcs = [
         "run_block_tree_cache_benchmark.py",
         "benchmark_cases.py",
@@ -232,6 +242,7 @@ py_binary(
 
 py_test(
     name = "block_tree_cache_benchmark_smoke_test",
+    target_compatible_with = CUDA_ONLY,
     srcs = ["run_block_tree_cache_benchmark_smoke_test.py"],
     main = "run_block_tree_cache_benchmark_smoke_test.py",
     data = [
@@ -243,4 +254,41 @@ py_test(
     # Runs the CUDA benchmark binary; keep on GPU machines and off remote exec.
     tags = ["gpu", "local", "exclusive", "manual"],
     timeout = "moderate",
+)
+
+cc_test(
+    name = "tree_workload_generator_test",
+    srcs = ["TreeWorkloadGeneratorTest.cc"],
+    copts = copts(),
+    deps = [
+        ":tree_workload_generator",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "benchmark_cli",
+    srcs = ["BenchmarkCli.cc"],
+    hdrs = ["BenchmarkCli.h"],
+    copts = copts(),
+    deps = [":benchmark_common"],
+)
+
+cc_test(
+    name = "benchmark_cli_test",
+    srcs = ["BenchmarkCliTest.cc"],
+    copts = copts(),
+    data = ["//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1"],
+    deps = [":benchmark_cli", "@com_google_googletest//:gtest_main"],
+)
+
+cc_test(
+    name = "model_profile_test",
+    srcs = ["ModelProfileTest.cc"],
+    copts = copts(),
+    data = [
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
+    ],
+    deps = [":benchmark_common", "@com_google_googletest//:gtest_main"],
 )

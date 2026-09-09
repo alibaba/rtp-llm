@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TreeBenchmarkOptions.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkArgumentParser.h"
 
-#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 
@@ -15,9 +14,6 @@ TreeOptions TreeOptions::parse(int& argc, char**& argv) {
             if (opts.task_pool_size == 0) {
                 throw std::runtime_error("--task-pool-size must be positive");
             }
-        } else if (key == "help") {
-            printHelp();
-            std::exit(0);
         } else
             return false;
         return true;
