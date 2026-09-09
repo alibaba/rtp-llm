@@ -182,8 +182,8 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         default=MoeStrategyName.AUTO.value,
         help=(
             "指定moe strategy, 默认为auto。fp4_b12x 仅适用于 sm_120/121，"
-            "并要求逻辑 MoE tp_size=1、ep_size=1、dp_size=1；启用 prefill CP 时"
-            "其逻辑 MoE 视图仍须满足该拓扑。"
+            "要求 ep_size=1、dp_size=1，并支持 tp_size>=1 的普通 pure TP；"
+            "启用 prefill CP 时，物理 TP 组用于 CP，逻辑 MoE tp_size=1。"
         ),
     )
     moe_group.add_argument(
@@ -196,9 +196,9 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help=(
             "指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 "
             "TensorRT-LLM), cutedsl (使用 CuTe DSL), b12x (仅支持 "
-            "sm_120/121 且逻辑 MoE tp_size=1、ep_size=1、dp_size=1 的 "
-            "flashinfer b12x；启用 prefill CP 时其逻辑 MoE 视图仍须满足该拓扑，"
-            "该架构没有其他单卡 FP4 fallback)。"
+            "sm_120/121 且要求 ep_size=1、dp_size=1 的 flashinfer b12x；"
+            "支持 tp_size>=1 的普通 pure TP；启用 prefill CP 时，物理 TP 组用于 CP，"
+            "逻辑 MoE tp_size=1；该架构没有其他 FP4 fallback)。"
         ),
     )
     moe_group.add_argument(

@@ -1246,9 +1246,19 @@ class TestCudaFp4StrategySelection(unittest.TestCase):
                     config = self._make_config("tp_eq_ep", fp4_moe_op)
                     self.assertEqual(self._candidates(config), self.NONE_SELECTED)
 
-    def test_sm12x_tp_only_rejects_all(self) -> None:
+    def test_sm12x_tp_only_selects_b12x(self) -> None:
         with self._arch(sm12x=True):
-            for fp4_moe_op in ("auto", "b12x", "cutedsl", "trtllm"):
+            for fp4_moe_op in ("auto", "b12x"):
+                with self.subTest(fp4_moe_op=fp4_moe_op):
+                    config = self._make_config("tp_only", fp4_moe_op)
+                    self.assertEqual(
+                        self._candidates(config),
+                        {**self.NONE_SELECTED, "b12x": True},
+                    )
+
+    def test_sm12x_tp_only_rejects_legacy_operators(self) -> None:
+        with self._arch(sm12x=True):
+            for fp4_moe_op in ("cutedsl", "trtllm"):
                 with self.subTest(fp4_moe_op=fp4_moe_op):
                     config = self._make_config("tp_only", fp4_moe_op)
                     self.assertEqual(self._candidates(config), self.NONE_SELECTED)
