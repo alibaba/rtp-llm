@@ -16,6 +16,38 @@ import static org.mockito.Mockito.*;
 
 class IgraphConstraintTreePollerTest {
     @Test
+    void numericModeAllowsOmittedPrefixButPreservesExplicitPrefix() {
+        for (String prefix : new String[]{null, "", "pool_"}) {
+            var builds = builds();
+            var leader = mock(org.flexlb.consistency.LBStatusConsistencyService.class);
+            when(leader.isMaster()).thenReturn(true);
+            var variables = new java.util.HashMap<String, Object>();
+            variables.put("CONSTRAINT_TREE_IGRAPH_MODEL", "engine_service");
+            variables.put("CONSTRAINT_TREE_IGRAPH_BUCKET_ALGORITHM", "ITEM_ID_MOD");
+            variables.put("CONSTRAINT_TREE_IGRAPH_BUCKET_COUNT", "4000");
+            variables.put("CONSTRAINT_TREE_IGRAPH_DRY_RUN", "true");
+            if (prefix != null) { variables.put("CONSTRAINT_TREE_IGRAPH_KEY_PREFIX", prefix); }
+            var env = new org.springframework.mock.env.MockEnvironment();
+            env.getPropertySources().addFirst(new org.springframework.core.env.SystemEnvironmentPropertySource(
+                    "test-systemEnvironment", variables));
+            var nextBucket = new AtomicInteger();
+            SidBucketClient client = (key, limit, timeout) -> {
+                int bucket = nextBucket.getAndIncrement();
+                assertEquals((prefix == null ? "" : prefix) + bucket, key);
+                return CompletableFuture.completedFuture(List.of(new SidBucketClient.Row(
+                        key, Integer.toString(bucket), "C1C2")));
+            };
+            var poller = new IgraphConstraintTreePoller(client, builds, leader, env);
+            try {
+                poller.pollOnce();
+                assertEquals("VALIDATED_NO_PUBLISH", poller.getStatus().state());
+                assertEquals(4000, nextBucket.get());
+                verifyNoInteractions(builds);
+            } finally { poller.close(); }
+        }
+    }
+
+    @Test
     void explicitEmptyPrefixNumericConfigAndDryRunNeverPublish() {
         var builds = builds();
         var leader = mock(org.flexlb.consistency.LBStatusConsistencyService.class);

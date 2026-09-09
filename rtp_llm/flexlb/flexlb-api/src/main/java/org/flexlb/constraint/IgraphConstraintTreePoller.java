@@ -187,7 +187,10 @@ public class IgraphConstraintTreePoller {
 
     private static String requiredPrefix(Environment env) {
         String value = env.getProperty("constraint.tree.igraph.key.prefix");
-        if (value == null) { throw new IllegalArgumentException("missing iGraph key.prefix (explicit empty is allowed)"); }
+        if (value == null && "ITEM_ID_MOD".equals(env.getProperty("constraint.tree.igraph.bucket.algorithm"))) {
+            return "";
+        }
+        if (value == null) { throw new IllegalArgumentException("missing iGraph key.prefix for CRC32 mode"); }
         return value;
     }
 }

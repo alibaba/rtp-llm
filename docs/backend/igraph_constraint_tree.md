@@ -1,5 +1,9 @@
 # iGraph bucket input for the CSR constraint-tree Master
 
+Update (2026-09-09): `ITEM_ID_MOD` now accepts an omitted `KEY_PREFIX`, defaulting
+to plain numeric keys. Local regression passed 67 tests with no failures/errors/skips;
+see `build_logs/igraph_omitted_prefix_acceptance_20260908.log` (executed September 9).
+
 Status (2026-09-08, numeric-bucket update): Local acceptance passed: 66 tests,
 zero failures/errors/skips, with numeric 4000-bucket E2E and a 2.5-million-item
 synthetic merge. See `build_logs/igraph_numeric_acceptance_20260908.log`.
@@ -33,8 +37,10 @@ Writer/reader agreement for this implementation:
   numeric bucket, but the original item ID remains the skey.
 - `pkey = key_prefix + decimal(bucket)`; no zero padding. Defaults: 4096 buckets,
   e.g. prefix `gul_item_bucket_` gives keys `gul_item_bucket_0` ... `_4095`.
-- Explicit empty `KEY_PREFIX` supports plain numeric pkeys. Omitting the variable
-  is an error. `ITEM_ID_MOD`, count `4000`, empty prefix yields `"0"` ... `"3999"`.
+- `ITEM_ID_MOD` defaults to no prefix when `KEY_PREFIX` is omitted, for platforms
+  that reject empty environment values. Explicit empty or non-empty prefixes
+  remain supported. Legacy `CRC32` still requires an explicit prefix setting.
+  `ITEM_ID_MOD`, count `4000`, no prefix yields `"0"` ... `"3999"`.
 - `skey = item_id`; value field `sid` contains the C-coded SID, not token IDs.
 - Hash the exact canonical item ID string; do not use Java/Python's built-in
   string hash, signed CRC conversion, whitespace or inconsistent leading zeros.
@@ -133,13 +139,14 @@ For a numeric-source deployment override:
 ```text
 CONSTRAINT_TREE_IGRAPH_BUCKET_ALGORITHM=ITEM_ID_MOD
 CONSTRAINT_TREE_IGRAPH_BUCKET_COUNT=4000
-CONSTRAINT_TREE_IGRAPH_KEY_PREFIX=
 CONSTRAINT_TREE_IGRAPH_PKEY_FIELD=item_bucket_id
 CONSTRAINT_TREE_IGRAPH_CONCURRENCY=4
 CONSTRAINT_TREE_IGRAPH_RETRIES=0
 ```
 
-In zone JSON, preserve empty prefix as `["CONSTRAINT_TREE_IGRAPH_KEY_PREFIX", ""]`.
+For this numeric-source override, remove `CONSTRAINT_TREE_IGRAPH_KEY_PREFIX`
+entirely from zone JSON (do not retain an old prefix, or fill a space/`null`).
+Explicit empty still works on platforms that support it.
 MODEL must be the actual Worker discovery model key, not an inferred project name.
 
 Only the active Master polls. An additional round is skipped while a read is
