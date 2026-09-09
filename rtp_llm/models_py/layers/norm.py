@@ -81,7 +81,7 @@ class RMSNorm(RtpModule):
                     from rtp_llm.models_py.modules.base.rocm.norm import (
                         _requires_opus_rmsnorm,
                     )
-                except (ImportError, OSError) as exc:
+                except (ImportError, OSError, RuntimeError) as exc:
                     _disable_fused_rmsnorm(exc)
                 else:
                     if _requires_opus_rmsnorm(input_2d):
@@ -94,7 +94,7 @@ class RMSNorm(RtpModule):
             else:
                 try:
                     from rtp_llm.ops.compute_ops import rtp_llm_ops
-                except (ImportError, OSError) as exc:
+                except (ImportError, OSError, RuntimeError) as exc:
                     _disable_fused_rmsnorm(exc)
                 else:
                     output = torch.empty_like(input_2d)
@@ -184,7 +184,7 @@ class RMSResNorm(RtpModule):
                     from rtp_llm.models_py.modules.base.rocm.norm import (
                         _requires_opus_rmsnorm,
                     )
-                except (ImportError, OSError) as exc:
+                except (ImportError, OSError, RuntimeError) as exc:
                     _disable_fused_rmsnorm(exc)
                 else:
                     output = torch.empty_like(hidden_states)
