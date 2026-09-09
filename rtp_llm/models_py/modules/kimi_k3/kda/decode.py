@@ -16,6 +16,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     kimi_kda_short_conv_paged_target_verify,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.utils.k3_model_trace import record_module
 from rtp_llm.utils.model_weight import W
 
 
@@ -140,6 +141,11 @@ class KimiK3KDADecode(nn.Module):
             sequence_length,
             self.local_heads,
             self.head_dim,
+        )
+        record_module(self, "conv.qkv", (q, k, v))
+        record_module(self, "recurrence.block_map", block_map)
+        record_module(
+            self, "recurrence.sequence_lengths_plus_one", sequence_lengths_plus_one
         )
         output, _ = fused_recurrent_kda(
             q.reshape(indexed_shape),

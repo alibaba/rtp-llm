@@ -36,6 +36,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_quant import (
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.utils.k3_model_trace import record_module
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
 
@@ -446,6 +447,10 @@ class KimiK3KDA(nn.Module):
             hidden_states,
             prefill_sp_layout=prefill_sp_layout,
         )
+        record_module(self, "projection.qkv", (q_projected, k_projected, v_projected))
+        record_module(self, "projection.raw_gate", raw_gate)
+        record_module(self, "projection.raw_beta", raw_beta)
+        record_module(self, "projection.output_gate", output_gate_projected)
         token_count = q_projected.shape[0]
         output_gate = output_gate_projected.reshape(
             1, token_count, self.local_heads, self.head_dim
@@ -478,6 +483,7 @@ class KimiK3KDA(nn.Module):
                 attention_inputs=attention_inputs,
                 is_target_verify=is_target_verify,
             )
+        record_module(self, "recurrence.output", output)
         output = self._project_output(
             output,
             output_gate,

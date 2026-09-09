@@ -18,8 +18,8 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     prepare_kimi_kda_short_conv_metadata,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.utils.k3_model_trace import record_module
 from rtp_llm.utils.model_weight import W
-
 
 _CULA_LOGGED_DEVICES: set[int] = set()
 
@@ -190,9 +190,7 @@ def prepare_kimi_kda_prefill_metadata(
         else active_original_batch_indices
     )
     continuing = list(
-        [False] * sequence_count
-        if continuation_mask is None
-        else continuation_mask
+        [False] * sequence_count if continuation_mask is None else continuation_mask
     )
     if len(active_indices) != sequence_count or len(continuing) != sequence_count:
         raise ValueError(
@@ -215,9 +213,7 @@ def prepare_kimi_kda_prefill_metadata(
         active_original_batch_indices=torch.tensor(
             active_indices, dtype=torch.int64, device=device
         ),
-        continuation_mask=torch.tensor(
-            continuing, dtype=torch.bool, device=device
-        ),
+        continuation_mask=torch.tensor(continuing, dtype=torch.bool, device=device),
         active_original_batch_indices_host=tuple(active_indices),
         continuation_mask_host=tuple(continuing),
     )
@@ -312,9 +308,7 @@ class KimiK3KDAPrefill(nn.Module):
                 use_gate_in_kernel=True,
                 use_beta_sigmoid_in_kernel=True,
                 cu_seqlens=cula_cu_seqlens,
-                cu_seqlens_cpu=(
-                    None if cula_cu_seqlens is None else cu_seqlens_cpu
-                ),
+                cu_seqlens_cpu=(None if cula_cu_seqlens is None else cu_seqlens_cpu),
                 safe_gate=True,
                 lower_bound=float(self.gate_lower_bound),
                 disable_recompute=False,
@@ -362,9 +356,7 @@ class KimiK3KDAPrefill(nn.Module):
             )
         _, conv_cache = self.cache.get_views(kv_cache)
         current_conv = (
-            current_state.conv.index_select(
-                0, metadata.active_original_batch_indices
-            )
+            current_state.conv.index_select(0, metadata.active_original_batch_indices)
             if current_state is not None
             else None
         )
@@ -411,6 +403,11 @@ class KimiK3KDAPrefill(nn.Module):
             ).contiguous()
         else:
             recurrent_state = physical_initial_state
+        record_module(self, "conv.qkv", (q_conv, k_conv, v_conv))
+        record_module(self, "conv.final_state", final_conv)
+        record_module(self, "recurrence.initial_state", recurrent_state)
+        record_module(self, "recurrence.block_map", linear_block_map)
+        record_module(self, "recurrence.cu_seqlens", cu_seqlens)
         head_shape = (1, token_count, self.local_heads, self.head_dim)
         output = self._cula_checkpoint_prefill(
             q_conv.reshape(head_shape),
@@ -424,6 +421,7 @@ class KimiK3KDAPrefill(nn.Module):
             checkpoint_interval=metadata.page_size,
             checkpoint_states=metadata.recurrent_checkpoints,
         )
+        record_module(self, "recurrence.checkpoints", metadata.recurrent_checkpoints)
         self.cache.store_recurrent_checkpoints(
             metadata.recurrent_checkpoints,
             metadata.recurrent,
