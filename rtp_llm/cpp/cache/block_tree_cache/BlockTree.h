@@ -22,17 +22,10 @@ struct ReusableGroupLocation {
 
 using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>;
 
-struct BlockTreeAdoptedNode {
-    TreeNode*           node{nullptr};
-    std::vector<size_t> group_set_ids;
-    std::vector<Tier>   old_top_tiers;
-    std::vector<Tier>   new_top_tiers;
-};
-
 struct BlockTreeInsertResult {
-    std::vector<TreeNode*>            path;
-    std::vector<TreeNode*>            inserted_nodes;
-    std::vector<BlockTreeAdoptedNode> adopted_nodes;
+    std::vector<TreeNode*>                                 path;
+    std::vector<TreeNode*>                                 inserted_nodes;
+    std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
     // Borrowed from the tree; consumed under the BlockTreeCache mutex.
     std::vector<TreeNode*> newly_resident_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.

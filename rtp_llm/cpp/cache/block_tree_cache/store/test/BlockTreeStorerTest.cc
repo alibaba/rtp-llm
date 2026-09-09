@@ -303,14 +303,15 @@ protected:
         return true;
     }
 
-    void expectResidentPrefix(const BlockIndicesType& expected_blocks, bool has_lower_copy) {
+    void expectResidentPrefix(const BlockIndicesType& expected_blocks) {
         const std::vector<TreeNode*> path = env_->cache->tree()->findNode(keys_);
         ASSERT_EQ(path.size(), keys_.size());
         for (const TreeNode* node : path) {
             EXPECT_TRUE(node->is_resident);
             EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
             EXPECT_EQ(node->group_set_resources[0].getTopTier(), Tier::DEVICE);
-            EXPECT_EQ(node->group_set_resources[0].hasTier(GetParam()), has_lower_copy);
+            EXPECT_FALSE(node->group_set_resources[0].hasTier(GetParam()));
+            EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
         }
         for (Tier tier : {Tier::DEVICE, GetParam()}) {
             EXPECT_EQ(candidateCountForTier(*env_->cache, tier), 0u);
@@ -324,19 +325,13 @@ protected:
         EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
     }
 
-    void exerciseLoadCompletion(TransferCopyAction action, bool already_resident) {
-        if (already_resident) {
-            env_->cache->insert(keys_, resources_, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
-        }
+    void exerciseLoadCompletion(TransferCopyAction action) {
         auto                                   barrier = std::make_shared<CallbackBarrier>();
         block_tree_cache_detail::ScopeRollback release_barrier([barrier]() { barrier->release(); });
         ASSERT_TRUE(waitForIdle());
         const size_t submitted_before = engine_->submittedBatchCount();
         engine_->setCopyBehavior(action, barrier);
-        BlockTreeMatchPolicy policy;
-        policy.enable_device                            = !already_resident;
-        policy.enable_remote                            = false;
-        BlockTreeMatchResult                    result  = env_->cache->match(keys_, policy);
+        BlockTreeMatchResult                    result  = env_->cache->match(keys_);
         const std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
         ASSERT_NE(context, nullptr);
         ASSERT_EQ(context->loadDescs().size(), keys_.size());
@@ -358,7 +353,7 @@ protected:
         const std::vector<TreeNode*> busy_path = env_->cache->tree()->findNode(keys_);
         ASSERT_EQ(busy_path.size(), keys_.size());
         for (const TreeNode* node : busy_path) {
-            EXPECT_EQ(node->is_resident, already_resident);
+            EXPECT_FALSE(node->is_resident);
             EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
         }
         barrier->release();
@@ -372,58 +367,79 @@ protected:
         const std::vector<TreeNode*> settled_path = env_->cache->tree()->findNode(keys_);
         ASSERT_EQ(settled_path.size(), keys_.size());
         for (const TreeNode* node : settled_path) {
-            EXPECT_EQ(node->is_resident, already_resident);
+            EXPECT_FALSE(node->is_resident);
             EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-            EXPECT_EQ(node->group_set_resources[0].getTopTier(),
-                      succeeded || already_resident ? Tier::DEVICE : GetParam());
+            EXPECT_EQ(node->group_set_resources[0].getTopTier(), succeeded ? Tier::DEVICE : GetParam());
         }
 
         env_->cache->insert(keys_, resources_, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
-        BlockIndicesType expected_blocks = target_blocks;
-        if (!succeeded || already_resident) {
-            expected_blocks.clear();
-            for (const std::vector<GroupSetResource>& per_node : resources_) {
-                expected_blocks.push_back(per_node[0].device_blocks.front());
+        if (succeeded) {
+            expectResidentPrefix(target_blocks);
+            EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+        } else {
+            // A failed load retains the only source; resident insertion must not
+            // publish a second serving tier or mark an unpromoted prefix resident.
+            for (const TreeNode* node : settled_path) {
+                EXPECT_FALSE(node->is_resident);
+                EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
+                EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
             }
+            EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), keys_.size());
+            EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
         }
-        expectResidentPrefix(expected_blocks, !succeeded || already_resident);
     }
 
-    std::shared_ptr<StoreEnvironment>          env_;
+    std::shared_ptr<StoreEnvironment>                     env_;
     std::shared_ptr<ControlledPerRankBlockTransferEngine> engine_;
-    const CacheKeysType                        keys_{100, 200};
-    std::vector<std::vector<GroupSetResource>> resources_;
-    std::vector<BlockIndicesType>              request_holds_;
+    const CacheKeysType                                   keys_{100, 200};
+    std::vector<std::vector<GroupSetResource>>            resources_;
+    std::vector<BlockIndicesType>                         request_holds_;
 };
 
-TEST_P(ResidentTieredCacheTest, DeviceInsertRetainsAndProtectsExistingLowerCopy) {
+TEST_P(ResidentTieredCacheTest, ResidentInsertDoesNotDuplicateExistingLowerTier) {
     EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
     env_->cache->insert(keys_, resources_, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
-    BlockIndicesType expected_blocks;
-    for (const std::vector<GroupSetResource>& per_node : resources_) {
-        expected_blocks.push_back(per_node[0].device_blocks.front());
+    const auto path = env_->cache->tree()->findNode(keys_);
+    ASSERT_EQ(path.size(), keys_.size());
+    for (const TreeNode* node : path) {
+        EXPECT_FALSE(node->is_resident);
+        EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
+        EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
     }
-    expectResidentPrefix(expected_blocks, true);
     EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), keys_.size());
+    EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
+    EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
 }
 
 TEST_P(ResidentTieredCacheTest, SuccessfulAsyncLoadCanBePromotedToResidentAfterSettlement) {
-    exerciseLoadCompletion(TransferCopyAction::Succeed, false);
+    exerciseLoadCompletion(TransferCopyAction::Succeed);
 }
 
 TEST_P(ResidentTieredCacheTest, FailedAsyncLoadPreservesSourceForResidentRetry) {
-    exerciseLoadCompletion(TransferCopyAction::Fail, false);
+    exerciseLoadCompletion(TransferCopyAction::Fail);
+    ASSERT_FALSE(HasFatalFailure());
+    exerciseLoadCompletion(TransferCopyAction::Succeed);
 }
 
-TEST_P(ResidentTieredCacheTest, SuccessfulLowerTierReadDoesNotReadmitResidentNodes) {
-    exerciseLoadCompletion(TransferCopyAction::Succeed, true);
+TEST_P(ResidentTieredCacheTest, ResidentDeviceMatchDoesNotSubmitLowerTierReadOrReadmitNodes) {
+    exerciseLoadCompletion(TransferCopyAction::Succeed);
+    ASSERT_FALSE(HasFatalFailure());
+    const size_t submitted_before = engine_->submittedBatchCount();
+    engine_->setCopyBehavior(TransferCopyAction::Fail, nullptr);
+    BlockTreeMatchResult result = env_->cache->match(keys_);
+    EXPECT_EQ(result.matched_device_blocks, keys_.size());
+    EXPECT_EQ(result.async_context, nullptr);
+    EXPECT_EQ(engine_->submittedBatchCount(), submitted_before);
+    releaseRequestRefsForTest(*env_->cache, result.matched_device_resources);
+    for (const TreeNode* node : env_->cache->tree()->findNode(keys_)) {
+        EXPECT_TRUE(node->is_resident);
+        EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
+    }
+    EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
+    EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 0u);
 }
 
-TEST_P(ResidentTieredCacheTest, FailedLowerTierReadDoesNotReadmitResidentNodes) {
-    exerciseLoadCompletion(TransferCopyAction::Fail, true);
-}
-
-TEST_P(ResidentTieredCacheTest, CancelPendingLoadThenRegisterResidentWithoutReadmission) {
+TEST_P(ResidentTieredCacheTest, CancelPendingLoadThenRetryBeforeRegisteringResident) {
     BlockTreeMatchResult                    result  = env_->cache->match(keys_);
     const std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
@@ -436,21 +452,12 @@ TEST_P(ResidentTieredCacheTest, CancelPendingLoadThenRegisterResidentWithoutRead
     }
     ASSERT_TRUE(env_->cache->abortPendingLoad(context));
     EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
-    env_->cache->insert(keys_, resources_, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
-    BlockIndicesType expected_blocks;
-    for (const std::vector<GroupSetResource>& per_node : resources_) {
-        expected_blocks.push_back(per_node[0].device_blocks.front());
+    EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
+    for (const TreeNode* node : path) {
+        EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
     }
-    expectResidentPrefix(expected_blocks, true);
-
-    BlockTreeMatchPolicy lower_only;
-    lower_only.enable_device                                 = false;
-    lower_only.enable_remote                                 = false;
-    BlockTreeMatchResult                    resident_result  = env_->cache->match(keys_, lower_only);
-    const std::shared_ptr<LoadAsyncContext> resident_context = takeLoadContext(resident_result);
-    ASSERT_NE(resident_context, nullptr);
-    ASSERT_TRUE(env_->cache->abortPendingLoad(resident_context));
-    expectResidentPrefix(expected_blocks, true);
+    exerciseLoadCompletion(TransferCopyAction::Succeed);
 }
 
 INSTANTIATE_TEST_SUITE_P(HostAndDisk, ResidentTieredCacheTest, ::testing::Values(Tier::HOST, Tier::DISK));
