@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -74,6 +75,8 @@ class DecodePreemptionCoordinatorTest {
         secondTerminal.complete(new VictimTerminal(12L));
 
         assertTrue(result.get(1, TimeUnit.SECONDS).committed());
+        verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq(11L), anyLong());
+        verify(cancelChannel).cancel(eq(new CancelTarget("10.0.0.1", 9090)), eq(12L), anyLong());
         verify(endpoint).commitPriorityPreemption(1L);
         verify(endpoint, never()).abortPriorityPreemption(anyLong());
     }

@@ -27,7 +27,6 @@ public final class PreemptionRegistration {
     private DeferredTerminal pendingTerminal;
     private boolean pendingDeliveryConfirmation;
     private long pendingConfirmationBatchId;
-    private String postDeliveryFenceDetail;
 
     PreemptionRegistration(
             long requestId,
@@ -56,14 +55,6 @@ public final class PreemptionRegistration {
 
     String detail() {
         return detail;
-    }
-
-    String postDeliveryFenceDetail() {
-        return postDeliveryFenceDetail;
-    }
-
-    void requirePostDeliveryFence(String fenceDetail) {
-        postDeliveryFenceDetail = fenceDetail;
     }
 
     DeferredTerminal pendingTerminal() {
@@ -96,10 +87,6 @@ public final class PreemptionRegistration {
 
     boolean isReleasable() {
         return !settled && phase.isLocallyReleasable();
-    }
-
-    boolean isFenceTransferable() {
-        return !settled && phase.isFenceTransferable();
     }
 
     boolean isNotFound() {
