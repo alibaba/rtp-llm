@@ -28,6 +28,11 @@ def _get_sm_for_device(device_id: int) -> Tuple[int, int]:
     return major, minor
 
 
+@functools.cache
+def _get_cuda_device_name_for_device(device_id: int) -> str:
+    return torch.cuda.get_device_name(device_id)
+
+
 def is_sm90(device_id: Optional[Union[int, torch.device]] = None) -> bool:
     """SM 9.x Hopper (H100 / H200 / H800 / H20)."""
     if not is_cuda():
@@ -62,6 +67,19 @@ def is_sm12x(device_id: Optional[Union[int, torch.device]] = None) -> bool:
     if not is_cuda():
         return False
     return get_sm(device_id)[0] == 12
+
+
+def is_rtx_pro_5000_blackwell(
+    device_id: Optional[Union[int, torch.device]] = None,
+) -> bool:
+    if not is_cuda():
+        return False
+    resolved_device = _canonical_cuda_device(device_id)
+    return (
+        _get_sm_for_device(resolved_device) == (12, 0)
+        and _get_cuda_device_name_for_device(resolved_device)
+        == "NVIDIA RTX PRO 5000 Blackwell"
+    )
 
 
 def is_blackwell(device_id: Optional[Union[int, torch.device]] = None) -> bool:

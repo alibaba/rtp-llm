@@ -1,3 +1,6 @@
+import logging
+import os
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
@@ -19,7 +22,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla im
     check_attention_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import is_sm10x, is_sm90
+from rtp_llm.models_py.utils.arch import is_rtx_pro_5000_blackwell, is_sm10x, is_sm90
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -32,6 +35,7 @@ from rtp_llm.ops.compute_ops import (
 
 # Constants
 DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+MIN_CASCADE_BATCH_SIZE = 16
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
@@ -1027,6 +1031,144 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         )
 
 
+@dataclass(frozen=True)
+class CascadeDecodeMetadata:
+    shared_page_indices: torch.Tensor
+    suffix_page_indptr: torch.Tensor
+    suffix_page_indices: torch.Tensor
+    suffix_last_page_len: torch.Tensor
+    merge_mask: torch.Tensor
+    live_batch_size: int
+    shared_page_count: int
+
+
+@dataclass
+class CascadeDecodeState:
+    batch_size: int
+    max_pages_per_row: int
+    shared_wrapper: BatchPrefillWithPagedKVCacheWrapper
+    suffix_wrapper: BatchPrefillWithPagedKVCacheWrapper
+    shared_qo_indptr_h: torch.Tensor
+    shared_kv_indptr_h: torch.Tensor
+    shared_page_indices_h: torch.Tensor
+    shared_page_indices_d: torch.Tensor
+    shared_last_page_len_h: torch.Tensor
+    suffix_qo_indptr_h: torch.Tensor
+    suffix_kv_indptr_h: torch.Tensor
+    suffix_page_indices_h: torch.Tensor
+    suffix_page_indices_d: torch.Tensor
+    suffix_last_page_len_h: torch.Tensor
+    merge_mask_h: torch.Tensor
+    merge_mask_d: torch.Tensor
+    shared_out: torch.Tensor
+    shared_lse: torch.Tensor
+    suffix_out: torch.Tensor
+    suffix_lse: torch.Tensor
+
+
+_g_cascade_merge_warmed_devices: set[torch.device] = set()
+
+
+def _warmup_cascade_merge(device: torch.device, num_heads: int, head_dim: int) -> None:
+    device = torch.device(device)
+    if device in _g_cascade_merge_warmed_devices:
+        return
+    value = torch.zeros((1, num_heads, head_dim), dtype=torch.bfloat16, device=device)
+    lse = torch.zeros((1, num_heads), dtype=torch.float32, device=device)
+    mask = torch.zeros(1, dtype=torch.bool, device=device)
+    merge_state_in_place(value, lse, value, lse, mask)
+    torch.cuda.synchronize(device)
+    _g_cascade_merge_warmed_devices.add(device)
+
+
+def partition_cascade_decode_pages(
+    page_indptr: torch.Tensor,
+    page_indices: torch.Tensor,
+    last_page_len: torch.Tensor,
+    kv_lens: torch.Tensor,
+    page_size: int,
+) -> CascadeDecodeMetadata:
+    if page_size <= 0:
+        raise ValueError(f"page_size must be positive, got {page_size}")
+    if page_indptr.dim() != 1 or page_indptr.numel() < 2:
+        raise ValueError(
+            "page_indptr must be a one-dimensional tensor with at least two entries"
+        )
+
+    batch_size = page_indptr.numel() - 1
+    if last_page_len.numel() != batch_size or kv_lens.numel() != batch_size:
+        raise ValueError("decode page metadata batch dimensions do not match")
+
+    indptr = [int(value) for value in page_indptr.tolist()]
+    if indptr[0] != 0 or any(end < start for start, end in zip(indptr, indptr[1:])):
+        raise ValueError("decode page_indptr must be monotonic and start at zero")
+    total_pages = indptr[-1]
+    if total_pages > page_indices.numel():
+        raise ValueError("decode page indices are shorter than page_indptr requires")
+
+    indices = [int(value) for value in page_indices[:total_pages].tolist()]
+    kv_lengths = [int(value) for value in kv_lens.tolist()]
+
+    live_batch_size = 0
+    saw_padding = False
+    for row in range(batch_size):
+        start, end = indptr[row], indptr[row + 1]
+        if end <= start:
+            raise ValueError("every decode row must contain at least one page")
+        is_padding = indices[start] == 0
+        if is_padding:
+            saw_padding = True
+        elif saw_padding:
+            raise ValueError("live decode rows must precede CUDA graph padding rows")
+        else:
+            live_batch_size += 1
+
+    shared_page_count = 0
+    if live_batch_size >= 2:
+        eligible_pages = []
+        for row in range(live_batch_size):
+            page_count = indptr[row + 1] - indptr[row]
+            eligible = max((kv_lengths[row] - 1) // page_size, 0)
+            eligible_pages.append(min(eligible, page_count - 1))
+        candidate_pages = min(eligible_pages)
+        for page_offset in range(candidate_pages):
+            page_id = indices[indptr[0] + page_offset]
+            if page_id <= 0 or any(
+                indices[indptr[row] + page_offset] != page_id
+                for row in range(1, live_batch_size)
+            ):
+                break
+            shared_page_count += 1
+
+    shared_indices = indices[indptr[0] : indptr[0] + shared_page_count]
+    suffix_indptr = [0]
+    suffix_indices = []
+    for row in range(batch_size):
+        remove_pages = shared_page_count if row < live_batch_size else 0
+        row_start = indptr[row] + remove_pages
+        row_end = indptr[row + 1]
+        if row_start >= row_end:
+            raise ValueError("cascade suffix must retain the current-token page")
+        suffix_indices.extend(indices[row_start:row_end])
+        suffix_indptr.append(len(suffix_indices))
+
+    return CascadeDecodeMetadata(
+        shared_page_indices=torch.tensor(shared_indices, dtype=torch.int32),
+        suffix_page_indptr=torch.tensor(suffix_indptr, dtype=torch.int32),
+        suffix_page_indices=torch.tensor(suffix_indices, dtype=torch.int32),
+        suffix_last_page_len=last_page_len.to(dtype=torch.int32, device="cpu").clone(),
+        merge_mask=torch.tensor(
+            [
+                row < live_batch_size and shared_page_count > 0
+                for row in range(batch_size)
+            ],
+            dtype=torch.bool,
+        ),
+        live_batch_size=live_batch_size,
+        shared_page_count=shared_page_count,
+    )
+
+
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:
     """Determine whether to use tensor cores based on attention configs."""
     # Use tensor cores for larger head dimensions and when kv_head_num matches requirements
@@ -1060,6 +1202,26 @@ class PyFlashinferDecodeAttnOp(object):
             attn_q_dtype(attn_configs) if self.use_tensor_core else self.dtype
         )
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        self.cascade_enabled = (
+            os.environ.get("RTP_LLM_DISABLE_FLASHINFER_CASCADE", "0") != "1"
+            and is_rtx_pro_5000_blackwell()
+            and attn_inputs.input_lengths.numel() >= MIN_CASCADE_BATCH_SIZE
+            and self.dtype == torch.bfloat16
+            and self.q_dtype == torch.bfloat16
+            and self.kv_dtype == torch.bfloat16
+            and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
+            and not attn_configs.use_mla
+            and self.local_head_num == 32
+            and self.local_kv_head_num == 8
+            and self.head_dim_qk == 128
+            and not attn_inputs.sequence_lengths.is_cuda
+        )
+        self._cascade_state: Optional[CascadeDecodeState] = None
+        self._cascade_active = False
+        self._cascade_shared_page_count = 0
+        self._cascade_logged_shared_page_count: Optional[int] = None
+        if self.cascade_enabled:
+            logging.info("Enabled RTX PRO 5000 cascaded FlashInfer decode")
         # Snapshot of the page indptr used by the last CUDA-core graph plan.
         # Dtype, head counts, and page size are fixed for this op's lifetime.
         self._cuda_core_plan_page_indptr_h: Optional[torch.Tensor] = None
@@ -1070,13 +1232,283 @@ class PyFlashinferDecodeAttnOp(object):
 
     def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams) -> None:
         """Install params before initial prepare and invalidate the plan snapshot."""
-        if self.decode_wrapper._fixed_batch_size != 0:
+        if self.decode_wrapper._fixed_batch_size != 0 or (
+            self.enable_cuda_graph and self._cascade_state is not None
+        ):
             raise RuntimeError(
                 "FlashInfer decode params cannot be replaced after CUDA graph buffers "
                 "have been bound"
             )
         self.fmha_params = params
         self._cuda_core_plan_page_indptr_h = None
+        self._cascade_state = None
+        self._cascade_active = False
+
+    @staticmethod
+    def _pinned_i32(size: int) -> torch.Tensor:
+        return torch.empty(size, dtype=torch.int32, device="cpu", pin_memory=True)
+
+    @staticmethod
+    def _pinned_bool(size: int) -> torch.Tensor:
+        return torch.empty(size, dtype=torch.bool, device="cpu", pin_memory=True)
+
+    def _cascade_max_pages_per_row(self, attn_inputs: PyAttentionInputs) -> int:
+        for block_table in (
+            attn_inputs.kv_cache_kernel_block_id,
+            attn_inputs.kv_cache_kernel_block_id_device,
+        ):
+            if block_table is not None and block_table.numel() > 0:
+                return int(block_table.shape[-1])
+        indptr = self.fmha_params.decode_page_indptr_h
+        return max(
+            int((indptr[1:] - indptr[:-1]).max().item()),
+            1,
+        )
+
+    def _create_cascade_state(
+        self,
+        batch_size: int,
+        max_pages_per_row: int,
+    ) -> CascadeDecodeState:
+        device = self.g_workspace_buffer.device
+        max_pages_per_row = max(max_pages_per_row, 1)
+        suffix_capacity = batch_size * max_pages_per_row
+
+        shared_qo_indptr_h = self._pinned_i32(2)
+        shared_qo_indptr_h.copy_(torch.tensor([0, batch_size], dtype=torch.int32))
+        shared_kv_indptr_h = self._pinned_i32(2)
+        shared_page_indices_h = self._pinned_i32(max_pages_per_row)
+        shared_page_indices_d = torch.empty(
+            max_pages_per_row, dtype=torch.int32, device=device
+        )
+        shared_last_page_len_h = self._pinned_i32(1)
+
+        suffix_qo_indptr_h = self._pinned_i32(batch_size + 1)
+        suffix_qo_indptr_h.copy_(torch.arange(batch_size + 1, dtype=torch.int32))
+        suffix_kv_indptr_h = self._pinned_i32(batch_size + 1)
+        suffix_page_indices_h = self._pinned_i32(suffix_capacity)
+        suffix_page_indices_d = torch.empty(
+            suffix_capacity, dtype=torch.int32, device=device
+        )
+        suffix_last_page_len_h = self._pinned_i32(batch_size)
+        merge_mask_h = self._pinned_bool(batch_size)
+        merge_mask_d = torch.empty(batch_size, dtype=torch.bool, device=device)
+
+        wrapper_kwargs = {"backend": "fa2"}
+        if self.enable_cuda_graph:
+            shared_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self.g_workspace_buffer,
+                "HND",
+                use_cuda_graph=True,
+                qo_indptr_buf=torch.empty(2, dtype=torch.int32, device=device),
+                paged_kv_indptr_buf=torch.empty(2, dtype=torch.int32, device=device),
+                paged_kv_indices_buf=shared_page_indices_d,
+                paged_kv_last_page_len_buf=torch.empty(
+                    1, dtype=torch.int32, device=device
+                ),
+                **wrapper_kwargs,
+            )
+            suffix_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self.g_workspace_buffer,
+                "HND",
+                use_cuda_graph=True,
+                qo_indptr_buf=torch.empty(
+                    batch_size + 1, dtype=torch.int32, device=device
+                ),
+                paged_kv_indptr_buf=torch.empty(
+                    batch_size + 1, dtype=torch.int32, device=device
+                ),
+                paged_kv_indices_buf=suffix_page_indices_d,
+                paged_kv_last_page_len_buf=torch.empty(
+                    batch_size, dtype=torch.int32, device=device
+                ),
+                **wrapper_kwargs,
+            )
+        else:
+            shared_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self.g_workspace_buffer, "HND", **wrapper_kwargs
+            )
+            suffix_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self.g_workspace_buffer, "HND", **wrapper_kwargs
+            )
+
+        output_shape = (batch_size, self.local_head_num, self.head_dim_vo)
+        lse_shape = (batch_size, self.local_head_num)
+        _warmup_cascade_merge(device, self.local_head_num, self.head_dim_vo)
+        return CascadeDecodeState(
+            batch_size=batch_size,
+            max_pages_per_row=max_pages_per_row,
+            shared_wrapper=shared_wrapper,
+            suffix_wrapper=suffix_wrapper,
+            shared_qo_indptr_h=shared_qo_indptr_h,
+            shared_kv_indptr_h=shared_kv_indptr_h,
+            shared_page_indices_h=shared_page_indices_h,
+            shared_page_indices_d=shared_page_indices_d,
+            shared_last_page_len_h=shared_last_page_len_h,
+            suffix_qo_indptr_h=suffix_qo_indptr_h,
+            suffix_kv_indptr_h=suffix_kv_indptr_h,
+            suffix_page_indices_h=suffix_page_indices_h,
+            suffix_page_indices_d=suffix_page_indices_d,
+            suffix_last_page_len_h=suffix_last_page_len_h,
+            merge_mask_h=merge_mask_h,
+            merge_mask_d=merge_mask_d,
+            shared_out=torch.empty(output_shape, dtype=self.dtype, device=device),
+            shared_lse=torch.empty(lse_shape, dtype=torch.float32, device=device),
+            suffix_out=torch.empty(output_shape, dtype=self.dtype, device=device),
+            suffix_lse=torch.empty(lse_shape, dtype=torch.float32, device=device),
+        )
+
+    def _ensure_cascade_state(
+        self,
+        attn_inputs: PyAttentionInputs,
+        batch_size: int,
+        forbid_realloc: bool,
+    ) -> CascadeDecodeState:
+        max_pages_per_row = self._cascade_max_pages_per_row(attn_inputs)
+        state = self._cascade_state
+        needs_allocation = (
+            state is None
+            or state.batch_size != batch_size
+            or state.max_pages_per_row < max_pages_per_row
+        )
+        if needs_allocation:
+            if state is not None and forbid_realloc:
+                raise RuntimeError(
+                    "CUDA graph cascade metadata exceeds its captured capacity"
+                )
+            state = self._create_cascade_state(batch_size, max_pages_per_row)
+            self._cascade_state = state
+        return state
+
+    def _plan_cascade_wrappers(
+        self,
+        attn_inputs: PyAttentionInputs,
+        forbid_realloc: bool,
+    ) -> None:
+        if attn_inputs.input_lengths.is_cuda and not self.enable_cuda_graph:
+            self._cascade_active = False
+            return
+        metadata = partition_cascade_decode_pages(
+            self.fmha_params.decode_page_indptr_h,
+            self.fmha_params.page_indice_h,
+            self.fmha_params.paged_kv_last_page_len_h,
+            self.fmha_params.kvlen_h,
+            self.seq_size_per_block,
+        )
+        batch_size = metadata.merge_mask.numel()
+        self._cascade_shared_page_count = metadata.shared_page_count
+        if self._cascade_logged_shared_page_count != metadata.shared_page_count:
+            logging.info(
+                "RTX PRO 5000 cascade metadata: shared_pages=%d shared_tokens=%d "
+                "live_batch=%d graph_batch=%d",
+                metadata.shared_page_count,
+                metadata.shared_page_count * self.seq_size_per_block,
+                metadata.live_batch_size,
+                batch_size,
+            )
+            self._cascade_logged_shared_page_count = metadata.shared_page_count
+
+        if not self.enable_cuda_graph and (
+            metadata.live_batch_size < 2 or metadata.shared_page_count == 0
+        ):
+            self._cascade_active = False
+            return
+
+        state = self._ensure_cascade_state(
+            attn_inputs, batch_size, forbid_realloc=forbid_realloc
+        )
+        shared_count = max(metadata.shared_page_count, 1)
+        suffix_count = metadata.suffix_page_indices.numel()
+        if shared_count > state.max_pages_per_row:
+            raise RuntimeError("shared cascade metadata exceeds its captured capacity")
+        if suffix_count > state.suffix_page_indices_h.numel():
+            raise RuntimeError("suffix cascade metadata exceeds its captured capacity")
+
+        state.shared_kv_indptr_h.copy_(
+            torch.tensor([0, shared_count], dtype=torch.int32)
+        )
+        state.shared_last_page_len_h[0] = (
+            self.seq_size_per_block if metadata.shared_page_count > 0 else 1
+        )
+        if metadata.shared_page_count > 0:
+            state.shared_page_indices_h[:shared_count].copy_(
+                metadata.shared_page_indices
+            )
+        else:
+            state.shared_page_indices_h[0] = 0
+
+        state.suffix_kv_indptr_h.copy_(metadata.suffix_page_indptr)
+        state.suffix_page_indices_h[:suffix_count].copy_(metadata.suffix_page_indices)
+        state.suffix_last_page_len_h.copy_(metadata.suffix_last_page_len)
+        state.merge_mask_h.copy_(metadata.merge_mask)
+
+        state.shared_page_indices_d[:shared_count].copy_(
+            state.shared_page_indices_h[:shared_count], non_blocking=True
+        )
+        state.suffix_page_indices_d[:suffix_count].copy_(
+            state.suffix_page_indices_h[:suffix_count], non_blocking=True
+        )
+        state.merge_mask_d.copy_(state.merge_mask_h, non_blocking=True)
+
+        plan_kwargs = dict(
+            num_qo_heads=self.local_head_num,
+            num_kv_heads=self.local_kv_head_num,
+            head_dim_qk=self.head_dim_qk,
+            head_dim_vo=self.head_dim_vo,
+            page_size=self.seq_size_per_block,
+            causal=False,
+            pos_encoding_mode="NONE",
+            q_data_type=self.q_dtype,
+            kv_data_type=self.kv_dtype,
+            o_data_type=self.dtype,
+            non_blocking=True,
+        )
+        state.shared_wrapper.plan(
+            state.shared_qo_indptr_h,
+            state.shared_kv_indptr_h,
+            state.shared_page_indices_d[:shared_count],
+            state.shared_last_page_len_h,
+            **plan_kwargs,
+        )
+        state.suffix_wrapper.plan(
+            state.suffix_qo_indptr_h,
+            state.suffix_kv_indptr_h,
+            state.suffix_page_indices_d[:suffix_count],
+            state.suffix_last_page_len_h,
+            **plan_kwargs,
+        )
+        self._cascade_active = True
+
+    def _run_cascade(
+        self,
+        q: torch.Tensor,
+        paged_kv_cache: torch.Tensor,
+    ) -> torch.Tensor:
+        state = self._cascade_state
+        if state is None:
+            raise RuntimeError("cascade decode state was not prepared")
+        suffix_out, suffix_lse = state.suffix_wrapper.run(
+            q,
+            paged_kv_cache,
+            out=state.suffix_out,
+            lse=state.suffix_lse,
+            return_lse=True,
+        )
+        shared_out, shared_lse = state.shared_wrapper.run(
+            q,
+            paged_kv_cache,
+            out=state.shared_out,
+            lse=state.shared_lse,
+            return_lse=True,
+        )
+        merge_state_in_place(
+            suffix_out,
+            suffix_lse,
+            shared_out,
+            shared_lse,
+            state.merge_mask_d,
+        )
+        return suffix_out
 
     def _tensor_core_cuda_graph_needs_replan(self) -> bool:
         # FlashInfer BatchDecode routes tensor-core decode through BatchPrefill.
@@ -1202,6 +1634,21 @@ class PyFlashinferDecodeAttnOp(object):
                 forbid_realloc=forbid_realloc,
             )
 
+        if self.cascade_enabled:
+            try:
+                self._plan_cascade_wrappers(attn_inputs, forbid_realloc=forbid_realloc)
+                if self._cascade_active:
+                    return self.fmha_params
+            except Exception:
+                if forbid_realloc:
+                    raise
+                logging.exception(
+                    "Disabling RTX PRO 5000 cascaded decode after setup failure"
+                )
+                self.cascade_enabled = False
+                self._cascade_active = False
+                self._cascade_state = None
+
         if self.enable_cuda_graph and self.decode_wrapper._fixed_batch_size == 0:
             batch_size = attn_inputs.input_lengths.size(0)
             self.decode_wrapper._use_cuda_graph = True
@@ -1241,9 +1688,17 @@ class PyFlashinferDecodeAttnOp(object):
                 self.seq_size_per_block,
                 forbid_realloc=True,
             )
+            if self.cascade_enabled:
+                self._plan_cascade_wrappers(attn_inputs, forbid_realloc=True)
+                return
             if self._cuda_graph_replay_needs_replan():
                 self._plan_decode_wrapper(attn_inputs)
             return
+
+        if self.cascade_enabled:
+            raise RuntimeError(
+                "RTX PRO 5000 cascaded CUDA graph replay requires host page metadata"
+            )
 
         # Device-metadata compatibility path inherited from the base
         # implementation. CudaGraphRunner routes graph replay through the
@@ -1282,6 +1737,8 @@ class PyFlashinferDecodeAttnOp(object):
                 self.seq_size_per_block,
                 self.head_dim_qk,
             )
+        if self._cascade_active:
+            return self._run_cascade(q, paged_kv_cache)
         # Decode FP8 defaults to unit scales and the output dtype from plan().
         return self.decode_wrapper.run(q, paged_kv_cache)
 
