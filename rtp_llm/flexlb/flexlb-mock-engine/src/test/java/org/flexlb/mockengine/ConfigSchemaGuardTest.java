@@ -4,15 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-/**
- * Guards the shipped master configs against FlexlbConfig schema drift:
- * every master config and performance model pair must parse against the
- * current FlexlbConfig schema. MockPerformanceModel.load runs
- * ConfigService.parse with FAIL_ON_UNKNOWN_PROPERTIES, so any renamed or
- * removed field (e.g. the base switch renamed prefill outlierRejection
- * maxWaitVsAverageMultiplier to maxProjectedDrainVsAverageMultiplier)
- * surfaces here before a remote run wastes a full build.
- */
+/** Shipped master/performance fixtures must parse against the strict current schema. */
 class ConfigSchemaGuardTest {
 
     private static final String[] MASTERS = {

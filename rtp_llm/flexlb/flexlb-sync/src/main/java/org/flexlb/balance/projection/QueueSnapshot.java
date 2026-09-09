@@ -36,7 +36,10 @@ public record QueueSnapshot(
         }
     }
 
-    /** Exact ACTIVE head whose current capacity rejection parks the worker. */
+    /**
+     * Exact ACTIVE head whose current capacity rejection parks the worker.
+     * Null semantics mean the wait only limits delivery, not queue publication.
+     */
     public record AdmissionBlock(
             long requestId,
             long enqueueSeq,

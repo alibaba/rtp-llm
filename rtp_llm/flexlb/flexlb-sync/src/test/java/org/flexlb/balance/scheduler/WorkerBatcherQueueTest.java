@@ -40,7 +40,7 @@ class WorkerBatcherQueueTest {
 
     @BeforeEach
     void setUp() {
-        config = new FlexlbConfig();
+        config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
         prefillEndpoint = stablePrefillEndpoint();
@@ -55,20 +55,14 @@ class WorkerBatcherQueueTest {
     }
 
     @Test
-    void deliveryCapacityAllowsExactPriorityReplacementBeforeHardQueueIsFull() {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightBatchesPerPrefillWorker(1);
+    void batchModeKeepsPriorityQueueWithoutAnExtraRequestCountLimit() {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
         WorkerBatcher runtime = runningRuntime();
         ScheduledRequest low = item(901L, 10, Long.MAX_VALUE, 1, 128);
         ScheduledRequest high = item(902L, 90, Long.MAX_VALUE, 2, 128);
         assertTrue(runtime.offer(low));
-        assertFalse(runtime.offer(high));
-        WorkerBatcher.QueueSnapshot snapshot = runtime.captureQueueSnapshot();
-        assertEquals(1, snapshot.queueCapacity());
-        assertTrue(snapshot.queueCapacity() < config.queueScheduler().getCapacity()
-                .getMaxWaitingRequestsPerPrefillWorker());
-        assertEquals(WorkerBatcher.QueueReplacementStatus.SUCCESS,
-                runtime.replaceQueued(List.of(low), high));
-        assertEquals(List.of(high), runtime.captureQueueSnapshot().items());
+        assertTrue(runtime.offer(high));
+        assertEquals(List.of(high, low), runtime.captureQueueSnapshot().items());
     }
 
     @Test
@@ -85,8 +79,6 @@ class WorkerBatcherQueueTest {
                 runtime.captureQueueSnapshot();
         assertEquals(List.of(2L, 1L, 3L, 4L), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
-        assertEquals(SchedulingTestConfig.useQueueCapacity(config)
-                .getMaxWaitingRequestsPerPrefillWorker(), snapshot.queueCapacity());
         assertEquals("test-worker", snapshot.endpointId());
     }
 
@@ -217,13 +209,14 @@ class WorkerBatcherQueueTest {
         when(predictor.evaluator()).thenReturn(evaluator);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
-        when(endpoint.getStatus()).thenReturn(WorkerStatus.createDiscovered(
+        WorkerStatus status = WorkerStatus.createDiscovered(
                 RoleType.PREFILL,
                 "test",
                 "127.0.0.1",
                 8080,
                 8090,
-                "test-site"));
+                "test-site");
+        when(endpoint.getStatus()).thenReturn(status);
         return endpoint;
     }
 

@@ -67,7 +67,7 @@ public class ConfigService {
                     CACHE_STATUS_DIFF_SIZE CACHE_STATUS_MIN_INTERVAL_MS CACHE_STATUS_MAX_INTERVAL_MS
                     SYNC_STATUS_INTERVAL SYNC_REQUEST_TIMEOUT_MS WHALE_CACHE_DEBUG_MODE
                     VIT_SYNC_REQUEST_TIMEOUT_MS VIT_WORKER_TIMEOUT_US VIT_RETAIN_ALIVE_ON_TIMEOUT
-                    FLEXLB_MONITOR_MODE
+                    FLEXLB_MONITOR_MODE FLEXLB_MONITOR_METRIC_WHITELIST
                     """.trim().split("\\s+")));
 
     private static final ObjectMapper STRICT_MAPPER = JsonMapper.builder()
@@ -88,11 +88,22 @@ public class ConfigService {
     }
 
     ConfigService(Map<String, String> environment) {
-        rejectRemovedLegacyEnvironment(environment);
-        String document = environment.get(FLEXLB_CONFIG_ENV);
-        this.flexlbConfig = document == null ? new FlexlbConfig() : parse(document);
+        this(configDocument(environment));
+    }
+
+    ConfigService(String document) {
+        if (document == null || document.isBlank()) {
+            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
+                    "is required; configure requestLifecycle.request.timeoutMs");
+        }
+        this.flexlbConfig = parse(document);
         FlexlbConfigValidator.validate(flexlbConfig);
         logEffectiveConfig(flexlbConfig);
+    }
+
+    private static String configDocument(Map<String, String> environment) {
+        rejectRemovedLegacyEnvironment(environment);
+        return environment.get(FLEXLB_CONFIG_ENV);
     }
 
     private static void rejectRemovedLegacyEnvironment(Map<String, String> environment) {
@@ -103,15 +114,15 @@ public class ConfigService {
         if (removed.isEmpty()) {
             return;
         }
-        String monitorMigration = removed.contains("FLEXLB_MONITOR_MODE")
-                ? " Replace FLEXLB_MONITOR_MODE with FLEXLB_MONITOR_METRIC_WHITELIST"
+        String monitorMigration = removed.stream().anyMatch(name -> name.startsWith("FLEXLB_MONITOR_"))
+                ? " Configure metric exposure with --flexlb.monitor.metric-whitelist"
                         + " (the bare flexlb_ prefix exposes all FlexLB metrics)."
                 : "";
         throw new ConfigValidationException(
                 "environment",
                 "Removed legacy FlexLB environment variables are no longer read: "
                         + String.join(", ", removed)
-                        + ". Migrate scheduling behavior into FLEXLB_CONFIG with schemaVersion 2."
+                        + ". Migrate scheduling behavior into FLEXLB_CONFIG with schemaVersion 3."
                         + monitorMigration);
     }
 
@@ -171,10 +182,8 @@ public class ConfigService {
                 : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
         String dispatcher = config.getDispatcher().typeName();
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
-                        + "dispatcher={}, prefillCandidateChoice={}, groupRules={}",
+                        + "dispatcher={}, prefillSelection=BEST_ONLY, groupRules={}",
                 config.getSchemaVersion(), scheduler, ordering, decision, dispatcher,
-                config.getRouter().getRoles().getPrefill()
-                        .getCandidateChoice().getType(),
                 config.getRouter().getGroupSelector() == null ? 0
                         : config.getRouter().getGroupSelector().getRules().size());
     }

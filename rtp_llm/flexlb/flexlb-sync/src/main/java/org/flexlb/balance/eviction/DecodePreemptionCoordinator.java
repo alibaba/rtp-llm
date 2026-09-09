@@ -52,7 +52,7 @@ public final class DecodePreemptionCoordinator {
             DecodeEndpoint.AdmissionCapacity capacity,
             List<DecodeRequestView> victims,
             long cancelAckTimeoutMs,
-            long cancelCompletionTimeoutMs,
+            long preemptionTimeoutMs,
             BooleanSupplier admissionOpen,
             String detail) {
         public PreemptionCommand {
@@ -302,7 +302,7 @@ public final class DecodePreemptionCoordinator {
         // window rather than sharing one 50ms deadline.
         long completionDeadlineNanos = System.nanoTime()
                 + TimeUnit.MILLISECONDS.toNanos(
-                        Math.max(1, command.cancelCompletionTimeoutMs()));
+                        Math.max(1, command.preemptionTimeoutMs()));
         List<CompletableFuture<Boolean>> boundedSettlements =
                 new ArrayList<>(pendingTerminals.size());
         for (ClaimedVictim pending : pendingTerminals) {

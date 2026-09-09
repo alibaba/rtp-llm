@@ -122,10 +122,15 @@ public final class PrefillTimeFormula {
      * {@code sum(expr)} evaluates {@code expr} for each array in {@code itemVars}.
      */
     public long evaluate(double[] vars, List<double[]> itemVars) {
+        return (long) evaluateAsDouble(vars, itemVars);
+    }
+
+    /** Retain fractional and non-finite results until the prediction boundary validates them. */
+    public double evaluateAsDouble(double[] vars, List<double[]> itemVars) {
         EvalContext context = EVALUATION_CONTEXT.get();
         context.reset(vars, itemVars);
         try {
-            return (long) root.evaluate(context);
+            return root.evaluate(context);
         } finally {
             context.reset(null, null);
         }

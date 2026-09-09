@@ -21,8 +21,7 @@ import java.util.stream.Collectors;
 /**
  * Metric whitelist — the single configurable {@code flexlb.} exposure
  * filter: only {@code flexlb.} prefixed metrics matching the comma-separated
- * {@code flexlb.monitor.metric-whitelist} property (env
- * {@code FLEXLB_MONITOR_METRIC_WHITELIST} via relaxed binding) are
+ * {@code flexlb.monitor.metric-whitelist} command-line property are
  * registered/reported, so deployments (e.g. the online_eval harness) can
  * trim the exposition surface down to exactly the series their collector
  * consumes.
@@ -97,7 +96,7 @@ public class WhitelistMetricsFilterConfig {
         if (this.whitelist.isEmpty()) {
             log.warn("flexlb.monitor.metric-whitelist is empty/blank: denying every "
                     + "flexlb.* metric (fail-safe; configure a comma-separated prefix "
-                    + "list, e.g. FLEXLB_MONITOR_METRIC_WHITELIST)");
+                    + "list via --flexlb.monitor.metric-whitelist)");
         }
     }
 

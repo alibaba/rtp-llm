@@ -15,15 +15,14 @@ the knobs expressed as native generator parameters.
 Category theme: priority-order fidelity (PR1 band, same-level FIFO,
 three-channel normalization) + the Auto-TPM preemption/degradation
 contract (victim selection, terminal split, timeout attribution, config
-strictness, observability).  15 cases:
+strictness, observability):
 
-  prio_* (5) — basics: priority-order fidelity (PR1 band),
+  prio_* — basics: priority-order fidelity (PR1 band),
       same-priority FIFO (PR2), three-channel normalization (PR3),
       low-priority completion (PR8 completion calibre), queueTimeout
       absolute deadline (PR8 band).
 
-  atpm_* (10) — preemption + boundary: PREFILL_QUEUED
-      queue replacement (PR10/PR5/PR6/PR4), DECODE_RESERVED vs
+  atpm_* — Decode preemption + boundary: DECODE_RESERVED vs
       DECODE_ENGINE_OWNED eviction (PR6 + AT5 band), same-priority and
       preemption-disabled zero eviction (PR4/AT3/AT2), admission-timeout
       attribution (PR7), comparator-freeze weak form (PR9), error-code
@@ -123,7 +122,7 @@ def case(name: str, profiles=None, requires=None, source: str = ""):
 # ===========================================================================
 
 CODE_OK = 200
-# NO_AVAILABLE_WORKER — PREFILL_QUEUED/DECODE_RESERVED victim "yielded to
+# NO_AVAILABLE_WORKER — DECODE_RESERVED victim "yielded to
 # higher-priority request", retryable, engine never saw (part of) it.
 CODE_YIELDED = 8400
 # NO_PREFILL_WORKER — route/commit failure family (retryable).
@@ -132,9 +131,8 @@ CODE_NO_PREFILL = 8402
 CODE_ENGINE_CANCELLED = 8429
 CODE_ADMISSION_TIMEOUT = 8430
 CODE_RESOURCE_EXHAUSTED = 8431
-CODE_QUEUE_FULL = 8502
 CODE_QUEUE_TIMEOUT = 8503  # dead code in the master (never emitted)
-# BATCH_DISPATCH_FAILED — queue full + eviction fallback DECLINED (the
+# DISPATCH_FAILED — queue full + eviction fallback DECLINED (the
 # code-level correction to the design's "8402 family" for that path).
 CODE_QUEUE_REJECTED = 8510
 
@@ -150,8 +148,8 @@ CODE_QUEUE_REJECTED = 8510
 #: {8503, 8402, 8430}; the first e2e run records the observed distribution.
 CODE_SLO_EXPIRED = 8511
 
-# A4 (Mark P1-2, PR3): BATCH dispatcher family reservation — the group
-# token-capacity / plan-conflict codes only fire on the BATCH dispatcher,
+# A4 (Mark P1-2, PR3): BATCH dispatcher family reservation — the Engine-reported group
+# token-shape / plan-conflict codes only fire on the BATCH dispatcher,
 # which the current priority family base (SINGLE + NON_BATCH) never enters;
 # constants reserved so atpm_error_code_family's segment-4 skeleton has
 # them in place for a future priority-batch variant.
@@ -599,7 +597,7 @@ def _dispatch_order(ops, fires: list) -> list:
     """Prefill running_ms ascending == master dispatch order, with the client
     schedule() settle order arbitrating same-millisecond conflicts (design
     §3.3: SINGLE dispatches one head per cycle; under a
-    maxInflightRequestsPerPrefillWorker=1 window the running_ms gaps equal
+    one-request admission window the running_ms gaps follow
     the prefill execution time, so conflicts are rare — the arbitration is
     the fallback).  Returns the ordered rid list; queue-timeout terminals
     (never dispatched) sort last."""
@@ -709,23 +707,8 @@ def _design_final_pattern(
 # FLEXLB_CONFIG factory + EnvSpec factories (design §4.3 env plan)
 # ===========================================================================
 
-_PREEMPT_PQ = {"allowed_victim_stages": ["PREFILL_QUEUED"]}
 _PREEMPT_DECODE = {
     "allowed_victim_stages": ["DECODE_RESERVED", "DECODE_ENGINE_OWNED"],
-    "engine_cancellation": {"ack_timeout_ms": 50, "completion_timeout_ms": 1000},
-}
-# All-three-stage superset (the live preemption config — cancel.py's
-# cancel_preemption_victim runs exactly this set): DECODE_ENGINE_OWNED
-# REQUIRES the engineCancellation block (FlexlbConfigValidator rejects
-# the stage set otherwise); ack 50ms / completion 1000ms mirror the
-# ft-line precedent.
-_PREEMPT_ALL_STAGES = {
-    "allowed_victim_stages": [
-        "PREFILL_QUEUED",
-        "DECODE_RESERVED",
-        "DECODE_ENGINE_OWNED",
-    ],
-    "engine_cancellation": {"ack_timeout_ms": 50, "completion_timeout_ms": 1000},
 }
 # Metric-plane exposure for the live-eviction family: the default
 # critical-only filter hides auto_tpm.* (FLEXLB_MONITOR_MODE=all is dead
@@ -734,58 +717,20 @@ _PREEMPT_ALL_STAGES = {
 # promName.startsWith) covers the whole family the eviction cases
 # assert on: auto_tpm.victim.count / auto_tpm.priority_preempt.count /
 # auto_tpm.victim.kv_tokens / auto_tpm.decode.reserved.count.
-_MONITOR_AUTO_TPM_ENV = {"FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_auto_tpm"}
+_MONITOR_AUTO_TPM_ARGS = ["--flexlb.monitor.metric-whitelist=flexlb_auto_tpm"]
 
 
 def _prio_config(
-    *,
-    ordering: str = "priority",
-    preemption: Optional[dict] = None,
-    default_priority: Optional[int] = None,
-    queue_timeout_ms: Optional[int] = None,
-    max_outstanding: Optional[int] = None,
-    max_inflight: Optional[int] = 1,
-    max_waiting: Optional[int] = 8,
-    dispatcher: str = "non_batch",
-    max_inflight_batches: int = 4,
+    *, ordering: str = "priority", preemption: Optional[dict] = None,
+    default_priority: Optional[int] = None, queue_timeout_ms: Optional[int] = None,
+    max_inflight_per_prefill_worker: int = 1, dispatcher: str = "non_batch",
 ) -> str:
-    """Unified priority-family config (PRIORITY + SINGLE + NON_BATCH base;
-    dispatcher="batch" variant for the live-eviction family, 2026-09).
-
-    Implementation-period additions over the design's config sketch
-    (all verified against the Java code):
-
-    * ``maxInflightRequestsPerPrefillWorker=1`` (build_flexlb_config kwarg
-      max_inflight_requests_per_worker) is what actually creates the
-      master-side backlog window — RoutePrefillAdmission.reserveRoute
-      leases one in-flight delivery per dispatch, and without the cap
-      every request dispatches immediately (no queueing, no observable
-      ordering).
-    * ``maxWaitingRequestsPerPrefillWorker`` rides the native
-      max_waiting_requests_per_prefill_worker generator parameter on
-      this line (the admission wave-2 passthrough, 2026-09) — on the
-      source branch it had to be spliced via JSON post-processing; the
-      queue-full eviction path needs the tight cap (Java default 1024).
-    * ``dispatcher="batch"`` (preemption-stage coverage, 2026-09): boots
-      the BATCH dispatcher so the master-owned enqueue path (WorkerBatcher
-      queue + the maxWaiting cap feeding AdmissionFallback's preemption
-      trigger) is reachable — the live 8400 eviction paths need it; under
-      batch the per-worker inflight cap is meaningless and
-      ``max_inflight_batches`` is the caliber instead.
-    """
+    """Priority fixtures admit one request at a time unless a case sets another limit."""
     return build_flexlb_config(
-        ordering=ordering,
-        decision="single",
-        dispatcher=dispatcher,
-        default_priority=default_priority,
-        preemption=preemption,
+        ordering=ordering, decision="single", dispatcher=dispatcher,
+        default_priority=default_priority, preemption=preemption,
         queue_timeout_ms=queue_timeout_ms,
-        max_outstanding=max_outstanding if max_outstanding is not None else 5_000,
-        max_inflight_batches=max_inflight_batches,
-        max_inflight_requests_per_worker=(
-            None if dispatcher == "batch" else max_inflight
-        ),
-        max_waiting_requests_per_prefill_worker=max_waiting,
+        max_inflight_per_prefill_worker=max_inflight_per_prefill_worker,
     )
 
 
@@ -797,12 +742,10 @@ def _spec(
     n_decode: int = 4,
     config: str,
     master_debug_log: bool = False,
-    extra_env: Optional[dict] = None,
+    extra_args: Optional[list] = None,
     decode_cache_blocks: Optional[int] = None,
 ) -> EnvSpec:
     env = {"FLEXLB_CONFIG": config}
-    if extra_env:
-        env.update(extra_env)
     # decode_cache_blocks sizes the mock's decode KV pool
     # (totalKvTokens = blocks x blockSize — the reported capacity always
     # tracks the built pool); None keeps the harness default.
@@ -816,6 +759,7 @@ def _spec(
         perf=default_perf(),
         master_profile=ctx.profile,
         master_env=env,
+        master_extra_args=extra_args or [],
         master_debug_log=master_debug_log,
         **spec_kwargs,
     )
@@ -827,11 +771,11 @@ def _q1_spec(ctx: CaseContext) -> EnvSpec:
 
 
 def _q2_spec(ctx: CaseContext) -> EnvSpec:
-    """ENV-Q2: PREFILL_QUEUED preemption env (1P+4D, queue cap 8)."""
+    """ENV-Q2: Priority queue without preemption (1P+4D)."""
     return _spec(
         ctx,
         "atpm_q2",
-        config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=60_000),
+        config=_prio_config(queue_timeout_ms=60_000),
     )
 
 
@@ -841,11 +785,11 @@ def _t1_spec(ctx: CaseContext) -> EnvSpec:
 
 
 def _a1_spec(ctx: CaseContext) -> EnvSpec:
-    """ENV-A1: PREFILL_QUEUED preemption + queueTimeout 7s (1P+4D)."""
+    """ENV-A1: Priority queue with queueTimeout 7s and no preemption (1P+4D)."""
     return _spec(
         ctx,
         "atpm_a1",
-        config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=7_000),
+        config=_prio_config(queue_timeout_ms=7_000),
     )
 
 
@@ -874,7 +818,7 @@ def _d1_spec(ctx: CaseContext) -> EnvSpec:
     FLEXLB_MONITOR_MODE switch is dead on this line);
     atpm_decode_reservation_priority asserts the auto_tpm.victim.count
     priority tags, so the shared family-prefix entry flexlb_auto_tpm
-    (_MONITOR_AUTO_TPM_ENV — a promName.startsWith match covering the
+    (_MONITOR_AUTO_TPM_ARGS — a promName.startsWith match covering the
     whole auto_tpm family) carries the exposure.
     """
     return _spec(
@@ -882,20 +826,20 @@ def _d1_spec(ctx: CaseContext) -> EnvSpec:
         "atpm_d1",
         n_prefill=2,
         config=_prio_config(
-            preemption=_PREEMPT_DECODE, max_inflight=3, queue_timeout_ms=60_000
+            preemption=_PREEMPT_DECODE, max_inflight_per_prefill_worker=3, queue_timeout_ms=60_000
         ),
-        extra_env=_MONITOR_AUTO_TPM_ENV,
+        extra_args=_MONITOR_AUTO_TPM_ARGS,
     )
 
 
 def _c1_spec(ctx: CaseContext) -> EnvSpec:
-    """ENV-C1: global outstanding capacity 2 (G11b isomorphic, 2P+2D)."""
+    """Two workers each admit one request; overflow waits for a 1.5s queue TTL."""
     return _spec(
         ctx,
         "atpm_c1",
         n_prefill=2,
         n_decode=2,
-        config=_prio_config(max_outstanding=2, max_inflight=None, max_waiting=None),
+        config=_prio_config(max_inflight_per_prefill_worker=1, queue_timeout_ms=1500),
     )
 
 
@@ -925,16 +869,16 @@ def _o1_spec(ctx: CaseContext) -> EnvSpec:
 
     Implementation-period corrections over the design's env sketch: the
     default critical-only whitelist does not expose auto_tpm.*, so the
-    FLEXLB_MONITOR_METRIC_WHITELIST family entry is required (the legacy
+    --flexlb.monitor.metric-whitelist family entry is required (the legacy
     FLEXLB_MONITOR_MODE switch is dead on this line — see _q3_spec);
     pv.log writes at INFO level by default on the harness line
     (FLEXLB_PV_LOG is a load-client-line knob with no consumer here)."""
     return _spec(
         ctx,
         "atpm_o1",
-        config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=7_000),
+        config=_prio_config(queue_timeout_ms=7_000),
         master_debug_log=True,
-        extra_env=_MONITOR_AUTO_TPM_ENV,
+        extra_args=_MONITOR_AUTO_TPM_ARGS,
     )
 
 
@@ -951,7 +895,7 @@ def _q3_spec(ctx: CaseContext) -> EnvSpec:
 
     [2026-09-04] FLEXLB_MONITOR_MODE=all is DEAD on the v2 line — the
     single configurable exposure filter is flexlb.monitor.metric-
-    whitelist (env FLEXLB_MONITOR_METRIC_WHITELIST via relaxed binding;
+    whitelist (env --flexlb.monitor.metric-whitelist via relaxed binding;
     WhitelistMetricsFilterConfig), whose default preset keeps only the
     six core link-latency metrics, so the old env var silently left
     auto_tpm.* hidden and prio_normalize's segment 4 scraped None
@@ -965,7 +909,7 @@ def _q3_spec(ctx: CaseContext) -> EnvSpec:
         ctx,
         "prio_q3",
         config=_prio_config(),
-        extra_env={"FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_auto_tpm_request_count"},
+        extra_args=["--flexlb.monitor.metric-whitelist=flexlb_auto_tpm_request_count"],
     )
 
 
@@ -1394,9 +1338,8 @@ def prio_normalize(ctx: CaseContext):
     (F1 control env) is not profile-reachable on this line; the FIFO
     control lives separately in atpm_comparator_frozen_weak's fifo_half.
     Implementation-period note: design §2.2 sketched this segment without
-    maxInflightRequestsPerPrefillWorker, but without it there is no
-    backlog window and no observable queue-jumping — the window env
-    keeps the choreography and makes it observable.
+    an explicit concurrency setting. The fixture uses one request per Engine
+    window so priority changes remain observable while work is running.
 
     Segment 3 (ENV-N1 — the defaultPriority=30 variant, built as its own
     case-layer env): [EV-1-FIXED] submit order adapted for the
@@ -1954,242 +1897,6 @@ def _code_of(fr) -> object:
 
 
 @case(
-    "atpm_preempt_prefill_queued",
-    profiles=["single-nonbatch"],
-    source="design §2.3 #6 — PR10 + PR5 + PR6 + PR4",
-)
-def atpm_preempt_prefill_queued(ctx: CaseContext):
-    """PREFILL_QUEUED preemption choreography under the intake3 pull model
-    (PR10 + PR5 + PR6 + PR4, [EV-1-FIXED] design-final form).
-
-    ENV-Q2: preemption allows PREFILL_QUEUED only, queueTimeout 60s,
-    maxWaiting 8, inflight cap 1, single prefill.
-
-    [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
-    (6ad0315f10): capacity blocking parks EVERY submitter (pull-based
-    WaitBucket, priority desc + FIFO tiebreak), so the queue-replacement
-    choreography (a failed enqueue feeding AdmissionFallback → evict
-    exactly one 30f → 8400) has no trigger — maxWaiting's
-    enqueueUnderLock cap is a BATCH-path check the NON_BATCH pull model
-    never reaches, no enqueue ever fails, and the eviction fallback
-    never runs (zero victims across both waves; the deficit==1
-    replacement exactness and multi-victim events migrate to the
-    BATCH-profile white-box handover, design §2.5 row 11).
-
-    Wave 1: a priority=50 placeholder parks the lease, then EIGHT
-    requests + the incoming 70 queue up: 30a, 30b, 40a, 40b, 30c, 30d,
-    30e, 30f, 70.  All nine park and complete 200; the dispatch order
-    (design-final) is [30a (first parker — the wave's first submitter
-    legitimately wins the first release slot), 70, 40a, 40b, 30b, 30c,
-    30d, 30e, 30f] — after the first parker, strict priority desc +
-    same-level FIFO.
-
-    Wave 2 (same-priority infeasible shape): after the drain, a 70
-    placeholder parks the lease; 70x8 + the incoming 90 all park.  The
-    "no strictly-lower candidate → DECLINED" branch stays what the
-    (never-triggered) fallback would see; zero victims holds trivially,
-    and all nine complete 200 with the 90 dispatching FIRST among the
-    wave (priority desc; first parker 70a keeps slot one).
-    """
-    env = ctx.env_manager.ensure(_q2_spec(ctx))
-    ops = ctx.engine_ops(env)
-    report = GradeReport(run_grade=ctx.grade)
-    base = rid_base(ctx, "priority")
-    fires: list = []
-    prefill_names: list = []
-    try:
-        prefill_names = _prefill_names(ops)
-        for name in prefill_names:
-            ops.set_perf(name, prefill_fixed_ms=4000.0)
-        time.sleep(PERF_SETTLE_S)
-
-        # ---- wave 1: victim selection + deficit exactness --------------
-        ph = ops.next_request_id(base)
-        ph_fire = _fire(ops, ph, priority=50, input_len=2048, output_len=2)
-        fires.append(ph_fire)
-        if not ph_fire.ok:
-            return False, f"wave1 placeholder failed: code={ph_fire.code}"
-        if not _poll_engine_pending(ops, prefill_names[0], 1):
-            return False, "wave1 placeholder never dispatched"
-
-        tags = ["30a", "30b", "40a", "40b", "30c", "30d", "30e", "30f"]
-        rids: dict = {}
-        specs = []
-        for tag in tags:
-            rid = ops.next_request_id(base)
-            rids[tag] = rid
-            specs.append(
-                (rid, {"priority": int(tag[:-1]), "input_len": 2048, "output_len": 2})
-            )
-        incoming = ops.next_request_id(base)
-        specs.append((incoming, {"priority": 70, "input_len": 2048, "output_len": 2}))
-        wave1 = _fire_batch(ops, specs)
-        fires.extend(wave1)
-
-        outcomes1 = _drain(ops, [ph_fire] + wave1)
-        m1 = _outcome_map(outcomes1)
-        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
-        # (6ad0315f10): the whole wave parks — no enqueue ever fails, the
-        # eviction fallback never runs, zero victims.  Design-final shape:
-        # all nine settle 200 and the dispatch order is [30a (first
-        # parker), 70, 40a, 40b, 30b..30f] (first submitter + priority
-        # desc + same-level FIFO after it).
-        zero_eviction_w1 = all(
-            m1[rids[tag]][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED)
-            for tag in tags
-        ) and m1[incoming][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED)
-        wave1_rids = [rids[t] for t in tags] + [incoming]
-        prio1 = {rids[t]: int(t[:-1]) for t in tags}
-        prio1[incoming] = 70
-        first1, shape1, order1 = _design_final_pattern(
-            ops, [ph_fire] + wave1, wave1_rids, prio1
-        )
-        all1_ok = all(m1[rids[t]][0] for t in tags) and m1[incoming][0]
-        ph1_ok = m1[ph][0]
-
-        report.invariant(
-            "PR10",
-            shape1 and zero_eviction_w1 and ph1_ok,
-            context="deficit_exact_one_design_final",
-            detail=(
-                f"[EV-1-FIXED] baseline flipped at intake3 "
-                f"PendingPlacementCoordinator (6ad0315f10): no enqueue ever "
-                f"fails (maxWaiting is a BATCH-path cap under the NON_BATCH "
-                f"pull model), the queue-full replacement has no trigger "
-                f"and zero victims holds; dispatch shape ok={shape1}, "
-                f"zero 8400/8429={zero_eviction_w1}, "
-                f"codes={[(t, m1[rids[t]][1]) for t in tags]}, "
-                f"incoming70={m1[incoming][1]}, "
-                f"dispatch={[r % 1_000_000 for r in order1]}"
-            ),
-        )
-        report.invariant(
-            "PR5",
-            zero_eviction_w1 and shape1,
-            context="victim_determinism_design_final",
-            detail=(
-                "[EV-1-FIXED] baseline flipped at intake3 "
-                "PendingPlacementCoordinator (6ad0315f10): eviction never "
-                "triggers (no failed enqueue feeds the fallback) — zero "
-                "victims across the wave; victim-selection determinism "
-                "stays a white-box handover, the design-final dispatch "
-                "shape carries the ordering evidence"
-            ),
-        )
-        report.invariant(
-            "PR6",
-            all1_ok and shape1,
-            context="prefill_queued_terminal_design_final",
-            detail=(
-                f"[EV-1-FIXED] baseline flipped at intake3 "
-                f"PendingPlacementCoordinator (6ad0315f10): every parked "
-                f"submitter (not just the first) is re-pulled on capacity "
-                f"release — all wave codes 200, zero route-reject; "
-                f"codes={[(t, m1[rids[t]][1]) for t in tags]}, "
-                f"incoming70={m1[incoming][1]}, "
-                f"dispatch={[r % 1_000_000 for r in order1]}"
-            ),
-        )
-        report.invariant(
-            "PR4",
-            zero_eviction_w1 and ph1_ok and shape1 and all1_ok,
-            context="strict_low_priority_victims_design_final",
-            detail=(
-                "[EV-1-FIXED] baseline flipped at intake3 "
-                "PendingPlacementCoordinator (6ad0315f10): strictly-lower-"
-                "priority victim selection stays white-box (the eviction "
-                "fallback has no trigger under the pull model); the "
-                "design-final form is zero victims + every queued request "
-                "completing untouched in priority-desc dispatch order"
-            ),
-        )
-        clean1_ok, clean1_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
-        report.invariant(
-            "P6",
-            shape1 and all1_ok and ph1_ok and clean1_ok,
-            detail=(
-                f"[EV-1-FIXED] wave1: all nine requests dispatched from the "
-                f"park bucket and completed 200 (first parker 30a, then "
-                f"priority desc + FIFO), "
-                f"inflight={'ok' if clean1_ok else clean1_detail}"
-            ),
-        )
-        if not (shape1 and all1_ok and ph1_ok and clean1_ok):
-            return report.finish(f"wave1 incomplete, grades: {report.summary()}")
-
-        # ---- wave 2: infeasible → zero eviction -------------------------
-        ph2 = ops.next_request_id(base)
-        ph2_fire = _fire(ops, ph2, priority=70, input_len=2048, output_len=2)
-        fires.append(ph2_fire)
-        if not ph2_fire.ok:
-            return False, f"wave2 placeholder failed: code={ph2_fire.code}"
-        if not _poll_engine_pending(ops, prefill_names[0], 1):
-            return False, "wave2 placeholder never dispatched"
-
-        w2_rids = [ops.next_request_id(base) for _ in range(8)]
-        w2_specs = [
-            (rid, {"priority": 70, "input_len": 2048, "output_len": 2})
-            for rid in w2_rids
-        ]
-        inc90 = ops.next_request_id(base)
-        w2_specs.append((inc90, {"priority": 90, "input_len": 2048, "output_len": 2}))
-        wave2 = _fire_batch(ops, w2_specs)
-        fires.extend(wave2)
-
-        outcomes2 = _drain(ops, [ph2_fire] + wave2)
-        m2 = _outcome_map(outcomes2)
-        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
-        # (6ad0315f10): the same-priority wave parks all eight 70s AND the
-        # incoming 90 — the "no strictly-lower candidate -> DECLINED"
-        # branch is what the (never-triggered) fallback would still see,
-        # zero victims holds trivially, and the design-final form is all
-        # nine completing 200 with the 90 dispatching FIRST among the wave
-        # (priority desc; first parker 70a keeps slot one).
-        zero_eviction = all(
-            m2[rid][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED)
-            for rid in w2_rids + [ph2, inc90]
-        )
-        prio2 = {rid: 70 for rid in w2_rids}
-        prio2[inc90] = 90
-        first2, shape2, order2 = _design_final_pattern(
-            ops, [ph2_fire] + wave2, w2_rids + [inc90], prio2
-        )
-        all2_ok = all(m2[rid][0] for rid in w2_rids) and m2[inc90][0]
-        ph2_ok = m2[ph2][0]
-        report.invariant(
-            "PR10",
-            zero_eviction and shape2 and all2_ok and ph2_ok,
-            context="infeasible_no_partial_eviction_design_final",
-            detail=(
-                f"[EV-1-FIXED] zero eviction={zero_eviction} (no "
-                f"strictly-lower candidate for the 90 — all-or-nothing, and "
-                f"the fallback never triggers anyway), "
-                f"90 terminal={m2[inc90][1]} (dispatched first among the "
-                f"wave, priority desc), shape ok={shape2}, "
-                f"dispatch={[r % 1_000_000 for r in order2]}, ph ok={ph2_ok}"
-            ),
-        )
-        clean2_ok, clean2_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
-        report.invariant(
-            "P6",
-            shape2 and all2_ok and ph2_ok and clean2_ok,
-            detail=(
-                f"[EV-1-FIXED] wave2: all nine requests completed 200 (the "
-                f"90 first among the wave by priority), "
-                f"inflight={'ok' if clean2_ok else clean2_detail}"
-            ),
-        )
-        return report.finish(
-            f"wave1 shape={shape1} all-200 zero-victims, wave2 shape={shape2} "
-            f"zero-eviction={zero_eviction}, grades: {report.summary()}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-    finally:
-        _finally_hygiene(ops, fires, prefill_names)
-
-
-@case(
     "atpm_preempt_decode_engine_owned",
     profiles=["single-nonbatch"],
     source="design §2.3 #7 — AT5(band) + PR6 + PR10(decode)",
@@ -2199,10 +1906,8 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
     (PR6: reserved → 8400 retryable, engine-accepted → 8429 typed cancel)
     plus the preemption closure budget (AT5 band).
 
-    ENV-D1: 2P+4D, preemption allows both decode stages with
-    engineCancellation {ack 50ms, completion 1000ms}, prefill inflight
-    cap 3 (so four victims + the incoming all dispatch concurrently),
-    queueTimeout 60s.
+    ENV-D1: 2P+4D, preemption allows both Decode stages,
+    maxInflightPerPrefillWorker=3 requests, queueTimeout=60s.
 
     Guardrail (design §2.5 row 2, EvictionManager.java:445-452): decode
     eviction is never a substitute for an ordinary available endpoint —
@@ -2245,8 +1950,9 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
     (verify_engine_cancelled), and the 70 itself completes.  AT5 closure =
     the 70's first engine running_ms (epoch) minus the victim's stream
     terminal (client clock crossed into the epoch domain via
-    _mono_to_epoch) — expected well inside completionTimeoutMs(1000) +
-    scheduling margin.
+    _mono_to_epoch). The AT5 band measures scheduling delay AFTER the victim
+    has terminated; the configured maximum TPOT bounds cancellation before
+    that terminal.
 
     Victim-count note: exactly ONE victim per wave (the planner releases
     one endpoint's worth); the 70 then takes that endpoint.
@@ -2465,7 +2171,7 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
                 context="preemption_closure",
                 detail=(
                     "closure = incoming prefill running_ms − victim stream "
-                    f"terminal (epoch-crossed); completionTimeoutMs=1000"
+                    "terminal (epoch-crossed); post-terminal scheduling latency"
                 ),
             )
         clean2_ok, clean2_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
@@ -2511,8 +2217,7 @@ def atpm_same_priority_zero_eviction(ctx: CaseContext):
     come up empty for a same-priority incoming, so ZERO victims are
     taken (no 8400/8429 anywhere) and the design-final shape is all
     nine completing 200 in pure submit FIFO order.
-    ENV-Q2 is shared with atpm_preempt_prefill_queued (same
-    fingerprint → same run, sequential order + finally hygiene)."""
+    ENV-Q2 uses priority ordering without an eviction policy."""
     env = ctx.env_manager.ensure(_q2_spec(ctx))
     ops = ctx.engine_ops(env)
     report = GradeReport(run_grade=ctx.grade)
@@ -2735,7 +2440,7 @@ def atpm_timeout_attribution(ctx: CaseContext):
     here); every queued expiry rides the plain deadlineErrorType path
     (RequestLifecycleCoordinator.timeoutEntry fallback).
 
-    ENV-A1: PREFILL_QUEUED preemption, queueTimeout 7s, maxWaiting 8.
+    ENV-A1: priority ordering without preemption, queueTimeout 7s.
 
     Wave 1 (mixed priorities): a 90a placeholder (12s prefill) parks the
     lease; eight 30s, the incoming 70, then 90b/90c all park.  Every
@@ -3091,54 +2796,7 @@ CODE_NO_DECODE = 8403
     source="design §2.4 #12 — AT4 + P6",
 )
 def atpm_error_code_family(ctx: CaseContext):
-    """Error-code family separation (AT4): each admission failure code
-    appears only under its own trigger condition, and the three segments
-    never cross-contaminate.
-
-    Segment 1 (8502 QUEUE_FULL, ENV-C1 maxOutstanding=2, G11b-isomorphic):
-    two slow placeholders hold both global outstanding permits; two
-    arrivals (priority 30 and 70 — the GLOBAL cap exempts no priority)
-    fail submit's outstanding acquire → completeError(QUEUE_FULL) as a
-    synchronous fast-reject.  The single-argument Response.error path
-    leaves admission_reject_reason=UNSPECIFIED(0) (code-level finding;
-    the actual pair is recorded for first-e2e calibration, per the
-    design's "8502 vs 8431 presentation needs first-run calibration"
-    note — the code-level expectation here is 8502 on the outstanding
-    path).  After the placeholders drain, a sequential request succeeds
-    (exact permit release).
-
-    Segment 2 (capacity park, ENV-Q2 shared; [EV-1-FIXED] flipped at
-    intake3 PendingPlacementCoordinator 6ad0315f10): a 70 placeholder
-    parks the inflight lease, eight 70s + the incoming 90 ALL park —
-    the {8402, 8510} route-reject family lost its capacity-blocked
-    trigger (maxWaiting's enqueueUnderLock cap is a BATCH-path check
-    the NON_BATCH pull model never reaches, so no enqueue ever fails
-    and the tryFallback path to 8510 never runs).  Zero victims, all
-    nine complete 200 with the 90 dispatching first among the wave
-    (priority desc; first parker 70a keeps slot one); the explicit-cap
-    rejection observation lives in segment 1's 8502.
-
-    Segment 3 (expiry uniformity, ENV-A1 shared; [EV-1-FIXED] flipped
-    at intake3): a 70_early placeholder (10s prefill — it must OUTLAST
-    every queue deadline, the deadline-cancels-at-dispatch finding)
-    parks the lease; 30a..30h + the incoming 90 all park and every one
-    expires at its own 7s deadline as plain 8511 BATCH_SLO_EXPIRED +
-    UNSPECIFIED (QUEUE_TIMEOUT 8503 is dead code; the 8431 +
-    RESOURCE_EXHAUSTED attributed form needs the expiry-time
-    classifier, which has zero call sites in the intake3 master —
-    Java-side observation gap, filed).  The 70_early completes (its
-    deadline cancelled at delivery ACK).
-
-    Segment 4 (A4, Mark P1-2, SKELETON — BATCH dispatcher family,
-    reserved not constructed): 8514 BATCH_TOKEN_CAPACITY / 8515
-    SCHEDULER_PLAN_CONFLICT only fire on the BATCH dispatcher, which the
-    current case base (SINGLE + NON_BATCH) never enters; filled
-    when a priority-batch variant enables BATCH dispatch.
-
-    Cross-segment isolation (AT4, per segment): segment-1 terminals
-    contain no 8402/8403/8431/8400/8429/8511; segment-2 no
-    8502/8403/8431/8400/8429/8511; segment-3 no 8502/8402/8403/8510.
-    """
+    """Verify queue-TTL errors, waitable Prefill token pressure and expiry attribution separately."""
     # A4 (Mark P1-2): batch-dispatch caliber reservation, following the
     # dual-caliber paradigm (is_batch = ctx.batch_dispatch();
     # completion-duration caliber under BATCH, client-TTFT under NON_BATCH).
@@ -3159,7 +2817,7 @@ def atpm_error_code_family(ctx: CaseContext):
     base = rid_base(ctx, "priority")
     segs = []
 
-    # ---- segment 1: 8502 QUEUE_FULL (ENV-C1) ---------------------------
+    # ---- segment 1: 8511 queue TTL (ENV-C1) ---------------------------
     env1 = ctx.env_manager.ensure(_c1_spec(ctx))
     ops1 = ctx.engine_ops(env1)
     fires1: list = []
@@ -3185,8 +2843,7 @@ def atpm_error_code_family(ctx: CaseContext):
         if not _poll_engine_pending(ops1, names1[0], 1):
             return False, "seg1 placeholders never dispatched"
 
-        # Both outstanding permits are held from submit time; the next two
-        # arrivals — low and high priority alike — must fast-reject 8502.
+        # Both workers retain their one admitted request beyond the queue TTL.
         rej_lo = ops1.next_request_id(base)
         rej_hi = ops1.next_request_id(base)
         rej_fires = _fire_batch(
@@ -3200,7 +2857,7 @@ def atpm_error_code_family(ctx: CaseContext):
 
         m1 = _outcome_map(_drain(ops1, ph_fires + rej_fires))
         rej_codes = [m1[rej_lo][1], m1[rej_hi][1]]
-        rej_fast = all(f.settled_s - f.submitted_s < 3.0 for f in rej_fires)
+        deadline_waited = all(1.0 <= f.settled_s - f.submitted_s < 4.0 for f in rej_fires)
         rej_reasons = [f.reason for f in rej_fires]
         placeholders_ok = m1[ph_a][0] and m1[ph_b][0]
         isolated1 = all(
@@ -3211,7 +2868,6 @@ def atpm_error_code_family(ctx: CaseContext):
                 CODE_RESOURCE_EXHAUSTED,
                 CODE_YIELDED,
                 CODE_ENGINE_CANCELLED,
-                CODE_SLO_EXPIRED,
             )
             for c in rej_codes + [m1[ph_a][1], m1[ph_b][1]]
         )
@@ -3222,17 +2878,17 @@ def atpm_error_code_family(ctx: CaseContext):
         clean1_ok, clean1_detail = AssertUtils.inflight_clean(_master_http(ops1), 30.0)
         segs.append(
             (
-                "s1_8502_outstanding",
-                rej_codes == [CODE_QUEUE_FULL, CODE_QUEUE_FULL]
-                and rej_fast
+                "s1_8511_queue_ttl",
+                rej_codes == [CODE_SLO_EXPIRED, CODE_SLO_EXPIRED]
+                and deadline_waited
                 and placeholders_ok
                 and isolated1
                 and recovery_ok
                 and clean1_ok,
                 (
-                    f"rejected codes={rej_codes} (expected [8502, 8502]), "
+                    f"rejected codes={rej_codes} (expected [8511, 8511]), "
                     f"reasons={rej_reasons} (expected [0, 0] UNSPECIFIED), "
-                    f"fast={rej_fast}, placeholders completed={placeholders_ok}, "
+                    f"deadline_waited={deadline_waited}, placeholders completed={placeholders_ok}, "
                     f"isolated={isolated1}, recovery={recovery_ok}"
                     f"({recovery_detail[:60]}), "
                     f"inflight={'ok' if clean1_ok else clean1_detail}"
@@ -3296,7 +2952,6 @@ def atpm_error_code_family(ctx: CaseContext):
         isolated2 = all(
             m2[rid][1]
             not in (
-                CODE_QUEUE_FULL,
                 CODE_NO_DECODE,
                 CODE_RESOURCE_EXHAUSTED,
                 CODE_YIELDED,
@@ -3390,7 +3045,6 @@ def atpm_error_code_family(ctx: CaseContext):
         isolated3 = all(
             m3[rid][1]
             not in (
-                CODE_QUEUE_FULL,
                 CODE_NO_DECODE,
                 CODE_YIELDED,
                 CODE_ENGINE_CANCELLED,
@@ -3427,12 +3081,12 @@ def atpm_error_code_family(ctx: CaseContext):
 
     # ---- segment 4 (A4, Mark P1-2): BATCH dispatcher family — SKELETON --
     # Reserved, not constructed: CODE_BATCH_TOKEN_CAPACITY (8514, group
-    # token capacity exceeded) and CODE_SCHEDULER_PLAN_CONFLICT (8515,
+    # Engine-reported batch shape exceeded) and CODE_SCHEDULER_PLAN_CONFLICT (8515,
     # plan conflict) only fire on the BATCH dispatcher, which the
     # current case base (SINGLE + NON_BATCH) never enters.  Fill
     # when a priority-batch variant enables BATCH dispatch —
-    # expected shape: saturate maxWaitingRequestsPerGroup so an incoming
-    # over the group token budget rejects 8514; force a concurrent plan
+    # expected shape: exceed the Engine-reported batch token shape for
+    # 8514; force a concurrent plan
     # mutation for 8515; keep the cross-segment isolation table growing
     # (segment-4 terminals must contain none of segments 1-3's codes).
     # Constants live at the module head next to the code-family block.
@@ -3470,41 +3124,7 @@ def atpm_error_code_family(ctx: CaseContext):
     source="design §2.4 #13 — AT1",
 )
 def atpm_config_strict_reject(ctx: CaseContext):
-    """Strict FLEXLB_CONFIG rejection (AT1): three illegal config variants
-    injected as RAW JSON strings (bypassing build_flexlb_config's Python
-    mirror validation on purpose — the Java strict parser is the system
-    under test) must fail MASTER STARTUP.
-
-    Variants:
-      1. a legal priority base plus a top-level ``"autoTpmEnabled": true``
-         — a removed field must not resurrect: the STRICT_MAPPER
-         (FAIL_ON_UNKNOWN_PROPERTIES, ConfigService) rejects the
-         unrecognized field (ConfigServiceTest.java:204-209 white-box
-         precedent);
-      2. ``ordering.type=FIFO`` with ``scheduler.ordering.defaultPriority``
-         spliced in — a cross-field violation (FifoOrderingConfig has no
-         such field; the Python mirror raises on the same shape, the raw
-         JSON splice bypasses it to hit the Java parser);
-      3. PRIORITY with ``allowedVictimStages`` containing
-         DECODE_ENGINE_OWNED but the ``engineCancellation`` block DELETED
-         — the validator's owned-cancellation cross-check.
-
-    Assertion signal (design §2.4): the Spring context dies during config
-    parsing → start_master's health check never sees the port → ensure()
-    raises RuntimeError("master failed to start:\n<tail log>") — the
-    black-box failure signal; the tail is grepped for the strict-parser
-    message family ("Config validation failed" / "Unrecognized field" /
-    "Invalid FLEXLB_CONFIG").  The harness's _build failure path already
-    stops the half-started processes and resets current=None (verified),
-    so each next variant builds cleanly.  Each variant costs a full
-    wait_for_port timeout (~90s — the status poll does not early-exit on
-    process death); the design explicitly accepts the runtime.
-
-    Profile declaration (single-nonbatch + PRIORITY axis injected at the
-    case layer) is semantic ownership + regression efficiency only (the
-    G11b label-honesty precedent): config rejection is
-    profile-independent behaviour.
-    """
+    """Startup rejects removed fields, inactive FIFO settings and missing decision lifetime."""
     report = GradeReport(run_grade=ctx.grade)
 
     cfg1 = json.loads(_prio_config())
@@ -3515,9 +3135,9 @@ def atpm_config_strict_reject(ctx: CaseContext):
     cfg2["scheduler"]["ordering"]["defaultPriority"] = 50
     variants.append(("fifo_with_defaultPriority", json.dumps(cfg2)))
 
-    cfg3 = json.loads(_prio_config(preemption=_PREEMPT_DECODE))
-    del cfg3["scheduler"]["ordering"]["preemption"]["engineCancellation"]
-    variants.append(("owned_without_engineCancellation", json.dumps(cfg3)))
+    cfg3 = json.loads(_prio_config())
+    del cfg3["requestLifecycle"]["decision"]["lifetime"]
+    variants.append(("missing_decision_lifetime", json.dumps(cfg3)))
 
     results = []
     try:
@@ -3612,8 +3232,7 @@ def atpm_config_strict_reject(ctx: CaseContext):
 )
 def atpm_decode_reservation_priority(ctx: CaseContext):
     """Decode-reservation priority consistency across stages (AT7): the
-    priority rules that govern PREFILL_QUEUED eviction hold verbatim in
-    the decode plane — strictly-lower-priority decode victims only, and
+    Decode reclamation selects strictly-lower-priority victims only, and
     same-priority decode occupancy never evicts (the decode-plane PR4,
     cross-checked against atpm_same_priority_zero_eviction's prefill
     side — that pair is the cross-stage consistency evidence).
@@ -3910,7 +3529,7 @@ def atpm_observability_integrity(ctx: CaseContext):
     > debug log) carries the priority/TPM facts on ONE composite
     choreography.
 
-    ENV-O1: Q2-shaped config (PREFILL_QUEUED preemption, queueTimeout 7s
+    ENV-O1: Q2-shaped config (priority ordering without preemption, queueTimeout 7s
     — [EV-1-FIXED] flipped from 8s at intake3
     PendingPlacementCoordinator 6ad0315f10: under the pull model the
     wave's third release slot lands at t=9s, which raced the 8s deadline
@@ -3920,15 +3539,14 @@ def atpm_observability_integrity(ctx: CaseContext):
     Implementation-period corrections over the design's env sketch: the
     DEFAULT critical-only whitelist hides auto_tpm.* (the legacy
     flexlb.monitor.mode switch is dead on this line), so the
-    FLEXLB_MONITOR_METRIC_WHITELIST entry is required; FLEXLB_PV_LOG is
+    --flexlb.monitor.metric-whitelist entry is required; FLEXLB_PV_LOG is
     a load-client-line knob with no consumer
     on the harness line — the pvLogger writes at INFO by default, so
     the pv.log plane needs no extra knob.  The master_env + debug-log
     differences give O1 its own fingerprint (exclusive env — the metric
     counters start from zero).
 
-    Choreography (the atpm_preempt_prefill_queued wave-1 shape with
-    mixed priorities for bucket coverage), [EV-1-FIXED] design-final
+    Choreography (mixed priorities for bucket coverage), [EV-1-FIXED] design-final
     form: a 50 placeholder parks the inflight lease; 30a/30b/50a/50b/
     70a/70b/30c/30d + the 90 ALL park in the pull-based coordinator.
     Prefill is slowed to 3s: ph completes at t=3, the first parker 30a
@@ -4155,16 +3773,10 @@ def atpm_observability_integrity(ctx: CaseContext):
 # ===========================================================================
 # Preemption-stage live coverage — atpm_preempt_* live family (2026-09)
 #
-# Design input: the preemption-stages audit (Zara,
-# verdict_preemption_stages.md).  The existing atpm_preempt_prefill_queued
-# ([EV-1-FIXED]) and the decode family ([EV-2]) all assert ZERO eviction —
-# under the NON_BATCH pull model capacity blocking parks every submitter,
-# so neither 8400 path (PREFILL_QUEUED queue replacement / DECODE_RESERVED
-# shadow-reservation eviction) ever fires.  The live family boots the
-# BATCH dispatcher so the master-owned enqueue path (WorkerBatcher queue
-# + maxWaiting cap → AdmissionFallback → EvictionManager) is reachable,
-# and pins the REAL victim terminals: exactly-8400 for both master-local
-# stages, 8429 for the engine-owned tombstone settle.
+# Decode reserved ownership is reclaimed locally and produces retryable 8400.
+# Engine-owned reclamation sends Cancel and waits for authoritative terminal
+# evidence; its victim terminal is 8429. The live family uses BATCH delivery
+# with constrained Decode capacity to exercise both implemented ownership stages.
 # ===========================================================================
 
 # 3-strike health demotion + restart windows (cancel.py HA-family
@@ -4299,27 +3911,11 @@ def _max_engine_requests_1(config: str) -> str:
     return json.dumps(parsed, separators=(",", ":"))
 
 
-def _pq_live_spec(ctx: CaseContext) -> EnvSpec:
-    """ENV for atpm_preempt_prefill_queued_live: BATCH dispatcher +
-    PREFILL_QUEUED-only preemption + maxWaiting=2, so the third submitter
-    (the P70 incoming) overflows the queue into AdmissionFallback's
-    queue-replacement path (1P+4D)."""
-    return _spec(
-        ctx,
-        "atpm_pq_live",
-        config=_prio_config(
-            dispatcher="batch",
-            preemption=_PREEMPT_PQ,
-            max_waiting=2,
-            queue_timeout_ms=60_000,
-        ),
-        extra_env=_MONITOR_AUTO_TPM_ENV,
-    )
 
 
 def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_decode_reserved_live: BATCH dispatcher + the
-    production-baseline stage set {PREFILL_QUEUED, DECODE_RESERVED} + a
+    production-baseline stage set {DECODE_RESERVED} + a
     4-block decode KV pool (4096 tokens at blockSize=1024) on a SINGLE
     decode engine, so the victim's shadow reservation — not a slot
     deficit — makes the incoming's decode placement fail."""
@@ -4330,30 +3926,30 @@ def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
         decode_cache_blocks=4,
         config=_prio_config(
             dispatcher="batch",
-            preemption={"allowed_victim_stages": ["PREFILL_QUEUED", "DECODE_RESERVED"]},
+            preemption={"allowed_victim_stages": ["DECODE_RESERVED"]},
             queue_timeout_ms=60_000,
         ),
-        extra_env=_MONITOR_AUTO_TPM_ENV,
+        extra_args=_MONITOR_AUTO_TPM_ARGS,
     )
 
 
 def _nf_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_cancel_not_found: all-three-stage preemption
-    (engineCancellation mandatory) + decode maxEngineRequests=1, NON_BATCH
+    (an explicit measured Decode TPOT profile) + decode maxEngineRequests=1, NON_BATCH
     single-decode topology (1P+1D)."""
     return _spec(
         ctx,
         "atpm_nf",
         n_decode=1,
         config=_max_engine_requests_1(
-            _prio_config(preemption=_PREEMPT_ALL_STAGES, queue_timeout_ms=60_000)
+            _prio_config(preemption=_PREEMPT_DECODE, queue_timeout_ms=60_000)
         ),
     )
 
 
 def _ts_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_cancel_tombstoned: the live preemption config
-    (all three stages + engineCancellation) + decode maxEngineRequests=1
+    (all three stages + an explicit Decode TPOT profile) + decode maxEngineRequests=1
     on the BATCH dispatcher (1P+1D) — same shape as cancel.py's
     cancel_preemption_victim."""
     return _spec(
@@ -4363,205 +3959,13 @@ def _ts_spec(ctx: CaseContext) -> EnvSpec:
         config=_max_engine_requests_1(
             _prio_config(
                 dispatcher="batch",
-                preemption=_PREEMPT_ALL_STAGES,
+                preemption=_PREEMPT_DECODE,
                 queue_timeout_ms=60_000,
             )
         ),
     )
 
 
-@case(
-    "atpm_preempt_prefill_queued_live",
-    profiles=["single-batch"],
-    source="preemption-stages audit (2026-09) — live PREFILL_QUEUED eviction",
-)
-def atpm_preempt_prefill_queued_live(ctx: CaseContext):
-    """LIVE PREFILL_QUEUED eviction: a higher-priority incoming replaces a
-    queued low-priority victim in the master's prefill queue — the victim
-    terminal is EXACTLY 8400 and no engine ever saw the rid.
-
-    ENV (BATCH dispatcher — the decisive knob): under NON_BATCH the
-    intake3 pull model parks every capacity-blocked submitter, so the
-    queue-full replacement path has no trigger ([EV-1-FIXED]); BATCH
-    puts the queue back in the master (WorkerBatcher + maxWaiting cap →
-    AdmissionFallback → EvictionManager.tryAdmitByPrefillEviction).
-    preemption={PREFILL_QUEUED} only, maxWaiting=2, 1P+4D, prefill
-    slowed to 4s.
-
-    Choreography: a P50 placeholder dispatches first (occupying the
-    engine's single prefill concurrency slot — the dispatch gate holds
-    everything else MASTER_QUEUED_NOT_DISPATCHED), then two P30 victims
-    queue (activeIndex=2=maxWaiting), then the P70 incoming overflows
-    the queue: queueDeficit = queued(2) + 1 − maxWaiting(2) = 1
-    (EvictionPlanner) → CANDIDATE_ORDER (priority asc, enqueuedAtMs
-    desc — latest same-priority first) picks victim_b → master-local
-    atomic replacement → 8400.
-
-    Contract:
-      * victim_b terminal is EXACTLY 8400 (yielded, retryable) and NO
-        engine ever saw the rid (master-local transaction — the
-        never-delivered proof);
-      * victim_a / placeholder / incoming all complete 200 with real
-        FetchResponse output;
-      * metric plane: auto_tpm.victim.count{stage=prefill_queued} == 1
-        with the 30←70 priority tags, and
-        auto_tpm.priority_preempt.count{stage=prefill_queued} >= 1;
-      * the ledger closes clean (master inflight + engine side) and
-        recovery works.
-    """
-    env = ctx.env_manager.ensure(_pq_live_spec(ctx))
-    ops = ctx.engine_ops(env)
-    report = GradeReport(run_grade=ctx.grade)
-    base = rid_base(ctx, "priority")
-    handles: dict = {}
-    prefill_names: list = []
-    try:
-        prefill_names = _prefill_names(ops)
-        for name in prefill_names:
-            ops.set_perf(name, prefill_fixed_ms=4000.0)
-        time.sleep(PERF_SETTLE_S)
-
-        ph = ops.next_request_id(base)
-        ph_resp = ops.schedule(
-            ph, priority=50, input_len=2048, output_len=2, timeout_s=90.0
-        )
-        if ph_resp.code != CODE_OK or not ph_resp.success:
-            return False, f"placeholder schedule failed: {ph_resp.error_message}"
-        if not _poll_engine_pending(ops, prefill_names[0], 1):
-            return False, "placeholder never dispatched"
-
-        va = ops.next_request_id(base)
-        vb = ops.next_request_id(base)
-        inc = ops.next_request_id(base)
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            a_future = pool.submit(
-                ops.schedule,
-                va,
-                priority=30,
-                input_len=2048,
-                output_len=2,
-                timeout_s=90.0,
-            )
-            time.sleep(FIRE_GAP_S)
-            b_future = pool.submit(
-                ops.schedule,
-                vb,
-                priority=30,
-                input_len=2048,
-                output_len=2,
-                timeout_s=90.0,
-            )
-            time.sleep(FIRE_GAP_S)
-            inc_future = pool.submit(
-                ops.schedule,
-                inc,
-                priority=70,
-                input_len=2048,
-                output_len=2,
-                timeout_s=90.0,
-            )
-            a_resp = a_future.result(timeout=95.0)
-            b_resp = b_future.result(timeout=95.0)
-            inc_resp = inc_future.result(timeout=95.0)
-
-        vb_evicted = b_resp.code == CODE_YIELDED and not b_resp.success
-        va_ok = a_resp.code == CODE_OK and a_resp.success
-        inc_ok = inc_resp.code == CODE_OK and inc_resp.success
-
-        # Survivors: consume the FetchResponse streams (BATCH delivery —
-        # the master owns the enqueue, the client stream is a
-        # FetchResponse against the original prefill).
-        completed = {}
-        for rid, resp in ((ph, ph_resp), (va, a_resp), (inc, inc_resp)):
-            if resp.code != CODE_OK or not resp.success:
-                continue
-            handle = ops.start_stream(resp, rid)
-            handles[rid] = handle
-            ended = handle.wait_end(45.0)
-            completed[rid] = ended and handle.snap.completed
-        survivors_completed = all(completed.get(r) for r in (ph, va, inc))
-        vb_never_seen = not _engine_saw(ops, vb)
-
-        samples = _scrape_master_metrics(ops)
-        pq_victim = _metric_sum(
-            samples, "auto_tpm_victim_count", {"stage": "prefill_queued"}
-        )
-        pq_victim_30_70 = _metric_sum(
-            samples,
-            "auto_tpm_victim_count",
-            {
-                "stage": "prefill_queued",
-                "victim_priority": "30",
-                "incoming_priority": "70",
-            },
-        )
-        pq_preempt = _metric_sum(
-            samples,
-            "auto_tpm_priority_preempt_count",
-            {"stage": "prefill_queued"},
-        )
-
-        report.invariant(
-            "PR10",
-            vb_evicted and va_ok and inc_ok and survivors_completed,
-            context="live_prefill_queued_replacement",
-            detail=(
-                f"victim_b terminal={b_resp.code} (expected exactly "
-                f"{CODE_YIELDED}), victim_a schedule={a_resp.code}, "
-                f"incoming schedule={inc_resp.code}, FetchResponse "
-                f"completed={ {r % 1_000_000: completed.get(r) for r in (ph, va, inc)} }"
-            ),
-        )
-        report.invariant(
-            "PR5",
-            vb_never_seen and vb_evicted,
-            context="live_victim_master_local_never_delivered",
-            detail=(
-                f"victim_b terminal={b_resp.code}, engine ever saw rid="
-                f"{_engine_saw(ops, vb)} (master-local atomic replacement "
-                f"— never-delivered proof; CANDIDATE_ORDER priority asc, "
-                f"enqueuedAtMs desc picks the latest same-priority "
-                f"victim_b over victim_a)"
-            ),
-        )
-        report.invariant(
-            "PR6",
-            vb_evicted and pq_victim == 1.0 and (pq_preempt or 0.0) >= 1.0,
-            context="live_prefill_queued_metrics",
-            detail=(
-                f"auto_tpm.victim.count{{stage=prefill_queued}}="
-                f"{pq_victim} (expected 1), 30<-70 tagged sample="
-                f"{pq_victim_30_70}, priority_preempt.count="
-                f"{pq_preempt} (>=1), victim samples="
-                f"{_metric_lines(samples, 'auto_tpm_victim_count')}"
-            ),
-        )
-        clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
-        engine_clean, engine_detail = engine_inflight_clean(
-            ops, _all_engine_names(ops), 30.0
-        )
-        recovery_ok, recovery_msg = ops.verify_recovery()
-        report.invariant(
-            "P6",
-            clean_ok and engine_clean and recovery_ok,
-            detail=(
-                f"inflight={'ok' if clean_ok else clean_detail}, "
-                f"engine={'ok' if engine_clean else engine_detail}, "
-                f"recovery={recovery_msg}"
-            ),
-        )
-        return report.finish(
-            f"live prefill-queued eviction: victim_b={b_resp.code} "
-            f"(never delivered), survivors completed="
-            f"{survivors_completed}, metric victim.count={pq_victim}, "
-            f"grades: {report.summary()}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-    finally:
-        for handle in handles.values():
-            handle.cancel()
-        _finally_hygiene(ops, [], prefill_names)
 
 
 @case(
@@ -4577,8 +3981,8 @@ def atpm_preempt_decode_reserved_live(ctx: CaseContext):
     would surface the typed-cancel 8429 terminal).
 
     ENV: BATCH dispatcher + the production-baseline stage set
-    {PREFILL_QUEUED, DECODE_RESERVED} (master_fixed_window.json values —
-    no engineCancellation because no engine-owned stage is enabled), a
+    {DECODE_RESERVED} (master_fixed_window.json values —
+    no Decode TPOT profile because no engine-owned stage is enabled), a
     4-block decode KV pool (4096 tokens at blockSize=1024) on a SINGLE
     decode engine, 1P+1D, prefill slowed to 4s.
 
