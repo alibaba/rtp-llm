@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.function.LongPredicate;
+import java.util.function.Supplier;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
@@ -83,8 +84,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     DeliveryStrategy deliveryStrategy,
                     EndpointEventProjector endpointEvents,
                     BatchSchedulerReporter reporter) {
-        this(status, config, deliveryStrategy,
-                endpointEvents, reporter,
+        this(status, () -> config, deliveryStrategy, endpointEvents, reporter,
                 new PlacementAvailability());
     }
 
@@ -94,7 +94,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     EndpointEventProjector endpointEvents,
                     BatchSchedulerReporter reporter,
                     PlacementAvailability placementAvailability) {
+        this(status, () -> config, deliveryStrategy, endpointEvents, reporter,
+                placementAvailability);
+    }
+
+    PrefillEndpoint(WorkerStatus status,
+                    Supplier<FlexlbConfig> configSupplier,
+                    DeliveryStrategy deliveryStrategy,
+                    EndpointEventProjector endpointEvents,
+                    BatchSchedulerReporter reporter,
+                    PlacementAvailability placementAvailability) {
         super(status);
+        FlexlbConfig config = configSupplier.get();
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.endpointEvents = java.util.Objects.requireNonNull(
                 endpointEvents, "endpointEvents");
@@ -104,7 +115,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.inflightRequestLimit = config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                 ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
         this.runtime = new WorkerBatcher(
-                status.getLogicalIpPort(), this, config,
+                status.getLogicalIpPort(), this, configSupplier,
                 deliveryStrategy, endpointEvents);
         this.prefillState = runtime.ownedState();
     }
