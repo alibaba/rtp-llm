@@ -3,10 +3,14 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.mxfp8_ops import MX_BLOCK
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+    MX_BLOCK,
+    mxfp8_quant_act_packed,
+)
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
     CudaMxfp8Linear,
 )
+from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 
 # DeepGEMM's default relative JIT path is not stable under Bazel's launcher.
 # Set an absolute cache before the first lazy DeepGEMM import/JIT invocation.
@@ -88,6 +92,25 @@ class CudaMxfp8LinearTest(unittest.TestCase):
             with self.subTest(m=m):
                 self._run(m)
 
+    def test_dense_mlp_reuses_external_mxfp8_input(self):
+        mlp = DenseMLP.__new__(DenseMLP)
+        torch.nn.Module.__init__(mlp)
+        mlp.up_proj = self.linear
+        mlp.down_proj = torch.nn.Identity()
+        mlp.act_fn = torch.nn.Identity()
+        mlp._fuse_silu_quant = False
+        mlp.parallelism_config = type(
+            "Parallelism", (), {"get_ffn_tp_size": lambda self: 1}
+        )()
+
+        self.assertFalse(mlp.accepts_fp8_input)
+        self.assertTrue(mlp.accepts_mxfp8_input)
+
+        x = torch.randn(4, self.K, dtype=torch.bfloat16, device=self.device)
+        x_q, x_scale = mxfp8_quant_act_packed(x)
+        expected = mlp(x)
+        actual = mlp(x, x_fp8=x_q, x_scale=x_scale)
+        self.assertTrue(torch.equal(actual, expected))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

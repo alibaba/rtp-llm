@@ -19,6 +19,42 @@ def _ieee_rn_div_f32(x, y):
 
 
 @triton.jit
+def _mxfp8_float_to_ue8m0(value):
+    """Match FlashInfer's round-toward-positive-infinity UE8M0 cast."""
+    bits = value.to(tl.int32, bitcast=True)
+    exponent = (bits >> 23) & 0xFF
+    mantissa = bits & 0x7FFFFF
+    bump = tl.where(mantissa != 0, 1, 0)
+    tiny_subnormal = (exponent == 0) & (mantissa <= 0x400000)
+    bump = tl.where(tiny_subnormal, 0, bump)
+    result = tl.minimum(exponent + bump, 254)
+    return tl.where(value <= 0.0, 0, result)
+
+
+@triton.jit
+def _mxfp8_ue8m0_to_inv_scale(exponent):
+    """Construct FlashInfer's exact reciprocal power-of-two MXFP8 scale."""
+    inv_exponent = tl.maximum(254 - exponent, 0)
+    inv_bits = inv_exponent << 23
+    inv_scale = inv_bits.to(tl.float32, bitcast=True)
+    return tl.where(exponent == 0, 0.0, inv_scale)
+
+
+def _allocate_mxfp8_packed_scale(
+    tokens: int, hidden_size: int, device: torch.device
+) -> torch.Tensor:
+    """Allocate DeepGEMM's group-32, four-UE8M0-bytes-per-int layout."""
+    import deep_gemm
+
+    packed_k = hidden_size // 128
+    aligned_tokens = deep_gemm.get_tma_aligned_size(tokens, 4)
+    storage = torch.empty(
+        (packed_k, aligned_tokens), device=device, dtype=torch.int32
+    )
+    return storage.transpose(0, 1)[:tokens, :]
+
+
+@triton.jit
 def _silu_and_mul_kernel(
     output_ptr,
     input_ptr,
@@ -807,6 +843,7 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
     BLOCK_N: tl.constexpr,  # group_size (typically 128)
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    MXFP8_SEMANTICS: tl.constexpr,
 ):
     """Fused: SiLU-and-mul + per-token-group FP8 quant.
 
@@ -845,22 +882,38 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
             silu_gate = gate / (1 + tl.exp(-gate))
             gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
             gate_up = gate_up_bf16.to(tl.float32)
-            # Match sgl_per_token_group_quant_fp8 byte-exact: 1e-10 floor on
-            # absmax, IEEE-RNE fp32 div for scale and per-element val/s
-            # (fp64-promoted to escape Triton's ``div.approx.f32`` default).
-            _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-4)
-            # IEEE-RNE fp32 div via inline ``div.rn.f32`` (Triton default `/`
-            # uses ``div.approx.f32`` which is ~1 ULP off sgl).
-            output_s = _ieee_rn_div_f32(_absmax, fp8_max)
-            output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
-            output_q = tl.clamp(
-                _ieee_rn_div_f32(gate_up, tl.full(gate_up.shape, output_s, tl.float32)),
-                fp8_min,
-                fp8_max,
-            ).to(output_ptr.dtype.element_ty)
+            _absmax = tl.max(tl.abs(gate_up))
+            if MXFP8_SEMANTICS:
+                # Native MXFP8 has no generic 1e-4 floor.  Convert absmax/448
+                # directly to the UE8M0 byte and multiply by its exact
+                # reciprocal, matching flashinfer.mxfp8_quantize for zero and
+                # subnormal groups as well as normal values.
+                normalized_max = _absmax * tl.full(
+                    _absmax.shape, 1.0 / 448.0, tl.float32
+                )
+                exp_bits = _mxfp8_float_to_ue8m0(normalized_max)
+                inv_scale = _mxfp8_ue8m0_to_inv_scale(exp_bits)
+                output_q = tl.clamp(
+                    gate_up * tl.full(gate_up.shape, inv_scale, tl.float32),
+                    fp8_min,
+                    fp8_max,
+                ).to(output_ptr.dtype.element_ty)
+            else:
+                # Match generic sgl_per_token_group_quant_fp8 byte-exact.
+                _absmax = tl.maximum(_absmax, 1e-4)
+                output_s = _ieee_rn_div_f32(_absmax, fp8_max)
+                output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
+                output_q = tl.clamp(
+                    _ieee_rn_div_f32(
+                        gate_up,
+                        tl.full(gate_up.shape, output_s, tl.float32),
+                    ),
+                    fp8_min,
+                    fp8_max,
+                ).to(output_ptr.dtype.element_ty)
+                scale_bits = output_s.to(tl.int32, bitcast=True)
+                exp_bits = (scale_bits >> 23) & 0xFF
             tl.store(out_base + offs_in_d, output_q, mask=mask)
-            scale_bits = output_s.to(tl.int32, bitcast=True)
-            exp_bits = (scale_bits >> 23) & 0xFF
             packed_scale = packed_scale | (exp_bits << (g * 8))
         tl.store(scale_base, packed_scale)
     else:
@@ -896,6 +949,7 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     input: torch.Tensor,
     quant_group_size: int = 128,
     scale_ue8m0: bool = True,
+    mxfp8_semantics: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dense 2-D fused SiLU-and-mul + per-token-group FP8 quant.
 
@@ -907,6 +961,8 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         quant_group_size: must divide H_out, defaults to 128.
         scale_ue8m0:  True for Blackwell-style packed int32 UE8M0 scales,
                       False for H20-style fp32 scales.
+        mxfp8_semantics: use native group-32 FlashInfer MXFP8 zero/subnormal
+                        scale semantics instead of generic FP8 quantization.
 
     Returns:
         (fp8_output, output_scale) tuple.
@@ -920,17 +976,27 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     assert input.shape[-1] % 2 == 0
     size_n = input.shape[-1] // 2
     assert size_n % quant_group_size == 0
+    if mxfp8_semantics:
+        assert quant_group_size == 32
+        assert scale_ue8m0
     num_groups = size_n // quant_group_size
 
     T = input.shape[0]
 
     if T >= _SILU_MUL_FP8_QUANT_M_THRESHOLD:
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            sgl_per_token_group_quant_fp8,
-        )
         from rtp_llm.models_py.modules.base import FusedSiluAndMul
 
         activated = FusedSiluAndMul()(input)
+        if mxfp8_semantics:
+            from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+                mxfp8_quant_act_packed,
+            )
+
+            return mxfp8_quant_act_packed(activated.contiguous())
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+
         return sgl_per_token_group_quant_fp8(
             activated,
             group_size=quant_group_size,
@@ -940,13 +1006,17 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         )
 
     output = torch.empty((T, size_n), dtype=torch.float8_e4m3fn, device=input.device)
-    output_scale = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, size_n),
-        device=input.device,
-        group_size=quant_group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
+    output_scale = (
+        _allocate_mxfp8_packed_scale(T, size_n, input.device)
+        if mxfp8_semantics
+        else create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, size_n),
+            device=input.device,
+            group_size=quant_group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     )
 
     if T == 0:
@@ -982,6 +1052,7 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGE,
         SCALE_UE8M0=scale_ue8m0,
+        MXFP8_SEMANTICS=mxfp8_semantics,
         num_warps=1,
     )
     return output, output_scale

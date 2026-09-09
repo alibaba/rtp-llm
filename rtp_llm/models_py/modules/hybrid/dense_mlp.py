@@ -20,11 +20,24 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
     )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
+        CudaMxfp8Linear,
+    )
     from rtp_llm.models_py.triton_kernels.common.activation import (
         silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
     )
 else:
     CudaFp8GEMMLinear = None  # type: ignore
+    CudaMxfp8Linear = None  # type: ignore
+
+
+def _mxfp8_silu_fusion_max_rows(hidden_size: int) -> int:
+    # HY4's shared expert has a 2048-wide down input. CUDA-Graph replay
+    # measurements keep the fused producer faster through M=256 at this width.
+    # Wider MXFP8 MLPs retain the conservative crossover established by their
+    # own benchmark.
+    return 256 if hidden_size == 2048 else 64
+
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
@@ -118,11 +131,27 @@ class DenseMLP(nn.Module):
         )
         if self._fuse_silu_quant and self.down_proj.scale_ue8m0:
             self._fuse_silu_quant = self.down_proj.K % 512 == 0
+        self._fuse_silu_mxfp8_quant = bool(
+            fuse_kernels_enabled(hw_kernel_config)
+            and self.is_gated
+            and CudaMxfp8Linear is not None
+            and isinstance(self.down_proj, CudaMxfp8Linear)
+            and self.down_proj.K % 128 == 0
+        )
 
     @property
     def accepts_fp8_input(self) -> bool:
+        # This flag is consumed by generic group-128 FP8 producer fusions.
+        # MXFP8 has a different group size and scale layout, so keep the
+        # capability contracts separate.
         return CudaFp8GEMMLinear is not None and isinstance(
             self.up_proj, CudaFp8GEMMLinear
+        )
+
+    @property
+    def accepts_mxfp8_input(self) -> bool:
+        return CudaMxfp8Linear is not None and isinstance(
+            self.up_proj, CudaMxfp8Linear
         )
 
     def forward(
@@ -132,7 +161,11 @@ class DenseMLP(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
         skip_allreduce: bool = False,
     ):
-        if x_fp8 is not None and x_scale is not None and self.accepts_fp8_input:
+        if (
+            x_fp8 is not None
+            and x_scale is not None
+            and (self.accepts_fp8_input or self.accepts_mxfp8_input)
+        ):
             up = self.up_proj(x_fp8, input_scales=x_scale)
         else:
             up = self.up_proj(x)
@@ -143,6 +176,23 @@ class DenseMLP(nn.Module):
                     up.contiguous(),
                     quant_group_size=128,
                     scale_ue8m0=scale_ue8m0,
+                )
+            )
+            output = self.down_proj(fp8_out, input_scales=scale_out)
+        elif (
+            getattr(self, "_fuse_silu_mxfp8_quant", False)
+            and up.dim() == 2
+            and up.size(0) <= _mxfp8_silu_fusion_max_rows(self.down_proj.K)
+        ):
+            # The exact HY4 shared-expert shape is H=2048. Its group-32
+            # single launch wins through M=256; wider MLPs use the lower
+            # helper threshold above.
+            fp8_out, scale_out = (
+                silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
+                    up.contiguous(),
+                    quant_group_size=32,
+                    scale_ue8m0=True,
+                    mxfp8_semantics=True,
                 )
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
