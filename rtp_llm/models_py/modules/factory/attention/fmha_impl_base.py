@@ -48,6 +48,7 @@ class MlaImplBase(object):
         self.is_cuda_graph = is_cuda_graph
         self.fmha_params: Any = None
         self.cp_params: Optional[Any] = None
+        self.pinned_mla_groups: Dict[int, Any] = {}
         self.parallelism_config = parallelism_config
 
     @staticmethod

@@ -55,7 +55,12 @@ from rtp_llm.ops import (
     KvCacheDataType,
     ParallelismConfig,
 )
-from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    LayerKVCache,
+    PyAttentionInputs,
+    rtp_llm_ops,
+)
 from rtp_llm.utils.model_weight import W
 
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
@@ -144,6 +149,15 @@ class SparseMlaOp(object):
         # Filled by plan() each forward
         self.block_table: Optional[torch.Tensor] = None
         self.mla_params: Optional[rtp_llm_ops.FlashInferMlaAttnParams] = None
+        # Several HY4 layers consume the exact same request-local TopK tensor.
+        # Its physical-cache conversion is also identical while the block table
+        # and request-id mapping stay unchanged, so retain the most recent
+        # result for the following shared-TopK layers. plan() clears this state
+        # at every forward boundary.
+        self._global_topk_source: Optional[torch.Tensor] = None
+        self._global_topk_block_table: Optional[torch.Tensor] = None
+        self._global_topk_req_ids: Optional[torch.Tensor] = None
+        self._global_topk_result: Optional[torch.Tensor] = None
 
     # Sub-classes that consume KV in paged layout override this to True.
     expects_paged_kv: bool = False
@@ -156,6 +170,10 @@ class SparseMlaOp(object):
     ) -> None:
         self.block_table = block_table
         self.mla_params = mla_params
+        self._global_topk_source = None
+        self._global_topk_block_table = None
+        self._global_topk_req_ids = None
+        self._global_topk_result = None
 
     def _convert_topk_indices_to_global(
         self, topk_indices: torch.Tensor
@@ -165,11 +183,20 @@ class SparseMlaOp(object):
         Returns [T, 1, topk]. h_kv=1 for MLA — heads share indices.
         """
         assert self.block_table is not None and self.mla_params is not None
+        req_ids = self.mla_params.batch_indice_d
+        if (
+            topk_indices is self._global_topk_source
+            and self.block_table is self._global_topk_block_table
+            and req_ids is self._global_topk_req_ids
+            and self._global_topk_result is not None
+        ):
+            return self._global_topk_result
+
         topk_2d = _topk_2d(topk_indices)
         topk = topk_2d.shape[1]
         assert topk == self.top_k, f"topk {topk} != top_k {self.top_k}"
         global_2d = triton_convert_req_index_to_global_index(
-            req_id=self.mla_params.batch_indice_d,
+            req_id=req_ids,
             block_table=self.block_table,
             # REBASE CONFLICT CONTEXT(e2e00e570): source branch passed
             # `token_indices=topk_2d, BLOCK_SIZE=self.token_per_block`; new
@@ -183,7 +210,12 @@ class SparseMlaOp(object):
             BLOCK_N=min(128, topk),
             HAS_PREFILL_WORKSPACE=False,
         )
-        return global_2d.unsqueeze(1)
+        result = global_2d.unsqueeze(1)
+        self._global_topk_source = topk_indices
+        self._global_topk_block_table = self.block_table
+        self._global_topk_req_ids = req_ids
+        self._global_topk_result = result
+        return result
 
     def _pad_query_and_sink(
         self,
@@ -215,9 +247,7 @@ class SparseMlaOp(object):
         if actual_heads == kernel_heads:
             return q, attn_sink, actual_heads
         q_padded = (
-            maybe_pad_query_heads(q, kernel_heads)
-            if fuse_kernels_enabled()
-            else None
+            maybe_pad_query_heads(q, kernel_heads) if fuse_kernels_enabled() else None
         )
         if q_padded is None:
             q_padded = q.new_zeros((q.size(0), kernel_heads, q.size(2)))
@@ -250,7 +280,8 @@ class SparseMlaOp(object):
         q, attn_sink, actual_heads = self._pad_query_and_sink(q, attn_sink)
         global_indices = (
             self._convert_topk_indices_to_global(topk_indices)
-            if physical_indices is None else physical_indices
+            if physical_indices is None
+            else physical_indices
         )
         sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         out, _, _ = flash_mla_sparse_fwd(
@@ -294,6 +325,17 @@ class _GatherWorkspace:
     seq_lens: torch.Tensor  # [batch_size], int32, indptr diff
     total_kv_len: int
     batch_size: int
+
+
+@dataclass
+class _SparseMlaPreparedForward:
+    """Top-K-independent SparseMLA work submitted before Indexer completion."""
+
+    q_transformed: torch.Tensor
+    kv_input: torch.Tensor
+    layer_id: int
+    attn_sink: Optional[torch.Tensor]
+    physical_indices: Optional[torch.Tensor] = None
 
 
 class SparseMlaFp8Op(SparseMlaOp):
@@ -410,7 +452,11 @@ class SparseMlaFp8Op(SparseMlaOp):
         if self._gather is not None and physical_indices is None:
             return self._forward_gather(q, kv, topk_indices, attn_sink)
         return self._forward_with_kvcache(
-            q, kv, topk_indices, layer_id, attn_sink=attn_sink,
+            q,
+            kv,
+            topk_indices,
+            layer_id,
+            attn_sink=attn_sink,
             physical_indices=physical_indices,
         )
 
@@ -498,9 +544,14 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # Indices: [T, 1, topk] → [1, T, topk] (kernel expects batched layout)
         global_indices = (
-            self._convert_topk_indices_to_global(topk_indices)
-            if physical_indices is None else physical_indices
-        ).squeeze(1).unsqueeze(0)
+            (
+                self._convert_topk_indices_to_global(topk_indices)
+                if physical_indices is None
+                else physical_indices
+            )
+            .squeeze(1)
+            .unsqueeze(0)
+        )
 
         sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         attn_out, _ = flash_mla_with_kvcache(
@@ -526,6 +577,25 @@ class SparseMlaFp8Op(SparseMlaOp):
 
 class SparseMlaImpl(MlaImplBase):
     """Wraps a SparseMlaOp / SparseMlaFp8Op with rope, KV write, and absorbed BMMs."""
+
+    supports_topk_late_binding = True
+
+    def can_fuse_kv_norm_cache(
+        self, compressed_kv: torch.Tensor, kv_norm_weight: torch.Tensor
+    ) -> bool:
+        """Whether the cache writer can consume raw KV-A and apply RMSNorm."""
+        return bool(
+            self._fuse_qk_rope_cat_cache_mla
+            and self._kv_cache_type == "fp8_ds_mla"
+            and self.kv_lora_rank == 512
+            and compressed_kv.dim() == 2
+            and compressed_kv.dtype == torch.bfloat16
+            and compressed_kv.stride(-1) == 1
+            and kv_norm_weight.shape == (self.kv_lora_rank,)
+            and kv_norm_weight.dtype == torch.bfloat16
+            and kv_norm_weight.is_contiguous()
+            and compressed_kv.device == kv_norm_weight.device
+        )
 
     def __init__(
         self,
@@ -791,6 +861,7 @@ class SparseMlaImpl(MlaImplBase):
         self,
         q: torch.Tensor,
         layer_id: int,
+        q_transformed: Optional[torch.Tensor] = None,
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Project q_nope @ W_kc to kv_lora_rank, assemble [T, H, kv_lora_rank|rope].
@@ -802,32 +873,48 @@ class SparseMlaImpl(MlaImplBase):
             -1, self.num_heads, self.nope_head_dim + self.rope_head_dim
         ).split([self.nope_head_dim, self.rope_head_dim], dim=-1)
 
-        expected_shape = (
-            q_nope.shape[0],
-            self.num_heads,
-            self.kv_lora_rank + self.rope_head_dim,
-        )
-        if out is None:
+        if out is not None:
+            if q_transformed is not None:
+                raise ValueError(
+                    "out and prefilled q_transformed are mutually exclusive"
+                )
+            expected_shape = (
+                q_nope.shape[0],
+                self.num_heads,
+                self.kv_lora_rank + self.rope_head_dim,
+            )
+            if (
+                tuple(out.shape) != expected_shape
+                or out.dtype != q.dtype
+                or out.device != q.device
+                or not out.is_contiguous()
+            ):
+                raise ValueError("invalid absorbed-query output buffer")
+            q_transformed = out
+            strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
+
+        if q_transformed is None:
             q_transformed = torch.empty(
-                expected_shape,
+                q_nope.shape[0],
+                self.num_heads,
+                self.kv_lora_rank + self.rope_head_dim,
                 dtype=q.dtype,
                 device=q.device,
             )
-        elif (
-            tuple(out.shape) != expected_shape
-            or out.dtype != q.dtype
-            or out.device != q.device
-            or not out.is_contiguous()
-        ):
-            raise ValueError(
-                "SparseMLA input BMM out must be contiguous and match q: "
-                f"expected shape/dtype/device={expected_shape}/{q.dtype}/{q.device}, "
-                f"got {tuple(out.shape)}/{out.dtype}/{out.device}, "
-                f"contiguous={out.is_contiguous()}"
-            )
+            strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
         else:
-            q_transformed = out
-        strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
+            expected_shape = (
+                q_nope.shape[0],
+                self.num_heads,
+                self.kv_lora_rank + self.rope_head_dim,
+            )
+            if (
+                q_transformed.shape != expected_shape
+                or q_transformed.dtype != q.dtype
+                or q_transformed.device != q.device
+                or not q_transformed.is_contiguous()
+            ):
+                raise ValueError("invalid prefilled absorbed-query buffer")
 
         if q_nope.shape[0] > 0:
             k_weight = self.weights[layer_id][W.mla_kc]
@@ -861,40 +948,44 @@ class SparseMlaImpl(MlaImplBase):
         if group_layer == 0:
             working.begin(self.fmha_impl._convert_topk_indices_to_global(topk_indices))
 
-    def forward(
+
+    def prepare_topk_independent_forward(
         self,
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
         kv_cache: Optional[KVCache],
         layer_id: int,
-        topk_indices: Optional[torch.Tensor] = None,
         attn_sink: Optional[torch.Tensor] = None,
-        kv_prefetched: bool = False,
-    ) -> torch.Tensor:
-        """Sparse MLA forward. q: [T, H, qk_head_dim], topk: [T, (H,) topk] (req-local).
-        Returns [T, H, nope_head_dim]."""
-        assert topk_indices is not None and kv_cache is not None
-
-        working_entry = getattr(self, "pinned_mla_groups", {}).get(layer_id)
+        kv_norm_weight: Optional[torch.Tensor] = None,
+        kv_norm_eps: float = 0.0,
+    ) -> _SparseMlaPreparedForward:
+        """Submit RoPE/cache write and absorbed-Q BMM before Top-K is ready."""
+        assert kv_cache is not None
+        working_entry = self.pinned_mla_groups.get(layer_id)
         cache_target = kv_cache
         write_slots = self.rope_params.slot_mapping
         if working_entry is not None:
             working, group_layer = working_entry
-            if not kv_prefetched:
-                self.prefetch_kv(layer_id, topk_indices)
-            # Produce exactly the original cache bytes in a small GPU scratch
-            # buffer while historical KV prefetch proceeds on its own stream.
             cache_target = LayerKVCache()
             cache_target.kv_cache_base = torch.empty(
                 (q.shape[0], 1, kv_cache.kv_cache_base.shape[-1]),
-                dtype=kv_cache.kv_cache_base.dtype, device=q.device,
+                dtype=kv_cache.kv_cache_base.dtype,
+                device=q.device,
             )
             write_slots = torch.arange(q.shape[0], dtype=torch.int64, device=q.device)
 
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
+        q_transformed = None
         if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
+            q_transformed = torch.empty(
+                q.shape[0],
+                self.num_heads,
+                self.kv_lora_rank + self.rope_head_dim,
+                dtype=q.dtype,
+                device=q.device,
+            )
             fused_qk_rope_cat_cache_mla(
                 q=q,
                 compressed_kv=compressed_kv,
@@ -907,41 +998,97 @@ class SparseMlaImpl(MlaImplBase):
                 rope_head_dim=self.rope_head_dim,
                 is_neox_style=self._is_neox_style,
                 kv_cache_type=self._kv_cache_type,
+                q_rope_output=q_transformed[..., self.kv_lora_rank :],
+                kv_norm_weight=kv_norm_weight,
+                kv_norm_eps=kv_norm_eps,
             )
         else:
             self.rope_impl.forward(q_pe, k_pe, self.rope_params)
             self.kv_cache_write_op.forward(
-                compressed_kv, k_pe, cache_target, self.rope_params,
+                compressed_kv,
+                k_pe,
+                cache_target,
+                self.rope_params,
                 slot_mapping_override=write_slots,
             )
 
+        # 2. Project q via W_kc into the absorbed kv_lora_rank space
+        q_transformed = self._apply_input_bmm(
+            q, layer_id, q_transformed=q_transformed
+        )
+
+        physical_indices = None
         if working_entry is not None:
-            # Q projection overlaps admission and H2D before joining prefetch.
-            q_transformed = self._apply_input_bmm(q, layer_id)
-            working.write(group_layer, self.rope_params.slot_mapping,
-                          cache_target.kv_cache_base.flatten(0, 1))
+            working.write(
+                group_layer,
+                self.rope_params.slot_mapping,
+                cache_target.kv_cache_base.flatten(0, 1),
+            )
+            kv_input = working.resident[group_layer]
+            physical_indices = working.physical_indices
+        else:
+            kv_input = kv_cache.kv_cache_base
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        if working_entry is None:
-            q_transformed = self._apply_input_bmm(q, layer_id)
-
-        # 3. Sparse attention. FP8 op consumes paged shape; BF16 op wants flat.
-        kv_input = (working.resident[group_layer] if working_entry is not None
-                    else kv_cache.kv_cache_base)
         if not self.fmha_impl.expects_paged_kv:
             kv_input = kv_input.view(-1, 1, kv_input.size(-1))
-        attention_kwargs = {}
-        if working_entry is not None:
-            attention_kwargs["physical_indices"] = working.physical_indices
-        attn_output = self.fmha_impl.forward(
-            q_transformed,
-            kv_input,
-            topk_indices,
+        return _SparseMlaPreparedForward(
+            q_transformed=q_transformed,
+            kv_input=kv_input,
             layer_id=layer_id,
             attn_sink=attn_sink,
-            **attention_kwargs,
+            physical_indices=physical_indices,
         )
 
-        # 4. Project attention output via W_vc → final output
-        return self._apply_output_bmm(attn_output, layer_id)
+    def finish_topk_dependent_forward(
+        self,
+        prepared: _SparseMlaPreparedForward,
+        topk_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run sparse attention and the output BMM after Top-K is available."""
+        attn_output = self.fmha_impl.forward(
+            prepared.q_transformed,
+            prepared.kv_input,
+            topk_indices,
+            layer_id=prepared.layer_id,
+            attn_sink=prepared.attn_sink,
+            **(
+                {"physical_indices": prepared.physical_indices}
+                if prepared.physical_indices is not None
+                else {}
+            ),
+        )
+
+        return self._apply_output_bmm(attn_output, prepared.layer_id)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[KVCache],
+        layer_id: int,
+        topk_indices: Optional[torch.Tensor] = None,
+        attn_sink: Optional[torch.Tensor] = None,
+        kv_norm_weight: Optional[torch.Tensor] = None,
+        kv_norm_eps: float = 0.0,
+        kv_prefetched: bool = False,
+    ) -> torch.Tensor:
+        """Sparse MLA forward. q: [T, H, qk_head_dim], topk: [T, (H,) topk] (req-local).
+        Returns [T, H, nope_head_dim]."""
+        assert topk_indices is not None
+        if layer_id in self.pinned_mla_groups and not kv_prefetched:
+            self.prefetch_kv(layer_id, topk_indices)
+        prepared = self.prepare_topk_independent_forward(
+            q,
+            compressed_kv,
+            k_pe,
+            kv_cache,
+            layer_id,
+            attn_sink,
+            kv_norm_weight,
+            kv_norm_eps,
+        )
+
+        return self.finish_topk_dependent_forward(prepared, topk_indices)

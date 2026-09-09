@@ -839,9 +839,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if self._gather is not None:
             out0 = self._attend_gather(q0, kv_cache, topk, attn_sink)
         else:
-            out0 = self._attend_with_kvcache(
-                q0, kv_cache, topk, layer_id, attn_sink
-            )
+            out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id, attn_sink)
 
         if use_identity_q:
             return out0
@@ -1024,6 +1022,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
 class SparseMlaCpImpl(SparseMlaImpl):
     """Sparse MLA wrapper that selects SparseMlaFp8CPOp and packs CP indices."""
+
+    # CP must all-gather/restore KV before it can select and run its local Q
+    # work, so the non-CP late-Top-K split is not a valid execution contract.
+    supports_topk_late_binding = False
 
     def __init__(
         self,
