@@ -1,5 +1,7 @@
+import itertools
 import logging
 import math
+import os
 import random
 import unittest
 
@@ -58,6 +60,111 @@ def causal_conv1d_ref(
 
 
 class TestCausalConv1dPrefill(unittest.TestCase):
+    def test_grouped_output_preserves_fp32_arithmetic_and_prefix_cache(self):
+        torch.manual_seed(530909)
+        lengths = [1, 3, 127, 129, 513]
+        cu = torch.tensor(
+            [0] + list(itertools.accumulate(lengths)), device="cuda", dtype=torch.int32
+        )
+        for channels in (128, 129, 1024):
+            for width in (2, 3, 4):
+                for prefix in (0, 128):
+                    for activation in (None, "silu"):
+                        with self.subTest(
+                            channels=channels,
+                            width=width,
+                            prefix=prefix,
+                            activation=activation,
+                        ):
+                            dim = 3 * channels
+                            x = torch.randn(
+                                sum(lengths), dim, device="cuda", dtype=torch.bfloat16
+                            )
+                            weight = torch.randn(dim, width, device="cuda")
+                            bias = torch.randn(dim, device="cuda")
+                            prefixes = torch.full(
+                                (len(lengths),),
+                                prefix,
+                                device="cuda",
+                                dtype=torch.int32,
+                            )
+                            counts = [math.ceil((prefix + n) / 128) for n in lengths]
+                            slots = torch.randperm(
+                                sum(counts), device="cuda", dtype=torch.int32
+                            )
+                            block_map = torch.full(
+                                (len(lengths), max(counts)),
+                                -1,
+                                device="cuda",
+                                dtype=torch.int32,
+                            )
+                            offset = 0
+                            for row, count in enumerate(counts):
+                                block_map[row, :count] = slots[offset : offset + count]
+                                offset += count
+                            state = torch.randn(
+                                sum(counts),
+                                width - 1,
+                                dim,
+                                device="cuda",
+                                dtype=torch.bfloat16,
+                            )
+                            old_state, new_state = state.clone(), state.clone()
+                            kwargs = dict(
+                                x=x.T,
+                                weight=weight,
+                                bias=bias,
+                                query_start_loc=cu,
+                                block_map=block_map,
+                                prefix_lengths=prefixes,
+                                seq_size_per_block=128,
+                                activation=activation,
+                            )
+                            old = causal_conv1d_fn(
+                                conv_states=old_state.transpose(1, 2), **kwargs
+                            ).T
+                            new = causal_conv1d_fn(
+                                conv_states=new_state.transpose(1, 2),
+                                output_groups=3,
+                                **kwargs,
+                            )
+                            for actual, expected in zip(
+                                new.unbind(0), old.split(channels, -1)
+                            ):
+                                self.assertTrue(actual.is_contiguous())
+                                torch.testing.assert_close(
+                                    actual, expected, rtol=0, atol=0
+                                )
+                            torch.testing.assert_close(
+                                new_state, old_state, rtol=0, atol=0
+                            )
+
+    @unittest.skipUnless(
+        os.environ.get("GLM53_TEST_LARGE_CONV") == "1", "12 GiB conv test"
+    )
+    def test_grouped_output_offsets_above_int32(self):
+        # The V plane begins at element 2**31 for the real B8/128K TP8 shape.
+        tokens, channels = 1048576, 1024
+        x = torch.ones(tokens, 3 * channels, device="cuda", dtype=torch.bfloat16)
+        x[:, channels : 2 * channels] = 2
+        x[:, 2 * channels :] = 3
+        weight = torch.zeros(3 * channels, 4, device="cuda")
+        weight[:, -1] = 1
+        output = causal_conv1d_fn(
+            x.T,
+            weight,
+            None,
+            None,
+            torch.arange(9, device="cuda", dtype=torch.int32) * 131072,
+            None,
+            torch.zeros(8, device="cuda", dtype=torch.int32),
+            128,
+            activation=None,
+            output_groups=3,
+        )
+        for group in range(3):
+            self.assertTrue(bool((output[group] == group + 1).all()))
+
     # without KVCache
     def test_basic(self):
         device = "cuda"

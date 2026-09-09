@@ -11,8 +11,10 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-import rtp_llm.ops.compute_ops as compute_ops
 import torch
+from torch import nn
+
+import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.glm53_prefill_parallel import (
@@ -24,8 +26,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_gather_trim,
     all_reduce,
-    reduce_scatter_padded,
 )
+from rtp_llm.models_py.distributed.glm53_collective_gemm import reduce_scatter_glm53
 from rtp_llm.models_py.distributed.sequence_parallel import (
     TokenShardLayout,
     shard_tokens,
@@ -90,7 +92,6 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
-from torch import nn
 
 _CULA_LOGGED_DEVICES: set[int] = set()
 
@@ -222,6 +223,14 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
     ):
         super().__init__(
             linear_attn_config, parallelism_config, weights, gate_lower_bound
+        )
+        self.conv_output_groups = (
+            3
+            if gate_lower_bound is not None
+            and self.local_num_k_heads == self.local_num_v_heads
+            and self.head_k_dim == self.head_v_dim
+            and os.environ.get("GLM53_KDA_PREFILL_CONV_LAYOUT", "0") == "1"
+            else 1
         )
 
     @staticmethod
@@ -366,8 +375,9 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths,
             metadata=metadata,
-        ).transpose(0, 1)
-        return out
+            output_groups=self.conv_output_groups,
+        )
+        return out if self.conv_output_groups > 1 else out.transpose(0, 1)
 
     def _fla(
         self,
@@ -408,15 +418,18 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 seq_size_per_block,
             )
 
-        query, key, value = torch.split(
-            mixed_qkv,
-            [
-                self.local_num_k_heads * self.head_k_dim,
-                self.local_num_k_heads * self.head_k_dim,
-                self.local_num_v_heads * self.head_v_dim,
-            ],
-            dim=-1,
-        )
+        if self.conv_output_groups == 3:
+            query, key, value = mixed_qkv.unbind(0)
+        else:
+            query, key, value = torch.split(
+                mixed_qkv,
+                [
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_v_heads * self.head_v_dim,
+                ],
+                dim=-1,
+            )
         query = query.view(
             1, query.shape[0], self.local_num_k_heads, self.head_k_dim
         ).contiguous()
@@ -834,6 +847,17 @@ class KimiLinearKDA(nn.Module):
         self.parallelism_config = parallelism_config
 
         # Projections
+        self.local_low_rank = (
+            gate_lower_bound is not None
+            and os.environ.get("GLM53_KDA_LOCAL_LOW_RANK", "0") == "1"
+        )
+        self.local_low_rank_min_tokens = int(
+            os.environ.get("GLM53_KDA_LOCAL_LOW_RANK_MIN_TOKENS", "1048576")
+        )
+        if self.local_low_rank_min_tokens < 32768:
+            raise ValueError(
+                "Local KDA low-rank threshold must be at least 32768 tokens"
+            )
         self.in_proj_qkv = LinearFactory.create_linear_from_weights(
             weights, W.linear_attn_qkv_w, None, None, quant_config
         )
@@ -901,10 +925,18 @@ class KimiLinearKDA(nn.Module):
         # 1. Projections. The SP caller may leave the input rank-local for AG/GEMM.
         if input_is_sharded:
             from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                all_gather_kda_projections,
                 all_gather_projections,
             )
 
-            projected_qkv, beta_input, forget_low, gate_low = all_gather_projections(
+            project = (
+                all_gather_kda_projections
+                if self.local_low_rank
+                and attn_meta.token_shard.logical_tokens
+                >= self.local_low_rank_min_tokens
+                else all_gather_projections
+            )
+            projected_qkv, beta_input, forget_low, gate_low = project(
                 hidden_states,
                 self.input_projections(),
                 attn_meta.token_shard.logical_tokens,
@@ -971,7 +1003,7 @@ class KimiLinearKDA(nn.Module):
 
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = (
-                reduce_scatter_padded(attn_output, Group.TP)
+                reduce_scatter_glm53(attn_output)
                 if attn_meta.token_shard is not None
                 else all_reduce(attn_output, group=Group.TP)
             )
@@ -1246,7 +1278,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 hidden_states, layout.logical_tokens, Group.TP
             )
             hidden_states = self.mlp(hidden_states, skip_allreduce=True)
-            hidden_states = reduce_scatter_padded(hidden_states, Group.TP)
+            hidden_states = reduce_scatter_glm53(hidden_states)
         hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
         return DecodeLayerOutput(hidden_states, hidden_states)
 

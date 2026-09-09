@@ -21,6 +21,15 @@ def mla_cp_enabled(model_type: str, role_type: Any) -> bool:
     )
 
 
+def shared_expert_local_enabled(model_type: str, role_type: Any) -> bool:
+    """One selection shared by checkpoint loading and MoE execution."""
+    return bool(
+        model_type == "glm5_3_flash"
+        and role_type == RoleType.PREFILL
+        and _enabled("GLM53_PREFILL_SHARED_EXPERT_LOCAL")
+    )
+
+
 def sequence_parallel_enabled(model_type: str, parallelism: Any) -> bool:
     return bool(
         model_type == "glm5_3_flash"

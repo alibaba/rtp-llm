@@ -37,6 +37,33 @@ def _expected_cp(x, lengths, size, rank):
 
 
 class LayoutTest(unittest.TestCase):
+    def test_shared_fp8_kernel_and_scales_replicate_only_when_selected(self):
+        from rtp_llm.model_loader.ffn_weight import FfnConfig
+        from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+            W8A8Fp8PerBlockFfnAtomicWeight,
+        )
+        from rtp_llm.models.glm53_prefill_parallel import shared_expert_local_enabled
+        from rtp_llm.ops import RoleType
+        from rtp_llm.utils.model_weight import W
+
+        cfg = FfnConfig(replicate_for_prefill_tokens=True)
+        for name in (W.ffn_w13, W.ffn_w2, W.ffn_s13, W.ffn_s2):
+            weight = W8A8Fp8PerBlockFfnAtomicWeight(name, [], config=cfg)
+            tensor = torch.arange(128).reshape(16, 8)
+            result = weight._split({name: tensor}, None)[name]
+            torch.testing.assert_close(result, tensor, rtol=0, atol=0)
+            self.assertNotEqual(result.data_ptr(), tensor.data_ptr())
+        with patch.dict(os.environ, {"GLM53_PREFILL_SHARED_EXPERT_LOCAL": "1"}):
+            self.assertTrue(
+                shared_expert_local_enabled("glm5_3_flash", RoleType.PREFILL)
+            )
+            self.assertFalse(
+                shared_expert_local_enabled("glm5_3_flash", RoleType.DECODE)
+            )
+            self.assertFalse(
+                shared_expert_local_enabled("kimi_linear", RoleType.PREFILL)
+            )
+
     def test_mla_view_preserves_kda_tp_and_rejects_global_cp(self):
         from rtp_llm.models.glm53_prefill_parallel import MlaCPParallelismView
 
@@ -150,13 +177,17 @@ class LayoutTest(unittest.TestCase):
             self.assertFalse(mla_cp_enabled("kimi_linear", RoleType.PREFILL))
 
     @unittest.skipUnless(os.environ.get("GLM5_CKPT_PATH"), "real checkpoint manifest")
-    @patch.dict(os.environ, {"GLM53_PREFILL_MLA_CP": "1"})
+    @patch.dict(
+        os.environ,
+        {"GLM53_PREFILL_MLA_CP": "1", "GLM53_PREFILL_SHARED_EXPERT_LOCAL": "1"},
+    )
     def test_glm53_quantized_manifest_role_and_layer_scope(self):
         import json
         from pathlib import Path
 
         from rtp_llm.config.kv_cache_config import KVCacheConfig
         from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight
+        from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight
         from rtp_llm.model_loader.weight_module import CompositeWeight
         from rtp_llm.models.glm5_3_flash import Glm53Flash, Glm53FlashWeight
         from rtp_llm.ops import HWKernelConfig, ParallelismConfig, RoleType
@@ -185,7 +216,7 @@ class LayoutTest(unittest.TestCase):
             weight_info = manifest.get_weight_info()
             found = set()
 
-            def check(weight):
+            def check(weight, layer_id):
                 if (
                     isinstance(weight, MlaAttnAtomicWeight)
                     and weight.config is not None
@@ -194,9 +225,15 @@ class LayoutTest(unittest.TestCase):
                         weight.config.replicate_for_prefill_cp, role == RoleType.PREFILL
                     )
                     found.add(weight.name)
+                elif isinstance(weight, FfnAtomicWeight):
+                    self.assertEqual(
+                        weight.config.replicate_for_prefill_tokens,
+                        role == RoleType.PREFILL
+                        and layer_id in manifest.moe_layer_index_,
+                    )
                 elif isinstance(weight, CompositeWeight):
                     for child in weight.sub_weights.values():
-                        check(child)
+                        check(child, layer_id)
                 else:
                     self.assertFalse(
                         getattr(
@@ -206,9 +243,9 @@ class LayoutTest(unittest.TestCase):
                         )
                     )
 
-            for layer in weight_info.layer_weights:
+            for layer_id, layer in enumerate(weight_info.layer_weights):
                 for weight in layer:
-                    check(weight)
+                    check(weight, layer_id)
             for name in (
                 W.mla_q_b_w,
                 W.mla_q_b_s,

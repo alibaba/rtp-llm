@@ -1,6 +1,14 @@
 test_envs = {}
 
 py_test(
+    name = "glm53_local_router_test",
+    srcs = ["glm53_local_router_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV", "gpu_count": "1"},
+)
+
+py_test(
     name = "glm53_precision_contract_test",
     srcs = ["glm53_precision_contract_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

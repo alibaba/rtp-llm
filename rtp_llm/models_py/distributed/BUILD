@@ -16,6 +16,7 @@ py_library(
     ],
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm/models_py/triton_kernels:common",
     ],
     visibility = ["//visibility:public"],
 )

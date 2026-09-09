@@ -2,9 +2,15 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
+from rtp_llm.models_py.distributed.sequence_parallel import (
+    shard_tokens,
+    token_shard_layout,
+)
 from rtp_llm.models_py.distributed.tp_token_shard import (
     gather_routed_tokens,
     slice_routed_tokens,
@@ -38,7 +44,6 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -154,8 +159,8 @@ class GenericMoeLayer(nn.Module):
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
         # CP already supplies disjoint tokens. The ordinary GLM TP path supplies
-        # replicated tokens to EP, so shard only the routed branch after routing.
-        # Keeping the router's original M preserves its GEMM/top-k numerics.
+        # replicated tokens to EP. GLM53's FP32 router can process local rows
+        # while preserving the original GEMM shapes at shard boundaries.
         self.routed_tp_size = (
             parallelism_config.get_attn_tp_size()
             if config.model_type == "glm5_3_flash"
@@ -167,6 +172,23 @@ class GenericMoeLayer(nn.Module):
             else 1
         )
         self.routed_tp_rank = parallelism_config.tp_rank
+        self.route_local_tokens = (
+            config.model_type == "glm5_3_flash" and self.routed_tp_size > 1
+        )
+        from rtp_llm.models.glm53_prefill_parallel import shared_expert_local_enabled
+
+        self.shared_expert_local = (
+            self.add_shared_expert
+            and shared_expert_local_enabled(
+                config.model_type, getattr(parallelism_config, "role_type", None)
+            )
+        )
+        if self.shared_expert_local and (
+            self.routed_tp_size <= 1 or self.ep_size <= 1 or self.gate_chunk_rows != 0
+        ):
+            raise ValueError(
+                "Local shared experts require GLM53 TP token sharding, EP and native router"
+            )
         shared_expert_gate_weight = weights.get(W.shared_expert_gate, None)
         is_ep_mode = self.ep_size > 1
         use_ep_shared_allreduce_at_init = (
@@ -331,6 +353,8 @@ class GenericMoeLayer(nn.Module):
         clone.ep_size = self.ep_size
         clone.routed_tp_size = self.routed_tp_size
         clone.routed_tp_rank = self.routed_tp_rank
+        clone.route_local_tokens = self.route_local_tokens
+        clone.shared_expert_local = self.shared_expert_local
         clone.shared_expert = self.shared_expert
         clone._shared_expert_stream = getattr(self, "_shared_expert_stream", None)
         clone.shared_expert_gate = self.shared_expert_gate
@@ -383,6 +407,11 @@ class GenericMoeLayer(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
         sequence_parallel_layout=None,
     ) -> torch.Tensor:
+        routing_hidden = hidden_states
+        routing_layout = None
+        # An explicit legacy fixed-M override has its own padding semantics.
+        # Preserve that opt-in path; native GLM53 uses gate_chunk_rows == 0.
+        local_router = self.route_local_tokens and self.gate_chunk_rows == 0
         if sequence_parallel_layout is not None:
             from rtp_llm.models_py.distributed.collective_torch import all_gather_trim
 
@@ -394,13 +423,33 @@ class GenericMoeLayer(nn.Module):
                 raise ValueError(
                     "sequence-parallel MoE expects unquantized local tokens"
                 )
-            # Preserve the full router GEMM shape and near-tie routing decisions.
-            # The gathered input is also consumed by the TP shared expert.
-            hidden_states = all_gather_trim(
-                hidden_states, sequence_parallel_layout.logical_tokens, Group.TP
+            expected_layout = token_shard_layout(
+                sequence_parallel_layout.logical_tokens,
+                self.routed_tp_size,
+                self.routed_tp_rank,
             )
+            if (
+                sequence_parallel_layout != expected_layout
+                or hidden_states.shape[0] != expected_layout.local_tokens
+            ):
+                raise ValueError("sequence-parallel MoE token layout mismatch")
+            if local_router:
+                routing_layout = sequence_parallel_layout
+            else:
+                hidden_states = all_gather_trim(
+                    hidden_states, sequence_parallel_layout.logical_tokens, Group.TP
+                )
+                routing_hidden = hidden_states
+        elif local_router:
+            routing_layout = token_shard_layout(
+                hidden_states.shape[0], self.routed_tp_size, self.routed_tp_rank
+            )
+            routing_hidden = shard_tokens(hidden_states, routing_layout)
         num_tokens, _ = hidden_states.shape
-        if self.gate_chunk_rows > 0 and num_tokens > 0:
+        routing_tokens = routing_hidden.shape[0]
+        if local_router:
+            router_logits = self.gate.forward_shard(routing_hidden, routing_layout)
+        elif self.gate_chunk_rows > 0 and num_tokens > 0:
             router_logits = fixed_m_linear(
                 self.gate, hidden_states, self.gate_chunk_rows
             )
@@ -409,14 +458,14 @@ class GenericMoeLayer(nn.Module):
         router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
-            (num_tokens, self.top_k),
+            (routing_tokens, self.top_k),
             dtype=torch.float32,
             device=hidden_states.device,
         )
         # different executor may need different topk_ids dtype
         topk_ids_dtype = self.fused_moe.topk_ids_dtype
         topk_ids = torch.empty(
-            (num_tokens, self.top_k),
+            (routing_tokens, self.top_k),
             dtype=topk_ids_dtype,
             device=hidden_states.device,
         )
@@ -447,6 +496,14 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        if routing_layout is not None:
+            # Equal EP input lengths keep collective chunk counts identical.
+            # Padding must not dispatch a nonzero contribution to any expert.
+            valid = routing_layout.local_valid_tokens
+            if valid < routing_tokens:
+                topk_weights[valid:].zero_()
+                topk_ids[valid:].zero_()
+
         is_ep_mode = self.ep_size > 1
         use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
@@ -459,11 +516,11 @@ class GenericMoeLayer(nn.Module):
         )
 
         routed_hidden, routed_weights, routed_ids = (
-            hidden_states,
+            routing_hidden,
             topk_weights,
             topk_ids,
         )
-        if self.routed_tp_size > 1:
+        if self.routed_tp_size > 1 and not local_router:
             routed_hidden, routed_weights, routed_ids, _ = slice_routed_tokens(
                 hidden_states,
                 topk_weights,
@@ -478,6 +535,27 @@ class GenericMoeLayer(nn.Module):
             topk_ids=routed_ids,
             activation="SiGLU",
         )
+        if self.shared_expert_local:
+            # Full FP8 shared weights consume exactly the routed branch's local
+            # rows. EP dispatch/combine has already completed for routed experts.
+            shared_output = self.shared_expert(routed_hidden, skip_allreduce=True)
+            if self.shared_expert_gate is not None:
+                shared_output = (
+                    torch.sigmoid(self.shared_expert_gate(routed_hidden))
+                    * shared_output
+                )
+            experts_output = experts_output + shared_output
+            if sequence_parallel_layout is not None:
+                valid = sequence_parallel_layout.local_valid_tokens
+                if valid < experts_output.shape[0]:
+                    # The old shared RS padded its output with zero rows.
+                    # Preserve that contract even if input padding is nonzero.
+                    experts_output[valid:].zero_()
+            if sequence_parallel_layout is None:
+                experts_output = gather_routed_tokens(
+                    experts_output, num_tokens, lambda x: all_gather(x, group=Group.TP)
+                )
+            return experts_output
         if self.routed_tp_size > 1 and sequence_parallel_layout is None:
             experts_output = gather_routed_tokens(
                 experts_output, num_tokens, lambda x: all_gather(x, group=Group.TP)
@@ -485,6 +563,13 @@ class GenericMoeLayer(nn.Module):
         if use_mega_moe_fused_shared:
             return experts_output
         if self.shared_expert is not None:
+            if sequence_parallel_layout is not None and local_router:
+                # The routed branch has already dispatched local tokens to EP.
+                # Only the TP-sharded shared expert needs the complete input;
+                # its reduction below returns the corresponding local rows.
+                hidden_states = all_gather_trim(
+                    hidden_states, sequence_parallel_layout.logical_tokens, Group.TP
+                )
             if shared_expert_output is None:
                 shared_expert_output = self.shared_expert(
                     hidden_states,
@@ -506,13 +591,11 @@ class GenericMoeLayer(nn.Module):
                         torch.sigmoid(gate_output) * shared_expert_output
                     )
                 if sequence_parallel_layout is not None:
-                    from rtp_llm.models_py.distributed.collective_torch import (
-                        reduce_scatter_padded,
+                    from rtp_llm.models_py.distributed.glm53_collective_gemm import (
+                        reduce_scatter_glm53,
                     )
 
-                    shared_expert_output = reduce_scatter_padded(
-                        shared_expert_output, Group.TP
-                    )
+                    shared_expert_output = reduce_scatter_glm53(shared_expert_output)
                 else:
                     shared_expert_output = all_reduce(
                         shared_expert_output, group=Group.TP

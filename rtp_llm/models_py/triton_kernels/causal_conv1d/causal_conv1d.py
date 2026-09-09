@@ -171,6 +171,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
+    OUTPUT_GROUP_WIDTH: tl.constexpr = 0,
 ):
     # Keep the activation and cache tensors in their storage dtype. FP32
     # weights require FP32 history registers in every branch, including the
@@ -394,10 +395,14 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             idx_feats < dim
         )  # token-index  # feature-index
         o_ptrs = (
-            o_ptr
-            + (sequence_start_index + token_offset + idx_token) * stride_o_token
-            + (idx_feats * stride_o_dim)
+            o_ptr + (sequence_start_index + token_offset + idx_token) * stride_o_token
         )
+        if OUTPUT_GROUP_WIDTH:
+            o_ptrs += (idx_feats.to(tl.int64) // OUTPUT_GROUP_WIDTH) * stride_o_seq + (
+                idx_feats % OUTPUT_GROUP_WIDTH
+            ) * stride_o_dim
+        else:
+            o_ptrs += idx_feats * stride_o_dim
 
         tl.store(o_ptrs, acc, mask=mask_1d)
 
@@ -518,6 +523,7 @@ def causal_conv1d_fn(
     pad_slot_id: int = PAD_SLOT_ID,
     metadata: Optional[CausalConv1dMetadata] = None,
     validate_data=False,
+    output_groups: int = 1,
 ):
     """support varlen + continuous batching when x is 2D tensor
 
@@ -563,7 +569,10 @@ def causal_conv1d_fn(
         Providing precomputed metadata can improve performance when
         calling this function multiple times with the same sequence configuration.
 
-    out: same shape as `x`
+    output_groups: optionally store independent contiguous channel groups.
+        For groups > 1, return [groups, cu_seq_len, dim // groups].
+        This changes only the output layout, including for cached prefixes.
+    out: same shape as `x` when output_groups == 1
     """
     if isinstance(activation, bool) and activation:
         activation = "silu"
@@ -575,7 +584,14 @@ def causal_conv1d_fn(
     # makes cached BF16 history disagree with uncached history registers.
     if weight.dtype != torch.float32:
         x = x.to(weight.dtype)
-    out = torch.empty_like(x)
+    dim, cu_seqlen = x.shape
+    if output_groups < 1 or dim % output_groups:
+        raise ValueError("output_groups must be positive and divide conv channels")
+    out = (
+        torch.empty_like(x)
+        if output_groups == 1
+        else x.new_empty((output_groups, cu_seqlen, dim // output_groups))
+    )
 
     # Prepare metadata if not provided
     if metadata is None:
@@ -628,8 +644,8 @@ def causal_conv1d_fn(
         stride_o_token = out.stride(1)
     else:
         stride_o_seq = out.stride(0)
-        stride_o_dim = out.stride(1)
-        stride_o_token = out.stride(2)
+        stride_o_dim = out.stride(2)
+        stride_o_token = out.stride(1)
 
     if validate_data:
         assert x.dim() == 2
@@ -714,6 +730,7 @@ def causal_conv1d_fn(
         NP2_STATELEN=np2_statelen,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        OUTPUT_GROUP_WIDTH=dim // output_groups if output_groups > 1 else 0,
     )
     return out.to(original_x_dtype)
 
