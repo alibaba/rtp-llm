@@ -37,7 +37,11 @@ def start_dash_sc_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    service_draining=None,
 ):
+    from rtp_llm.metrics import kmonitor
+
+    kmonitor.bind_service_draining(service_draining)
     _install_hot_hook_runtime(f"dash_sc_rank_{rank_id}_server_{server_id}")
     logging.info(
         f"[PROCESS_START]Start dash_sc server process rank_{rank_id}_server_{server_id}"

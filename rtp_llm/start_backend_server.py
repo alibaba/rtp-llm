@@ -58,6 +58,7 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    service_draining=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
@@ -109,6 +110,8 @@ def local_rank_start(
 
     def signal_handler(signum, frame):
         nonlocal deferred_sigterm_seen, deferred_sigterm_timer
+        if service_draining is not None:
+            service_draining.set()
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
@@ -179,7 +182,7 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
-        backend_manager = BackendManager(py_env_configs)
+        backend_manager = BackendManager(py_env_configs, service_draining)
         if shutdown_pending:
             backend_manager.request_shutdown()
         backend_manager.start()
@@ -263,6 +266,7 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
 def _create_rank_processes(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    service_draining=None,
 ):
     """Create and start rank processes, returns (processes, rank_pipe_readers)"""
     pc = py_env_configs.parallelism_config
@@ -282,7 +286,13 @@ def _create_rank_processes(
 
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+                service_draining,
+            ),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -399,6 +409,7 @@ def multi_rank_start(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     cleanup=None,
+    service_draining=None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -412,9 +423,10 @@ def multi_rank_start(
         monitor_interval=py_env_configs.server_config.monitor_interval,
         allow_defer_first_sigterm=True,
         pre_exit_cleanup=cleanup,
+        service_draining=service_draining,
     )
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs
+        global_controller, py_env_configs, service_draining
     )
     manager.set_processes(processes, shutdown_group="backend")
     local_world_size = len(processes)
@@ -554,6 +566,7 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    service_draining=None,
 ):
     _install_hot_hook_runtime("backend_manager")
     logging.info(f"[PROCESS_START]Start backend server process")
@@ -575,7 +588,9 @@ def start_backend_server(
     )
 
     if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+        return local_rank_start(
+            global_controller, py_env_configs, 0, pipe_writer, service_draining
+        )
 
     pc = py_env_configs.parallelism_config
     if (
@@ -613,8 +628,11 @@ def start_backend_server(
                 py_env_configs,
                 pipe_writer,
                 cleanup=manager.stop if manager else None,
+                service_draining=service_draining,
             )
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+        return local_rank_start(
+            global_controller, py_env_configs, 0, pipe_writer, service_draining
+        )
     finally:
         if manager:
             manager.stop()

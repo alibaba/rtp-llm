@@ -100,6 +100,49 @@ class TestProcessManager(unittest.TestCase):
                         # Process may have already died
                         pass
 
+    def test_draining_notification_precedes_waits_without_signaling_children(self):
+        event = multiprocessing.get_context("spawn").Event()
+        self.manager.service_draining = event
+        backend = Mock()
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager._signal_handler(signal.SIGTERM, None)
+        self.assertTrue(event.is_set())
+        backend.terminate.assert_not_called()
+
+        event.clear()
+
+        def assert_notified(*_):
+            self.assertTrue(event.is_set())
+            backend.terminate.assert_not_called()
+            return False
+
+        with patch.object(
+            self.manager, "_sigterm_and_drain_groups", side_effect=assert_notified
+        ), patch.object(
+            self.manager,
+            "_linger_before_deferred_group_shutdown",
+            side_effect=assert_notified,
+        ), patch.object(
+            self.manager, "_sigterm_deferred_groups"
+        ), patch.object(
+            self.manager, "_wait_process_list_exit"
+        ):
+            self.manager._terminate_processes(600)
+
+    def test_deferred_sigterm_notifies_without_forwarding_or_stopping(self):
+        self.manager.service_draining = multiprocessing.get_context("spawn").Event()
+        self.manager._defer_first_sigterm = True
+        backend = Mock()
+        self.manager.add_process(backend, shutdown_group="backend")
+        try:
+            self.manager._signal_handler(signal.SIGTERM, None)
+            self.manager._signal_handler(signal.SIGTERM, None)
+            self.assertTrue(self.manager.service_draining.is_set())
+            self.assertFalse(self.manager.shutdown_requested)
+            backend.terminate.assert_not_called()
+        finally:
+            self.manager._cancel_deferred_sigterm_timer()
+
     def test_init(self):
         """Test ProcessManager initialization"""
         self.assertEqual(self.manager.processes, [])

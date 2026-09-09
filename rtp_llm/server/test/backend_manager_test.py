@@ -114,6 +114,26 @@ class BackendManagerStopTest(unittest.TestCase):
         )
         self.assertEqual(engine.serving_states[0], False)
 
+    def test_draining_notification_only_marks_metrics_and_keeps_engine_running(self):
+        engine = _FakeEngine()
+        manager = self._manager(engine)
+        manager._service_draining = threading.Event()
+        with patch("rtp_llm.server.backend_manager.kmonitor.set_serving") as report:
+            listener = threading.Thread(target=manager._wait_for_service_draining)
+            listener.start()
+            try:
+                self.assertEqual(engine.serving_states, [])
+            finally:
+                manager._service_draining.set()
+                listener.join(5)
+            self.assertFalse(listener.is_alive())
+            report.assert_called_once_with(False)
+        self.assertEqual(engine.serving_states, [False])
+        self.assertFalse(engine.stopped)
+        self.assertFalse(engine.prepared)
+        self.assertFalse(manager._shutdown_requested.is_set())
+        self.assertFalse(manager._distributed_server.shutdown_requested)
+
     def test_request_shutdown_marks_metrics_and_native_engine_not_serving(self):
         engine = _FakeEngine()
         manager = self._manager(engine)

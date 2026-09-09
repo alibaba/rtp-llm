@@ -1,9 +1,46 @@
 import os
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from rtp_llm import start_server
+
+
+class ServiceDrainingPropagationTest(unittest.TestCase):
+    def test_each_launch_passes_a_fresh_event_to_all_process_groups(self):
+        configs = Mock()
+        configs.parallelism_config.dp_size = 1
+        with ExitStack() as stack:
+            for name in (
+                "init_controller",
+                "_sync_server_shutdown_timeout",
+                "_setup_startup_warmup_health_gate",
+                "_maybe_run_startup_real_warmup",
+                "_mark_startup_warmup_health_gate_ready",
+            ):
+                stack.enter_context(patch.object(start_server, name))
+            manager_class = stack.enter_context(
+                patch.object(start_server, "ProcessManager")
+            )
+            starters = [
+                stack.enter_context(patch.object(start_server, name))
+                for name in (
+                    "start_backend_server_impl",
+                    "start_frontend_server_impl",
+                    "start_dash_sc_server_impl",
+                )
+            ]
+            previous = None
+            for _ in range(2):
+                start_server.start_server(configs)
+                event = manager_class.call_args.kwargs["service_draining"]
+                self.assertIsNot(event, previous)
+                self.assertFalse(event.is_set())
+                for starter in starters:
+                    self.assertIs(starter.call_args.args[-1], event)
+                event.set()
+                previous = event
 
 
 class StartupRealWarmupTokenLensTest(unittest.TestCase):

@@ -26,8 +26,10 @@ BACKEND_STORE_FAILURE_TIMEOUT_S = 600.0
 
 
 class BackendManager(object):
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(self, py_env_configs: PyEnvConfigs, service_draining=None):
         self.py_env_configs = py_env_configs
+        self._service_draining = service_draining
+        kmonitor.bind_service_draining(service_draining)
         self._access_logger = AccessLogger(
             get_log_path(),
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
@@ -43,6 +45,17 @@ class BackendManager(object):
         self.engine: Optional[BaseEngine] = None
         self._shutdown_requested = threading.Event()
         self._stopped = threading.Event()
+        if service_draining is not None:
+            threading.Thread(
+                target=self._wait_for_service_draining,
+                name="service_draining",
+                daemon=True,
+            ).start()
+
+    def _wait_for_service_draining(self):
+        self._service_draining.wait()
+        # This only changes Python/native metrics; RPCs and the engine keep running.
+        self._mark_not_serving()
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -129,6 +142,9 @@ class BackendManager(object):
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
         )
+        # Replay a notification received while the engine was still loading.
+        if self._service_draining is not None and self._service_draining.is_set():
+            self._mark_not_serving()
         logging.info(
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,

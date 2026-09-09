@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import tempfile
 import threading
@@ -13,6 +14,25 @@ from rtp_llm.metrics.kmonitor_metric_reporter import (
     GaugeMetrics,
     MetricReporter,
 )
+
+
+def _observe_draining(event, connection):
+    fixture = MetricReporterServingStateTest()
+    fixture.setUp()
+    try:
+        fixture.reporter.bind_service_draining(event)
+        fixture.reporter.start_serving_when_ready()
+        connection.send(fixture.reporter.is_serving)
+        if not event.wait(10):
+            raise AssertionError("missing draining notification")
+        fixture.worker.do_report()
+        connection.send(
+            (fixture.reporter.is_serving, fixture.events(SERVICE_STATUS_METRIC)[-1])
+        )
+        connection.recv()  # Remain alive while the frontend drains requests.
+    finally:
+        fixture.doCleanups()
+        connection.close()
 
 
 class MetricReporterServingStateTest(unittest.TestCase):
@@ -116,6 +136,49 @@ class MetricReporterServingStateTest(unittest.TestCase):
             self.reporter.set_serving(True)
             self.assertFalse(self.reporter.is_serving)
             self.worker.flume.send_batch.assert_not_called()
+
+    def test_shared_event_updates_all_backends_without_terminating_them(self):
+        ctx = multiprocessing.get_context("spawn")
+        event = ctx.Event()
+        self.reporter.bind_service_draining(event)
+        children = []
+        try:
+            for _ in range(2):
+                parent, child = ctx.Pipe()
+                process = ctx.Process(target=_observe_draining, args=(event, child))
+                process.start()
+                child.close()
+                children.append((process, parent))
+                self.assertTrue(parent.poll(10))
+                self.assertTrue(parent.recv())
+            self.reporter.start_serving_when_ready()
+            self.reporter.set_serving(False)
+            self.reporter.set_serving(False)  # Duplicate notifications are harmless.
+            for process, parent in children:
+                self.assertTrue(parent.poll(10))
+                serving, sample = parent.recv()
+                self.assertFalse(serving)
+                self.assertIn(" 0.0 is_serving=false", sample)
+                self.assertTrue(process.is_alive())
+                parent.send("exit")
+                process.join(10)
+                self.assertEqual(process.exitcode, 0)
+        finally:
+            for process, parent in children:
+                if process.is_alive():
+                    process.kill()
+                process.join(10)
+                parent.close()
+
+    def test_notification_before_startup_is_retained(self):
+        event = multiprocessing.get_context("spawn").Event()
+        event.set()
+        self.reporter.bind_service_draining(event)
+        self.reporter.start_serving_when_ready()
+        self.reporter.set_serving(True)
+        self.worker.do_report()
+        self.assertFalse(self.reporter.is_serving)
+        self.worker.flume.send_batch.assert_not_called()
 
     def test_shutdown_racing_with_gate_check_remains_terminal(self):
         os.environ[STARTUP_WARMUP_HEALTH_GATE_FILE_ENV] = "/test/warmup_gate"

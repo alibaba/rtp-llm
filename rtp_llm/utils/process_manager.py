@@ -40,6 +40,7 @@ class ProcessManager:
         monitor_interval: int = 1,
         allow_defer_first_sigterm: bool = False,
         pre_exit_cleanup: Optional[Callable[[], None]] = None,
+        service_draining=None,
     ):
         if shutdown_timeout <= 0:
             logging.warning(
@@ -52,6 +53,7 @@ class ProcessManager:
         self.shutdown_requested = False
         self.failure_detected = False
         self.pre_exit_cleanup = pre_exit_cleanup
+        self.service_draining = service_draining
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
         self.process_groups: Dict[str, List[Process]] = {}
@@ -82,6 +84,8 @@ class ProcessManager:
         logging.info(
             f"Process manager received signal {signum}, initiating shutdown..."
         )
+        if self.service_draining is not None:
+            self.service_draining.set()
         if self._defer_first_sigterm_if_needed(signum):
             return
         self._cancel_deferred_sigterm_timer()
@@ -324,6 +328,8 @@ class ProcessManager:
         Non-staged mode (post-crash all-stop): SIGTERM everyone at once.
         """
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
+        if self.service_draining is not None:
+            self.service_draining.set()
         self._used_pre_stop_drain_signal = False
         drain_deadline = self._make_deadline(drain_timeout)
 

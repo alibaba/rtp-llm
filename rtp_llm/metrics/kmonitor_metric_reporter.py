@@ -154,7 +154,11 @@ class MetricReporter(object):
         self._state_lock = threading.RLock()
         self._state = ServiceState.STARTING
         self._gate_file = ""
+        self._service_draining = None
         self._kmon.report_worker.before_report = self._report_service_status
+
+    def bind_service_draining(self, event) -> None:
+        self._service_draining = event
 
     def report(
         self,
@@ -202,6 +206,8 @@ class MetricReporter(object):
         if serving:
             self.start_serving_when_ready()
             return
+        if self._service_draining is not None:
+            self._service_draining.set()
         with self._state_lock:
             # Shutdown is terminal, including when it precedes init/readiness.
             if self._state in (ServiceState.DRAINING, ServiceState.STOPPED):
@@ -217,6 +223,13 @@ class MetricReporter(object):
         # Reuse the worker's reporting cycle for both readiness and heartbeat.
         # Checking the gate and committing readiness share the shutdown lock.
         with self._state_lock:
+            if self._service_draining is not None and self._service_draining.is_set():
+                if self._state not in (ServiceState.DRAINING, ServiceState.STOPPED):
+                    self._state = (
+                        ServiceState.DRAINING
+                        if self._state == ServiceState.SERVING
+                        else ServiceState.STOPPED
+                    )
             if self._state == ServiceState.WAITING_FOR_WARMUP and (
                 not self._gate_file or os.path.exists(self._gate_file)
             ):

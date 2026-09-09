@@ -94,12 +94,13 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    service_draining=None,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None)
+        start_backend_server(global_controller, py_env_configs, None, service_draining)
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
@@ -116,7 +117,7 @@ def start_backend_server_impl(
     try:
         backend_process = multiprocessing.Process(
             target=start_backend_server,
-            args=(global_controller, py_env_configs, pipe_writer),
+            args=(global_controller, py_env_configs, pipe_writer, service_draining),
             name="backend_manager",
         )
         backend_process.start()
@@ -216,6 +217,7 @@ def start_dash_sc_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    service_draining=None,
 ):
     from rtp_llm.start_dash_sc_server import start_dash_sc_server
 
@@ -239,6 +241,7 @@ def start_dash_sc_server_impl(
                     global_controller,
                     py_env_configs,
                     pipe_writer,
+                    service_draining,
                 ),
                 name=f"dash_sc_server_{rank}_{i}",
             )
@@ -304,6 +307,7 @@ def start_frontend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    service_draining=None,
 ):
     from rtp_llm.start_frontend_server import start_frontend_server
 
@@ -342,6 +346,7 @@ def start_frontend_server_impl(
                         i,
                         global_controller,
                         py_env_configs,
+                        service_draining,
                     ),
                     name=f"frontend_server_{i}",
                 )
@@ -470,10 +475,14 @@ def start_server(py_env_configs: PyEnvConfigs):
     )
     _sync_server_shutdown_timeout(py_env_configs)
 
+    # One in-memory notification shared by this launch and all spawned ranks.
+    service_draining = multiprocessing.Event()
+
     # Create process manager with config values
     process_manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
+        service_draining=service_draining,
     )
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
@@ -483,20 +492,20 @@ def start_server(py_env_configs: PyEnvConfigs):
         if py_env_configs.role_config.role_type != RoleType.FRONTEND:
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, service_draining
             )
             process_manager.add_process(backend_process, shutdown_group="backend")
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
-            global_controller, py_env_configs, process_manager
+            global_controller, py_env_configs, process_manager, service_draining
         )
         process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             logging.info("start dash_sc server")
             dash_sc_processes = start_dash_sc_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, service_draining
             )
             if dash_sc_processes:
                 process_manager.add_processes(
