@@ -97,9 +97,13 @@ class Qwen3NextBase(BaseModel):
         config.moe_k = config_json["num_experts_per_tok"]
         config.expert_num = config_json["num_experts"]
         config.moe_inter_size = config_json["moe_intermediate_size"]
-        config.inter_size = config_json["shared_expert_intermediate_size"]
+        config.inter_size = config_json.get("shared_expert_intermediate_size", 0)
+        # Qwen uses one independently-sized shared expert; its width is not a
+        # multiple of the routed expert width and must not be used to infer a
+        # DeepSeek-style shared-expert count.
+        config.n_shared_experts = int(config.inter_size > 0)
         config.has_moe_norm = config_json.get("norm_topk_prob", True)  # 默认 True
-        config.moe_style = 2  # shared + expert
+        config.moe_style = 2 if config.n_shared_experts > 0 else 1
 
         moe_step = config_json.get("decoder_sparse_step", 1)
         moe_layer_index = []
