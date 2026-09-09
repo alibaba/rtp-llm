@@ -229,6 +229,12 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
 
     for (auto it = begin_ptr; it != end_ptr; ++it) {
         auto [src_block_index, dest_block_index] = *it;
+        auto mla_copy_type = copy_type;
+        if (config_.dsa_mla_resident_tokens) {
+            mla_copy_type = BatchCopyParams::get_copy_type(
+                dest_block_index < config_.dsa_mla_hbm_blocks ? MEMORY_GPU : MEMORY_CPU_PINNED,
+                src_block_index < config_.dsa_mla_hbm_blocks ? MEMORY_GPU : MEMORY_CPU_PINNED);
+        }
 
         for (int layer_id = 0; layer_id < config_.layer_num; layer_id++) {
             auto src_addr_info = convertIndexToAddr(layer_id, src_block_index);
@@ -242,7 +248,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
                 continue;
             }
 
-            copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
+            copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, mla_copy_type);
 
             if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
                 copy_params.add(dst_addr_info.kv_scale_addr,
@@ -429,7 +435,7 @@ KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per
 }
 
 std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
-    return {};
+    return block_pool_ ? block_pool_->tierMetricsSnapshots() : std::vector<KVCachePoolMetricsSnapshot>{};
 }
 
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {

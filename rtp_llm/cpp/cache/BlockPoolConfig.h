@@ -12,6 +12,7 @@ struct BlockPoolConfig {
 
     // all memory layouts share the same block id space
     uint32_t block_num = 0;
+    bool mla_tiered_cache = false;
 
     size_t total_size_bytes = 0;
 

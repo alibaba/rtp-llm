@@ -137,6 +137,10 @@ class GenericMoeMTPModel(GptModelBase):
         clone.layer_num = self.layer_num
         clone.vocab_size = self.vocab_size
         clone.kv_cache = None
+        # Clones using the same KV arena must share its token-to-slot mapping.
+        # initialize() rebuilds the working sets if the arena changes.
+        clone.pinned_mla_groups = self.pinned_mla_groups
+        clone._pinned_mla_cache_key = self._pinned_mla_cache_key
         clone.device_type = self.device_type
         clone.params_dict = {}
         clone.moe_config = self.moe_config
@@ -265,6 +269,7 @@ class GenericMoeMTPModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         inputs_embeds = self.embed_tokens(input_ids)
+        fmha_impl.pinned_mla_groups = self.pinned_mla_groups
         inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, fmha_impl)
         last_hidden_states = inputs.input_hiddens
 

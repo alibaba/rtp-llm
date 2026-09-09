@@ -31,6 +31,10 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
+        .def_readonly("dsa_mla_resident_tokens", &KVCache::dsa_mla_resident_tokens)
+        .def_readonly("dsa_mla_hbm_blocks", &KVCache::dsa_mla_hbm_blocks)
+        .def_readonly("mla_hbm_cache_by_layer", &KVCache::mla_hbm_cache_by_layer)
+        .def_readonly("block_generations", &KVCache::block_generations)
         .def_readwrite("kv_cache_base_by_layer", &KVCache::kv_cache_base_by_layer, "Per-layer KV cache tensors")
         .def_readwrite("kv_scale_base_by_layer", &KVCache::kv_scale_base_by_layer, "Per-layer KV scale tensors")
         .def_readwrite("seq_size_per_block", &KVCache::seq_size_per_block, "Physical (logical) block size in tokens")

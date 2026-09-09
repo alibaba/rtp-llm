@@ -18,9 +18,11 @@ public:
     bool init(const MemoryLayoutConfig& config,
               torch::Tensor&            kv_cache_tensor,
               torch::Tensor&            kv_scale_tensor,
-              void*                     cache_base_ptr);
+              void*                     cache_base_ptr,
+              const torch::Tensor&      hbm_cache_tensor = {});
 
     std::vector<torch::Tensor> getLayerCacheTensors() const;
+    const std::vector<torch::Tensor>& getLayerHbmCacheTensors() const { return layer_hbm_tensors_; }
     std::vector<torch::Tensor> getLayerScaleCacheTensors() const;
 
     BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const;
@@ -52,6 +54,7 @@ private:
     void*                      kv_scale_base_ptr_ = nullptr;
     rtp_llm::DataType          data_type_         = rtp_llm::TYPE_INVALID;
     std::vector<torch::Tensor> layer_kv_tensors_;
+    std::vector<torch::Tensor> layer_hbm_tensors_;
     std::vector<torch::Tensor> layer_kv_scale_tensors_;
 };
 

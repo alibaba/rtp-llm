@@ -96,3 +96,15 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+# MTP long-decode boundary regression, validated on the requested remote worker.
+cc_test(
+    name = "mtp_minimum_output_l20d_test",
+    srcs = ["GenerateStreamTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    args = ["--gtest_filter=GenerateStreamTest.testMtpMinNewTokensIgnoresEarlyStopWithinAcceptedBatch"],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV"},
+)

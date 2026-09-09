@@ -9,7 +9,8 @@ namespace rtp_llm {
 bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
                                 torch::Tensor&            kv_cache_tensor,
                                 torch::Tensor&            kv_scale_tensor,
-                                void*                     cache_base_ptr) {
+                                void*                     cache_base_ptr,
+                                const torch::Tensor&      hbm_cache_tensor) {
     config_         = config;
     cache_base_ptr_ = cache_base_ptr;
     data_type_      = config_.dtype;
@@ -18,6 +19,19 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
     RTP_LLM_CHECK_WITH_INFO(kv_cache_tensor.numel() > 0, "kv cache tensor is empty, cannot split by layers");
 
     processKVTensor(kv_cache_tensor);
+    if (hbm_cache_tensor.defined()) {
+        const auto bytes_per_token = config_.kv_block_stride_bytes / config_.seq_size_per_block;
+        const auto blocks = config_.mla_hbm_blocks + config_.mla_resident_tokens / config_.seq_size_per_block;
+        auto typed = torch::from_blob(hbm_cache_tensor.data_ptr(),
+            {static_cast<int64_t>(config_.layer_num), static_cast<int64_t>(blocks),
+             static_cast<int64_t>(config_.seq_size_per_block),
+             static_cast<int64_t>(bytes_per_token / rtp_llm::getTypeSize(data_type_))},
+            hbm_cache_tensor.options().dtype(dataTypeToTorchType(data_type_)));
+        typed.zero_();
+        for (uint32_t layer = 0; layer < config_.layer_num; ++layer) {
+            layer_hbm_tensors_.push_back(typed[layer]);
+        }
+    }
     processScaleTensor(kv_scale_tensor);
 
     RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
@@ -63,7 +77,7 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                                 config_.seq_size_per_block);
         const size_t  stride_elems    = kv_block_stride_elems / config_.seq_size_per_block;
         torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
-                                                                static_cast<int64_t>(config_.block_num),
+                                                                static_cast<int64_t>(config_.block_num - config_.mla_hbm_blocks),
                                                                 static_cast<int64_t>(config_.seq_size_per_block),
                                                                 static_cast<int64_t>(stride_elems)});
         clearKVTensor(reshaped_tensor);
@@ -248,7 +262,11 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
     // performance of beam search where massive kv cache info is required
 
     checkLayerIdValidity(layer_id);
-    auto& layer_tensor = layer_kv_tensors_[layer_id];
+    RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<uint32_t>(block_id) < config_.block_num,
+                            "block ID %d out of range", block_id);
+    const bool in_hbm = static_cast<uint32_t>(block_id) < config_.mla_hbm_blocks;
+    const auto& layer_tensor = in_hbm ? layer_hbm_tensors_[layer_id] : layer_kv_tensors_[layer_id];
+    const int storage_block = in_hbm ? block_id : block_id - config_.mla_hbm_blocks;
     void* kv_addr      = nullptr;
     if (config_.kernel_blocks_per_kv_block > 1) {
         RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<size_t>(block_id) < config_.block_num,
@@ -258,7 +276,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
         kv_addr =
             static_cast<char*>(layer_tensor.data_ptr()) + static_cast<size_t>(block_id) * config_.kv_block_stride_bytes;
     } else {
-        kv_addr = getBlockPtr(layer_tensor, block_id);
+        kv_addr = getBlockPtr(layer_tensor, storage_block);
     }
     auto kv_info = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 

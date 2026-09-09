@@ -474,10 +474,28 @@ class Glm5Cmp:
         if mla_cache.dtype != torch.uint8:
             mla_cache = mla_cache.view(torch.uint8)
         mla_cache = mla_cache.view(-1, 64, 656)
+        working_entry = getattr(implementation, "pinned_mla_groups", {}).get(
+            self.layer_idx
+        )
+        write_slots = params.slot_mapping
+        if working_entry is not None:
+            # Keep CMP's fused KV producer on HBM. Publish its rows to their
+            # owning tier after prefetch completes, before attention consumes KV.
+            mla_cache = torch.empty(
+                ((rows + 63) // 64, 64, 656),
+                dtype=torch.uint8,
+                device=hidden_states.device,
+            )
+            write_slots = torch.arange(
+                rows, dtype=params.slot_mapping.dtype, device=hidden_states.device
+            )
+            working, group_layer = working_entry
 
         if not self.has_indexer or reuse_topk_indices:
             if prev_topk_indices is None:
                 raise RuntimeError("reused Indexer path requires prior TopK indices")
+            if working_entry is not None:
+                implementation.prefetch_kv(self.layer_idx, prev_topk_indices)
             # Residual add + RMSNorm, then group-128 FP8 quantization for the
             # following attention projections.
             residual_out, _, hidden_fp8, hidden_scale = ops.add_norm_quant(
@@ -502,7 +520,7 @@ class Glm5Cmp:
                 attention.kv_a_layernorm.weight.data,
                 implementation._cos_sin_cache,
                 params.positions_d,
-                params.slot_mapping,
+                write_slots,
                 q_epsilon=float(attention.q_a_layernorm.variance_epsilon),
                 kv_epsilon=float(attention.kv_a_layernorm.variance_epsilon),
                 cache=mla_cache,
@@ -524,6 +542,11 @@ class Glm5Cmp:
                 implementation.weights[self.layer_idx][W.mla_kc],
                 out=q_for_sparse_mla,
             )
+            if working_entry is not None:
+                working.write(
+                    group_layer, params.slot_mapping,
+                    mla_cache.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
+                )
             return residual_out, q_for_sparse_mla, prev_topk_indices
 
         block_table = _page_block_table(implementation.attn_inputs)
@@ -633,7 +656,7 @@ class Glm5Cmp:
                 attention.kv_a_layernorm.weight.data,
                 implementation._cos_sin_cache,
                 params.positions_d,
-                params.slot_mapping,
+                write_slots,
                 out=(q_fp8, q_scale, mla_cache),
                 q_epsilon=float(attention.q_a_layernorm.variance_epsilon),
                 kv_epsilon=float(attention.kv_a_layernorm.variance_epsilon),
@@ -712,11 +735,20 @@ class Glm5Cmp:
                     params,
                     implementation.attn_inputs,
                 )
+                if working_entry is not None:
+                    # Start pin misses on TopK completion, while the CMP query
+                    # branch may still be running. Shared layers reuse this map.
+                    implementation.prefetch_kv(self.layer_idx, topk_indices)
                 events.indexer_complete.record()
 
             events.indexer_complete.wait()
             events.side_streams_complete.record()
         events.side_streams_complete.wait()
+        if working_entry is not None:
+            working.write(
+                group_layer, params.slot_mapping,
+                mla_cache.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
+            )
         return residual_out, q_for_sparse_mla, topk_indices
 
     def sparse_mla(
@@ -728,10 +760,19 @@ class Glm5Cmp:
     ) -> torch.Tensor:
         implementation = self._attention_impl(fmha_impl)
         cache = kv_cache.kv_cache_base
+        attention_kwargs = {}
+        working_entry = getattr(implementation, "pinned_mla_groups", {}).get(
+            self.layer_idx
+        )
+        if working_entry is not None:
+            working, group_layer = working_entry
+            # mla_prologue joins the layer's transfer event before writing KV.
+            cache = working.resident[group_layer]
+            attention_kwargs["physical_indices"] = working.physical_indices
         if not implementation.fmha_impl.expects_paged_kv:
             cache = cache.view(-1, 1, cache.size(-1))
         return implementation.fmha_impl.forward(
-            query, cache, topk_indices, layer_id=self.layer_idx
+            query, cache, topk_indices, layer_id=self.layer_idx, **attention_kwargs
         )
 
     def mla_post_moe_pre(

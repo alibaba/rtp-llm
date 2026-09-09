@@ -92,6 +92,36 @@ class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
 
+TEST_F(GenerateStreamTest, testMtpMinNewTokensIgnoresEarlyStopWithinAcceptedBatch) {
+    for (bool use_eos : {false, true}) {
+        for (bool stop_at_minimum : {false, true}) {
+            auto config = std::make_shared<GenerateConfig>();
+            config->min_new_tokens = 8;
+            config->max_new_tokens = 8;
+            config->aux_info = true;
+            config->is_streaming = false;
+            config->ignore_eos = !use_eos;
+            if (!use_eos) {
+                config->stop_words_list = {{7}};
+            }
+            auto stream = GenerateStreamBuilder().createContextStream({1, 2}, config);
+            stream->special_tokens_.eos_token_id = 7;
+            stream->update({torch::tensor({{3, 4, 5, 6}}, torch::kInt32), 4});
+            ASSERT_FALSE(stream->hasOutput());
+            // The second MTP batch crosses min_new_tokens; its first stop is
+            // at output five and must not truncate the final output to five.
+            stream->update({torch::tensor({{7, 4, 5, stop_at_minimum ? 7 : 6}}, torch::kInt32), 4});
+            auto output = stream->nextOutput();
+            ASSERT_TRUE(output.ok());
+            ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+            const auto& result = output.value().generate_outputs[0];
+            EXPECT_TRUE(result.finished);
+            EXPECT_EQ(result.output_ids.numel(), 8);
+            EXPECT_EQ(result.aux_info.output_len, 8);
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});

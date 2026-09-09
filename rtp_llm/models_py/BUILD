@@ -100,6 +100,12 @@ py_library(
 exports_files(["modules/factory/sitecustomize.py"])
 
 py_library(
+    name = "pinned_mla_cache",
+    srcs = ["modules/factory/attention/cuda_mla_impl/pinned_mla_cache.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "modules_cuda",
     srcs = glob([
         "modules/cuda/*.py",

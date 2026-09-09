@@ -1,4 +1,22 @@
 # only can run in cu129 so mark as manual
+load("//bazel:arch_select.bzl", "requirement")
+
+requirement(["torch", "triton", "flash-mla"])
+
+py_test(
+    name = "pinned_mla_cache_test",
+    srcs = ["pinned_mla_cache_test.py"],
+    deps = [
+        "//rtp_llm/models_py:pinned_mla_cache",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+        ":flash-mla",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV"},
+)
+
 py_test(
     name = "glm53_prefill_workspace_test",
     srcs = ["glm53_prefill_workspace_test.py"],

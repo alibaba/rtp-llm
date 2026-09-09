@@ -44,6 +44,7 @@ public:
     std::vector<BlockIdxType> malloc(int num_blocks);
     size_t                    totalBlocksNum() const;
     size_t                    freeBlocksNum() const;
+    std::vector<KVCachePoolMetricsSnapshot> tierMetricsSnapshots() const;
     size_t                    availableBlocksNum() const;
     size_t                    requestRefBlocksNum() const;
     size_t                    connectorRefBlocksNum() const;
@@ -64,6 +65,7 @@ public:
     void   connectorReference(BlockIdxType block_idx);
     void   connectorReference(const BlockIndicesType& block_indices);
 
+    const std::vector<torch::Tensor>& allLayerHbmCacheBase() const { return global_layer_hbm_tensors_; }
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
     int64_t getMrCostTimeMs() const {
@@ -80,6 +82,9 @@ public:
     size_t getTotalSizeBytes() const {
         return config_.total_size_bytes;
     }
+    const torch::Tensor& blockGenerations() const {
+        return block_generations_;
+    }
 
 private:
     void initFreeBlocks();
@@ -92,7 +97,7 @@ private:
     void validateConfig() const;
     void initializeCacheBuffer();
     void initializePinnedCpuBuffer(const char* log_context);
-    void initializeCudaMallocBuffer();
+    torch::Tensor allocateCudaBuffer(size_t size_bytes);
     void initializeLayerMappings();
     void initializeLayoutStrategies();
 
@@ -142,6 +147,10 @@ private:
     BlockCachePtr block_cache_;
 
     torch::Tensor               cache_aligned_buffer_;
+    torch::Tensor               block_generations_;
+    std::vector<torch::Tensor>   layout_indexer_buffers_;
+    std::vector<torch::Tensor>   layout_hbm_buffers_;
+    std::vector<torch::Tensor>   global_layer_hbm_tensors_;
     void*                       cache_base_ptr_               = nullptr;
     bool                        cache_buffer_registered_host_ = false;
     bool                        kvcache_reg_mr_               = false;

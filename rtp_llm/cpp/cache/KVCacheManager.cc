@@ -96,6 +96,17 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.used_ratio           = pool_snapshot.used_ratio;
 
     kmonitor::MetricsTags pool_tags("pool", std::to_string(pool_snapshot.pool_index));
+    if (!pool_snapshot.storage.empty()) {
+        pool_tags.AddTag("storage", pool_snapshot.storage);
+        if (should_log) {
+            RTP_LLM_LOG_INFO("kvc tier[%s]: total=%zu free=%zu available=%zu capacity_bytes=%zu "
+                             "occupied_bytes=%zu indexer_bytes=%zu working_set_bytes=%zu",
+                             pool_snapshot.storage.c_str(), pool_snapshot.total_blocks,
+                             pool_snapshot.free_blocks, pool_snapshot.available_blocks,
+                             pool_snapshot.capacity_bytes, pool_snapshot.occupied_bytes,
+                             pool_snapshot.indexer_bytes, pool_snapshot.working_set_bytes);
+        }
+    }
     metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
 }
 
@@ -128,6 +139,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
     if (warmup) {
         config_.block_num = 1;
+        config_.dsa_mla_resident_tokens = 0;
+        config_.dsa_mla_hbm_blocks = 0;
     } else {
         allocateAndSync();
     }
@@ -343,6 +356,9 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     CacheLayerLayout layout;
 
     auto  all_layout        = allocator_->allLayerCacheBase();
+    layout.dsa_mla_resident_tokens = all_layout.dsa_mla_resident_tokens;
+    layout.dsa_mla_hbm_blocks = all_layout.dsa_mla_hbm_blocks;
+    layout.block_generations = all_layout.block_generations;
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
@@ -372,6 +388,9 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         if (static_cast<size_t>(layer_id) < all_layer_tensors.size()) {
             layout.layer_to_groups[layer_id]          = all_layout.layer_to_groups[layer_id];
             layout.layers_to_kv_buffer_ptrs[layer_id] = all_layer_tensors[layer_id];
+            if (!all_layout.mla_hbm_cache_by_layer.empty()) {
+                layout.mla_hbm_cache_by_layer.push_back(all_layout.mla_hbm_cache_by_layer[layer_id]);
+            }
         } else {
             RTP_LLM_CHECK(false);
         }
@@ -434,6 +453,9 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
 
     auto  all_layout        = allocator_->allLayerCacheBase();
+    layout.dsa_mla_resident_tokens = all_layout.dsa_mla_resident_tokens;
+    layout.dsa_mla_hbm_blocks = all_layout.dsa_mla_hbm_blocks;
+    layout.block_generations = all_layout.block_generations;
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
@@ -471,6 +493,9 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
             if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
                 layout.layer_to_groups[local_layer_id]          = all_layout.layer_to_groups[global_layer_id];
                 layout.layers_to_kv_buffer_ptrs[local_layer_id] = all_layer_tensors[global_layer_id];
+                if (!all_layout.mla_hbm_cache_by_layer.empty()) {
+                    layout.mla_hbm_cache_by_layer.push_back(all_layout.mla_hbm_cache_by_layer[global_layer_id]);
+                }
             } else {
                 RTP_LLM_CHECK(false);
             }
@@ -715,6 +740,17 @@ void KVCacheManager::allocateAndSync() {
     }
     if (config_.use_independent_block_pools) {
         config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+    }
+    if (config_.dsa_mla_resident_tokens) {
+        RTP_LLM_CHECK_WITH_INFO(config_.block_num > 1, "tiered MLA needs at least two logical blocks");
+        config_.dsa_mla_hbm_blocks = std::min(config_.dsa_mla_hbm_blocks, config_.block_num - 1);
+        config_.finalizeBlockNums(config_.block_num, runtime_config_);
+        for (auto& sub : config_.mtp_sub_configs) {
+            sub->block_num = config_.block_num;
+            sub->dsa_mla_resident_tokens = config_.dsa_mla_resident_tokens;
+            sub->dsa_mla_hbm_blocks = config_.dsa_mla_hbm_blocks;
+            sub->finalizeBlockNums(config_.block_num, runtime_config_);
+        }
     }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }

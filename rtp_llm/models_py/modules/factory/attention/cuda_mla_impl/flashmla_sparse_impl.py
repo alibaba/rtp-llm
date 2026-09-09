@@ -52,7 +52,7 @@ from rtp_llm.ops import (
     KvCacheDataType,
     ParallelismConfig,
 )
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
@@ -167,12 +167,16 @@ class SparseMlaOp(object):
         topk_indices: torch.Tensor,
         kv_scale: Optional[torch.Tensor] = None,
         layer_id: int = 0,
+        physical_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """q: [T, H, qk_head_dim], kv: [total_kv_len, 1, kv_lora_rank+rope].
 
         Returns [T, H, kv_lora_rank].
         """
-        global_indices = self._convert_topk_indices_to_global(topk_indices)
+        global_indices = (
+            self._convert_topk_indices_to_global(topk_indices)
+            if physical_indices is None else physical_indices
+        )
         out, _, _ = flash_mla_sparse_fwd(
             q, kv, global_indices, self.scale, d_v=self.kv_lora_rank
         )
@@ -313,10 +317,11 @@ class SparseMlaFp8Op(SparseMlaOp):
         topk_indices: torch.Tensor,
         kv_scale: Optional[torch.Tensor] = None,
         layer_id: int = 0,
+        physical_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if self._gather is not None:
+        if self._gather is not None and physical_indices is None:
             return self._forward_gather(q, kv, topk_indices)
-        return self._forward_with_kvcache(q, kv, topk_indices, layer_id)
+        return self._forward_with_kvcache(q, kv, topk_indices, layer_id, physical_indices)
 
     def _forward_gather(
         self,
@@ -378,6 +383,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         kv: torch.Tensor,
         topk_indices: torch.Tensor,
         layer_id: int = 0,
+        physical_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash_mla_with_kvcache directly on FP8 paged cache."""
         assert self._sched_meta is not None
@@ -391,8 +397,9 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # Indices: [T, 1, topk] → [1, T, topk] (kernel expects batched layout)
         global_indices = (
-            self._convert_topk_indices_to_global(topk_indices).squeeze(1).unsqueeze(0)
-        )
+            self._convert_topk_indices_to_global(topk_indices)
+            if physical_indices is None else physical_indices
+        ).squeeze(1).unsqueeze(0)
 
         attn_out, _ = flash_mla_with_kvcache(
             q=q.unsqueeze(0),
@@ -737,6 +744,11 @@ class SparseMlaImpl(MlaImplBase):
 
     # -- Main forward --------------------------------------------------------
 
+    def prefetch_kv(self, layer_id: int, topk_indices: torch.Tensor) -> None:
+        working, group_layer = self.pinned_mla_groups[layer_id]
+        if group_layer == 0:
+            working.begin(self.fmha_impl._convert_topk_indices_to_global(topk_indices))
+
     def forward(
         self,
         q: torch.Tensor,
@@ -745,10 +757,27 @@ class SparseMlaImpl(MlaImplBase):
         kv_cache: Optional[KVCache],
         layer_id: int,
         topk_indices: Optional[torch.Tensor] = None,
+        kv_prefetched: bool = False,
     ) -> torch.Tensor:
         """Sparse MLA forward. q: [T, H, qk_head_dim], topk: [T, (H,) topk] (req-local).
         Returns [T, H, nope_head_dim]."""
         assert topk_indices is not None and kv_cache is not None
+
+        working_entry = getattr(self, "pinned_mla_groups", {}).get(layer_id)
+        cache_target = kv_cache
+        write_slots = self.rope_params.slot_mapping
+        if working_entry is not None:
+            working, group_layer = working_entry
+            if not kv_prefetched:
+                self.prefetch_kv(layer_id, topk_indices)
+            # Produce exactly the original cache bytes in a small GPU scratch
+            # buffer while historical KV prefetch proceeds on its own stream.
+            cache_target = LayerKVCache()
+            cache_target.kv_cache_base = torch.empty(
+                (q.shape[0], 1, kv_cache.kv_cache_base.shape[-1]),
+                dtype=kv_cache.kv_cache_base.dtype, device=q.device,
+            )
+            write_slots = torch.arange(q.shape[0], dtype=torch.int64, device=q.device)
 
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
@@ -757,8 +786,8 @@ class SparseMlaImpl(MlaImplBase):
                 q=q,
                 compressed_kv=compressed_kv,
                 k_pe=k_pe,
-                kv_cache=kv_cache.kv_cache_base,
-                slot_mapping=self.rope_params.slot_mapping,
+                kv_cache=cache_target.kv_cache_base,
+                slot_mapping=write_slots,
                 positions=self.rope_params.positions_d,
                 cos_sin_cache=self._cos_sin_cache,
                 kv_lora_rank=self.kv_lora_rank,
@@ -769,24 +798,31 @@ class SparseMlaImpl(MlaImplBase):
         else:
             self.rope_impl.forward(q_pe, k_pe, self.rope_params)
             self.kv_cache_write_op.forward(
-                compressed_kv, k_pe, kv_cache, self.rope_params
+                compressed_kv, k_pe, cache_target, self.rope_params,
+                slot_mapping_override=write_slots,
             )
+
+        if working_entry is not None:
+            # Q projection overlaps admission and H2D before joining prefetch.
+            q_transformed = self._apply_input_bmm(q, layer_id)
+            working.write(group_layer, self.rope_params.slot_mapping,
+                          cache_target.kv_cache_base.flatten(0, 1))
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-
-        # 2. Project q via W_kc into the absorbed kv_lora_rank space
-        q_transformed = self._apply_input_bmm(q, layer_id)
+        if working_entry is None:
+            q_transformed = self._apply_input_bmm(q, layer_id)
 
         # 3. Sparse attention. FP8 op consumes paged shape; BF16 op wants flat.
-        if self.fmha_impl.expects_paged_kv:
-            kv_input = kv_cache.kv_cache_base
-        else:
-            kv_input = kv_cache.kv_cache_base.view(
-                -1, 1, kv_cache.kv_cache_base.size(-1)
-            )
+        kv_input = (working.resident[group_layer] if working_entry is not None
+                    else kv_cache.kv_cache_base)
+        if not self.fmha_impl.expects_paged_kv:
+            kv_input = kv_input.view(-1, 1, kv_input.size(-1))
+        attention_kwargs = {}
+        if working_entry is not None:
+            attention_kwargs["physical_indices"] = working.physical_indices
         attn_output = self.fmha_impl.forward(
-            q_transformed, kv_input, topk_indices, layer_id=layer_id
+            q_transformed, kv_input, topk_indices, layer_id=layer_id, **attention_kwargs
         )
 
         # 4. Project attention output via W_vc → final output

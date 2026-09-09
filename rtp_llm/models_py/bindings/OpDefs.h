@@ -35,6 +35,10 @@ struct LayerKVCache {
 // Whole-model KV cache holding tensors for all layers.
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 struct KVCache {
+    size_t        dsa_mla_resident_tokens = 0;
+    size_t        dsa_mla_hbm_blocks = 0;
+    std::vector<torch::Tensor> mla_hbm_cache_by_layer;
+    torch::Tensor block_generations;
     // Per-layer views
     std::vector<torch::Tensor> kv_cache_base_by_layer;
     std::vector<torch::Tensor> kv_scale_base_by_layer;
@@ -116,7 +120,7 @@ struct KVCache {
 
             if (scale.defined()) {
                 // Keep kv_scale_base aligned with kernel-block view of kv_cache_base.
-                const int64_t physical_block_num = base.size(0);
+                const int64_t physical_block_num = scale.size(0);
                 const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
 
                 if (use_mla) {

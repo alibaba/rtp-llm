@@ -829,6 +829,7 @@ class GenericMoeModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         prev_topk_indices = None
+        fmha_impl.pinned_mla_groups = self.pinned_mla_groups
         enable_cmp = should_enable_glm5_cmp(
             self.layers,
             self.layer_num,

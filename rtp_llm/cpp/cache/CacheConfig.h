@@ -53,6 +53,9 @@ struct CacheConfig {
 
     // Block configuration
     uint32_t block_num;
+    // Nonzero enables complete HBM blocks, pinned overflow, and an HBM token working set.
+    size_t dsa_mla_resident_tokens = 0;
+    uint32_t dsa_mla_hbm_blocks = 0;
     size_t   seq_size_per_block        = 1;
     size_t   kernel_seq_size_per_block = 1;
 
@@ -198,6 +201,8 @@ struct CacheConfig {
         OUTPUT_FIELD(dsv4_fixed_pool_blocks);
         OUTPUT_FIELD(dsv4_hca_state_pool_blocks);
         OUTPUT_FIELD(use_independent_block_pools);
+        OUTPUT_FIELD(dsa_mla_hbm_blocks);
+        OUTPUT_FIELD(dsa_mla_resident_tokens);
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);

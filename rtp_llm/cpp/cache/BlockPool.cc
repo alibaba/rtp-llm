@@ -380,6 +380,20 @@ void BlockPool::validateConfig() const {
 void BlockPool::initializeCacheBuffer() {
     cache_buffer_registered_host_ = false;
     if (allocation_type_ == AllocationType::HOST) {
+        config_.mla_tiered_cache = false;
+    }
+    if (config_.mla_tiered_cache) {
+        for (const auto& layout : config_.memory_layouts) {
+            RTP_LLM_CHECK_WITH_INFO(layout.use_mla && layout.hasScale() && !layout.enable_hybrid_attention,
+                                    "pinned MLA backing requires a sparse MLA-only pool");
+        }
+        use_pinned_cpu_backing_ = true;
+        block_generations_ = torch::zeros(
+            {config_.block_num}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));
+        layout_indexer_buffers_.resize(config_.memory_layouts.size());
+        layout_hbm_buffers_.resize(config_.memory_layouts.size());
+    }
+    if (allocation_type_ == AllocationType::HOST) {
         if (shouldPinHostBlockPool()) {
             // Parse the mode outside the allocation fallback. Invalid configuration
             // must fail fast instead of silently changing pinned memory to pageable.
@@ -415,10 +429,17 @@ void BlockPool::initializeCacheBuffer() {
                          cache_aligned_buffer_.data_ptr(),
                          config_.total_size_bytes);
         markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
+    } else if (config_.mla_tiered_cache) {
+        // The caching pinned allocator rounds large arenas up to a power of two.
+        // Register the exact budget instead, using the existing NUMA policy.
+        cache_aligned_buffer_ = allocateRegisteredCpuTensor(
+            config_.total_size_bytes, shouldInterleaveRegisteredHostBlockPool(), hostBlockPoolPrefaultThreads());
+        cache_buffer_registered_host_ = true;
+        markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else if (use_pinned_cpu_backing_) {
         initializePinnedCpuBuffer("device block pool pinned CPU backing");
     } else if (use_cuda_malloc_backing_) {
-        initializeCudaMallocBuffer();
+        cache_aligned_buffer_ = allocateCudaBuffer(config_.total_size_bytes);
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
@@ -460,11 +481,11 @@ void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     }
 }
 
-void BlockPool::initializeCudaMallocBuffer() {
+torch::Tensor BlockPool::allocateCudaBuffer(size_t size_bytes) {
 #if USING_CUDA
     RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::DEVICE,
                             "cudaMalloc block pool backing requires DEVICE allocation");
-    RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes > 0, "cudaMalloc block pool total_size_bytes must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(size_bytes > 0, "cudaMalloc block pool total_size_bytes must be > 0");
 
     int  device_id  = -1;
     auto device_err = cudaGetDevice(&device_id);
@@ -473,11 +494,11 @@ void BlockPool::initializeCudaMallocBuffer() {
                             cudaGetErrorString(device_err));
 
     void*      ptr = nullptr;
-    const auto err = cudaMalloc(&ptr, config_.total_size_bytes);
+    const auto err = cudaMalloc(&ptr, size_bytes);
     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
                             "cudaMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
                             config_.pool_name.c_str(),
-                            config_.total_size_bytes,
+                            size_bytes,
                             cudaGetErrorString(err));
 
     auto deleter = [device_id](void* p) {
@@ -493,9 +514,9 @@ void BlockPool::initializeCudaMallocBuffer() {
         }
         (void)cudaFree(p);
     };
-    cache_aligned_buffer_ =
+    auto tensor =
         torch::from_blob(ptr,
-                         {static_cast<int64_t>(config_.total_size_bytes)},
+                         {static_cast<int64_t>(size_bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
     // REBASE CONFLICT CONTEXT(2413e8e03): source branch added cudaMalloc backing for
@@ -503,10 +524,11 @@ void BlockPool::initializeCudaMallocBuffer() {
     RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
                      config_.pool_name.c_str(),
                      ptr,
-                     config_.total_size_bytes,
+                     size_bytes,
                      device_id);
+    return tensor;
 #else
-    RTP_LLM_FAIL("cudaMalloc block pool backing requested but this binary was not built with CUDA");
+    throw std::runtime_error("cudaMalloc block pool backing requested but this binary was not built with CUDA");
 #endif
 }
 
@@ -519,6 +541,9 @@ void BlockPool::initializeLayerMappings() {
     }
     global_layer_to_local_.assign(total_layers, {-1, -1});
     global_layer_kv_tensors_.assign(total_layers, torch::Tensor());
+    if (config_.mla_tiered_cache) {
+        global_layer_hbm_tensors_.assign(total_layers, torch::Tensor());
+    }
     global_layer_kv_scale_tensors_.assign(total_layers, torch::Tensor());
 }
 
@@ -545,13 +570,29 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
     // 创建缩放张量（如果需要）
     torch::Tensor kv_scale_tensor;
     if (layout_cfg.hasScale()) {
-        kv_scale_tensor = createTensor(full_tensor,
+        if (config_.mla_tiered_cache) {
+            // RDMA requires the same legacy CUDA allocation for the separate
+            // Indexer buffer as for an ordinary HBM block pool.
+            kv_scale_tensor = use_cuda_malloc_backing_ ?
+                                  allocateCudaBuffer(layout_cfg.kv_scale_pool_size_bytes) :
+                                  torch::empty({static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes)},
+                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            layout_indexer_buffers_[layout_idx] = kv_scale_tensor;
+        } else {
+            kv_scale_tensor = createTensor(full_tensor,
                                        static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes),
                                        static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes),
                                        layout_idx,
                                        "kv_scale");
+        }
     }
 
+    if (config_.mla_tiered_cache) {
+        layout_hbm_buffers_[layout_idx] = use_cuda_malloc_backing_ ?
+            allocateCudaBuffer(layout_cfg.mla_hbm_size_bytes) :
+            torch::empty({static_cast<int64_t>(layout_cfg.mla_hbm_size_bytes)},
+                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    }
     // 初始化内存布局策略
     initializeLayoutStrategy(layout_idx, layout_cfg, kv_cache_tensor, kv_scale_tensor);
 
@@ -595,7 +636,8 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
                             layout_idx);
 
     RTP_LLM_CHECK_WITH_INFO(
-        layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr),
+        layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr,
+            config_.mla_tiered_cache ? layout_hbm_buffers_[layout_idx] : torch::Tensor()),
         "Failed to initialize memory layout strategy for layout[%zu]",
         layout_idx);
 }
@@ -617,6 +659,10 @@ void BlockPool::processLayerTensors(size_t                    layout_idx,
         RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
         global_layer_to_local_[global_layer]   = {static_cast<int>(layout_idx), static_cast<int>(local_layer)};
         global_layer_kv_tensors_[global_layer] = layer_tensors[local_layer];
+        if (config_.mla_tiered_cache) {
+            global_layer_hbm_tensors_[global_layer] =
+                layout_strategies_[layout_idx]->getLayerHbmCacheTensors()[local_layer];
+        }
     }
 
     // 处理缩放张量（如果存在）
@@ -691,6 +737,12 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
         auto first = free_block_ids_.begin();
         auto last  = std::next(first, num_blocks);
         block_ids.assign(first, last);
+        if (block_generations_.defined()) {
+            auto* generations = block_generations_.data_ptr<int64_t>();
+            for (const auto block_id : block_ids) {
+                ++generations[block_id];
+            }
+        }
         free_block_ids_.erase(first, last);
         request_ref_counter_.incrementRefCounter(block_ids);
         req_con_ref_counter_.incrementRefCounter(block_ids);
@@ -818,6 +870,10 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                     gpu,
                                     "kv");
 
+            if (config_.mla_tiered_cache) {
+                registerUserMrForBuffer(memory_util, layout_idx, 0, layout_cfg.mla_hbm_size_bytes,
+                                        layout_cfg.kv_block_stride_bytes, true, "hbm_kv");
+            }
             // Register scale buffer if present
             if (layout_cfg.hasScale()) {
                 registerUserMrForBuffer(memory_util,
@@ -846,6 +902,9 @@ void BlockPool::deregUserMr() {
             // Deregister KV buffer
             deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
 
+            if (config_.mla_tiered_cache) {
+                deregisterUserMrForBuffer(memory_util, layout_idx, 0, true, "hbm_kv");
+            }
             // Deregister scale buffer if present
             if (layout_cfg.hasScale()) {
                 deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
@@ -865,6 +924,13 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
                                         bool                                 gpu,
                                         const std::string&                   buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
+    if (config_.mla_tiered_cache && buffer_type == "scale") {
+        base_ptr = layout_indexer_buffers_[layout_idx].data_ptr();
+        gpu = true;
+    } else if (config_.mla_tiered_cache && buffer_type == "hbm_kv") {
+        base_ptr = layout_hbm_buffers_[layout_idx].data_ptr();
+        gpu = true;
+    }
     auto  start_us = currentTimeUs();
 
     if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
@@ -889,10 +955,52 @@ void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> m
                                           bool                                 gpu,
                                           const std::string&                   buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
+    if (config_.mla_tiered_cache && buffer_type == "scale") {
+        base_ptr = layout_indexer_buffers_[layout_idx].data_ptr();
+        gpu = true;
+    } else if (config_.mla_tiered_cache && buffer_type == "hbm_kv") {
+        base_ptr = layout_hbm_buffers_[layout_idx].data_ptr();
+        gpu = true;
+    }
 
     if (!memory_util->deregUserMr(base_ptr, gpu)) {
         RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
     }
+}
+
+std::vector<KVCachePoolMetricsSnapshot> BlockPool::tierMetricsSnapshots() const {
+    if (!config_.mla_tiered_cache) {
+        return {};
+    }
+    std::vector<KVCachePoolMetricsSnapshot> snapshots(2);
+    snapshots[0].storage = "hbm";
+    snapshots[1].storage = "pinned";
+    const size_t hbm_blocks = config_.memory_layouts.front().mla_hbm_blocks;
+    size_t block_bytes = 0;
+    for (const auto& layout : config_.memory_layouts) {
+        block_bytes += layout.layer_num * layout.kv_block_stride_bytes;
+        snapshots[0].indexer_bytes += layout.kv_scale_pool_size_bytes;
+        snapshots[0].working_set_bytes += layout.layer_num * layout.kv_block_stride_bytes
+            * (layout.mla_resident_tokens / layout.seq_size_per_block);
+    }
+    // Take a single consistent snapshot across request, connector and cache refs.
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    for (uint32_t block = 1; block < config_.block_num; ++block) {
+        auto& entry = snapshots[block < hbm_blocks ? 0 : 1];
+        ++entry.total_blocks;
+        entry.free_blocks += free_block_ids_.count(block);
+        entry.available_blocks += req_con_ref_counter_.getRefCounter(block) == 0;
+        entry.request_ref_blocks += request_ref_counter_.getRefCounter(block) > 0;
+        entry.connector_ref_blocks += connector_ref_counter_.getRefCounter(block) > 0;
+    }
+    for (auto& entry : snapshots) {
+        entry.capacity_bytes = entry.total_blocks * block_bytes;
+        // Occupied includes reusable prefix-cache blocks; available excludes only in-flight refs.
+        entry.occupied_bytes = (entry.total_blocks - entry.free_blocks) * block_bytes;
+        entry.used_ratio = entry.total_blocks ?
+            100.0 * (entry.total_blocks - entry.available_blocks) / entry.total_blocks : 0.0;
+    }
+    return snapshots;
 }
 
 size_t BlockPool::freeBlocksNum() const {

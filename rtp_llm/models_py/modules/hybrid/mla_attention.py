@@ -168,7 +168,7 @@ class MlaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_c: Optional[torch.Tensor],
-        q_view: torch.Tensor,
+        q_view: Optional[torch.Tensor],
         kv_cache: Optional[LayerKVCache],
         fmha_impl: MlaImplBase,
         x_fp8: Optional[torch.Tensor] = None,
@@ -217,6 +217,9 @@ class MlaAttention(nn.Module):
         return_topk: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
+        early_prefetch = self.q_lora_rank > 0 and self.layer_idx in getattr(
+            fmha_impl, "pinned_mla_groups", {}
+        )
         q_c = None
         q_c_fp8 = None
         q_c_scale = None
@@ -247,17 +250,36 @@ class MlaAttention(nn.Module):
                         scale_ue8m0=self.q_b_proj.scale_ue8m0,
                     )
                 )
-                q = self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
             elif self._fuse_q_a_norm_mode == "bf16":
                 q_c = fused_strided_rmsnorm(
                     q,
                     self.q_a_layernorm.weight.data,
                     self.q_a_layernorm.variance_epsilon,
                 )
-                q = self.q_b_proj(q_c)
             else:
                 q_c = self.q_a_layernorm(q.contiguous())
-                q = self.q_b_proj(q_c)
+            if early_prefetch:
+                # Indexer consumes q_c, so Q expansion and KV normalization can
+                # run while the selected historical KV is being fetched.
+                topk_indices = self._run_sparse_indexer(
+                    hidden_states,
+                    q_c,
+                    None,
+                    kv_cache,
+                    fmha_impl,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                    prev_topk_indices,
+                    force_reuse_topk_indices,
+                )
+                fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
+            q = (
+                self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+                if q_c_fp8 is not None
+                else self.q_b_proj(q_c)
+            )
         else:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_proj(x_fp8, input_scales=x_scale)
@@ -288,25 +310,32 @@ class MlaAttention(nn.Module):
         else:
             compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        topk_indices = self._run_sparse_indexer(
-            hidden_states,
-            q_c,
-            q_view,
-            kv_cache,
-            fmha_impl,
-            x_fp8,
-            x_scale,
-            q_c_fp8,
-            q_c_scale,
-            prev_topk_indices,
-            force_reuse_topk_indices,
-        )
+        if not early_prefetch:
+            topk_indices = self._run_sparse_indexer(
+                hidden_states,
+                q_c,
+                q_view,
+                kv_cache,
+                fmha_impl,
+                x_fp8,
+                x_scale,
+                q_c_fp8,
+                q_c_scale,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+            )
         # q_c and its quantized representation are Indexer-only. Releasing
         # the local references here lets SparseMLA reuse their blocks;
         # q_view, compressed_kv and k_pe must stay live through attention.
         del q_c, q_c_fp8, q_c_scale
         attn_output = fmha_impl.forward(
-            q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
+            q_view,
+            compressed_kv,
+            k_pe,
+            kv_cache,
+            self.layer_idx,
+            topk_indices,
+            **({"kv_prefetched": True} if early_prefetch else {}),
         )
 
         # The sparse-attention launch has consumed these projections. PyTorch's

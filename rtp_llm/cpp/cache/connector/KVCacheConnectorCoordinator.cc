@@ -196,6 +196,8 @@ bool KVCacheConnectorCoordinator::init() {
     }
 #ifdef USE_REMOTE_KV_CACHE
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
+        RTP_LLM_CHECK_WITH_INFO(cache_config_.dsa_mla_resident_tokens == 0,
+                                "whole-pool remote cache does not support split pinned MLA/indexer storage");
         remote_connector_ = initRemoteConnector();
         connectors_.emplace_back(remote_connector_);
     }

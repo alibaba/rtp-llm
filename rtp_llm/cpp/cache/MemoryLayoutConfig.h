@@ -8,6 +8,10 @@
 namespace rtp_llm {
 
 struct MemoryLayoutConfig {
+    uint32_t mla_hbm_blocks = 0;
+    size_t mla_resident_tokens = 0;
+    size_t mla_hbm_size_bytes = 0;
+
     uint32_t layer_num = 0;
     uint32_t block_num = 0;
 
