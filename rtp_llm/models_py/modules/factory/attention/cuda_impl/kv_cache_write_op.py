@@ -5,7 +5,7 @@ from typing import Any, Optional, Tuple
 import flashinfer.page as page
 import torch
 
-from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 
 class KVCacheWriteOp:
@@ -15,19 +15,38 @@ class KVCacheWriteOp:
         self,
         num_kv_heads: int,
         head_size: int,
-        token_per_block: int,
+        physical_page_size: Optional[int] = None,
+        kernel_page_size: Optional[int] = None,
+        dynamic_mode: bool = False,
+        token_per_block: Optional[int] = None,
     ) -> None:
-        """
-        Initialize KV Cache Write operator.
+        """Initialize the KV cache writer for physical/kernel page geometry.
 
-        Args:
-            num_kv_heads: Number of key-value heads
-            head_size: Dimension of each attention head
-            token_per_block: Number of tokens per KV cache block (page size)
+        ``token_per_block`` remains as a compatibility alias for callers that
+        predate separate physical and kernel page sizes.
         """
+        if physical_page_size is None:
+            physical_page_size = token_per_block
+        elif token_per_block is not None and token_per_block != physical_page_size:
+            raise ValueError("token_per_block must match physical_page_size")
+        if physical_page_size is None or physical_page_size <= 0:
+            raise ValueError("physical_page_size must be positive")
+        if kernel_page_size is None:
+            kernel_page_size = physical_page_size
+        if kernel_page_size <= 0 or physical_page_size % kernel_page_size != 0:
+            raise ValueError(
+                "physical_page_size must be divisible by kernel_page_size, got "
+                f"{physical_page_size} and {kernel_page_size}"
+            )
+
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
-        self.token_per_block = token_per_block
+        self.physical_page_size = physical_page_size
+        self.kernel_page_size = kernel_page_size
+        self.subdivision = physical_page_size // kernel_page_size
+        self.dynamic_mode = dynamic_mode
+        # Keep the old attribute for warmup and compatibility users.
+        self.token_per_block = kernel_page_size
         self.params = None
 
     def set_params(self, params: Any):
@@ -49,14 +68,50 @@ class KVCacheWriteOp:
             kv_cache: KV cache [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
         """
         if kv_cache is not None:
-            # For real execution - use provided KV cache
-            # KV cache has shape [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
-            k_cache = kv_cache.kv_cache_base[
-                :, 0, :, :, :
-            ]  # [num_pages, num_kv_heads, page_size, head_dim]
-            v_cache = kv_cache.kv_cache_base[
-                :, 1, :, :, :
-            ]  # [num_pages, num_kv_heads, page_size, head_dim]
+            # FlashInfer requires batch_indices/positions size == nnz. Device
+            # planner buffers can be oversized, so narrow without a host sync.
+            nnz = key.size(0)
+            batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
+            positions = self.params.positions_d.narrow(0, 0, nnz)
+
+            if self.dynamic_mode:
+                kv_scales = getattr(kv_cache, "kv_scale_base", None)
+                if kv_scales is None or kv_scales.numel() == 0:
+                    raise ValueError(
+                        "FP8 KV cache mode 2 requires a non-empty kv_scale_base"
+                    )
+
+                page_slots = self.params.decode_page_indptr_d[batch_indices.long()]
+                page_slots = page_slots + torch.div(
+                    positions, self.kernel_page_size, rounding_mode="floor"
+                )
+                target_kernel_pages = self.params.page_indice_d[page_slots.long()]
+                target_physical_pages = torch.div(
+                    target_kernel_pages,
+                    self.subdivision,
+                    rounding_mode="floor",
+                ).contiguous()
+                physical_token_offsets = (
+                    torch.remainder(target_kernel_pages, self.subdivision)
+                    * self.kernel_page_size
+                    + torch.remainder(positions, self.kernel_page_size)
+                ).contiguous()
+                rtp_llm_ops.quantize_and_write_fp8_kv_cache(
+                    key.contiguous(),
+                    value.contiguous(),
+                    kv_cache.kv_cache_base,
+                    kv_scales,
+                    target_physical_pages,
+                    physical_token_offsets,
+                    self.physical_page_size,
+                    self.kernel_page_size,
+                    self.subdivision,
+                )
+                return
+
+            # For legacy/base execution, cache dtype must already match K/V.
+            k_cache = kv_cache.kv_cache_base[:, 0, :, :, :]
+            v_cache = kv_cache.kv_cache_base[:, 1, :, :, :]
             if key.dtype != k_cache.dtype:
                 raise ValueError(
                     f"key dtype {key.dtype} must match K cache dtype {k_cache.dtype}"
@@ -66,26 +121,21 @@ class KVCacheWriteOp:
                     f"value dtype {value.dtype} must match V cache dtype {v_cache.dtype}"
                 )
 
-            # FlashInfer requires batch_indices/positions size == nnz.
-            # Device planner leaves buffers oversized, so narrow without a host sync.
-            nnz = key.size(0)
-            batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
-            positions = self.params.positions_d.narrow(0, 0, nnz)
-
-            # Append K and V to paged cache using HND layout
+            # Append K and V to paged cache using HND layout.
             page.append_paged_kv_cache(  # type: ignore
-                key,  # append_key: [total_tokens, num_kv_heads, head_dim]
-                value,  # append_value: [total_tokens, num_kv_heads, head_dim]
+                key,
+                value,
                 batch_indices,
                 positions,
-                (k_cache, v_cache),  # paged_kv_cache: tuple of K and V caches
+                (k_cache, v_cache),
                 self.params.page_indice_d,
                 self.params.decode_page_indptr_d,
                 self.params.paged_kv_last_page_len_d,
-                "HND",  # kv_layout: HND layout (num_pages, num_kv_heads, page_size, head_dim)
+                "HND",
             )
-        else:
-            # For warmup/JIT compilation - create dummy KV cache
+        elif not self.dynamic_mode:
+            # For legacy/base warmup/JIT compilation - create dummy KV cache.
+            # Dynamic mode intentionally performs no write without a real cache.
             (
                 batch_indices,
                 positions,

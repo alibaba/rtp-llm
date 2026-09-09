@@ -5,7 +5,7 @@ from typing import List, NamedTuple, Optional, Sequence
 
 import torch
 
-from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
 from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
@@ -203,6 +203,95 @@ class BaseAttentionTest(unittest.TestCase):
             seq_size_per_block=seq_size_per_block,
             tp_size=tp_size,
         )
+
+    @staticmethod
+    def _enable_qwen35_mrope_mode1(config: TestConfig) -> None:
+        attn_configs = config.attn_configs
+        attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        attn_configs.fp8_kv_cache_mode = 1
+        attn_configs.need_rope_kv_cache = True
+        attn_configs.max_seq_len = 2048
+        rope_config = attn_configs.rope_config
+        rope_config.style = RopeStyle.Mrope
+        rope_config.dim = 64
+        rope_config.base = 10000
+        rope_config.scale = 1.0
+        rope_config.max_pos = 2048
+        rope_config.index_factor = 3
+        rope_config.mrope_dim1 = 11
+        rope_config.mrope_dim2 = 11
+        rope_config.mrope_dim3 = 10
+        rope_config.mrope_interleaved = True
+
+    def _add_qwen35_mrope_inputs(
+        self,
+        attn_inputs: PyAttentionInputs,
+        input_lengths: Sequence[int],
+        prefix_lengths: Optional[Sequence[int]] = None,
+    ) -> torch.Tensor:
+        if prefix_lengths is None:
+            prefix_lengths = [0] * len(input_lengths)
+        cu_seqlens = [0]
+        padding_offsets = []
+        max_input_length = max(input_lengths)
+        position_chunks = []
+        for batch_idx, (prefix_length, input_length) in enumerate(
+            zip(prefix_lengths, input_lengths)
+        ):
+            cu_seqlens.append(cu_seqlens[-1] + input_length)
+            padding_offsets.extend(
+                [batch_idx * max_input_length - cu_seqlens[batch_idx]] * input_length
+            )
+            positions = torch.arange(
+                prefix_length,
+                prefix_length + input_length,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            position_chunks.append(
+                torch.stack((positions, positions, positions), dim=-1)
+            )
+
+        attn_inputs.cu_kv_seqlens_device = attn_inputs.cu_seqlens_device
+        attn_inputs.padding_offset = torch.tensor(
+            padding_offsets, dtype=torch.int32, device=self.device
+        )
+        attn_inputs.context_total_kv_length = 0
+        attn_inputs.combo_position_ids = torch.cat(position_chunks).contiguous()
+        return attn_inputs.combo_position_ids
+
+    @staticmethod
+    def _apply_qwen35_mrope_reference(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        rope_dim = 64
+        rotary_pairs = rope_dim // 2
+        mrope_sections = (11, 11, 10)
+        axes = torch.zeros(rotary_pairs, dtype=torch.long, device=q.device)
+        axes[1 : 3 * mrope_sections[1] : 3] = 1
+        axes[2 : 3 * mrope_sections[2] : 3] = 2
+        positions = position_ids[:, axes].to(torch.float32)
+        inv_freq = 10000 ** (
+            -2.0
+            * torch.arange(rotary_pairs, dtype=torch.float32, device=q.device)
+            / rope_dim
+        )
+        angle = positions * inv_freq.unsqueeze(0)
+        cos = torch.cos(angle).unsqueeze(1)
+        sin = torch.sin(angle).unsqueeze(1)
+
+        def rotate(tensor: torch.Tensor) -> torch.Tensor:
+            tensor_float = tensor.float()
+            low = tensor_float[..., :rotary_pairs]
+            high = tensor_float[..., rotary_pairs:rope_dim]
+            tail = tensor_float[..., rope_dim:]
+            return torch.cat(
+                [low * cos - high * sin, high * cos + low * sin, tail], dim=-1
+            ).to(tensor.dtype)
+
+        return rotate(q), rotate(k)
 
     def _assert_output_close(
         self,

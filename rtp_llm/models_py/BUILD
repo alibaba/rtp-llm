@@ -51,7 +51,9 @@ py_library(
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [
+    data = glob([
+        "modules/factory/attention/cuda_impl/flashinfer_direct_scale/include/**/*.cuh",
+    ]) + [
         ":cutlass_moe_config",
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
