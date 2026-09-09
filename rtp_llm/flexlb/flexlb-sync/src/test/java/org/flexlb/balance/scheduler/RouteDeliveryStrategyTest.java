@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestContext;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestEndpointCapabilities;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestRequestRegistry;
@@ -9,7 +10,10 @@ import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestTelemetry;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -21,6 +25,82 @@ import static org.mockito.Mockito.verify;
 
 /** Exact ordered-prefix and per-request completion contract for route delivery. */
 class RouteDeliveryStrategyTest {
+
+    @Test
+    void removedMemberDoesNotContributeToLaterRouteCompletionTime() {
+        Fixture fixture = new Fixture();
+        ScheduledRequest first = fixture.item(1L);
+        ScheduledRequest cancelled = fixture.item(2L);
+        ScheduledRequest last = fixture.item(3L);
+        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork(99L, WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
+        fixture.slots.commitLostFor(cancelled);
+
+        fixture.context.deliver(fixture.strategy, List.of(first, cancelled, last),
+                "cancelled-middle", 0, OptionalLong.empty());
+
+        assertEquals(Map.of(first, 90L,
+                last, 180L), fixture.slots.unstartedWorkMs());
+        assertEquals(115L, fixture.slots.remainingWorkMsAt(first, 1_000L).orElseThrow());
+        assertEquals(205L, fixture.slots.remainingWorkMsAt(last, 1_000L).orElseThrow());
+        assertEquals(List.of(List.of(first, last)), fixture.telemetry.routes());
+    }
+
+    @Test
+    void zeroPredictionStillDeliversTheRoute() {
+        Fixture fixture = new Fixture();
+        ScheduledRequest item = fixture.item(1L);
+        org.mockito.Mockito.when(item.seqLen()).thenReturn(0L);
+        org.mockito.Mockito.when(item.hitCache()).thenReturn(0L);
+
+        fixture.context.deliver(fixture.strategy, List.of(item),
+                "zero", 0, OptionalLong.empty());
+
+        assertEquals(Map.of(item, 0L), fixture.slots.unstartedWorkMs());
+        assertEquals(List.of(List.of(item)), fixture.telemetry.routes());
+    }
+
+    @Test
+    void unknownPrecedingWorkStillDeliversEveryRoute() {
+        Fixture fixture = new Fixture();
+        ScheduledRequest first = fixture.item(1L);
+        ScheduledRequest second = fixture.item(2L);
+        fixture.capabilities.precedingWork(new WorkSnapshot(2_000L, List.of(), List.of(), 1L));
+
+        fixture.context.deliver(fixture.strategy, List.of(first, second),
+                "unknown", 0, OptionalLong.empty());
+
+        assertEquals(Map.of(first, 90L,
+                second, 180L), fixture.slots.unstartedWorkMs());
+        assertTrue(fixture.slots.remainingWorkMsAt(first, 2_000L).isEmpty());
+        assertSame(fixture.slots.precedingWork(first), fixture.slots.precedingWork(second));
+        assertEquals(List.of(List.of(first, second)), fixture.telemetry.routes());
+    }
+
+    @Test
+    void slowFirstRoutePublicationDoesNotAgeTheSecondMembersUnstartedWork() {
+        Fixture fixture = new Fixture();
+        ScheduledRequest first = fixture.item(1L);
+        ScheduledRequest second = fixture.item(2L);
+        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(
+                        new WorkSnapshot.RequestWork(3L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L),
+                        new WorkSnapshot.RequestWork(4L, WorkSnapshot.Phase.ENGINE_QUEUED, 300L)), List.of(), 0L));
+        AtomicInteger published = new AtomicInteger();
+        AtomicLong deliveryClock = new AtomicLong(1_000L);
+        fixture.slots.beforeCompletion(() -> {
+            if (published.getAndIncrement() == 0) {
+                assertEquals(1_390L, fixture.slots.remainingWorkMsAt(first, deliveryClock.get()).orElseThrow());
+                deliveryClock.set(3_000L);
+            } else {
+                assertEquals(480L, fixture.slots.remainingWorkMsAt(second, deliveryClock.get()).orElseThrow());
+                assertEquals(180L, fixture.slots.unstartedWorkMs().get(second));
+            }
+        });
+
+        fixture.context.deliver(fixture.strategy, List.of(first, second),
+                "slow-first-route", 0, OptionalLong.empty());
+
+        assertEquals(2, published.get());
+    }
 
     @Test
     void commitsAndDeliversEveryExactRouteInOrder() {

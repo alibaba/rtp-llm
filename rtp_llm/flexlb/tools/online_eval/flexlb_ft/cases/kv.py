@@ -14,9 +14,9 @@ category-reorg migrations:
     kv_pe_prefix_continuity      continuous-prefix matching (gap truncates)
 
   global (the master-side index maps key -> holder SET)
-    kv_g_shared_block_both_match   both holders -> NO_CACHE_LEAD spread
+    kv_g_shared_block_both_match   both holders retain cache hits
     kv_g_partial_release_redirect  one holder evicts -> redirect to other
-    kv_g_full_release_no_ghost     all holders evict -> zero-hit spread
+    kv_g_full_release_no_ghost     all holders evict -> zero-hit replay
     kv_g_sync_convergence          mixed admit/evict, quiet > 3.5s, routing
                                    matches the engine snapshots
     kv_g_engine_down_cleanup       engine removal keeps shared blocks for
@@ -33,11 +33,11 @@ category-reorg migrations:
 
   affinity routing (migrated from the legacy scheduling family)
     kv_prefix_stickiness           prefix-reuse traffic sticks to the
-                                   holder (P9 + P2 + P6)
-    kv_hot_prefix_tension          70% hot family: stickiness holds AND
-                                   holder concentration capped (P9 + M2)
-    kv_match_mixed                 full/half-hit concentrate, zero-hit
-                                   spreads (M3 + P2)
+                                   holder (P9 + P6)
+    kv_hot_prefix_tension          70% hot family retains affinity;
+                                   fresh requests have zero cache hits
+    kv_match_mixed                 full/half/zero cache-hit evidence
+                                   and holder affinity (M3 + P6)
 
   LRU capacity (migrated from the legacy gate family)
     kv_lru_eviction_affinity       LRU prefix reuse + capacity eviction +
@@ -93,7 +93,7 @@ from ..engine_ops import engine_inflight_clean
 from ..grade import GradeReport
 from ..harness import (
     DEFAULT_PREFILL_CACHE_BLOCKS,
-    TTL_DRAIN_TIMEOUT_S,
+    REQUEST_CLEANUP_TIMEOUT_S,
     AssertUtils,
     EnvSpec,
     default_perf,
@@ -114,15 +114,6 @@ KV_CACHE_SYNC_WAIT_S = 2.0
 # GrpcCacheStatusCheckRunner poll period plus margin (smoke S2 used 2.0
 # as a single sleep; the eviction events need the longer convergence).
 KV_SYNC_CONVERGENCE_S = 3.5
-# P1 fired-batch wave size.  GRADE_BANDS' P1 uniformity bands (strict /
-# normal / loose = 0.65 / 0.75 / 0.85) are calibrated against B(20, 0.5):
-# normal 0.75 ~= 2 * P(X >= 15) ~= 4.1%, loose 0.85 ~= 2 * P(X >= 17) ~=
-# 0.26% two-sided nominal false-fail per wave (see the P1 entry in
-# grade.GRADE_BANDS).  Every P1 fired-batch wave MUST fire exactly this
-# many requests: the historical n=10 put the SAME bands at ~10.9%
-# (normal) / ~2.1% (loose) per wave — one loose trip drops the
-# whole-suite verdict straight to unusable.
-P1_WAVE_N = 20
 # Prefix-family calibration (module docstring): 10 blocks of 1024 tokens
 # per family; a full-hit continuation prices at hitTokens = 9216 >= 8192.
 PREFIX_BLOCKS = 10
@@ -148,23 +139,10 @@ STORM_FLIP_BOUND = 8 * STORM_WINDOWS  # anti ping-pong bound (TODO calibrate)
 # footprint for nothing.  CAVEAT: n=1 calibration run — re-check (and
 # tighten) from multi-run regression data before trusting strict.
 STORM_REPLICATION_BANDS = {"strict": 1.5, "normal": 1.75, "loose": 2.0}
-# Hit-tier concentration bands (M3 case override for kv_storm_hot_churn).
-# 2026-09-04 recalibration (n=1): the shared GRADE_BANDS M3 floor (loose
-# 0.6) sat EXACTLY on this run's measurement — 0.600 = 30/50 graded
-# loose-only and failed a normal-grade run on a boundary artifact.
-# Cross-era drift is real (promotion-era 0.86 -> 0.600 after the codex
-# admission changes), so the tiers below split healthy warming from the
-# collapse regimes instead: the 5-requests-per-window structure makes
-# the first request of each window a guaranteed miss (rotation period
-# 4 windows = 40 blocks > the 24-block LRU), capping perfect stickiness
-# at 0.8 — strict 0.72 sits just under it; normal 0.50 admits the
-# observed warm-but-not-fully-sticky form with binomial margin
-# (sigma ~= 0.07 at n=50); loose 0.40 floors the true collapse regimes
-# (holder-avoidance / no in-window warming, ~<= 0.2).  n=1 caveat:
-# with 2 prefills even non-affinity routing warms in-window (~0.6 in
-# this construction), so the tiers police collapse-vs-healthy more
-# than a clean hit-vs-random split — recalibrate from n>=3 runs before
-# tightening.
+# Storm M3 bands retain the measured hit-rate calibration. Four rotating
+# families exceed the 24-block cache, so each five-request window starts
+# cold and caps perfect in-window reuse at 0.8. The 2026-09-04 run measured
+# 0.600; these bands concern cache warming, not worker traffic shares.
 STORM_HIT_RATE_BANDS = {"strict": 0.72, "normal": 0.50, "loose": 0.40}
 # Capacity-conflict shape: a 40-block family keeps the seed's hit share
 # above minPrefixHitPercent even against a 147456-token seqLen
@@ -271,6 +249,70 @@ def _cache_evict(ops, engine_name: str, keys) -> dict:
 def _prefill_names(ops) -> list[str]:
     snap = ops.snapshot_by_name()
     return sorted(name for name, e in snap.items() if e.get("role") == "prefill")
+
+
+def _cache_checked_request(
+    ops, rid: int, *, input_len: int, block_keys: list,
+    expected_hit_blocks: int, expected_holders=None,
+):
+    """Compare one completed request with Master and Engine cache facts.
+
+    Calls are serial on the case's isolated environment. Master counters
+    expose routing matches; Engine counters expose actual admission hits.
+    The input-token delta counts successful selections, including retries;
+    each selection must report the expected candidate match. Missing series
+    fail the check instead of being treated as a zero-hit observation.
+    """
+    prefix = "flexlb_app_cache_routing_"
+    max_key = prefix + "candidate_max_hit_tokens_total"
+    total_key = prefix + "selected_match_total_tokens_total"
+
+    def master_counters():
+        samples = ops.master_prometheus_metric(prefix, {"role": "PREFILL"})
+        if samples is None or any(
+            not any(name.startswith(key) for name in samples)
+            for key in (max_key, total_key)
+        ):
+            raise RuntimeError("Master candidate-match/input counters unavailable")
+        return (
+            sum(value for name, value in samples.items() if name.startswith(max_key)),
+            sum(value for name, value in samples.items() if name.startswith(total_key)),
+        )
+
+    def engine_hits():
+        rows = [row for row in ops.snapshot_by_name().values()
+                if row.get("role") == "prefill"]
+        if not rows or any("cache_key_hits" not in row for row in rows):
+            raise RuntimeError("Engine cache_key_hits counters unavailable")
+        return sum(int(row["cache_key_hits"]) for row in rows)
+
+    before_max, before_total = master_counters()
+    before_hits = engine_hits()
+    addr, err = ops.run_one_request(
+        rid, input_len=input_len, output_len=2, block_keys=block_keys,
+        stream_timeout_s=STREAM_TIMEOUT_S,
+    )
+    if err:
+        return addr, err
+    after_max, after_total = master_counters()
+    max_delta = after_max - before_max
+    total_delta = after_total - before_total
+    hit_delta = engine_hits() - before_hits
+    expected_tokens = min(input_len, expected_hit_blocks * BLOCK_TOKENS)
+    selections = total_delta / input_len
+    matched = (selections >= 1 and selections.is_integer()
+               and max_delta == expected_tokens * selections)
+    name = ops.addr_to_name().get(addr, addr)
+    if (not matched or total_delta < input_len
+            or hit_delta != expected_hit_blocks
+            or expected_holders is not None and name not in expected_holders):
+        return addr, (
+            f"cache evidence mismatch: engine={name}, "
+            f"Master max_hit_delta={max_delta}, input_delta={total_delta}, "
+            f"Engine hit_blocks={hit_delta}, expected_blocks={expected_hit_blocks}, "
+            f"holders={expected_holders}"
+        )
+    return addr, None
 
 
 def _fam_keys(base: int, fam: int, blocks: int = PREFIX_BLOCKS) -> list:
@@ -672,25 +714,16 @@ def kv_pe_admit_isolation(ctx: CaseContext):
     source="kv family: eviction event syncs through the master index (task #84)",
 )
 def kv_pe_evict_zero_match(ctx: CaseContext):
-    """[per-engine] A forced evict syncs through: no stale stickiness.
+    """Evict a sole holder's prefix, then verify a cold replay.
 
-    Scenario: family-0 is primed on its landing engine X (capacity 16 —
-    the spec's tiny-capacity spirit, sized up from 4 so the 10-block
-    prefix survives the LRU and prices past the affinity line); the
-    sync converges; a positive-control request sticks to X; then
-    /cache_evict removes the whole family from X and the sync converges
-    again (>= 3.5s of cache_version quiet).  Behaviour: master-side
-    propagation of the eviction event.  Expected (contract): the
-    post-evict batch carries the same prefix but must NOT stick to X —
-    zero-hit tie-window spread over the fired batch (P1); a stale
-    master index would keep routing the family onto X (max-share 1.0).
-    Prediction: passes.
+    The positive control verifies live affinity before eviction. After
+    cache sync, the first replay must report zero Master candidate-match
+    tokens and zero Engine admission hits. No distribution is prescribed.
     """
     env = ctx.env_manager.ensure(_kv_spec(ctx, "_evict", prefill_cache_blocks=16))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "kv")
     report = GradeReport(run_grade=ctx.grade)
-    fired, fired_handles = [], {}
     try:
         names = _prefill_names(ops)
         if len(names) < 2:
@@ -737,63 +770,16 @@ def kv_pe_evict_zero_match(ctx: CaseContext):
         x_keys = _engine_cache_keys(ops, x_name)
         evicted_ok = not (set(fam0) & x_keys)
 
-        # -- negative control: a fired batch (two-phase, decisions inside
-        #    one sync window) must spread — no stale stickiness to X.
-        #    Hedge note (deliberate, not incidental): the 0.12s fire
-        #    spacing keeps every decision inside the live ~2s ledger
-        #    window, so later fires hedge away from earlier landings —
-        #    the spread is negatively correlated and the real false-fail
-        #    rate sits BELOW the independent-binomial nominal (P1_WAVE_N
-        #    calibration); widening the fire spacing silently removes
-        #    this protection.
-        wave_names = []
-        for _ in range(P1_WAVE_N):
-            rid = ops.next_request_id(base)
-            name, err = _fire_request(
-                ops,
-                rid,
-                fired,
-                fired_handles,
-                input_len=PREFIX_INPUT_LEN,
-                output_len=2,
-                block_keys=fam0,
-            )
-            if err:
-                report.invariant("P6", False, detail=f"wave fire failed: {err}")
-                break
-            wave_names.append(name)
-            time.sleep(0.12)
-        outcomes = _drain_fired(ops, fired, fired_handles)
-        fired, fired_handles = [], {}
-        if wave_names:
-            dist = {}
-            for n in wave_names:
-                dist[n] = dist.get(n, 0) + 1
-            max_share = max(dist.values()) / len(wave_names)
-            share_x = dist.get(x_name, 0) / len(wave_names)
-            report.check(
-                "P1",
-                max_share,
-                context="post_evict",
-                detail=(
-                    f"holder_evicted={x_name}, share_x={share_x:.2f}, "
-                    f"dist={json.dumps(dist, sort_keys=True)}"
-                ),
-            )
-            passed, detail, rep = report.finish(
-                f"evicted_holder={x_name}, grades: {report.summary()}"
-            )
-            return (
-                passed and evicted_ok,
-                f"evicted_from_holder={evicted_ok}, {detail}",
-                rep,
-            )
-        passed, detail, rep = report.finish("wave never fired")
-        return False, detail, rep
+        rid = ops.next_request_id(base)
+        addr, err = _cache_checked_request(
+            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            expected_hit_blocks=0,
+        )
+        report.invariant("P6", evicted_ok and err is None,
+                         context="post_evict", detail=f"evicted={evicted_ok}, replay={addr}, error={err}")
+        return report.finish(f"evicted_holder={x_name}, grades: {report.summary()}")
     except Exception as exc:
         return False, f"exception: {exc!r}"
-    finally:
-        _drain_fired(ops, fired, fired_handles)
 
 
 @case(
@@ -883,19 +869,14 @@ def kv_pe_prefix_continuity(ctx: CaseContext):
 
 @case(
     "kv_g_shared_block_both_match",
-    source="kv family: shared holder set -> equal-hit tie (task #84)",
+    source="kv family: shared holder set and cache-hit evidence",
 )
 def kv_g_shared_block_both_match(ctx: CaseContext):
-    """[global] Both holders of a shared block match: tie, not fight.
+    """Both Engine holders retain the full prefix and provide cache hits.
 
-    Scenario: the double dispatch shares family-0 between e1 and e2
-    (the master's global index maps the blocks to a holder SET).
-    Behaviour: affinity with two equal max-hit candidates.  Expected
-    (contract): maxHit == minHit -> NO_CACHE_LEAD — subsequent
-    same-prefix requests spread across the holders (P1 max-share over
-    20 serial requests, P2 both engines used) and the holder-union
-    share stays 100%; a one-holder-only index would instead pin every
-    request onto a single engine (max-share ~1.0).  Prediction: passes.
+    Replays must stay within the holder set, report a full candidate match
+    in Master, and hit every prefix block at Engine admission. Equal-cost
+    workers have no required traffic share.
     """
     env = ctx.env_manager.ensure(_kv_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -917,46 +898,18 @@ def kv_g_shared_block_both_match(ctx: CaseContext):
             fam0
         ) <= _engine_cache_keys(ops, e2)
 
-        # -- 20 serial same-prefix requests: equal-hit tie spreads.
-        addrs = []
-        for _ in range(20):
+        report.invariant("P6", shared_ok, context="shared_keys",
+                         detail=f"both holders contain the complete prefix: {shared_ok}")
+        for _ in range(4):
             rid = ops.next_request_id(base)
-            addr, err = ops.run_one_request(
-                rid,
-                input_len=PREFIX_INPUT_LEN,
-                output_len=2,
-                block_keys=fam0,
-                stream_timeout_s=STREAM_TIMEOUT_S,
+            addr, err = _cache_checked_request(
+                ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+                expected_hit_blocks=len(fam0), expected_holders={e1, e2},
             )
+            report.invariant("P6", err is None, context="shared_cache_hit",
+                             detail=f"replay={addr}, error={err}")
             if err:
-                report.invariant("P6", False, detail=f"request failed: {err}")
                 break
-            addrs.append(ops.addr_to_name().get(addr, addr))
-        if addrs:
-            dist = {}
-            for n in addrs:
-                dist[n] = dist.get(n, 0) + 1
-            max_share = max(dist.values()) / len(addrs)
-            used = len(dist)
-            union_share = (dist.get(e1, 0) + dist.get(e2, 0)) / len(addrs)
-            report.check(
-                "P1",
-                max_share,
-                context="shared_both_match",
-                detail=f"dist={json.dumps(dist, sort_keys=True)}",
-            )
-            report.invariant(
-                "P2",
-                used >= 2,
-                context="shared_both_match",
-                detail=f"workers={used}",
-            )
-            report.invariant(
-                "P6",
-                union_share == 1.0,
-                context="holder_union",
-                detail=f"holder-union share={union_share:.2f} (e1+e2)",
-            )
         passed, detail, rep = report.finish(
             f"holders={{{e1}, {e2}}}, grades: {report.summary()}"
         )
@@ -975,7 +928,7 @@ def kv_g_partial_release_redirect(ctx: CaseContext):
     Scenario: family-0 shared between e1 and e2; /cache_evict releases
     it from e1 only (e1's own churn — the spec's small-A/big-A surface,
     expressed through the eviction endpoint because EnvSpec capacities
-    are uniform across engines).  Behaviour: partial release of a
+    are equal across engines). Behaviour: partial release of a
     shared block.  Expected (contract): after convergence e2 is the
     SOLE holder and the sole max-hit candidate — every subsequent
     same-prefix request redirects to e2 (P9 over 10 serial requests);
@@ -1042,21 +995,16 @@ def kv_g_partial_release_redirect(ctx: CaseContext):
     source="kv family: full release leaves no ghost entries (task #84)",
 )
 def kv_g_full_release_no_ghost(ctx: CaseContext):
-    """[global] Full release leaves no ghost entries.
+    """Release every holder and verify the next replay has no cached prefix.
 
-    Scenario: family-0 shared between e1 and e2; BOTH holders evict it;
-    the sync converges (>= 3.5s of cache_version quiet).  Behaviour:
-    full release of a shared block.  Expected (contract): the master's
-    index carries no residue — same-prefix requests behave zero-hit
-    (P1 spread over the fired batch, no engine pinned); a ghost entry
-    would keep the family stuck on one engine (max-share ~1.0).
-    Prediction: passes.
+    The key snapshots must be empty for this family, Master must report
+    zero candidate-match tokens, and Engine must record zero admission
+    hits. The cold replay must complete.
     """
     env = ctx.env_manager.ensure(_kv_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "kv")
     report = GradeReport(run_grade=ctx.grade)
-    fired, fired_handles = [], {}
     try:
         names = _prefill_names(ops)
         if len(names) < 2:
@@ -1077,59 +1025,16 @@ def kv_g_full_release_no_ghost(ctx: CaseContext):
             not (set(fam0) & _engine_cache_keys(ops, n)) for n in (e1, e2)
         )
 
-        # -- fired batch (two-phase, decisions inside one sync window):
-        #    zero-hit tie-window spread — no ghost stickiness.  Hedge
-        #    note (deliberate, not incidental): the 0.12s fire spacing
-        #    keeps every decision inside the live ~2s ledger window, so
-        #    later fires hedge away from earlier landings — the spread is
-        #    negatively correlated and the real false-fail rate sits BELOW
-        #    the independent-binomial nominal (P1_WAVE_N calibration);
-        #    widening the fire spacing silently removes this protection.
-        wave_names = []
-        for _ in range(P1_WAVE_N):
-            rid = ops.next_request_id(base)
-            name, err = _fire_request(
-                ops,
-                rid,
-                fired,
-                fired_handles,
-                input_len=PREFIX_INPUT_LEN,
-                output_len=2,
-                block_keys=fam0,
-            )
-            if err:
-                report.invariant("P6", False, detail=f"wave fire failed: {err}")
-                break
-            wave_names.append(name)
-            time.sleep(0.12)
-        _drain_fired(ops, fired, fired_handles)
-        fired, fired_handles = [], {}
-        if wave_names:
-            dist = {}
-            for n in wave_names:
-                dist[n] = dist.get(n, 0) + 1
-            max_share = max(dist.values()) / len(wave_names)
-            report.check(
-                "P1",
-                max_share,
-                context="full_release",
-                detail=(
-                    f"both_evicted={{{e1}, {e2}}}, "
-                    f"dist={json.dumps(dist, sort_keys=True)}"
-                ),
-            )
-            passed, detail, rep = report.finish(f"grades: {report.summary()}")
-            return (
-                passed and released_ok,
-                f"released_ok={released_ok}, {detail}",
-                rep,
-            )
-        passed, detail, rep = report.finish("wave never fired")
-        return False, detail, rep
+        rid = ops.next_request_id(base)
+        addr, err = _cache_checked_request(
+            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            expected_hit_blocks=0,
+        )
+        report.invariant("P6", released_ok and err is None,
+                         context="full_release", detail=f"released={released_ok}, replay={addr}, error={err}")
+        return report.finish(f"holders={{{e1}, {e2}}}, grades: {report.summary()}")
     except Exception as exc:
         return False, f"exception: {exc!r}"
-    finally:
-        _drain_fired(ops, fired, fired_handles)
 
 
 @case(
@@ -1137,26 +1042,16 @@ def kv_g_full_release_no_ghost(ctx: CaseContext):
     source="kv family: mixed admit/evict stream converges to snapshot truth (task #84)",
 )
 def kv_g_sync_convergence(ctx: CaseContext):
-    """[global] Mixed admit/evict sequences converge to snapshot truth.
+    """Interleaved admits and evictions converge to the Engine snapshots.
 
-    Scenario: an INTERLEAVED event stream — family-0 double-dispatched
-    (2 admits) then evicted from e1; family-1 admitted once (landing
-    spot s1 recorded); family-0 evicted from e2 too; family-2
-    double-dispatched then evicted from one side — then >= 3.5s of
-    silence.  Behaviour: incremental sync under a mixed event stream
-    (the out-of-order / dropped-update paths have never been
-    exercised).  Expected (contract): post-silence routing matches the
-    ENGINE snapshots — family-0 (no holder) spreads (P1 over the fired
-    batch), family-1 (sole holder s1) sticks (P9), family-2 (sole
-    holder d2) sticks (P9); a ghost or a lost update lands in the wrong
-    bucket.  Prediction: UNCERTAIN — the reorder/drop path is
-    untested; a failure here is a finding, not a flake to retry away.
+    After sync, family 0 has no holder and its first replay must have zero
+    Master/Engine hits. Families 1 and 2 retain their sole holders and
+    continuations must route to those holders.
     """
     env = ctx.env_manager.ensure(_kv_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "kv")
     report = GradeReport(run_grade=ctx.grade)
-    fired, fired_handles = [], {}
     try:
         names = _prefill_names(ops)
         if len(names) < 2:
@@ -1205,43 +1100,13 @@ def kv_g_sync_convergence(ctx: CaseContext):
         fam2_sole = sorted(n for n, ks in holder_keys.items() if set(fam2) <= ks)
         snapshot_ok = not fam0_ghost and fam1_sole == [s1] and fam2_sole == [d2]
 
-        # -- fam0 (no holder): fired batch spreads (no ghost stickiness).
-        #    Hedge note (deliberate, not incidental): the 0.12s fire
-        #    spacing keeps every decision inside the live ~2s ledger
-        #    window, so later fires hedge away from earlier landings —
-        #    the spread is negatively correlated and the real false-fail
-        #    rate sits BELOW the independent-binomial nominal (P1_WAVE_N
-        #    calibration); widening the fire spacing silently removes
-        #    this protection.
-        wave_names = []
-        for _ in range(P1_WAVE_N):
-            rid = ops.next_request_id(base)
-            name, err = _fire_request(
-                ops,
-                rid,
-                fired,
-                fired_handles,
-                input_len=PREFIX_INPUT_LEN,
-                output_len=2,
-                block_keys=fam0,
-            )
-            if err:
-                report.invariant("P6", False, detail=f"wave fire failed: {err}")
-                break
-            wave_names.append(name)
-            time.sleep(0.12)
-        _drain_fired(ops, fired, fired_handles)
-        fired, fired_handles = [], {}
-        if wave_names:
-            dist = {}
-            for n in wave_names:
-                dist[n] = dist.get(n, 0) + 1
-            report.check(
-                "P1",
-                max(dist.values()) / len(wave_names),
-                context="fam0_no_holder",
-                detail=f"dist={json.dumps(dist, sort_keys=True)}",
-            )
+        rid = ops.next_request_id(base)
+        addr, err = _cache_checked_request(
+            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            expected_hit_blocks=0,
+        )
+        report.invariant("P6", err is None, context="fam0_no_holder",
+                         detail=f"replay={addr}, error={err}")
 
         # -- fam1/fam2 (sole holders): continuations stick (P9 x2).
         for label, keys, holder in (
@@ -1283,8 +1148,6 @@ def kv_g_sync_convergence(ctx: CaseContext):
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
-    finally:
-        _drain_fired(ops, fired, fired_handles)
 
 
 @case(
@@ -1302,7 +1165,7 @@ def kv_g_engine_down_cleanup(ctx: CaseContext):
     post-removal same-prefix requests keep landing on h2 (P9 over 5
     requests) and the survivor's key set is untouched; a cleanup that
     drops the whole key entry would orphan h2's cache and scatter the
-    family uniformly across the remaining engines.  Prediction:
+    family onto a remaining non-holder. Prediction:
     UNCERTAIN — the removal -> index-cleanup wiring has never been
     verified; a failure is a finding (over-cleanup or leak).
     """
@@ -1809,38 +1672,12 @@ def kv_capacity_conflict_overflow(ctx: CaseContext):
     source="scheduling_smoke.py S2+S5 (merged, task #61; M1 generalized, task #62)",
 )
 def kv_prefix_stickiness(ctx: CaseContext):
-    """Prefix-reuse traffic sticks to the engine that holds the prefix cache —
-    multi-family + free-mixing generalization (M1).
+    """Keep prefix affinity while interleaving family and fresh-key requests.
 
-    Result properties (graded): P9 affinity fidelity (family-A followers
-    landing on the family-A seed engine), P2 free-flow multi-engine spread,
-    P6 completeness.
-
-    Construction:
-      1. seed A (keys 1001-1008, input_len=8192) fired while both prefills
-         are slowed to 2s — its ~231ms production-fit estimate keeps the
-         landing engine's ledger entry live (tie-window override is
-         impossible: the doubled ledger ~463ms vs ~231ms dwarfs the
-         ~23ms tie window);
-      2. seed B (keys 2001-2008, same shape) scheduled while A is still
-         in flight -> deterministically lands on the OTHER engine — the
-         family separation the design calls for (a plain serial seeding
-         would put both families on the same engine half the time);
-      3. after both seeds complete and the master cache syncs
-         (KV_CACHE_SYNC_WAIT_S), the main phase runs ~30 serial requests:
-         60% family-A continuations (same keys, deterministic stickiness —
-         the production-fit estimate prices the hit engine only ~6ms above
-         the all-miss engine, but the bounded cache-affinity gate
-         (maxExtraTtftMs=20) keeps the cache leader preferred; the legacy
-         1ms/token default instead relied on its 0.7*hitTokens discount
-         pushing the hit engine ~5s BELOW the tie window) interleaved
-         with 40% unique-key free requests (no cache lead on either
-         engine -> uniform tie-window spread).
-
-    The legacy S5 cache_keys>0 assertion stays demoted to an observational
-    log: mock-internal cache accounting is the mock's own unit-tested
-    behaviour, not an LB contract.  Hit-latency benefits are NOT asserted
-    (mock execution time is length/cache-blind — framework fact).
+    Two seeds land on separate workers using a live Prefill ledger.
+    Family-A continuations retain P9 affinity coverage. Each fresh-key
+    request must complete with zero Master/Engine cache hits; equal-cost
+    workers have no distribution requirement.
     """
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
@@ -1907,9 +1744,6 @@ def kv_prefix_stickiness(ctx: CaseContext):
         time.sleep(KV_CACHE_SYNC_WAIT_S)  # master cache sync
 
         if seed_a_name == seed_b_name:
-            # The ledger technique makes this practically impossible (the
-            # ~8s ledger gap dwarfs the tie window); keep the design's
-            # "report it" clause as a loud observation.
             report.invariant(
                 "P6",
                 False,
@@ -1941,12 +1775,9 @@ def kv_prefix_stickiness(ctx: CaseContext):
                     addrs_a.append(addr)
             else:
                 keys = [rid * 100 + j for j in range(8)]
-                addr, err = ops.run_one_request(
-                    rid,
-                    input_len=8192,
-                    output_len=2,
-                    block_keys=keys,
-                    stream_timeout_s=STREAM_TIMEOUT_S,
+                addr, err = _cache_checked_request(
+                    ops, rid, input_len=8192, block_keys=keys,
+                    expected_hit_blocks=0,
                 )
                 if err:
                     failures.append(f"free rid={rid}: {err}")
@@ -1976,12 +1807,6 @@ def kv_prefix_stickiness(ctx: CaseContext):
                 f"cache_keys={cache_keys_a} (observational)"
             ),
         )
-        report.invariant(
-            "P2",
-            free_engines >= 2,
-            context="free_flow",
-            detail=f"engines={free_engines}, free_n={len(addrs_free)}",
-        )
         return report.finish(
             f"seed_a={seed_a_name}, seed_b={seed_b_name}, "
             f"stick={hits}/{len(addrs_a)}, free_engines={free_engines}, "
@@ -2004,53 +1829,21 @@ def kv_prefix_stickiness(ctx: CaseContext):
             # stopped short of it and the residue poisoned later cases on
             # this shared env.  Still not asserted (this finally is
             # hygiene, the case's own contract lives in its verdict).
-            AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+            AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
         except Exception:
             pass
 
 
 @case(
     "kv_hot_prefix_tension",
-    source="hot-prefix tension M2 (task #62)",
+    source="hot-prefix affinity mixed with cold requests",
 )
 def kv_hot_prefix_tension(ctx: CaseContext):
-    """A 70%-traffic hot prefix family: stickiness holds AND the holder's
-    concentration stays capped.
+    """Preserve cache affinity under a 70% hot-prefix request mix.
 
-    Result properties (graded combination): P9 family stickiness (graded —
-    the design's tension axis 1), M2 holder total-share cap (graded upper
-    bound — tension axis 2, first calibrated measurement of the M2 band),
-    P2 free-flow no-starvation (the other engine still takes free traffic),
-    P6 completeness.
-
-    Construction: family F shares a 16-block long prefix (keys 3001-3016,
-    input_len=16384).  One seed request lands on engine X (uniform initial
-    pick); after the master cache sync the main phase runs 40 serial
-    requests in a fixed 7:3 interleave — 28 family continuations (every one
-    carries the ~10.7s estimate discount on X: est = 16384 - 0.7*15360 =
-    5619 vs 16384 elsewhere, a gap ~20x the tie window -> deterministic
-    stickiness) and 12 unique-key free requests (no affinity on either
-    engine -> uniform tie-window spread).
-
-    On X's accumulating state: each completed family request re-admits the
-    same 16 blocks (LRU-refreshed, idempotent) and adds its inputLen to the
-    mock's KV accounting — the holder's cache/KV footprint keeps growing
-    across the phase (observational), while the routing ledger itself
-    resets between serial requests (each completes before the next fires),
-    which is what keeps P9 deterministic and pins the M2 model to the free
-    flow's binomial spread.
-
-    M2 caliber: family and free requests share input_len=16384, so token
-    share and request share coincide; the holder's TOTAL share counts seed,
-    family continuations AND the free requests that tie-window scatter onto
-    it: (29 + k)/41 with k ~ B(12, 0.5) over the free flow (29 = seed + 28
-    continuations deterministically on X when stickiness is perfect), i.e.
-    ~0.854 ± 0.042 (1σ) — see the M2 calibration note in grade.GRADE_BANDS
-    for the false-fail derivation of the band values.
-
-    Free-flow starvation (P2): if all 12 free requests were swallowed by
-    X the other engine would idle — that is the starvation this property
-    forbids (probability 0.5**12 under correct uniform spread).
+    Family continuations retain P9 affinity coverage. Fresh requests must
+    have zero Master/Engine cache hits and every request must complete.
+    BEST_ONLY sets no holder traffic-share cap.
     """
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
@@ -2058,7 +1851,7 @@ def kv_hot_prefix_tension(ctx: CaseContext):
     family_keys = list(range(3001, 3017))
     input_len = 16384
     try:
-        # -- seed: family F prefix lands on X (uniform initial pick).
+        # -- seed: record the holder of family F.
         rid_seed = ops.next_request_id(base)
         seed_addr, seed_err = ops.run_one_request(
             rid_seed,
@@ -2094,12 +1887,9 @@ def kv_hot_prefix_tension(ctx: CaseContext):
                     cont_addrs.append(addr)
             else:
                 keys = [rid * 100 + j for j in range(16)]
-                addr, err = ops.run_one_request(
-                    rid,
-                    input_len=input_len,
-                    output_len=2,
-                    block_keys=keys,
-                    stream_timeout_s=STREAM_TIMEOUT_S,
+                addr, err = _cache_checked_request(
+                    ops, rid, input_len=input_len, block_keys=keys,
+                    expected_hit_blocks=0,
                 )
                 if err:
                     failures.append(f"free rid={rid}: {err}")
@@ -2109,17 +1899,6 @@ def kv_hot_prefix_tension(ctx: CaseContext):
         holder_hits = sum(1 for a in cont_addrs if addr_map.get(a, a) == holder)
         stick_share = holder_hits / len(cont_addrs) if cont_addrs else 0.0
         free_on_other = sum(1 for a in free_addrs if addr_map.get(a, a) != holder)
-        # M2 caliber: the holder's TOTAL share — seed + family continuations
-        # + free requests scattered onto it by the tie window (token share ==
-        # request share by uniform input_len).
-        free_on_holder = len(free_addrs) - free_on_other
-        holder_total = holder_hits + 1 + free_on_holder  # + seed
-        total = 1 + len(cont_addrs) + len(free_addrs)
-        holder_share = holder_total / total if total else 1.0
-        holder_token_share = (
-            holder_total * input_len / (total * input_len) if total else 1.0
-        )
-
         report.invariant(
             "P6",
             not failures and len(cont_addrs) == cont_n and len(free_addrs) == free_n,
@@ -2134,28 +1913,8 @@ def kv_hot_prefix_tension(ctx: CaseContext):
                 f"other={other_names}"
             ),
         )
-        report.check(
-            "M2",
-            holder_share,
-            context="holder_total_share",
-            detail=(
-                f"holder={holder}: {holder_total}/{total} requests "
-                f"(token share {holder_token_share:.3f} — equal by uniform "
-                f"input_len), free_on_other={free_on_other}/{len(free_addrs)}"
-            ),
-        )
-        report.invariant(
-            "P2",
-            free_on_other >= 1,
-            context="free_flow",
-            detail=(
-                f"free requests landing off-holder={free_on_other}/"
-                f"{len(free_addrs)} (other engine must not be starved)"
-            ),
-        )
         return report.finish(
             f"holder={holder}, stick={holder_hits}/{len(cont_addrs)}, "
-            f"holder_share={holder_share:.3f}, "
             f"free_off_holder={free_on_other}/{len(free_addrs)}, "
             f"grades: {report.summary()}"
         )
@@ -2168,36 +1927,12 @@ def kv_hot_prefix_tension(ctx: CaseContext):
     source="hit-rate tier contrast M3 (task #62)",
 )
 def kv_match_mixed(ctx: CaseContext):
-    """Prefix hit-rate tiers: full-hit and half-hit traffic concentrate on
-    the holder while zero-hit traffic spreads — a graded contrast.
+    """Verify full-prefix, partial-prefix and cold-cache routing separately.
 
-    Result properties: M3 soft contrast bound (graded lower band on the
-    same-engine concentration of the full-hit and half-hit tiers), P2
-    zero-hit multi-engine spread, P6 completeness.  Hit-latency benefits
-    are NOT asserted (mock execution time is length/cache-blind).
-
-    Construction (fixed input_len=8192, three tiers, all serial):
-      * full-hit tier — seed family keys 4001-4008 on engine X1, then 10
-        continuations reusing the SAME 8 blocks: hitTokens = 7168 (the last
-        partial block is excluded: rawHit >= seqLen -> seqLen - blockSize),
-        estimate discount ~5.0s vs tie window ~0.3s -> deterministic
-        concentration on X1;
-      * half-hit tier — seed keys 5001-5004 (input_len=4096, 4 blocks) on
-        X2, then 10 requests carrying [5001-5004 + 4 fresh keys]: the
-        continuous prefix match stops at 4 blocks -> hitTokens = 4096,
-        discount ~2.9s vs tie window ~0.5s -> deterministic concentration
-        on X2 (a 50% hit rate still clears the affinity threshold — the
-        contrast with the zero-hit tier is the point, not a partial
-        stickiness);
-      * zero-hit tier — 10 requests with fresh unique keys on both
-        engines: no discount anywhere -> uniform tie-window spread.
-
-    Why P2 covers only the zero-hit tier: P2 forbids starving an engine
-    with INDISTINGUISHABLE traffic; full/half-hit requests landing on
-    their holder is correct affinity routing, not starvation.  The
-    zero-hit tier is exactly the indistinguishable population, so its
-    spread carries the P2 contract (probability of a single-engine
-    collapse under correct spread: 2 * 0.5**10 ~= 0.2%).
+    Full and half-hit requests retain M3 holder-affinity coverage and
+    must observe their expected Master/Engine cache hits. Fresh requests
+    must observe zero hits. Every tier must complete; cold requests have
+    no traffic-share requirement.
     """
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
@@ -2211,12 +1946,9 @@ def kv_match_mixed(ctx: CaseContext):
             addrs, failures = [], []
             for i in range(n):
                 rid = ops.next_request_id(base)
-                addr, err = ops.run_one_request(
-                    rid,
-                    input_len=8192,
-                    output_len=2,
-                    block_keys=keys_fn(rid, i),
-                    stream_timeout_s=STREAM_TIMEOUT_S,
+                addr, err = _cache_checked_request(
+                    ops, rid, input_len=8192, block_keys=keys_fn(rid, i),
+                    expected_hit_blocks={"full": 8, "half": 4, "zero": 0}[label],
                 )
                 if err:
                     failures.append(f"{label} rid={rid}: {err}")
@@ -2275,8 +2007,6 @@ def kv_match_mixed(ctx: CaseContext):
         full_conc = concentration(full_addrs, seed1_addr)
         half_conc = concentration(half_addrs, seed2_addr)
         zero_dist = Counter(addr_map.get(a, a) for a in zero_addrs)
-        zero_engines = len(zero_dist)
-        zero_max = max(zero_dist.values()) / len(zero_addrs) if zero_addrs else 1.0
 
         report.invariant(
             "P6",
@@ -2291,8 +2021,7 @@ def kv_match_mixed(ctx: CaseContext):
             full_conc,
             context="full_hit",
             detail=(
-                f"concentration on full-hit seed engine={full_conc:.2f} "
-                f"(vs zero-hit baseline ~0.5)"
+                f"concentration on full-hit seed engine={full_conc:.2f}"
             ),
         )
         report.check(
@@ -2302,15 +2031,6 @@ def kv_match_mixed(ctx: CaseContext):
             detail=(
                 f"concentration on half-hit seed engine={half_conc:.2f} "
                 f"(50% hit still clears the affinity threshold)"
-            ),
-        )
-        report.invariant(
-            "P2",
-            zero_engines >= 2,
-            context="zero_hit",
-            detail=(
-                f"zero-hit spread: engines={zero_engines}, "
-                f"max_share={zero_max:.2f} (observational, expected ~0.5-0.7)"
             ),
         )
         return report.finish(
@@ -2425,65 +2145,11 @@ def kv_lru(ctx: CaseContext):
     source="decode-side anomaly gap (G1) — new (anomaly E4 until task #85)",
 )
 def kv_decode_capacity_park(ctx: CaseContext):
-    """Decode-side anomaly: every decode engine KV-exhausted -> the request
-    is parked undelivered, a master Cancel releases it without residue, and
-    clearing the pressure recovers routing.
+    """Exhaust every Decode KV budget and submit a queued request.
 
-    Why KV pressure and not the E-series ops.inject faults: a decode engine
-    in the Java mock never receives traffic through any gRPC entry point.
-    After prefill completes, the request is handed off IN-PROCESS
-    (JavaMockEngineCluster.FastRpcService.startDecode ->
-    scheduleDecodeCompletion), so enqueue_error / generate_error /
-    fetch_error — all checked at the enqueueBatch / generateStreamCall /
-    fetchResponse RPC entries — never fire for a decode engine, and
-    no_respond on decode only suppresses the "intermediate first-step
-    output" which the mock never produces (each request yields exactly one
-    finished message).  The one decode-side anomaly observable end-to-end
-    is KV capacity: the delivery-capacity admission hard-filters every
-    decode endpoint whose available_kv_tokens < seq_len, so exhausting
-    every decode engine's KV must block delivery.
-
-    v2 contract (task #55, source-verified — supersedes the v1 fail-fast
-    assertion): the QUEUE scheduler treats decode KV exhaustion as a WAIT
-    condition, not a fail-fast rejection:
-      * FixedWindowBatcherAlgorithm parks the head when delivery capacity
-        cannot be reserved ("Dynamic KV pressure is a wait condition, not a
-        rejection"; BatcherContext.admitAndDeliverCapacityFeasiblePrefix
-        returns CapacityBlocked and the worker loop waits for the exact
-        resource-change event).
-      * The scheduling deadline is owned by the queue config
-        (QueueSchedulerConfig.queueTimeoutMs, default 1h), not the caller,
-        so the Schedule RPC stays pending while parked — the client
-        observes its own gRPC DEADLINE_EXCEEDED instead of a rejection
-        response.  The pre-v2 fail-fast NO_AVAILABLE_WORKER contract
-        belonged to the v1 non-QUEUE flow and does not exist in v2.
-      * A client-side RPC deadline/cancellation does NOT release the
-        parked entry (it lingered until the stale-inflight TTL eviction in
-        the repro); an explicit master Cancel does
-        (PriorityScheduler.cancelRequest -> isLocallyReversible -> local
-        cleanup).
-
-    Scenario:
-      1. set active_kv_tokens = total on every decode engine
-      2. probe Schedule with a short client-side deadline: it must stay
-         pending (client DEADLINE_EXCEEDED, no rejection response) and the
-         parked rid must NOT be delivered to any engine
-      3. master Cancel must release the parked request and leave no
-         inflight residue
-      4. clear the pressure -> a fresh request must complete again
-
-    Profile semantics (v2): the decision and dispatcher axes are invisible
-    to the decode-side delivery capacity gate — both delivery modes share
-    the per-worker batcher and the same capacity admission — so the case
-    runs under all profiles.  The no-residue assertion is a pre-probe
-    WATERMARK comparison rather than a global zero check: under NON_BATCH
-    dispatch a client-side Cancel cannot safely release a delivered
-    request's master ledger entry (the fence probe's NOT_FOUND ack is not
-    a safe-release fact — the client connects to the engine
-    asynchronously after RouteDecision), so earlier requests on the
-    shared env may leave contract-parked entries; this case only owns
-    the residue of ITS OWN parked probe.
-    """
+    Require waiting without Engine delivery, explicit cancellation with no
+    reservation residue, and successful routing after restoring capacity. Queue
+    and complete-request deadlines remain active while waiting."""
     ops = ctx.ops()
     base = rid_base(ctx, "kv")
     injected: list[str] = []

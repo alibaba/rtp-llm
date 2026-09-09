@@ -28,8 +28,8 @@ import java.util.Objects;
  * owners prevents routing from retaining a worker which service discovery no
  * longer observes.
  *
- * <p>Runs every {@code WORKER_CLEAN_INTERVAL_MS} (default 3 s) via Spring
- * {@link Scheduled}. The configured stale timeout is deliberately longer than
+ * <p>Runs at {@code workerRegistry.health.cleanupIntervalMs} (default 3 seconds)
+ * via Spring {@link Scheduled}. The configured stale timeout is deliberately longer than
  * one status RPC timeout so a single delayed poll does not evict a live worker.
  */
 @Component
@@ -67,7 +67,7 @@ public class ExpirationCleaner {
         return configMs * 1000L;
     }
 
-    @Scheduled(fixedRateString = "${WORKER_CLEAN_INTERVAL_MS:3000}")
+    @Scheduled(fixedRateString = "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
     public void cleanExpiredWorkers() {
         List<PendingRetirement> retirements = new ArrayList<>();
         for (RoleType role : RoleType.values()) {

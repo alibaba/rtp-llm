@@ -28,9 +28,9 @@ class RequestAdmissionExpirationRaceTest {
     @ValueSource(booleans = {false, true})
     void pendingFailureAndLateDecodeStatusCannotStrandAnExpiredAdmission(boolean clientCancellation) throws Exception {
         long requestId = 301L;
-        var config = new org.flexlb.config.FlexlbConfig();
+        var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useNonBatchDispatcher(config);
-        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(300L);
+        config.getRequestLifecycle().getRequest().setTimeoutMs(300L);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
@@ -44,7 +44,7 @@ class RequestAdmissionExpirationRaceTest {
             prefillStatus.setRole(RoleType.PREFILL);
             prefillStatus.setServerIp("127.0.0.1");
             prefillStatus.setGrpcPort(8081);
-            var future = registry.register(context, 0);
+            var future = registry.register(context);
             RequestSlot slot = registry.requestSlot(requestId);
             var item = new ScheduledRequest(context, future, new Response(), prefillStatus, null,
                     prefill, decode, reservation, slot.createdAtMs());
@@ -61,7 +61,7 @@ class RequestAdmissionExpirationRaceTest {
                 // The automatic timer covers a new timeout; the explicit clock
                 // also covers expiry after a previously recorded client cancellation.
                 if (clientCancellation) {
-                    registry.cancelForRequestInactivity(slot, slot.createdAtMs() + 300L);
+                    registry.expireInactiveRequest(slot, slot.createdAtMs() + 300L);
                 } else {
                     RequestLifecycleTestSupport.awaitCondition(() -> registry.getRequestState(requestId, 0L)
                             .state() == RequestState.Phase.CANCEL_REQUESTED);
@@ -71,10 +71,10 @@ class RequestAdmissionExpirationRaceTest {
                             "the fired deadline stays disarmed until the admission is completed");
                 }
                 assertFalse(future.isDone());
-                new EndpointEventProjector(registry).onDecodeStatus(decode,
-                        java.util.List.of(DecodeEndpoint.WorkerStatusFact.accepted(reservation)));
+                registry.onDecodeFact(decode,
+                        DecodeEndpoint.WorkerStatusFact.accepted(reservation));
                 synchronized (slot) {
-                    slot.observeWorkerStatus(System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
+                    slot.observeDecodeFact(decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
                 }
             }
 

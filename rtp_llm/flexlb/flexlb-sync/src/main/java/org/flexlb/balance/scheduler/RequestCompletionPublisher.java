@@ -50,11 +50,9 @@ final class RequestCompletionPublisher implements AutoCloseable {
                 workers,
                 0L,
                 TimeUnit.MILLISECONDS,
-                // Accepted requests are already bounded by RequestRegistry's
-                // outstanding-admission permit. An unbounded handoff queue
-                // therefore cannot grow independently of admitted work, and
-                // guarantees that a decision thread never runs a completion
-                // inline merely because the publisher is busy.
+                // Queue completions so a busy publisher never runs client callbacks
+                // inline on a decision thread. Request lifetime remains owned
+                // by RequestRegistry until terminal publication completes.
                 new LinkedBlockingQueue<>(),
                 runnable -> {
                     Thread thread = new Thread(

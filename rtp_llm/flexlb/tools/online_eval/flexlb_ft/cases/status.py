@@ -1,111 +1,14 @@
-"""Status-category cases: the engine→master status-report contract.
+"""Engine status, dispatch uncertainty and exact-generation settlement tests.
 
-The engine→master status channel is the authoritative terminal source for
-the master's inflight ledgers: WorkerStatus facts (ACTIVE / TERMINAL) both
-settle request slots and refresh their stale-inflight activity clock
-(RequestSlot.observeWorkerStatus → reduceStaleSlot expires a slot only when
-now - lastWorkerStatusAtMs > staleInflightTimeoutMs).  This category
-injects faults into exactly that channel (mock /inject "status_*" /
-"enqueue_ack_*" types) and pins the CORRECT master contract, NOT the
-current behaviour: assertions state what a correct master MUST do, and
-cases the current implementation cannot satisfy are expected to FAIL —
-that failure is the finding (status_zombie_fake_running is the declared
-P2 probe; the fence-TTL drain of status_ack_empty_no_crash is a second
-structural candidate per the verified quarantine semantics).
-
-Injection interface (mock side, parallel implementation; field names per
-the agreed spec — do not invent alternatives):
-
-    status_suppress_finished(bool) / status_suppress_running(bool)
-    status_suppress_rids([rid...]) / status_no_respond(bool)
-    status_fake_task({rid required, batchId, phase: RUNNING | KV_ALLOCATED
-                      | RECEIVED | finished(+errorCode)})
-    status_duplicate_finished(bool) / status_cursor_regress(int n)
-    status_version_regress(bool) / status_zombie_running(bool)
-    enqueue_ack_partial_fail(int k) / enqueue_ack_error_code(int code)
-    enqueue_ack_drop(bool)
-
-Shared environment (_status_spec): 2P+2D, legacy fault axes pinned via
-FLEXLB_CONFIG (PRIORITY + FIXED_WINDOW + BATCH), staleInflightTimeoutMs=30s
-(TTL observations cap at TTL+margin) and scheduler.queueTimeoutMs=10s —
-zombie keep-alive scenarios (a suppressed-finished request keeps appearing
-RUNNING, which refreshes lastWorkerStatusAtMs and disarms the stale TTL)
-need a short deadline bottom line.
-
-Master-side cleanup observability — two channels (task #103 step 2):
-  * Counter channel: the master prometheus counters behind
-    app.flexlb.inflight.ttl.expired.qps (role=SCHEDULER per-request slot
-    sweep / role=PREFILL|DECODE per-endpoint orphan sweep), read via
-    ops.master_ttl_eviction_counts() with a before/after DELTA (>= bound,
-    never equality — process-cumulative counters, uncontrolled merges).
-    The counter only advances on the PASSIVE stale-inflight sweep, so a
-    >= bound is assertable ONLY in a case that deliberately constructs
-    a stale inflight with no other exit — status_inflight_ttl_cleanup
-    (scheduler role).  Cases whose ledgers drain through retire/settle
-    completion paths assert ledger zero + their behaviour contract and
-    only require the channel to stay REACHABLE (UNREACHABLE =
-    environment failure), reporting the counter delta as observation:
-    status_prefill_suppress_all, status_status_no_respond,
-    status_version_regress (a retired engine's endpoint row disappears
-    from the inflight view, so its ledger cleanup does not ride the TTL
-    counter channel).
-  * Log-anchor channel (informational only): the drained ledgers are the
-    hard assertions for every other case.  Both anchors are logged via
-    org.flexlb.util.Logger → logback "flexlbLogger" → the FLEXLB file
-    appender (additivity=false), i.e. ~/ai-whale/logs/flexlb.log — NOT
-    the JVM stdout redirect (a structural 0 there):
-    event=scheduler_inflight_ttl_eviction   (ExpirationTimer.maintain)
-    event=endpoint_inflight_ttl_eviction    (EndpointRegistry)
-
-CAVEAT (event channel): the TTL maintenance sweep runs at a 60s cadence
-(SchedulerRuntime.maintainExpiration, fixedRate=60s), so eviction COUNTERS
-lag the eviction event — after-side reads must poll (wait_for) inside
-TTL_EVENT_WINDOW_S, never sample once.  An unreachable prometheus endpoint
-(ops.master_ttl_eviction_counts() is None) is an environment failure the
-cases fail on, never a pass reason.
-
-Case index (P0 = release-blocking contract, P1 = robustness, P2 = declared
-contract-level finding probe):
-
-    P0 status_ack_partial_fail          k-of-batch ack failure isolates
-                                       + ledger release + retry matrix
-    P0 status_batch_async_partial_fail  in-batch execution-phase partial
-                                       failure: typed terminal + mixed-batch
-                                       lease closure
-    P0 status_ack_multi_error           per-request error-code passthrough
-    P0 status_ack_empty_no_crash        empty ack → uncertain fence, bounded + clearable
-    P0 status_prefill_suppress_all      full status silence → TTL eviction
-    P0 status_prefill_suppress_finished running keep-alive → queueTimeout is the only exit
-    P0 status_status_no_respond         status RPC silence → generation retirement
-    P0 status_unknown_rid_finished      unknown-rid terminal ignored
-    P0 status_version_regress           stale version → generation retirement
-    P1 status_decode_suppress_finished       decode-side terminal suppression
-    P1 status_decode_before_prefill          D terminal settles + event-driven P cleanup
-    P1 status_decode_running_before_prefill  D ACTIVE-only: no premature P cleanup
-    P1 status_decode_waiting_before_prefill  D RECEIVED-only: no premature P cleanup
-    P1 status_unknown_rid_running       one-shot ghost running entry
-    P1 status_unknown_batchid           mismatched batchId must not settle a real rid
-    P1 status_special_ids               sentinel/boundary ids: rid -1/0, batch 0/-1
-    P1 status_unbatched_single_request  batch-less facts, omitted/0 × RUNNING/finished
-    P1 status_foreign_batchid           out-of-range batchId, real traffic unaffected
-    P1 status_duplicate_finished        duplicate terminal replay idempotent
-    P1 status_cursor_regress            completion cursor rewind idempotent
-    P1 status_finished_then_running     terminal must not be resurrected
-    P1 status_zombie_completed_running  zombie running vs tombstone
-    P2 status_zombie_fake_running       permanent-resident inflight probe (expected finding)
-
-Migrated in from the legacy fault families (task #85 category reorg):
-
-    status_inflight_ttl_cleanup         stuck inflight → TTL cleanup (S1 port)
-    status_fetch_error                  batch FetchResponse fault surfacing
-"""
+The fixture uses a 30-second complete request lifetime and a 10-second
+queue timeout. Engine heartbeats never extend complete request lifetime.
+A missing status fact can trigger suspected-loss reconciliation; it does
+not prove that Engine work has stopped or permit unsafe capacity reuse."""
 
 from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import Optional
 
 from ..context import CaseContext, CaseDef, rid_base
 from ..engine_ops import (
@@ -116,7 +19,7 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
-    TTL_DRAIN_TIMEOUT_S,
+    REQUEST_CLEANUP_TIMEOUT_S,
     AssertUtils,
     EnvSpec,
     _accepted,
@@ -128,38 +31,18 @@ from ..harness import (
 from ..harness import master_decode_requests_sum as _harness_decode_requests_sum
 from ..harness import master_prefill_batches_sum as _harness_prefill_batches_sum
 from ..harness import master_prefill_requests_sum as _harness_prefill_requests_sum
-from ..harness import ttl_spec, wait_for
+from ..harness import wait_for
 
 STATUS_CASES: list[CaseDef] = []
 
 STREAM_TIMEOUT_S = 15.0
-# > staleInflightTimeoutMs (30s): lets a TTL-eviction terminal reach the
-# client stream instead of the client's own stream deadline firing first.
 LONG_STREAM_TIMEOUT_S = 45.0
-STALE_INFLIGHT_TTL_S = 30.0
-TTL_MARGIN_S = 30.0
+REQUEST_LIFETIME_S = 30.0
 QUEUE_TIMEOUT_S = 10.0
-# Event-driven prefill-cleanup window (decode-before-prefill contract):
-# once the decode terminal has settled the request, the prefill ledger
-# entry for the same member must be released by the settle path itself,
-# not parked until the 30s stale TTL + 60s sweep — 10s covers several
-# status-poll rounds (statusRpcMs=1s) with margin.
 EVENT_DRIVEN_CLEANUP_S = 10.0
 # 3-strike health demotion + eviction window (fault-family MASTER_EVICT_S
 # precedent).
 MASTER_EVICT_S = 30.0
-# TTL-eviction EVENT window (task #103 step 2): the drain window
-# (TTL_DRAIN_TIMEOUT_S = 95s, ledger-side) plus event margin — the eviction
-# counters are reported by the 60s maintenance sweep
-# (SchedulerRuntime.maintainExpiration) and only then become visible in the
-# prometheus exposition, so the after-side read must poll for up to this
-# long SEPARATELY from the drain wait.  Dov's ruling: the observation
-# window must stay >= 100s (worst-phase eviction lands at TTL + a full
-# sweep).
-TTL_EVENT_WINDOW_S = 105.0
-# Fake/ghost rid offset: far above every rid this process will hand out
-# (next_request_ids stay within base + small offsets) so the master has
-# never seen these ids.
 GHOST_RID_OFFSET = 900_000
 
 
@@ -199,14 +82,7 @@ def case(
 
 
 def _status_spec(ctx: CaseContext) -> EnvSpec:
-    """Family env: 2P+2D, legacy fault axes, TTL=30s, queueTimeout=10s.
-
-    queueTimeoutMs=10s is the zombie keep-alive bottom line: a request
-    whose terminal is suppressed but which keeps appearing RUNNING on the
-    status channel refreshes lastWorkerStatusAtMs forever, disarming the
-    stale-inflight TTL — the queue/deadline path is then the ONLY legal
-    exit, and it must fire quickly.
-    """
+    """2P+2D, PRIORITY/FIXED_WINDOW/BATCH; request lifetime 30s, queue timeout 10s."""
     return EnvSpec(
         label=f"status_fault_{ctx.profile}",
         n_prefill=2,
@@ -219,7 +95,7 @@ def _status_spec(ctx: CaseContext) -> EnvSpec:
                 decision="fixed_window",
                 dispatcher="batch",
                 queue_timeout_ms=int(QUEUE_TIMEOUT_S * 1000),
-                stale_inflight_ms=int(STALE_INFLIGHT_TTL_S * 1000),
+                request_timeout_ms=int(REQUEST_LIFETIME_S * 1000),
             )
         },
     )
@@ -381,118 +257,8 @@ def _inflight_fingerprint(ops):
     )
 
 
-def _log_count(env, anchor: str) -> int:
-    """Occurrences of *anchor* in the master's flexlbLogger file appender
-    (~/ai-whale/logs/flexlb.log, shared across every master in the
-    container) since OUR master started — env.flexlb_log_offset is
-    recorded by harness.start_master.  The TTL-eviction anchors are
-    logged via org.flexlb.util.Logger → logback "flexlbLogger" → the
-    FLEXLB appender with additivity=false, so they NEVER reach the JVM
-    stdout redirect (mp.log_file) the old reader watched — a structural
-    0 there.  Cases take a before/after delta because the shared env
-    keeps one master log across cases."""
-    flexlb_log = Path.home() / "ai-whale" / "logs" / "flexlb.log"
-    offset = getattr(env, "flexlb_log_offset", 0)
-    try:
-        with open(flexlb_log, "rb") as fh:
-            if offset > 0:
-                fh.seek(offset)
-            return fh.read().decode("utf-8", errors="replace").count(anchor)
-    except Exception:
-        return 0
-
-
-def _ttl_anchor_deltas(env, before: tuple) -> tuple:
-    """(scheduler_evictions, endpoint_evictions) delta since *before*."""
-    return (
-        _log_count(env, "event=scheduler_inflight_ttl_eviction") - before[0],
-        _log_count(env, "event=endpoint_inflight_ttl_eviction") - before[1],
-    )
-
-
-def _ttl_eviction_delta(ops, before: dict, role: str) -> Optional[int]:
-    """Prometheus TTL-eviction counter delta for *role* since *before*.
-
-    Role keys: "scheduler" (per-request slot sweep), "prefill" / "decode"
-    (per-endpoint orphan sweeps).  None means the master prometheus
-    endpoint is unreachable — NOT zero evictions; the sparse-counter
-    "never happened" state is a role-level None that reads as a 0 baseline
-    (see engine_ops.master_ttl_eviction_counts).
-    """
-    after = ops.master_ttl_eviction_counts()
-    if after is None:
-        return None
-    return int((after.get(role) or 0) - (before.get(role) or 0))
-
-
-def _ttl_eviction_events(
-    ops,
-    before: dict,
-    role: str,
-    min_delta: int,
-    window_s: float = TTL_EVENT_WINDOW_S,
-) -> tuple:
-    """wait_for the *role* TTL-eviction counter to advance by >= min_delta.
-
-    Event channel (task #103 step 2): the master reports evictions via
-    app.flexlb.inflight.ttl.expired.qps (prometheus
-    flexlb_app_flexlb_inflight_ttl_expired_qps_total) at the 60s
-    maintenance-sweep granularity, so the after side POLLS instead of
-    sampling once.  Deliberately a >= bound, never equality: the counter
-    is process-cumulative on a shared env and its merges are
-    uncontrolled (residue from earlier cases can land inside this
-    window), so only the lower bound carries assertion semantics.
-
-    A persistently unreachable endpoint FAILS: a missing observability
-    channel is an environment problem, not a pass reason.  A transient
-    miss just keeps polling inside the window.
-    """
-    final_delta: Optional[int] = None
-
-    def _delta_reached() -> bool:
-        nonlocal final_delta
-        delta = _ttl_eviction_delta(ops, before, role)
-        if delta is None:
-            return False  # transiently unreachable: keep polling
-        final_delta = delta
-        return delta >= min_delta
-
-    reached = wait_for(_delta_reached, window_s, 2.0)
-    if final_delta is None:
-        return False, (
-            f"{role}_ttl_eviction=UNREACHABLE — master prometheus endpoint "
-            f"never answered within {window_s:.0f}s (observability channel "
-            f"missing: environment failure, not a pass)"
-        )
-    return reached, f"{role}_ttl_eviction_delta={final_delta} (need>={min_delta})"
-
-
-def _ttl_counter_observe(ops, before: dict, role: str) -> tuple:
-    """Observational TTL-eviction counter delta for *role* — NO >= bound.
-
-    The counter channel only advances on the PASSIVE stale-inflight sweep
-    (ExpirationTimer / EndpointRegistry orphan expiry); a ledger drained
-    through retire or settle completion paths clears cleanly WITHOUT
-    touching it — correct semantics, not a lost eviction.  So a case that
-    does not deliberately construct a stale inflight (that is
-    status_inflight_ttl_cleanup's job) asserts only channel REACHABILITY
-    here: a master whose prometheus endpoint never answers is an
-    environment failure.  Returns (channel_ok, detail)."""
-    after = ops.master_ttl_eviction_counts()
-    if after is None:
-        return False, (
-            f"{role}_ttl_eviction=UNREACHABLE — master prometheus endpoint "
-            f"never answered (observability channel missing: environment "
-            f"failure, not a pass)"
-        )
-    delta = int((after.get(role) or 0) - (before.get(role) or 0))
-    return True, f"{role}_ttl_eviction_delta={delta} (observational)"
-
-
 def _fire_and_forget(ops, base: int, n: int, output_len: int = 10) -> tuple:
-    """Schedule *n* requests WITHOUT consuming their streams — the master
-    has enqueued the batches and the ledgers hold live entries (the
-    status_inflight_ttl_cleanup precedent).  Returns (rids, error)."""
+    """Schedule requests without consuming streams; return (rids, error)."""
     rids: list[int] = []
     for _ in range(n):
         rid = ops.next_request_id(base)
@@ -506,185 +272,13 @@ def _fire_and_forget(ops, base: int, n: int, output_len: int = 10) -> tuple:
     return rids, None
 
 
-def _wait_scheduler_zero(ops, timeout_s: float = TTL_DRAIN_TIMEOUT_S):
-    # TTL-aware default: the settle rides the 30s stale TTL PLUS the
-    # ExpirationTimer's 60s sweep period (worst-phase ~90s).  The legacy
-    # TTL+margin=60s default lost that race whenever the TTL expiry landed
-    # in the sweeper's second half: the case itself false-FAILed on the
-    # drain and the surviving residue poisoned the next case on this
-    # shared env (integration-round cascade, task #87).
+def _wait_scheduler_zero(ops, timeout_s: float = REQUEST_CLEANUP_TIMEOUT_S):
     return wait_for(lambda: ops.master_scheduler_inflight() == 0, timeout_s, 2.0)
 
 
-def _stale_inflight_clean(ops, timeout_s: float = TTL_DRAIN_TIMEOUT_S) -> tuple:
-    """Master inflight drain with the TTL-aware window (30s TTL + 60s
-    ExpirationTimer sweep + margin — the worst-case settle path)."""
+def _request_cleanup(ops, timeout_s: float = REQUEST_CLEANUP_TIMEOUT_S) -> tuple:
+    """Wait for request and endpoint ledgers after authoritative settlement or retirement."""
     return AssertUtils.inflight_clean(_master_http(ops), timeout_s)
-
-
-# ===========================================================================
-# Migrated from the legacy fault families: stuck-inflight TTL cleanup (S1)
-# ===========================================================================
-
-
-@case(
-    "status_inflight_ttl_cleanup",
-    profiles=["batch-window"],
-    source="flexlb_behavior_test.sh S1 (stuck inflight TTL cleanup)",
-)
-def inflight_ttl_cleanup(ctx: CaseContext):
-    """S1 port, suppressed-alive form: the TTL sweep is the ONLY exit.
-
-    Construction (task #107 fix): the legacy kill-engine form never
-    reached the TTL sweep — the 3-strike engine-death verdict fires the
-    fence / failure-terminal cleanup path first (Tara's forensics:
-    ttl_eviction_delta=0, zero log anchors), so the
-    staleInflightTimeoutMs machinery itself went untested.  The engines
-    now stay ALIVE (no stop, no fence, no death verdict): the batch's
-    rids are pre-generated and the suppression is armed BEFORE the
-    requests are sent, on EVERY engine of BOTH roles (prefills AND
-    decodes suppress all facts for those rids via status_suppress_rids
-    — no RUNNING, no finished; without the D-side arm a decode
-    finished fact would settle the slots and bypass the TTL exit
-    again).  The requests really reach the engines (fire-and-forget
-    Schedule + the prefills' accepted counters asserted >= the wave
-    size up front — fail loudly otherwise) and the slow prefills (10s)
-    stretch the in-flight window, but the ledger never sees ANY worker
-    fact for them: no terminal, no engine-down signal — the only exit
-    left is the scheduler slot's staleInflightTimeoutMs (30s) sweep,
-    reported by the 60s maintainExpiration cycle.
-
-    Expected (contract): the suppressed wave is accepted by the engines
-    (precondition asserted BEFORE the observation — a suppression that
-    never reached the engines is a construction failure, not a pass);
-    while the suppression holds the scheduler inflight STAYS > 0 (no
-    early cleanup: the engines are alive and silence alone must not
-    settle anything); the ledger then drains to zero within the
-    TTL-aware window (30s TTL + 60s sweep + margin); the
-    scheduler-role TTL-eviction counter advances by >= the suppressed
-    population (105s event window); the fleet still serves after the
-    release (recovery).
-
-    Profile semantics (v2, task #55): ttl_spec pins the legacy fault
-    axes (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG — the
-    declaration stays batch-window (label honesty + regression
-    efficiency).  fault_env_config sets no queueTimeoutMs, so the Java
-    default (1h) cannot expire these requests before the TTL — the
-    deadline path is not an exit here.
-    """
-    env = ctx.env_manager.ensure(ttl_spec(ctx))
-    ops = ctx.engine_ops(env)
-    base = rid_base(ctx, "status")
-    pnames = _prefill_names(ops)
-    dnames = _decode_names(ops)
-    if not pnames or not dnames:
-        return False, (f"engines missing (prefill={len(pnames)}, decode={len(dnames)})")
-    all_names = pnames + dnames
-    # Pre-generate the wave's rids so the suppression can be armed
-    # BEFORE the requests are sent (rids are client-assigned) — no
-    # RUNNING fact may leak into the ledger first.
-    rids = [ops.next_request_id(base) for _ in range(6)]
-    try:
-        # Slow both prefills (10s) so the suppressed requests stay
-        # genuinely in-flight at the engines: the in-flight window is
-        # real, only its reporting is silenced.
-        ops.set_perf("prefill-0", prefill_fixed_ms=10000.0)
-        ops.set_perf("prefill-1", prefill_fixed_ms=10000.0)
-
-        # Event-channel baseline (task #103 step 2), BEFORE any eviction
-        # this case can cause.  Unreachable = environment failure, not a
-        # pass reason.
-        ttl_before = ops.master_ttl_eviction_counts()
-        if ttl_before is None:
-            return False, (
-                "master prometheus unreachable before injection — "
-                "TTL-eviction observability missing (environment failure)"
-            )
-
-        # Arm the suppression on every engine of both roles, then fire:
-        # the requests travel for real, but neither role ever reports a
-        # fact for them.
-        inject_type_all(ops, all_names, "status_suppress_rids", rids=rids)
-
-        # Fire-and-forget: schedule without consuming the response
-        # streams — the observation target is the LEDGER.
-        for rid in rids:
-            resp = ops.schedule(rid, output_len=10)
-            if resp.code != 200 or not resp.success:
-                return False, f"schedule failed for rid={rid}: {resp.error_message}"
-
-        # PRECONDITION (fail loudly): the suppressed wave must have
-        # actually reached the engines — accepted >= 6 on the prefills —
-        # otherwise the scenario degenerates into "nothing was ever
-        # in-flight" and the TTL sweep would pass vacuously.
-        accepted_ok = wait_for(
-            lambda: _accepted(ops, "prefill-0") + _accepted(ops, "prefill-1") >= 6,
-            15.0,
-            0.5,
-        )
-        accepted_total = _accepted(ops, "prefill-0") + _accepted(ops, "prefill-1")
-        if not accepted_ok:
-            return False, (
-                f"precondition failed: suppressed wave never reached the "
-                f"engines (accepted={accepted_total} < 6 after 15s) — the "
-                f"TTL scenario is vacuous, not proven"
-            )
-        inflight_before = ops.master_scheduler_inflight()
-
-        # Observation window INSIDE the suppression: the engines are
-        # alive and (unreported) RUNNING — worker silence alone must
-        # settle nothing.  12s sits deep inside the 30s stale TTL and
-        # past the 10s prefill horizon.
-        time.sleep(12.0)
-        inflight_held = ops.master_scheduler_inflight()
-
-        # The ONLY exit: the TTL sweep drains the ledger (30s stale TTL
-        # + 60s ExpirationTimer cycle + margin — the same worst-case
-        # settle window as TTL_DRAIN_TIMEOUT_S).
-        cleanup_ok = wait_for(
-            lambda: ops.master_scheduler_inflight() == 0, TTL_DRAIN_TIMEOUT_S, 2.0
-        )
-        inflight_final = ops.master_scheduler_inflight()
-
-        # task #103 step 2 — event-channel assertion, SEPARATE from the
-        # drain above: the scheduler-level TTL-eviction counter must
-        # have advanced by at least the suppressed population (105s
-        # window — the 60s maintenance sweep reports the eviction with
-        # lag).
-        ttl_events_ok, ttl_events_detail = _ttl_eviction_events(
-            ops, ttl_before, "scheduler", len(rids)
-        )
-
-        # The engines were never stopped: release the suppression and
-        # prove the fleet still serves.
-        clear_type_all(ops, all_names, "status_suppress_rids")
-        recovery_ok, recovery_msg = ops.verify_recovery()
-
-        passed = (
-            inflight_held > 0
-            and cleanup_ok
-            and inflight_final == 0
-            and ttl_events_ok
-            and recovery_ok
-        )
-        return passed, (
-            f"accepted={accepted_total}/6 (precondition), "
-            f"inflight_before={inflight_before}, "
-            f"inflight_held_after_12s={inflight_held} (no early cleanup), "
-            f"ttl_cleanup_within_{TTL_DRAIN_TIMEOUT_S:.0f}s={cleanup_ok}, "
-            f"inflight_final={inflight_final}, "
-            f"scheduler_ttl_evictions[{ttl_events_detail}], "
-            f"recovery={recovery_msg}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-    finally:
-        try:
-            clear_type_all(ops, all_names, "status_suppress_rids")
-            ops.set_perf("prefill-0", prefill_fixed_ms=100.0)
-            ops.set_perf("prefill-1", prefill_fixed_ms=100.0)
-        except Exception:
-            pass
 
 
 # ===========================================================================
@@ -881,79 +475,10 @@ def status_ack_partial_fail(ctx: CaseContext):
     "on 4 concurrent requests (execution-phase in-batch failure)",
 )
 def status_batch_async_partial_fail(ctx: CaseContext):
-    """Scenario: 4 concurrent requests (output_len=2, concurrency=4) land on
-    prefills injected with prefill_async_partial_fail k=1 code=8500: the
-    FIRST non-cancelled member of every executing prefill batch fails AT
-    the batch completion callback (execution phase), while the EnqueueBatch
-    ack stays fully successful for all members — the execution-phase
-    counterpart of status_ack_partial_fail.
+    """Fail one executing member per batch while ACK succeeds.
 
-    Behaviour (mock, production-aligned): the batch executes normally, then
-    the injected member surfaces a TYPED terminal
-    (task_info.error_code=8500, "injected prefill_async_partial_fail") on
-    the same finished_task_list channel the survivors' terminals ride; the
-    failed member starts no decode, leaves no output frame and no KV lease;
-    the survivors hand off to decode and finish normally.
-
-    Expectation (contract), five layers:
-    1. Batch isolation: the survivors of each affected batch complete
-       NORMALLY (>= 2 of 4 requests succeed).
-    2. Typed failure terminal: every failed request's client-visible error
-       carries the engine error code 8500 (master path:
-       WorkerTerminalObservation -> "worker error code 8500" ->
-       WORKER_EXECUTION_FAILED); 1 <= failed <= 2 — 4 requests form 1-2
-       batches, each losing exactly k=1 member (the ack_partial_fail
-       interval calibre).
-    3. Ledger integrity: the master inflight ledger drains (inflight_clean)
-       — a failure terminal missing or mismatching the dispatched batchId
-       falls into the reconcile mismatch branch and leaks the slot, so this
-       layer also covers batchId correctness. The failed member's slot
-       settles immediately through the typed FAILED terminal (scheduler +
-       prefill ledger drain fast), while its decode-side reservation is a
-       soft hold reclaimed by the master's stale-inflight eviction
-       (stale_inflight_ms TTL plus the eviction sweep's fixed-rate
-       interval), so the drain window uses the relaxed TTL calibre
-       (STALE_INFLIGHT_TTL_S + TTL_MARGIN_S + 60.0), not a fast path.
-    4. No resurrection / duplicate settle: the master stays HTTP-200 and
-       the drained ledger fingerprint stays stable across a late-terminal
-       observation window.
-    5. Batch lease closure: mixed-terminal batches release their dispatch
-       capacity (BatchCompletionProjection counts members outcome-blind,
-       the LAST member closes the lease) — a fresh healthy round of 4
-       requests recovers >= 95%.
-
-    Optional second form (prefill_fixed_ms=3000): stretching prefill
-    execution past the batching window forces queued-serial batches — the
-    same typed-terminal interval must hold when batch boundaries are
-    unambiguous.
-
-    Production alignment notes (ground truth survey):
-    * Splitting is master-transparent: production EnqueueBatch has no
-      split (each request enters FIFOScheduler as its own stream; partial
-      admit / residual groups only reorganize execution) and the status
-      report is a per-request terminal stream — batch_id travels unchanged
-      from the stream group_id into TaskInfo. The mock models no split:
-      whether the 4 requests form 1 or 2 batches, the shape above is the
-      legal outcome.
-    * In-batch async failure semantics: after admission an execution-phase
-      failure goes stream->reportError -> the dequeue fills
-      task_info.error_code / error_message -> finished_task_list,
-      independent of the same batch's surviving members (no batch-level
-      failure propagation); each member settles on its own.
-      stream->reportError is a TWO-channel terminal — the client-visible
-      half terminates the request's own output stream with an error frame
-      (the mock engine delivers RpcErrorPB carrying the injected code),
-      the master half rides finished_task_list into the reconcile; layer 2
-      asserts the former (client error string carries 8500), layer 3 the
-      latter (ledger drains through the typed FAILED terminal).
-    * Master settlement: a P-side terminal fact with errorCode != 0 maps
-      to Kind.FAILED -> WorkerStatusFact.terminal -> the slot's failure
-      terminal (errorCode == 0 non-cancel prefill returns null — the
-      success terminal is left for decode, which is exactly what the
-      survivors exercise in parallel); no re-dispatch, no whole-batch
-      abandon.
-
-    Grade: P0."""
+    Require typed per-request errors, unaffected survivors, exact ledger closure,
+    no resurrection and successful subsequent batches at both execution speeds."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
     base = rid_base(ctx, "status")
     names = _prefill_names(ops)
@@ -985,13 +510,8 @@ def status_batch_async_partial_fail(ctx: CaseContext):
         )
         error_shapes = sorted({str(e)[:80] for e in failed})[:3]
 
-        # ── Layers 3+4: ledger integrity + no resurrection.
-        # Relaxed window: the failed member's decode-side reservation is a
-        # soft hold reclaimed by stale-inflight eviction (TTL + the sweep's
-        # fixed-rate interval), so use the relaxed TTL calibre like the
-        # other relaxed precedents in this file.
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), STALE_INFLIGHT_TTL_S + TTL_MARGIN_S + 60.0
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
         fingerprint = _inflight_fingerprint(ops)
         time.sleep(3.0)  # late-terminal / duplicate-report window
@@ -1026,7 +546,7 @@ def status_batch_async_partial_fail(ctx: CaseContext):
             and all("8500" in str(e) for e in failed2)
         )
         inflight_ok2, inflight_detail2 = AssertUtils.inflight_clean(
-            _master_http(ops), STALE_INFLIGHT_TTL_S + TTL_MARGIN_S + 60.0
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
 
         passed = (
@@ -1126,32 +646,12 @@ def status_ack_multi_error(ctx: CaseContext):
     "status_ack_empty_no_crash",
     profiles=["batch-window"],
     source="P0 status fault family: enqueue_ack_drop — empty ack (dispatch-uncertain)",
-    expected_fail=True,
 )
 def status_ack_empty_no_crash(ctx: CaseContext):
-    """Scenario: the prefill drops the whole enqueue ack
-    (enqueue_ack_drop) — the master sees an EMPTY ack for a batch it
-    dispatched.
+    """An empty ACK creates dispatch uncertainty.
 
-    Behaviour: the master classifies the batch dispatch-uncertain and
-    installs a BATCH_ACK_UNCERTAIN engine fence.
-
-    Expectation (contract): the fence residue stays BOUNDED and
-    non-growing (reuse _fence_residue_stable), AND the quarantined entries
-    are ultimately clearable — the scheduler inflight must drain to zero
-    within TTL+margin.  NOTE: the verified current behaviour parks
-    uncertain-fence entries in quarantine forever (cleanupInflight skips
-    engineFence entries from the stale TTL), so the drain assertion is a
-    declared contract-level candidate to FAIL — that failure is the
-    finding.  The master itself must stay up (HTTP 200) regardless.
-
-    Expected-fail marking (task #101): the quarantine-forever behaviour
-    is the DECLARED finding, so the case is marked expected_fail — a
-    failure classifies as finding-confirmed (the finding stands, exit
-    0), an unexpected pass as finding-resolved (the fence-TTL drain
-    landed; review the mark).
-
-    Grade: P0."""
+    Require bounded residue, a live Master and prompt closure from subsequent
+    authoritative Engine status. No timer is allowed to invent Engine completion."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
     base = rid_base(ctx, "status")
     names = _prefill_names(ops)
@@ -1169,8 +669,7 @@ def status_ack_empty_no_crash(ctx: CaseContext):
         failed = sum(1 for e in errs if e is not None)
         # 4 requests -> at most 4 fence entries (one slot per request).
         residue_ok, residue_detail = _fence_residue_stable(ops, 4)
-        # Contract: no permanently-resident entries — TTL+margin drain.
-        drained = _wait_scheduler_zero(ops)
+        drained = _wait_scheduler_zero(ops, EVENT_DRIVEN_CLEANUP_S)
         final = ops.master_scheduler_inflight()
         master_ok = _master_ok(ops)
 
@@ -1179,7 +678,7 @@ def status_ack_empty_no_crash(ctx: CaseContext):
             f"request_fate: {4 - failed}/4 ok, "
             f"err_types={getattr(_run_requests, 'last_error_types', [])[:2]}, "
             f"fence_residue={residue_ok}({residue_detail}), "
-            f"ttl_drained={drained} (final={final}), "
+            f"status_drained={drained} (final={final}), "
             f"master_200={master_ok}"
         )
     except Exception as exc:
@@ -1199,28 +698,10 @@ def status_ack_empty_no_crash(ctx: CaseContext):
     source="P0 status fault family: status_suppress_running+finished on every prefill",
 )
 def status_prefill_suppress_all(ctx: CaseContext):
-    """Scenario: every prefill suppresses BOTH the running and the finished
-    facts (status_suppress_running + status_suppress_finished) — the status
-    channel goes fully silent for those tasks while the requests are live.
+    """Suppress all Prefill facts while Decode status remains healthy.
 
-    Behaviour: with no ACTIVE fact the slot's lastWorkerStatusAtMs freezes,
-    so the stale-inflight TTL (30s) is the ONLY ledger exit; the requests
-    themselves terminate (success if the data plane stays up, or a
-    timeout-class terminal otherwise — both are contract-acceptable; a
-    non-timeout internal error or an infinite hang is not).
-
-    Expectation (contract): master stays HTTP 200; every request ends with
-    a legal terminal (ok or timeout-typed); scheduler_inflight AND the
-    prefill inflight_batches both drain to zero within TTL(30s)+margin;
-    TTL eviction anchors and the prefill endpoint TTL-eviction counter
-    are observational — the counter only advances on the PASSIVE
-    stale-inflight sweep, while these ledgers clear through the
-    retire/settle completion paths (queueTimeout deadline / data-plane
-    terminal), which never touch it; the counter channel must stay
-    REACHABLE (UNREACHABLE = environment failure); after the injection
-    is cleared a fresh batch recovers (verify_recovery).
-
-    Grade: P0."""
+    Decode terminal evidence must settle the exact request and release its Prefill
+    reservation promptly. Clear the injection and verify new requests succeed."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "status")
@@ -1228,47 +709,17 @@ def status_prefill_suppress_all(ctx: CaseContext):
     if not names:
         return False, "no prefill engines found"
     try:
-        anchors_before = (
-            _log_count(env, "event=scheduler_inflight_ttl_eviction"),
-            _log_count(env, "event=endpoint_inflight_ttl_eviction"),
-        )
-        # Event-channel baseline (task #103 step 2), before any eviction
-        # this case can cause.  Unreachable = environment failure.
-        ttl_before = ops.master_ttl_eviction_counts()
-        if ttl_before is None:
-            return False, (
-                "master prometheus unreachable before injection — "
-                "TTL-eviction observability missing (environment failure)"
-            )
         inject_type_all(ops, names, "status_suppress_running")
         inject_type_all(ops, names, "status_suppress_finished")
         try:
             errs = _run_requests(
                 ops, base, 4, concurrency=4, stream_timeout_s=LONG_STREAM_TIMEOUT_S
             )
-            # Suppress stays ON so the TTL is the only cleanup path.
-            sched_zero = _wait_scheduler_zero(ops)
+            sched_zero = _wait_scheduler_zero(ops, EVENT_DRIVEN_CLEANUP_S)
             batches_zero = wait_for(
                 lambda: _prefill_batches_sum(ops) == 0,
-                TTL_DRAIN_TIMEOUT_S,
+                EVENT_DRIVEN_CLEANUP_S,
                 2.0,
-            )
-            anchors_after = _ttl_anchor_deltas(env, anchors_before)
-            # TTL counter OBSERVATION, not an assertion: the counter only
-            # advances on the passive stale-inflight sweep, and these
-            # ledgers clear through the retire/settle completion paths
-            # (queueTimeout deadline / data-plane terminal), which never
-            # touch it — the hard assertion is the drain itself
-            # (sched_zero / batches_zero / final == 0).  The channel must
-            # stay reachable: UNREACHABLE is an environment failure.
-            ttl_channel_ok, ttl_channel_detail = _ttl_counter_observe(
-                ops, ttl_before, "prefill"
-            )
-            # Scheduler-side delta rides the same 60s sweep — also
-            # observational here; the hard scheduler assertion lives in
-            # status_inflight_ttl_cleanup.
-            sched_channel_ok, sched_channel_detail = _ttl_counter_observe(
-                ops, ttl_before, "scheduler"
             )
         finally:
             clear_type_all(ops, names, "status_suppress_running")
@@ -1290,8 +741,8 @@ def status_prefill_suppress_all(ctx: CaseContext):
             and batches_zero
             and final_sched == 0
             and final_batches == 0
-            and ttl_channel_ok
-            and sched_channel_ok
+
+
             and master_ok
             and recovery_ok
         )
@@ -1300,9 +751,6 @@ def status_prefill_suppress_all(ctx: CaseContext):
             f"illegal_errors={bad_errs[:2]}, "
             f"scheduler_zero={sched_zero} (final={final_sched}), "
             f"prefill_batches_zero={batches_zero} (final={final_batches}), "
-            f"ttl_anchors(sched,endp)={anchors_after}, "
-            f"prefill_ttl_counter[{ttl_channel_detail}], "
-            f"observability: {sched_channel_detail}, "
             f"master_200={master_ok}, recovery={recovery_msg}"
         )
     except Exception as exc:
@@ -1318,22 +766,10 @@ def status_prefill_suppress_all(ctx: CaseContext):
     source="P0 status fault family: status_suppress_finished on every prefill",
 )
 def status_prefill_suppress_finished(ctx: CaseContext):
-    """Scenario: every prefill suppresses only the finished facts
-    (status_suppress_finished) — the requests keep appearing RUNNING.
+    """Suppress Prefill terminals while Decode keeps reporting.
 
-    Behaviour: the persistent RUNNING fact refreshes the slot's
-    lastWorkerStatusAtMs on every poll, DISARMING the stale-inflight TTL.
-    That keep-alive is allowed; consequently the queue/deadline path is
-    the ONLY legal exit for the stuck ledger.
-
-    Expectation (contract): master stays HTTP 200; every request ends
-    within queueTimeout(10s)+margin with a legal terminal (success if the
-    data plane stays up, or a timeout-class terminal via the deadline
-    bottom line); AFTER the injection is cleared the whole ledger drains
-    (inflight_clean within a TTL+margin window — the keep-alive stops, the
-    frozen activity clock finally expires).
-
-    Grade: P0."""
+    Requests must terminate, and normal status after clearing the injection must
+    leave no ledger residue. RUNNING reports do not extend request lifetime."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
     base = rid_base(ctx, "status")
     names = _prefill_names(ops)
@@ -1342,10 +778,9 @@ def status_prefill_suppress_finished(ctx: CaseContext):
     try:
         inject_type_all(ops, names, "status_suppress_finished")
         try:
-            # queueTimeout(10s) + margin: the deadline bottom line must
-            # fire well inside this window when the data plane also hangs.
+            # The stream window exceeds the fixture's complete request lifetime.
             errs = _run_requests(
-                ops, base, 4, concurrency=4, stream_timeout_s=QUEUE_TIMEOUT_S + 10.0
+                ops, base, 4, concurrency=4, stream_timeout_s=LONG_STREAM_TIMEOUT_S
             )
         finally:
             clear_type_all(ops, names, "status_suppress_finished")
@@ -1355,14 +790,13 @@ def status_prefill_suppress_finished(ctx: CaseContext):
         bad_errs = [
             str(e)[:70] for e in errs if e is not None and not _timeout_typed(e)
         ]
-        # Clear -> keep-alive stops -> frozen clock expires -> drain.
-        inflight_ok, inflight_detail = _stale_inflight_clean(ops)
+        inflight_ok, inflight_detail = _request_cleanup(ops)
         master_ok = _master_ok(ops)
 
         passed = legal_terminal and inflight_ok and master_ok
         return passed, (
             f"request_terminals: ok={ok}/4 within "
-            f"{QUEUE_TIMEOUT_S + 10.0:.0f}s, illegal_errors={bad_errs[:2]}, "
+            f"{LONG_STREAM_TIMEOUT_S:.0f}s, illegal_errors={bad_errs[:2]}, "
             f"inflight_clean_after_clear={inflight_ok}({inflight_detail}), "
             f"master_200={master_ok}"
         )
@@ -1378,24 +812,10 @@ def status_prefill_suppress_finished(ctx: CaseContext):
     source="P0 status fault family: status_no_respond — engine stops answering the status RPC",
 )
 def status_status_no_respond(ctx: CaseContext):
-    """Scenario: prefills stop answering the WorkerStatus poll entirely
-    (status_no_respond) while batches are live in their ledgers.
+    """Stop Prefill status RPC responses during live work.
 
-    Behaviour: the health poller accumulates strikes (3 consecutive
-    failures) and demotes/retires the whole engine generation; the live
-    slots freeze (no ACTIVE fact), so the stale TTL reclaims them.
-
-    Expectation (contract): the alive count DROPS within the 3-strike
-    window (generation retirement); master stays HTTP 200; the scheduler
-    inflight drains to zero within TTL+margin; the TTL-eviction counter
-    is observational here — the generation retirement itself clears the
-    ledger through the retire path, which does not ride the TTL counter
-    channel (the counter only advances on the passive stale-inflight
-    sweep), but the channel must stay REACHABLE (UNREACHABLE =
-    environment failure); after the injection is cleared the topology
-    fully recovers (alive back to 2P) and a fresh request succeeds.
-
-    Grade: P0."""
+    Require generation retirement, request settlement and healthy topology/service
+    recovery after restoring the status channel."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "status")
@@ -1411,18 +831,6 @@ def status_status_no_respond(ctx: CaseContext):
         if sched_err:
             return False, f"could not stage live inflight: {sched_err}"
 
-        anchors_before = (
-            _log_count(env, "event=scheduler_inflight_ttl_eviction"),
-            _log_count(env, "event=endpoint_inflight_ttl_eviction"),
-        )
-        # Event-channel baseline (task #103 step 2).  Unreachable =
-        # environment failure.
-        ttl_before = ops.master_ttl_eviction_counts()
-        if ttl_before is None:
-            return False, (
-                "master prometheus unreachable before injection — "
-                "TTL-eviction observability missing (environment failure)"
-            )
         inject_type_all(ops, names, "status_no_respond")
         try:
             alive_dropped = wait_for(
@@ -1436,16 +844,6 @@ def status_status_no_respond(ctx: CaseContext):
                 0.5,
             )
             drained = _wait_scheduler_zero(ops)
-            anchors_after = _ttl_anchor_deltas(env, anchors_before)
-            # TTL counter OBSERVATION, not an assertion: the generation
-            # retirement clears the ledger through the retire path, which
-            # does not advance the counter (it only moves on the passive
-            # stale-inflight sweep) — the hard assertion is the drain
-            # itself (drained / final_sched == 0).  The channel must stay
-            # reachable: UNREACHABLE is an environment failure.
-            ttl_channel_ok, ttl_channel_detail = _ttl_counter_observe(
-                ops, ttl_before, "scheduler"
-            )
         finally:
             clear_type_all(ops, names, "status_no_respond")
 
@@ -1464,7 +862,7 @@ def status_status_no_respond(ctx: CaseContext):
             and all_retired
             and drained
             and final_sched == 0
-            and ttl_channel_ok
+
             and master_ok
             and alive_back
             and recovery_ok
@@ -1473,8 +871,6 @@ def status_status_no_respond(ctx: CaseContext):
             f"generation_retired={all_retired} "
             f"(alive={ops.master_alive_count('PREFILL')}), "
             f"scheduler_zero={drained} (final={final_sched}), "
-            f"ttl_anchors(sched,endp)={anchors_after}, "
-            f"scheduler_ttl_counter[{ttl_channel_detail}], "
             f"master_200={master_ok}, topology_recovered={alive_back}, "
             f"recovery={recovery_msg}"
         )
@@ -1559,22 +955,10 @@ def status_unknown_rid_finished(ctx: CaseContext):
     source="P0 status fault family: status_version_regress — stale status version",
 )
 def status_version_regress(ctx: CaseContext):
-    """Scenario: prefills keep answering the status RPC but with a
-    REGRESSED version (status_version_regress) while batches are live.
+    """Keep returning invalid old Prefill status versions during live work.
 
-    Behaviour: the master rejects the stale-version reports as invalid;
-    sustained invalid reports accumulate into the health 3-strike, so the
-    whole engine generation retires; the live slots freeze and the stale
-    TTL reclaims them.
-
-    Expectation (contract): the alive count DROPS (generation retirement);
-    master stays HTTP 200; the scheduler inflight drains to zero within
-    TTL+margin; the TTL-eviction counter is observational here — same
-    rationale as status_status_no_respond (the retire path clears the
-    ledger without advancing the passive-sweep counter), but the channel
-    must stay REACHABLE (UNREACHABLE = environment failure).
-
-    Grade: P0."""
+    Require health retirement and exact request settlement; restoring normal
+    status must let the topology recover."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "status")
@@ -1588,18 +972,6 @@ def status_version_regress(ctx: CaseContext):
         if sched_err:
             return False, f"could not stage live inflight: {sched_err}"
 
-        anchors_before = (
-            _log_count(env, "event=scheduler_inflight_ttl_eviction"),
-            _log_count(env, "event=endpoint_inflight_ttl_eviction"),
-        )
-        # Event-channel baseline (task #103 step 2).  Unreachable =
-        # environment failure.
-        ttl_before = ops.master_ttl_eviction_counts()
-        if ttl_before is None:
-            return False, (
-                "master prometheus unreachable before injection — "
-                "TTL-eviction observability missing (environment failure)"
-            )
         inject_type_all(ops, names, "status_version_regress")
         try:
             alive_dropped = wait_for(
@@ -1608,15 +980,6 @@ def status_version_regress(ctx: CaseContext):
                 0.5,
             )
             drained = _wait_scheduler_zero(ops)
-            anchors_after = _ttl_anchor_deltas(env, anchors_before)
-            # TTL counter OBSERVATION, not an assertion — same rationale
-            # as status_status_no_respond: the retire path clears the
-            # ledger without advancing the passive-sweep counter; the
-            # channel must stay reachable (UNREACHABLE = environment
-            # failure).
-            ttl_channel_ok, ttl_channel_detail = _ttl_counter_observe(
-                ops, ttl_before, "scheduler"
-            )
         finally:
             clear_type_all(ops, names, "status_version_regress")
 
@@ -1635,14 +998,12 @@ def status_version_regress(ctx: CaseContext):
             and drained
             and final_sched == 0
             and master_ok
-            and ttl_channel_ok
+
         )
         return passed, (
             f"generation_retired={alive_dropped} "
             f"(alive={ops.master_alive_count('PREFILL')}), "
             f"scheduler_zero={drained} (final={final_sched}), "
-            f"ttl_anchors(sched,endp)={anchors_after}, "
-            f"scheduler_ttl_counter[{ttl_channel_detail}], "
             f"master_200={master_ok}, topology_recovered={alive_back}"
         )
     except Exception as exc:
@@ -1667,21 +1028,10 @@ def status_version_regress(ctx: CaseContext):
     source="P1 status fault family: status_suppress_finished on every decode engine",
 )
 def status_decode_suppress_finished(ctx: CaseContext):
-    """Scenario: every DECODE engine suppresses its finished facts
-    (status_suppress_finished) while prefills report normally.
+    """Suppress Decode terminal reports while Prefill reports normally.
 
-    Behaviour: the prefill stage settles normally (prefill inflight_batches
-    drain at the usual pace); the decode ledger keeps its entries alive via
-    the still-reported ACTIVE facts (TTL disarmed).
-
-    Expectation (contract): every request ends within deadline/TTL
-    (success or a timeout-class terminal); the prefill batches drain fast
-    (normal settle); AFTER the injection is cleared the decode
-    inflight_requests drain to zero within a RELAXED TTL+margin window
-    (the fence-exemption margin — decode-side cleanup may lag the strict
-    scheduler TTL); master stays HTTP 200.
-
-    Grade: P1."""
+    Prefill capacity must release promptly. Restoring Decode terminals must
+    settle the remaining reservations without extending complete request lifetime."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
     base = rid_base(ctx, "status")
     dnames = _decode_names(ops)
@@ -1704,10 +1054,9 @@ def status_decode_suppress_finished(ctx: CaseContext):
         bad_errs = [
             str(e)[:70] for e in errs if e is not None and not _timeout_typed(e)
         ]
-        # Relaxed window: TTL + margin + the fence-exemption margin.
         d_requests_zero = wait_for(
             lambda: _decode_requests_sum(ops) == 0,
-            STALE_INFLIGHT_TTL_S + TTL_MARGIN_S + 60.0,
+            REQUEST_CLEANUP_TIMEOUT_S,
             2.0,
         )
         final_d = _decode_requests_sum(ops)
@@ -1736,52 +1085,12 @@ def status_decode_suppress_finished(ctx: CaseContext):
     "status_decode_before_prefill",
     profiles=["batch-window"],
     source="P1 status fault family: status_suppress_rids(full batch) on prefills, decodes normal",
-    expected_fail=True,  # MIXED form (see docstring) — whole-case probe
 )
 def status_decode_before_prefill(ctx: CaseContext):
-    """Scenario (finished arm of the decode-before-prefill matrix): the
-    prefills suppress ALL facts for the whole batch's rids
-    (status_suppress_rids on pre-generated ids) while the decodes report
-    normally — the decode side delivers the terminal.
+    """Suppress Prefill facts and deliver the real terminal through Decode.
 
-    Behaviour: the prefill ledger never hears about these rids; the decode
-    finished fact settles the request slots.
-
-    Expectation (contract — "a D terminal drives the P cleanup, no TTL
-    waiting"): under P/D separation a decode-side finished fact settles
-    the request — all 4 requests reach a SUCCESSFUL terminal — AND the
-    prefill inflight_batches for those members are released by the
-    settle path itself within a short event-driven window (<= 10s,
-    several status-poll rounds — the master already knows the request is
-    finished, so no TTL wait is justified); master stays HTTP 200 (no
-    crash from the cross-role settle).
-
-    PREDICTED FINDING (cleanup linkage missing): in the current BATCH
-    dispatch the decode terminal's counterpart cleanup only runs on the
-    ROUTE_DECISION path (RequestRegistry.workerStatusCounterpartCleanup
-    → exactPrefillCounterpartCleanup); a batch-delivered decode terminal
-    does NOT release the prefill accounting, whose only exit is
-    PrefillState.evictExpiredBatches (30s stale TTL + 60s sweep).  The
-    event-driven assertion is EXPECTED TO FAIL and that failure is the
-    finding; the TTL fallback observation below then documents that the
-    entries do eventually expire (a permanent hang would be a worse,
-    separate bug).
-
-    Expected-fail marking (task #101, MIXED form): the case mixes
-    should-pass dimensions (all-4-successful terminals via the decode
-    settle, eventual drain, master health, recovery) with the
-    predicted-fail <= 10s event-driven cleanup dimension
-    (p_batches_fast), and the expected_fail granularity is whole-case —
-    so the whole case is marked expected_fail: its expected failure
-    classifies as finding-confirmed (the cleanup-linkage finding
-    stands), its unexpected pass as finding-resolved (the counterpart
-    cleanup landed on the batch path).  CAVEAT: a regression in the
-    should-pass dimensions ALSO shows up as finding-confirmed — read the
-    detail flags (requests_succeeded_via_decode_terminal /
-    ttl_fallback_drained / master_200) to tell a regression apart from
-    the declared finding.
-
-    Grade: P1 (+ P2 cleanup-linkage probe)."""
+    Require all four successful streams and release of their Prefill batches
+    within the event-driven cleanup window, with no passive-expiry fallback."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "status")
@@ -1792,10 +1101,6 @@ def status_decode_before_prefill(ctx: CaseContext):
     # BEFORE the requests are sent (rids are client-assigned).
     rids = [ops.next_request_id(base) for _ in range(4)]
     try:
-        anchors_before = (
-            _log_count(env, "event=scheduler_inflight_ttl_eviction"),
-            _log_count(env, "event=endpoint_inflight_ttl_eviction"),
-        )
         inject_type_all(ops, names, "status_suppress_rids", rids=rids)
         try:
 
@@ -1807,23 +1112,11 @@ def status_decode_before_prefill(ctx: CaseContext):
 
             with ThreadPoolExecutor(max_workers=4) as pool:
                 errs = list(pool.map(run, rids))
-            # Event-driven window: every stream above has completed, so
-            # the decode terminal has ALREADY settled the requests — the
-            # frozen prefill entries must now be released by the settle
-            # path itself, not parked until the stale TTL.
             p_batches_fast = wait_for(
                 lambda: _prefill_batches_sum(ops) == 0,
                 EVENT_DRIVEN_CLEANUP_S,
                 1.0,
             )
-            # TTL fallback observation (NOT in `passed`): the entries must
-            # at least expire — a permanent hang is a separate bug.
-            p_batches_ttl = p_batches_fast or wait_for(
-                lambda: _prefill_batches_sum(ops) == 0,
-                TTL_DRAIN_TIMEOUT_S,
-                2.0,
-            )
-            anchors_after = _ttl_anchor_deltas(env, anchors_before)
         finally:
             clear_type_all(ops, names, "status_suppress_rids")
 
@@ -1841,8 +1134,6 @@ def status_decode_before_prefill(ctx: CaseContext):
             f"(err_kinds={err_kinds}), "
             f"prefill_event_drained={p_batches_fast} "
             f"(<= {EVENT_DRIVEN_CLEANUP_S:.0f}s), "
-            f"ttl_fallback_drained={p_batches_ttl} (final={final_p}), "
-            f"ttl_anchors(sched,endp)={anchors_after}, "
             f"master_200={master_ok}, recovery={recovery_msg}"
         )
     except Exception as exc:
@@ -1879,7 +1170,7 @@ def status_decode_running_before_prefill(ctx: CaseContext):
     the positive direction, this arm pins the negative) — and the
     requests must stay unsettled (scheduler inflight keeps them); after
     the injections are cleared the frozen slots converge to zero within
-    the TTL-aware window (no permanent hang); the master stays HTTP 200.
+    the cleanup window (no permanent hang); the master stays HTTP 200.
 
     Grade: P1."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
@@ -1915,12 +1206,8 @@ def status_decode_running_before_prefill(ctx: CaseContext):
             clear_type_all(ops, pnames, "status_suppress_rids")
             clear_type_all(ops, dnames, "status_suppress_finished")
 
-        # After release: the suppressed decode terminal is permanently lost
-        # (the completion-cursor head-trim ran under the injection), so the
-        # frozen slots must expire via the stale TTL within the TTL-aware
-        # window — convergence, not a hang.
         drained, drained_detail = AssertUtils.inflight_clean(
-            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
         master_ok = _master_ok(ops)
 
@@ -1970,7 +1257,7 @@ def status_decode_waiting_before_prefill(ctx: CaseContext):
     the terminal-driven direction, this arm pins the
     intermediate-driven prohibition); after the injections are cleared
     the synthetic fact stops and the frozen slots converge to zero
-    within the TTL-aware window; the master stays HTTP 200.
+    within the cleanup window; the master stays HTTP 200.
 
     Grade: P1."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
@@ -2011,12 +1298,8 @@ def status_decode_waiting_before_prefill(ctx: CaseContext):
             clear_type_all(ops, dnames, "status_suppress_rids")
             clear_type_all(ops, dnames, "status_fake_task")
 
-        # After release: the real decode terminal is permanently lost (the
-        # completion-cursor head-trim ran under the suppression), so the
-        # frozen slots must expire via the stale TTL within the TTL-aware
-        # window — convergence, not a hang.
         drained, drained_detail = AssertUtils.inflight_clean(
-            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
         master_ok = _master_ok(ops)
 
@@ -2052,16 +1335,9 @@ def status_unknown_rid_running(ctx: CaseContext):
     master has never seen (status_fake_task, one-shot on the first
     prefill).
 
-    Behaviour: correct masters ignore the ghost ACTIVE (no slot exists);
-    an implementation that registers it creates a resident ghost entry —
-    which the stale TTL must still reclaim once the one-shot report stops.
-
-    Expectation (contract): the master stays HTTP 200 and the scheduler
-    inflight is ZERO within TTL+margin after the one-shot injection (both
-    implementations converge to zero — the contract forbids a permanent
-    ghost resident either way).
-
-    Grade: P1."""
+    Verify exact status identity and settlement; clearing an injection restores
+    authoritative reports. Timers do not substitute for Engine completion.
+    """
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
     base = rid_base(ctx, "status")
     names = _prefill_names(ops)
@@ -2091,7 +1367,7 @@ def status_unknown_rid_running(ctx: CaseContext):
             f"baseline_clean={clean0}({clean0_detail}), "
             f"ghost_registered={registered} "
             f"(before={before}, after_injection={peak}), "
-            f"scheduler_zero_within_ttl={drained} (final={final}), "
+            f"scheduler_zero_after_status={drained} (final={final}), "
             f"master_200={master_ok}"
         )
     except Exception as exc:
@@ -2172,14 +1448,8 @@ def status_unknown_batchid(ctx: CaseContext):
         finally:
             clear_type_all(ops, names, "status_fake_task")
 
-        # Window-insufficient instability fix: the settle here rides the
-        # same stale-TTL + ExpirationTimer physical drain (worst ~90s) as
-        # every other residue contract — 30s let a normal slow drain read
-        # as a FAIL.  Aligned to the TTL_DRAIN_TIMEOUT_S standard; the
-        # all-zero assertion itself is unchanged (a true leak still
-        # times out and fails).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+            _master_http(ops), REQUEST_CLEANUP_TIMEOUT_S
         )
         master_ok = _master_ok(ops)
 
@@ -2792,7 +2062,7 @@ def status_zombie_completed_running(ctx: CaseContext):
             clear_type_all(ops, dnames, "status_zombie_running")
 
         ok = sum(1 for e in errs if e is None)
-        clean_ok, clean_detail = _stale_inflight_clean(ops)
+        clean_ok, clean_detail = _request_cleanup(ops)
         d_requests = _decode_requests_sum(ops)
         master_ok = _master_ok(ops)
 
@@ -2835,34 +2105,14 @@ def status_zombie_completed_running(ctx: CaseContext):
 @case(
     "status_zombie_fake_running",
     profiles=["batch-window"],
-    source="P2 status fault family (DECLARED FINDING PROBE): persistent fake RUNNING for N ghost rids, >= 2x TTL",
-    expected_fail=True,
+    source="Repeated unknown Engine RUNNING facts must not create Master requests",
 )
 def status_zombie_fake_running(ctx: CaseContext):
-    """Scenario: the engine PERSISTENTLY reports RUNNING facts for several
-    request ids the master has never seen (status_fake_task, ghost rids,
-    held for >= 2x the stale TTL).
+    """Repeated unknown Engine RUNNING facts must never create Master requests.
 
-    Behaviour: every status poll re-delivers the ghost ACTIVE facts.  On
-    the current implementation each report refreshes the entry's activity
-    clock (lastWorkerStatusAtMs), so the stale TTL can NEVER fire — the
-    expected failure mode is permanently-resident inflight entries
-    (ConfirmedTask-style) that survive the whole observation window.
-
-    Expectation (contract — this is the probe): the master must NOT retain
-    inflight entries that cannot be cleared.  Concretely: after the
-    injection is cleared (the ghost reports stop), the scheduler inflight
-    MUST drain to zero within TTL(30s)+margin.  EXPECTED TO FAIL on the
-    current implementation — the failure IS the finding (record the
-    resident count and the non-draining ledger as evidence).
-
-    Expected-fail marking (task #101): the permanent-resident ghost
-    behaviour is the DECLARED finding, so the case is marked
-    expected_fail — a failure classifies as finding-confirmed (the
-    finding stands, exit 0), an unexpected pass as finding-resolved (the
-    activity-clock refresh landed; review the mark).
-
-    Grade: P2 (contract-level finding probe)."""
+    Observe two request lifetimes, then clear the injection and require a clean
+    Master ledger. Unknown Engine work remains tracked without an invented
+    waiting deadline until authoritative status reconciles it; this case asserts request identity."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "status")
@@ -2876,24 +2126,27 @@ def status_zombie_fake_running(ctx: CaseContext):
         sched_before = ops.master_scheduler_inflight()
 
         # Arm the persistent ghost RUNNING reports (one inject per rid; a
-        # MERGE-semantics server accumulates them, a replace-semantics
-        # server keeps the last — the probe only needs >= 1 resident).
+        # MERGE-semantics server accumulates them; a replace-semantics
+        # server keeps the last. Either must leave the Master request set unchanged).
         for rid in ghost_rids:
             inject_type(ops, names[0], "status_fake_task", rid=rid, phase="RUNNING")
         try:
             # Observation window: >= 2x TTL with the reports flowing.
-            deadline = time.monotonic() + 2 * STALE_INFLIGHT_TTL_S
+            deadline = time.monotonic() + 2 * REQUEST_LIFETIME_S
             samples = []
             while time.monotonic() < deadline:
                 samples.append(ops.master_scheduler_inflight())
                 time.sleep(5.0)
             resident = ops.master_scheduler_inflight()
             peak = max(samples) if samples else -1
-            bounded = resident <= sched_before + n_ghosts
+            bounded = (
+                sched_before == 0
+                and all(value == 0 for value in samples)
+                and resident == 0
+            )
             master_ok_during = _master_ok(ops)
         finally:
-            for rid in ghost_rids:
-                clear_type_all(ops, names, "status_fake_task")
+            clear_type_all(ops, names, "status_fake_task")
 
         # Contract: once the reports stop, nothing may stay resident.
         drained = _wait_scheduler_zero(ops)
@@ -2911,11 +2164,10 @@ def status_zombie_fake_running(ctx: CaseContext):
         return passed, (
             f"baseline_clean={clean0}({clean0_detail}), "
             f"resident_after_2xTTL={resident} (peak={peak}, "
-            f"bounded={bounded} <= {sched_before + n_ghosts}), "
+            f"no_phantom_master_requests={bounded}), "
             f"drained_after_clear={drained} (final={final}), "
             f"master_200=(during={master_ok_during}, after={master_ok}), "
-            f"ghost_rids={n_ghosts} — expected finding: persistent "
-            f"activity-clock refresh keeps ghost entries resident"
+            f"ghost_rids={n_ghosts}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -2934,21 +2186,10 @@ def status_zombie_fake_running(ctx: CaseContext):
     source="gap G6/G7: /inject type=fetch_error (cross-process, batch FetchResponse path)",
 )
 def inject_fetch_error(ctx: CaseContext):
-    """fetch_error makes the batch-mode FetchResponse stream fail after
-    emitting one unfinished output.  The client must observe the error;
-    the engine-side inflight drains immediately; the master-side ledger
-    entry is cleaned by the 30s stale-inflight TTL (verified contract);
-    a fresh request succeeds once the injection is cleared.
+    """FetchResponse fails after one unfinished output.
 
-    Profile semantics (v2, task #55): the fault is checked only at the
-    engine's fetchResponse entry, which exists only under the BATCH
-    dispatcher — and _fault_spec pins the legacy fault axes
-    (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG, so re-running
-    under another --profile would execute the identical configuration.
-    The declaration stays batch-window (regression efficiency + label
-    honesty); a NON_BATCH master-path generate_error variant is
-    dedicated-phase material.
-    """
+    The client must observe the failure, Engine status/cancellation must settle
+    the request, and a fresh request must succeed after clearing the injection."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_fault_spec(ctx)))
     base = rid_base(ctx, "status")
     names = _prefill_names(ops)
@@ -2981,7 +2222,7 @@ def inject_fetch_error(ctx: CaseContext):
 
         rid2 = ops.next_request_id(base)
         _, err2 = ops.run_one_request(rid2, stream_timeout_s=STREAM_TIMEOUT_S)
-        inflight_ok, inflight_detail = _stale_inflight_clean(ops)
+        inflight_ok, inflight_detail = _request_cleanup(ops)
         engine_clean, engine_detail = engine_inflight_clean(ops, names)
         recovery_ok, recovery_msg = ops.verify_recovery()
 

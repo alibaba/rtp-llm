@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestBatchSubmission;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestContext;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestEndpointCapabilities;
@@ -10,6 +11,7 @@ import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestTelemetry;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalLong;
 
 import static org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.unavailable;
@@ -243,6 +245,7 @@ class BatchDeliveryStrategyTest {
         ScheduledRequest first = fixture.item(1L);
         ScheduledRequest second = fixture.item(2L);
         fixture.slots.commitLostFor(first);
+        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork(99L, WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
 
         fixture.context.deliver(
                 fixture.strategy, List.of(first, second),
@@ -256,6 +259,37 @@ class BatchDeliveryStrategyTest {
                 fixture.telemetry.batches().getFirst();
         assertEquals(List.of(second), telemetry.dispatched());
         assertEquals(100L, telemetry.predictedMs());
+        assertEquals(Map.of(second, 100L),
+                fixture.slots.unstartedWorkMs(),
+                "cancelled members must not inflate the delivered batch lifetime");
+        assertEquals(125L, fixture.slots.remainingWorkMsAt(second, 1_000L).orElseThrow());
+    }
+
+    @Test
+    void zeroPredictionStillSubmitsTheBatch() {
+        Fixture fixture = new Fixture(701L);
+        ScheduledRequest item = fixture.item(1L);
+
+        fixture.context.deliver(fixture.strategy, List.of(item),
+                "zero", 0, OptionalLong.of(0L));
+
+        assertEquals(List.of(item), fixture.submission.command().exactItems());
+        assertEquals(Map.of(item, 0L), fixture.slots.unstartedWorkMs());
+    }
+
+    @Test
+    void unknownPrecedingWorkStillSubmitsWithUnknownRemainingTime() {
+        Fixture fixture = new Fixture(701L);
+        ScheduledRequest item = fixture.item(1L);
+        fixture.capabilities.precedingWork(new WorkSnapshot(2_000L, List.of(), List.of(), 1L));
+
+        fixture.context.deliver(fixture.strategy, List.of(item),
+                "unknown", 0, OptionalLong.of(100L));
+
+        assertEquals(List.of(item), fixture.submission.command().exactItems());
+        assertEquals(Map.of(item, 100L),
+                fixture.slots.unstartedWorkMs());
+        assertTrue(fixture.slots.remainingWorkMsAt(item, 2_000L).isEmpty());
     }
 
     private static final class Fixture {

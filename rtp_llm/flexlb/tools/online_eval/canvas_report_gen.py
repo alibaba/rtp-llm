@@ -2288,7 +2288,7 @@ def main():
         )
         # master 侧队列深度（master prometheus G3，1s 采样；label 变体已聚合）。
         # 新口径（batcher_ts_by_role）：per-engine batcher 队列按 role 拆分；
-        # 只画 prefill avg/engine + 128 容量线（decode 侧队列语义不同，不画）；
+        # 只画 prefill avg/engine（请求数量不是 token 容量，不叠加容量线）；
         # prefill 另给 top-5 引擎序列（决策时点深度的 1s 采样近似；
         # Top/Bottom-5 全集见 2.1 节）。旧口径（仅 batcher_ts，P+D 合计）
         # 退化画集群总量。
@@ -2310,22 +2310,13 @@ def main():
                     "master 队列深度：batcher prefill（avg/engine）",
                     "x = 压测时间（s，1s 采样）；y = 队列深度 / 引擎（prefill 集群总量 ÷ "
                     + num(p_engines)
-                    + "）；容量线 = maxWaitingRequestsPerPrefillWorker 128（prefill 口径）",
+                    + "）；仅表示等待请求数量；并发上限由 dispatcher.maxInflightPerPrefillWorker 控制",
                     emit_chart(
                         "LineChart",
                         BRT,
                         230,
                         [
                             ("pq", "prefill（avg/engine）", p_bq_avg, "info"),
-                            (
-                                "cap",
-                                "容量 128",
-                                const(
-                                    "batchCap",
-                                    num_arr([128] * len(batcher_ts_by_role)),
-                                ),
-                                "danger",
-                            ),
                         ],
                     ),
                 )
@@ -2370,7 +2361,7 @@ def main():
                             "P master-batcher 队列深度 Top-5",
                             "master batcher 队列深度（决策时点 1s 采样近似，5s 窗口）；"
                             "数据源 master.json prometheus_timeseries per-engine；"
-                            "按峰值排序；容量上限 128（maxWaitingRequestsPerPrefillWorker）",
+                            "按峰值排序；请求数量观测，不表示 token 容量上限",
                             emit_chart("LineChart", TET, 230, top_lines),
                         )
                     )
@@ -2592,7 +2583,7 @@ def main():
                 "P master-batcher 队列深度",
                 "per-engine master batcher 队列深度（决策时点 1s 采样近似，"
                 "5s 窗口）；数据源 master.json prometheus_timeseries；"
-                "按峰值排序；容量上限 128（maxWaitingRequestsPerPrefillWorker）",
+                "按峰值排序；请求数量观测，不表示 token 容量上限",
             ),
             (
                 "p_running",

@@ -24,11 +24,9 @@ import java.util.function.LongSupplier;
  * the request registry; a slot stores the opaque registration returned
  * by this class.
  *
- * <p>Maintenance always completes its three phases in this order:
- * stale-request reduction, exact tombstone removal, then endpoint-orphan
- * sweeping. A failure in one slot is surfaced after the remaining slots and
- * later phases have run, so a single bad generation cannot stop retention
- * progress for every other generation.
+ * <p>Maintenance removes settled tombstones before sweeping endpoint orphans.
+ * A request's inactivity deadline bounds local ownership independently of
+ * Engine cancellation acknowledgements or terminal status delivery.
  */
 final class ExpirationTimer implements AutoCloseable {
 
@@ -43,8 +41,7 @@ final class ExpirationTimer implements AutoCloseable {
     /** Exact capabilities detached together from one slot during shutdown. */
     record DetachedDeadlines(
             RequestDeadline requestDeadline,
-            AcceptanceDeadline acceptanceDeadline,
-            InactivityDeadline inactivityDeadline) {
+            DecisionDeadline decisionDeadline, InactivityDeadline inactivityDeadline) {
     }
 
     private enum CloseState {
@@ -129,18 +126,19 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    /** Exact one-shot capability for one delivered request's acceptance deadline. */
-    static final class AcceptanceDeadline extends DeadlineRegistration {
-        private AcceptanceDeadline(ExpirationTimer owner) {
-            super(owner);
-        }
+    /** Wake-up to recheck the latest request activity, not proof of expiration. */
+    static final class InactivityDeadline extends DeadlineRegistration {
+        private InactivityDeadline(ExpirationTimer owner) { super(owner); }
     }
 
-    /** Exact one-shot wake-up for this generation's inactivity deadline. */
-    static final class InactivityDeadline extends DeadlineRegistration {
-        private InactivityDeadline(ExpirationTimer owner) {
+    /** Exact one-shot capability for request visibility and PD handoff detection. */
+    static final class DecisionDeadline extends DeadlineRegistration {
+        private final long deadlineAtMs;
+        private DecisionDeadline(ExpirationTimer owner, long deadlineAtMs) {
             super(owner);
+            this.deadlineAtMs = deadlineAtMs;
         }
+        long deadlineAtMs() { return deadlineAtMs; }
     }
 
     private final RequestRegistry lifecycle;
@@ -148,7 +146,7 @@ final class ExpirationTimer implements AutoCloseable {
     private final BatchSchedulerReporter reporter;
     private final LongSupplier clock;
     private final ScheduledThreadPoolExecutor executor;
-    private final Object acceptanceGate = new Object();
+    private final Object registrationMonitor = new Object();
     private CloseState closeState = CloseState.OPEN;
     private int inflightRegistrations;
     private Throwable closeFailure;
@@ -207,28 +205,24 @@ final class ExpirationTimer implements AutoCloseable {
     }
 
     /**
-     * Register one acceptance deadline relative to the current clock value.
+     * Register one exact stage deadline from the current delivery evidence.
      *
      * @return its exact slot-owned capability, or null when the slot rejected
      *         installation because another lifecycle transition already won
      */
-    AcceptanceDeadline registerAcceptanceDeadline(
+    DecisionDeadline registerDecisionDeadline(
             RequestSlot exactSlot,
-            long timeoutMs) {
-        if (timeoutMs < 0L) {
-            throw new IllegalArgumentException(
-                    "timeoutMs must be non-negative");
-        }
+            long deadlineAtMs) {
         if (lifecycle.isShuttingDown()) {
             return null;
         }
         try {
             return register(
                     exactSlot,
-                    new AcceptanceDeadline(this),
-                    timeoutMs,
-                    this::installAcceptanceDeadline,
-                    this::acceptanceDeadlineExpired);
+                    new DecisionDeadline(this, deadlineAtMs),
+                    delayUntil(deadlineAtMs),
+                    this::installDecisionDeadline,
+                    this::decisionDeadlineExpired);
         } catch (RuntimeException timerStopped) {
             if (lifecycle.isShuttingDown()) {
                 return null;
@@ -273,7 +267,7 @@ final class ExpirationTimer implements AutoCloseable {
             }
         }
         try {
-            lifecycle.cancelForRequestInactivity(slot, clock.getAsLong());
+            lifecycle.expireInactiveRequest(slot, clock.getAsLong());
         } finally {
             // Engine facts only renew the timestamp. Rearm when the old wake-up
             // fires, so frequent status reports do not create new timer tasks.
@@ -289,18 +283,18 @@ final class ExpirationTimer implements AutoCloseable {
         return requireOwner(exactDeadline).cancel();
     }
 
-    boolean cancel(AcceptanceDeadline exactDeadline) {
+    boolean cancel(DecisionDeadline exactDeadline) {
         return requireOwner(exactDeadline).cancel();
     }
 
-    void release(RequestSlot.AdmissionCleanup cleanup) {
+    void release(DecisionDeadline cleanup) {
         if (cleanup == null) {
             return;
         }
         try {
-            cleanup.release(this);
+            cancel(cleanup);
         } catch (Throwable failure) {
-            Logger.error("Admission cleanup isolated", failure);
+            Logger.error("Decision timer cleanup failed", failure);
         }
     }
 
@@ -314,18 +308,10 @@ final class ExpirationTimer implements AutoCloseable {
     /** Run one complete maintenance pass using one dynamic policy snapshot. */
     void maintain(
             BiConsumer<Long, LongPredicate> exactSweeper) {
-        if (lifecycle.isShuttingDown()
-                || !config.loadBalanceConfig().isQueue()) {
+        if (lifecycle.isShuttingDown()) {
             return;
         }
-        long ttlMs = config.loadBalanceConfig()
-                .queueScheduler()
-                .getLifecycle()
-                .getStaleInflightTimeoutMs();
-        if (ttlMs < 0L) {
-            throw new IllegalArgumentException(
-                    "stale inflight timeout must be non-negative");
-        }
+        long ttlMs = config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
         long nowMs = clock.getAsLong();
         List<RequestSlot> exactSlots = List.of();
         Throwable failure = null;
@@ -333,17 +319,6 @@ final class ExpirationTimer implements AutoCloseable {
             exactSlots = lifecycle.snapshotSlots();
         } catch (RuntimeException | Error snapshotFailure) {
             failure = snapshotFailure;
-        }
-
-        int staleReduced = 0;
-        for (RequestSlot exactSlot : exactSlots) {
-            try {
-                if (lifecycle.reduceStale(exactSlot, nowMs, ttlMs)) {
-                    staleReduced++;
-                }
-            } catch (RuntimeException | Error reductionFailure) {
-                failure = append(failure, reductionFailure);
-            }
         }
 
         long tombstoneCutoff = subtractSaturated(nowMs, ttlMs);
@@ -361,18 +336,6 @@ final class ExpirationTimer implements AutoCloseable {
             failure = append(failure, sweepFailure);
         }
         rethrow(failure);
-        if (staleReduced > 0) {
-            // Scheduler-ledger eviction: report through the split-by-ledger
-            // series (role=SCHEDULER + engineIp="scheduler" + reason) so it
-            // is no longer mislabelled as a PREFILL endpoint series. This
-            // architecture has a single stale-inflight exit, so the reason
-            // bucket is always "ttl".
-            reporter.reportSchedulerInflightTtlExpired(
-                    "ttl", staleReduced);
-            Logger.info(
-                    "event=scheduler_inflight_ttl_eviction evicted={} scanned={}",
-                    staleReduced, exactSlots.size());
-        }
     }
 
     private <D extends DeadlineRegistration> D register(
@@ -417,12 +380,12 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    private boolean installAcceptanceDeadline(
+    private boolean installDecisionDeadline(
             RequestSlot exactSlot,
-            AcceptanceDeadline exactDeadline) {
+            DecisionDeadline exactDeadline) {
         synchronized (exactSlot) {
             return lifecycle.isCurrentSlot(exactSlot)
-                    && exactSlot.installAcceptanceDeadline(exactDeadline);
+                    && exactSlot.installDecisionDeadline(exactDeadline);
         }
     }
 
@@ -438,15 +401,15 @@ final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    private void acceptanceDeadlineExpired(
+    private void decisionDeadlineExpired(
             RequestSlot exactSlot,
-            AcceptanceDeadline exactDeadline) {
-        RequestSlot.AcceptanceExpiry expiry;
+            DecisionDeadline exactDeadline) {
+        RequestSlot.DecisionExpiry expiry;
         synchronized (exactSlot) {
-            expiry = exactSlot.expireAcceptanceDeadline(exactDeadline);
+            expiry = exactSlot.expireDecisionDeadline(exactDeadline);
         }
         if (expiry != null) {
-            lifecycle.acceptanceExpired(expiry);
+            lifecycle.decisionExpired(expiry);
         }
     }
 
@@ -458,7 +421,7 @@ final class ExpirationTimer implements AutoCloseable {
     }
 
     private void beginRegistration() {
-        synchronized (acceptanceGate) {
+        synchronized (registrationMonitor) {
             if (closeState != CloseState.OPEN) {
                 throw new RejectedExecutionException(
                         "ExpirationTimer is closing");
@@ -468,14 +431,14 @@ final class ExpirationTimer implements AutoCloseable {
     }
 
     private void endRegistration() {
-        synchronized (acceptanceGate) {
+        synchronized (registrationMonitor) {
             if (inflightRegistrations <= 0) {
                 throw new IllegalStateException(
                         "ExpirationTimer registration count underflow");
             }
             inflightRegistrations--;
             if (inflightRegistrations == 0) {
-                acceptanceGate.notifyAll();
+                registrationMonitor.notifyAll();
             }
         }
     }
@@ -543,7 +506,7 @@ final class ExpirationTimer implements AutoCloseable {
     public void close() {
         boolean interrupted = false;
         boolean closeOwner = false;
-        synchronized (acceptanceGate) {
+        synchronized (registrationMonitor) {
             if (closeState == CloseState.OPEN) {
                 closeState = CloseState.CLOSING;
                 closeOwner = true;
@@ -551,7 +514,7 @@ final class ExpirationTimer implements AutoCloseable {
             while (closeState == CloseState.CLOSING
                     && (!closeOwner || inflightRegistrations != 0)) {
                 try {
-                    acceptanceGate.wait();
+                    registrationMonitor.wait();
                 } catch (InterruptedException interruption) {
                     interrupted = true;
                 }
@@ -572,10 +535,10 @@ final class ExpirationTimer implements AutoCloseable {
         } catch (RuntimeException | Error shutdownFailure) {
             failure = append(failure, shutdownFailure);
         } finally {
-            synchronized (acceptanceGate) {
+            synchronized (registrationMonitor) {
                 closeFailure = failure;
                 closeState = CloseState.CLOSED;
-                acceptanceGate.notifyAll();
+                registrationMonitor.notifyAll();
             }
             if (interrupted) {
                 Thread.currentThread().interrupt();
@@ -604,9 +567,8 @@ final class ExpirationTimer implements AutoCloseable {
             failure = cancelDetached(
                     detached.requestDeadline(), failure);
             failure = cancelDetached(
-                    detached.acceptanceDeadline(), failure);
-            failure = cancelDetached(
-                    detached.inactivityDeadline(), failure);
+                    detached.decisionDeadline(), failure);
+            failure = cancelDetached(detached.inactivityDeadline(), failure);
         }
         return failure;
     }
