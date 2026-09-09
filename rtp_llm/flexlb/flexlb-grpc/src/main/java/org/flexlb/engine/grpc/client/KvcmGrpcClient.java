@@ -212,12 +212,12 @@ public class KvcmGrpcClient {
                 .build();
 
         try {
-            long startTimeUs = System.nanoTime() / 1_000;
+            long startTimeNanos = System.nanoTime();
             GetHostCacheStateResponse response = metaServiceClient.getHostCacheState(
                     currentLeader, request, config.getRequestTimeoutMs());
             grpcReporter.reportCallMetrics(
                     "KVCM_GET_HOST_CACHE_STATE",
-                    System.nanoTime() / 1_000 - startTimeUs,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
                     response.getSerializedSize(),
                     retry);
             ErrorCode code = response.getHeader().getStatus().getCode();

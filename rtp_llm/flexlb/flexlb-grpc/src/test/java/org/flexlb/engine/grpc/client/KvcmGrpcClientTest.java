@@ -14,15 +14,20 @@ import org.flexlb.kvcm.grpc.QueryType;
 import org.flexlb.kvcm.grpc.Status;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class KvcmGrpcClientTest {
@@ -37,7 +42,7 @@ class KvcmGrpcClientTest {
     }
 
     @Test
-    void preservesLogicalWorkerIdentitiesInP2pAwareMatches() {
+    void reportsLogicalWorkerMatchesAndMillisecondCallMetrics() {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         KvcmConfig config = new KvcmConfig();
         KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
@@ -57,26 +62,37 @@ class KvcmGrpcClientTest {
                 RoleType.PREFILL, "default")).thenReturn(QueryType.QT_PREFIX_MATCH);
         when(leaderResolver.resolve()).thenReturn(new GrpcTarget("127.0.0.1", 7001));
         when(metaServiceClient.getHostCacheState(any(), any(), anyLong()))
-                .thenReturn(GetHostCacheStateResponse.newBuilder()
+                .thenAnswer(invocation -> {
+                    TimeUnit.MILLISECONDS.sleep(5L);
+                    return GetHostCacheStateResponse.newBuilder()
                         .setHeader(okHeader())
                         .addHosts(HostCacheMatch.newBuilder()
                                 .setHostIpPort("10.0.0.1:8601@1")
                                 .setLocal(2)
                                 .setP2P1Fetch(8)
                                 .setP2P1TotalMatch(10))
-                        .build());
+                        .build();
+                });
 
+        GrpcReporter reporter = mock(GrpcReporter.class);
         client = new KvcmGrpcClient(
                 configuration,
                 metaServiceClient,
                 leaderResolver,
                 metadataResolver,
-                mock(GrpcReporter.class));
+                reporter);
 
+        long startedAt = System.nanoTime();
         Map<String, org.flexlb.dao.cache.HostCacheMatch> result =
                 client.findMatchingEngines(
                         "request-1", List.of(11L, 22L), 2192L,
                         RoleType.PREFILL, "default");
+
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) + 1L;
+        ArgumentCaptor<Long> duration = ArgumentCaptor.forClass(Long.class);
+        verify(reporter).reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), duration.capture(), anyInt(), eq(false));
+        assertTrue(duration.getValue() >= 5L);
+        assertTrue(duration.getValue() <= elapsedMs, "Call duration must use milliseconds");
 
         assertEquals(2, result.get("10.0.0.1:8601@1").localMatchBlocks());
         assertEquals(8, result.get("10.0.0.1:8601@1").p2pFetchBlocks());
