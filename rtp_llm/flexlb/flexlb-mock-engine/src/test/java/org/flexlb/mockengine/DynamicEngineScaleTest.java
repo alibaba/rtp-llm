@@ -68,7 +68,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  *       cases;</li>
  *   <li>graceful specifics → in-flight request completes normally, drain
  *       deadline expiry falls back to teardown (drained=false), concurrent
- *       removes of one engine are idempotent, and a mid-drain engine stays
+ *       removes of one engine leave a consistent teardown, and a mid-drain engine stays
  *       out of the discovery file even under a concurrent add_engine;</li>
  *   <li>concurrent add×N + remove×M crossfire → the discovery file always
  *       parses completely and its entry set equals the services map;</li>
@@ -300,33 +300,46 @@ class DynamicEngineScaleTest {
     }
 
     @Test
-    void concurrentRemoveOfSameEngineIsIdempotent() throws Exception {
+    void concurrentRemoveOfSameEngineKeepsTeardownConsistent() throws Exception {
         startCluster(model("10", 1.0), 1, 1);
         JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
         int victimPort = added.path("port").asInt();
 
         CountDownLatch startGate = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(2);
-        List<Future<JsonNode>> outcomes = new ArrayList<>();
+        List<Future<HttpResponse<String>>> outcomes = new ArrayList<>();
         try {
             for (int i = 0; i < 2; i++) {
                 outcomes.add(pool.submit(() -> {
                     startGate.await();
-                    return postOk("/remove_engine", "{\"port\":" + victimPort + "}");
+                    return post("/remove_engine", "{\"port\":" + victimPort + "}");
                 }));
             }
             startGate.countDown();
-            for (Future<JsonNode> outcome : outcomes) {
-                // Both callers observe the SAME teardown outcome — one drives
-                // the drain, the other awaits its future; neither sees an
-                // error and neither resurrects the engine.
-                JsonNode removed = outcome.get(30, TimeUnit.SECONDS);
-                assertEquals("ok", removed.path("status").asText());
-                assertEquals(victimPort, removed.path("port").asInt());
+            int successfulRemovals = 0;
+            for (Future<HttpResponse<String>> outcome : outcomes) {
+                // An overlapping drain shares its result. If teardown finishes
+                // before the other handler resolves the victim, the documented
+                // "victim gone" response is 404; client start gates cannot
+                // impose ordering on those server-side lookups.
+                HttpResponse<String> response = outcome.get(30, TimeUnit.SECONDS);
+                JsonNode removed = MAPPER.readTree(response.body());
+                if (response.statusCode() == 200) {
+                    successfulRemovals++;
+                    assertEquals("ok", removed.path("status").asText());
+                    assertEquals("removed", removed.path("action").asText());
+                    assertEquals(victimPort, removed.path("port").asInt());
+                } else {
+                    assertEquals(404, response.statusCode(), response.body());
+                    assertEquals("engine not found for port " + victimPort,
+                            removed.path("error").asText());
+                }
             }
+            assertTrue(successfulRemovals >= 1, "at least one caller must remove the victim");
         } finally {
             pool.shutdownNow();
         }
+        awaitPortRefused(victimPort);
         assertFalse(services.containsKey(victimPort), "services map still holds removed port");
         assertFalse(serversByPort.containsKey(victimPort), "serversByPort still holds removed port");
         // The bootstrap decode-0 is STILL hosted — only the dynamic victim is
