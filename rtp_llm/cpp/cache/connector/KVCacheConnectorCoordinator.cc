@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <pthread.h>
 #include <utility>
 #include <vector>
 
@@ -577,7 +578,18 @@ void KVCacheConnectorCoordinator::initTieredEvictionWorker() {
         tiered_eviction_accepting_ = true;
         tiered_eviction_stopping_  = false;
     }
-    tiered_eviction_worker_ = std::thread([this]() { tieredEvictionLoop(); });
+    // Metrics groups are registered lazily on the first report. Emit an initial
+    // zero-valued sample so all tiered-eviction metrics are discoverable even
+    // before memory pressure selects the first remote-eviction victim.
+    if (metrics_reporter_) {
+        RtpLLMMemoryRemoteEvictionMetricsCollector collector;
+        metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
+                                  RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
+    }
+    tiered_eviction_worker_ = std::thread([this]() {
+        pthread_setname_np(pthread_self(), "MemRemoteEvict");
+        tieredEvictionLoop();
+    });
 }
 
 void KVCacheConnectorCoordinator::stopTieredEvictionWorker() {
@@ -728,6 +740,16 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                     victim.block_size,
                     victim.generation);
             }
+            RTP_LLM_LOG_INFO(
+                "memory remote eviction started, trace_id=%s, blocks=%zu, bytes=%zu, inflight=%zu, memory_total_blocks=%zu, memory_free_blocks=%zu, estimated_d2h_blocks=%zu, timeout_ms=%d",
+                trace_id.c_str(),
+                victims.size(),
+                remote_evict_bytes,
+                victims.size(),
+                memory_connector_->totalMemoryBlocks(),
+                memory_connector_->freeMemoryBlocks(),
+                estimated_d2h_blocks,
+                kv_cache_config_.memory_cache_remote_eviction_timeout_ms);
             const auto remote_evict_started = std::chrono::steady_clock::now();
             bool remote_success = false;
             try {
@@ -780,10 +802,11 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                                           RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
             }
             RTP_LLM_LOG_INFO(
-                "memory remote eviction finished, trace_id=%s, unique_id=%s, blocks=%zu, bytes=%zu, latency_us=%ld, inflight=0, success=%d",
-                trace_id.c_str(),
+                "memory remote eviction finished, trace_id=%s, attempted_blocks=%zu, success_blocks=%zu, failed_blocks=%zu, bytes=%zu, latency_us=%ld, inflight=0, success=%d",
                 trace_id.c_str(),
                 victims.size(),
+                remote_success ? victims.size() : 0,
+                remote_success ? 0 : victims.size(),
                 remote_evict_bytes,
                 remote_evict_latency_us,
                 remote_success);
