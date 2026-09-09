@@ -22,11 +22,22 @@ public:
     using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
 
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
+        // Ticket 1 Phase 2b: is_fake_stream_ must mean "this round carries NO real
+        // work" (ALL streams fake), not "some stream is fake" (ANY). Consumers gate
+        // real post-round work on !is_fake_stream (e.g. MtpExecutor::decodeStep's
+        // spec-logits/commit path), so under the ANY semantics a padded batch
+        // (1 real + N-1 fake, RTP_LLM_DECODE_FIXED_BS) is misclassified as a fake
+        // mirror round and the real stream's tokens are never committed —
+        // measured: seq frozen at 8193 across 402 rounds, zero throws, GPUs busy.
+        // Inert unless a mixed batch exists: without the fixed-bs padding, fakes
+        // are added only when a rank is idle, so every batch is all-real or
+        // all-fake and both semantics agree.
+        size_t fake_count = 0;
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();
             auto next_batch_size = stream->nextBatchSize();
             if (stream->isFakeStream()) {
-                is_fake_stream_ = true;
+                ++fake_count;
             }
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
@@ -72,6 +83,7 @@ public:
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
         }
+        is_fake_stream_ = !streams.empty() && fake_count == streams.size();
     }
 
     size_t totalDecodeBatchSize() const {

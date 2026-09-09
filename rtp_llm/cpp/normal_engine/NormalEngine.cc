@@ -650,6 +650,16 @@ bool NormalEngine::isDSpark() {
     return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
 }
 
+// Ticket 1 Phase 2b — constant decode batch size for rank-invariant graph keys.
+// RTP_LLM_DECODE_FIXED_BS=N (default 0 = off = ship behaviour byte-identical).
+static int decodeFixedBs() {
+    static const int value = [] {
+        const char* e = getenv("RTP_LLM_DECODE_FIXED_BS");
+        return (e && *e) ? atoi(e) : 0;
+    }();
+    return value;
+}
+
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
@@ -662,12 +672,59 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                         MtpExecutor::createMinFakePrefillStream(1, model_config_, runtime_config, resource_context_));
                 }
                 break;
-            case RoleType::DECODE:
+            case RoleType::DECODE: {
+                // Ticket 1 Phase 2b — rank-uniform decode batch size.
+                //
+                // Without this, an idle DP rank is padded with exactly ONE fake
+                // stream while a busy rank keeps its real bs, so DP ranks replay
+                // DIFFERENT CUDA-graph keys in the same round. fixed_ep bakes its
+                // AG/AR sizes per graph key, so the ranks then issue mismatched
+                // collective sizes and pin the GPUs at 100% with zero progress
+                // (measured: Ticket-1 v3 — dense capture {1,2,3,4,8}, c=4 wave
+                // deadlock, bs 3 vs 1 across ranks).
+                //
+                // Padding EVERY rank to a constant N makes the graph key
+                // rank-invariant by construction and adds ZERO collectives. That
+                // is deliberate: the v1 verdict forbids a happy-path agreement
+                // all-reduce here (a per-step AR hung even plain c=1 traffic on
+                // cadence skew vs the fake-mirror rounds). The prefillStep
+                // world-max AR (MtpExecutor.cc ~L967) stays available as the
+                // fallback if constant padding ever proves too expensive.
+                //
+                // Contract: decode bs must be <= N and N must be in the capture
+                // set (--decode_capture_config). A bs larger than N is left
+                // UNPADDED on purpose — padding it to a rank-local value would
+                // reintroduce the divergence, so instead the existing
+                // capture-bound CHECK fails the batch cleanly (Phase 1 isolation
+                // keeps the server alive) and the error is logged.
+                const int fixed_bs = decodeFixedBs();
+                if (fixed_bs > 0) {
+                    const int n = static_cast<int>(streams.size());
+                    if (n <= fixed_bs) {
+                        for (int i = n; i < fixed_bs; ++i) {
+                            streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
+                                propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
+                        }
+                    } else {
+                        static int over_log_budget = 50;
+                        if (over_log_budget-- > 0) {
+                            RTP_LLM_LOG_ERROR(
+                                "[Ticket1-P2b] rank %d decode bs %d exceeds RTP_LLM_DECODE_FIXED_BS %d: not "
+                                "padding (a rank-local bs would diverge the graph keys and deadlock the EP "
+                                "collectives). Raise RTP_LLM_DECODE_FIXED_BS or cap decode concurrency.",
+                                (int)parallelism_config.world_rank,
+                                n,
+                                fixed_bs);
+                        }
+                    }
+                    break;
+                }
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
                         propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
                 }
                 break;
+            }
             case RoleType::PDFUSION: {
                 bool has_prefill = false;
                 bool has_decode  = false;

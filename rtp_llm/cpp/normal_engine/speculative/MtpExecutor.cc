@@ -2299,6 +2299,59 @@ void MtpExecutor::releaseAllModelBuffers() {
     }
 }
 
+// Ticket 1 Phase 2a — DSpark admission control: lifecycle-uniform decode batches.
+// RTP_LLM_DSPARK_ADMISSION_CONTROL=1 arms it (default off = ship behaviour).
+static bool dsparkAdmissionControl() {
+    static const bool enabled = [] {
+        const char* e = getenv("RTP_LLM_DSPARK_ADMISSION_CONTROL");
+        return e && std::string(e) == "1";
+    }();
+    return enabled;
+}
+
+// Give a FRESH (PD-handoff) DSpark stream the device round state a STEADY stream
+// already has, choosing values so that both arms of dsparkRoundHeadState and
+// dsparkNewestToken compute IDENTICAL numbers:
+//
+//   committed_end: steady = next_seq_len_gpu - 1 | fresh = sequence_lengths[i]
+//                  (and the gatherer's fresh arm writes seqLength()-1 there)
+//                  -> seed next_seq_len_gpu = seqLength()
+//   anchor:        steady = accept_tokens[accept_len-1]
+//                  | fresh = completeTokenIds()[0][seqLength()-1]
+//                  -> seed accept_len = 1, accept_tokens[0] = that same token
+//
+// Field mapping mirrors prepareGrpcMtpDeviceState (next_seq_len = seqLength(),
+// accept_len = 1, epoch = 0) and createMinFakeDecodeStream's dspark pattern
+// (propose/hidden/probs left undefined). Fires once per stream lifetime: after
+// the round the engine publishes real device state, so the predicate stops
+// matching. Rank-local and collective-free by construction.
+static void seedDsparkFreshRoundState(const GenerateStreamPtr& stream, int64_t propose_step) {
+    const int seq_length = stream->seqLength();
+    if (seq_length <= 0) {
+        return;
+    }
+    const auto ids        = stream->completeTokenIdsVec(0);
+    int        anchor_idx = seq_length - 1;
+    if (anchor_idx >= static_cast<int>(ids.size())) {
+        anchor_idx = static_cast<int>(ids.size()) - 1;
+    }
+    const int32_t anchor    = anchor_idx >= 0 ? static_cast<int32_t>(ids[anchor_idx]) : 0;
+    const auto    cuda_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    std::vector<int32_t> accept_tokens(static_cast<size_t>(propose_step) + 1, 0);
+    accept_tokens[0] = anchor;
+    stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+        .epoch                  = 0,
+        .accept_len_gpu         = torch::ones({1}, cuda_i32),
+        .accept_tokens_gpu      = torch::tensor(accept_tokens, cuda_i32).reshape({1, propose_step + 1}),
+        .next_seq_len_gpu       = torch::full({1}, seq_length, cuda_i32),
+        .propose_tokens_gpu     = torch::Tensor(),
+        .last_hidden_states_gpu = torch::Tensor(),
+        .draft_all_probs_gpu    = torch::Tensor(),
+        .last_real_seq_len      = seq_length,
+        .next_real_seq_len      = seq_length,
+    });
+}
+
 void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                                  std::list<GenerateStreamPtr>&       prefill_streams,
                                  std::list<GenerateStreamPtr>&       decode_streams) {
@@ -2327,6 +2380,36 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             prefill_streams.push_back(stream);
         } else {
             stream->setScoreLen(propose_step_ + 1);
+            // Ticket 1 Phase 2a — make every DSpark decode stream STEADY before
+            // the round is built. A PD-handoff DSpark stream arrives with no
+            // MtpAsyncDeviceState: prepareGrpcMtpDeviceState only seeds streams
+            // whose SP buffer carries a gRPC tensors_holder (classic MTP
+            // probs+hidden) and DSpark's holder is empty, so that loop
+            // `continue`s silently (measured: zero [mtp-grpc] lines on the
+            // DSpark decode lane). Such a stream is "fresh" and takes the
+            // host-mirror arms, while EVERY fake stream is "steady"
+            // (createMinFakeDecodeStream seeds device state) — so a batch mixing
+            // a real fresh stream with fakes is lifecycle-non-uniform, which is
+            // §3.2's semantic trigger. Seeding here removes the fresh class from
+            // decode rounds entirely, which is strictly stronger than splitting
+            // seed/steady lanes and needs no cross-rank agreement (lanes would:
+            // ranks 1-3 cannot see rank 0's fresh stream, and a happy-path
+            // agreement AR is forbidden by the v1 verdict).
+            if (dsparkAdmissionControl() && is_dspark_ && !stream->isFakeStream()) {
+                const auto& next_seq_len = stream->getNextSeqLenGpu();
+                if (!next_seq_len.defined() || !next_seq_len.is_cuda()) {
+                    seedDsparkFreshRoundState(stream, propose_step_);
+                    static std::atomic<int> p2a_budget{200};
+                    if (p2a_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                        fprintf(stderr,
+                                "[P2A-SEED] r=%d sid=%lld seq=%d fresh->steady seeded\n",
+                                (int)parallelism_config_.world_rank,
+                                (long long)stream->streamId(),
+                                (int)stream->seqLength());
+                        fflush(stderr);
+                    }
+                }
+            }
             if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
                 auto sp_output_buffer =
                     makeFakeSPOutputBuffer(data_type_, hidden_size_, draft_vocab_size_, propose_step_, is_dspark_);
