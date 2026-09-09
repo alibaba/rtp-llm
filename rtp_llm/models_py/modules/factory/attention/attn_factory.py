@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -21,6 +22,60 @@ PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
+
+
+def _get_glm5_trtllm_impl(
+    model_config,
+    attn_configs,
+    parallelism_config,
+    weight,
+    attn_inputs,
+    fmha_config,
+    is_cuda_graph,
+) -> Optional[MlaImplBase]:
+    """Explicit experimental selection, outside the automatic fallback loop."""
+    backend = os.environ.get("GLM5_SPARSE_DECODE_BACKEND", "flashmla")
+    if backend == "flashmla":
+        return None
+    if backend != "trtllm_gen":
+        raise ValueError(f"Unknown GLM5_SPARSE_DECODE_BACKEND: {backend!r}")
+    multi_token_decode = bool(getattr(attn_inputs, "is_target_verify", False)) or (
+        bool(getattr(attn_inputs, "is_draft_extend", False)) and attn_configs.is_sparse
+    )
+    if attn_inputs.is_prefill and not multi_token_decode:
+        # In particular, P/CP prefill keeps its current 656-byte writer/reader.
+        return None
+    if str(getattr(model_config, "model_type", "")) not in ("glm_5", "glm_5_mtp"):
+        raise ValueError("TRT sparse Decode is currently limited to GLM5x models")
+    if fmha_config is not None and fmha_config.disable_flash_infer:
+        raise ValueError("TRT sparse Decode conflicts with disable_flash_infer")
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.trtllm_sparse_impl import (
+        TrtllmSparseMlaImpl,
+    )
+
+    if not TrtllmSparseMlaImpl.support(attn_configs, attn_inputs):
+        raise ValueError(
+            "Unsupported TRT sparse Decode configuration: requires GLM5x sparse "
+            "MLA, BF16 activations, FP8 KV, H8/16/32/64, page64, TopK2048"
+        )
+    if not TrtllmSparseMlaImpl.support_parallelism_config(parallelism_config):
+        raise ValueError(
+            "Unsupported TRT sparse Decode parallelism: active CP or "
+            "rank-sharded KV caches are not supported"
+        )
+    # Metadata-only PREFILL_CP is allowed, but actual CP execution and compact
+    # rank-local RR block tables require a different reader/collective path.
+    return TrtllmSparseMlaImpl(
+        attn_configs,
+        attn_inputs,
+        weight.weights,
+        cos_sin_cache=weight.get_global_weight(W.rope_cos_sin_cache),
+        fmha_config=fmha_config,
+        quant_config=model_config.quant_config,
+        max_seq_len=model_config.max_seq_len,
+        is_cuda_graph=is_cuda_graph,
+        parallelism_config=parallelism_config,
+    )
 
 
 def get_mla_impl(
@@ -254,6 +309,17 @@ class AttnImplFactory(object):
             parallelism_config.get_attn_tp_size()
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
+        explicit_impl = _get_glm5_trtllm_impl(
+            model_config,
+            attn_configs,
+            parallelism_config,
+            weight,
+            attn_inputs,
+            fmha_config,
+            is_cuda_graph,
+        )
+        if explicit_impl is not None:
+            return explicit_impl
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(

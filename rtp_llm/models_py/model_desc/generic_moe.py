@@ -638,7 +638,8 @@ class GenericMoeDecoderLayer(nn.Module):
             reuse_topk_indices=force_reuse_topk_indices,
         )
 
-        # Run RTP's existing FlashMLA interface explicitly.
+        # Dispatch to the selected sparse attention backend. The backend owns
+        # any temporary cache conversion; CMP keeps the original paged KV ABI.
         mla_output = cmp.sparse_mla(
             mla_query,
             topk_indices,
