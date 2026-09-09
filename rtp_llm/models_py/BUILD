@@ -77,9 +77,9 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
-        # cuda13 locks currently ship flash-mla (+tilelang on arm; no fast-hadamard).
+        # cuda13 locks ship flash-mla and tilelang, but no fast-hadamard.
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
-        "@//:using_cuda13_x86": ["flash-mla"],
+        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
         "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],

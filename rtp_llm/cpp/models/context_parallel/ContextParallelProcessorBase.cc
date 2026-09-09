@@ -284,8 +284,7 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         });
     }
     auto prefix_lengths = prefix_lengths_on_device ? model_input.prefix_lengths.cpu() : model_input.prefix_lengths;
-    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths
-                                || prefix_lengths.numel() == static_cast<int64_t>(num_prefill_stream),
+    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || prefix_lengths.numel() == static_cast<int64_t>(num_prefill_stream),
                             "CP prefix_lengths must match the prefill stream count");
     // prefix_lengths_ptr is indexed linearly below, and .cpu() keeps the source stride.
     RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || prefix_lengths.is_contiguous(),
@@ -332,8 +331,9 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     const bool           need_source_map = need_token_remap || has_prefix_reuse;
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
-    RTP_LLM_CHECK_WITH_INFO(!need_source_map || num_decode_stream == 0,
-                            "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
+    RTP_LLM_CHECK_WITH_INFO(
+        !need_source_map || num_decode_stream == 0,
+        "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
     if (need_source_map) {
         cp_select_indices.reserve(cp_split_input_tokens.numel());
         cp_valid_mask.reserve(cp_split_input_tokens.numel());
@@ -496,6 +496,7 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_actual_input_lengths_cpu = input_lengths_cpu_tensor;
+    cp_params.prefill_prefix_lengths_cpu       = prefix_lengths;
 #endif
 }
 

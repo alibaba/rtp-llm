@@ -27,7 +27,7 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
@@ -119,6 +119,11 @@ class CPContext:
     # straight to the local pool. Plumbed from
     # ``parallelism_config.prefill_cp_config.kv_cache_sharded``.
     kv_cache_sharded: bool = False
+    input_lengths_global_host: Optional[Tuple[int, ...]] = None
+    prefix_lengths_host: Optional[Tuple[int, ...]] = None
+    _full_prefill_positions_cache: Optional[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ] = field(default=None, init=False, repr=False, compare=False)
 
 
 @dataclass
@@ -323,6 +328,8 @@ def build_cp_context_for_forward(
     num_tokens: int,
     device: torch.device,
     prefix_lengths: Optional[torch.Tensor] = None,
+    prefix_lengths_host: Optional[torch.Tensor] = None,
+    chunk_lengths_device: Optional[torch.Tensor] = None,
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """`build_cp_context` plus the shared prefix->position-offset convention.
@@ -335,7 +342,7 @@ def build_cp_context_for_forward(
     """
     position_offset: Union[int, torch.Tensor] = 0
     if prefix_lengths is not None and int(prefix_lengths.numel()) > 0:
-        position_offset = prefix_lengths.to(device=device, dtype=torch.long)
+        position_offset = prefix_lengths
     return build_cp_context(
         cp_info,
         cp_size,
@@ -343,8 +350,17 @@ def build_cp_context_for_forward(
         num_tokens,
         device,
         position_offset=position_offset,
+        position_offset_host=prefix_lengths_host,
+        chunk_lengths_device=chunk_lengths_device,
         kv_cache_sharded=kv_cache_sharded,
     )
+
+
+def _host_int_tuple(values: torch.Tensor) -> Tuple[int, ...]:
+    if values.dim() != 1:
+        raise ValueError(f"expected 1-D length metadata, got {tuple(values.shape)}")
+    host_values = values if values.device.type == "cpu" else values.cpu()
+    return tuple(int(value) for value in host_values.tolist())
 
 
 def build_cp_context(
@@ -354,6 +370,8 @@ def build_cp_context(
     chunk_length: int,
     device: torch.device,
     position_offset: Union[int, torch.Tensor] = 0,
+    position_offset_host: Optional[torch.Tensor] = None,
+    chunk_lengths_device: Optional[torch.Tensor] = None,
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
@@ -371,62 +389,175 @@ def build_cp_context(
             f"padded_seq_len({padded_seq_len})"
         )
 
+    prepare_fusion_requested = False
+    try:
+        from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
+            cp_metadata_fusion_supported,
+        )
+
+        prepare_fusion_requested = (
+            torch.device(device).type == "cuda" and cp_metadata_fusion_supported()
+        )
+    except (ImportError, ModuleNotFoundError):
+        pass
+
     actual_input_lengths_cpu = getattr(
         cp_info, "prefill_actual_input_lengths_cpu", None
     )
     input_lengths_global: Optional[torch.Tensor] = None
     cu_seqlens_global: Optional[torch.Tensor] = None
+    input_lengths_global_host: Optional[Tuple[int, ...]] = None
     if actual_input_lengths_cpu is not None and actual_input_lengths_cpu.numel() > 0:
-        input_lengths_global = actual_input_lengths_cpu.to(
-            device=device, dtype=torch.int32
-        ).contiguous()
-        zero = torch.zeros(1, dtype=torch.int32, device=device)
-        cu_seqlens_global = torch.cat(
-            [zero, torch.cumsum(input_lengths_global, dim=0).to(torch.int32)]
-        ).contiguous()
+        input_lengths_global_host = _host_int_tuple(actual_input_lengths_cpu)
 
     chunk_lengths_obj = getattr(cp_info, "prefill_cp_chunk_lengths", None)
-    if chunk_lengths_obj is not None and chunk_lengths_obj.numel() > 0:
+    if prepare_fusion_requested and input_lengths_global_host is not None:
+        alignment = 2 * int(cp_size)
+        chunk_lengths = [
+            ((length + alignment - 1) // alignment) * 2
+            for length in input_lengths_global_host
+        ]
+    elif chunk_lengths_obj is not None and chunk_lengths_obj.numel() > 0:
         chunk_lengths = [int(v) for v in chunk_lengths_obj.detach().cpu().tolist()]
-    elif input_lengths_global is not None and input_lengths_global.numel() == 1:
+    elif input_lengths_global_host is not None and len(input_lengths_global_host) == 1:
         chunk_lengths = [chunk_length]
     else:
         # Test/legacy fallback: a single stream with the caller-provided
         # aggregate rank-local chunk length.
         chunk_lengths = [chunk_length]
 
-    assert sum(chunk_lengths) == chunk_length, (
-        f"sum(prefill_cp_chunk_lengths)={sum(chunk_lengths)} != "
-        f"chunk_length={chunk_length}"
-    )
-    for i, per_req_chunk in enumerate(chunk_lengths):
-        assert per_req_chunk % 2 == 0, (
-            f"prefill_cp_chunk_lengths[{i}]={per_req_chunk} must be even "
-            "for zigzag CP"
-        )
+    assert (
+        sum(chunk_lengths) == chunk_length
+    ), f"sum(prefill_cp_chunk_lengths)={sum(chunk_lengths)} != chunk_length={chunk_length}"
+    assert all(
+        length % 2 == 0 for length in chunk_lengths
+    ), "prefill_cp_chunk_lengths must be even for zigzag CP"
 
-    if input_lengths_global is not None:
-        B = int(input_lengths_global.numel())
+    if input_lengths_global_host is not None:
+        B = len(input_lengths_global_host)
     else:
         B = len(chunk_lengths)
-    assert B == len(
-        chunk_lengths
-    ), f"num global lengths ({B}) != num CP chunks ({len(chunk_lengths)})"
+    assert B == len(chunk_lengths), "global lengths and CP chunks must match"
 
     if isinstance(position_offset, torch.Tensor):
-        prefix_lengths = position_offset.to(
-            device=device, dtype=torch.long
-        ).contiguous()
+        host_source = (
+            position_offset_host
+            if prepare_fusion_requested
+            and position_offset_host is not None
+            and int(position_offset_host.numel()) > 0
+            else position_offset
+        )
+        prefix_lengths_host_list = list(_host_int_tuple(host_source))
+        if len(prefix_lengths_host_list) == 1 and B > 1:
+            prefix_lengths_host_list *= B
+        prefix_lengths = position_offset.to(device=device).contiguous()
         if prefix_lengths.numel() == 1 and B > 1:
             prefix_lengths = prefix_lengths.expand(B).contiguous()
     else:
+        prefix_lengths_host_list = [int(position_offset)] * B
         prefix_lengths = torch.full(
             (B,), int(position_offset), dtype=torch.long, device=device
         )
-    assert (
-        prefix_lengths.numel() >= B
-    ), f"prefix_lengths has {prefix_lengths.numel()} entries, expected at least {B}"
+    assert prefix_lengths.numel() >= B, "prefix_lengths must cover every request"
     prefix_lengths = prefix_lengths[:B].contiguous()
+    prefix_lengths_host = tuple(prefix_lengths_host_list[:B])
+
+    if input_lengths_global_host is not None:
+        input_lengths_global = actual_input_lengths_cpu.to(
+            device=device,
+            dtype=torch.int32,
+            non_blocking=prepare_fusion_requested,
+        ).contiguous()
+
+    seq_len_full_host = (
+        sum(input_lengths_global_host)
+        if input_lengths_global_host is not None
+        else None
+    )
+    fused_metadata = None
+    if (
+        prepare_fusion_requested
+        and input_lengths_global is not None
+        and seq_len_full_host is not None
+        and chunk_lengths_obj is not None
+    ):
+        shuffle_indices = getattr(cp_info, "prefill_shuffle_indices", None)
+        if shuffle_indices is not None:
+            chunks_device = (
+                chunk_lengths_device
+                if chunk_lengths_device is not None
+                else chunk_lengths_obj
+            )
+            try:
+                from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
+                    try_build_cp_forward_metadata,
+                )
+
+                fused_metadata = try_build_cp_forward_metadata(
+                    input_lengths_global,
+                    chunks_device.to(device=device).contiguous(),
+                    prefix_lengths,
+                    padding_mask,
+                    restore_indices,
+                    shuffle_indices.to(device=device).contiguous(),
+                    cp_size=cp_size,
+                    cp_rank=cp_rank,
+                    chunk_length=chunk_length,
+                    seq_len_full=seq_len_full_host,
+                )
+            except (ImportError, ModuleNotFoundError):
+                pass
+
+    if fused_metadata is not None:
+        (
+            relative_positions,
+            global_positions,
+            req_id_per_token,
+            local_is_real,
+            unpad_restore,
+            cu_seqlens_global,
+            prefix_lengths,
+        ) = fused_metadata
+        prefix_length = prefix_lengths_host[0] if prefix_lengths_host else 0
+        seq_len_total = max(
+            (
+                prefix + length
+                for prefix, length in zip(
+                    prefix_lengths_host, input_lengths_global_host
+                )
+            ),
+            default=0,
+        )
+        return CPContext(
+            cp_size=int(cp_size),
+            cp_rank=int(cp_rank),
+            chunk_length=int(chunk_length),
+            padded_seq_len=padded_seq_len,
+            seq_len_full=seq_len_full_host,
+            relative_positions=relative_positions,
+            prefix_length=prefix_length,
+            global_positions=global_positions,
+            req_id_per_token=req_id_per_token,
+            prefix_lengths=prefix_lengths,
+            local_is_real=local_is_real,
+            unpad_restore=unpad_restore,
+            seq_len_total=seq_len_total,
+            cp_info=cp_info,
+            input_lengths_global=input_lengths_global,
+            cu_seqlens_global=cu_seqlens_global,
+            unpad_restore_is_prefix=False,
+            chunk_lengths_per_req=tuple(chunk_lengths),
+            kv_cache_sharded=bool(kv_cache_sharded),
+            input_lengths_global_host=input_lengths_global_host,
+            prefix_lengths_host=prefix_lengths_host,
+        )
+
+    prefix_lengths = prefix_lengths.to(device=device, dtype=torch.long).contiguous()
+    if input_lengths_global is not None:
+        zero = torch.zeros(1, dtype=torch.int32, device=device)
+        cu_seqlens_global = torch.cat(
+            [zero, torch.cumsum(input_lengths_global, dim=0).to(torch.int32)]
+        ).contiguous()
 
     if input_lengths_global is not None:
         real_lengths = input_lengths_global.to(device=device, dtype=torch.long)
@@ -458,7 +589,9 @@ def build_cp_context(
         req_relative = torch.cat(
             [even_padded - padded_seq_offset, odd_padded - padded_seq_offset]
         )
-        if req_id < int(real_lengths.numel()):
+        if input_lengths_global_host is not None:
+            max_real_pos = max(input_lengths_global_host[req_id] - 1, 0)
+        elif req_id < int(real_lengths.numel()):
             max_real_pos = max(int(real_lengths[req_id].item()) - 1, 0)
         else:
             max_real_pos = max(padded_len - 1, 0)
@@ -475,8 +608,8 @@ def build_cp_context(
 
     local_is_real = padding_mask[relative_positions] == 1  # [chunk_length] bool
     unpad_restore_is_prefix = False
-    if input_lengths_global is not None:
-        seq_len_full = int(input_lengths_global.to(torch.long).sum().item())
+    if input_lengths_global_host is not None:
+        seq_len_full = sum(input_lengths_global_host)
     else:
         seq_len_full = int((padding_mask == 1).sum().item())
 
@@ -496,9 +629,17 @@ def build_cp_context(
         seq_len_full = int(unpad_restore.shape[0])
     prefix_per_token = prefix_lengths.gather(0, req_id_per_token.to(torch.long))
     global_positions = (prefix_per_token + local_positions).contiguous()
-    prefix_length = int(prefix_lengths[0].item()) if prefix_lengths.numel() > 0 else 0
-    if input_lengths_global is not None:
-        seq_len_total = int((prefix_lengths + real_lengths[:B]).max().item())
+    prefix_length = prefix_lengths_host[0] if prefix_lengths_host else 0
+    if input_lengths_global_host is not None:
+        seq_len_total = max(
+            (
+                prefix + length
+                for prefix, length in zip(
+                    prefix_lengths_host, input_lengths_global_host
+                )
+            ),
+            default=0,
+        )
     else:
         seq_len_total = prefix_length + seq_len_full
 
@@ -522,6 +663,8 @@ def build_cp_context(
         unpad_restore_is_prefix=unpad_restore_is_prefix,
         chunk_lengths_per_req=tuple(chunk_lengths),
         kv_cache_sharded=bool(kv_cache_sharded),
+        input_lengths_global_host=input_lengths_global_host,
+        prefix_lengths_host=prefix_lengths_host,
     )
 
 
@@ -926,6 +1069,14 @@ def build_cp_full_prefill_positions(
 
     Returns ``(positions, b_idx, seq_start_per_req, cu_seq_per_req)``.
     """
+    cached = cp_ctx._full_prefill_positions_cache
+    if cached is not None:
+        target_device = torch.device(device)
+        cached_device = cached[0].device
+        if cached_device.type == target_device.type and (
+            target_device.index is None or cached_device.index == target_device.index
+        ):
+            return cached
     assert (
         cp_ctx.input_lengths_global is not None
     ), "CP full prefill positions require input_lengths_global"
@@ -940,32 +1091,70 @@ def build_cp_full_prefill_positions(
             device=device,
         )
 
-    positions = []
-    b_idx = []
-    for req_id in range(int(lengths.numel())):
-        length = int(lengths[req_id].item())
-        start = int(prefixes[req_id].item())
-        if length <= 0:
-            continue
-        positions.append(
-            torch.arange(start, start + length, dtype=torch.long, device=device)
-        )
-        b_idx.append(torch.full((length,), req_id, dtype=torch.long, device=device))
-    if positions:
-        pos = torch.cat(positions).contiguous()
-        req = torch.cat(b_idx).contiguous()
-    else:
-        pos = torch.empty((0,), dtype=torch.long, device=device)
-        req = torch.empty((0,), dtype=torch.long, device=device)
+    total = int(cp_ctx.seq_len_full)
+    batch_size = int(lengths.numel())
+    fused = None
+    if lengths.is_cuda and batch_size > 1:
+        try:
+            from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
+                try_build_cp_full_prefill_positions,
+            )
 
-    zero = torch.zeros(1, dtype=torch.long, device=device)
-    cu_seq = torch.cat([zero, torch.cumsum(lengths.to(torch.long), dim=0)]).contiguous()
-    return (
+            fused = try_build_cp_full_prefill_positions(
+                lengths, prefixes, total_tokens=total
+            )
+        except (ImportError, ModuleNotFoundError):
+            pass
+    if fused is not None:
+        pos, req = fused
+    else:
+        if batch_size == 1:
+            req = torch.zeros(total, dtype=torch.long, device=device)
+            prefix_host = getattr(cp_ctx, "prefix_lengths_host", None)
+            start = (
+                int(prefix_host[0])
+                if prefix_host is not None and len(prefix_host) == 1
+                else int(cp_ctx.prefix_length)
+            )
+            pos = torch.arange(start, start + total, dtype=torch.long, device=device)
+        elif batch_size > 1:
+            flat_offsets = torch.arange(total, dtype=torch.long, device=device)
+            req = torch.repeat_interleave(
+                torch.arange(batch_size, dtype=torch.long, device=device),
+                lengths,
+                output_size=total,
+            )
+            if cp_ctx.cu_seqlens_global is not None:
+                starts = cp_ctx.cu_seqlens_global[:-1].to(
+                    device=device, dtype=torch.long
+                )
+            else:
+                starts = torch.zeros(batch_size, dtype=torch.long, device=device)
+                starts[1:] = torch.cumsum(lengths[:-1], dim=0)
+            pos = flat_offsets - starts[req] + prefixes[req]
+        else:
+            pos = torch.empty((0,), dtype=torch.long, device=device)
+            req = torch.empty((0,), dtype=torch.long, device=device)
+        pos = pos.contiguous()
+        req = req.contiguous()
+
+    if cp_ctx.cu_seqlens_global is not None:
+        cu_seq = cp_ctx.cu_seqlens_global.to(
+            device=device, dtype=torch.long
+        ).contiguous()
+    else:
+        zero = torch.zeros(1, dtype=torch.long, device=device)
+        cu_seq = torch.cat(
+            [zero, torch.cumsum(lengths.to(torch.long), dim=0)]
+        ).contiguous()
+    result = (
         pos,
         req,
         prefixes.to(device=device, dtype=torch.long).contiguous(),
         cu_seq,
     )
+    cp_ctx._full_prefill_positions_cache = result
+    return result
 
 
 def combine_topk_swa_indices_cp_b1(
@@ -1268,12 +1457,25 @@ def build_kv_allgather_restore_indices(
         if batch_size == 1 and total_kv_len is not None:
             total_local = cp_padded_local_kv_len(total_real, cp_size, block_size)
         else:
-            local_per_req = cp_padded_local_kv_lens(
-                total_kv_lens, cp_size, block_size
-            )
+            local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
             total_local = int(local_per_req.sum().item())
     else:
         total_local = int(total_local_kv)
+
+    if total_kv_lens.is_cuda:
+        from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
+            try_build_cp_restore_indices,
+        )
+
+        fused_restore = try_build_cp_restore_indices(
+            total_kv_lens,
+            cp_size=cp_size,
+            owner_block_size=block_size,
+            total_tokens=total_real,
+            total_local_kv=total_local,
+        )
+        if fused_restore is not None:
+            return fused_restore
 
     # Flat ``[total_real]`` arange of "logical token position within request".
     # Fully vectorized: positions_flat[i] = i - cu_starts[req_ids[i]] where
@@ -1284,9 +1486,7 @@ def build_kv_allgather_restore_indices(
         cu_offsets = None
     else:
         local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
-        cu_local_per_req = torch.zeros(
-            batch_size + 1, dtype=torch.int64, device=device
-        )
+        cu_local_per_req = torch.zeros(batch_size + 1, dtype=torch.int64, device=device)
         cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
         req_ids = torch.repeat_interleave(
             torch.arange(batch_size, dtype=torch.int64, device=device),
@@ -1311,8 +1511,7 @@ def build_kv_allgather_restore_indices(
         restore = restore + cu_offsets
     restore = restore.contiguous()
     assert int(restore.numel()) == total_real, (
-        f"restore size {int(restore.numel())} != expected total_kv_len "
-        f"{total_real}"
+        f"restore size {int(restore.numel())} != expected total_kv_len " f"{total_real}"
     )
     return restore
 

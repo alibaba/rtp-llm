@@ -1,5 +1,24 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "cuda13_test_exec_properties", "torch_deps")
+load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
+
+cuda13_cc_test(
+    name = "cuda_graph_replay_retry_integration_test",
+    srcs = ["cuda_graph_replay_retry_integration_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        "//rtp_llm/cpp/utils:torch_cuda_oom",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    exec_properties = cuda13_test_exec_properties(),
+    target_compatible_with = select({
+        "//:using_cuda13_arm": [],
+        "//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    timeout = "short",
+)
 
 cc_test(
     name = "combo_position_ids_validation_test",

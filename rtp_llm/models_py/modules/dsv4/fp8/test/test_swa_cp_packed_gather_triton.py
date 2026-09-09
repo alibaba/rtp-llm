@@ -126,9 +126,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             )
         rows = [packed[i, :length] for i, length in enumerate(padded_lens)]
         if not rows or sum(padded_lens) == 0:
-            return torch.empty(
-                (0, ENTRY_BYTES), dtype=torch.uint8, device=self.device
-            )
+            return torch.empty((0, ENTRY_BYTES), dtype=torch.uint8, device=self.device)
         return torch.cat(rows, dim=0)
 
     def _run_exact_case(
@@ -218,9 +216,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
 
     def test_unsupported_or_disabled_input_leaves_output_untouched(self) -> None:
         pool, block_table, padded, actual = self._make_case([4], [2], 2)
-        out = torch.full(
-            (4, ENTRY_BYTES), 0xA5, dtype=torch.uint8, device=self.device
-        )
+        out = torch.full((4, ENTRY_BYTES), 0xA5, dtype=torch.uint8, device=self.device)
         before = out.clone()
         self.assertFalse(
             try_gather_k_cache_packed_to_flat(
@@ -248,9 +244,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             )
         self.assertTrue(torch.equal(out, before))
 
-        pool65, table65, padded65, actual65 = self._make_case(
-            [1] * 65, [1] * 65, 1
-        )
+        pool65, table65, padded65, actual65 = self._make_case([1] * 65, [1] * 65, 1)
         out65 = torch.full(
             (65, ENTRY_BYTES), 0xA5, dtype=torch.uint8, device=self.device
         )
@@ -301,9 +295,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
         block_size = 8
         seq_lens_list = [5, 0, 9]
         total = sum(seq_lens_list)
-        values = torch.randn(
-            total, HEAD_DIM, dtype=torch.bfloat16, device=self.device
-        )
+        values = torch.randn(total, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
         pool = torch.zeros(
             (3, block_size, ENTRY_BYTES), dtype=torch.uint8, device=self.device
         )
@@ -366,9 +358,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             (1, 4, HEAD_DIM), -17, dtype=torch.bfloat16, device=self.device
         )
         before = out.clone()
-        gathered = torch.zeros(
-            (2, ENTRY_BYTES), dtype=torch.uint8, device=self.device
-        )
+        gathered = torch.zeros((2, ENTRY_BYTES), dtype=torch.uint8, device=self.device)
         restore_indices = torch.tensor([0, 1], dtype=torch.int64, device=self.device)
         unsupported_lens = torch.tensor([2], dtype=torch.int64, device=self.device)
 
@@ -389,9 +379,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             (1, 4, HEAD_DIM), -17, dtype=torch.bfloat16, device=self.device
         )
         before = out.clone()
-        gathered = torch.zeros(
-            (2, ENTRY_BYTES), dtype=torch.uint8, device=self.device
-        )
+        gathered = torch.zeros((2, ENTRY_BYTES), dtype=torch.uint8, device=self.device)
         restore_indices = torch.tensor([0, 1], dtype=torch.int64, device=self.device)
         seq_lens = torch.tensor([2], dtype=torch.int32, device=self.device)
 
@@ -407,9 +395,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
         self.assertTrue(torch.equal(out, before))
 
     def test_fused_restore_masks_invalid_restore_and_destination_metadata(self) -> None:
-        gathered = torch.zeros(
-            (1, ENTRY_BYTES), dtype=torch.uint8, device=self.device
-        )
+        gathered = torch.zeros((1, ENTRY_BYTES), dtype=torch.uint8, device=self.device)
         restore_indices = torch.tensor([0, 9], dtype=torch.int64, device=self.device)
 
         invalid_restore_out = torch.full(
@@ -423,8 +409,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             offset=1,
             seq_lens_total=2,
         )
-        if not supported:
-            self.skipTest("direct Triton fast paths are unsupported on this GPU")
+        self.assertTrue(supported, "expected the supported Triton restore path")
         torch.cuda.synchronize()
         self.assertEqual(int(invalid_restore_out[0, 1].count_nonzero()), 0)
         self.assertTrue(
@@ -454,7 +439,9 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
             )
         )
 
-    def test_direct_fast_paths_return_fallback_on_unsupported_architecture(self) -> None:
+    def test_direct_fast_paths_return_fallback_on_unsupported_architecture(
+        self,
+    ) -> None:
         pool, block_table, padded, actual = self._make_case([4], [2], 2)
         packed_out = torch.full(
             (4, ENTRY_BYTES), 0xA5, dtype=torch.uint8, device=self.device
@@ -528,9 +515,7 @@ class SwaCPPackedGatherTritonTest(unittest.TestCase):
     def test_hot_path_is_one_kernel_without_torch_pack_ops(self) -> None:
         padded_lens = [8, 4, 8, 4, 8, 4, 8, 4, 8, 4]
         actual_lens = [3, 0, 7, 4, 2, 1, 8, 0, 5, 3]
-        pool, block_table, padded, actual = self._make_case(
-            padded_lens, actual_lens, 2
-        )
+        pool, block_table, padded, actual = self._make_case(padded_lens, actual_lens, 2)
         out = torch.empty(
             (sum(padded_lens), ENTRY_BYTES), dtype=torch.uint8, device=self.device
         )

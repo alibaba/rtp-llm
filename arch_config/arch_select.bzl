@@ -98,6 +98,7 @@ def whl_deps():
             "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl",
             "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
             "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
+            "tilelang==0.1.9",
         ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
@@ -215,6 +216,15 @@ def select_py_bindings():
         "//conditions:default": [
             "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
         ],
+    })
+
+def cuda13_test_exec_properties(gpu_count = 1):
+    """GPU test pools; internal builds override CUDA13 pool names."""
+    return select({
+        "@rtp_llm//:using_cuda13_arm": {"gpu": "SM100_ARM", "gpu_count": str(gpu_count)},
+        "@rtp_llm//:using_cuda13_x86": {"gpu": "SM100_X86", "gpu_count": str(gpu_count)},
+        "@rtp_llm//:using_cuda12_arm": {"gpu": "SM100_ARM", "gpu_count": str(gpu_count)},
+        "//conditions:default": {"gpu": "A10", "gpu_count": str(gpu_count)},
     })
 
 def no_block_copy_link_deps():
