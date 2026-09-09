@@ -47,6 +47,7 @@ class ModelLoader:
         load_method: LoadMethod = LoadMethod.AUTO,
         force_cpu_load_weights: bool = False,
         moe_pure_tp_preshard: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -79,6 +80,7 @@ class ModelLoader:
             exported_device=get_current_device(),
             force_cpu_load_weights=force_cpu_load_weights,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
         )
 
     def get_load_config(self) -> LoadConfig:
@@ -332,12 +334,17 @@ class ModelLoader:
                 f"doubling model_mem estimate for fastsafetensor memory check"
             )
         max_file_mem = max_file_size / (1024.0**2)
+        # Empirical reserve (MiB) for TensorCollector inputs overlapping final
+        # materialization; this is not a measured peak-memory guarantee.
+        rtp_reserve_mem = self._load_config.fastsafetensors_reserve_mb
+        transient_mem = 3 * max_file_mem + rtp_reserve_mem
         logging.info(
             f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
             f"model_mem={model_mem:.0f}MB, max_file_mem={max_file_mem:.0f}MB, "
-            f"enough={(free_mem - model_mem) > (3 * max_file_mem)}"
+            f"rtp_reserve_mem={rtp_reserve_mem:.0f}MB, "
+            f"enough={(free_mem - model_mem) > transient_mem}"
         )
-        return (free_mem - model_mem) > (3 * max_file_mem)
+        return (free_mem - model_mem) > transient_mem
 
     @staticmethod
     def _build_stacked_key_config(weight_info_list) -> dict:
@@ -415,6 +422,7 @@ class ModelLoader:
             device,
             True,
             stacked_key_config=stacked_key_config,
+            local_copyout_filter=tensor_to_weight_map.__contains__,
         )
 
         _inline_count = 0
@@ -857,6 +865,7 @@ def get_model_loader(
     load_method: LoadMethod = LoadMethod.AUTO,
     force_cpu_load_weights: bool = False,
     moe_pure_tp_preshard: bool = False,
+    fastsafetensors_reserve_mb: int = 2048,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -871,4 +880,5 @@ def get_model_loader(
         load_method=load_method,
         force_cpu_load_weights=force_cpu_load_weights,
         moe_pure_tp_preshard=moe_pure_tp_preshard,
+        fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
     )
