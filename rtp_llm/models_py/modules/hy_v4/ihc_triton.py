@@ -386,6 +386,7 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
     norm_weight_ptr,
     read_ptr,
     read_fp32_ptr,
+    raw_gate_clear_ptr,
     post_gate_ptr,
     mxfp8_ptr,
     mxfp8_scale_ptr,
@@ -412,6 +413,7 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
     HAS_MXFP8_OUTPUT: tl.constexpr,
     HAS_MEGA_MOE_OUTPUT: tl.constexpr,
     HAS_FP32_OUTPUT: tl.constexpr,
+    HAS_RAW_GATE_CLEAR: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     split_offsets = tl.arange(0, BLOCK_SPLITS)
@@ -487,6 +489,9 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
             normalized_bf16.to(tl.float32),
             mask=hidden_mask,
         )
+    if HAS_RAW_GATE_CLEAR:
+        raw_gate_offsets = tl.arange(0, 32)
+        tl.store(raw_gate_clear_ptr + row * 32 + raw_gate_offsets, 0.0)
     tl.store(post_gate_ptr + row * HC + channel_offsets, post_gate)
 
     if HAS_MXFP8_OUTPUT or HAS_MEGA_MOE_OUTPUT:
@@ -729,6 +734,7 @@ def _maybe_deepgemm_ihc_pre(
     split_reference_m: int | None = None,
     read_out: torch.Tensor | None = None,
     read_fp32_out: torch.Tensor | None = None,
+    raw_gate_clear_out: torch.Tensor | None = None,
     post_gate_out: torch.Tensor | None = None,
     mxfp8_out: torch.Tensor | None = None,
     mxfp8_scale_out: torch.Tensor | None = None,
@@ -790,6 +796,19 @@ def _maybe_deepgemm_ihc_pre(
             or read_fp32_out.device != channels.device
         ):
             raise ValueError("invalid HY4 iHC FP32 read output ABI")
+    clear_raw_gate = raw_gate_clear_out is not None
+    if clear_raw_gate:
+        if norm_weight is None:
+            raise ValueError("raw head-gate clear requires the fused RMSNorm path")
+        if (
+            hidden_size != 6144
+            or not emit_mxfp8
+            or tuple(raw_gate_clear_out.shape) != (m, 32)
+            or raw_gate_clear_out.dtype != torch.float32
+            or not raw_gate_clear_out.is_contiguous()
+            or raw_gate_clear_out.device != channels.device
+        ):
+            raise ValueError("invalid HY4 raw head-gate clear output ABI")
     emit_mega_moe = (
         mega_mxfp8_out is not None or mega_mxfp8_scale_out is not None
     )
@@ -858,6 +877,7 @@ def _maybe_deepgemm_ihc_pre(
                 norm_weight,
                 read,
                 read_fp32_out if emit_fp32 else read,
+                raw_gate_clear_out if clear_raw_gate else read,
                 post_gate,
                 mxfp8_out if emit_mxfp8 else read,
                 mxfp8_scale_out if emit_mxfp8 else read,
@@ -894,6 +914,7 @@ def _maybe_deepgemm_ihc_pre(
                 HAS_MXFP8_OUTPUT=emit_mxfp8,
                 HAS_MEGA_MOE_OUTPUT=emit_mega_moe,
                 HAS_FP32_OUTPUT=emit_fp32,
+                HAS_RAW_GATE_CLEAR=clear_raw_gate,
                 num_warps=8,
                 num_stages=2,
             )
@@ -914,6 +935,7 @@ def maybe_fused_ihc_pre_normed_grouped(
     chunk_size: int,
     emit_mxfp8: bool = False,
     emit_fp32: bool = False,
+    raw_gate_clear_out: torch.Tensor | None = None,
     mega_mxfp8_out: torch.Tensor | None = None,
     mega_mxfp8_scale_out: torch.Tensor | None = None,
 ) -> (
@@ -940,11 +962,21 @@ def maybe_fused_ihc_pre_normed_grouped(
     if not ihc_pre_is_supported(channels, fn_weight, scale, base):
         return None
     hidden_size = channels.shape[2]
+    m = int(channels.shape[0])
+    if raw_gate_clear_out is not None:
+        if (
+            hidden_size != 6144
+            or not emit_mxfp8
+            or tuple(raw_gate_clear_out.shape) != (m, 32)
+            or raw_gate_clear_out.dtype != torch.float32
+            or not raw_gate_clear_out.is_contiguous()
+            or raw_gate_clear_out.device != channels.device
+        ):
+            return None
     emit_mega_moe = (
         mega_mxfp8_out is not None or mega_mxfp8_scale_out is not None
     )
     if emit_mega_moe:
-        m = int(channels.shape[0])
         expected_activation = (m, hidden_size)
         expected_scale = (m, hidden_size // (4 * MX_BLOCK))
         if (
@@ -972,7 +1004,6 @@ def maybe_fused_ihc_pre_normed_grouped(
     ):
         return None
 
-    m = int(channels.shape[0])
     chunk_size = max(int(chunk_size), 1)
     read = torch.empty((m, hidden_size), dtype=channels.dtype, device=channels.device)
     post_gate = torch.empty((m, _HC_MULT), dtype=torch.float32, device=channels.device)
@@ -1015,6 +1046,11 @@ def maybe_fused_ihc_pre_normed_grouped(
             split_reference_m=split_reference_m,
             read_out=read[start:end],
             read_fp32_out=(read_fp32[start:end] if emit_fp32 else None),
+            raw_gate_clear_out=(
+                raw_gate_clear_out[start:end]
+                if raw_gate_clear_out is not None
+                else None
+            ),
             post_gate_out=post_gate[start:end],
             mxfp8_out=(mxfp8_out[start:end] if emit_mxfp8 else None),
             mxfp8_scale_out=(mxfp8_scale[start:end] if emit_mxfp8 else None),

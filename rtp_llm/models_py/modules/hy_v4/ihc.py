@@ -6,7 +6,7 @@ DeepSeek-V4 mHC transform: there is no 4x4 Sinkhorn/combination matrix.
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -264,6 +264,42 @@ class Hy4IHCUnit(nn.Module):
         )
 
         read_fp8, read_scale = mxfp8_quant_act_packed(read.contiguous())
+        return read, post_gate, read_fp8, read_scale
+
+    def try_pre_normed_mxfp8_with_raw_gate_clear(
+        self,
+        channels: torch.Tensor,
+        norm: nn.Module,
+        raw_gate_clear_out: torch.Tensor,
+    ) -> Optional[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ]:
+        """Fuse iHC, RMSNorm, MXFP8 quant and raw-gate initialization.
+
+        Return ``None`` without publishing ``raw_gate_clear_out`` when the
+        fused producer is unsupported, so the caller can keep the independent
+        FP32 head-gate path.
+        """
+        channels = self.prepare_input(channels)
+        if channels.size(0) == 0:
+            return None
+        result = maybe_fused_ihc_pre_normed_grouped(
+            channels,
+            self.fn_weight,
+            self.scale,
+            self.base,
+            norm.weight.data,
+            magnitude=self.magnitude,
+            hc_eps=self.hc_eps,
+            ihc_norm_eps=self.norm_eps,
+            read_norm_eps=norm.variance_epsilon,
+            chunk_size=self.chunk_size,
+            emit_mxfp8=True,
+            raw_gate_clear_out=raw_gate_clear_out,
+        )
+        if result is None:
+            return None
+        read, post_gate, read_fp8, read_scale = result
         return read, post_gate, read_fp8, read_scale
 
     def pre_normed_mxfp8_with_fp32(

@@ -811,13 +811,20 @@ class GenericMoeDecoderLayer(nn.Module):
         force_reuse_topk_indices,
     ) -> DecodeLayerOutput:
         """MTP CMP entry; publish caller-produced inputs to HY4's three streams."""
-        fp8_hs = scale = fp32_hs = None
+        fp8_hs = scale = fp32_hs = raw_head_gate_output = None
         if self._fuse_hy4_cmp_input_norm_quant and hidden_states.dim() == 2:
+            raw_head_gate_output = self.hy4_cmp.allocate_raw_head_gate_output(
+                hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                force_reuse_topk_indices=force_reuse_topk_indices,
+            )
             emit_head_gate_fp32 = bool(
                 self.hy4_cmp is not None
                 and self.self_attn.indexer is not None
                 and not self.self_attn.reuse_topk_indices
                 and not force_reuse_topk_indices
+                and raw_head_gate_output is None
                 and (
                     hidden_states.shape[0] > 32
                     or getattr(
@@ -835,6 +842,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 scale_ue8m0=True,
                 mxfp8_semantics=True,
                 emit_fp32_output=emit_head_gate_fp32,
+                raw_gate_clear_out=raw_head_gate_output,
             )
             if emit_head_gate_fp32:
                 bf16_hs, fp8_hs, scale, fp32_hs = norm_outputs
@@ -859,6 +867,7 @@ class GenericMoeDecoderLayer(nn.Module):
             x_fp8=fp8_hs,
             x_scale=scale,
             x_fp32=fp32_hs,
+            raw_head_gate_output=raw_head_gate_output,
             prev_topk_indices=prev_topk_indices,
             force_reuse_topk_indices=force_reuse_topk_indices,
             return_topk=True,

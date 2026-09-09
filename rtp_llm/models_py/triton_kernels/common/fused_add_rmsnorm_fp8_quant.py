@@ -262,6 +262,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     weight_ptr,
     bf16_out_ptr,
     fp32_out_ptr,
+    raw_gate_clear_ptr,
     fp8_out_ptr,
     scale_out_ptr,
     mega_mxfp8_out_ptr,
@@ -286,6 +287,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     MXFP8_SEMANTICS: tl.constexpr,
     HAS_MEGA_MOE_OUTPUT: tl.constexpr,
     HAS_FP32_OUTPUT: tl.constexpr,
+    HAS_RAW_GATE_CLEAR: tl.constexpr,
 ):
     """Single-pass dual-output: also stores bf16 normed alongside fp8.
 
@@ -334,6 +336,9 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
             normed,
             mask=mask,
         )
+    if HAS_RAW_GATE_CLEAR:
+        raw_gate_offsets = tl.arange(0, 32)
+        tl.store(raw_gate_clear_ptr + token_id * 32 + raw_gate_offsets, 0.0)
 
     num_groups: tl.constexpr = BLOCK_N // GROUP_SIZE
     actual_num_groups: tl.constexpr = H // GROUP_SIZE
@@ -541,6 +546,7 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     mega_mxfp8_out: torch.Tensor | None = None,
     mega_mxfp8_scale_out: torch.Tensor | None = None,
     emit_fp32_output: bool = False,
+    raw_gate_clear_out: torch.Tensor | None = None,
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -577,9 +583,24 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
             or mega_mxfp8_scale_out.device != hidden_states.device
         ):
             raise ValueError("invalid HY4 MegaMoE activation/scale output ABI")
+    clear_raw_gate = raw_gate_clear_out is not None
+    if clear_raw_gate and (
+        not mxfp8_semantics
+        or group_size != MX_BLOCK
+        or H != 6144
+        or tuple(raw_gate_clear_out.shape) != (T, 32)
+        or raw_gate_clear_out.dtype != torch.float32
+        or not raw_gate_clear_out.is_contiguous()
+        or raw_gate_clear_out.device != hidden_states.device
+    ):
+        raise ValueError("invalid HY4 raw head-gate clear output ABI")
 
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H:
+        if clear_raw_gate:
+            raise ValueError(
+                "raw head-gate clear requires the single-pass RMSNorm producer"
+            )
         result = _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
             hidden_states,
             residual,
@@ -638,6 +659,7 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         weight,
         bf16_out,
         fp32_out if emit_fp32_output else bf16_out,
+        raw_gate_clear_out if clear_raw_gate else bf16_out,
         fp8_out,
         scale_out,
         mega_mxfp8_out if emit_mega_moe else fp8_out,
@@ -662,6 +684,7 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         MXFP8_SEMANTICS=mxfp8_semantics,
         HAS_MEGA_MOE_OUTPUT=emit_mega_moe,
         HAS_FP32_OUTPUT=emit_fp32_output,
+        HAS_RAW_GATE_CLEAR=clear_raw_gate,
         num_warps=_select_num_warps(H),
     )
     if emit_fp32_output:

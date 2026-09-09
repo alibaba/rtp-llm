@@ -230,12 +230,30 @@ class Hy4DecoderLayer(nn.Module):
         attn_input_fp8 = None
         attn_input_scale = None
         attn_input_fp32 = None
+        raw_head_gate_output = None
         if getattr(self, "_fuse_attn_ihc_mxfp8", False):
+            raw_gate_candidate = (
+                self.hy4_cmp.allocate_raw_head_gate_output(
+                    channels, fmha_impl=fmha_impl, kv_cache=kv_cache
+                )
+                if enable_cmp and self.hy4_cmp is not None
+                else None
+            )
+            producer_outputs = (
+                self.attn_ihc.try_pre_normed_mxfp8_with_raw_gate_clear(
+                    channels,
+                    self.input_layernorm,
+                    raw_gate_candidate,
+                )
+                if raw_gate_candidate is not None
+                else None
+            )
             emit_head_gate_fp32 = bool(
                 enable_cmp
                 and self.hy4_cmp is not None
                 and self.self_attn.indexer is not None
                 and not self.self_attn.reuse_topk_indices
+                and producer_outputs is None
                 and (
                     channels.shape[0] > 32
                     or getattr(
@@ -244,7 +262,15 @@ class Hy4DecoderLayer(nn.Module):
                     is None
                 )
             )
-            if emit_head_gate_fp32:
+            if producer_outputs is not None:
+                (
+                    attn_input,
+                    attn_post_gate,
+                    attn_input_fp8,
+                    attn_input_scale,
+                ) = producer_outputs
+                raw_head_gate_output = raw_gate_candidate
+            elif emit_head_gate_fp32:
                 (
                     attn_input,
                     attn_post_gate,
@@ -280,6 +306,8 @@ class Hy4DecoderLayer(nn.Module):
             and self.hy4_cmp.can_run(attn_input, fmha_impl, kv_cache)
         ):
             attention = self.hy4_cmp.forward_attention
+            if raw_head_gate_output is not None:
+                attn_kwargs["raw_head_gate_output"] = raw_head_gate_output
         attn_output, topk_indices = attention(
             hidden_states=attn_input,
             fmha_impl=fmha_impl,

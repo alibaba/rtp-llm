@@ -283,6 +283,9 @@ class TestFusedAddRmsNormFp8QuantDualOutput(unittest.TestCase):
                     weight = torch.randn(
                         6144, dtype=torch.bfloat16, device="cuda"
                     )
+                    raw_gate = torch.full(
+                        (T, 32), 123.0, dtype=torch.float32, device="cuda"
+                    )
 
                     ref_hidden = hidden.clone()
                     ref_residual = residual.clone()
@@ -301,9 +304,11 @@ class TestFusedAddRmsNormFp8QuantDualOutput(unittest.TestCase):
                             group_size=32,
                             scale_ue8m0=True,
                             mxfp8_semantics=True,
+                            raw_gate_clear_out=raw_gate,
                         )
                     )
 
+                    self.assertEqual(torch.count_nonzero(raw_gate).item(), 0)
                     self.assertEqual(fused_scale.dtype, torch.int32)
                     self.assertEqual(fused_scale.shape, ref_scale.shape)
                     self.assertEqual(fused_scale.stride(), ref_scale.stride())

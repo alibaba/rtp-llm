@@ -716,7 +716,7 @@ class Hy4IhcTest(unittest.TestCase):
     @unittest.skipUnless(
         _deepgemm_prenorm_available(), "requires SM100 DeepGEMM prenorm"
     )
-    def test_deepgemm_pre_rmsnorm_mxfp8_cuda_graph_replay(self):
+    def test_deepgemm_pre_rmsnorm_mxfp8_raw_gate_cuda_graph_replay(self):
         torch.manual_seed(20260904)
         device = torch.device("cuda")
         hidden, hc, tokens = 6144, 4, 4
@@ -740,25 +740,38 @@ class Hy4IhcTest(unittest.TestCase):
             tokens, hc, hidden, dtype=torch.bfloat16, device=device
         )
         replay_channels = torch.randn_like(static_channels)
+        raw_gate = torch.full(
+            (tokens, 32), 123.0, dtype=torch.float32, device=device
+        )
         with torch.no_grad():
             for _ in range(3):
-                unit.pre_normed_mxfp8(static_channels, norm)
+                unit.try_pre_normed_mxfp8_with_raw_gate_clear(
+                    static_channels, norm, raw_gate
+                )
+            expected_result = unit.try_pre_normed_mxfp8_with_raw_gate_clear(
+                replay_channels, norm, raw_gate
+            )
+            self.assertIsNotNone(expected_result)
             expected = tuple(
-                value.clone()
-                for value in unit.pre_normed_mxfp8(replay_channels, norm)
+                value.clone() for value in expected_result
             )
             torch.cuda.synchronize()
 
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                captured = unit.pre_normed_mxfp8(static_channels, norm)
+                captured = unit.try_pre_normed_mxfp8_with_raw_gate_clear(
+                    static_channels, norm, raw_gate
+                )
 
             static_channels.copy_(replay_channels)
+            raw_gate.fill_(123.0)
             graph.replay()
             torch.cuda.synchronize()
 
+        self.assertIsNotNone(captured)
         for actual, reference in zip(captured, expected):
             self.assertTrue(torch.equal(actual, reference))
+        self.assertEqual(torch.count_nonzero(raw_gate).item(), 0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA and Triton")
     def test_triton_head_matches_eager_path(self):

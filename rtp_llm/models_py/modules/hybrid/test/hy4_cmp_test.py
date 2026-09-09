@@ -358,6 +358,117 @@ class Hy4CmpTest(unittest.TestCase):
         )
         self.assertEqual(cmp._disabled_reason, "HY4 CMP requires TP=1")
 
+    def test_missing_native_provider_only_disables_optional_fusion(self) -> None:
+        cmp = bridge.Hy4Cmp(
+            config=_config(),
+            parallelism_config=_parallelism(),
+            self_attn=_attention(indexer=SimpleNamespace(use_hadamard=False)),
+        )
+        layers = [SimpleNamespace(hy4_cmp=cmp)]
+        cache = SimpleNamespace(get_layer_cache=Mock(return_value=object()))
+        with patch.object(
+            cmp, "_dynamic_disabled_reason", return_value=None
+        ), patch.object(
+            bridge, "_load_hy4_ops", side_effect=ImportError("old wheel")
+        ) as load:
+            self.assertTrue(
+                bridge.should_enable_hy4_cmp(layers, 1, object(), object(), cache)
+            )
+            self.assertTrue(
+                bridge.should_enable_hy4_cmp(layers, 1, object(), object(), cache)
+            )
+        load.assert_called_once()
+        self.assertTrue(cmp._qkv_head_gate_initialized)
+        self.assertIn("old wheel", cmp._qkv_head_gate_disabled_reason)
+        clone = cmp.clone_for_cuda_graph(self_attn=cmp.self_attn)
+        self.assertTrue(clone._qkv_head_gate_initialized)
+        self.assertEqual(
+            clone._qkv_head_gate_disabled_reason,
+            cmp._qkv_head_gate_disabled_reason,
+        )
+
+    def test_qkv_a_can_publish_raw_head_gate_from_one_provider_call(self) -> None:
+        cmp = object.__new__(bridge.Hy4Cmp)
+        projected = torch.randn(2, 4, dtype=torch.bfloat16)
+        raw_gate = torch.empty(2, 1, dtype=torch.float32)
+        native = Mock(return_value=(projected, raw_gate))
+        cmp._qkv_head_gate_ops = SimpleNamespace(qkv_a_head_gate=native)
+        cmp._qkv_weight = object()
+        cmp._qkv_weight_scale = object()
+        cmp._qkv_head_gate_weight = object()
+        fallback = Mock(side_effect=AssertionError("fallback QKV-A called"))
+        cmp.self_attn = SimpleNamespace(
+            fused_qkv_a_proj=fallback,
+            q_lora_rank=2,
+            kv_lora_rank=1,
+            qk_rope_head_dim=1,
+            q_a_layernorm=nn.Identity(),
+            _fuse_q_a_norm_mode="off",
+        )
+        hidden = torch.randn(2, 4, dtype=torch.bfloat16)
+        x_fp8, x_scale = object(), object()
+        q, q_fp8, q_scale, kv = cmp._qkv_a(
+            hidden,
+            x_fp8,
+            x_scale,
+            {"qkv": projected},
+            raw_gate,
+        )
+        fallback.assert_not_called()
+        native.assert_called_once_with(
+            x_fp8,
+            x_scale,
+            cmp._qkv_weight,
+            cmp._qkv_weight_scale,
+            hidden,
+            cmp._qkv_head_gate_weight,
+            out=projected,
+            gate_output=raw_gate,
+        )
+        self.assertIsNone(q_fp8)
+        self.assertIsNone(q_scale)
+        torch.testing.assert_close(q, projected[:, :2], rtol=0, atol=0)
+        torch.testing.assert_close(kv, projected[:, 2:], rtol=0, atol=0)
+
+    def test_raw_gate_allocation_requires_complete_split_preflight(self) -> None:
+        cmp = object.__new__(bridge.Hy4Cmp)
+        cmp._qkv_head_gate_ops = object()
+        cmp._indexer_frontend_parallel = True
+        cmp.self_attn = SimpleNamespace(
+            indexer=SimpleNamespace(
+                index_n_heads=32, _hy4_small_t_head_gate_weight=None
+            ),
+            reuse_topk_indices=False,
+        )
+        source = SimpleNamespace(
+            shape=(64, 6144),
+            dim=Mock(return_value=2),
+            is_cuda=True,
+            device=torch.device("cuda"),
+        )
+        sentinel = object()
+        with patch.object(
+            cmp, "_can_preallocate_fused_raw_gate", return_value=False
+        ) as preflight, patch.object(
+            bridge.torch, "empty", return_value=sentinel
+        ) as allocate:
+            self.assertIsNone(
+                cmp.allocate_raw_head_gate_output(
+                    source, fmha_impl=object(), kv_cache=object()
+                )
+            )
+            allocate.assert_not_called()
+            preflight.return_value = True
+            self.assertIs(
+                cmp.allocate_raw_head_gate_output(
+                    source, fmha_impl=object(), kv_cache=object()
+                ),
+                sentinel,
+            )
+            allocate.assert_called_once_with(
+                (64, 32), device=source.device, dtype=torch.float32
+            )
+
     def test_model_call_selects_cmp_for_all_layers_or_none(self) -> None:
         first = bridge.Hy4Cmp(
             config=_config(),
