@@ -60,9 +60,9 @@
             <artifactId>guava</artifactId>
         </dependency>
         <dependency>
-            <groupId>uk.org.webcompere</groupId>
-            <artifactId>system-stubs-jupiter</artifactId>
-            <scope>test</scope>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>${protobuf.version}</version>
         </dependency>
     </dependencies>
     <build>

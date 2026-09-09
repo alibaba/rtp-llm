@@ -12,9 +12,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
+import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
-import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
@@ -100,7 +100,7 @@ class BatchSchedulerReporterTest {
         verify(monitor).prepare(DISPATCH_ACK_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTE_SUBMIT_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTING_QUEUE_WAIT_TIME_MS, endpointTags);
-        for (String reason : new String[]{"batch_full", "fixed_window_timeout", "predict_threshold"}) {
+        for (String reason : new String[]{"batch_full", "fixed_window_timeout", "predicted_execution_cap"}) {
             FlexMetricTags reasonTags = FlexMetricTags.of(
                     "role", "PREFILL",
                     "engineIp", "10.0.0.1",
@@ -136,11 +136,46 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
-    void should_report_inflight_ttl_expired_with_role_tag_only() {
-        reporter.reportInflightTtlExpired(3);
+    void should_report_scheduler_inflight_ttl_expired_with_scheduler_role_and_reason() {
+        reporter.reportSchedulerInflightTtlExpired("ttl", 3);
 
-        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL");
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "scheduler",
+                "role", "SCHEDULER",
+                "reason", "ttl");
         verify(monitor).report(INFLIGHT_TTL_EXPIRED_QPS, tags, 3.0);
+    }
+
+    @Test
+    void should_report_scheduler_inflight_max_age_with_scheduler_role() {
+        reporter.reportSchedulerInflightMaxAgeMs(15_000L);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "scheduler",
+                "role", "SCHEDULER");
+        verify(monitor).report(INFLIGHT_MAX_AGE_MS, tags, 15_000.0);
+    }
+
+    @Test
+    void should_report_endpoint_inflight_ttl_expired_with_reason_bucket() {
+        reporter.reportEndpointInflightTtlExpired("PREFILL", "10.0.0.1", "ttl", 2);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "reason", "ttl");
+        verify(monitor).report(INFLIGHT_TTL_EXPIRED_QPS, tags, 2.0);
+    }
+
+    @Test
+    void should_report_endpoint_inflight_ttl_expired_for_decode_endpoint() {
+        reporter.reportEndpointInflightTtlExpired("DECODE", "10.0.0.2", "ttl", 1);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.2",
+                "role", "DECODE",
+                "reason", "ttl");
+        verify(monitor).report(INFLIGHT_TTL_EXPIRED_QPS, tags, 1.0);
     }
 
     @Test

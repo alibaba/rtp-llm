@@ -1,4 +1,6 @@
+import math
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -63,6 +65,30 @@ class ServerConfig:
         self.pre_stop_drain_headroom_seconds: float = -1.0
         self.pre_stop_drain_signal: bool = True
         self.backend_post_frontend_drain_seconds: float = -1.0
+        self.enable_torch_allocator_dump: bool = False
+        self.torch_allocator_dump_auth_token: str = ""
+        self.torch_allocator_dump_auth_header: str = (
+            "X-RTP-LLM-Allocator-Dump-Token"
+        )
+        self.torch_allocator_dump_cooldown_seconds: float = 60.0
+
+    def validate_allocator_dump_config(self) -> None:
+        cooldown = self.torch_allocator_dump_cooldown_seconds
+        if not math.isfinite(cooldown) or cooldown < 0:
+            raise ValueError(
+                "torch_allocator_dump_cooldown_seconds must be finite and non-negative"
+            )
+        if not self.enable_torch_allocator_dump:
+            return
+        if not self.torch_allocator_dump_auth_token:
+            raise ValueError(
+                "torch_allocator_dump_auth_token is required when allocator dumps are enabled"
+            )
+        if not re.fullmatch(
+            r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+",
+            self.torch_allocator_dump_auth_header,
+        ):
+            raise ValueError("torch_allocator_dump_auth_header is not a valid HTTP header name")
 
     def _server_base(self) -> int:
         return self.start_port + self.rank_id * self.worker_info_port_num
@@ -131,6 +157,10 @@ class ServerConfig:
             f"pre_stop_drain_headroom_seconds: {self.pre_stop_drain_headroom_seconds}\n"
             f"pre_stop_drain_signal: {self.pre_stop_drain_signal}\n"
             f"backend_post_frontend_drain_seconds: {self.backend_post_frontend_drain_seconds}\n"
+            f"enable_torch_allocator_dump: {self.enable_torch_allocator_dump}\n"
+            f"torch_allocator_dump_auth_configured: {bool(self.torch_allocator_dump_auth_token)}\n"
+            f"torch_allocator_dump_auth_header: {self.torch_allocator_dump_auth_header}\n"
+            f"torch_allocator_dump_cooldown_seconds: {self.torch_allocator_dump_cooldown_seconds}\n"
             f"server_port: {self.server_port}\n"
             f"rpc_server_port: {self.rpc_server_port}\n"
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
@@ -448,6 +478,13 @@ class GenerateEnvConfig:
 
 class RepetitionDetectionConfig:
     def __init__(self):
+        self.output_repetition_monitor: bool = True
+        self.output_repetition_min_repeats: int = 3
+        self.output_repetition_min_dup_tokens: int = 32
+        self.output_repetition_max_period: int = 512
+        self.noncontig_repeat_min_span_tokens: int = 32
+        self.noncontig_repeat_min_occurrences: int = 3
+        self.noncontig_repeat_max_span_tokens: int = 256
         self.tool_call_loop_monitor: bool = True
         self.tool_call_loop_threshold: int = 5
         self.tool_call_loop_max_span_tokens: int = 16384
@@ -456,6 +493,13 @@ class RepetitionDetectionConfig:
 
     def to_string(self):
         return (
+            f"output_repetition_monitor: {self.output_repetition_monitor}\n"
+            f"output_repetition_min_repeats: {self.output_repetition_min_repeats}\n"
+            f"output_repetition_min_dup_tokens: {self.output_repetition_min_dup_tokens}\n"
+            f"output_repetition_max_period: {self.output_repetition_max_period}\n"
+            f"noncontig_repeat_min_span_tokens: {self.noncontig_repeat_min_span_tokens}\n"
+            f"noncontig_repeat_min_occurrences: {self.noncontig_repeat_min_occurrences}\n"
+            f"noncontig_repeat_max_span_tokens: {self.noncontig_repeat_max_span_tokens}\n"
             f"tool_call_loop_monitor: {self.tool_call_loop_monitor}\n"
             f"tool_call_loop_threshold: {self.tool_call_loop_threshold}\n"
             f"tool_call_loop_max_span_tokens: {self.tool_call_loop_max_span_tokens}\n"

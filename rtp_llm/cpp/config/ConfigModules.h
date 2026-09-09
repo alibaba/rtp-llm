@@ -423,11 +423,18 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     // Service-level xgrammar matcher policy. Requests cannot override it.
-    bool                 terminate_without_stop_token = false;
-    int                  num_workers                  = 8;
-    std::string          tokenizer_info_json;
-    // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
-    int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
+    bool terminate_without_stop_token = false;
+    // Threads used by one grammar compile. <=0 is resolved by Python from this rank's CPU share.
+    int num_workers = 0;
+    // Positive wall-clock budget a caller waits for a compile. Non-positive values are rejected.
+    int compile_timeout_ms = 2000;
+    // Positive number of grammar compiles that may run concurrently in this engine process.
+    int compile_concurrency = 1;
+    // Positive number of distinct compiles that may wait behind running work.
+    int compile_queue_size = 2;
+    std::string tokenizer_info_json;
+    // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
+    int64_t     compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
     std::string to_string() const;
 };
 

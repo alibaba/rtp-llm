@@ -10,11 +10,13 @@ import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -36,8 +38,9 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     private final List<String> serviceAddressList;
     private final Map<String/*address*/, String/*protocol*/> addressProtocolMap = new ConcurrentHashMap<>();
 
-    public EngineAddressNameResolver(ServiceDiscovery serviceDiscovery) {
-        String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
+    public EngineAddressNameResolver(
+            ServiceDiscovery serviceDiscovery,
+            @Value("${MODEL_SERVICE_CONFIG:}") String modelConfig) {
         this.serviceDiscovery = serviceDiscovery;
         this.serviceAddressList = initServiceAddressList(modelConfig);
         log.info("EngineAddressNameResolver start subscribe clusters:{} ", serviceAddressList);
@@ -47,7 +50,6 @@ public class EngineAddressNameResolver implements CustomNameResolver {
 
     @Scheduled(fixedDelay = 30000) // Execute every 30 seconds
     public void periodicHostUpdate() {
-        Logger.info("EngineAddressNameResolver performing periodic host update for domains: {}", serviceAddressList);
         fetchAllDomainsHosts();
     }
 
@@ -72,7 +74,6 @@ public class EngineAddressNameResolver implements CustomNameResolver {
 
             try {
                 List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
-                Logger.info("Fetched {} hosts for domain: {}", hosts != null ? hosts.size() : 0, serverAddress);
                 updateDomainHosts(serverAddress, hosts);
             } catch (Exception e) {
                 Logger.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
@@ -109,7 +110,7 @@ public class EngineAddressNameResolver implements CustomNameResolver {
      * @param address  Service address
      * @param hostList Host list
      */
-    private void updateDomainHosts(String address, List<WorkerHost> hostList) {
+    private synchronized void updateDomainHosts(String address, List<WorkerHost> hostList) {
         if (hostList == null || hostList.isEmpty()) {
             domainHostsMap.remove(address);
         } else {
@@ -131,7 +132,15 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         for (List<String/*ip:port*/> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
-        Logger.info("Address {} hosts updated, total aggregated hosts: {}", address, aggregatedHosts.size());
+
+        // Service discovery polls even when membership is unchanged. Keep the
+        // update path and its logs edge-triggered so a steady cluster is quiet.
+        if (new HashSet<>(allIpPortList).equals(new HashSet<>(aggregatedHosts))) {
+            return;
+        }
+
+        Logger.info("Engine hosts changed: domain={}, domainHosts={}, totalHosts={}",
+                address, hostList == null ? 0 : hostList.size(), aggregatedHosts.size());
         // Update global host list and notify listener
         this.allIpPortList = aggregatedHosts;
         if (this.listener != null) {

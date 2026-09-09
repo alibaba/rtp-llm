@@ -543,6 +543,33 @@ class DeepSeekV4Model(GptModelBase):
         idx_w = 2 * 2 * index_head_dim
         return main_w, idx_w
 
+    def _initialize_commit_only(
+        self, init_resource: PyModelInitResources, device_str: str
+    ) -> bool:
+        """Initialize an attention-only DSpARK PREFILL commit model."""
+        logging.info(
+            "[DeepSeekV4Model] building DSpARK commit-only transformer "
+            "(layers=%d, globals=%d)",
+            len(self.weight.weights),
+            len(self.weight.global_weights),
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+
+        for layer in self.v4.layers:
+            layer.attn.init_rope_cache(device=device_str)
+
+        self._load_extra_weights(self.weight)
+        del self.weight
+        self._bind_runtime_buffers(torch.device(device_str))
+        self._materialized = True
+        return True
+
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         assert self.v4 is not None
         mtp_hidden = None
@@ -647,6 +674,9 @@ class DeepSeekV4Model(GptModelBase):
             )
             self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
 
+        if bool(getattr(self._v4_args, "commit_only", False)):
+            return self._initialize_commit_only(init_resource, device_str)
+
         # ``self.weight`` is a framework ``ModelWeights`` populated by the
         # ``DeepSeekV4Weight`` descriptor (see ``rtp_llm/models/deepseek_v4.py``)
         # via the fastsafetensors loader.  Each dsv4 sub-module's factory
@@ -673,10 +703,10 @@ class DeepSeekV4Model(GptModelBase):
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
 
-        # Recompute RoPE cache on real device (precompute_freqs_cis under
-        # meta context yields zeros; we need real values).
+        # Recompute RoPE on the real device and prebuild the compressors'
+        # shared cos_sin_cache before runtime memory allocation starts.
         for layer in self.v4.layers:
-            layer.attn.reset_rope_cache(device=device_str)
+            layer.attn.init_rope_cache(device=device_str)
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
@@ -997,6 +1027,11 @@ class DeepSeekV4Model(GptModelBase):
                         kv_cache=self.kv_cache,
                         cp_size=_prefill_cp_size,
                         device=_jit_device,
+                        max_batch_size=max(
+                            int(self._max_context_batch_size),
+                            int(self._max_generate_batch_size),
+                            1,
+                        ),
                     )
                 _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
                 warmup_fp8_mqa_logits_jit(

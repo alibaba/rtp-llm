@@ -32,10 +32,10 @@ public class ChannelConfiguration {
     @Bean
     public ThreadPoolExecutor managedChannelThreadPoolExecutor() {
         return new ThreadPoolExecutor(
-                config.getGrpcClientExecutorCoreSize(),
-                config.getGrpcClientExecutorMaxSize(),
+                config.getInternalRuntime().getGrpcClientExecutorThreads(),
+                config.getInternalRuntime().getGrpcClientExecutorThreads(),
                 5, TimeUnit.MINUTES,
-                new LinkedBlockingQueue<>(config.getGrpcClientExecutorQueueSize()),
+                new LinkedBlockingQueue<>(config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
                 new NamedThreadFactory("engine-grpc-client-executor")
         );
     }
@@ -45,9 +45,9 @@ public class ChannelConfiguration {
      * <p>
      * Kept separate from {@link #managedChannelThreadPoolExecutor()} so that load
      * from {@code EngineGrpcClient} (engine status queries) cannot saturate the
-     * Forwarder's channel callback threads. The Forwarder already has fallback
-     * logic that routes locally when forwarding fails, so {@link ThreadPoolExecutor.AbortPolicy}
-     * is acceptable under saturation.
+     * Forwarder's channel callback threads. Only a request for which no Master
+     * was selected may fall back to local scheduling; after a Master is selected,
+     * any forwarding failure is terminal to prevent duplicate dispatch.
      */
     @Bean
     public ThreadPoolExecutor forwarderChannelExecutor() {
@@ -64,7 +64,7 @@ public class ChannelConfiguration {
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
         return new NioEventLoopGroup(
-                config.getGrpcClientEventLoopThreads(),
+                config.getInternalRuntime().getGrpcClientEventLoopThreads(),
                 null,
                 DefaultEventExecutorChooserFactory.INSTANCE,
                 SelectorProvider.provider(),
@@ -77,7 +77,7 @@ public class ChannelConfiguration {
     @Bean(destroyMethod = "")
     public EventLoopGroup grpcServerEventLoopGroup() {
         return new NioEventLoopGroup(
-                config.getGrpcServerWorkerEventLoopThreads(),
+                config.getInternalRuntime().getGrpcServerWorkerEventLoopThreads(),
                 new DefaultThreadFactory("grpc-server-elg")
         );
     }

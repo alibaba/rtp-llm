@@ -66,7 +66,8 @@ class RecentCacheKeyTraceReporterTest {
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig disabledConfig = new FlexlbConfig();
-        disabledConfig.setCacheHitWindowWriteEnabled(false);
+        disabledConfig.getObservability().getCacheHit().getRecentKeyWindow()
+                .setWriteEnabled(false);
         BalanceContext skippedContext = contextWithConfig(disabledConfig);
         reporter.report(skippedContext);
 
@@ -85,7 +86,7 @@ class RecentCacheKeyTraceReporterTest {
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         FlexlbConfig metricOffConfig = new FlexlbConfig();
-        metricOffConfig.setCacheHitMetricReportEnabled(false);
+        metricOffConfig.getObservability().getCacheHit().setMetricsEnabled(false);
         BalanceContext firstContext = context(metricOffConfig, List.of(1L, 2L));
         reporter.report(firstContext);
         verify(cacheMetricsReporter, never()).reportRecentCacheKeyHitMetrics(
@@ -162,15 +163,16 @@ class RecentCacheKeyTraceReporterTest {
 
     private static ShardedRecentCacheKeyWindow smallWindow() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setCacheHitTimeWindowMs(60_000L);
-        config.setCacheHitMaxCacheKeys(3_200L);
+        config.getObservability().getCacheHit().getRecentKeyWindow()
+                .setDurationMs(60_000L);
+        config.getObservability().getCacheHit().getRecentKeyWindow()
+                .setMaxKeyOccurrences(3_200L);
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         return new ShardedRecentCacheKeyWindow(configService);
     }
 
     private static BalanceContext contextWithConfig(FlexlbConfig config) {
-        config.setCacheHitTheoryLogEnabled(false);
         BalanceContext balanceContext = mock(BalanceContext.class);
         when(balanceContext.getConfig()).thenReturn(config);
         return balanceContext;
@@ -181,7 +183,6 @@ class RecentCacheKeyTraceReporterTest {
     }
 
     private static BalanceContext context(FlexlbConfig config, List<Long> cacheKeys, long seqLen, long cacheKeyBlockSize) {
-        config.setCacheHitTheoryLogEnabled(false);
         BalanceContext balanceContext = mock(BalanceContext.class);
         Request request = mock(Request.class);
         when(balanceContext.getConfig()).thenReturn(config);

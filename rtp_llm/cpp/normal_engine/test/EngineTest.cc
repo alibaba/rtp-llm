@@ -22,6 +22,19 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
+TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterAddition) {
+    EXPECT_EQ(
+        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 1u);
+    EXPECT_EQ(
+        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/8, /*reserve_tokens=*/1, /*tokens_per_block=*/8), 2u);
+    EXPECT_EQ(
+        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/7, /*reserve_tokens=*/9, /*tokens_per_block=*/8), 2u);
+    EXPECT_EQ(
+        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/9, /*reserve_tokens=*/8, /*tokens_per_block=*/8), 3u);
+    EXPECT_ANY_THROW(
+        NormalEngine::warmUpReservedBlockCount(/*seq_len=*/1, /*reserve_tokens=*/1, /*tokens_per_block=*/0));
+}
+
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
     config.kv_cache_data_type = DataType::TYPE_FP8_E4M3;

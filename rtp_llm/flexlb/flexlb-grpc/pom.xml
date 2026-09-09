@@ -21,10 +21,6 @@
             <artifactId>flexlb-common</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.flexlb</groupId>
-            <artifactId>flexlb-cache</artifactId>
-        </dependency>
-        <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-all</artifactId>
         </dependency>

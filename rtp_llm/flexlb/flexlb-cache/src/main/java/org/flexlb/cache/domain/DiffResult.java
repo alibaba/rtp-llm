@@ -24,36 +24,36 @@ public class DiffResult implements Serializable {
 
     @Serial
     private static final long serialVersionUID = 1L;
-    
+
     /**
      * Added cache blocks
      */
     @Builder.Default
     private Set<Long> addedBlocks = Collections.emptySet();
-    
+
     /**
      * Removed cache blocks
      */
     @Builder.Default
     private Set<Long> removedBlocks = Collections.emptySet();
-    
+
     /**
      * Engine IP
      */
     private String engineIp;
-    
+
     /**
      * Version number
      */
     private String version;
-    
+
     /**
      * Check if there are changes
      */
     public boolean hasChanges() {
         return !addedBlocks.isEmpty() || !removedBlocks.isEmpty();
     }
-    
+
     /**
      * Create empty diff result
      */

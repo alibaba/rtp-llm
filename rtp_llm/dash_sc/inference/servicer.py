@@ -79,6 +79,8 @@ from rtp_llm.dash_sc.grpc_metrics import (
     report_frontend_rpc_done,
 )
 from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCheckOverloaded,
+    GrammarCheckTimeout,
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
@@ -323,6 +325,11 @@ def _dash_error_mapping_for_ft_exception(
     )
     if typed_mapping is not None:
         return typed_mapping
+    if exception_type == ExceptionType.GRAMMAR_COMPILE_OVERLOADED:
+        return _DashFtErrorMapping(
+            DASH_ERROR_ADMISSION_OVERLOADED,
+            "Too many requests.",
+        )
 
     return _DashFtErrorMapping(
         _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exception_type.category]
@@ -1509,11 +1516,12 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 return None
         except GrammarCompilationError as e:
             return DASH_ERROR_BAD_REQUEST, str(e)
+        except GrammarCheckOverloaded:
+            return DASH_ERROR_ADMISSION_OVERLOADED, "Too many requests."
+        except GrammarCheckTimeout as e:
+            return DASH_ERROR_TIMEOUT, f"grammar validation timed out: {e}"
         except GrammarCheckUnavailable as e:
-            return (
-                DASH_ERROR_BAD_REQUEST,
-                f"grammar validation or compilation failed: {e}",
-            )
+            return DASH_ERROR_CAPACITY, f"grammar validation unavailable: {e}"
 
         if ok:
             return None
@@ -1578,10 +1586,15 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
 
     async def close(self) -> None:
-        """Hook for teardown; currently holds no resources (backend_visitor is owned by
-        the caller, sequence counter is in-memory). Kept so future handles can be flushed
-        here without changing the call-site in ``DashScGrpcServer.stop``.
+        """Release resources owned by the servicer.
+
+        The backend visitor remains caller-owned. Clear the validator reference before
+        closing it so repeated or concurrent shutdown requests cannot close it twice.
         """
+        validator = getattr(self, "_grammar_validator", None)
+        self._grammar_validator = None
+        if validator is not None:
+            await asyncio.to_thread(validator.close)
 
     def _next_rtp_llm_request_id(self) -> int:
         sequence = self._seq_counter.increment() % 4096  # 12 bits

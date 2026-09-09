@@ -40,7 +40,10 @@ from rtp_llm.dash_sc.access_log import (
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import LLMFinishReason
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.dash_sc.repetition_monitor import ToolCallLoopResult
+from rtp_llm.dash_sc.repetition_monitor import (
+    OutputRepetitionResult,
+    ToolCallLoopResult,
+)
 from rtp_llm.dash_sc.status import classify_error_message, classify_rpc_exception
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.ops import RoleType
@@ -932,6 +935,8 @@ class GrpcMetricsTest(TestCase):
         # Monitor verdict is computed before report_frontend_rpc_done; here we stub it to
         # the "loop hit" shape and assert the metric projection.
         rec._repetition_monitor = SimpleNamespace(
+            output_repetition_check_ms=0.0,
+            output_repetition_result=None,
             tool_call_loop_check_ms=1.5,
             tool_call_loop_result=ToolCallLoopResult(
                 hit=True, repeat_count=5, current_span_tokens=6, marker_index=0
@@ -945,6 +950,42 @@ class GrpcMetricsTest(TestCase):
         self.assertEqual(metrics.count(GaugeMetrics.TOOL_CALL_LOOP_CHECK_RT_METRIC), 1)
         loop = self._for(AccMetrics.TOOL_CALL_LOOP_QPS_METRIC)[0]
         self.assertEqual(loop[2]["action"], "metric")
+
+    def test_done_output_repetition_family(self) -> None:
+        rec = _make_record()
+        rec._repetition_monitor = SimpleNamespace(
+            output_repetition_check_ms=2.5,
+            output_repetition_result=OutputRepetitionResult(
+                hit=True,
+                repeat_unit_size=1,
+                repeat_count=10,
+                covered_token_count=10,
+                duplicate_token_count=9,
+                start_index=0,
+                end_index=10,
+                first_detect_index=8,
+                non_contiguous=False,
+                occurrence_count=10,
+            ),
+            tool_call_loop_check_ms=None,
+            tool_call_loop_result=None,
+        )
+        grpc_metrics.report_frontend_rpc_done(
+            rec, rank_id=self.rank_id, server_id=self.server_id, status="OK"
+        )
+        metrics = self._metrics()
+        self.assertEqual(metrics.count(AccMetrics.OUTPUT_REPETITION_QPS_METRIC), 1)
+        self.assertEqual(metrics.count(AccMetrics.SAME_TOKEN_RUN_QPS_METRIC), 1)
+        self.assertEqual(
+            metrics.count(GaugeMetrics.OUTPUT_REPETITION_CHECK_RT_METRIC), 1
+        )
+        output = self._for(AccMetrics.OUTPUT_REPETITION_QPS_METRIC)[0]
+        self.assertEqual(output[2]["kind"], "same_token_run")
+        self.assertEqual(output[2]["action"], "metric")
+        self.assertEqual(
+            self._for(GaugeMetrics.OUTPUT_REPETITION_DUPLICATE_TOKENS_METRIC)[0][1],
+            9,
+        )
 
     # -- priority tag ----------------------------------------------------
 

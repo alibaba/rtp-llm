@@ -47,6 +47,12 @@ from rtp_llm.dash_sc.codec import (
     LLMFinishReason,
     SamplingParams,
 )
+from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCheckOverloaded,
+    GrammarCheckTimeout,
+    GrammarCheckUnavailable,
+    GrammarCompilationError,
+)
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _build_mm_inputs_from_request,
@@ -153,6 +159,10 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
             (ExceptionType.LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
             (ExceptionType.UNSUPPORTED_OPERATION, DASH_ERROR_UNSUPPORTED),
             (ExceptionType.MASTER_NO_AVAILABLE_WORKER, DASH_ERROR_CAPACITY),
+            (
+                ExceptionType.GRAMMAR_COMPILE_OVERLOADED,
+                DASH_ERROR_ADMISSION_OVERLOADED,
+            ),
             (ExceptionType.GENERATE_TIMEOUT, DASH_ERROR_TIMEOUT),
             (ExceptionType.OUT_OF_VOCAB_RANGE, DASH_ERROR_INVALID_OUTPUT),
             (ExceptionType.CANCELLED_ERROR, DASH_ERROR_ABORT),
@@ -2594,6 +2604,55 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             aux_info=AuxInfo(input_len=1, reuse_len=0),
         )
         return _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
+
+    async def test_close_closes_grammar_validator_once_and_is_idempotent(self) -> None:
+        validator = MagicMock()
+        servicer = DashScInferenceServicer(
+            backend_visitor=self._terminal_visitor(), grammar_validator=validator
+        )
+
+        await servicer.close()
+        await servicer.close()
+
+        validator.close.assert_called_once_with()
+        self.assertIsNone(servicer._grammar_validator)
+
+        uninitialized_servicer = DashScInferenceServicer.__new__(
+            DashScInferenceServicer
+        )
+        await uninitialized_servicer.close()
+        await uninitialized_servicer.close()
+
+    async def test_grammar_failures_map_to_typed_admission_statuses(self) -> None:
+        cases = (
+            (GrammarCompilationError("invalid"), DASH_ERROR_BAD_REQUEST),
+            (GrammarCheckOverloaded("busy"), DASH_ERROR_ADMISSION_OVERLOADED),
+            (GrammarCheckTimeout("slow"), DASH_ERROR_TIMEOUT),
+            (GrammarCheckUnavailable("down"), DASH_ERROR_CAPACITY),
+        )
+        for error, expected_status in cases:
+            with self.subTest(error=type(error).__name__):
+                validator = MagicMock()
+                validator.validate_response_format.side_effect = error
+                servicer = DashScInferenceServicer(
+                    backend_visitor=self._terminal_visitor(),
+                    grammar_validator=validator,
+                )
+                sampling = MagicMock(
+                    structural_tag=None,
+                    response_format={"type": "json_object"},
+                    json_format=False,
+                )
+
+                status, message = await servicer._validate_request_grammar(
+                    sampling, "grammar-status-test"
+                )
+
+                self.assertEqual(status, expected_status)
+                if isinstance(error, GrammarCheckOverloaded):
+                    self.assertEqual("Too many requests.", message)
+                else:
+                    self.assertIn(str(error), message)
 
     async def test_model_stream_infer_passes_multimodal_payload_to_backend(
         self,

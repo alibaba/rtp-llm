@@ -248,7 +248,11 @@ class TestSharedExpertExecutor(unittest.TestCase):
         overlap = OverlapSharedExpertExecutor()
         with _env("DSV4_MOE_STRICT_FUSED", "0"):
             overlap.start(shared, x)
+        self.assertIs(overlap._input, x)
+        self.assertIsNotNone(overlap._producer_stream)
         got = overlap.finish()
+        self.assertIsNone(overlap._input)
+        self.assertIsNone(overlap._producer_stream)
         ref = shared(x).float()
         self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
 

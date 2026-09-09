@@ -2,9 +2,6 @@ package org.flexlb.dao.loadbalance;
 
 import lombok.Getter;
 
-import java.util.HashMap;
-import java.util.Map;
-
 @Getter
 public enum StrategyErrorType {
 
@@ -23,6 +20,7 @@ public enum StrategyErrorType {
     // queue error
     QUEUE_FULL(8502, false, "TooManyRequests"),
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
+    REQUEST_CANCELLED(8504, false),
 
     // batch dispatch error
     BATCH_DISPATCH_FAILED(8510, true),
@@ -60,15 +58,6 @@ public enum StrategyErrorType {
     private final boolean canRetry;
     private final String statusName; // DashScope-compatible status_name (null = not set)
 
-    // Cache for O(1) lookup by error code
-    private static final Map<Integer, StrategyErrorType> ERROR_CODE_MAP = new HashMap<>();
-
-    static {
-        for (StrategyErrorType type : values()) {
-            ERROR_CODE_MAP.put(type.errorCode, type);
-        }
-    }
-
     StrategyErrorType(int errorCode, boolean shouldRetry) {
         this(errorCode, shouldRetry, null);
     }
@@ -99,16 +88,6 @@ public enum StrategyErrorType {
         String escaped = safeDetail.replace("\\", "\\\\").replace("\"", "\\\"");
         return "{\"status_name\":\"" + statusName
                 + "\",\"detail\":\"" + escaped + "\"}";
-    }
-
-    /**
-     * Find StrategyErrorType by error code
-     *
-     * @param errorCode Error code to search for
-     * @return StrategyErrorType if found, null otherwise
-     */
-    public static StrategyErrorType fromErrorCode(int errorCode) {
-        return ERROR_CODE_MAP.get(errorCode);
     }
 
     @Override

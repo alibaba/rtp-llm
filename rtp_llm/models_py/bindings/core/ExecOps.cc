@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #if USING_CUDA
@@ -150,7 +151,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             size_t                               cache_model_id,
                             int                                  cp_rank,
                             int                                  cp_size,
-                            std::shared_ptr<torch::Event>        pre_created_event) {
+                            std::shared_ptr<torch::Event>        pre_created_event,
+                            CacheStoreCompletionRegistrar        register_store_completion) {
     const auto& param = cache_store_inputs;
     const auto  requireHostTensor =
         [](const torch::Tensor& tensor, const char* name, int64_t expected_dim, c10::ScalarType expected_type) {
@@ -180,6 +182,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     requireHostTensor(param.cache_keys, "cache_keys", 2, torch::kInt64);
 
     if (!cache_store) {
+        RTP_LLM_CHECK_WITH_INFO(!register_store_completion,
+                                "writeCacheStore has tracked publication but cache_store is null; "
+                                "refusing to silently drop the KV transfer");
         RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
         return;
     }
@@ -290,40 +295,60 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             continue;
         }
 
-        const bool uses_cp_canonical_keys = cp_size > 1 && group.policy.cp_mapping != CpBlockMappingMode::NONE
-                                            && seq_size_per_block % static_cast<size_t>(cp_size) == 0;
-        const size_t canonical_seq_size_per_block =
-            uses_cp_canonical_keys ? seq_size_per_block / static_cast<size_t>(cp_size) : seq_size_per_block;
+        const size_t base_seq_size_per_block = cache_config.seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(base_seq_size_per_block > 0 && seq_size_per_block >= base_seq_size_per_block
+                                    && seq_size_per_block % base_seq_size_per_block == 0,
+                                "cache-store tag=%s tokens_per_block=%zu is incompatible with "
+                                "base tokens_per_block=%zu",
+                                layer_kv.tag.c_str(),
+                                seq_size_per_block,
+                                base_seq_size_per_block);
+        const size_t key_blocks_per_group_block = seq_size_per_block / base_seq_size_per_block;
+        const bool compact_cp_mapping = group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
+                                        && key_blocks_per_group_block > 1;
+        RTP_LLM_CHECK_WITH_INFO(!compact_cp_mapping
+                                    || key_blocks_per_group_block == static_cast<size_t>(cp_size),
+                                "cache-store tag=%s compact block scale=%zu does not match cp_size=%d",
+                                layer_kv.tag.c_str(),
+                                key_blocks_per_group_block,
+                                cp_size);
+        const int planner_cp_size = group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
+                                        && !compact_cp_mapping ?
+                                        1 :
+                                        cp_size;
+
         const int prefix_length = prefix_lengths_host[context_index];
-        RTP_LLM_CHECK_WITH_INFO(prefix_length % static_cast<int>(canonical_seq_size_per_block) == 0,
-                                "cache-store tag=%s prefix_length=%d is not aligned to canonical "
-                                "tokens_per_block=%zu (physical tokens_per_block=%zu, cp_size=%d)",
+        RTP_LLM_CHECK_WITH_INFO(prefix_length % static_cast<int>(base_seq_size_per_block) == 0,
+                                "cache-store tag=%s prefix_length=%d is not aligned to base "
+                                "tokens_per_block=%zu",
                                 layer_kv.tag.c_str(),
                                 prefix_length,
-                                canonical_seq_size_per_block,
-                                seq_size_per_block,
-                                cp_size);
+                                base_seq_size_per_block);
 
-        const auto input_index     = static_cast<int64_t>(decoder_batch_size + batch_id);
-        const int  input_length    = input_lengths_host[input_index];
-        const int  reuse_block_num = prefix_length / static_cast<int>(seq_size_per_block);
-        const int  block_num =
-            (input_length + static_cast<int>(seq_size_per_block) - 1) / static_cast<int>(seq_size_per_block);
-        const int canonical_reuse_block_num = prefix_length / static_cast<int>(canonical_seq_size_per_block);
-        const int canonical_block_num       = (input_length + static_cast<int>(canonical_seq_size_per_block) - 1)
-                                        / static_cast<int>(canonical_seq_size_per_block);
-        const int canonical_total_blocks = canonical_block_num + canonical_reuse_block_num;
-        const int total_blocks =
-            uses_cp_canonical_keys ? (canonical_total_blocks + cp_size - 1) / cp_size : block_num + reuse_block_num;
-        if (total_blocks <= 0) {
+        const auto input_index  = static_cast<int64_t>(decoder_batch_size + batch_id);
+        const int  input_length = input_lengths_host[input_index];
+        const size_t request_cache_key_count = std::min(
+            cache_keys_per_batch,
+            static_cast<size_t>((input_length + static_cast<int>(base_seq_size_per_block) - 1)
+                                / static_cast<int>(base_seq_size_per_block)
+                                + prefix_length / static_cast<int>(base_seq_size_per_block)));
+        if (request_cache_key_count == 0) {
             continue;
         }
+        const size_t total_logical_blocks =
+            compact_cp_mapping ? request_cache_key_count :
+                                 (request_cache_key_count + key_blocks_per_group_block - 1)
+                                     / key_blocks_per_group_block;
+        const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
         const int64_t request_id     = request_ids[context_index];
         auto          event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
         auto          request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
-        RTP_LLM_LOG_DEBUG(
-            "write cache store, request id is %ld, blocks num is %d", static_cast<long>(request_id), total_blocks);
+        std::vector<int64_t> publication_lease_keys;
+        std::vector<int32_t> publication_lease_blocks;
+        RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
+                          static_cast<long>(request_id),
+                          total_logical_blocks);
 
         auto addBlock = [&](int key_index, int offset_index) {
             RTP_LLM_CHECK_WITH_INFO(offset_index >= 0 && offset_index < static_cast<int>(max_blocks_per_batch),
@@ -356,6 +381,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                     block_id);
                 return;
             }
+            publication_lease_keys.push_back(
+                cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]);
+            publication_lease_blocks.push_back(block_id);
 
             if (cp_size > 1 && group.policy.cp_slice != CpBlockSliceMode::NONE) {
                 RTP_LLM_CHECK_WITH_INFO(cp_rank >= 0 && cp_rank < cp_size,
@@ -429,38 +457,61 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         // Under CP sharding, kv_cache_offset can be rank-local-compact while
         // cache_keys stays in the full logical namespace. The common cache
         // policy owns the key/offset projection for both legacy and sharded cases.
-        // Clamp by cache_keys_per_batch (global width) -- NOT max_blocks_per_batch,
-        // which under CP shard is the local-compact width for FULL groups.
-        const auto block_plan = buildCacheStorePlan(
-            group.policy,
-            static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
-            /*reuse_block_size=*/0,
-            use_group_cache_transfer_policy,
-            cp_rank,
-            cp_size);
+        const auto block_plan = buildCacheStorePlan(group.policy,
+                                                     total_logical_blocks,
+                                                     /*reuse_block_size=*/0,
+                                                     use_group_cache_transfer_policy,
+                                                     cp_rank,
+                                                     planner_cp_size,
+                                                     key_blocks_per_logical_block,
+                                                     request_cache_key_count);
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }
 
-        auto storeCallback = [layer_id = layer_kv.layer_id,
-                              cache_model_id,
-                              tag = layer_kv.tag,
-                              request_id,
-                              request_blocks](bool success, CacheStoreErrorCode ec) {
-            if (!success) {
-                RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d tag=%s "
-                                    "error_code=%d error=%s buffer={%s}",
-                                    static_cast<long>(request_id),
-                                    cache_model_id,
-                                    layer_id,
-                                    tag.c_str(),
-                                    static_cast<int>(ec),
-                                    ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str(),
-                                    request_blocks->debugInfo().c_str());
-            }
-        };
         if (request_blocks->getBlocksCount() > 0) {
-            cache_store->store(request_blocks, std::move(storeCallback));
+            CacheStoreCompletionCallback store_completion;
+            if (register_store_completion) {
+                store_completion = register_store_completion(publication_lease_keys,
+                                                              publication_lease_blocks,
+                                                              cache_config.groupIdForTag(layer_kv.tag));
+            }
+            auto store_callback = [layer_id = layer_kv.layer_id,
+                                   cache_model_id,
+                                   tag = layer_kv.tag,
+                                   request_id,
+                                   request_blocks,
+                                   store_completion](bool success, CacheStoreErrorCode ec) {
+                if (!success) {
+                    RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d "
+                                        "tag=%s error_code=%d error=%s buffer={%s}",
+                                        static_cast<long>(request_id),
+                                        cache_model_id,
+                                        layer_id,
+                                        tag.c_str(),
+                                        static_cast<int>(ec),
+                                        ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str(),
+                                        request_blocks->debugInfo().c_str());
+                }
+                if (store_completion) {
+                    if (success) {
+                        store_completion(nullptr);
+                    } else {
+                        store_completion(std::make_exception_ptr(std::runtime_error(
+                            "cache-store publication failed for request " + std::to_string(request_id)
+                            + ", model " + std::to_string(cache_model_id) + ", layer " + std::to_string(layer_id)
+                            + ", tag " + tag + ", error code " + std::to_string(static_cast<int>(ec)))));
+                    }
+                }
+            };
+            try {
+                cache_store->store(request_blocks, std::move(store_callback));
+            } catch (...) {
+                if (store_completion) {
+                    store_completion(std::current_exception());
+                }
+                throw;
+            }
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
                               static_cast<long>(request_id),

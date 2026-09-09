@@ -183,6 +183,12 @@ size_t graphAllocatedBytes() {
 #endif
 }
 
+void graphEmptyCache() {
+#if USING_CUDA
+    c10::cuda::CUDACachingAllocator::emptyCache();
+#endif
+}
+
 GraphPoolHandle graphPoolHandle() {
 #if USING_CUDA
     return at::cuda::graph_pool_handle();
