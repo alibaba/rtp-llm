@@ -60,38 +60,6 @@ class _FusedSharedExpertSentinel(nn.Module):
         raise RuntimeError("shared expert is fused into MegaMoE")
 
 
-def _validate_hy4_mxfp8_moe_strategy(
-    config: ModelConfig, moe_config: MoeConfig
-) -> None:
-    """Reject MXFP8 HY4 expert backends that silently drop SwiGLU clamp.
-
-    HY4 applies ``swiglu_limit`` only to routed experts. Both ``mega_moe_fp8``
-    and plain ``mega_moe`` leave the shared expert on its separate, unclamped
-    path; plain ``mega_moe`` converts routed MXFP8 weights to FP4 at load time.
-    A fused-shared strategy cannot represent routed-clamped/shared-unclamped.
-    """
-    if config.model_type not in ("hy_v4", "hy_v4_mtp"):
-        return
-    quant_config = config.quant_config
-    quant_method = quant_config.get_method() if quant_config is not None else None
-    if quant_method != "MXFP8" or float(config.swiglu_limit) <= 0:
-        return
-    if moe_config.moe_strategy in {
-        "mega_moe_se",
-        "mega_moe_fused",
-        "mega_moe_fp8_se",
-    }:
-        raise ValueError(
-            f"HY V4 does not support moe_strategy={moe_config.moe_strategy}: "
-            "the fused MegaMoE kernel applies one activation_clamp to routed "
-            "and shared experts, while HY V4 clamps routed experts only"
-        )
-    if moe_config.moe_strategy not in {"mega_moe_fp8", "mega_moe"}:
-        raise ValueError(
-            "HY V4 MXFP8 routed experts require mega_moe_fp8, or mega_moe "
-            "with online FP8-to-FP4 weight conversion: "
-            f"got moe_strategy={moe_config.moe_strategy!r}"
-        )
 
 
 class GenericMoeLayer(nn.Module):
@@ -154,7 +122,6 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        _validate_hy4_mxfp8_moe_strategy(config, moe_config)
         self._hy4_fp32_router = getattr(config, "model_type", "") in (
             "hy_v4",
             "hy_v4_mtp",

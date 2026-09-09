@@ -13,9 +13,6 @@ from rtp_llm.models_py.modules.glm5_mega_moe import (
     mega_moe_wrapper,
     quant_layouts,
 )
-from rtp_llm.models_py.model_desc.generic_moe import (
-    _validate_hy4_mxfp8_moe_strategy,
-)
 from rtp_llm.utils.model_weight import W
 
 
@@ -78,26 +75,6 @@ def _parallelism(role_type=None):
 
 
 class MegaMoeWrapperLayoutTest(unittest.TestCase):
-    def test_hy4_mxfp8_rejects_backend_that_drops_routed_clamp(self):
-        config = _config(swiglu_limit=10.0)
-        config.model_type = "hy_v4"
-        config.quant_config = SimpleNamespace(get_method=lambda: "MXFP8")
-        with self.assertRaisesRegex(ValueError, "online FP8-to-FP4"):
-            _validate_hy4_mxfp8_moe_strategy(
-                config, SimpleNamespace(moe_strategy="auto")
-            )
-
-        _validate_hy4_mxfp8_moe_strategy(
-            config, SimpleNamespace(moe_strategy="mega_moe_fp8")
-        )
-        _validate_hy4_mxfp8_moe_strategy(
-            config, SimpleNamespace(moe_strategy="mega_moe")
-        )
-        with self.assertRaisesRegex(ValueError, "clamps routed experts only"):
-            _validate_hy4_mxfp8_moe_strategy(
-                config, SimpleNamespace(moe_strategy="mega_moe_se")
-            )
-
     def test_fp4_wrapper_forwards_routed_clamp(self):
         wrapper = object.__new__(mega_moe_wrapper.MegaMoeWrapper)
         torch.nn.Module.__init__(wrapper)

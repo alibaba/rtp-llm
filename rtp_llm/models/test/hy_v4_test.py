@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -25,6 +26,9 @@ from rtp_llm.models.hy_v4 import (
     Hy4Weight,
     _move_indexer_rope_to_front,
     _transpose_stacked_gate_up,
+)
+from rtp_llm.models_py.model_desc.hy_v4_model import (
+    _validate_hy4_moe_quant_strategy,
 )
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_, transpose
 
@@ -391,6 +395,54 @@ class Hy4WeightTest(unittest.TestCase):
             final_norm.weights[0].name,
             "model.mtp_layers.0.final_layernorm.weight",
         )
+
+
+class Hy4MoeStrategyTest(unittest.TestCase):
+    @staticmethod
+    def _config(quant_config, model_type="hy_v4"):
+        return SimpleNamespace(
+            model_type=model_type,
+            quant_config=quant_config,
+            swiglu_limit=10.0,
+        )
+
+    def test_mxfp8_rejects_backend_that_drops_routed_clamp(self):
+        config = self._config(Fp8MxBlockWiseQuantConfig(is_quanted=True))
+
+        with self.assertRaisesRegex(ValueError, "online FP8-to-FP4"):
+            _validate_hy4_moe_quant_strategy(
+                config, SimpleNamespace(moe_strategy="auto"), layer_idx=0
+            )
+        _validate_hy4_moe_quant_strategy(
+            config, SimpleNamespace(moe_strategy="mega_moe_fp8"), layer_idx=0
+        )
+        _validate_hy4_moe_quant_strategy(
+            config, SimpleNamespace(moe_strategy="mega_moe"), layer_idx=0
+        )
+        with self.assertRaisesRegex(ValueError, "clamps routed experts only"):
+            _validate_hy4_moe_quant_strategy(
+                config, SimpleNamespace(moe_strategy="mega_moe_se"), layer_idx=0
+            )
+
+    def test_native_mxfp4_uses_layer_specific_strategy(self):
+        quant_config = Fp8MxBlockWiseQuantConfig(
+            is_quanted=True,
+            quantized_layers={
+                "model.layers.3.mlp": {"quant_algo": "MXFP8"},
+                "model.layers.3.mlp.experts": {"quant_algo": "MXFP4"},
+            },
+        )
+        config = self._config(quant_config)
+
+        _validate_hy4_moe_quant_strategy(
+            config, SimpleNamespace(moe_strategy="mega_moe"), layer_idx=3
+        )
+        with self.assertRaisesRegex(ValueError, "checkpoint-native MXFP4"):
+            _validate_hy4_moe_quant_strategy(
+                config,
+                SimpleNamespace(moe_strategy="mega_moe_fp8"),
+                layer_idx=3,
+            )
 
 
 class Hy4Mxfp8WeightTest(unittest.TestCase):

@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8MxBlockWiseQuantConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
@@ -19,6 +20,58 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
+
+
+def _validate_hy4_moe_quant_strategy(
+    config: ModelConfig, moe_config: MoeConfig, layer_idx: int
+) -> None:
+    quant_config = config.quant_config
+    quant_method = quant_config.get_method() if quant_config is not None else None
+    if quant_method != "MXFP8" or float(config.swiglu_limit) <= 0:
+        return
+
+    routed_quant_method = quant_method
+    if (
+        isinstance(quant_config, Fp8MxBlockWiseQuantConfig)
+        and quant_config.quantized_layers
+    ):
+        routed_prefix = (
+            "model.mtp_layers.0.mlp.experts"
+            if config.model_type == "hy_v4_mtp"
+            else f"model.layers.{layer_idx}.mlp.experts"
+        )
+        routed_quant_method = quant_config.resolve_module_quant_algo(routed_prefix)
+        if routed_quant_method is None:
+            raise ValueError(
+                "HY V4 ModelOpt MIXED_PRECISION is missing routed expert "
+                f"configuration for {routed_prefix}"
+            )
+
+    if moe_config.moe_strategy in {
+        "mega_moe_se",
+        "mega_moe_fused",
+        "mega_moe_fp8_se",
+    }:
+        raise ValueError(
+            f"HY V4 does not support moe_strategy={moe_config.moe_strategy}: "
+            "the fused MegaMoE kernel applies one activation_clamp to routed "
+            "and shared experts, while HY V4 clamps routed experts only"
+        )
+    if routed_quant_method == "MXFP4":
+        if moe_config.moe_strategy != "mega_moe":
+            raise ValueError(
+                "HY V4 checkpoint-native MXFP4 routed experts require "
+                "moe_strategy=mega_moe with a separate shared expert: "
+                f"got moe_strategy={moe_config.moe_strategy!r}"
+            )
+        return
+    if moe_config.moe_strategy not in {"mega_moe_fp8", "mega_moe"}:
+        raise ValueError(
+            "HY V4 MXFP8 routed experts require mega_moe_fp8, or mega_moe "
+            "with online FP8-to-FP4 weight conversion: "
+            f"got moe_strategy={moe_config.moe_strategy!r}"
+        )
+
 
 
 @dataclass
@@ -69,6 +122,7 @@ class Hy4DecoderLayer(nn.Module):
             indexer_use_hadamard=config.indexer_use_hadamard,
         )
         if layer_idx in config.moe_layer_index:
+            _validate_hy4_moe_quant_strategy(config, moe_config, layer_idx)
             self.mlp = GenericMoeLayer(
                 config,
                 parallelism_config,
