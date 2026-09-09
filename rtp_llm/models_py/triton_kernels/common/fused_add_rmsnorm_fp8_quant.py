@@ -25,6 +25,57 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
 )
 
 MAX_INREG_H = 8192
+MX_BLOCK = 32
+
+
+def _create_mxfp8_packed_scale_output(
+    tokens: int, hidden_size: int, device: torch.device
+) -> torch.Tensor:
+    """Allocate the exact DeepGEMM MXFP8 activation-scale layout.
+
+    One int32 packs four adjacent group-32 UE8M0 bytes, so the logical K
+    dimension is ``hidden_size / 128``.  The generic FP8 allocator assumes
+    one UE8M0 byte per group-128 and therefore cannot be used for MXFP8.
+    """
+    import deep_gemm
+
+    packed_k = hidden_size // (4 * MX_BLOCK)
+    aligned_tokens = deep_gemm.get_tma_aligned_size(tokens, 4)
+    storage = torch.empty(
+        (packed_k, aligned_tokens), device=device, dtype=torch.int32
+    )
+    return storage.transpose(0, 1)[:tokens, :]
+
+
+def _canonical_mxfp8_quant_act_packed(
+    value: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Import MXFP8 only when an MXFP8 fallback is actually selected."""
+    from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act_packed
+
+    return mxfp8_quant_act_packed(value)
+
+
+@triton.jit
+def _mxfp8_float_to_ue8m0(value):
+    """Match FlashInfer's round-toward-+inf UE8M0 conversion."""
+    bits = value.to(tl.int32, bitcast=True)
+    exponent = (bits >> 23) & 0xFF
+    mantissa = bits & 0x7FFFFF
+    bump = tl.where(mantissa != 0, 1, 0)
+    tiny_subnormal = (exponent == 0) & (mantissa <= 0x400000)
+    bump = tl.where(tiny_subnormal, 0, bump)
+    result = tl.minimum(exponent + bump, 254)
+    return tl.where(value <= 0.0, 0, result)
+
+
+@triton.jit
+def _mxfp8_ue8m0_to_inv_scale(exponent):
+    """Construct FlashInfer's reciprocal power-of-two MXFP8 scale."""
+    inv_exponent = tl.maximum(254 - exponent, 0)
+    inv_bits = inv_exponent << 23
+    inv_scale = inv_bits.to(tl.float32, bitcast=True)
+    return tl.where(exponent == 0, 0.0, inv_scale)
 
 
 @triton.jit
@@ -83,6 +134,7 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    MXFP8_SEMANTICS: tl.constexpr,
 ):
     """Single-pass: load whole row → r_new in registers → reuse for normalize+quant.
 
@@ -129,7 +181,9 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     # CUDA kernel (which does pure fp32 ``local_absmax / max_8bit``). The fp8
     # cast below already clamps to [fp8_min, fp8_max] so a zero absmax yields
     # NaN/inf that gets safely clamped to 0 (matching baseline behaviour).
-    absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-4)
+    absmax = tl.max(abs_2d, axis=1)
+    if not MXFP8_SEMANTICS:
+        absmax = tl.maximum(absmax, 1e-4)
 
     # Use default fp32 `/` (div.approx.f32) + reciprocal-multiply for the
     # quant divisions. Empirically bit-identical to the prior div.rn.f32
@@ -137,16 +191,32 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     # power-of-2 rounding and E4M3's 3-mantissa quant). Saves ~20% wall time
     # on the kernel by avoiding the inline-asm div.rn.f32.
     if SCALE_UE8M0:
-        s_init = absmax / fp8_max
-        s, exp_field = _ue8m0_pow2_round(s_init)
-        s_bcast = tl.reshape(s, (num_groups, 1))
-        s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
-        inv_s = 1.0 / s_full
-        fp8_2d = tl.clamp(
-            normed_2d * inv_s,
-            fp8_min,
-            fp8_max,
-        ).to(fp8_out_ptr.dtype.element_ty)
+        if MXFP8_SEMANTICS:
+            normalized_max = absmax * tl.full(
+                absmax.shape, 1.0 / 448.0, tl.float32
+            )
+            exp_field = _mxfp8_float_to_ue8m0(normalized_max)
+            inv_scale = _mxfp8_ue8m0_to_inv_scale(exp_field)
+            inv_scale_full = tl.broadcast_to(
+                tl.reshape(inv_scale, (num_groups, 1)),
+                (num_groups, GROUP_SIZE),
+            )
+            fp8_2d = tl.clamp(
+                normed_2d * inv_scale_full,
+                fp8_min,
+                fp8_max,
+            ).to(fp8_out_ptr.dtype.element_ty)
+        else:
+            s_init = absmax / fp8_max
+            s, exp_field = _ue8m0_pow2_round(s_init)
+            s_bcast = tl.reshape(s, (num_groups, 1))
+            s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+            inv_s = 1.0 / s_full
+            fp8_2d = tl.clamp(
+                normed_2d * inv_s,
+                fp8_min,
+                fp8_max,
+            ).to(fp8_out_ptr.dtype.element_ty)
         fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
 
@@ -191,8 +261,11 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     residual_ptr,
     weight_ptr,
     bf16_out_ptr,
+    fp32_out_ptr,
     fp8_out_ptr,
     scale_out_ptr,
+    mega_mxfp8_out_ptr,
+    mega_mxfp8_scale_out_ptr,
     H: tl.constexpr,
     eps,
     fp8_max,
@@ -200,12 +273,19 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     stride_h_t,
     stride_r_t,
     stride_b_t,
+    stride_fp32_t,
     stride_o_t,
     stride_scale_t,
     stride_scale_g,
+    stride_mega_mxfp8_t,
+    stride_mega_mxfp8_scale_t,
+    stride_mega_mxfp8_scale_g,
     BLOCK_N: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    MXFP8_SEMANTICS: tl.constexpr,
+    HAS_MEGA_MOE_OUTPUT: tl.constexpr,
+    HAS_FP32_OUTPUT: tl.constexpr,
 ):
     """Single-pass dual-output: also stores bf16 normed alongside fp8.
 
@@ -248,6 +328,12 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
         mask=mask,
     )
     normed = normed_bf16.to(tl.float32)
+    if HAS_FP32_OUTPUT:
+        tl.store(
+            fp32_out_ptr + token_id * stride_fp32_t + offs,
+            normed,
+            mask=mask,
+        )
 
     num_groups: tl.constexpr = BLOCK_N // GROUP_SIZE
     actual_num_groups: tl.constexpr = H // GROUP_SIZE
@@ -260,7 +346,9 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     # CUDA kernel (which does pure fp32 ``local_absmax / max_8bit``). The fp8
     # cast below already clamps to [fp8_min, fp8_max] so a zero absmax yields
     # NaN/inf that gets safely clamped to 0 (matching baseline behaviour).
-    absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-4)
+    absmax = tl.max(abs_2d, axis=1)
+    if not MXFP8_SEMANTICS:
+        absmax = tl.maximum(absmax, 1e-4)
 
     # Use default fp32 `/` (div.approx.f32) + reciprocal-multiply for the
     # quant divisions. Empirically bit-identical to the prior div.rn.f32
@@ -268,16 +356,32 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     # power-of-2 rounding and E4M3's 3-mantissa quant). Saves ~20% wall time
     # on the kernel by avoiding the inline-asm div.rn.f32.
     if SCALE_UE8M0:
-        s_init = absmax / fp8_max
-        s, exp_field = _ue8m0_pow2_round(s_init)
-        s_bcast = tl.reshape(s, (num_groups, 1))
-        s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
-        inv_s = 1.0 / s_full
-        fp8_2d = tl.clamp(
-            normed_2d * inv_s,
-            fp8_min,
-            fp8_max,
-        ).to(fp8_out_ptr.dtype.element_ty)
+        if MXFP8_SEMANTICS:
+            normalized_max = absmax * tl.full(
+                absmax.shape, 1.0 / 448.0, tl.float32
+            )
+            exp_field = _mxfp8_float_to_ue8m0(normalized_max)
+            inv_scale = _mxfp8_ue8m0_to_inv_scale(exp_field)
+            inv_scale_full = tl.broadcast_to(
+                tl.reshape(inv_scale, (num_groups, 1)),
+                (num_groups, GROUP_SIZE),
+            )
+            fp8_2d = tl.clamp(
+                normed_2d * inv_scale_full,
+                fp8_min,
+                fp8_max,
+            ).to(fp8_out_ptr.dtype.element_ty)
+        else:
+            s_init = absmax / fp8_max
+            s, exp_field = _ue8m0_pow2_round(s_init)
+            s_bcast = tl.reshape(s, (num_groups, 1))
+            s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+            inv_s = 1.0 / s_full
+            fp8_2d = tl.clamp(
+                normed_2d * inv_s,
+                fp8_min,
+                fp8_max,
+            ).to(fp8_out_ptr.dtype.element_ty)
         fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
 
@@ -315,6 +419,50 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
             mask=g_mask,
         )
 
+    if HAS_MEGA_MOE_OUTPUT:
+        # Plain MegaMoE consumes the same normalized BF16 values as the
+        # shared expert, but owns a distinct activation ABI: group-32 E4M3,
+        # four packed UE8M0 bytes, contiguous row-major scales, and a 1e-4
+        # absmax floor.  Produce that ABI directly in the caller-owned CUDA
+        # Graph buffers while the normalized row is still resident.
+        mega_absmax = tl.maximum(absmax, 1.0e-4)
+        mega_scale_exponent = _mxfp8_float_to_ue8m0(mega_absmax / 448.0)
+        mega_inv_scale = _mxfp8_ue8m0_to_inv_scale(mega_scale_exponent)
+        mega_inv_scale_full = tl.broadcast_to(
+            tl.reshape(mega_inv_scale, (num_groups, 1)),
+            (num_groups, GROUP_SIZE),
+        )
+        mega_fp8_2d = tl.clamp(
+            normed_2d * mega_inv_scale_full,
+            fp8_min,
+            fp8_max,
+        ).to(mega_mxfp8_out_ptr.dtype.element_ty)
+        tl.store(
+            mega_mxfp8_out_ptr + token_id * stride_mega_mxfp8_t + offs,
+            tl.reshape(mega_fp8_2d, (BLOCK_N,)),
+            mask=mask,
+        )
+
+        mega_num_packed: tl.constexpr = num_groups // 4
+        mega_actual_packed: tl.constexpr = actual_num_groups // 4
+        mega_group_offsets = tl.arange(0, num_groups)
+        mega_shifted = tl.where(
+            mega_group_offsets < actual_num_groups,
+            mega_scale_exponent << ((mega_group_offsets % 4) * 8),
+            0,
+        )
+        mega_packed = tl.sum(
+            tl.reshape(mega_shifted, (mega_num_packed, 4)), axis=1
+        )
+        mega_packed_offsets = tl.arange(0, mega_num_packed)
+        tl.store(
+            mega_mxfp8_scale_out_ptr
+            + token_id * stride_mega_mxfp8_scale_t
+            + mega_packed_offsets * stride_mega_mxfp8_scale_g,
+            mega_packed,
+            mask=mega_packed_offsets < mega_actual_packed,
+        )
+
 
 def _select_num_warps(H: int) -> int:
     if H <= 512:
@@ -331,6 +479,7 @@ def _baseline_add_rmsnorm_fp8_quant(
     eps: float,
     group_size: int,
     scale_ue8m0: bool,
+    mxfp8_semantics: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fallback: baseline CUDA kernels for H > MAX_INREG_H."""
     import flashinfer.norm
@@ -339,6 +488,8 @@ def _baseline_add_rmsnorm_fp8_quant(
 
     residual.add_(hidden_states)
     normed = flashinfer.norm.rmsnorm(residual, weight, eps=eps)
+    if mxfp8_semantics:
+        return _canonical_mxfp8_quant_act_packed(normed)
     return sgl_per_token_group_quant_fp8(
         normed,
         group_size=group_size,
@@ -356,6 +507,7 @@ def _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
     eps: float,
     group_size: int,
     scale_ue8m0: bool,
+    mxfp8_semantics: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fallback: baseline CUDA kernels for H > MAX_INREG_H (dual output)."""
     import flashinfer.norm
@@ -364,6 +516,9 @@ def _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
 
     residual.add_(hidden_states)
     bf16_out = flashinfer.norm.rmsnorm(residual, weight, eps=eps)
+    if mxfp8_semantics:
+        fp8_out, scale = _canonical_mxfp8_quant_act_packed(bf16_out)
+        return bf16_out, fp8_out, scale
     fp8_out, scale = sgl_per_token_group_quant_fp8(
         bf16_out,
         group_size=group_size,
@@ -382,35 +537,94 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     eps: float = 1e-6,
     group_size: int = 128,
     scale_ue8m0: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mxfp8_semantics: bool = False,
+    mega_mxfp8_out: torch.Tensor | None = None,
+    mega_mxfp8_scale_out: torch.Tensor | None = None,
+    emit_fp32_output: bool = False,
+) -> (
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+):
     """Same as ``fused_add_rmsnorm_fp8_quant`` but also returns bf16 normed."""
     assert hidden_states.dim() == 2, "hidden_states must be 2-D"
     assert residual.shape == hidden_states.shape
     assert weight.dim() == 1 and weight.shape[0] == hidden_states.shape[1]
     T, H = hidden_states.shape
     assert H % group_size == 0
+    if mxfp8_semantics:
+        assert group_size == MX_BLOCK and scale_ue8m0
     if scale_ue8m0:
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
+    emit_mega_moe = mega_mxfp8_out is not None or mega_mxfp8_scale_out is not None
+    if emit_mega_moe:
+        if mega_mxfp8_out is None or mega_mxfp8_scale_out is None:
+            raise ValueError(
+                "mega_mxfp8_out and mega_mxfp8_scale_out must be provided together"
+            )
+        expected_scale_shape = (T, H // (4 * MX_BLOCK))
+        if (
+            not mxfp8_semantics
+            or group_size != MX_BLOCK
+            or H % (4 * MX_BLOCK) != 0
+            or tuple(mega_mxfp8_out.shape) != (T, H)
+            or mega_mxfp8_out.dtype != torch.float8_e4m3fn
+            or not mega_mxfp8_out.is_contiguous()
+            or tuple(mega_mxfp8_scale_out.shape) != expected_scale_shape
+            or mega_mxfp8_scale_out.dtype != torch.int32
+            or not mega_mxfp8_scale_out.is_contiguous()
+            or mega_mxfp8_out.device != hidden_states.device
+            or mega_mxfp8_scale_out.device != hidden_states.device
+        ):
+            raise ValueError("invalid HY4 MegaMoE activation/scale output ABI")
+
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H:
-        return _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
-            hidden_states, residual, weight, eps, group_size, scale_ue8m0
+        result = _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
+            hidden_states,
+            residual,
+            weight,
+            eps,
+            group_size,
+            scale_ue8m0,
+            mxfp8_semantics,
         )
+        if emit_mega_moe:
+            from rtp_llm.models_py.modules.glm5_mega_moe.quant_layouts import (
+                per_token_cast_to_fp8_packed_ue8m0,
+            )
+
+            mega_fp8, mega_scale = per_token_cast_to_fp8_packed_ue8m0(
+                result[0].contiguous(), gran_k=MX_BLOCK
+            )
+            mega_mxfp8_out.copy_(mega_fp8)
+            mega_mxfp8_scale_out.copy_(mega_scale)
+        return (*result, result[0].float()) if emit_fp32_output else result
 
     bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=hidden_states.device)
+    fp32_out = (
+        torch.empty((T, H), dtype=torch.float32, device=hidden_states.device)
+        if emit_fp32_output
+        else None
+    )
     fp8_out = torch.empty(
         (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
     )
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=hidden_states.device,
-        group_size=group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
-    )
+    if mxfp8_semantics:
+        scale_out = _create_mxfp8_packed_scale_output(T, H, hidden_states.device)
+    else:
+        scale_out = create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=hidden_states.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     if T == 0:
+        if emit_fp32_output:
+            assert fp32_out is not None
+            return bf16_out, fp8_out, scale_out, fp32_out
         return bf16_out, fp8_out, scale_out
 
     finfo = torch.finfo(torch.float8_e4m3fn)
@@ -423,8 +637,11 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         residual,
         weight,
         bf16_out,
+        fp32_out if emit_fp32_output else bf16_out,
         fp8_out,
         scale_out,
+        mega_mxfp8_out if emit_mega_moe else fp8_out,
+        mega_mxfp8_scale_out if emit_mega_moe else scale_out,
         H,
         eps,
         fp8_max,
@@ -432,14 +649,24 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         hidden_states.stride(0),
         residual.stride(0),
         bf16_out.stride(0),
+        fp32_out.stride(0) if emit_fp32_output else 0,
         fp8_out.stride(0),
         scale_out.stride(0),
         scale_out.stride(1),
+        mega_mxfp8_out.stride(0) if emit_mega_moe else 0,
+        mega_mxfp8_scale_out.stride(0) if emit_mega_moe else 0,
+        mega_mxfp8_scale_out.stride(1) if emit_mega_moe else 0,
         BLOCK_N=block_n,
         GROUP_SIZE=group_size,
         SCALE_UE8M0=scale_ue8m0,
+        MXFP8_SEMANTICS=mxfp8_semantics,
+        HAS_MEGA_MOE_OUTPUT=emit_mega_moe,
+        HAS_FP32_OUTPUT=emit_fp32_output,
         num_warps=_select_num_warps(H),
     )
+    if emit_fp32_output:
+        assert fp32_out is not None
+        return bf16_out, fp8_out, scale_out, fp32_out
     return bf16_out, fp8_out, scale_out
 
 
@@ -450,6 +677,7 @@ def fused_add_rmsnorm_fp8_quant(
     eps: float = 1e-6,
     group_size: int = 128,
     scale_ue8m0: bool = False,
+    mxfp8_semantics: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused add-residual + RMSNorm + per-token-group FP8 quant.
 
@@ -461,26 +689,37 @@ def fused_add_rmsnorm_fp8_quant(
     assert weight.dim() == 1 and weight.shape[0] == hidden_states.shape[1]
     T, H = hidden_states.shape
     assert H % group_size == 0
+    if mxfp8_semantics:
+        assert group_size == MX_BLOCK and scale_ue8m0
     if scale_ue8m0:
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H:
         return _baseline_add_rmsnorm_fp8_quant(
-            hidden_states, residual, weight, eps, group_size, scale_ue8m0
+            hidden_states,
+            residual,
+            weight,
+            eps,
+            group_size,
+            scale_ue8m0,
+            mxfp8_semantics,
         )
 
     fp8_out = torch.empty(
         (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
     )
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=hidden_states.device,
-        group_size=group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
-    )
+    if mxfp8_semantics:
+        scale_out = _create_mxfp8_packed_scale_output(T, H, hidden_states.device)
+    else:
+        scale_out = create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=hidden_states.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     if T == 0:
         return fp8_out, scale_out
 
@@ -507,6 +746,7 @@ def fused_add_rmsnorm_fp8_quant(
         BLOCK_N=block_n,
         GROUP_SIZE=group_size,
         SCALE_UE8M0=scale_ue8m0,
+        MXFP8_SEMANTICS=mxfp8_semantics,
         num_warps=_select_num_warps(H),
     )
     return fp8_out, scale_out

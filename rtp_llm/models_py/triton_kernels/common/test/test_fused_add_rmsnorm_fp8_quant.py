@@ -14,9 +14,10 @@ import unittest
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-    create_per_token_group_quant_fp8_output_scale,
     sgl_per_token_group_quant_fp8,
 )
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act_packed
+from rtp_llm.models_py.modules.base.cuda.norm import RMSResNorm
 from rtp_llm.models_py.triton_kernels.common.fused_add_rmsnorm_fp8_quant import (
     fused_add_rmsnorm_fp8_quant,
     fused_add_rmsnorm_fp8_quant_with_bf16_output,
@@ -254,6 +255,93 @@ class TestFusedAddRmsNormFp8QuantDualOutput(unittest.TestCase):
             for ue8m0 in [False, True]:
                 with self.subTest(T=T, H=H, scale_ue8m0=ue8m0):
                     self._run(T, H, scale_ue8m0=ue8m0)
+
+    def test_hy4_mtp_mxfp8_matches_production_path(self):
+        """CMP G2 preserves residual and consumer-critical MXFP8 boundaries."""
+        eps = 1e-6
+        for T in (1, 4, 16, 64):
+            for kind in ("random", "zero", "tiny"):
+                with self.subTest(T=T, kind=kind):
+                    if kind == "random":
+                        hidden = torch.randn(
+                            T, 6144, dtype=torch.bfloat16, device="cuda"
+                        )
+                        residual = torch.randn_like(hidden)
+                    elif kind == "zero":
+                        hidden = torch.zeros(
+                            T, 6144, dtype=torch.bfloat16, device="cuda"
+                        )
+                        residual = torch.zeros_like(hidden)
+                    else:
+                        hidden = torch.full(
+                            (T, 6144),
+                            2.0**-20,
+                            dtype=torch.bfloat16,
+                            device="cuda",
+                        )
+                        residual = torch.full_like(hidden, -(2.0**-21))
+                    weight = torch.randn(
+                        6144, dtype=torch.bfloat16, device="cuda"
+                    )
+
+                    ref_hidden = hidden.clone()
+                    ref_residual = residual.clone()
+                    ref_bf16, _ = RMSResNorm(weight, eps)(
+                        ref_hidden, ref_residual
+                    )
+                    ref_fp8, ref_scale = mxfp8_quant_act_packed(ref_bf16)
+
+                    fused_residual = residual.clone()
+                    fused_bf16, fused_fp8, fused_scale = (
+                        fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                            hidden.clone(),
+                            fused_residual,
+                            weight,
+                            eps,
+                            group_size=32,
+                            scale_ue8m0=True,
+                            mxfp8_semantics=True,
+                        )
+                    )
+
+                    self.assertEqual(fused_scale.dtype, torch.int32)
+                    self.assertEqual(fused_scale.shape, ref_scale.shape)
+                    self.assertEqual(fused_scale.stride(), ref_scale.stride())
+                    bf16_delta = (fused_bf16.float() - ref_bf16.float()).abs()
+                    bf16_mismatch = torch.count_nonzero(fused_bf16 != ref_bf16).item()
+                    fp8_mismatch = torch.count_nonzero(
+                        fused_fp8.view(torch.uint8) != ref_fp8.view(torch.uint8)
+                    ).item()
+                    scale_mismatch = torch.count_nonzero(
+                        fused_scale != ref_scale
+                    ).item()
+                    mismatch_summary = (
+                        f"bf16={bf16_mismatch}/{fused_bf16.numel()} "
+                        f"max_bf16_delta={bf16_delta.max().item()} "
+                        f"fp8={fp8_mismatch}/{fused_fp8.numel()} "
+                        f"scale={scale_mismatch}/{fused_scale.numel()}"
+                    )
+                    self.assertTrue(torch.equal(fused_residual, ref_residual))
+                    # Triton and FlashInfer use different fp32 RMS reduction
+                    # trees.  A value on a BF16 rounding midpoint can therefore
+                    # differ by one representable BF16 step, while the MXFP8
+                    # bytes consumed by both projections remain exact.
+                    ref_up = torch.nextafter(
+                        ref_bf16, torch.full_like(ref_bf16, float("inf"))
+                    )
+                    ref_down = torch.nextafter(
+                        ref_bf16, torch.full_like(ref_bf16, float("-inf"))
+                    )
+                    one_ulp = torch.maximum(
+                        (ref_up.float() - ref_bf16.float()).abs(),
+                        (ref_bf16.float() - ref_down.float()).abs(),
+                    )
+                    self.assertTrue(torch.all(bf16_delta <= one_ulp), mismatch_summary)
+                    self.assertLessEqual(
+                        bf16_mismatch / fused_bf16.numel(), 1e-3, mismatch_summary
+                    )
+                    self.assertEqual(fp8_mismatch, 0, mismatch_summary)
+                    self.assertEqual(scale_mismatch, 0, mismatch_summary)
 
 
 if __name__ == "__main__":

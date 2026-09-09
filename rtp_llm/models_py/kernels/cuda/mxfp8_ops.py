@@ -18,6 +18,28 @@ _FLASHINFER_CUTE_DSL_MAX_NUMEL = 2**31 - 1
 
 
 @triton.jit
+def _float_to_ue8m0(value):
+    """Match FlashInfer's round-toward-+inf UE8M0 conversion exactly."""
+    bits = value.to(tl.int32, bitcast=True)
+    exponent = (bits >> 23) & 0xFF
+    mantissa = bits & 0x7FFFFF
+    bump = tl.where(mantissa != 0, 1, 0)
+    tiny_subnormal = (exponent == 0) & (mantissa <= 0x400000)
+    bump = tl.where(tiny_subnormal, 0, bump)
+    result = tl.minimum(exponent + bump, 254)
+    return tl.where(value <= 0.0, 0, result)
+
+
+@triton.jit
+def _ue8m0_to_inv_scale(exponent):
+    """Construct FlashInfer's exact reciprocal power-of-two scale."""
+    inv_exponent = tl.maximum(254 - exponent, 0)
+    inv_bits = inv_exponent << 23
+    inv_scale = inv_bits.to(tl.float32, bitcast=True)
+    return tl.where(exponent == 0, 0.0, inv_scale)
+
+
+@triton.jit
 def _pack_flashinfer_mxfp8_scale_kernel(
     scale_u8_ptr,
     packed_ptr,

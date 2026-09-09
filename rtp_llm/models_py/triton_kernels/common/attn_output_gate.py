@@ -320,6 +320,7 @@ def _sigmoid_mul_fp8_quant_row_kernel(
 
 
 _SIGMOID_MUL_FP8_QUANT_M_THRESHOLD = 1024
+_SIGMOID_MUL_MXFP8_ROW_THRESHOLD = 64
 
 
 def sigmoid_mul_fp8_quant_fwd(
@@ -393,8 +394,26 @@ def sigmoid_mul_fp8_quant_fwd(
     else:
         num_blocks = num_groups
 
-    if T >= _SIGMOID_MUL_FP8_QUANT_M_THRESHOLD:
-        groups_per_program = min(_PREFILL_GROUPS_PER_PROGRAM, num_groups)
+    # MXFP8's group-32 layout creates H / 128 independent programs per row in
+    # the four-group kernel (128 programs for HY4's H=16384). Once M reaches
+    # 64, grouping 128 adjacent scales into each row program is substantially
+    # faster on SM10x while preserving the exact BF16, FP8, and UE8M0 bytes.
+    # Keep the older threshold for generic FP8 callers, whose scale contract
+    # and optimal occupancy differ.
+    use_mxfp8_row_kernel = bool(
+        scale_ue8m0
+        and round_scale_to_pow2
+        and quant_group_size == 32
+        and T >= _SIGMOID_MUL_MXFP8_ROW_THRESHOLD
+    )
+    if T >= _SIGMOID_MUL_FP8_QUANT_M_THRESHOLD or use_mxfp8_row_kernel:
+        # HY4 MTP runs at exactly 64 rows. Its 512 group-32 scales are faster
+        # as 16 moderately sized programs per row; the larger M=256 target
+        # verify path remains best with four 128-group programs per row.
+        max_groups_per_program = (
+            32 if use_mxfp8_row_kernel and T <= 64 else _PREFILL_GROUPS_PER_PROGRAM
+        )
+        groups_per_program = min(max_groups_per_program, num_groups)
         groups_per_program = triton.next_power_of_2(groups_per_program)
         num_group_blocks = triton.cdiv(num_groups, groups_per_program)
         grid = (T * num_group_blocks,)
