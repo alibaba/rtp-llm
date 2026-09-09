@@ -399,8 +399,8 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
                                                                allocator_,
                                                                metrics_reporter_);
 
-    RTP_LLM_CHECK_WITH_INFO(remote_connector_->init(), "remote connector init failed");
     remote_connector_->setMemoryConnector(memory_connector_);
+    RTP_LLM_CHECK_WITH_INFO(remote_connector_->init(), "remote connector init failed");
     return remote_connector_;
 #else
     RTP_LLM_LOG_ERROR("not RemoteConnector");

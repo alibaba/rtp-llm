@@ -66,6 +66,13 @@ public:
     virtual bool              copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
     std::vector<CacheKeyType> cacheKeys() const;
 
+    // The memory connector owns one host BlockPool per RTP client. These
+    // accessors expose its shared backing to the remote KVCM client without
+    // transferring ownership of either the mapping or the memfd.
+    void* hostPoolBaseAddress() const;
+    size_t hostPoolSizeBytes() const;
+    int hostPoolSharedMemoryFd() const;
+
     using MemoryRemoteEvictionItem = MemoryDiskBlockCache::CacheItem;
     using HostBlockBuffer = std::vector<BlockInfo>;
     using HostBlockBuffers = std::vector<HostBlockBuffer>;

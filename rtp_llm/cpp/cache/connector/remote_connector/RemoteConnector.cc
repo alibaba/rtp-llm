@@ -387,10 +387,30 @@ bool RemoteConnector::init() {
         tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
         &regist_span,
         genLocationSpecName(tp_rank, group_policy_->groups().at(full_group_idx).group_name)};
+    kv_cache_manager::SharedMemoryRegistration shared_memory_registration;
+    const kv_cache_manager::SharedMemoryRegistration* shared_memory_registration_ptr = nullptr;
+    if (auto memory_connector = memory_connector_.lock()) {
+        const int shared_memory_fd = memory_connector->hostPoolSharedMemoryFd();
+        if (shared_memory_fd >= 0) {
+            shared_memory_registration = {memory_connector->hostPoolBaseAddress(),
+                                          memory_connector->hostPoolSizeBytes(),
+                                          shared_memory_fd};
+            RTP_LLM_CHECK_WITH_INFO(shared_memory_registration.base != nullptr && shared_memory_registration.size > 0,
+                                    "invalid shared host block pool registration: fd=%d base=%p size=%zu",
+                                    shared_memory_registration.fd,
+                                    shared_memory_registration.base,
+                                    shared_memory_registration.size);
+            shared_memory_registration_ptr = &shared_memory_registration;
+            RTP_LLM_LOG_INFO("remote connector uses shared host block pool: fd=%d base=%p size=%zu",
+                             shared_memory_registration.fd,
+                             shared_memory_registration.base,
+                             shared_memory_registration.size);
+        }
+    }
     int cur_device = -1;
     check_cuda_value(cudaGetDevice(&cur_device));
     RTP_LLM_LOG_INFO("cuda cur device: %d", cur_device);
-    if (!client_wrapper_->init(client_config_map, client_init_params)) {
+    if (!client_wrapper_->init(client_config_map, client_init_params, shared_memory_registration_ptr)) {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
     }

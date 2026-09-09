@@ -80,6 +80,9 @@ public:
     size_t getTotalSizeBytes() const {
         return config_.total_size_bytes;
     }
+    int getSharedMemoryFd() const {
+        return shared_memory_fd_;
+    }
 
 private:
     void initFreeBlocks();
@@ -143,6 +146,7 @@ private:
 
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_               = nullptr;
+    int                         shared_memory_fd_             = -1;
     bool                        cache_buffer_registered_host_ = false;
     bool                        kvcache_reg_mr_               = false;
     int64_t                     mr_cost_time_ms_              = 0;

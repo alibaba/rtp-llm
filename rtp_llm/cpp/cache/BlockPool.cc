@@ -154,8 +154,11 @@ void releaseRegisteredCpuMapping(void* ptr, size_t size_bytes) noexcept {
 }
 #endif
 
-torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, bool use_memfd) {
+torch::Tensor
+allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_numa_nodes, bool use_memfd, int* shared_memory_fd) {
 #if USING_CUDA
+    RTP_LLM_CHECK_WITH_INFO(shared_memory_fd != nullptr, "shared memory fd output must not be null");
+    *shared_memory_fd = -1;
     int fd = -1;
     if (use_memfd) {
         fd = static_cast<int>(::syscall(SYS_memfd_create, "rtp_llm_host_block_pool", MFD_CLOEXEC));
@@ -174,10 +177,10 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_num
                      use_memfd ? MAP_SHARED : (MAP_PRIVATE | MAP_ANONYMOUS),
                      fd,
                      0);
-    if (fd >= 0) {
-        (void)::close(fd);
-    }
     if (ptr == MAP_FAILED) {
+        if (fd >= 0) {
+            (void)::close(fd);
+        }
         throw std::runtime_error(std::string(use_memfd ? "memfd mmap failed: " : "anonymous mmap failed: ")
                                  + std::strerror(errno));
     }
@@ -185,6 +188,9 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_num
         const auto numa_result = applyAllowedNumaInterleavePolicy(ptr, size_bytes);
         if (!numa_result.success) {
             (void)munmap(ptr, size_bytes);
+            if (fd >= 0) {
+                (void)::close(fd);
+            }
             throw std::runtime_error("failed to set NUMA policy for registered host block pool: "
                                      + numa_result.error_message);
         }
@@ -212,16 +218,24 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool interleave_num
     const auto err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
     if (err != cudaSuccess) {
         (void)munmap(ptr, size_bytes);
+        if (fd >= 0) {
+            (void)::close(fd);
+        }
         throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(err));
     }
     try {
-        return torch::from_blob(
+        auto tensor = torch::from_blob(
             ptr,
             {static_cast<int64_t>(size_bytes)},
             [size_bytes](void* registered_ptr) { releaseRegisteredCpuMapping(registered_ptr, size_bytes); },
             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+        *shared_memory_fd = fd;
+        return tensor;
     } catch (...) {
         releaseRegisteredCpuMapping(ptr, size_bytes);
+        if (fd >= 0) {
+            (void)::close(fd);
+        }
         throw;
     }
 #else
@@ -278,6 +292,10 @@ BlockPool::BlockPool(const BlockPoolConfig& config,
 
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
+    if (shared_memory_fd_ >= 0) {
+        (void)::close(shared_memory_fd_);
+        shared_memory_fd_ = -1;
+    }
 }
 
 void BlockPool::validateConfig() const {
@@ -316,8 +334,8 @@ void BlockPool::initializeCacheBuffer() {
                                  use_memfd_host ? "memfd_shared" : "anonymous_private",
                                  interleave_numa_nodes ? "interleave" : "none",
                                  config_.total_size_bytes);
-                cache_aligned_buffer_ =
-                    allocateRegisteredCpuTensor(config_.total_size_bytes, interleave_numa_nodes, use_memfd_host);
+                cache_aligned_buffer_ = allocateRegisteredCpuTensor(
+                    config_.total_size_bytes, interleave_numa_nodes, use_memfd_host, &shared_memory_fd_);
                 cache_buffer_registered_host_ = true;
             } else {
                 try {

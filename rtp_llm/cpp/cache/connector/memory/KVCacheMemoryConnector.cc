@@ -54,6 +54,18 @@ size_t memoryCacheWaitDoneQueueSize() {
 
 }  // namespace
 
+void* KVCacheMemoryConnector::hostPoolBaseAddress() const {
+    return block_pool_ ? block_pool_->getBaseAddress() : nullptr;
+}
+
+size_t KVCacheMemoryConnector::hostPoolSizeBytes() const {
+    return block_pool_ ? block_pool_->getTotalSizeBytes() : 0;
+}
+
+int KVCacheMemoryConnector::hostPoolSharedMemoryFd() const {
+    return block_pool_ ? block_pool_->getSharedMemoryFd() : -1;
+}
+
 // When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
 // This legacy SM-copy path is only used for non typed layer-region layouts.
 static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const CacheConfig& cfg, MultiCopyParams& out) {

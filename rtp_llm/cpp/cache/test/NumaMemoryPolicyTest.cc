@@ -217,6 +217,7 @@ TEST(NumaMemoryPolicyTest, MemfdRegisteredHostBlockPoolUsesSharedMapping) {
         BlockPool pool(config, AllocationType::HOST);
         ASSERT_TRUE(pool.init());
         ASSERT_EQ(pool.where(), MemoryType::MEMORY_CPU_PINNED);
+        EXPECT_GE(pool.getSharedMemoryFd(), 0);
 #if USING_CUDA
         cudaPointerAttributes attributes{};
         ASSERT_EQ(cudaPointerGetAttributes(&attributes, pool.getBaseAddress()), cudaSuccess);

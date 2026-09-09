@@ -15,6 +15,10 @@ public:
     CreateMetaClient(const std::string& config, const kv_cache_manager::InitParams& init_params) const;
     virtual std::unique_ptr<kv_cache_manager::TransferClient>
     CreateTransferClient(const std::string& config, const kv_cache_manager::InitParams& init_params) const;
+    virtual std::unique_ptr<kv_cache_manager::TransferClient>
+    CreateTransferClient(const std::string&                                config,
+                         const kv_cache_manager::InitParams&                init_params,
+                         const kv_cache_manager::SharedMemoryRegistration& shared_memory_registration) const;
 };
 
 }  // namespace remote_connector
