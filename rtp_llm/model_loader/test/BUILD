@@ -3,11 +3,21 @@ py_test_deps = [
 ]
 
 py_test(
-    name = "per_expert_parallel_loader_test",
-    srcs = ["per_expert_parallel_loader_test.py"],
+    name = "test_fastsafetensors_memory",
+    srcs = ["test_fastsafetensors_memory.py"],
     deps = py_test_deps,
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20"},
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_fastsafetensors_reserve_wiring",
+    srcs = ["test_fastsafetensors_reserve_wiring.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:async_model",
+        "//rtp_llm:sdk",
+        "//rtp_llm:models",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
 )
 
 py_test(

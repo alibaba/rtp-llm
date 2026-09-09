@@ -83,6 +83,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
         force_cpu_load_weights: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -109,6 +110,7 @@ class BaseModel(object):
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
+        self.fastsafetensors_reserve_mb = fastsafetensors_reserve_mb
         self.weight = None
         self.weight_manager = None
         # Keep the owner alive for the complete lifetime of any non-owning
@@ -313,6 +315,7 @@ class BaseModel(object):
         skip_python_model: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        fastsafetensors_reserve_mb: int = 2048,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -342,6 +345,7 @@ class BaseModel(object):
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
         )
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(
@@ -479,4 +483,5 @@ class BaseModel(object):
             database,
             load_method=self.load_method,
             force_cpu_load_weights=self.force_cpu_load_weights,
+            fastsafetensors_reserve_mb=self.fastsafetensors_reserve_mb,
         )

@@ -51,6 +51,7 @@ class ModelLoader:
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
         force_cpu_load_weights: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -80,6 +81,7 @@ class ModelLoader:
             phy2log=self._phy2log,
             exported_device=get_current_device(),
             force_cpu_load_weights=force_cpu_load_weights,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
         )
 
     def get_load_config(self) -> LoadConfig:
@@ -311,10 +313,37 @@ class ModelLoader:
             / (1024.0**2)
         )
         max_file_mem = max_file_size / (1024.0**2)
-        logging.debug(
-            f"free mem: {free_mem}, model mem: {model_mem}, max file mem: {max_file_mem}"
+        rtp_reserve_mem = self._load_config.fastsafetensors_reserve_mb
+        transient_mem = 3 * max_file_mem + rtp_reserve_mem
+        logging.info(
+            f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
+            f"model_mem={model_mem:.0f}MB, max_file_mem={max_file_mem:.0f}MB, "
+            f"rtp_reserve_mem={rtp_reserve_mem:.0f}MB, "
+            f"enough={(free_mem - model_mem) > transient_mem}"
         )
-        return (free_mem - model_mem) > (3 * max_file_mem)
+        return (free_mem - model_mem) > transient_mem
+
+    @staticmethod
+    def _fastsafetensors_transient_budget_bytes(max_file_size: int) -> int:
+        """Return the configured bounded-loader peak or the legacy estimate.
+
+        New fastsafetensors versions expose queue/producer-aware batch-buffer
+        accounting. Keep the historical three-shard estimate when loading an
+        older wheel or when ``max_batch_bytes`` is unset.
+        """
+        legacy_budget = 3 * max_file_size
+        try:
+            from fastsafetensors import load_config
+
+            config = load_config()
+            estimate = getattr(config, "estimated_peak_device_bytes", None)
+            return legacy_budget if estimate is None else estimate
+        except (ImportError, ModuleNotFoundError, AttributeError, ValueError) as error:
+            logging.warning(
+                "failed to read bounded fastsafetensors memory config; "
+                f"use legacy estimate: {error}"
+            )
+            return legacy_budget
 
     @staticmethod
     def _build_stacked_key_config(weight_info_list) -> dict:
@@ -395,11 +424,9 @@ class ModelLoader:
           isolation (a private ``MemPool``), which aborts under
           torch_memory_saver — see ``mempool-destroy-crashes-under-tms``.
 
-        ``force_nogds`` explicitly selects the fastsafetensors ``nogds`` copier
-        (pread into a framework host buffer) over the default SHM copier. It is
-        retained as a deployment/debug fallback; the level-2 wake path does not
-        force it because repeated-cycle profiling localized the observed
-        regression to the downstream Mega pageable-D2H stash, not the copier.
+        Loader backend and scheduling policy are selected by
+        ``FASTSAFETENSORS_CONFIG_JSON``. ``force_nogds`` remains a compatibility
+        switch for sleep reload and maps to the equivalent base/nogds config.
         """
         logging.info(f"load weight by device: {device}")
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
@@ -407,7 +434,8 @@ class ModelLoader:
         stacked_key_config = self._build_stacked_key_config(weight_info_list)
         if stacked_key_config:
             logging.info(
-                f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
+                "fastsafetensors per-expert split enabled for %d stacked keys",
+                len(stacked_key_config),
             )
 
         all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
@@ -416,6 +444,7 @@ class ModelLoader:
             stacked_key_config=stacked_key_config,
             allocation_context=weights_region if in_weights_region else None,
             force_nogds=force_nogds,
+            local_copyout_filter=tensor_to_weight_map.__contains__,
         )
 
         for key, loaded_tensor in all_tensors:
@@ -454,8 +483,9 @@ class ModelLoader:
         Distinct from the cold-start check (:meth:`_is_memory_enough_for_fastsafetensor`),
         which sizes headroom for allocating a *second* full copy of the model.
         Wake reload copies into weights that are ALREADY resident (blank pages
-        remapped by ``resume``), so only the transient shard buffers need
-        headroom — checked against a few max-size files, not the whole model.
+        remapped by ``resume``), so only the transient loader buffers need
+        headroom. Bounded loading uses the configured batch/producer/queue peak;
+        legacy file loading keeps the historical three-max-shard estimate.
         Returns False (caller falls back to the load-from-scratch per-tensor
         reload) when fastsafetensors is unavailable or the checkpoint is not
         fast-loadable (non-safetensors / duplicate tensor names).
@@ -472,12 +502,17 @@ class ModelLoader:
             return False
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is not None:
-            free_mb = device_mem_info.free / (1024.0**2)
-            max_file_mb = self._load_config.database.get_max_file_size() / (1024.0**2)
-            if free_mb <= 3 * max_file_mb:
+            free_bytes = device_mem_info.free
+            max_file_size = self._load_config.database.get_max_file_size()
+            transient_bytes = self._fastsafetensors_transient_budget_bytes(
+                max_file_size
+            )
+            if free_bytes <= transient_bytes:
+                free_mb = free_bytes / (1024.0**2)
+                transient_mb = transient_bytes / (1024.0**2)
                 logging.warning(
                     "reload: insufficient transient headroom for fastsafetensors "
-                    f"(free={free_mb:.0f}MB <= 3x max_file={3 * max_file_mb:.0f}MB), "
+                    f"(free={free_mb:.0f}MB <= configured peak={transient_mb:.0f}MB), "
                     "use scratch path"
                 )
                 return False
@@ -869,6 +904,7 @@ def get_model_loader(
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
     force_cpu_load_weights: bool = False,
+    fastsafetensors_reserve_mb: int = 2048,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -882,4 +918,5 @@ def get_model_loader(
         database,
         load_method=load_method,
         force_cpu_load_weights=force_cpu_load_weights,
+        fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
     )

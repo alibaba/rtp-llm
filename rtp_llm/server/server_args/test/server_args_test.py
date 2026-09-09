@@ -3,6 +3,7 @@ import os
 import pickle
 import sys
 from unittest import TestCase, main
+from unittest.mock import patch
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -19,6 +20,72 @@ class ServerArgsSetTest(TestCase):
         os.environ.clear()
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
+
+    @staticmethod
+    def _setup_args(args=None):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        # This branch's public entry reads sys.argv, not an explicit arg list.
+        if args is None:
+            return setup_args()
+        with patch.object(sys, "argv", ["rtp-llm", *args]):
+            return setup_args()
+
+    def test_fastsafetensors_reserve_defaults_and_cli_precedence(self):
+        setup_args = self._setup_args
+
+        self.assertEqual(setup_args([]).load_config.fastsafetensors_reserve_mb, 2048)
+        os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = "512"
+        self.assertEqual(setup_args([]).load_config.fastsafetensors_reserve_mb, 512)
+        configs = setup_args(["--fastsafetensors_reserve_mb", "0"])
+        self.assertEqual(configs.load_config.fastsafetensors_reserve_mb, 0)
+        self.assertIn("fastsafetensors_reserve_mb: 0", configs.load_config.to_string())
+
+    def test_fastsafetensors_reserve_equals_cli_overrides_environment(self):
+        setup_args = self._setup_args
+
+        os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = "512"
+        for value in (0, 128):
+            for use_sys_argv in (False, True):
+                with self.subTest(value=value, use_sys_argv=use_sys_argv):
+                    args = [f"--fastsafetensors_reserve_mb={value}"]
+                    if use_sys_argv:
+                        sys.argv = ["rtp-llm", *args]
+                        configs = setup_args()
+                    else:
+                        configs = setup_args(args)
+                    self.assertEqual(
+                        configs.load_config.fastsafetensors_reserve_mb, value
+                    )
+
+    def test_fastsafetensors_reserve_abbreviation_overrides_environment(self):
+        setup_args = self._setup_args
+
+        os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = "512"
+        for value in (0, 128):
+            for inline in (False, True):
+                with self.subTest(value=value, inline=inline):
+                    args = (
+                        [f"--fastsafetensors_reserve={value}"]
+                        if inline
+                        else ["--fastsafetensors_reserve", str(value)]
+                    )
+                    self.assertEqual(
+                        setup_args(args).load_config.fastsafetensors_reserve_mb,
+                        value,
+                    )
+
+    def test_fastsafetensors_reserve_rejects_invalid_values(self):
+        setup_args = self._setup_args
+
+        for value in ("-1", "1.5", "", "invalid"):
+            with self.subTest(value=value):
+                os.environ.pop("RTP_FASTSAFETENSORS_RESERVE_MB", None)
+                with self.assertRaises(SystemExit):
+                    setup_args(["--fastsafetensors_reserve_mb", value])
+                os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = value
+                with self.assertRaises(SystemExit):
+                    setup_args([])
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""

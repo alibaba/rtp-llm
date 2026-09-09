@@ -268,12 +268,9 @@ class CkptDatabase(BaseDatabase):
         stacked_key_config: Optional[Dict[str, str]] = None,
         allocation_context: Optional[Callable[[], ContextManager[Any]]] = None,
         force_nogds: bool = False,
+        local_copyout_filter: Optional[Callable[[str], bool]] = None,
     ):
-        from fastsafetensors import SingleGroup
-
-        from rtp_llm.model_loader.per_expert_parallel_loader import (
-            PerExpertParallelLoader,
-        )
+        from fastsafetensors import AutoLoader, SingleGroup
 
         def iterator(device: str, use_tqdm_on_load: bool):
             if torch.distributed.is_initialized():
@@ -288,31 +285,23 @@ class CkptDatabase(BaseDatabase):
                 device = f"cuda:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
 
-            # FASTSAFETENSORS_NOGDS=1 forces the 'nogds' copier (skips the
-            # fast_safetensors C++ extension), needed when the patched
-            # 0.1.20+ali wheel is installed without the underscore-named
-            # native helper (e.g. dev environments where torch ABI does not
-            # match the prebuilt fast_safetensors).
-            #
-            # force_nogds remains an explicit deployment/debug override. Normal
-            # cold load and level-2 wake both keep the default SHM copier; the
-            # repeated-wakeup regression was localized to downstream Mega
-            # pageable-D2H staging rather than this file copier.
-            use_nogds = (
-                force_nogds or os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
-            )
-            loader_kwargs: Dict[str, Any] = dict(
-                pg=pg,
-                hf_weights_files=hf_weights_files,
-                use_tqdm_on_load=use_tqdm_on_load,
+            if force_nogds or os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1":
+                os.environ["FASTSAFETENSORS_CONFIG_JSON"] = (
+                    '{"loader":"base","base":{"copier_type":"nogds"}}'
+                )
+                logging.warning(
+                    "force_nogds/FASTSAFETENSORS_NOGDS overrides "
+                    "FASTSAFETENSORS_CONFIG_JSON with the base/nogds config"
+                )
+
+            # The new package owns backend selection and scheduling policy.
+            loader = AutoLoader(
+                pg,
+                hf_weights_files,
                 device=device,
-                bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=not use_nogds,
-                nogds=use_nogds,
+                local_copyout_filter=local_copyout_filter,
+                stacked_moe_tensors=stacked_key_config,
             )
-            # Even unstacked checkpoints need the source-stream lifetime guard:
-            # wake reload consumes producer-owned shards on a non-default stream.
-            loader = PerExpertParallelLoader(stacked_key_config or {}, **loader_kwargs)
             try:
                 context = (
                     allocation_context
@@ -321,8 +310,17 @@ class CkptDatabase(BaseDatabase):
                 )
                 with context():
                     yield from loader.iterate_weights()
-            finally:
-                loader.loader.close()
+            except BaseException:
+                try:
+                    loader.close()
+                except BaseException:
+                    logging.warning(
+                        "FastSafeTensors close failed while preserving active error",
+                        exc_info=True,
+                    )
+                raise
+            else:
+                loader.close()
 
         return iterator(device, use_tqdm_on_load)
 
