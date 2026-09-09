@@ -1,21 +1,36 @@
-"""CPU contract tests for GenericMoeLayer's unified TP all-reduce path."""
+"""Contract tests for GenericMoeLayer's unified TP all-reduce paths.
 
+Mostly CPU tensors; the side-stream shared expert needs a real CUDA graph.
+"""
+
+import inspect
+from functools import partial
 from types import SimpleNamespace
-from unittest import TestCase, main
+from unittest import TestCase, main, skipUnless
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.model_desc.generic_moe import (
+    _SHARED_EXPERT_STREAMS,
+    GenericMoeLayer,
+    _ensure_shared_expert_stream,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.utils.model_weight import W
+
+# This file also runs as generic_moe_allreduce_test_rocm. Only the CUDA
+# low-latency router advertises supports_row_scatter_finalize, so the side
+# stream never runs on ROCm.
+_CUDA_GRAPH_READY = torch.cuda.is_available() and torch.version.hip is None
 
 
 def _make_layer(
     *,
     supports_skip_tp_allreduce=True,
+    supports_row_scatter_finalize=False,
     ffn_tp_size=2,
     attn_tp_size=2,
     ep_size=1,
@@ -50,6 +65,7 @@ def _make_layer(
         topk_ids_dtype=torch.int32,
         router=SimpleNamespace(
             supports_skip_tp_allreduce=supports_skip_tp_allreduce,
+            supports_row_scatter_finalize=supports_row_scatter_finalize,
             tp_collective_size=attn_tp_size,
         ),
     )
@@ -229,6 +245,206 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         torch.testing.assert_close(result, routed_output + shared_output)
         self.assertFalse(fused_moe.call_args.kwargs["skip_tp_allreduce"])
         self.assertFalse(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+
+
+class GenericMoeEpUnifiedAllreduceTest(TestCase):
+    def test_ep_unified_decision_covers_all_predicate_terms(self):
+        cases = (
+            ("ep_router_supports_row_scatter", True, 2, 2, 2, 2, True),
+            ("router_lacks_support", False, 2, 2, 2, 2, False),
+            ("pure_tp_is_not_ep", True, 2, 1, 2, 2, False),
+            ("ffn_tp_one", True, 1, 2, 1, 2, False),
+            ("no_shared_expert", True, 2, 2, 2, 1, False),
+            ("router_tp_size_mismatch", True, 4, 2, 2, 2, False),
+        )
+        for name, supports, ffn_tp, ep_size, attn_tp, moe_style, expected in cases:
+            with self.subTest(name=name):
+                layer = _make_layer(
+                    supports_row_scatter_finalize=supports,
+                    ffn_tp_size=ffn_tp,
+                    attn_tp_size=attn_tp,
+                    ep_size=ep_size,
+                    moe_style=moe_style,
+                )
+                self.assertEqual(layer.use_ep_unified_allreduce, expected)
+
+    def test_ep_unified_displaces_the_separate_shared_reduce(self):
+        fused = _make_layer(ep_size=2, supports_row_scatter_finalize=True)
+        self.assertTrue(fused.use_ep_unified_allreduce)
+        self.assertFalse(fused.use_ep_shared_allreduce)
+
+        legacy = _make_layer(ep_size=2, supports_row_scatter_finalize=False)
+        self.assertFalse(legacy.use_ep_unified_allreduce)
+        self.assertTrue(legacy.use_ep_shared_allreduce)
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_row_scatter_reduces_both_branches_once(self, mock_all_reduce):
+        layer = _make_layer(ep_size=2, supports_row_scatter_finalize=True)
+        hidden_states, routed_output, shared_output, gate_output, fused_moe = (
+            _configure_forward(layer, gate_enabled=True)
+        )
+        # Stand in for the router: scatter-add the routed slice into the buffer
+        # the layer supplied, then hand that same buffer back.
+        fused_moe.side_effect = lambda **kwargs: kwargs["row_scatter_target"].add_(
+            routed_output
+        )
+        expected_input = torch.sigmoid(gate_output) * shared_output + routed_output
+        mock_all_reduce.side_effect = lambda tensor, group, inplace: tensor * 2
+
+        result = layer(hidden_states)
+
+        mock_all_reduce.assert_called_once()
+        self.assertIs(mock_all_reduce.call_args.kwargs["group"], Group.TP)
+        self.assertTrue(mock_all_reduce.call_args.kwargs["inplace"])
+        reduce_input = mock_all_reduce.call_args.args[0]
+        self.assertIs(reduce_input, fused_moe.call_args.kwargs["row_scatter_target"])
+        torch.testing.assert_close(reduce_input, expected_input)
+        torch.testing.assert_close(result, expected_input * 2)
+        self.assertTrue(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+        self.assertNotIn("skip_tp_allreduce", fused_moe.call_args.kwargs)
+        # CPU weights mean no side stream, so the router needs no join.
+        self.assertIsNone(fused_moe.call_args.kwargs["row_scatter_ready"])
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_a_failed_routed_chain_joins_the_shared_branch(self, _):
+        # The router does the join on the success path. When the routed chain
+        # raises, forward has to do it, or the side stream stays outstanding.
+        layer = _make_layer(ep_size=2, supports_row_scatter_finalize=True)
+        hidden_states, _, _, _, fused_moe = _configure_forward(layer)
+        ready = object()
+        layer._shared_expert_partial = Mock(
+            return_value=(torch.zeros_like(hidden_states), ready)
+        )
+        fused_moe.side_effect = RuntimeError("dispatch failed")
+        waited = []
+        stream = SimpleNamespace(wait_event=waited.append)
+
+        with patch("torch.cuda.current_stream", return_value=stream):
+            with self.assertRaisesRegex(RuntimeError, "dispatch failed"):
+                layer(hidden_states)
+
+        self.assertEqual(waited, [ready])
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_layer_only_passes_keywords_fused_moe_accepts(self, _):
+        # The fused_moe mock accepts any keyword, so a layer-only keyword passes
+        # every other test here and only fails once a real FusedMoe is called.
+        accepted = set(inspect.signature(FusedMoe.forward).parameters)
+        cases = (
+            ("ep_unified", dict(ep_size=2, supports_row_scatter_finalize=True)),
+            ("ep_shared", dict(ep_size=2, supports_row_scatter_finalize=False)),
+            ("pure_tp", dict(ep_size=1)),
+            ("ffn_tp_one", dict(ffn_tp_size=1)),
+        )
+        for name, kwargs in cases:
+            with self.subTest(name=name):
+                layer = _make_layer(**kwargs)
+                hidden_states, _, _, _, fused_moe = _configure_forward(layer)
+
+                layer(hidden_states)
+
+                unexpected = set(fused_moe.call_args.kwargs) - accepted
+                self.assertFalse(
+                    unexpected, f"not FusedMoe.forward parameters: {unexpected}"
+                )
+
+
+@skipUnless(_CUDA_GRAPH_READY, "needs a CUDA device")
+class SharedExpertSideStreamCaptureTest(TestCase):
+    """Covers _shared_expert_partial's side-stream branch under real capture.
+
+    CPU weights leave shared_expert_stream unset, so only a CUDA device reaches
+    this branch, and an unclosed fork only shows up at capture end.
+    """
+
+    SHARED_FACTOR = 3.0
+
+    def setUp(self):
+        _SHARED_EXPERT_STREAMS.clear()
+        self.device = torch.device("cuda", torch.cuda.current_device())
+
+    def _stub_layer(self):
+        """Stand-in for ``self``: this path only needs these four attributes."""
+        stream = _ensure_shared_expert_stream(self.device)
+        self.assertIsNotNone(stream)
+        stub = SimpleNamespace(
+            # A row-parallel shared expert leaves a TP-partial sum; scaling
+            # stands in for that work without needing real weights.
+            shared_expert=lambda x, skip_allreduce: x * self.SHARED_FACTOR,
+            shared_expert_gate=None,
+            shared_expert_stream=stream,
+            shared_expert_ready=torch.cuda.Event(),
+        )
+        stub._gate_shared_expert_output = partial(
+            GenericMoeLayer._gate_shared_expert_output, stub
+        )
+        return stub
+
+    def _fork_and_join(self, stub, hidden):
+        shared_partial, ready = GenericMoeLayer._shared_expert_partial(stub, hidden)
+        self.assertIs(ready, stub.shared_expert_ready)
+        # The join the router performs in _finalize_row_scatter.
+        torch.cuda.current_stream().wait_event(ready)
+        return shared_partial
+
+    def test_one_stream_per_device_is_reused(self):
+        # Every MoE layer shares one side stream per device.
+        self.assertIs(
+            _ensure_shared_expert_stream(self.device),
+            _ensure_shared_expert_stream(self.device),
+        )
+
+    def test_capture_closes_the_fork_and_replay_recomputes(self):
+        stub = self._stub_layer()
+        hidden = torch.ones(8, 16, device=self.device)
+        out = torch.empty_like(hidden)
+
+        # torch.cuda.graph requires the work to have run once outside capture.
+        out.copy_(self._fork_and_join(stub, hidden))
+        torch.cuda.synchronize()
+
+        # Capture fails here if the side stream is still outstanding.
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out.copy_(self._fork_and_join(stub, hidden))
+
+        # A new input value distinguishes a real replay from leftover contents.
+        hidden.fill_(2.0)
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out, torch.full_like(out, 2.0 * self.SHARED_FACTOR))
+
+    def test_graphs_per_batch_size_share_the_stream_and_event(self):
+        # Decode captures one graph per batch size into a single memory pool
+        # (cuda_graph_runner.cc passes one shared_graph_pool_ to every capture),
+        # and every graph reuses the device's side stream and the layer's event.
+        stub = self._stub_layer()
+        pool = torch.cuda.graph_pool_handle()
+        captured = []
+        forked_on = set()
+        for num_tokens in (4, 8):
+            hidden = torch.ones(num_tokens, 16, device=self.device)
+            out = torch.empty_like(hidden)
+            out.copy_(self._fork_and_join(stub, hidden))
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=pool):
+                out.copy_(self._fork_and_join(stub, hidden))
+            forked_on.add((id(stub.shared_expert_stream), id(stub.shared_expert_ready)))
+            captured.append((graph, hidden, out))
+
+        self.assertEqual(len(forked_on), 1, "captures used different stream/event")
+
+        for index, (graph, hidden, _) in enumerate(captured):
+            hidden.fill_(index + 2.0)
+            graph.replay()
+        torch.cuda.synchronize()
+
+        for index, (_, _, out) in enumerate(captured):
+            torch.testing.assert_close(
+                out, torch.full_like(out, (index + 2.0) * self.SHARED_FACTOR)
+            )
 
 
 if __name__ == "__main__":
