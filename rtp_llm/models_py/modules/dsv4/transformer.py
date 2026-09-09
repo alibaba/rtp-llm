@@ -57,6 +57,7 @@ class V4Args:
     o_groups: int = 8
     o_lora_rank: int = 1024
     window_size: int = 128
+    kernel_tokens_per_block: int = 128
     compress_ratios: List[int] = field(
         default_factory=lambda: [0, 0] + [4, 128] * 20 + [4, 0]
     )

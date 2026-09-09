@@ -166,6 +166,44 @@ class MegaSupportTest(unittest.TestCase):
         self.assertIn("hc_mult=2", reason or "")
         self.assertIn("expected 4", reason or "")
 
+    def test_mhc_sinkhorn_iterations_must_match_the_kernel(self) -> None:
+        reason = mega_decode_unavailable_reason(
+            V4Args(hc_sinkhorn_iters=3), torch.device("cpu")
+        )
+
+        self.assertIn("hc_sinkhorn_iters=3", reason or "")
+        self.assertIn("expected 20", reason or "")
+
+    def test_supported_kernel_block_sizes_pass_startup_checks(self) -> None:
+        fake_rtp_kernel = SimpleNamespace(dsv4_mega=_supported_extension())
+        fake_deep_gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
+        for kernel_tokens_per_block in (128, 256, 512):
+            with self.subTest(
+                kernel_tokens_per_block=kernel_tokens_per_block
+            ), patch.object(
+                torch.cuda, "get_device_capability", return_value=(10, 3)
+            ), patch.dict(
+                sys.modules,
+                {"rtp_kernel": fake_rtp_kernel, "deep_gemm": fake_deep_gemm},
+            ):
+                reason = mega_decode_unavailable_reason(
+                    V4Args(
+                        ep_size=8,
+                        kernel_tokens_per_block=kernel_tokens_per_block,
+                    ),
+                    torch.device("cuda:0"),
+                )
+
+            self.assertIsNone(reason)
+
+    def test_unsupported_kernel_block_size_is_rejected_before_device(self) -> None:
+        reason = mega_decode_unavailable_reason(
+            V4Args(kernel_tokens_per_block=1024), torch.device("cpu")
+        )
+
+        self.assertIn("kernel_tokens_per_block=1024", reason or "")
+        self.assertIn("[128, 256, 512]", reason or "")
+
     def test_index_topk_must_match_the_official_geometry(self) -> None:
         for args, expected in (
             (V4Args(index_topk=1024), 512),

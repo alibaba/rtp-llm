@@ -8,23 +8,19 @@ from typing import Dict
 import torch
 
 from .mega_csa_weights import (
-    DIM,
     HC,
     HC_MIX,
     HEAD_DIM,
     MAX_BATCH,
     PRO_GEOMETRY,
-    Q_LORA_RANK,
     CSAGeometry,
     _cat_rows,
+    _normalize_weight_scale,
     _require_dtype,
     _require_shape,
 )
 
 HCA_COMPRESS_RATIO = 128
-# opA publishes ``[wq_a(1536) | window_kv(512)]`` columns; opB reads the first
-# ``Q_LORA_RANK`` for the projection and the final ``HEAD_DIM`` for SWA writes.
-HCA_FRONT_OUT_DIM = Q_LORA_RANK + HEAD_DIM
 HCA_APE_ROWS = HCA_COMPRESS_RATIO
 # HCA_STATE pool rows interleave ``kv(512) | gate(512)`` fp32.
 HCA_STATE_WIDTH = HEAD_DIM
@@ -77,17 +73,15 @@ class MegaHCAWeights:
             _require_shape(name, tensor, shape)
             _require_dtype(name, tensor, (torch.float8_e4m3fn,))
 
-        wq_a_sf = get(W.v4_attn_wq_a_s)
-        wkv_sf = get(W.v4_attn_wkv_s)
-        wq_b_sf = get(W.v4_attn_wq_b_s)
-        scale_dtypes = (torch.float8_e8m0fnu, torch.uint8)
-        for name, tensor, shape in (
-            ("wq_a_sf", wq_a_sf, (g.sf_q, g.sf_k)),
-            ("wkv_sf", wkv_sf, (4, g.sf_k)),
-            ("wq_b_sf", wq_b_sf, (g.n_main // 128, g.sf_q)),
-        ):
-            _require_shape(name, tensor, shape)
-            _require_dtype(name, tensor, scale_dtypes)
+        wq_a_sf = _normalize_weight_scale(
+            "wq_a_sf", get(W.v4_attn_wq_a_s), tuple(wq_a.shape)
+        )
+        wkv_sf = _normalize_weight_scale(
+            "wkv_sf", get(W.v4_attn_wkv_s), tuple(wkv.shape)
+        )
+        wq_b_sf = _normalize_weight_scale(
+            "wq_b_sf", get(W.v4_attn_wq_b_s), tuple(wq_b.shape)
+        )
 
         comp_wkv = get(W.v4_compressor_wkv)
         comp_wgate = get(W.v4_compressor_wgate)
@@ -137,7 +131,6 @@ class MegaHCAWeights:
 __all__ = [
     "HCA_APE_ROWS",
     "HCA_COMPRESS_RATIO",
-    "HCA_FRONT_OUT_DIM",
     "HCA_STATE_WIDTH",
     "MAX_BATCH",
     "MegaHCAWeights",

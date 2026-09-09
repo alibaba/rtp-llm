@@ -78,24 +78,27 @@ def _random_fp8(
     return _random_bf16(shape, device, scale=scale).to(torch.float8_e4m3fn)
 
 
-def _ue8m0_ones(shape: tuple[int, ...], device: torch.device) -> torch.Tensor:
-    return torch.full(shape, 127, dtype=torch.uint8, device=device).view(
-        torch.float8_e8m0fnu
-    )
+def _ue8m0_scale(
+    shape: tuple[int, int], device: torch.device, source: int
+) -> torch.Tensor:
+    rows = torch.arange(shape[0], dtype=torch.int64, device=device).unsqueeze(1)
+    columns = torch.arange(shape[1], dtype=torch.int64, device=device).unsqueeze(0)
+    exponents = 124 + (source + rows * 3 + columns * 5) % 7
+    return exponents.to(torch.uint8).view(torch.float8_e8m0fnu)
 
 
 def _make_layer_weights(device: torch.device) -> dict[str, torch.Tensor]:
     torch.manual_seed(20260818)
     weights = {
         W.v4_attn_wq_a_w: _random_fp8((Q_LORA_RANK, DIM), device),
-        W.v4_attn_wq_a_s: _ue8m0_ones((Q_LORA_RANK // 128, DIM // 128), device),
+        W.v4_attn_wq_a_s: _ue8m0_scale((Q_LORA_RANK // 128, DIM // 128), device, 0),
         W.v4_attn_wkv_w: _random_fp8((HEAD_DIM, DIM), device),
-        W.v4_attn_wkv_s: _ue8m0_ones((HEAD_DIM // 128, DIM // 128), device),
+        W.v4_attn_wkv_s: _ue8m0_scale((HEAD_DIM // 128, DIM // 128), device, 1),
         W.v4_attn_wq_b_w: _random_fp8(
             (MAIN_HEADS * HEAD_DIM, Q_LORA_RANK), device, scale=0.03
         ),
-        W.v4_attn_wq_b_s: _ue8m0_ones(
-            (MAIN_HEADS * HEAD_DIM // 128, Q_LORA_RANK // 128), device
+        W.v4_attn_wq_b_s: _ue8m0_scale(
+            (MAIN_HEADS * HEAD_DIM // 128, Q_LORA_RANK // 128), device, 2
         ),
         W.v4_compressor_wkv: _random_bf16((HCA_STATE_WIDTH, DIM), device),
         W.v4_compressor_wgate: _random_bf16((HCA_STATE_WIDTH, DIM), device),
@@ -118,14 +121,14 @@ def _make_layer_weights(device: torch.device) -> dict[str, torch.Tensor]:
             W.v4_attn_wo_a_w: _random_fp8(
                 (_O_GROUPS * _O_LORA_RANK, o_group_input), device, scale=0.01
             ),
-            W.v4_attn_wo_a_s: _ue8m0_ones(
-                (_O_GROUPS * _O_LORA_RANK // 128, o_group_input // 128), device
+            W.v4_attn_wo_a_s: _ue8m0_scale(
+                (_O_GROUPS * _O_LORA_RANK // 128, o_group_input // 128), device, 3
             ),
             W.v4_attn_wo_b_w: _random_fp8(
                 (DIM, _O_GROUPS * _O_LORA_RANK), device, scale=0.01
             ),
-            W.v4_attn_wo_b_s: _ue8m0_ones(
-                (DIM // 128, _O_GROUPS * _O_LORA_RANK // 128), device
+            W.v4_attn_wo_b_s: _ue8m0_scale(
+                (DIM // 128, _O_GROUPS * _O_LORA_RANK // 128), device, 4
             ),
         }
     )
@@ -381,7 +384,7 @@ class MegaHCARTPEagerTest(unittest.TestCase):
             tp_size=1,
             tp_rank=0,
         )
-        attention.reset_rope_cache(cls.device)
+        attention.init_rope_cache(cls.device)
         assert attention.indexer is None, "HCA layer must not build an indexer"
         cls.block = _AttentionBlock(attention, weights)
         cls.runtime = MegaCSARuntime()

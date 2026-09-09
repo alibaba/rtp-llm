@@ -104,6 +104,25 @@ def _require_dtype(
         raise TypeError(f"{name} must have dtype in ({choices}), got {tensor.dtype}")
 
 
+def _normalize_weight_scale(
+    name: str, tensor: torch.Tensor, weight_shape: Tuple[int, int]
+) -> torch.Tensor:
+    """Return checkpoint or DeepGEMM-packed UE8M0 scales in raw block layout."""
+    n, k = weight_shape
+    raw_shape = (n // 128, k // 128)
+    if tensor.dtype in (torch.float8_e8m0fnu, torch.uint8):
+        _require_shape(name, tensor, raw_shape)
+        return tensor.contiguous().view(torch.float8_e8m0fnu)
+    if tensor.dtype == torch.int32:
+        _require_shape(name, tensor, (n, k // 512))
+        scale_bytes = tensor.contiguous().view(torch.uint8).reshape(n, k // 128)
+        return scale_bytes[::128].contiguous().view(torch.float8_e8m0fnu)
+    raise TypeError(
+        f"{name} must have dtype in ({torch.float8_e8m0fnu}, {torch.uint8}, "
+        f"{torch.int32}), got {tensor.dtype}"
+    )
+
+
 def _cat_rows(
     name: str, tensors: Tuple[torch.Tensor, ...], shape: Tuple[int, int]
 ) -> torch.Tensor:
@@ -163,19 +182,18 @@ class MegaCSAWeights:
             _require_shape(name, tensor, shape)
             _require_dtype(name, tensor, (torch.float8_e4m3fn,))
 
-        wq_a_sf = get(W.v4_attn_wq_a_s)
-        wkv_sf = get(W.v4_attn_wkv_s)
-        main_wq_b_sf = get(W.v4_attn_wq_b_s)
-        index_wq_b_sf = get(W.v4_indexer_wq_b_s)
-        scale_dtypes = (torch.float8_e8m0fnu, torch.uint8)
-        for name, tensor, shape in (
-            ("wq_a_sf", wq_a_sf, (g.sf_q, g.sf_k)),
-            ("wkv_sf", wkv_sf, (4, g.sf_k)),
-            ("main_wq_b_sf", main_wq_b_sf, (g.n_main // 128, g.sf_q)),
-            ("index_wq_b_sf", index_wq_b_sf, (g.n_index // 128, g.sf_q)),
-        ):
-            _require_shape(name, tensor, shape)
-            _require_dtype(name, tensor, scale_dtypes)
+        wq_a_sf = _normalize_weight_scale(
+            "wq_a_sf", get(W.v4_attn_wq_a_s), tuple(wq_a.shape)
+        )
+        wkv_sf = _normalize_weight_scale(
+            "wkv_sf", get(W.v4_attn_wkv_s), tuple(wkv.shape)
+        )
+        main_wq_b_sf = _normalize_weight_scale(
+            "main_wq_b_sf", get(W.v4_attn_wq_b_s), tuple(main_wq_b.shape)
+        )
+        index_wq_b_sf = _normalize_weight_scale(
+            "index_wq_b_sf", get(W.v4_indexer_wq_b_s), tuple(index_wq_b.shape)
+        )
 
         main_wkv = get(W.v4_compressor_wkv)
         main_wgate = get(W.v4_compressor_wgate)

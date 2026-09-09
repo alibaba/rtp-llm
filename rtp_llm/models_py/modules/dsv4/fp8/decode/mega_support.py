@@ -143,6 +143,7 @@ def _model_geometry_reason(args: Any) -> Optional[str]:
         ("index_head_dim", args.index_head_dim, INDEX_HEAD_DIM),
         ("index_topk", args.index_topk, geometry.index_topk),
         ("hc_mult", args.hc_mult, 4),
+        ("hc_sinkhorn_iters", args.hc_sinkhorn_iters, 20),
     )
     mismatches = [
         f"{name}={actual} (expected {wanted})"
@@ -339,6 +340,12 @@ def mega_decode_unavailable_reason(args: Any, device: torch.device) -> Optional[
     geometry_reason = _model_geometry_reason(args)
     if geometry_reason is not None:
         return geometry_reason
+    kernel_tokens_per_block = int(args.kernel_tokens_per_block)
+    if kernel_tokens_per_block not in (128, 256, 512):
+        return (
+            f"kernel_tokens_per_block={kernel_tokens_per_block} is unsupported; "
+            "expected one of [128, 256, 512]"
+        )
 
     require_moe_front = int(args.ep_size) > 1
     components = ("csa", "hca", "moe_front") if require_moe_front else ("csa", "hca")
