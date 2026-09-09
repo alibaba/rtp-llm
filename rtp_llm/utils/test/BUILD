@@ -220,9 +220,3 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'}
 )
-
-py_test(
-    name = "bert_user_profile_test",
-    srcs = ["bert_user_profile_test.py"],
-    deps = ["//rtp_llm:utils", "//rtp_llm:torch"],
-)

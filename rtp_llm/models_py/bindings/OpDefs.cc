@@ -146,13 +146,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("cu_seqlens_device", &PyAttentionInputs::cu_seqlens_device)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
-        .def_readwrite("uqi_b_starts", &PyAttentionInputs::uqi_b_starts)
-        .def_readwrite("uqi_b_lens", &PyAttentionInputs::uqi_b_lens)
-        .def_readwrite("uqi_seg_indptr", &PyAttentionInputs::uqi_seg_indptr)
-        .def_readwrite("uqi_b_indptr", &PyAttentionInputs::uqi_b_indptr)
-        .def_readwrite("uqi_perm", &PyAttentionInputs::uqi_perm)
-        .def_readwrite("uqi_inv_perm", &PyAttentionInputs::uqi_inv_perm)
-        .def_readwrite("uqi_b_rows", &PyAttentionInputs::uqi_b_rows)
         .def_readwrite("cu_kv_seqlens_device", &PyAttentionInputs::cu_kv_seqlens_device)
         .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
@@ -195,6 +188,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite(
             "combo_tokens_type_ids", &PyEmbeddingInputs::combo_tokens_type_ids, "Combined token type IDs tensor")
         .def_readwrite("text_tokens_mask", &PyEmbeddingInputs::text_tokens_mask, "Text tokens mask tensor")
+        .def_readwrite("input_ids_host", &PyEmbeddingInputs::input_ids_host)
+        .def_readwrite("input_lengths_host", &PyEmbeddingInputs::input_lengths_host)
+        .def_readwrite("text_tokens_mask_host", &PyEmbeddingInputs::text_tokens_mask_host)
         .def("__repr__", [](const PyEmbeddingInputs& self) { return "PyEmbeddingInputs"; });
 
     pybind11::class_<PyMultimodalInputs>(m, "PyMultimodalInputs")

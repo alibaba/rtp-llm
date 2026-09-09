@@ -122,6 +122,7 @@ class CudaFp8GEMMLinear(LinearBase):
         self.K = self._deepgemm_linear.K
         self.N = self._deepgemm_linear.N
         self.scale_ue8m0 = getattr(self._deepgemm_linear, "scale_ue8m0", False)
+        self.supports_prequantized_activation = self._deepgemm_linear.supports_prequantized_activation
         self.cached_scales = getattr(self._deepgemm_linear, "cached_scales", None)
         self.cached_scales_max_len = getattr(
             self._deepgemm_linear, "cached_scales_max_len", 0

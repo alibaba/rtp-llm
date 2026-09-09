@@ -1,5 +1,3 @@
-#include <cstdlib>
-#include <string>
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -236,25 +234,17 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         model_input.need_moe_gating = true;
     }
     reportMetrics(batch_size, token_num, max_seq_len);
+    model_input.input_ids_host = model_input.combo_tokens;
+    model_input.input_lengths_host = model_input.input_lengths;
 #if USING_CUDA
     // TODO(async): embedding streams are still gathered through CPU pointers,
     // but the model-facing GptModelInputs metadata should be CUDA resident.
     // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
     // device-metadata branch requires the CUDA-only metadata kernel.
-    // BERT two-pass plans ragged attention from host lengths and scans host tokens.
-    // Keep the already gathered metadata on CPU rather than copying it back from CUDA.
-    static const bool use_uqi_two_pass = []() {
-        const char* mask = std::getenv("USE_VISION_BERT_UQI_BLOCK_MASK");
-        const char* two_pass = std::getenv("VISION_BERT_UQI_TWO_PASS");
-        return mask && std::string(mask) == "1"
-               && (!two_pass || std::string(two_pass) == "1");
-    }();
-    if (!use_uqi_two_pass) {
-        model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
-        model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
-        model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
-        model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
-    }
+    model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
+    model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
+    model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
+    model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
 #endif
     return model_input;
 }
@@ -268,10 +258,10 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
     ModelRequest model_request;
     model_request.generate_batch_size  = 0;
     model_request.context_batch_size   = model_input.input_lengths.size(0);
-    model_request.combo_tokens         = to_cpu(model_input.combo_tokens);
+    model_request.combo_tokens         = model_input.input_ids_host;
     model_request.combo_position_ids   = to_cpu(model_input.combo_position_ids);
     model_request.combo_token_type_ids = to_cpu(model_input.combo_tokens_type_ids);
-    model_request.input_lengths        = to_cpu(model_input.input_lengths);
+    model_request.input_lengths        = model_input.input_lengths_host;
     model_request.sequence_lengths     = to_cpu(model_input.sequence_lengths);
     model_request.prefix_lengths       = to_cpu(model_input.prefix_lengths);
     model_request.attention_mask       = model_input.attention_mask;

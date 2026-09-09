@@ -272,6 +272,9 @@ class PyContextParallelParams:
     def __init__(self) -> None: ...
 
 class PyEmbeddingInputs:
+    input_ids_host: torch.Tensor | None
+    input_lengths_host: torch.Tensor | None
+    text_tokens_mask_host: torch.Tensor | None
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
     @property

@@ -5,8 +5,6 @@
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <cstdint>
-#include <cstdlib>
-#include <string>
 #include <stdexcept>
 #include <mutex>
 #include <vector>
@@ -303,113 +301,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_seqlens              = cu_seqlens;
         py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);
-
-        // qui user-profile: 在 host token ids 上扫出画像段边界([CLS_UQI ... SEP] 闭区间),
-        // 作为元数据传给 Python bert.py —— 替代 Python 侧 GPU derive + b_lens D2H 同步。
-        // 语义与 block_mask.derive_bert_uqi_segment_ids 逐位一致; 纯 CPU 顺序扫描, ~us 级。
-        static const bool kUqiScanEnabled = []() {
-            const char* v = std::getenv("USE_VISION_BERT_UQI_BLOCK_MASK");
-            const char* two_pass = std::getenv("VISION_BERT_UQI_TWO_PASS");
-            return v != nullptr && std::string(v) == "1"
-                   && (two_pass == nullptr || std::string(two_pass) == "1");
-        }();
-        if (kUqiScanEnabled && inputs.combo_tokens.defined()
-            && inputs.combo_tokens.scalar_type() == torch::kInt32
-            && !inputs.combo_tokens.is_cuda() && inputs.combo_tokens.is_contiguous()
-            && (!inputs.text_tokens_mask.defined() || !inputs.text_tokens_mask.is_cuda())) {
-            static const int32_t kUqiClsTokenId = []() {
-                const char* v = std::getenv("VISION_BERT_CLS_UQI_TOKEN_ID");
-                return v != nullptr ? static_cast<int32_t>(atoi(v)) : 2;
-            }();
-            constexpr int32_t kUqiSepTokenId = 102;
-            const int32_t*    tok            = inputs.combo_tokens.data_ptr<int32_t>();
-            const int32_t*    lens           = py_attn_inputs.input_lengths.data_ptr<int32_t>();
-            const int64_t     ctx_batch      = static_cast<int64_t>(context_batch_size);
-            torch::Tensor     b_starts       = torch::empty({ctx_batch}, torch::kInt32);
-            torch::Tensor     b_lens         = torch::empty({ctx_batch}, torch::kInt32);
-            int32_t*          bs             = b_starts.data_ptr<int32_t>();
-            int32_t*          bl             = b_lens.data_ptr<int32_t>();
-            const int32_t* text_mask = inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.numel()
-                                        ? inputs.text_tokens_mask.data_ptr<int32_t>() : nullptr;
-            int64_t           off            = 0;
-            for (int64_t i = 0; i < ctx_batch; ++i) {
-                const int32_t n = lens[i];
-                int32_t       s = -1;
-                for (int32_t j = 0; j < n; ++j) {
-                    if ((!text_mask || text_mask[off + j]) && tok[off + j] == kUqiClsTokenId) {
-                        s = j;
-                        break;
-                    }
-                }
-                if (s >= 0) {
-                    int32_t e = n;  // 无 SEP 退化到序列尾
-                    for (int32_t j = s; j < n; ++j) {
-                        if ((!text_mask || text_mask[off + j]) && tok[off + j] == kUqiSepTokenId) {
-                            e = j + 1;  // 闭区间 [CLS_UQI, SEP]
-                            break;
-                        }
-                    }
-                    bs[i] = s;
-                    bl[i] = e - s;
-                } else {
-                    bs[i] = -1;
-                    bl[i] = 0;
-                }
-                off += n;
-            }
-            py_attn_inputs.uqi_b_starts = b_starts;
-            py_attn_inputs.uqi_b_lens   = b_lens;
-
-            // 顺手把两趟 attention 的 schedule 也在 C++ 建好 (闭式 permutation,
-            // 免 Python host 小算子开销): bert.py 直接消费, Python 侧只剩 plan。
-            torch::Tensor seg_indptr = torch::empty({2 * ctx_batch + 1}, torch::kInt32);
-            torch::Tensor b_indptr   = torch::empty({ctx_batch + 1}, torch::kInt32);
-            int32_t*      sip        = seg_indptr.data_ptr<int32_t>();
-            int32_t*      bip        = b_indptr.data_ptr<int32_t>();
-            sip[0]                   = 0;
-            bip[0]                   = 0;
-            for (int64_t i = 0; i < ctx_batch; ++i) {
-                const int32_t a = lens[i] - bl[i];
-                sip[2 * i + 1]  = sip[2 * i] + a;
-                sip[2 * i + 2]  = sip[2 * i + 1] + bl[i];
-                bip[i + 1]      = bip[i] + bl[i];
-            }
-            const int64_t total_b = bip[ctx_batch];
-            if (total_b > 0) {
-                torch::Tensor perm   = torch::empty({off}, torch::kInt64);
-                torch::Tensor inv    = torch::empty({off}, torch::kInt64);
-                torch::Tensor b_rows = torch::empty({total_b}, torch::kInt64);
-                int64_t*      pm     = perm.data_ptr<int64_t>();
-                int64_t*      iv     = inv.data_ptr<int64_t>();
-                int64_t*      br     = b_rows.data_ptr<int64_t>();
-                int64_t       base = 0, bc = 0;
-                for (int64_t i = 0; i < ctx_batch; ++i) {
-                    const int32_t n = lens[i], s = bs[i], l = bl[i], a = n - l;
-                    for (int32_t j = 0; j < n; ++j) {
-                        int64_t np;
-                        if (s >= 0 && j >= s && j < s + l) {
-                            np = a + (j - s);  // B 段 -> 序列尾
-                        } else if (s >= 0 && j >= s + l) {
-                            np = j - l;  // B 段之后的 A(如 vision) 前移
-                        } else {
-                            np = j;  // B 段之前的 A 原位
-                        }
-                        pm[base + np] = base + j;
-                        iv[base + j]  = base + np;
-                    }
-                    for (int32_t t = 0; t < l; ++t) {
-                        br[bc++] = base + a + t;
-                    }
-                    base += n;
-                }
-                py_attn_inputs.uqi_perm     = perm;
-                py_attn_inputs.uqi_inv_perm = inv;
-                py_attn_inputs.uqi_b_rows   = b_rows;
-            }
-            py_attn_inputs.uqi_seg_indptr = seg_indptr;
-            py_attn_inputs.uqi_b_indptr   = b_indptr;
-        }
-
     } else {
         py_attn_inputs.total_tokens         = 0;
         py_attn_inputs.cu_seqlens_device    = torch::zeros({batch_size + 1}, cuda_i32);
@@ -751,6 +642,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyEmbeddingInputs");
     torch_ext::PyEmbeddingInputs embedding_inputs;
+    embedding_inputs.input_ids_host = inputs.input_ids_host;
+    embedding_inputs.input_lengths_host = inputs.input_lengths_host;
+    embedding_inputs.text_tokens_mask_host = inputs.text_tokens_mask;
     if (inputs.combo_tokens_type_ids.defined()) {
         embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
     }
@@ -1459,10 +1353,25 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
             }
         }
     }
+    // CPU mirrors must describe the same slices as their device tensors.
+    size_t host_batch_offset = 0;
+    for (size_t i = 0; i < token_slice_recipes.size(); ++i) {
+        auto&       micro = micro_batch_inputs[i];
+        const auto& slice = token_slice_recipes[i];
+        if (inputs.input_ids_host.defined()) {
+            micro.input_ids_host = inputs.input_ids_host.narrow(0, slice.offset, slice.count);
+        }
+        if (inputs.input_lengths_host.defined()) {
+            micro.input_lengths_host = inputs.input_lengths_host.narrow(0, host_batch_offset, micro.input_lengths.size(0));
+        }
+        host_batch_offset += micro.input_lengths.size(0);
+    }
     return {micro_batch_inputs, token_slice_recipes};
 }
 
 void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
+    buffer_holder_.hold_host(inputs.input_ids_host);
+    buffer_holder_.hold_host(inputs.input_lengths_host);
     buffer_holder_.hold_host(inputs.combo_tokens);
     buffer_holder_.hold_host(inputs.input_lengths);
     buffer_holder_.hold_host(inputs.sequence_lengths);

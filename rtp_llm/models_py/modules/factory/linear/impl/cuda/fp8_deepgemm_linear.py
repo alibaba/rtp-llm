@@ -142,6 +142,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         # requant_weight_ue8m0 is applied at weight load time in _postprocess;
         # detect whether UE8M0 format was applied by checking scale dtype.
         self.scale_ue8m0 = self.weight_scales.dtype == torch.int32
+        self.supports_prequantized_activation = self.scale_ue8m0
         # Initialize cached scales attributes
         self.cached_scales = None
         self.cached_scales_max_len = 0

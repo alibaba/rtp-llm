@@ -1,5 +1,4 @@
-import os
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 import torch
 from torch import nn
@@ -23,16 +22,6 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
-)
-from rtp_llm.utils.bert_user_profile import (
-    build_bert_uqi_flashinfer_mask,
-    derive_bert_uqi_segment_ids,
-)
-from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
-    BertUqiTwoPassSchedule,
-    build_bert_uqi_two_pass_schedule,
-    build_bert_uqi_two_pass_schedule_from_bounds,
-    derive_bert_uqi_segment_ids_hostlen,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -175,126 +164,6 @@ class BertModel(GptModelBase):
             ]
         )
 
-        # 用户画像分支: 显式 opt-in, 默认关 -> 普通 BERT 老路逐字节不变。
-        # 开启后 A 段(Q+I)看不到 B 段(User), B 段从 CLS_UQI(token id) 起。
-        self.use_user_profile_mask = (
-            os.environ.get("USE_VISION_BERT_UQI_BLOCK_MASK", "0") == "1"
-        )
-        self.cls_uqi_token_id = int(os.environ.get("VISION_BERT_CLS_UQI_TOKEN_ID", "2"))
-
-        self.use_uqi_two_pass = os.environ.get("VISION_BERT_UQI_TWO_PASS", "1") == "1"
-        self._uqi_two_pass_op = None
-
-    def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
-    ) -> FMHAImplBase:
-        # Use FlashInfer native ragged attention for both masked and unmasked
-        # requests when the BERT user-profile path is enabled.
-        if self.use_user_profile_mask and is_cuda_graph:
-            raise ValueError("BERT user-profile attention does not support CUDA graphs")
-        if self.use_user_profile_mask:
-            attn_inputs = inputs.attention_inputs
-            if attn_inputs.is_prefill:
-                if self.use_uqi_two_pass:
-                    return self._prepare_uqi_two_pass_impl(inputs, attn_inputs)
-                # Build logical masks on device; variable-size planning uses host scalars.
-                token_ids = inputs.input_ids
-                text_mask = inputs.embedding_inputs.text_tokens_mask
-                if text_mask is not None and text_mask.numel():
-                    token_ids = token_ids.masked_fill(
-                        ~text_mask.to(device=token_ids.device, dtype=torch.bool), -1
-                    )
-                cu_seqlens = attn_inputs.cu_seqlens_device
-                if cu_seqlens is None or cu_seqlens.numel() == 0:
-                    cu_seqlens = attn_inputs.cu_seqlens
-                cu_seqlens = cu_seqlens[: attn_inputs.input_lengths.numel() + 1]
-                uqi_segment_ids = derive_bert_uqi_segment_ids(
-                    token_ids,
-                    cu_seqlens,
-                    self.cls_uqi_token_id,
-                )
-                attn_configs = self.config.getAttentionConfigs(
-                    self.parallelism_config.get_attn_tp_size()
-                )
-                from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-                    PyFlashinferPrefillImpl,
-                )
-
-                custom_mask = None
-                if bool(uqi_segment_ids.any()):
-                    custom_mask = build_bert_uqi_flashinfer_mask(
-                        uqi_segment_ids, cu_seqlens
-                    )
-                return PyFlashinferPrefillImpl(
-                    attn_configs,
-                    attn_inputs,
-                    self.parallelism_config,
-                    custom_mask=custom_mask,
-                )
-        return super().prepare_fmha_impl(inputs, is_cuda_graph)
-
-    def _prepare_uqi_two_pass_impl(
-        self, inputs: PyModelInputs, attn_inputs: Any
-    ) -> Any:
-        """Plan native two-pass attention from host metadata, reusing wrappers."""
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
-            BertUqiTwoPassAttnOp,
-            BertUqiTwoPassImpl,
-        )
-
-        batch_size = attn_inputs.input_lengths.size(0)
-        cu_host = attn_inputs.cu_seqlens[: batch_size + 1]
-        if cu_host.numel() != batch_size + 1:
-            lengths = attn_inputs.input_lengths.cpu().to(torch.int32)
-            cu_host = torch.zeros(batch_size + 1, dtype=torch.int32)
-            cu_host[1:] = lengths.cumsum(0)
-        # 优先走 C++ 全 schedule 路径: PyWrappedModel 已在 host token 上扫出段
-        # 边界并预构建 perm/indptr/b_rows —— Python 侧只剩 flashinfer plan 与
-        # permutation H2D。缺少预构建 metadata 时回退到分段推导。
-        uqi_seg_indptr = getattr(attn_inputs, "uqi_seg_indptr", None)
-        uqi_b_lens = getattr(attn_inputs, "uqi_b_lens", None)
-        if uqi_seg_indptr is not None and uqi_seg_indptr.numel() == 2 * batch_size + 1:
-            if int(attn_inputs.uqi_b_indptr[batch_size]) == 0:
-                schedule = BertUqiTwoPassSchedule(
-                    has_b=False, perm=None, inv_perm=None, b_rows=None,
-                    qo_indptr_p1=cu_host, qo_indptr_p2=None, kv_indptr_p2=None,
-                )
-            else:
-                dev = inputs.input_ids.device
-                schedule = BertUqiTwoPassSchedule(
-                    has_b=True,
-                    perm=attn_inputs.uqi_perm.to(dev, non_blocking=True),
-                    inv_perm=attn_inputs.uqi_inv_perm.to(dev, non_blocking=True),
-                    b_rows=attn_inputs.uqi_b_rows.to(dev, non_blocking=True),
-                    qo_indptr_p1=uqi_seg_indptr,
-                    qo_indptr_p2=attn_inputs.uqi_b_indptr,
-                    kv_indptr_p2=cu_host,
-                )
-        elif uqi_b_lens is not None and uqi_b_lens.numel() >= batch_size:
-            schedule = build_bert_uqi_two_pass_schedule_from_bounds(
-                attn_inputs.uqi_b_starts[:batch_size],
-                uqi_b_lens[:batch_size],
-                cu_host,
-                inputs.input_ids.device,
-            )
-        else:
-            cu_dev = attn_inputs.cu_seqlens_device[: batch_size + 1]
-            input_ids = inputs.input_ids[: int(cu_host[-1])]
-            text_mask = inputs.embedding_inputs.text_tokens_mask
-            if text_mask is not None and text_mask.numel():
-                input_ids = input_ids.masked_fill(~text_mask[:input_ids.numel()].to(device=input_ids.device, dtype=torch.bool), -1)
-            seg_ids = derive_bert_uqi_segment_ids_hostlen(
-                input_ids, cu_dev, cu_host, self.cls_uqi_token_id
-            )
-            schedule = build_bert_uqi_two_pass_schedule(seg_ids, cu_dev, cu_host)
-        if self._uqi_two_pass_op is None:
-            attn_configs = self.config.getAttentionConfigs(
-                self.parallelism_config.get_attn_tp_size()
-            )
-            self._uqi_two_pass_op = BertUqiTwoPassAttnOp(attn_configs)
-        impl = BertUqiTwoPassImpl(self._uqi_two_pass_op, attn_inputs, schedule)
-        return impl
-
     def forward(
         self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
     ) -> PyModelOutputs:
@@ -350,9 +219,6 @@ class BertModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         quantized_hidden_states = None
-        uqi_perm = getattr(fmha_impl, "uqi_perm", None)
-        if uqi_perm is not None:
-            hidden_states = hidden_states.index_select(0, uqi_perm)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             next_layer_uses_quantized_input = (
                 i + 1 < self.layer_num
@@ -367,6 +233,4 @@ class BertModel(GptModelBase):
                 quantized_hidden_states=quantized_hidden_states,
                 quantize_output=next_layer_uses_quantized_input,
             )
-        if uqi_perm is not None:
-            hidden_states = hidden_states.index_select(0, fmha_impl.uqi_inv_perm)
         return PyModelOutputs(hidden_states)
