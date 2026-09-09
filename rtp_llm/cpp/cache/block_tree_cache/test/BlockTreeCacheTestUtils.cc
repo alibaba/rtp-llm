@@ -509,12 +509,12 @@ void releaseLowerTierSeedRefs(const std::vector<GroupSetPtr>&                   
     for (const std::vector<GroupSetResource>& per_key_resources : resources) {
         for (size_t group_set_id = 0; group_set_id < per_key_resources.size(); ++group_set_id) {
             const GroupSetResource& resource = per_key_resources[group_set_id];
-            for (Tier tier : {Tier::HOST, Tier::DISK}) {
-                if (resource.hasTier(tier)) {
-                    group_sets[group_set_id]->releaseSingleBlock(
-                        tier, resource.getBlocks(tier).front(), BlockTreeRefType::CACHE);
-                }
+            const Tier              tier     = resource.getTopTier();
+            if (tier != Tier::HOST && tier != Tier::DISK) {
+                continue;
             }
+            group_sets[group_set_id]->releaseSingleBlock(
+                tier, resource.getBlocks(tier).front(), BlockTreeRefType::CACHE);
         }
     }
 }
