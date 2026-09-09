@@ -47,3 +47,72 @@ index 03ff7ce5..bdaff505 100644
  def genshared(name, lib):
      return native.genrule(
          name = name,
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
+index f0f8590e..6597e6a6 100644
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
+@@ -51,3 +51,13 @@
+ const string &MetricsRecord::Name() const { return info_->Name(); }
+-
++void MetricsRecord::OverrideTags(const map<string, string> &tags) {
++    if (tags.empty()) {
++        return;
++    }
++    auto mergedTags = tags_->GetTagsMap();
++    for (const auto &tag : tags) {
++        mergedTags[tag.first] = tag.second;
++    }
++    tags_.reset(new MetricsTags(mergedTags));
++}
++
+ void MetricsRecord::AddValue(const MetricsInfoPtr &info, double value) {
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h
+index cb2802e3..ec471b1b 100644
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.h
+@@ -31,2 +31,3 @@ public:
+     const std::vector<MetricsValue *> &Values() const { return values_; }
++    void OverrideTags(const std::map<std::string, std::string> &tags);
+     void AddValue(const MetricsInfoPtr &info, double value);
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
+index 0bebb64e..6625f88d 100644
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
+@@ -55,2 +55,14 @@ MetricsSystem::~MetricsSystem() {
+ void MetricsSystem::Init(MetricsConfig *config) {
++    output_override_tags_.clear();
++    const auto &globalTags = config->global_tags()->GetTagsMap();
++    for (const auto &key : {"hippo_slave_ip", "host_ip", "container_ip"}) {
++        auto iter = globalTags.find(key);
++        if (iter != globalTags.end()) {
++            output_override_tags_[iter->first] = iter->second;
++        }
++    }
++    auto hostIter = config->CommonTags().find("host");
++    if (hostIter != config->CommonTags().end()) {
++        output_override_tags_[hostIter->first] = hostIter->second;
++    }
+     if (!initSink(config)) {
+@@ -116,2 +128,5 @@ void MetricsSystem::Stop() {
+ void MetricsSystem::PublishMetrics(MetricsRecords &records) {
++    for (auto record : records.getRecords()) {
++        record->OverrideTags(output_override_tags_);
++    }
+     for (auto e : sinks_) {
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
+index 6ac5d7b8..840186ef 100644
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
+@@ -79,3 +79,4 @@ private:
+     std::queue<std::pair<int64_t, MetricsRecords>> publish_queue_;
+-
++    std::map<std::string, std::string> output_override_tags_;
++
+ private:
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsConfig.cpp
+@@ -76,2 +76,3 @@ MetricsConfig &MetricsConfig::operator=(const MetricsConfig &config) {
+         use_common_tag_ = config.use_common_tag();
++        common_tags_ = config.CommonTags();
+     }

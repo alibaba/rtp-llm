@@ -27,7 +27,7 @@ from rtp_llm.utils.process_manager import (
 )
 from rtp_llm.utils.scr_template_utils import (
     ScrParticipantManifest,
-    arrive_scr_checkpoint_barrier,
+    arrive_scr_template_barrier as arrive_scr_checkpoint_barrier,
     build_scr_participant_manifest,
     configure_scr_environment,
     is_scr_template_phase_active,

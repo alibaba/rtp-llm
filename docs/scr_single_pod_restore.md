@@ -2,7 +2,8 @@
 
 This branch adds opt-in stable loopback communication for ranks that share one
 Pod network namespace. It builds on `feat/dsv4_on_dev_scr` at
-`7eb9d7bc790b561e347e3bf4cc3c168c39787844`.
+`888476cf150c924b249d62b52afcd41753430e6b`, retaining its control-plane
+lifecycle and endpoint restore support.
 
 Set `RTP_LLM_SCR_LOCAL_COMM=1` on both the checkpoint seed and restore workload.
 Set `LOCAL_WORLD_SIZE` to `WORLD_SIZE`. RPC fan-out, TCPStore and NCCL rendezvous
@@ -12,10 +13,10 @@ After restore, the saved `self.ip` may differ from newly resolved member address
 that difference alone must not invalidate the topology.
 
 Local health polling uses numeric loopback to avoid transient resolver netlink
-sockets during checkpoint. With `SCR_ENABLE=1` and `SCR_PHASE=checkpoint`, grammar
-sandbox workers are created on first validation rather than eagerly at startup.
-Do not send grammar validation traffic before checkpoint: it can instantiate the
-sandbox pool. Ordinary startup retains eager pool creation.
+sockets during checkpoint. Grammar workers participate in the upstream template lifecycle; their sandbox
+pool is quiesced before the barrier and recreated when the template is released.
+The public integration switch is `RTPLLM_ENABLE_SCR=1`; the external controller
+selects `SCR_PHASE`.
 
 The internal entrypoint sets `NCCL_SOCKET_IFNAME=lo` in this mode and preloads the
 SCR-injected NCCL interposer for the checkpoint phase. The interposer and the
@@ -25,7 +26,9 @@ GCC 12 library search path needed by runtime JIT compilation.
 The fused RoPE call site supports both legacy and current rtp-kernel wrappers:
 the current API takes `position_ids` in prefill and separate position IDs plus
 sequence lengths in decode. Kernel feature detection is cached, uses the Python
-signature, and does not change tensors or native modules at runtime.
+signature, and does not change tensors or native modules at runtime. The paired
+image pins a kernel wheel using the current API, so this compatibility adapter
+is required even though the upstream branch removed it.
 
 ## Validation and acceptance boundary
 
@@ -54,20 +57,41 @@ network namespace. Leave it unset for multi-node deployments.
 
 ## Monitoring connections at the checkpoint boundary
 
-Each SCR participant pauses its already-loaded Kmonitor reporters before entering
-the Epsilon barrier. Python reporters join their reporting thread and close Flume.
-The native reporter stops its sampling/sending threads and reinitializes the
-configured sink in manual mode, releasing the old transport while retaining the
-registered metric sources. It does not shut down the Kmonitor factory.
+During an SCR checkpoint or restore phase, each participant creates its Python
+and native metric registries at the normal initialization points, but defers the
+external Kmonitor transport. The Python reporter does not create its Flume client
+or reporting thread. The native reporter initializes the factory configuration
+in manual mode and accepts metric registration, but does not start its metrics
+system or create the configured sink.
 
-When the barrier returns, including after a checkpoint error, both reporters
-resume using their original configuration. The native library must provide the
-matching lifecycle hooks; mixing new Python helpers with an older loaded native
-library rejects checkpoint participation rather than silently retaining sockets.
-Ordinary serving without SCR does not pause reporting.
+The upstream template lifecycle releases both reporters after the Epsilon
+barrier and restore fixup; its abort path also resumes prepared reporters.
+The main parent participates through the same lifecycle wrapper as its children,
+so its deferred Python reporter is also released. Both reporters then activate
+their external transport. They reread the Hippo
+runtime environment and rebuild the sink and identity tags so a restored process
+does not report with the seed Pod's host or container IP. Python also replaces
+stale runtime tags when rendering data points that were registered before the
+checkpoint. Native reporting applies the refreshed runtime identity at the
+publish boundary, so a metric declared before the checkpoint can retain its
+existing handle while its emitted records use the restored Pod's IP tags. The
+native library must provide the matching lifecycle hooks; mixing new Python
+helpers with an older loaded native library rejects checkpoint participation
+rather than silently retaining sockets. Ordinary serving without SCR keeps the
+original eager reporting behavior.
 
-CPU validation covers real Python TCP closure/reconnection and native metric
-registration retention across sink replacement. Full acceptance must additionally
-verify dump/restore, restored inference, and resumed reporting in a fresh image.
+CRIU can preserve `RequestedIP` from the seed even when the new Pod's hostname
+resolves to its new IP. Before native reporting resumes, the SCR helper resolves
+that hostname and refreshes `RequestedIP` in the process environment. If resolution
+fails, it logs the failure and leaves the existing value in place; that case still
+needs explicit monitoring validation. Rebuilding the native configuration also
+replaces its common tag map: otherwise the insert-only `host` tag would retain the
+seed value despite rerunning hostname resolution. Fresh-image acceptance checks
+both `container_ip` and `host` on actual emitted native records.
+
+CPU validation covers deferred Python transport activation, real TCP
+closure/reconnection, refreshed runtime identity, and native metric registration
+retention across sink replacement. Full acceptance must additionally verify
+dump/restore, restored inference, and resumed reporting in a fresh image.
 These hooks address the configured built-in sink; custom sinks and independently
 retained sink references require their own external-connection lifecycle checks.

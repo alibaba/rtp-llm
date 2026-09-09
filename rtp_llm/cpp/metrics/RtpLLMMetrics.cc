@@ -1136,6 +1136,38 @@ void RtpLLMDiskCacheMetrics::report(const kmonitor::MetricsTags*           tags,
 #undef REPORT_QPS
 #undef REPORT_GAUGE
 
+namespace {
+
+bool kmonitorTransportDeferred = false;
+
+bool deferKmonitorTransportForScr() {
+    const auto phase = autil::EnvUtil::getEnv("SCR_PHASE", "");
+    const bool enabled = autil::EnvUtil::getEnv("RTPLLM_ENABLE_SCR", false)
+                         || autil::EnvUtil::getEnv("RTP_LLM_ENABLE_SCR", false)
+                         || autil::EnvUtil::getEnv("SCR_ENABLE", false);
+    return enabled && (phase == "checkpoint" || phase == "restore");
+}
+
+void fillKmonitorConfig(kmonitor::MetricsConfig& metricsConfig, const KmonParam& param, bool manuallyMode) {
+    metricsConfig.set_tenant_name(param.kmonitorTenant);
+    metricsConfig.set_service_name(param.kmonitorServiceName);
+    std::string sink_address = param.kmonitorSinkAddress;
+    if (!param.kmonitorPort.empty()) {
+        sink_address += ":" + param.kmonitorPort;
+    }
+    metricsConfig.set_sink_address(sink_address.c_str());
+    metricsConfig.set_enable_log_file_sink(param.kmonitorEnableLogFileSink);
+    metricsConfig.set_manually_mode(manuallyMode);
+    metricsConfig.set_inited(true);
+    metricsConfig.AddGlobalTag("hippo_slave_ip", param.hippoSlaveIp);
+    for (const auto& pair : param.kmonitorTags) {
+        metricsConfig.AddGlobalTag(pair.first, pair.second);
+    }
+    setHippoTags(metricsConfig);
+}
+
+}  // namespace
+
 bool initKmonitorFactory() {
     KmonParam param;
     param.init();
@@ -1155,41 +1187,37 @@ bool initKmonitorFactory() {
     }
 
     kmonitor::MetricsConfig metricsConfig;
-    metricsConfig.set_tenant_name(param.kmonitorTenant);
-    metricsConfig.set_service_name(param.kmonitorServiceName);
-    std::string sink_address = param.kmonitorSinkAddress;
-    if (!param.kmonitorPort.empty()) {
-        sink_address += ":" + param.kmonitorPort;
-    }
-    metricsConfig.set_sink_address(sink_address.c_str());
-    metricsConfig.set_enable_log_file_sink(param.kmonitorEnableLogFileSink);
-    // metricsConfig.set_enable_prometheus_sink(param.kmonitorEnablePrometheusSink);
-    metricsConfig.set_manually_mode(param.kmonitorManuallyMode);
-    metricsConfig.set_inited(true);
-    metricsConfig.AddGlobalTag("hippo_slave_ip", param.hippoSlaveIp);
-    for (auto& pair : param.kmonitorTags) {
-        metricsConfig.AddGlobalTag(pair.first, pair.second);
-    }
-    setHippoTags(metricsConfig);
+    const bool deferTransport = deferKmonitorTransportForScr();
+    fillKmonitorConfig(metricsConfig, param, deferTransport || param.kmonitorManuallyMode);
     if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
         RTP_LLM_LOG_ERROR("init kmonitor factory failed with");
         return false;
     }
+    kmonitorTransportDeferred = deferTransport;
 
     // registerBuildInMetrics to refresh sg_buildin_kmonitor for KMonitorWorker::Start
     kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
     RTP_LLM_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
 
+    if (deferTransport) {
+        RTP_LLM_LOG_INFO("KMonitor transport deferred until SCR steady-point returns");
+        return true;
+    }
     kmonitor::KMonitorFactory::Start();
     RTP_LLM_LOG_INFO("KMonitorFactory::Start() finished");
     return true;
 }
 
 void stopKmonitorFactory() {
+    kmonitorTransportDeferred = false;
     kmonitor::KMonitorFactory::Shutdown();
 }
 
 bool pauseKmonitorForScr() {
+    if (kmonitorTransportDeferred) {
+        RTP_LLM_LOG_INFO("SCR native Kmonitor transport is already deferred");
+        return true;
+    }
     if (!kmonitor::KMonitorFactory::IsStarted()) {
         return false;
     }
@@ -1222,24 +1250,37 @@ bool pauseKmonitorForScr() {
 }
 
 bool resumeKmonitorAfterScr() {
-    if (!kmonitor::KMonitorFactory::IsStarted()) {
+    if (!kmonitorTransportDeferred && !kmonitor::KMonitorFactory::IsStarted()) {
         return false;
     }
     auto* worker = kmonitor::KMonitorFactory::GetWorker();
-    if (worker == nullptr || worker->getMetricsSystem() == nullptr) {
+    auto* factoryConfig = kmonitor::KMonitorFactory::GetConfig();
+    if (worker == nullptr || worker->getMetricsSystem() == nullptr || factoryConfig == nullptr) {
         return false;
     }
-    auto* config = kmonitor::KMonitorFactory::GetConfig();
-    if (config == nullptr) {
-        return false;
-    }
+    KmonParam param;
+    param.init();
+    kmonitor::MetricsConfig resumedConfig;
+    fillKmonitorConfig(resumedConfig, param, param.kmonitorManuallyMode);
+    *factoryConfig = resumedConfig;
     auto* system = worker->getMetricsSystem();
+    if (kmonitorTransportDeferred) {
+        worker->addCommonTags();
+        kmonitor::KMonitorFactory::Start();
+        if (!system->Started()) {
+            return false;
+        }
+        kmonitorTransportDeferred = false;
+        RTP_LLM_LOG_INFO("SCR native Kmonitor activated with refreshed runtime identity");
+        return true;
+    }
     system->Stop();
-    system->Init(config);
+    worker->addCommonTags();
+    system->Init(factoryConfig);
     if (!system->Started()) {
         return false;
     }
-    RTP_LLM_LOG_INFO("SCR native Kmonitor resumed");
+    RTP_LLM_LOG_INFO("SCR native Kmonitor activated with refreshed runtime identity");
     return true;
 }
 

@@ -20,6 +20,7 @@ import importlib
 import inspect
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -73,6 +74,16 @@ class _NativeKmonitorTemplateHook:
             return
         extension = self._extension()
         resume = getattr(extension, "resume_kmonitor_after_scr", None) if extension else None
+        # CRIU preserves seed environment values. Resolve the current namespace
+        # identity before native Kmonitor rebuilds its configuration.
+        if os.environ.get("HIPPO_ROLE"):
+            try:
+                os.environ["RequestedIP"] = socket.gethostbyname(socket.gethostname())
+            except OSError:
+                LOGGER.warning(
+                    "Cannot resolve current container IP for native Kmonitor",
+                    exc_info=True,
+                )
         if resume is None or not resume():
             raise RuntimeError("native Kmonitor did not resume after SCR")
         self._paused = False
@@ -148,7 +159,7 @@ class _BackendVisitorTemplateHook:
             self.configs.distribute_config,
             self.configs.parallelism_config,
         )
-        role = getattr(self.configs.pd_sep_config, "role_type", "")
+        role = self.configs.role_config.role_type
         role_name = str(getattr(role, "name", role)).lower()
         world_info = resolve_world_info(
             current,
