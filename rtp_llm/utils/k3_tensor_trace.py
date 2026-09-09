@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Lossless tensor snapshots for explicit K3 model/sampler instrumentation.
 
 The runner owns begin/end and CUDA-Graph capture/replay boundaries. This is
@@ -16,10 +19,11 @@ import queue
 import socket
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import torch
 
@@ -104,7 +108,7 @@ class TensorTrace:
             )
             temporary.replace(path)
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str) -> NoReturn:
         with self._lock:
             if self._error is None:
                 self._error = message
@@ -144,6 +148,8 @@ class TensorTrace:
 
     def _make_room(self, count: int) -> None:
         """Drain spillable data before reserving an eager snapshot and its D2H."""
+        if self._frame is None:
+            self._fail("reserving a snapshot outside a frame")
         if count > self._limit:
             self._fail("tensor trace pending-byte budget exceeded by one tensor")
         with self._lock:
@@ -159,6 +165,8 @@ class TensorTrace:
 
     def _flush_fragment(self, *, final: bool) -> None:
         frame = self._frame
+        if frame is None:
+            self._fail("flushing a fragment outside a frame")
         fragment = _Frame(
             {
                 **frame.metadata,
@@ -192,12 +200,13 @@ class TensorTrace:
             return
         if tensor.layout != torch.strided or tensor.is_quantized:
             self._fail(
-                "trace requires a dense tensor; explicitly unpack sparse/quantized values"
+                "trace requires a dense tensor; "
+                "explicitly unpack sparse/quantized values"
             )
         if tensor.device.type not in {"cpu", "cuda"}:
             self._fail(f"unsupported trace device: {tensor.device}")
         if tensor.is_cuda:
-            with torch.cuda.device(tensor.device):
+            with torch.accelerator.device_index(tensor.device.index):
                 capturing = torch.cuda.is_current_stream_capturing()
             if capturing != (self._frame.capture_key is not None):
                 self._fail(
@@ -225,7 +234,7 @@ class TensorTrace:
             value = tensor.detach().clone(memory_format=torch.contiguous_format)
             ready = None
             if tensor.is_cuda and self._frame.capture_key is None:
-                with torch.cuda.device(tensor.device):
+                with torch.accelerator.device_index(tensor.device.index):
                     ready = torch.cuda.Event()
                     ready.record(torch.cuda.current_stream(tensor.device))
         except BaseException:
@@ -251,7 +260,7 @@ class TensorTrace:
                 value = snapshot.value
                 if value.is_cuda:
                     device = value.device.index
-                    with torch.cuda.device(device):
+                    with torch.accelerator.device_index(device):
                         stream = self._copy_streams.get(device)
                         if stream is None:
                             stream = torch.cuda.Stream(device=device)
@@ -281,6 +290,8 @@ class TensorTrace:
         if key in self._graphs:
             self._fail(f"capture key already registered: {key}")
         self.begin({"capture_key": key})
+        if self._frame is None:
+            self._fail("begin_capture did not create a frame")
         self._frame.capture_key = key
 
     def end_capture(self) -> None:
@@ -360,10 +371,9 @@ class TensorTrace:
                 except BaseException as exc:
                     with self._lock:
                         self._error = self._error or f"writer: {exc}"
-                    try:
+                    with suppress(OSError):
                         self._write_json("incomplete.json", {"error": self._error})
-                    except OSError:
-                        pass  # close() still raises, even if the disk is full.
+                    # close() still raises, even if the disk is full.
                 finally:
                     del owners, staged, events, item
                     self._release(total)
@@ -388,7 +398,8 @@ class TensorTrace:
             {
                 "frames_written": self._written,
                 "coverage_verified": False,
-                "note": "writer flushed; full-model/stage/rank coverage requires a separate audit",
+                "note": "writer flushed; full-model/stage/rank coverage "
+                "requires a separate audit",
             },
         )
 
@@ -499,10 +510,8 @@ def traced_scope(name: str):
             try:
                 result = function(*args, **kwargs)
             except BaseException:
-                try:
+                with suppress(Exception):
                     exit_scope(scope_id, success=False)
-                except Exception:
-                    pass
                 raise
             exit_scope(scope_id)
             return result
