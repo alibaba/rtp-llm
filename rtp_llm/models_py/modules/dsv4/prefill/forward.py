@@ -374,12 +374,31 @@ def _fwd_profile_start():
     return prof
 
 
-def _fwd_profile_dump(prof) -> None:
+def _fwd_profile_dump(prof, fwd_idx: int = 0) -> None:
     import sys
 
     rank = (
         torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
     )
+    # The C++ StepWindowProfiler's chrome traces come out with zero-timestamped
+    # kernel events on this build; the python profiler's export carries real
+    # per-kernel GPU times, so also dump one when DSV4_FWD_TRACE_DIR is set.
+    trace_dir = os.environ.get("DSV4_FWD_TRACE_DIR", "")
+    if trace_dir:
+        try:
+            path = os.path.join(trace_dir, f"fwd_rank{rank}_idx{fwd_idx}.json")
+            prof.export_chrome_trace(path)
+            print(
+                "[FWDP] rank=%d chrome trace exported: %s" % (rank, path),
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                "[FWDP] rank=%d chrome trace export failed: %r" % (rank, e),
+                file=sys.stderr,
+                flush=True,
+            )
     ka = prof.key_averages()
     total_us = sum(float(e.self_device_time_total) for e in ka)
     print(
@@ -912,7 +931,7 @@ def forward_layers(
             # __exit__ synchronises, so every kernel the loop launched is
             # captured even though the launches themselves are async.
             _fs_prof.__exit__(None, None, None)
-            _fwd_profile_dump(_fs_prof)
+            _fwd_profile_dump(_fs_prof, _FWD_PROFILE_CT[0])
             _fs_prof = None
 
     if _fs_marks is not None:
