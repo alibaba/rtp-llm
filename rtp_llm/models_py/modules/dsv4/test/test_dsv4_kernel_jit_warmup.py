@@ -1,14 +1,19 @@
 import inspect
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -84,7 +89,171 @@ def _module_type(name, attrs):
     return type(name, (nn.Module,), {"__init__": __init__})
 
 
+def _cp_warmup_rank_worker(rank, directory):
+    dist.init_process_group(
+        "gloo",
+        init_method="file://" + os.path.join(directory, "rendezvous"),
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+        warmup_module._CP_METADATA_WARMUP_EPOCH = 0
+        local_calls = 0
+        original_error = ValueError("rank-local JIT compilation failed")
+
+        def local_warmup(**_kwargs):
+            nonlocal local_calls
+            local_calls += 1
+            if rank == 1 and local_calls == 1:
+                raise original_error
+            return True
+
+        outcomes = []
+        with (
+            mock.patch.object(
+                warmup_module, "model_warm_up_enabled", return_value=True
+            ),
+            mock.patch.object(warmup_module, "_is_cuda_device", return_value=True),
+            mock.patch.object(warmup_module, "_assert_not_capturing"),
+            mock.patch.object(
+                warmup_module,
+                "_warmup_prefill_cp_metadata_kernels",
+                side_effect=local_warmup,
+            ),
+            mock.patch.object(
+                dist, "barrier", side_effect=AssertionError("unexpected barrier")
+            ),
+            mock.patch.object(
+                dist, "all_reduce", side_effect=AssertionError("unexpected all_reduce")
+            ),
+        ):
+            for _ in range(3):
+                outcome = {}
+                try:
+                    warmup_module.warmup_prefill_cp_metadata_jit(
+                        is_decode_role=False,
+                        cp_enabled=True,
+                        cp_size=2,
+                        max_batch_size=2,
+                        fp8_kv_cache=True,
+                        kv_cache_sharded=True,
+                        device=torch.device("cpu"),
+                    )
+                except Exception as error:
+                    outcome = {
+                        "type": type(error).__name__,
+                        "error": str(error),
+                        "original_error": error is original_error,
+                    }
+                outcome["warm_keys"] = len(warmup_module._CP_METADATA_JIT_WARMED_KEYS)
+                outcomes.append(outcome)
+
+        # A rank that never reports must not inherit the production group's
+        # effectively unbounded collective timeout.
+        timeout_error = None
+        if rank == 0:
+            started = time.monotonic()
+            with mock.patch.object(
+                warmup_module, "_CP_METADATA_WARMUP_TIMEOUT_SECONDS", 1
+            ):
+                try:
+                    warmup_module._run_cp_metadata_warmup(lambda: True)
+                except RuntimeError as error:
+                    timeout_error = str(error)
+            timeout_elapsed = time.monotonic() - started
+        else:
+            time.sleep(3)
+            timeout_elapsed = None
+        with open(
+            os.path.join(directory, f"rank_{rank}.json"), "w", encoding="utf-8"
+        ) as result_file:
+            json.dump(
+                {
+                    "outcomes": outcomes,
+                    "local_calls": local_calls,
+                    "timeout_error": timeout_error,
+                    "timeout_elapsed": timeout_elapsed,
+                },
+                result_file,
+            )
+    finally:
+        dist.destroy_process_group()
+
+
 class Dsv4KernelJitWarmupTest(unittest.TestCase):
+    def test_cp_metadata_single_rank_preserves_result_and_exception_without_store(self):
+        for initialized in (False, True):
+            with self.subTest(initialized=initialized), mock.patch.object(
+                dist, "is_available", return_value=True
+            ), mock.patch.object(
+                dist, "is_initialized", return_value=initialized
+            ), mock.patch.object(
+                dist, "get_world_size", return_value=1
+            ), mock.patch.object(
+                dist.distributed_c10d,
+                "_get_default_store",
+                side_effect=AssertionError("single-rank warmup must not use a store"),
+            ):
+                self.assertTrue(warmup_module._run_cp_metadata_warmup(lambda: True))
+                self.assertFalse(warmup_module._run_cp_metadata_warmup(lambda: False))
+                original_error = ValueError("local JIT failure")
+                with self.assertRaises(ValueError) as caught:
+                    warmup_module._run_cp_metadata_warmup(
+                        mock.Mock(side_effect=original_error)
+                    )
+                self.assertIs(caught.exception, original_error)
+
+    def test_cp_metadata_rank_failure_propagates_and_retry_uses_fresh_status(self):
+        if not dist.is_available() or not dist.is_gloo_available():
+            self.fail("Gloo is required for the distributed warmup regression test")
+        with tempfile.TemporaryDirectory(prefix="dsv4_cp_warmup_") as directory:
+            context = mp.get_context("spawn")
+            processes = [
+                context.Process(target=_cp_warmup_rank_worker, args=(rank, directory))
+                for rank in range(2)
+            ]
+            try:
+                for process in processes:
+                    process.start()
+                deadline = time.monotonic() + 60
+                for process in processes:
+                    process.join(max(deadline - time.monotonic(), 0))
+                self.assertFalse(
+                    any(process.is_alive() for process in processes),
+                    "distributed warmup workers did not exit within 60s",
+                )
+                self.assertEqual([process.exitcode for process in processes], [0, 0])
+                results = []
+                for rank in range(2):
+                    with open(
+                        os.path.join(directory, f"rank_{rank}.json"), encoding="utf-8"
+                    ) as result_file:
+                        results.append(json.load(result_file))
+                for rank, result in enumerate(results):
+                    with self.subTest(rank=rank):
+                        first, retried, cached = result["outcomes"]
+                        self.assertIn(
+                            "rank-local JIT compilation failed", first["error"]
+                        )
+                        self.assertEqual(first["warm_keys"], 0)
+                        self.assertEqual(retried, {"warm_keys": 1})
+                        self.assertEqual(cached, {"warm_keys": 1})
+                        self.assertEqual(result["local_calls"], 2)
+                self.assertEqual(results[1]["outcomes"][0]["type"], "ValueError")
+                self.assertTrue(results[1]["outcomes"][0]["original_error"])
+                self.assertEqual(results[0]["outcomes"][0]["type"], "RuntimeError")
+                self.assertIn("rank 1", results[0]["outcomes"][0]["error"])
+                self.assertIn("within 1s", results[0]["timeout_error"])
+                self.assertLess(results[0]["timeout_elapsed"], 20)
+            finally:
+                for process in processes:
+                    if process.is_alive():
+                        process.terminate()
+                    if process.pid is not None:
+                        process.join(timeout=5)
+
     def test_public_jit_warmup_entrypoints_skip_when_model_warmup_disabled(self):
         with mock.patch.object(
             warmup_module, "model_warm_up_enabled", return_value=False
@@ -104,6 +273,20 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 cp_size=1,
                 device=device,
             )
+            with mock.patch.object(
+                warmup_module,
+                "_is_cuda_device",
+                side_effect=AssertionError("disabled warmup must not inspect CUDA"),
+            ):
+                warmup_module.warmup_prefill_cp_metadata_jit(
+                    is_decode_role=False,
+                    cp_enabled=True,
+                    cp_size=2,
+                    max_batch_size=3,
+                    fp8_kv_cache=True,
+                    kv_cache_sharded=True,
+                    device=torch.device("cuda"),
+                )
 
     def test_tilelang_prewarm_skips_when_model_warmup_disabled(self):
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
@@ -887,8 +1070,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(_collect_dsv4_mhc_head_fused_shapes(root), {})
 
     def test_slot_dequant_warmup_uses_padded_cp_full_stride(self):
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _swa_dequant_triton,
+            _swa_ops_triton,
+        )
 
         calls = []
         metadata_batches = []

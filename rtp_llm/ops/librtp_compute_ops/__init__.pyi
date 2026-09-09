@@ -264,6 +264,7 @@ class PyCacheStoreInputs:
 
 class PyContextParallelParams:
     prefill_actual_input_lengths_cpu: torch.Tensor
+    prefill_prefix_lengths_cpu: torch.Tensor
     prefill_cp_chunk_lengths: torch.Tensor
     prefill_cp_padding_lengths: torch.Tensor
     prefill_qkv_padding_mask: torch.Tensor
