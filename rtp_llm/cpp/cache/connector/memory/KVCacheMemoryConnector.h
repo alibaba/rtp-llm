@@ -140,6 +140,7 @@ private:
                                                 std::vector<torch::Tensor>&      dst,
                                                 std::vector<torch::Tensor>&      src);
     bool                     tryCopyCacheWith3DBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                                                 CopyDirection                       direction,
                                                                  const std::vector<LayerRegionSlot>& slots,
                                                                  size_t* tile_count = nullptr,
                                                                  size_t* run_count = nullptr,

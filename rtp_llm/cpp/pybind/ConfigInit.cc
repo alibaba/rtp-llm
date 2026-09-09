@@ -452,6 +452,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_h2d_copy_mode", &KVCacheConfig::memory_cache_h2d_copy_mode)
         .def_readwrite("memory_cache_h2d_copy_strict", &KVCacheConfig::memory_cache_h2d_copy_strict)
         .def_readwrite("enable_memory_cache_h2d_3d_batch_auto", &KVCacheConfig::enable_memory_cache_h2d_3d_batch_auto)
+        .def_readwrite("memory_cache_d2h_copy_mode", &KVCacheConfig::memory_cache_d2h_copy_mode)
+        .def_readwrite("memory_cache_d2h_copy_strict", &KVCacheConfig::memory_cache_d2h_copy_strict)
+        .def_readwrite("enable_memory_cache_d2h_3d_batch_auto", &KVCacheConfig::enable_memory_cache_d2h_3d_batch_auto)
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("enable_gpu_prefix_tree", &KVCacheConfig::enable_gpu_prefix_tree)
@@ -561,7 +564,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory_cache_remote_eviction_max_blocks,
                                       self.memory_cache_h2d_copy_mode,
                                       self.memory_cache_h2d_copy_strict,
-                                      self.enable_memory_cache_h2d_3d_batch_auto);
+                                      self.enable_memory_cache_h2d_3d_batch_auto,
+                                      self.memory_cache_d2h_copy_mode,
+                                      self.memory_cache_d2h_copy_strict,
+                                      self.enable_memory_cache_d2h_3d_batch_auto);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -657,6 +663,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                 c.memory_cache_h2d_copy_mode            = t[extra_start + 11].cast<std::string>();
                                 c.memory_cache_h2d_copy_strict          = t[extra_start + 12].cast<bool>();
                                 c.enable_memory_cache_h2d_3d_batch_auto = t[extra_start + 13].cast<bool>();
+                            }
+                            if (extra_count >= 17) {
+                                c.memory_cache_d2h_copy_mode            = t[extra_start + 14].cast<std::string>();
+                                c.memory_cache_d2h_copy_strict          = t[extra_start + 15].cast<bool>();
+                                c.enable_memory_cache_d2h_3d_batch_auto = t[extra_start + 16].cast<bool>();
                             }
                         }
                     }

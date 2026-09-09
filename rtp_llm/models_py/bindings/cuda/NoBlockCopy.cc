@@ -340,7 +340,8 @@ bool exec3DBatchedMemoryCopy(const BatchedMemoryCopy3DParams& params) {
         op.dst.op.ptr.rowLength   = run.dst_layer_pitch_bytes;
         op.dst.op.ptr.layerHeight = 1;
         op.extent                 = make_cudaExtent(run.width_bytes, 1, run.depth);
-        op.srcAccessOrder         = cudaMemcpySrcAccessOrderStream;
+        op.srcAccessOrder = params.source_is_cuda ? cudaMemcpySrcAccessOrderDuringApiCall :
+                                                    cudaMemcpySrcAccessOrderStream;
         op.flags                  = 0;
         ops.push_back(op);
     }

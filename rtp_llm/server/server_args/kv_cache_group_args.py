@@ -167,6 +167,30 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Allow auto mode to select CUDA 13 cudaMemcpy3DBatchAsync for eligible layouts.",
     )
     kv_cache_group.add_argument(
+        "--memory_cache_d2h_copy_mode",
+        env_name="MEMORY_CACHE_D2H_COPY_MODE",
+        bind_to=(kv_cache_config, "memory_cache_d2h_copy_mode"),
+        type=str,
+        default="auto",
+        help="Memory-cache D2H copy mode: auto, generic, memcpy_batch, memcpy3d_batch, staged_sm, split_kv_sm.",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_d2h_copy_strict",
+        env_name="MEMORY_CACHE_D2H_COPY_STRICT",
+        bind_to=(kv_cache_config, "memory_cache_d2h_copy_strict"),
+        type=str2bool,
+        default=False,
+        help="Fail D2H copy instead of falling back when the requested copy mode is unavailable.",
+    )
+    kv_cache_group.add_argument(
+        "--enable_memory_cache_d2h_3d_batch_auto",
+        env_name="ENABLE_MEMORY_CACHE_D2H_3D_BATCH_AUTO",
+        bind_to=(kv_cache_config, "enable_memory_cache_d2h_3d_batch_auto"),
+        type=str2bool,
+        default=False,
+        help="Allow auto mode to select CUDA 13 cudaMemcpy3DBatchAsync for eligible D2H layouts.",
+    )
+    kv_cache_group.add_argument(
         "--enable_prefix_tree_memory_cache",
         env_name="ENABLE_PREFIX_TREE_MEMORY_CACHE",
         bind_to=(kv_cache_config, "enable_prefix_tree_memory_cache"),

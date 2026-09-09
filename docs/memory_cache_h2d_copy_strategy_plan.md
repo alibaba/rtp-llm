@@ -1,20 +1,35 @@
-# RTP-LLM Memory Cache H2D Copy 多方案选路与 CUDA 3D Batch 实施计划
+# RTP-LLM Memory Cache H2D/D2H Copy 多方案选路与 CUDA 3D Batch 实施计划
 
 ## 1. 目标
 
-为 `KVCacheMemoryConnector` 的 Memory→Device 路径增加显式、可观测、可回退的 copy 方案选路，并为单 group MiniMax-M3 + MTP 增加 `cudaMemcpy3DBatchAsync` 实验路径。
+为 `KVCacheMemoryConnector` 的 Memory↔Device 双向路径增加显式、可观测、可回退的 copy 方案选路，并为单 group MiniMax-M3 + MTP 增加 `cudaMemcpy3DBatchAsync` 实验路径。
 
 本计划独立于 `memory_cache_remote_eviction_plan.md`，不修改 Memory→Remote 淘汰语义。
 
 目标：
 
-- 通过环境变量指定 H2D copy 方案。
+- 通过环境变量分别指定 H2D、D2H copy 方案。
 - 保留当前 generic、split-KV SM、staged SM、`cudaMemcpyBatchAsync` 路径。
 - 新增 `cudaMemcpy3DBatchAsync` 路径。
 - MiniMax-M3 + MTP 按真实 Device layout 分成 main KV、main idx_K、MTP KV、MTP idx_K 四类规则段。
 - eligibility 不满足或运行失败时安全回退。
 - 日志和指标明确记录 requested/effective/fallback mode。
-- 不改变 D2H 行为，不改变 cache match、in-flight、成功后释放 Memory backing 的语义。
+- D2H 复用同一套 regular-run 构造及 CUDA 3D Batch executor，仅交换 source/destination 与 source access order。
+- 不改变 cache match、in-flight、Memory→Remote 淘汰和成功后释放 Memory backing 的语义。
+
+### 1.1 D2H 对称扩展
+
+D2H 使用独立开关，避免 H2D 灰度策略影响 GPU→Memory 写回：
+
+```text
+MEMORY_CACHE_D2H_COPY_MODE=auto
+MEMORY_CACHE_D2H_COPY_STRICT=0
+ENABLE_MEMORY_CACHE_D2H_3D_BATCH_AUTO=0
+```
+
+`MEMORY_CACHE_D2H_COPY_MODE` 支持 `auto`、`generic`、`memcpy_batch`、`memcpy3d_batch`、`staged_sm`。第一版 `auto` 默认保持原选路；只有打开 D2H auto 灰度开关时才优先尝试 3D Batch。显式 `memcpy3d_batch` 配合 strict 可用于单测和 smoke，确保没有静默 fallback。
+
+CUDA 3D Batch 的 D2H source 位于 GPU，因此 descriptor 使用 `cudaMemcpySrcAccessOrderDuringApiCall`；H2D source 位于 host，继续使用 `cudaMemcpySrcAccessOrderStream`。
 
 ## 2. 当前 H2D 链路
 
@@ -147,9 +162,8 @@ MemoryCopyExecutionResult executeMemoryH2DCopy(
     const std::vector<LayerRegionSlot>& slots);
 ```
 
-`copyCache()` 只在 `direction == H2D` 且全部 item 为 Memory backing 时进入新选路。以下情况保持原有专用路径：
+H2D 与 D2H 各自使用独立配置进入选路；两者共享 regular-run builder 和 executor。以下情况保持原有专用路径：
 
-- D2H。
 - Disk backing 或 Memory/Disk 混合。
 - prefix-tree 的 `COMPRESSED_KV`、`STATE_SWA_KV`，除非后续单独验证。
 - 包含 host-only target slot。
@@ -575,7 +589,7 @@ MEMORY_CACHE_H2D_COPY_STRICT=1
 
 - 实现 regular run builder。
 - 实现 CUDA 13 `exec3DBatchedMemoryCopy()`。
-- 只开放单 group、Memory backing、H2D。
+- 开放单 group、Memory backing 的 H2D/D2H；两个方向分别灰度。
 - 完成 MiniMax-M3 + MTP 精度测试。
 
 ### 阶段三：性能验证
@@ -586,7 +600,7 @@ MEMORY_CACHE_H2D_COPY_STRICT=1
 
 ### 阶段四：auto 策略
 
-- 原型期保持 `ENABLE_MEMORY_CACHE_H2D_3D_BATCH_AUTO=0`，`auto` 默认沿用当前选路。
+- 原型期保持 H2D/D2H 两个 3D Batch auto 开关均为 `0`，`auto` 默认沿用当前选路。
 - 性能和稳定性达标后，再灰度设置为 `1`，将 eligible 单 group 纳入 auto。
 - 保留强制环境变量用于回滚。
 

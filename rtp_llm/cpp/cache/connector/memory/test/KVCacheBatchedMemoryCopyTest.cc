@@ -590,7 +590,9 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
     EXPECT_TRUE(pro_connector->isDsv4TypedCacheLayout(pro_connector->layerRegionSlots()));
 }
 
-void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_regions, bool use_3d_h2d = false) {
+void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_regions,
+                                    bool use_3d_h2d = false,
+                                    bool use_3d_d2h = false) {
     const auto set_device_rc = cudaSetDevice(0);
     ASSERT_EQ(set_device_rc, cudaSuccess) << cudaGetErrorString(set_device_rc);
 
@@ -661,7 +663,24 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_reg
         }
     }
 
-    ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(req, KVCacheMemoryConnector::CopyDirection::D2H, slots));
+    if (use_3d_d2h) {
+        size_t tile_count = 0;
+        size_t run_count = 0;
+        size_t payload_bytes = 0;
+        ASSERT_TRUE(connector->tryCopyCacheWith3DBatchedMemoryCopy(req,
+                                                                   KVCacheMemoryConnector::CopyDirection::D2H,
+                                                                   slots,
+                                                                   &tile_count,
+                                                                   &run_count,
+                                                                   &payload_bytes));
+        EXPECT_GT(tile_count, 0u);
+        EXPECT_GT(run_count, 0u);
+        EXPECT_LT(run_count, tile_count);
+        EXPECT_GT(payload_bytes, 0u);
+    } else {
+        ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(
+            req, KVCacheMemoryConnector::CopyDirection::D2H, slots));
+    }
 
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
         const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
@@ -707,7 +726,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_reg
         size_t run_count = 0;
         size_t payload_bytes = 0;
         ASSERT_TRUE(connector->tryCopyCacheWith3DBatchedMemoryCopy(
-            req, slots, &tile_count, &run_count, &payload_bytes));
+            req, KVCacheMemoryConnector::CopyDirection::H2D, slots, &tile_count, &run_count, &payload_bytes));
         EXPECT_GT(tile_count, 0u);
         EXPECT_GT(run_count, 0u);
         EXPECT_LT(run_count, tile_count);
@@ -733,6 +752,10 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
 
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesCuda3DBatchForH2D) {
     runDsv4TypedStagedCopyRoundTrip({}, true);
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesCuda3DBatchForD2H) {
+    runDsv4TypedStagedCopyRoundTrip({}, false, true);
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedStagedCopySupportsHostBackedStateRegions) {

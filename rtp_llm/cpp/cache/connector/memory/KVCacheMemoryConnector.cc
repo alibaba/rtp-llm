@@ -177,9 +177,13 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
 bool KVCacheMemoryConnector::init() {
     const auto memory_cache_sync_timeout_ms = kv_cache_config_.memory_cache_sync_timeout_ms;
     const auto h2d_copy_mode = normalizedH2DCopyMode(kv_cache_config_.memory_cache_h2d_copy_mode);
+    const auto d2h_copy_mode = normalizedH2DCopyMode(kv_cache_config_.memory_cache_d2h_copy_mode);
     RTP_LLM_CHECK_WITH_INFO(validH2DCopyMode(h2d_copy_mode),
                             "init failed, unknown MEMORY_CACHE_H2D_COPY_MODE=%s",
                             kv_cache_config_.memory_cache_h2d_copy_mode.c_str());
+    RTP_LLM_CHECK_WITH_INFO(validH2DCopyMode(d2h_copy_mode),
+                            "init failed, unknown MEMORY_CACHE_D2H_COPY_MODE=%s",
+                            kv_cache_config_.memory_cache_d2h_copy_mode.c_str());
     RTP_LLM_CHECK_WITH_INFO(memory_cache_sync_timeout_ms > 0,
                             "init failed, sync timeout is invalid, sync timeout: %ld ms",
                             memory_cache_sync_timeout_ms);
@@ -1712,12 +1716,80 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     }
 
     if (copy_direction == CopyDirection::D2H) {
-        bool success = tryCopyCacheWithStagedMemoryCopy(request, copy_direction, slots)
-                       || (has_typed_slots && tryCopyCacheWithBatchedMemoryCopy(request, copy_direction, slots))
-                       || copyMemoryItemsGeneric(
-                           request, copy_direction, slots, kv_cache_config_.enable_memory_cache_sm_copy);
+        const std::string requested = normalizedH2DCopyMode(kv_cache_config_.memory_cache_d2h_copy_mode);
+        const bool strict = kv_cache_config_.memory_cache_d2h_copy_strict;
+        std::string effective;
+        std::string fallback_reason;
+        size_t tile_count = 0;
+        size_t op_count = 0;
+        size_t payload_bytes = 0;
+        auto try_mode = [&](const std::string& mode) {
+            bool ok = false;
+            if (mode == "staged_sm") {
+                ok = tryCopyCacheWithStagedMemoryCopy(request, copy_direction, slots);
+            } else if (mode == "memcpy3d_batch") {
+                ok = tryCopyCacheWith3DBatchedMemoryCopy(
+                    request, copy_direction, slots, &tile_count, &op_count, &payload_bytes);
+            } else if (mode == "memcpy_batch") {
+                ok = tryCopyCacheWithBatchedMemoryCopy(request, copy_direction, slots);
+            } else if (mode == "split_kv_sm") {
+                ok = !has_typed_slots && copyMemoryItemsGeneric(request, copy_direction, slots, true);
+            } else if (mode == "generic") {
+                ok = copyMemoryItemsGeneric(request, copy_direction, slots, false);
+            }
+            if (ok) {
+                effective = mode;
+            } else if (fallback_reason.empty()) {
+                fallback_reason = mode + "_unavailable_or_failed";
+            }
+            return ok;
+        };
+
+        bool success = false;
+        if (requested == "auto") {
+            if (kv_cache_config_.enable_memory_cache_d2h_3d_batch_auto && cache_config_.groupNums() == 1) {
+                success = try_mode("memcpy3d_batch");
+            }
+            if (!success) {
+                success = try_mode("staged_sm");
+            }
+            if (!success && has_typed_slots) {
+                success = try_mode("memcpy_batch");
+            }
+            if (!success && kv_cache_config_.enable_memory_cache_sm_copy && !has_typed_slots) {
+                success = try_mode("split_kv_sm");
+            }
+            if (!success) {
+                success = try_mode("generic");
+            }
+        } else {
+            success = try_mode(requested);
+            if (!success && !strict) {
+                if (requested == "staged_sm") {
+                    success = try_mode("memcpy3d_batch");
+                }
+                if (!success && (requested == "staged_sm" || requested == "memcpy3d_batch")) {
+                    success = try_mode("memcpy_batch");
+                }
+                if (!success && requested != "generic") {
+                    success = try_mode("generic");
+                }
+            }
+        }
+        const auto elapsed_us = timer.done_us();
+        RTP_LLM_LOG_INFO("memory cache D2H copy requested=%s effective=%s strict=%d fallback_reason=%s "
+                         "blocks=%d tiles=%zu ops=%zu bytes=%zu elapsed_us=%ld",
+                         requested.c_str(),
+                         effective.empty() ? "none" : effective.c_str(),
+                         strict,
+                         fallback_reason.empty() ? "none" : fallback_reason.c_str(),
+                         request.copy_items_size(),
+                         tile_count,
+                         op_count,
+                         payload_bytes,
+                         elapsed_us);
         response.set_success(success);
-        reportCopyMetrics(success, timer.done_us(), copy_direction);
+        reportCopyMetrics(success, elapsed_us, copy_direction);
         return success;
     }
 
@@ -1733,7 +1805,8 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         if (mode == "staged_sm") {
             ok = tryCopyCacheWithStagedMemoryCopy(request, copy_direction, slots);
         } else if (mode == "memcpy3d_batch") {
-            ok = tryCopyCacheWith3DBatchedMemoryCopy(request, slots, &tile_count, &op_count, &payload_bytes);
+            ok = tryCopyCacheWith3DBatchedMemoryCopy(
+                request, copy_direction, slots, &tile_count, &op_count, &payload_bytes);
         } else if (mode == "memcpy_batch") {
             ok = tryCopyCacheWithBatchedMemoryCopy(request, copy_direction, slots);
         } else if (mode == "split_kv_sm") {
@@ -2281,6 +2354,7 @@ StagedMemoryCopyScratch& KVCacheMemoryConnector::stagedCopyScratchForDevice(int 
 }
 
 bool KVCacheMemoryConnector::tryCopyCacheWith3DBatchedMemoryCopy(const MemoryOperationRequestPB&     request,
+                                                                 CopyDirection                       direction,
                                                                  const std::vector<LayerRegionSlot>& slots,
                                                                  size_t*                             tile_count,
                                                                  size_t*                             run_count,
@@ -2291,6 +2365,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWith3DBatchedMemoryCopy(const MemoryOpe
     }
 
     BatchedMemoryCopy3DParams params;
+    params.source_is_cuda = direction == CopyDirection::D2H;
     std::vector<BatchedMemoryCopy3DTile> tiles;
     size_t bytes = 0;
     for (int item_idx = 0; item_idx < request.copy_items_size(); ++item_idx) {
@@ -2335,9 +2410,11 @@ bool KVCacheMemoryConnector::tryCopyCacheWith3DBatchedMemoryCopy(const MemoryOpe
                 } else if (params.device_index != gpu.device_index) {
                     return false;
                 }
-                const auto* src = static_cast<const char*>(mem_buffer.addr) + byte_off + within_layer_off;
+                auto* mem_addr = static_cast<char*>(mem_buffer.addr) + byte_off + within_layer_off;
+                const void* src = direction == CopyDirection::H2D ? mem_addr : gpu.addr;
+                void* dst = direction == CopyDirection::H2D ? gpu.addr : mem_addr;
                 tiles.push_back(BatchedMemoryCopy3DTile{
-                    src, gpu.addr, gpu.size_bytes, slot.layer_id, static_cast<int>(component), item_idx});
+                    src, dst, gpu.size_bytes, slot.layer_id, static_cast<int>(component), item_idx});
                 bytes += gpu.size_bytes;
                 within_layer_off += gpu.size_bytes;
             }
@@ -2353,7 +2430,8 @@ bool KVCacheMemoryConnector::tryCopyCacheWith3DBatchedMemoryCopy(const MemoryOpe
     if (tile_count) *tile_count = tiles.size();
     if (run_count) *run_count = params.runs.size();
     if (payload_bytes) *payload_bytes = bytes;
-    RTP_LLM_LOG_DEBUG("cuda memcpy 3d batch H2D, blocks=%d tiles=%zu runs=%zu bytes=%zu device=%d",
+    RTP_LLM_LOG_DEBUG("cuda memcpy 3d batch, direction=%s, blocks=%d tiles=%zu runs=%zu bytes=%zu device=%d",
+                      direction == CopyDirection::H2D ? "H2D" : "D2H",
                       request.copy_items_size(), tiles.size(), params.runs.size(), bytes, params.device_index);
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_3d_batch");
     return exec3DBatchedMemoryCopy(params);

@@ -53,9 +53,10 @@ struct BatchedMemoryCopy3DRun {
 struct BatchedMemoryCopy3DParams {
     std::vector<BatchedMemoryCopy3DRun> runs;
     int                                 device_index{-1};
+    bool                                source_is_cuda{false};
 };
 
-// Converts logical H2D tiles into maximal regular per-block/per-component runs.
+// Converts logical host/device tiles into maximal regular per-block/per-component runs.
 // Invalid or overlapping layouts are rejected; gaps and pitch changes start a new run.
 inline bool buildBatchedMemoryCopy3DRuns(const std::vector<BatchedMemoryCopy3DTile>& tiles,
                                          std::vector<BatchedMemoryCopy3DRun>&        runs,
