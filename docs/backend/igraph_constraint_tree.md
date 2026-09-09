@@ -1,5 +1,56 @@
 # iGraph bucket input for the CSR constraint-tree Master
 
+## Empty SID policy (2026-09-09)
+
+Local acceptance: 72 tests passed, zero failures/errors/skips, in the non-root
+CUDA 12.9 development container. Includes mixed empty/valid input across 4000
+buckets -> Java CSR build -> native C++ HTTP Worker activation, failed/all-empty
+round retention and next-version backup. Logs:
+`build_logs/igraph_empty_sid_acceptance_20260909.log`,
+`build_logs/igraph_empty_sid_package_20260909.log`,
+`build_logs/igraph_empty_sid_smoke_20260909.log`.
+The source is stubbed in these E2Es; they are NOT live iGraph or GPU model-load
+acceptance. Runtime previously received iGraph rows but rejected empty SID;
+complete live traversal with this policy remains to be verified after deployment.
+
+Business confirmed that an explicit empty SID (`""`) means an item has no SID
+mapping and may be excluded. Set this **Master** startup property and redeploy:
+
+```text
+CONSTRAINT_TREE_IGRAPH_EMPTY_SID_POLICY=SKIP
+```
+
+The default `REJECT` preserves strict behavior. Unknown policy names fail startup.
+`SKIP` filters on the client **after** checking raw bucket row limits, pkey,
+item ID, bucket assignment and duplicate items. It does not change the Gremlin
+query or permit arbitrary query templates. Null/missing fields, whitespace-only
+and malformed non-empty SIDs still fail the round. No default SID is invented.
+An all-empty/all-skipped round fails and retains the old tree; deny-all empty
+tree publication remains unsupported, so BE filtering and freshness monitoring
+are still required.
+
+Start with the existing `DRY_RUN=true`. Source status must reach
+`VALIDATED_NO_PUBLISH` with `buckets=4000`. Successful source status now includes:
+
+- `items`: all validated item rows, before filtering/deduplication;
+- `skippedEmptySids`: item rows with explicit empty SID excluded by SKIP;
+- `eligibleItems`: `items - skippedEmptySids` (not unique SID count);
+- `uniqueSids`: distinct non-empty SIDs used as tree input;
+- `maxBucketRows`: raw maximum bucket occupancy, including empty-SID rows.
+
+These counters describe a completed read, not a consistent source snapshot.
+On failure they reset; zero does not mean the source table is empty. All-empty
+failures include item/skip counts in `message`. Check source totals separately.
+After validating source completeness and accepting non-atomic reads, set
+`DRY_RUN=false`, `SOURCE_READY=true`, `ALLOW_NON_ATOMIC_READ=true`. `SUBMITTED`
+means input accepted, not Worker activation; check tree status and Worker versions.
+
+Prefer upstream filtering before launch; keep this fallback for unmapped items.
+Upstream full rebuild must remove existing empty-SID rows. Incremental handling
+must **delete an existing `(pkey,item_id)` when its SID changes from non-empty to
+empty**; simply dropping that update leaves the previous SID in iGraph. Newly
+mapped items must be inserted and offline/ineligible items must still be deleted.
+
 Update (2026-09-09): `ITEM_ID_MOD` now accepts an omitted `KEY_PREFIX`, defaulting
 to plain numeric keys. Local regression passed 67 tests with no failures/errors/skips;
 see `build_logs/igraph_omitted_prefix_acceptance_20260908.log` (executed September 9).

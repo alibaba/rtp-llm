@@ -5,10 +5,8 @@ import org.flexlb.constraint.source.SidBucketClient;
 import java.time.Duration;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -22,10 +20,18 @@ public final class BucketSidReader {
     private final Settings settings;
 
     public enum BucketAlgorithm { CRC32, ITEM_ID_MOD }
+    public enum EmptySidPolicy { REJECT, SKIP }
 
     public record Settings(String keyPrefix, int bucketCount, int concurrency, int maxRowsPerBucket,
                            Duration queryTimeout, Duration roundTimeout, int retries,
-                           BucketAlgorithm bucketAlgorithm, int sourceRowLimit) {
+                           BucketAlgorithm bucketAlgorithm, int sourceRowLimit, EmptySidPolicy emptySidPolicy) {
+        public Settings(String keyPrefix, int bucketCount, int concurrency, int maxRowsPerBucket,
+                        Duration queryTimeout, Duration roundTimeout, int retries,
+                        BucketAlgorithm bucketAlgorithm, int sourceRowLimit) {
+            this(keyPrefix, bucketCount, concurrency, maxRowsPerBucket, queryTimeout, roundTimeout, retries,
+                    bucketAlgorithm, sourceRowLimit, EmptySidPolicy.REJECT);
+        }
+
         public Settings(String keyPrefix, int bucketCount, int concurrency, int maxRowsPerBucket,
                         Duration queryTimeout, Duration roundTimeout, int retries) {
             this(keyPrefix, bucketCount, concurrency, maxRowsPerBucket, queryTimeout, roundTimeout, retries,
@@ -34,7 +40,7 @@ public final class BucketSidReader {
 
         public Settings {
             if (keyPrefix == null || !keyPrefix.matches("[A-Za-z0-9_.-]*")
-                    || bucketAlgorithm == null || sourceRowLimit < 0
+                    || bucketAlgorithm == null || emptySidPolicy == null || sourceRowLimit < 0
                     || bucketCount < 1 || bucketCount > 1_000_000 || concurrency < 1 || concurrency > 256
                     || maxRowsPerBucket < 1 || maxRowsPerBucket >= 50_000 || retries < 0 || retries > 3
                     || queryTimeout == null || queryTimeout.toMillis() < 1
@@ -47,7 +53,9 @@ public final class BucketSidReader {
     }
 
     public record Result(List<String> sids, long itemCount, int bucketCount, long elapsedMillis,
-                         int maxBucketRows) { }
+                         int maxBucketRows, long skippedEmptySids) {
+        public long eligibleItems() { return itemCount - skippedEmptySids; }
+    }
 
     public BucketSidReader(SidBucketClient client, Settings settings) {
         this.client = client;
@@ -59,6 +67,7 @@ public final class BucketSidReader {
         long deadline = started + settings.roundTimeout().toNanos();
         var sids = new HashSet<String>();
         long items = 0;
+        long skippedEmptySids = 0;
         int maxBucketRows = 0;
         // Only one window is live at a time. Parsing/merging happens on the caller's background thread.
         for (int first = 0; first < settings.bucketCount(); first += settings.concurrency()) {
@@ -79,19 +88,27 @@ public final class BucketSidReader {
                         throw new IllegalStateException("bucket " + key + " reached source row limit; possible truncation");
                     }
                     maxBucketRows = Math.max(maxBucketRows, rows.size());
-                    Map<String, String> uniqueItems = new HashMap<>();
+                    var uniqueItems = new HashSet<String>();
                     for (var row : rows) {
                         if (row == null || !key.equals(row.pkey()) || row.itemId() == null || row.itemId().isBlank()
-                                || row.sid() == null || !SID.matcher(row.sid()).matches()) {
+                                || row.sid() == null) {
                             throw new IllegalStateException("invalid item/SID in bucket " + key);
                         }
                         if (!key.equals(settings.key(bucketForItem(row.itemId(), settings.bucketCount(),
                                 settings.bucketAlgorithm())))) {
                             throw new IllegalStateException("item is in the wrong hash bucket " + key);
                         }
-                        String previous = uniqueItems.putIfAbsent(row.itemId(), row.sid());
-                        if (previous != null) {
+                        if (!uniqueItems.add(row.itemId())) {
                             throw new IllegalStateException("duplicate item in bucket " + key);
+                        }
+                        // Only the explicitly confirmed empty mapping is skippable. Missing fields,
+                        // malformed SIDs and wrong/duplicate items remain errors in SKIP mode too.
+                        if (row.sid().isEmpty() && settings.emptySidPolicy() == EmptySidPolicy.SKIP) {
+                            skippedEmptySids++;
+                            continue;
+                        }
+                        if (!SID.matcher(row.sid()).matches()) {
+                            throw new IllegalStateException("invalid SID in bucket " + key);
                         }
                         sids.add(row.sid());
                     }
@@ -103,10 +120,11 @@ public final class BucketSidReader {
         }
         check(mayContinue, deadline);
         if (sids.isEmpty()) {
-            throw new IllegalStateException("empty source; retaining existing tree (empty-tree publication unsupported)");
+            throw new IllegalStateException("empty source; retaining existing tree (empty-tree publication unsupported); "
+                    + "items=" + items + "; skippedEmptySids=" + skippedEmptySids);
         }
         return new Result(List.copyOf(sids), items, settings.bucketCount(),
-                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), maxBucketRows);
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), maxBucketRows, skippedEmptySids);
     }
 
     private CompletableFuture<List<SidBucketClient.Row>> start(String key) {

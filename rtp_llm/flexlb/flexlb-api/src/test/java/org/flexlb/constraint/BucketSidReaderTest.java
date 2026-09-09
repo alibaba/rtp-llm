@@ -16,6 +16,65 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class BucketSidReaderTest {
+    static BucketSidReader.Settings skipEmptySettings(int buckets, int sourceLimit) {
+        return new BucketSidReader.Settings("", buckets, 4, 2000, Duration.ofSeconds(5),
+                Duration.ofMinutes(5), 0, BucketSidReader.BucketAlgorithm.ITEM_ID_MOD, sourceLimit,
+                BucketSidReader.EmptySidPolicy.SKIP);
+    }
+
+    @Test
+    void skipsOnlyExplicitEmptyMappingsAndCountsBeforeSidDeduplication() throws Exception {
+        var rows = List.of(new SidBucketClient.Row("0", "0", ""),
+                new SidBucketClient.Row("0", "1", "C1C2"), new SidBucketClient.Row("0", "2", "C1C2"));
+        var result = new BucketSidReader((k, l, t) -> CompletableFuture.completedFuture(rows),
+                skipEmptySettings(1, 2000)).read(() -> true);
+        assertEquals(3, result.itemCount());
+        assertEquals(1, result.skippedEmptySids());
+        assertEquals(2, result.eligibleItems());
+        assertEquals(3, result.maxBucketRows());
+        assertEquals(List.of("C1C2"), result.sids());
+        assertThrows(IllegalStateException.class, () -> new BucketSidReader(
+                (k, l, t) -> CompletableFuture.completedFuture(rows), numericSettings(1, 2000)).read(() -> true));
+    }
+
+    @Test
+    void skipModeStillRejectsMalformedRowsAndDuplicateItems() {
+        var valid = new SidBucketClient.Row("0", "0", "C1C2");
+        for (var bad : List.of(new SidBucketClient.Row("0", "2", null),
+                new SidBucketClient.Row("0", "2", " "), new SidBucketClient.Row("0", "2", "C1oops"),
+                new SidBucketClient.Row("1", "2", ""), new SidBucketClient.Row("0", "1", ""),
+                new SidBucketClient.Row("0", "", ""), new SidBucketClient.Row("0", "0", ""))) {
+            assertThrows(IllegalStateException.class, () -> new BucketSidReader((k, l, t) ->
+                    CompletableFuture.completedFuture(List.of(valid, bad)), skipEmptySettings(2, 2000)).read(() -> true));
+        }
+        var empty = new SidBucketClient.Row("0", "0", "");
+        assertTrue(assertThrows(IllegalStateException.class, () -> new BucketSidReader((k, l, t) ->
+                CompletableFuture.completedFuture(List.of(empty, valid)), skipEmptySettings(1, 2000))
+                .read(() -> true)).getMessage().contains("duplicate item"));
+    }
+
+    @Test
+    void sourceCapIsCheckedBeforeSkippingEmptyMappings() {
+        var rows = new ArrayList<SidBucketClient.Row>();
+        for (int i = 0; i < 2000; i++) { rows.add(new SidBucketClient.Row("0", "" + i, "")); }
+        rows.set(0, new SidBucketClient.Row("0", "0", "C1C2"));
+        assertTrue(assertThrows(IllegalStateException.class, () -> new BucketSidReader((k, l, t) ->
+                CompletableFuture.completedFuture(rows), skipEmptySettings(1, 2000)).read(() -> true))
+                .getMessage().contains("possible truncation"));
+    }
+
+    @Test
+    void allEmptyMappingsRejectPublicationWithDiagnosticCounts() {
+        var calls = new AtomicInteger();
+        var error = assertThrows(IllegalStateException.class, () -> new BucketSidReader((k, l, t) -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(List.of(new SidBucketClient.Row(k, k, "")));
+        }, skipEmptySettings(4000, 2000)).read(() -> true));
+        assertEquals(4000, calls.get());
+        assertTrue(error.getMessage().contains("skippedEmptySids=4000"));
+        assertTrue(error.getMessage().contains("retaining existing tree"));
+    }
+
     static BucketSidReader.Settings numericSettings(int buckets, int sourceLimit) {
         return new BucketSidReader.Settings("", buckets, 4, 2000, Duration.ofSeconds(5),
                 Duration.ofMinutes(5), 0, BucketSidReader.BucketAlgorithm.ITEM_ID_MOD, sourceLimit);

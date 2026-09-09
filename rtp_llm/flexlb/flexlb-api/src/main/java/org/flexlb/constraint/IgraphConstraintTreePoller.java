@@ -42,7 +42,14 @@ public class IgraphConstraintTreePoller {
     private volatile Status status = new Status("IDLE", 0, 0, 0, 0, 0, 0, "not started");
 
     public record Status(String state, long startedAtMillis, long finishedAtMillis, long submittedVersion,
-                         int buckets, long items, long uniqueSids, String message) { }
+                         int buckets, long items, long uniqueSids, String message,
+                         long skippedEmptySids, long eligibleItems, int maxBucketRows) {
+        public Status(String state, long startedAtMillis, long finishedAtMillis, long submittedVersion,
+                      int buckets, long items, long uniqueSids, String message) {
+            this(state, startedAtMillis, finishedAtMillis, submittedVersion, buckets, items, uniqueSids,
+                    message, 0, items, 0);
+        }
+    }
 
     @Autowired
     public IgraphConstraintTreePoller(SidBucketClient client, ConstraintTreeBuildService builds,
@@ -55,7 +62,9 @@ public class IgraphConstraintTreePoller {
                         number(env, "retries", 1),
                         BucketSidReader.BucketAlgorithm.valueOf(env.getProperty(
                                 "constraint.tree.igraph.bucket.algorithm", "CRC32")),
-                        number(env, "source.row.limit", 0))),
+                        number(env, "source.row.limit", 0),
+                        BucketSidReader.EmptySidPolicy.valueOf(env.getProperty(
+                                "constraint.tree.igraph.empty.sid.policy", "REJECT")))),
                 builds, consistency::isMaster, required(env, "model"),
                 Boolean.parseBoolean(env.getProperty("constraint.tree.igraph.source.ready", "false")),
                 Boolean.parseBoolean(env.getProperty("constraint.tree.igraph.allow.non.atomic.read", "false")),
@@ -143,10 +152,11 @@ public class IgraphConstraintTreePoller {
                         result.bucketCount(), result.itemCount(), result.sids().size(),
                         "dry run; no tree submitted; maxBucketRows=" + result.maxBucketRows()
                                 + "; readMs=" + result.elapsedMillis()
-                                + "; source completeness and snapshot consistency NOT verified");
-                log.info("iGraph dry run: buckets={}, items={}, sids={}, maxBucketRows={}, readMs={}",
+                                + "; source completeness and snapshot consistency NOT verified",
+                        result.skippedEmptySids(), result.eligibleItems(), result.maxBucketRows());
+                log.info("iGraph dry run: buckets={}, items={}, sids={}, maxBucketRows={}, readMs={}, skippedEmptySids={}",
                         result.bucketCount(), result.itemCount(), result.sids().size(),
-                        result.maxBucketRows(), result.elapsedMillis());
+                        result.maxBucketRows(), result.elapsedMillis(), result.skippedEmptySids());
                 return;
             }
             long version = Math.max(clock.millis(), Math.addExact(builds.getStatus().requestedVersion(), 1));
@@ -157,9 +167,11 @@ public class IgraphConstraintTreePoller {
             }
             status = new Status("SUBMITTED", started, clock.millis(), version,
                     result.bucketCount(), result.itemCount(), result.sids().size(),
-                    "read completed; check constraint_tree/status for actual build and Worker activation");
-            log.info("iGraph tree input submitted: version={}, buckets={}, items={}, sids={}, readMs={}",
-                    version, result.bucketCount(), result.itemCount(), result.sids().size(), result.elapsedMillis());
+                    "read completed; check constraint_tree/status for actual build and Worker activation",
+                    result.skippedEmptySids(), result.eligibleItems(), result.maxBucketRows());
+            log.info("iGraph tree input submitted: version={}, buckets={}, items={}, sids={}, readMs={}, skippedEmptySids={}",
+                    version, result.bucketCount(), result.itemCount(), result.sids().size(), result.elapsedMillis(),
+                    result.skippedEmptySids());
         } catch (Exception e) {
             status = new Status("FAILED", started, clock.millis(), 0, 0, 0, 0,
                     "source read/submission failed; existing tree retained: " + e.getMessage());

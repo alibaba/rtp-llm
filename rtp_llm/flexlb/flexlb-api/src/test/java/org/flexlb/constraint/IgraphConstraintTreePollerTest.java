@@ -16,6 +16,46 @@ import static org.mockito.Mockito.*;
 
 class IgraphConstraintTreePollerTest {
     @Test
+    void emptySidPolicyBindsFromEnvironmentAndReportsDryRunCounts() throws Exception {
+        var builds = builds();
+        var leader = mock(org.flexlb.consistency.LBStatusConsistencyService.class);
+        when(leader.isMaster()).thenReturn(true);
+        var variables = new java.util.HashMap<String, Object>();
+        variables.put("CONSTRAINT_TREE_IGRAPH_MODEL", "engine_service");
+        variables.put("CONSTRAINT_TREE_IGRAPH_BUCKET_ALGORITHM", "ITEM_ID_MOD");
+        variables.put("CONSTRAINT_TREE_IGRAPH_BUCKET_COUNT", "4000");
+        variables.put("CONSTRAINT_TREE_IGRAPH_DRY_RUN", "true");
+        var env = new org.springframework.mock.env.MockEnvironment();
+        env.getPropertySources().addFirst(new org.springframework.core.env.SystemEnvironmentPropertySource(
+                "test-systemEnvironment", variables));
+        SidBucketClient client = (k, l, t) -> CompletableFuture.completedFuture(List.of(
+                new SidBucketClient.Row(k, k, ""),
+                new SidBucketClient.Row(k, "" + (Integer.parseInt(k) + 4000), "C1C2")));
+        for (String policy : new String[]{null, "REJECT", "SKIP"}) {
+            if (policy != null) { variables.put("CONSTRAINT_TREE_IGRAPH_EMPTY_SID_POLICY", policy); }
+            var poller = new IgraphConstraintTreePoller(client, builds, leader, env);
+            try {
+                poller.pollOnce();
+                var status = poller.getStatus();
+                assertEquals("SKIP".equals(policy) ? "VALIDATED_NO_PUBLISH" : "FAILED", status.state());
+                if ("SKIP".equals(policy)) {
+                    assertEquals(4000, status.buckets());
+                    assertEquals(8000, status.items());
+                    assertEquals(4000, status.skippedEmptySids());
+                    assertEquals(4000, status.eligibleItems());
+                    assertEquals(1, status.uniqueSids());
+                    assertEquals(2, status.maxBucketRows());
+                    var json = new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(status);
+                    assertEquals(4000, json.path("skippedEmptySids").asLong());
+                }
+                verifyNoInteractions(builds);
+            } finally { poller.close(); }
+        }
+        variables.put("CONSTRAINT_TREE_IGRAPH_EMPTY_SID_POLICY", "TYPO");
+        assertThrows(IllegalArgumentException.class, () -> new IgraphConstraintTreePoller(client, builds, leader, env));
+    }
+
+    @Test
     void numericModeAllowsOmittedPrefixButPreservesExplicitPrefix() {
         for (String prefix : new String[]{null, "", "pool_"}) {
             var builds = builds();

@@ -21,6 +21,20 @@ public class IgraphPackageSmoke {
             throw new AssertionError("packaged numeric bucket contract failed");
         }
         System.out.println("PACK_NUMERIC_BUCKET_OK");
+        var skipSettings = new org.flexlb.constraint.BucketSidReader.Settings("", 1, 1, 2000,
+                java.time.Duration.ofSeconds(5), java.time.Duration.ofMinutes(5), 0,
+                org.flexlb.constraint.BucketSidReader.BucketAlgorithm.ITEM_ID_MOD, 2000,
+                org.flexlb.constraint.BucketSidReader.EmptySidPolicy.SKIP);
+        var input = new org.flexlb.constraint.BucketSidReader((key, limit, timeout) ->
+                java.util.concurrent.CompletableFuture.completedFuture(List.of(
+                        new org.flexlb.constraint.source.SidBucketClient.Row(key, "0", ""),
+                        new org.flexlb.constraint.source.SidBucketClient.Row(key, "1", "C1C2"))),
+                skipSettings).read(() -> true);
+        if (input.itemCount() != 2 || input.skippedEmptySids() != 1 || input.eligibleItems() != 1
+                || !input.sids().equals(List.of("C1C2"))) {
+            throw new AssertionError("packaged empty SID policy failed");
+        }
+        System.out.println("PACK_EMPTY_SID_POLICY_OK");
         for (String name : List.of("org.flexlb.constraint.BucketSidReader",
                 "org.flexlb.constraint.IgraphConstraintTreePoller",
                 "org.flexlb.httpserver.IgraphConstraintTreeServer",

@@ -66,13 +66,18 @@ class ConstraintTreeMappedE2ETest {
                 }
                 int bucket = 123 % 4000;
                 return java.util.concurrent.CompletableFuture.completedFuture(key.equals(Integer.toString(bucket))
-                        ? List.of(new org.flexlb.constraint.source.SidBucketClient.Row(key, "123", sid.get())) : List.of());
+                        ? List.of(new org.flexlb.constraint.source.SidBucketClient.Row(key, "123", sid.get()),
+                                new org.flexlb.constraint.source.SidBucketClient.Row(key, "4123", "")) : List.of());
             };
-            poller = new IgraphConstraintTreePoller(new BucketSidReader(client, BucketSidReaderTest.numericSettings(4000, 2000)),
+            poller = new IgraphConstraintTreePoller(new BucketSidReader(client, BucketSidReaderTest.skipEmptySettings(4000, 2000)),
                     builds, () -> true, "gul_item", true, true, 600,
                     java.time.Clock.fixed(java.time.Instant.ofEpochMilli(100), java.time.ZoneOffset.UTC));
             poller.pollOnce();
             assertEquals("SUBMITTED", poller.getStatus().state());
+            assertEquals(4000, poller.getStatus().buckets());
+            assertEquals(2, poller.getStatus().items());
+            assertEquals(1, poller.getStatus().skippedEmptySids());
+            assertEquals(1, poller.getStatus().eligibleItems());
             awaitState(builds, ConstraintTreeModels.BuildState.READY);
             assertEquals(100, get(port, "/constraint_tree_status").path("version").asLong());
             var firstArtifact = builds.getCurrentArtifact().orElseThrow();
@@ -85,6 +90,13 @@ class ConstraintTreeMappedE2ETest {
             assertEquals(100, get(port, "/constraint_tree_status").path("version").asLong());
 
             failRead.set(false);
+            sid.set("");
+            poller.pollOnce();
+            assertEquals("FAILED", poller.getStatus().state());
+            assertTrue(poller.getStatus().message().contains("skippedEmptySids=2"));
+            assertSame(firstArtifact, builds.getCurrentArtifact().orElseThrow());
+            assertEquals(100, get(port, "/constraint_tree_status").path("version").asLong());
+
             sid.set("C3C2");
             poller.pollOnce();
             awaitState(builds, ConstraintTreeModels.BuildState.READY);
