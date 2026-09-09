@@ -50,6 +50,7 @@ PYBIND11_MODULE(sampler_test_module, m) {
                 no_repeat_ngram_size,
                 cum_log_probs,
                 output_log_probs,
+                false,  // return_original_all_probs
                 output_all_probs,
                 presence_penalty,
                 frequency_penalty,

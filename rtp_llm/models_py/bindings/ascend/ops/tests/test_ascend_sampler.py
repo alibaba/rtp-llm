@@ -403,6 +403,174 @@ class TestAscendSampler(unittest.TestCase):
         self.assertGreater(clp[0], -100.0, "cum_log_probs batch 0 must be > -inf")
         self.assertGreater(clp[1], -100.0, "cum_log_probs batch 1 must be > -inf")
 
+    # ==================================================================
+    # Test 7b — strict do_sample mixed-batch merge.
+    #   Near-flat logits make multinomial genuinely random, so pinning the
+    #   do_sample=false row to argmax across seeds can only come from the
+    #   per-row merge, not from distribution sharpness.
+    # ==================================================================
+    def test_do_sample_mixed_batch_strict(self):
+        batch_size = 3
+        vocab_size = 6
+        logits = npu_float_tensor(
+            [
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0,    # b0: sample, top-4 = {3,4,5}
+                1.0, 1.0, 1.0, 1.0, 1.1, 1.0,    # b1: near-flat, argmax=4
+                6.0, 5.0, 4.0, 3.0, 2.0, 1.0,    # b2: sample, top-4 = {0,1,2,3}
+            ],
+            (batch_size, vocab_size),
+        )
+        step = 3
+        token_ids = torch.tensor(
+            [[10, 0, 0, 0],
+             [20, 5, 5, 5],
+             [30, 0, 0, 0]],
+            dtype=torch.int32,
+        )
+        seq_lens = torch.tensor([3, 3, 3], dtype=torch.int32)
+        input_lens = torch.tensor([-1, -1, -1], dtype=torch.int32)
+        top_k = pinned_int_tensor([4, 4, 4])
+        top_p = pinned_float_tensor([1.0, 1.0, 1.0])
+        temperature = pinned_float_tensor([1.0, 1.0, 1.0])
+        do_sample = torch.tensor([True, False, True], dtype=torch.bool)
+
+        for trial in range(5):
+            gens = [npu_generator(7000 + trial * 10 + i) for i in range(batch_size)]
+            result = sampler_test_module.exec_sample_greedy(
+                logits=logits.clone(), input_lengths=input_lens,
+                sequence_lengths=seq_lens, token_ids=token_ids.clone(),
+                step=step, top_k=top_k, top_p=top_p, temperature=temperature,
+                do_sample=do_sample, generators=gens,
+            )
+            out = result["token_ids"].cpu().flatten().tolist()
+            self.assertEqual(
+                out[7], 4,
+                f"trial {trial}: do_sample=false row must equal argmax (4), got {out[7]}")
+            self.assertIn(out[3], (3, 4, 5), f"trial {trial}: b0 out of top-4 set")
+            self.assertIn(out[11], (0, 1, 2, 3), f"trial {trial}: b2 out of top-4 set")
+
+    # ==================================================================
+    # Test 7c — cum_log_probs numeric correctness vs plain-torch reference.
+    #   Covers: top_k=1 row (renormalized one-hot → delta 0), do_sample=false
+    #   row, and a sampling row; reference = top-k filter → softmax → log of
+    #   the chosen token's probability.
+    # ==================================================================
+    def test_cum_log_probs_matches_reference(self):
+        batch_size = 3
+        vocab_size = 6
+        logits_cpu = torch.tensor(
+            [
+                [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                [1.0, 1.0, 1.0, 1.0, 1.1, 1.0],
+                [6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+            ],
+            dtype=torch.float32,
+        )
+        logits = logits_cpu.to(NPU_DEVICE)
+        step = 3
+        token_ids = torch.tensor(
+            [[10, 0, 0, 0],
+             [20, 5, 5, 5],
+             [30, 0, 0, 0]],
+            dtype=torch.int32,
+        )
+        seq_lens = torch.tensor([3, 3, 3], dtype=torch.int32)
+        input_lens = torch.tensor([-1, -1, -1], dtype=torch.int32)
+        top_k = pinned_int_tensor([1, 4, 4])
+        top_p = pinned_float_tensor([1.0, 1.0, 1.0])
+        temperature = pinned_float_tensor([1.0, 1.0, 1.0])
+        do_sample = torch.tensor([True, False, True], dtype=torch.bool)
+        cum_log_probs = torch.zeros((batch_size,), dtype=torch.float32)
+
+        result = sampler_test_module.exec_sample_greedy(
+            logits=logits, input_lengths=input_lens, sequence_lengths=seq_lens,
+            token_ids=token_ids, step=step, top_k=top_k, top_p=top_p,
+            temperature=temperature, do_sample=do_sample,
+            cum_log_probs=cum_log_probs,
+        )
+
+        chosen = [row[step] for row in result["token_ids"].cpu().tolist()]
+        clp = result["cum_log_probs"].cpu().tolist()
+
+        for i, k in enumerate([1, 4, 4]):
+            # The custom op's top-k is threshold-based: every logit >= the
+            # k-th largest value survives (ties are all kept), unlike
+            # index-based torch.topk which keeps exactly k entries.
+            filtered = logits_cpu[i].clone()
+            threshold = torch.topk(filtered, k).values[-1]
+            filtered[filtered < threshold] = float("-inf")
+            probs = torch.softmax(filtered, -1)
+            if k == 1:
+                self.assertEqual(chosen[i], int(torch.argmax(logits_cpu[i])),
+                                 f"batch {i}: top_k=1 row must pick argmax")
+                expected = 0.0  # one-hot renormalized distribution → log(1)
+            else:
+                expected = float(torch.log(probs[chosen[i]]))
+            self.assertAlmostEqual(
+                clp[i], expected, delta=2e-3,
+                msg=f"batch {i}: cum_log_probs={clp[i]}, expected={expected}")
+
+    # ==================================================================
+    # Test 7d — unsupported penalties must be rejected with a clear error;
+    #   neutral values (=1.0 / =0.0) pass through as no-ops.
+    # ==================================================================
+    def test_penalties_rejected(self):
+        batch_size = 3
+        vocab_size = 6
+        logits = npu_float_tensor(
+            [
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+                1.0, 1.0, 1.0, 1.0, 1.1, 1.0,
+                6.0, 5.0, 4.0, 3.0, 2.0, 1.0,
+            ],
+            (batch_size, vocab_size),
+        )
+        step = 3
+        token_ids = torch.tensor(
+            [[10, 0, 0, 0],
+             [20, 5, 5, 5],
+             [30, 0, 0, 0]],
+            dtype=torch.int32,
+        )
+        seq_lens = torch.tensor([3, 3, 3], dtype=torch.int32)
+        input_lens = torch.tensor([-1, -1, -1], dtype=torch.int32)
+        top_k = pinned_int_tensor([1, 1, 1])
+        top_p = pinned_float_tensor([1.0, 1.0, 1.0])
+        temperature = pinned_float_tensor([1.0, 1.0, 1.0])
+
+        common = dict(
+            input_lengths=input_lens, sequence_lengths=seq_lens,
+            token_ids=token_ids.clone(), step=step,
+            top_k=top_k, top_p=top_p, temperature=temperature,
+        )
+
+        # Non-neutral repetition penalty → rejected.
+        with self.assertRaises(RuntimeError) as ctx:
+            sampler_test_module.exec_sample_greedy(
+                logits=logits.clone(),
+                repetition_penalty=pinned_float_tensor([1.5, 1.5, 1.5]),
+                **common)
+        self.assertIn("not support", str(ctx.exception))
+
+        # Non-neutral presence penalty → rejected.
+        with self.assertRaises(RuntimeError):
+            sampler_test_module.exec_sample_greedy(
+                logits=logits.clone(),
+                presence_penalty=pinned_float_tensor([0.0, 0.5, 0.0]),
+                **common)
+
+        # Neutral values → no-op, sampling succeeds.
+        result = sampler_test_module.exec_sample_greedy(
+            logits=logits.clone(),
+            repetition_penalty=pinned_float_tensor([1.0, 1.0, 1.0]),
+            presence_penalty=pinned_float_tensor([0.0, 0.0, 0.0]),
+            frequency_penalty=pinned_float_tensor([0.0, 0.0, 0.0]),
+            **common)
+        out = result["token_ids"].cpu().flatten().tolist()
+        self.assertEqual(out[3], 5)
+        self.assertEqual(out[7], 4)
+        self.assertEqual(out[11], 0)
+
 
     # ==================================================================
     # Test 8 — comprehensive cross-run determinism sweep.

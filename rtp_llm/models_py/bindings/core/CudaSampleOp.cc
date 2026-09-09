@@ -585,8 +585,11 @@ namespace rtp_llm {  // reopen
 // Strategy:
 //   - Temperature:        PyTorch div_() → torch_npu maps to NPU
 //   - Top-k/Top-p:        AscendC custom op applyTopKTopP
-//   - Repetition penalty: not yet available (AscendC kernel TBD)
-//   - Sampling:           torch::multinomial (same fallback as ROCm)
+//   - do_sample=false:    per-row merge with argmax (mixed batches)
+//   - cum_log_probs:      log of the sampled token's probability in the
+//                         filtered, renormalized distribution (CUDA parity)
+//   - Repetition/presence/frequency penalties and no_repeat_ngram_size:
+//                         not implemented — non-neutral values are rejected
 // ============================================================
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
@@ -631,10 +634,30 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         params.logits.masked_scatter_(mask_tensor, selected_logits);
     }
 
+    // ---- 1.5 Reject unsupported penalties (not implemented on Ascend) ----
+    // Fail fast with a clear error instead of silently ignoring user
+    // settings. Neutral values (=1.0 / =0) are allowed through as no-ops.
+    auto has_nonneutral_float = [](const c10::optional<torch::Tensor>& t, float neutral) {
+        if (!t.has_value()) {
+            return false;
+        }
+        const auto* p = t.value().data_ptr<float>();
+        return std::any_of(p, p + t.value().numel(), [neutral](auto v) { return v != neutral; });
+    };
+    if (has_nonneutral_float(params.repetition_penalty, 1.0f) ||
+        has_nonneutral_float(params.presence_penalty, 0.0f) ||
+        has_nonneutral_float(params.frequency_penalty, 0.0f) ||
+        (params.no_repeat_ngram_size.has_value() &&
+         torch::any(params.no_repeat_ngram_size.value().gt(0)).item<bool>())) {
+        RTP_LLM_CHECK_WITH_INFO(false,
+                                "Ascend sampler does not support repetition/presence/frequency "
+                                "penalties or no_repeat_ngram_size yet; disable them for Ascend");
+    }
+
     // ---- 2. Fast path: top_k = 1 for all batches → argmax only ----
     auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; }) &&
-        !params.output_all_probs.has_value()) {
+        !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
         auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1,
                                                   transposed_tokens.size(0)).squeeze(0);
         auto selected_tokens = torch::argmax(params.logits, -1, /*keepdim=*/false);
@@ -672,30 +695,26 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         params.logits.copy_(output);
     }
 
-    // ---- 4. Softmax → probabilities ----
+    // ---- 4. Softmax → probabilities (params.logits keeps the filtered logits) ----
     auto probs_t = torch::softmax(params.logits, -1);
-    params.logits.copy_(probs_t);
 
-    // ---- 5. Output_all_probs / cum_log_probs setup ----
+    // ---- 5. Output_all_probs ----
     torch::Tensor output_all_probs_t;
-    bool          need_output_all_probs = params.output_all_probs.has_value();
-    if (need_output_all_probs) {
+    if (params.output_all_probs.has_value()) {
         output_all_probs_t = params.output_all_probs.value();
     }
-    if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
-        output_all_probs_t = torch::zeros_like(probs_t);
-    }
 
-    // ---- 6. Sample ----
+    // ---- 6. Sample (per-row do_sample merge) ----
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1,
                                               transposed_tokens.size(0)).squeeze(0);
 
     bool all_topk_1 = std::all_of(top_k_ptr, top_k_ptr + batch_size,
                                    [](auto t) { return t == 1; });
+    torch::Tensor selected;
     if (all_topk_1) {
-        // Greedy: argmax
-        auto selected = torch::argmax(probs_t, -1, /*keepdim=*/false);
-        samples_t.copy_(selected);
+        // Greedy: argmax (top-1 filtering renormalizes each row to one-hot,
+        // so sampling would be equivalent but slower).
+        selected = torch::argmax(probs_t, -1, /*keepdim=*/false);
     } else {
         // Random sample: multinomial (same fallback as ROCm).
         // Only use a generator whose device matches the probs tensor;
@@ -709,21 +728,29 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                 break;
             }
         }
-        auto selected = torch::multinomial(probs_t, 1, /*replacement=*/false, gen).squeeze(-1);
-        samples_t.copy_(selected);
+        selected = torch::multinomial(probs_t, 1, /*replacement=*/false, gen).squeeze(-1);
+        if (params.do_sample.has_value()) {
+            // Per-row merge: do_sample=false rows must take argmax even in a
+            // mixed batch, instead of being sampled together with the rest.
+            auto greedy      = torch::argmax(probs_t, -1, /*keepdim=*/false);
+            auto do_sample_npu = params.do_sample.value().to(probs_t.device());
+            selected          = torch::where(do_sample_npu, selected, greedy);
+        }
     }
+    samples_t.copy_(selected);
 
-    if (need_output_all_probs) {
+    if (output_all_probs_t.defined()) {
         output_all_probs_t.copy_(probs_t);
     }
 
     // ---- 7. Update cum_log_probs ----
+    // CUDA parity: accumulate the log probability of the sampled token under
+    // the filtered, renormalized distribution (probs_t), i.e. log(probs[i, token]).
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        // Use log_softmax on the pre-filtered logits for numerical stability
-        auto log_probs       = torch::log_softmax(params.logits, -1);
-        auto token_log_probs = log_probs.gather(-1, samples_t.reshape({(int64_t)batch_size, 1})).squeeze(-1);
-        cum_log_probs_t.add_(token_log_probs.to(cum_log_probs_t.device()));
+        auto token_probs     = probs_t.gather(
+            1, samples_t.reshape({(int64_t)batch_size, 1}).to(torch::kLong)).squeeze(-1);
+        cum_log_probs_t.add_(token_probs.log().to(cum_log_probs_t.device()));
     }
 
     // ---- 8. Copy results back to token_ids ----

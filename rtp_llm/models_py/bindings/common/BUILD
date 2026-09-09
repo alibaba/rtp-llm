@@ -32,7 +32,10 @@ cc_library(
 
 cc_library(
     name = "common",
-    srcs = glob(["*.cc"], exclude = ["FusedCopyOp.cc"]),
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": glob(["*.cc"], exclude = ["FusedCopyOp.cc"]),
+    }),
     hdrs = glob(["*.h"]),
     deps = [
         ":fuse_copy_op",

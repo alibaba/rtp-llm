@@ -532,10 +532,13 @@ def setup_cuda_device_and_accl_env(local_rank: int) -> None:
     elif is_ascend():
         try:
             import torch_npu  # noqa: F401  (registers torch.npu)
-
-            torch.npu.set_device(local_rank)
-        except (ImportError, OSError, AttributeError) as e:
-            logging.warning("Ascend set_device(%d) failed: %s", local_rank, e)
+        except (ImportError, OSError) as e:
+            raise RuntimeError(
+                f"Ascend backend selected but torch_npu is unusable "
+                f"(import failed: {e}); install a torch-npu wheel matching "
+                f"torch {torch.__version__}"
+            ) from e
+        torch.npu.set_device(local_rank)
 
     if os.environ.get("ACCL_SELECT_PATH") == "1":
         select_port = str(local_rank % 2)

@@ -25,6 +25,7 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
 _ascend_excluded = [
     "triton",
+    "triton-kernels",
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "pyrsmi",
@@ -33,6 +34,20 @@ _ascend_excluded = [
     "fast-safetensors",
     "fastsafetensors",
     "decord",
+    "av",
+    "deep_gemm",
+    "deep_ep",
+    "apache-tvm-ffi",
+    "flashinfer-python",
+    "flashinfer-cubin",
+    "nvidia-cutlass-dsl",
+    "flashinfer-jit-cache",
+    "fast-hadamard-transform",
+    "flash-mla",
+    "tilelang",
+    "rtp-kernel",
+    "flash_attn",
+    "flash-attn-3",
 ]
 
 def requirement(names):

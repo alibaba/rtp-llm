@@ -38,8 +38,7 @@
 #include "torch_npu/csrc/framework/utils/CalcuOpUtil.h"
 #include "torch_npu/csrc/framework/utils/OpPreparation.h"
 #pragma GCC diagnostic pop
-#include "NPUBridge.h"
-#include "NPUStorageImpl.h"
+#include "torch_npu/csrc/core/npu/NPUFormat.h"
 
 #define NPU_NAME_SPACE at_npu::native
 using namespace at;
@@ -127,7 +126,10 @@ bool IsOpInputBaseFormat(const at::Tensor &tensor)
     if (!tensor.is_privateuseone()) {
         return true;
     }
-    const auto format = vllm_ascend::NPUBridge::GetNpuStorageImplDesc(tensor).npu_format_;
+    // Query the format through torch_npu's public API. Never cast the
+    // StorageImpl to a derived type — torch_npu's allocator does not create
+    // such objects, so reading derived members would be undefined behavior.
+    const auto format = static_cast<aclFormat>(at_npu::native::get_npu_format(tensor));
     return (format == ACL_FORMAT_ND) || (format == ACL_FORMAT_NCHW) || (format == ACL_FORMAT_NHWC) ||
         (format == ACL_FORMAT_NCDHW);
 }
@@ -243,10 +245,11 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor) {
   const auto dimNum = at_tensor.sizes().size();
   aclFormat format = ACL_FORMAT_ND;
   if (!IsOpInputBaseFormat(at_tensor)) {
-    format = vllm_ascend::NPUBridge::GetNpuStorageImpl(at_tensor)->npu_desc_.npu_format_;
+    format = static_cast<aclFormat>(at_npu::native::get_npu_format(at_tensor));
     if (acl_data_type != ACL_STRING) {
-          storageDims = vllm_ascend::NPUBridge::GetNpuStorageImpl(at_tensor)->npu_desc_.storage_sizes_;
-      }
+      const auto storage_sizes = at_npu::native::get_npu_storage_sizes(at_tensor);
+      storageDims.assign(storage_sizes.begin(), storage_sizes.end());
+    }
   } else {
     switch (dimNum) {
       case 3:
@@ -540,7 +543,8 @@ typedef void (*ReleaseHugeMem)(void *, bool);
         getWorkspaceSizeFuncAddr != nullptr && opApiFuncAddr != nullptr,      \
         #aclnn_api, " or ", #aclnn_api "GetWorkspaceSize", " not in ",        \
         GetOpApiLibName(), ", or ", GetOpApiLibName(), "not found.");         \
-    auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);           \
+    auto npu_stream = c10_npu::getCurrentNPUStream();                         \
+    auto acl_stream = npu_stream.stream(false);                               \
     uint64_t workspace_size = 0;                                              \
     uint64_t *workspace_size_addr = &workspace_size;                          \
     aclOpExecutor *executor = nullptr;                                        \
@@ -560,10 +564,11 @@ typedef void (*ReleaseHugeMem)(void *, bool);
     TORCH_CHECK(workspace_status == 0,                                        \
                 "call " #aclnn_api " failed, detail:", aclGetRecentErrMsg()); \
     void *workspace_addr = nullptr;                                           \
+    at::Tensor workspace_tensor;                                              \
     if (workspace_size != 0) {                                                \
       at::TensorOptions options =                                             \
           at::TensorOptions(torch_npu::utils::get_npu_device_type());         \
-      auto workspace_tensor =                                                 \
+      workspace_tensor =                                                      \
           at::empty({static_cast<int64_t>(workspace_size)}, options.dtype(kByte));                  \
       workspace_addr = const_cast<void *>(workspace_tensor.storage().data()); \
     }                                                                         \
@@ -588,6 +593,14 @@ typedef void (*ReleaseHugeMem)(void *, bool);
     cmd.Name(#aclnn_api);                                                     \
     cmd.SetCustomHandler(acl_call);                                           \
     cmd.Run();                                                                \
+    if (workspace_tensor.defined()) {                                         \
+      /* Record the async stream use so the caching allocator will not hand   \
+         this block to another stream before the kernel completes. Use the   \
+         dispatched tensor-level record_stream: the storage's DataPtr        \
+         carries a storage deleter that the allocator-level                   \
+         NPUCachingAllocator::recordStream(DataPtr&) rejects. */              \
+      workspace_tensor.record_stream(npu_stream.unwrap());                   \
+    }                                                                         \
     if (unInitMemFunc) {                                                      \
       unInitMemFunc(nullptr, false);                                          \
     }                                                                         \

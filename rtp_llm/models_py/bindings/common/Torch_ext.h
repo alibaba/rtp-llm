@@ -26,12 +26,6 @@ using StreamType = hipStream_t;
 using bf16_type  = nv_bfloat16;
 using StreamType = cudaStream_t;
 #define GET_CURRENT_STREAM() at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream()
-#elif USING_ASCEND
-#include <acl/acl.h>
-#include <torch_npu/csrc/core/npu/NPUStream.h>
-using bf16_type  = ACL_BF16;
-using StreamType = aclrtStream;
-#define GET_CURRENT_STREAM() c10_npu::getCurrentNPUStream().stream()
 #endif
 
 #define DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(pytorch_dtype, c_type, ...)                                               \

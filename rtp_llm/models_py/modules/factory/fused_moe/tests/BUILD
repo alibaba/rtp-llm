@@ -16,3 +16,11 @@ py_test(
     tags = ["open_skip"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "test_ascend_moe_strategy",
+    srcs = ["test_ascend_moe_strategy.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)

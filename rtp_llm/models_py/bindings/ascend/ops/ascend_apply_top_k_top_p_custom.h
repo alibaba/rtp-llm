@@ -45,15 +45,7 @@ inline void applyTopKTopP(    // ← 按算子功能命名，如 applyTopKTopP /
     //   2. 调用 GetWorkspaceSize 计算 workspace
     //   3. 分配 workspace
     //   4. 调用执行函数提交到 NPU stream
-    // 注意：多态分发使用 c10::optional<at::Tensor>，
-    //       nullptr 表示该参数不参与计算
-    if (param1.has_value() && param2.has_value()) {
-        EXEC_NPU_CMD(aclnnApplyTopKTopPCustom, input, param1.value(), param2.value(), output);
-    } else if (param1.has_value()) {
-        EXEC_NPU_CMD(aclnnApplyTopKTopPCustom, input, param1.value(), c10::nullopt, output);
-    } else {
-        EXEC_NPU_CMD(aclnnApplyTopKTopPCustom, input, c10::nullopt, param2.value(), output);
-    }
+    EXEC_NPU_CMD(aclnnApplyTopKTopPCustom, input, param1, param2, output);
 }
 
 }  // namespace ascend

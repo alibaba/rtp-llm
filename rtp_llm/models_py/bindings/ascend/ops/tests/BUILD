@@ -11,7 +11,7 @@ cc_test(
     srcs = [
         "SamplerTest.cc",
     ],
-    data = [],
+    data = ["//3rdparty/aclnn_custom_ops:aclnn_custom_ops"],
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings/core:exec_ctx_state",

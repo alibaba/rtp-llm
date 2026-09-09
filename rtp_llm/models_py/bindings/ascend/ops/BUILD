@@ -3,13 +3,7 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "npu_bridge",
-    srcs = [
-        "NPUBridge.cpp",
-        "NPUStorageImpl.cpp",
-    ],
     hdrs = [
-        "NPUBridge.h",
-        "NPUStorageImpl.h",
         "aclnn_apply_top_k_top_p_custom.h",
         "ascend_apply_top_k_top_p_custom.h",
         "op_api_common.h",
