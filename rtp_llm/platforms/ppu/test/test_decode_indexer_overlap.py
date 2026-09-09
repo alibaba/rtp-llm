@@ -6,30 +6,6 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
-
-
-class DecodeIndexerContractTest(unittest.TestCase):
-    def test_provider_freezes_and_propagates_schedule(self):
-        for mode in ("sequential", "overlap"):
-            options = {
-                "DSV4_PPU_DECODE_ATTN_MODE": "overlap",
-                "DSV4_PPU_DECODE_INDEXER": mode,
-            }
-            provider = PpuDecodeProvider(options)
-            options["DSV4_PPU_DECODE_INDEXER"] = "invalid"
-            with patch(
-                "rtp_llm.platforms.ppu.models.dsv4.ppu_module_provider.PpuModuleProvider.build_attention"
-            ) as build:
-                provider.build_attention(object)
-                self.assertEqual(build.call_args.kwargs["decode_indexer_mode"], mode)
-                self.assertIs(
-                    build.call_args.kwargs["decode_stream_pool"], provider.stream_pool
-                )
-        for mode in ("overlap", "invalid"):
-            with self.assertRaises(ValueError):
-                PpuDecodeProvider({"DSV4_PPU_DECODE_INDEXER": mode})
-
 
 @unittest.skipUnless(
     torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",

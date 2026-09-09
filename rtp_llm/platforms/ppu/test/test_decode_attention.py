@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     SWA_KV,
 )
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 from rtp_llm.platforms.ppu.models.dsv4.ppu_fp4_indexer import PpuFP4Attention
 from rtp_llm.utils.model_weight import W
 
@@ -141,7 +142,7 @@ def inject_long_history(cache, reference):
         reference.pools[tag].kv_cache_base.copy_(cache.pools[tag].kv_cache_base)
 
 
-def load_attention(checkpoint, layer, max_batch, overlap=False, execution_options=None):
+def load_attention(checkpoint, layer, max_batch):
     from safetensors import safe_open
 
     config = json.loads((checkpoint / "config.json").read_text())
@@ -183,13 +184,7 @@ def load_attention(checkpoint, layer, max_batch, overlap=False, execution_option
             value = value.float()
         weights[tag] = value.cuda()
     rope = config["rope_scaling"]
-    provider = PpuDecodeProvider(
-        {
-            "DSV4_PPU_SGLANG_WO_A": "1",
-            "DSV4_PPU_DECODE_ATTN_MODE": "overlap" if overlap else "sequential",
-            **(execution_options or {}),
-        }
-    )
+    provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
     attn = provider.build_attention(
         PpuFP4Attention,
         layer_id=layer,
@@ -324,28 +319,10 @@ class DecodeAttentionTest(unittest.TestCase):
             for n in os.environ.get("RTP_PPU_ATTN_BATCHES", "1,3,8,32,128").split(",")
         )
         reports = []
-        overlap = shared_rope or os.environ.get("RTP_PPU_ATTN_OVERLAP", "0") == "1"
+        overlap = True
         for layer in (0, 2, 3):
             attn, hashes = load_attention(
-                Path(os.environ["RTP_PPU_DSV4_CHECKPOINT"]),
-                layer,
-                max(batches),
-                overlap,
-                execution_options={
-                    "DSV4_PPU_DECODE_METADATA": (
-                        "graph_fused" if shared_rope else "eager"
-                    ),
-                    "DSV4_PPU_DECODE_ROPE": "shared" if shared_rope else "layer",
-                    "DSV4_PPU_DECODE_QKV": os.environ.get(
-                        "RTP_PPU_ATTN_QKV", "separate"
-                    ),
-                    "DSV4_PPU_DECODE_INDEXER": os.environ.get(
-                        "RTP_PPU_ATTN_INDEXER", "sequential"
-                    ),
-                    "DSV4_PPU_DECODE_FP8_QUANT": os.environ.get(
-                        "RTP_PPU_ATTN_FP8_QUANT", "auto"
-                    ),
-                },
+                Path(os.environ["RTP_PPU_DSV4_CHECKPOINT"]), layer, max(batches)
             )
             trace = AttentionTrace(attn)
             for batch in batches:
@@ -372,8 +349,14 @@ class DecodeAttentionTest(unittest.TestCase):
                         group_tags=cache.group_tags,
                     )
                     tagged = cache.inputs(positions, batch, stable=shared_rope)
-                    impl = attn._platform_provider.build_decode_metadata(
-                        DSv4DecodeFmhaImplFP8, config, torch.device("cuda"), tagged
+                    impl = (
+                        attn._platform_provider.build_decode_metadata(
+                            DSv4DecodeFmhaImplFP8, config, torch.device("cuda"), tagged
+                        )
+                        if shared_rope
+                        else DSv4DecodeFmhaImplFP8(
+                            config, torch.device("cuda"), tagged[SWA_KV]
+                        )
                     )
                     if shared_rope:
                         self.assertEqual(len(impl.metadata.rope_freqs_by_source), 1)

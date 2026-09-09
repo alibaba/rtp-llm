@@ -183,6 +183,7 @@ class Block(nn.Module):
             self.ffn = module_build_context.factory.build(
                 request_for("moe", module_build_context.selection, layer_id),
                 platform_provider=platform_provider,
+                tp_rank=tp_rank,
                 **moe_kwargs,
             )
         else:

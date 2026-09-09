@@ -16,6 +16,16 @@ _DSV4_CUDA13_ONLY = select({
 })
 
 
+# These compressor metadata/gather tests exercise shared tensor contracts and
+# are also run by the PPU regression. This does not qualify a PPU CP model.
+_DSV4_CUDA13_OR_PPU = select({
+    "@//:using_cuda13_x86": [],
+    "@//:using_cuda13_arm": [],
+    "@//:using_ppu": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+
 _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
     "//rtp_llm:testlib",
@@ -28,7 +38,6 @@ _DSV4_FP8_TESTS = [
     "test_compressor_forward_flat_input",
     "test_compressor_fp8_per_token",
     "test_compressor_gemm_merge",
-    "test_compressor_prepare_metadata_varlen",
     "test_compressor_raw_dispatch",
     "test_compressor_state_pool_cpu",
     "test_compressor_varlen_raw_path",
@@ -151,7 +160,16 @@ py_test(
     name = "test_compressor_cp_merged_gather",
     srcs = ["test_compressor_cp_merged_gather.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    target_compatible_with = _DSV4_CUDA13_ONLY,
+    target_compatible_with = _DSV4_CUDA13_OR_PPU,
+)
+
+py_test(
+    name = "test_compressor_prepare_metadata_varlen",
+    srcs = ["test_compressor_prepare_metadata_varlen.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["gpu", "H20", "ppu"],
+    exec_properties = select({"@//:using_ppu": {}, "//conditions:default": {"gpu": "H20"}}),
+    target_compatible_with = _DSV4_CUDA13_OR_PPU,
 )
 
 [

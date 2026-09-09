@@ -54,11 +54,11 @@ def build_decode_moe(*, build_ctx, request, platform_provider, **kwargs):
     )
 
 
-def build_moe_tp(*, build_ctx, request, **kwargs):
+def build_moe_tp(*, build_ctx, request, tp_rank, **kwargs):
     from .ppu_tp_moe import PpuTPMoE
 
     baseline.validate_arguments(build_ctx, request, kwargs)
-    return PpuTPMoE(tp_rank=build_ctx.selection.platform.local_rank, **kwargs)
+    return PpuTPMoE(tp_rank=tp_rank, **kwargs)
 
 
 def build_attention_fp4(*, build_ctx, request, platform_provider, **kwargs):

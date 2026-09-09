@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 
 
 @unittest.skipUnless(
@@ -18,12 +18,16 @@ class DecodeHCTest(unittest.TestCase):
         fn = torch.randn((24, 16384), device="cuda", dtype=torch.float32) / 128
         if zero:
             fn.zero_()
-        return PpuDecodeProvider(
-            {"DSV4_PPU_DECODE_HC_REDUCTION": reduction}
-        ).build_hc_unit(
+        from rtp_llm.platforms.ppu.models.dsv4.ppu_hc import PpuHCUnit
+
+        # Unfused reduction is an operator-level reference, not a provider mode.
+        return PpuHCUnit(
             fn,
             torch.zeros(24, device="cuda"),
             torch.ones(3, device="cuda"),
+            options=DECODE_EXECUTION_OPTIONS,
+            allow_graph=True,
+            fuse_prenorm=reduction == "fused",
             dim=4096,
             hc_mult=4,
             hc_sinkhorn_iters=20,

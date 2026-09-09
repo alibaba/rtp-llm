@@ -47,3 +47,13 @@ The locked flash-attn, flash-attn-3 and Triton artifacts also need a reachable
 distribution source. Keep their version and hash checks until matching artifacts
 are available. A clean wheel install/startup and affected CUDA HC/TP regression
 remain release conditions; these examples do not establish production readiness.
+
+## Focused PPU regression entry
+
+`//rtp_llm/platforms:ppu_decode_regression_tests` groups the generated-input HC,
+FP8/QKV, state-slot, metadata Graph, MoE output/scheduling, stream-error cleanup,
+and TP shared-weight partition tests. Run it with the PPU configuration and the
+repository GPU-lock wrapper on one M890P with the matching SDK. Its constituent
+targets are PPU-only; checkpoint and multirank tests retain their explicit manual
+entries. Successful generated-input tests do not qualify a clean SDK install or
+replace the fixed-history whole-model comparison.

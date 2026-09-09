@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import torch
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
     PpuFp8Linear,
     concatenate_ppu_fp8_linears,
@@ -12,25 +13,22 @@ from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
 
 
 class DecodeQKVContractTest(unittest.TestCase):
-    def test_provider_rejects_incompatible_execution_before_construction(self):
-        for options in (
-            {"DSV4_PPU_DECODE_QKV": "invalid"},
-            {"DSV4_PPU_DECODE_QKV": "merged"},
-        ):
-            with self.assertRaises(ValueError):
-                PpuDecodeProvider(options)
-        for mode in ("separate", "merged"):
-            provider = PpuDecodeProvider(
-                {"DSV4_PPU_DECODE_QKV": mode, "DSV4_PPU_DECODE_ATTN_MODE": "overlap"}
+    def test_published_attention_composition_is_frozen(self):
+        options = dict(DECODE_EXECUTION_OPTIONS)
+        provider = PpuDecodeProvider(options)
+        options["DSV4_PPU_DECODE_QKV"] = "separate"
+        with patch(
+            "rtp_llm.platforms.ppu.models.dsv4.ppu_module_provider.PpuModuleProvider.build_attention"
+        ) as build:
+            provider.build_attention(object)
+            self.assertEqual(build.call_args.kwargs["decode_qkv_mode"], "merged")
+            self.assertEqual(build.call_args.kwargs["decode_indexer_mode"], "overlap")
+            self.assertIs(
+                build.call_args.kwargs["decode_stream_pool"], provider.stream_pool
             )
-            with patch(
-                "rtp_llm.platforms.ppu.models.dsv4.ppu_module_provider.PpuModuleProvider.build_attention"
-            ) as build:
-                provider.build_attention(object)
-                self.assertEqual(build.call_args.kwargs["decode_qkv_mode"], mode)
-                self.assertIs(
-                    build.call_args.kwargs["decode_stream_pool"], provider.stream_pool
-                )
+        for key in DECODE_EXECUTION_OPTIONS:
+            with self.subTest(option=key), self.assertRaisesRegex(ValueError, key):
+                PpuDecodeProvider({**DECODE_EXECUTION_OPTIONS, key: "unsupported"})
 
     def test_concat_rejects_nonmatching_types_without_cuda(self):
         for parts in ((), (object(),), (object(), object())):
@@ -43,6 +41,30 @@ class DecodeQKVContractTest(unittest.TestCase):
     "requires M890P",
 )
 class DecodeQKVGpuTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_bound_compressor_linear_preserves_fp32_and_leading_dimensions(self):
+        from rtp_llm.models_py.modules.dsv4.fp8.compressor import _linear_bf16_bf16_fp32
+        from rtp_llm.models_py.modules.dsv4.platform_provider import (
+            build_dsv4_bf16_fp32_linear,
+        )
+
+        def unexpected_fallback(*args):
+            self.fail("PPU operation was not bound")
+
+        operation = build_dsv4_bf16_fp32_linear(
+            unexpected_fallback,
+            platform_provider=PpuDecodeProvider(DECODE_EXECUTION_OPTIONS),
+        )
+        torch.manual_seed(890440)
+        weight = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16) / 32
+        for shape in ((0, 256), (1, 256), (2, 3, 256)):
+            x = torch.randn(shape, device="cuda", dtype=torch.bfloat16) / 32
+            expected = (x.cpu().double() @ weight.cpu().double().t()).float()
+            actual = _linear_bf16_bf16_fp32(x, weight, linear_op=operation)
+            self.assertEqual(actual.dtype, torch.float32)
+            self.assertEqual(actual.shape, (*shape[:-1], 128))
+            torch.testing.assert_close(actual.cpu(), expected, rtol=1e-5, atol=1e-6)
+
     @torch.inference_mode()
     def test_owned_concat_snapshot_and_quantization_contract(self):
         torch.manual_seed(890437)

@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     SequentialSharedExpertExecutor,
 )
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 
 
 @unittest.skipUnless(
@@ -36,7 +37,7 @@ class DecodeSharedExpertTest(unittest.TestCase):
             with safe_open(checkpoint / index[key], framework="pt", device="cpu") as f:
                 return f.get_tensor(key).cuda()
 
-        self.provider = PpuDecodeProvider({"DSV4_PPU_SGLANG_MOE": "1"})
+        self.provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
         self.shared = self.provider.build_shared_expert(
             4096,
             2048,
@@ -106,18 +107,13 @@ class DecodeSharedExpertTest(unittest.TestCase):
     def test_overlap_graph_joins_producer_and_consumer(self):
         from rtp_llm.models_py.modules.dsv4.moe.moe_layer import MoE
 
-        provider = PpuDecodeProvider(
-            {
-                "DSV4_SHARED_EXPERT_MODE": "overlap",
-                "DSV4_PPU_DECODE_SHARED_SCHEDULE": "before_route",
-            }
-        )
+        provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
         executor = provider.build_shared_expert_executor()
         executor.prepare(self.shared)
         second = provider.build_shared_expert_executor()
         second.prepare(self.shared)
         self.assertIs(executor._stream, second._stream)
-        other_provider = PpuDecodeProvider({"DSV4_SHARED_EXPERT_MODE": "overlap"})
+        other_provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
         other = other_provider.build_shared_expert_executor()
         other.prepare(self.shared)
         self.assertIsNot(executor._stream, other._stream)

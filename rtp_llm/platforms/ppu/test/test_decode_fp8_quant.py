@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import torch
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 from rtp_llm.platforms.ppu.models.dsv4.ppu_wo_a import PpuWoAFp8Linear
 from rtp_llm.platforms.ppu.modules.linear import fp8_linear as fp8
 
@@ -14,7 +15,7 @@ from rtp_llm.platforms.ppu.modules.linear import fp8_linear as fp8
 class DecodeFp8PolicyTest(unittest.TestCase):
     def test_provider_freezes_dense_and_grouped_quantization(self):
         with patch.dict(os.environ, {"DSV4_PPU_DECODE_FP8_QUANT": "auto"}):
-            provider = PpuDecodeProvider({"DSV4_PPU_DECODE_FP8_QUANT": "v2"})
+            provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
         with patch.object(fp8, "PpuFp8Linear") as dense, patch(
             "rtp_llm.platforms.ppu.models.dsv4.ppu_wo_a.PpuWoAFp8Linear"
         ) as grouped:
@@ -22,8 +23,10 @@ class DecodeFp8PolicyTest(unittest.TestCase):
             provider.build_wo_a_fp8_linear(None, "weight", "scale")
             self.assertEqual(dense.call_args.kwargs["quantization"], "v2_column")
             self.assertEqual(grouped.call_args.kwargs["quantization"], "v2_row")
-        with self.assertRaisesRegex(ValueError, "auto or v2"):
-            PpuDecodeProvider({"DSV4_PPU_DECODE_FP8_QUANT": "unknown"})
+        with self.assertRaisesRegex(ValueError, "DSV4_PPU_DECODE_FP8_QUANT"):
+            PpuDecodeProvider(
+                {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_FP8_QUANT": "unknown"}
+            )
         with self.assertRaisesRegex(ValueError, "row-major"):
             PpuWoAFp8Linear(
                 None, None, groups=8, k_local=4096, quantization="v2_column"

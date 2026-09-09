@@ -8,6 +8,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
 from rtp_llm.platforms.ppu.models.dsv4 import pluggable_builders
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 from rtp_llm.platforms.ppu.models.dsv4.ppu_deepep_fp4 import PpuDeepEPFP4Strategy
 
 
@@ -27,10 +28,7 @@ class DecodeMoeHintTest(unittest.TestCase):
             local_expert_end=32,
             max_tokens_per_rank=128,
         )
-        options = {
-            "DSV4_PPU_DECODE_MOE_HINT": "capacity",
-            "DSV4_PPU_DECODE_MOE_OUTPUT": "bf16",
-        }
+        options = dict(DECODE_EXECUTION_OPTIONS)
         provider = PpuDecodeProvider(options)
         options["DSV4_PPU_DECODE_MOE_HINT"] = "batch"
         options["DSV4_PPU_DECODE_MOE_OUTPUT"] = "fp32"
@@ -76,12 +74,16 @@ class DecodeMoeHintTest(unittest.TestCase):
             self.assertEqual(launch.call_args.kwargs["expected_m"], 24)
             self.assertEqual(launch.call_args.kwargs["output_dtype"], torch.bfloat16)
             self.assertEqual(capacity.expected_rows(batch), 24)
-        with self.assertRaisesRegex(ValueError, "MoE hint"):
-            PpuDecodeProvider({"DSV4_PPU_DECODE_MOE_HINT": "unknown"})
+        with self.assertRaisesRegex(ValueError, "DSV4_PPU_DECODE_MOE_HINT"):
+            PpuDecodeProvider(
+                {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_HINT": "unknown"}
+            )
         with self.assertRaisesRegex(ValueError, "rows policy"):
             PpuDeepEPFP4Strategy(cfg, expected_m_policy="unknown")
-        with self.assertRaisesRegex(ValueError, "MoE output"):
-            PpuDecodeProvider({"DSV4_PPU_DECODE_MOE_OUTPUT": "fp16"})
+        with self.assertRaisesRegex(ValueError, "DSV4_PPU_DECODE_MOE_OUTPUT"):
+            PpuDecodeProvider(
+                {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_OUTPUT": "fp16"}
+            )
         with self.assertRaisesRegex(ValueError, "routed output"):
             PpuDeepEPFP4Strategy(cfg, output_dtype=torch.float16)
 

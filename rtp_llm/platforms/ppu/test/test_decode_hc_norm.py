@@ -7,6 +7,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 
 
 class HCNormDefaultTest(unittest.TestCase):
@@ -55,12 +56,21 @@ class HCNormGraphTest(unittest.TestCase):
         fn = torch.randn((24, 16384), device="cuda", dtype=torch.float32) / 128
         if zero:
             fn.zero_()
-        return PpuDecodeProvider(
-            {
-                "DSV4_PPU_DECODE_HC_REDUCTION": reduction,
-                "DSV4_PPU_DECODE_HC_NORM": norm,
-            }
-        ).build_hc_unit(
+        from rtp_llm.platforms.ppu.models.dsv4.ppu_hc import PpuHCUnit
+
+        factory = (
+            PpuDecodeProvider(DECODE_EXECUTION_OPTIONS).build_hc_unit
+            if reduction == "fused" and norm == "fused"
+            else lambda *args, **kwargs: PpuHCUnit(
+                *args,
+                options=DECODE_EXECUTION_OPTIONS,
+                allow_graph=True,
+                fuse_prenorm=reduction == "fused",
+                fuse_norm=norm == "fused",
+                **kwargs
+            )
+        )
+        return factory(
             fn,
             torch.zeros(24, device="cuda"),
             torch.ones(3, device="cuda"),

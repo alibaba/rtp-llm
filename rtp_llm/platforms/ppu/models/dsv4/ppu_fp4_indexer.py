@@ -88,7 +88,7 @@ class PpuFP4Compressor(CompressorFP8):
         if not x.shape[0]:
             return
         fused = _linear_bf16_bf16_fp32(
-            x, self._wkv_wgate_fused, platform_provider=self._platform_provider
+            x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
         ).reshape(x.shape[0], 512)
         plan, slots = build_decode_plan(
             meta, self._state_block_table, self._state_eb, self._state_tokens_per_block

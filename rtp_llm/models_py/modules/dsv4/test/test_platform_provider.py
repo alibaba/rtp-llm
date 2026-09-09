@@ -22,7 +22,7 @@ Dsv4AttentionLayout = _PROVIDER_MODULE.Dsv4AttentionLayout
 resolve_dsv4_attention_layout = _PROVIDER_MODULE.resolve_dsv4_attention_layout
 build_dsv4_fp8_linear = _PROVIDER_MODULE.build_dsv4_fp8_linear
 build_dsv4_wo_a_fp8_linear = _PROVIDER_MODULE.build_dsv4_wo_a_fp8_linear
-run_dsv4_bf16_fp32_linear = _PROVIDER_MODULE.run_dsv4_bf16_fp32_linear
+build_dsv4_bf16_fp32_linear = _PROVIDER_MODULE.build_dsv4_bf16_fp32_linear
 run_dsv4_fp8_mqa_logits = _PROVIDER_MODULE.run_dsv4_fp8_mqa_logits
 build_dsv4_fp4_linear = _PROVIDER_MODULE.build_dsv4_fp4_linear
 prepare_dsv4_fp4_weight_scale = _PROVIDER_MODULE.prepare_dsv4_fp4_weight_scale
@@ -244,18 +244,16 @@ class Dsv4PlatformProviderRegistryTest(unittest.TestCase):
             _PROVIDER_MODULE._PROVIDER_REGISTRY = Dsv4PlatformProviderRegistry()
             sentinel = object()
             self.assertIs(
-                run_dsv4_bf16_fp32_linear(lambda value, **_: value, sentinel),
+                build_dsv4_bf16_fp32_linear(lambda value, **_: value)(sentinel),
                 sentinel,
             )
 
             registry = Dsv4PlatformProviderRegistry()
             registry.register(_Bf16Fp32Provider())
             _PROVIDER_MODULE._PROVIDER_REGISTRY = registry
-            result = run_dsv4_bf16_fp32_linear(
+            result = build_dsv4_bf16_fp32_linear(
                 lambda *_args, **_kwargs: self.fail("default factory used"),
-                sentinel,
-                weight="weight",
-            )
+            )(sentinel, weight="weight")
             self.assertEqual(result[0], "provider-bf16-fp32")
             self.assertIs(result[2][0], sentinel)
             self.assertEqual(result[3]["weight"], "weight")
@@ -435,7 +433,6 @@ class Dsv4InstanceAdapterTest(unittest.TestCase):
             for name in (
                 "build_dsv4_fp8_linear",
                 "build_dsv4_wo_a_fp8_linear",
-                "run_dsv4_bf16_fp32_linear",
                 "run_dsv4_fp8_mqa_logits",
                 "prepare_dsv4_fp4_weight_scale",
                 "build_dsv4_fp4_linear",
@@ -569,6 +566,22 @@ class Dsv4PlatformProviderWiringTest(unittest.TestCase):
                 for node in ast.walk(statement)
             )
         )
+
+
+class BoundLinearTest(unittest.TestCase):
+    def test_bound_operation_retains_its_provider_without_reselection(self):
+        first, second = _Bf16Fp32Provider(), _Bf16Fp32Provider()
+        a = build_dsv4_bf16_fp32_linear(object(), platform_provider=first)
+        b = build_dsv4_bf16_fp32_linear(object(), platform_provider=second)
+        with patch.object(
+            _PROVIDER_MODULE,
+            "_normalize_capabilities",
+            side_effect=AssertionError("reselection"),
+        ):
+            self.assertIs(a.func.__self__, first)
+            self.assertIs(b.func.__self__, second)
+            self.assertEqual(a("x")[0], "provider-bf16-fp32")
+            self.assertEqual(b("y")[0], "provider-bf16-fp32")
 
 
 if __name__ == "__main__":

@@ -79,6 +79,12 @@ def _gate_from_logits(
     """Construct Gate without framework weight descriptors for contract UTs."""
     gate = Gate.__new__(Gate)
     nn.Module.__init__(gate)
+    gate._fp32_gemm = False
+    gate._fused_gate = True
+    gate._bf16_fp32_linear = provider_module.build_dsv4_bf16_fp32_linear(
+        lambda x, w: torch.nn.functional.linear(x, w).float(),
+        platform_provider=provider_module.DefaultDsv4PlatformProvider(),
+    )
     gate.dim = n_experts
     gate.topk = topk
     gate.score_func = "sqrtsoftplus"
@@ -100,14 +106,15 @@ class RouterEagerContractTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DSV4_GATE_FP32": "0"}), mock.patch.object(
             gate_module, "_use_fused_gate", return_value=False
         ), mock.patch.object(
-            provider_module, "run_dsv4_bf16_fp32_linear",
+            gate,
+            "_bf16_fp32_linear",
             return_value=precise,
         ) as dispatch:
             _, indices = gate(x)
         self.assertEqual(indices.tolist(), [[7, 6]])
         dispatch.assert_called_once()
-        self.assertIs(dispatch.call_args.args[1], x)
-        self.assertEqual(dispatch.call_args.args[2].dtype, torch.bfloat16)
+        self.assertIs(dispatch.call_args.args[0], x)
+        self.assertEqual(dispatch.call_args.args[1].dtype, torch.bfloat16)
 
     def test_gate_legacy_provider_fallback_remains_unchanged(self):
         gate = _gate_from_logits(8, 2, 1.0, torch.zeros(8))
@@ -115,10 +122,12 @@ class RouterEagerContractTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DSV4_GATE_FP32": "0"}), mock.patch.object(
             gate_module, "_use_fused_gate", return_value=False
         ), mock.patch.object(
-            provider_module, "run_dsv4_bf16_fp32_linear",
-            side_effect=lambda fallback, *args: fallback(*args),
+            gate,
+            "_bf16_fp32_linear",
+            side_effect=lambda x, w: torch.nn.functional.linear(x, w).float(),
         ):
             actual_w, actual_i = gate(x)
+        gate._fp32_gemm = True
         with mock.patch.dict(os.environ, {"DSV4_GATE_FP32": "1"}), mock.patch.object(
             gate_module, "_use_fused_gate", return_value=False
         ):
@@ -128,11 +137,10 @@ class RouterEagerContractTest(unittest.TestCase):
 
     def test_gate_fp32_override_and_empty_batch_bypass_provider(self):
         gate = _gate_from_logits(8, 2, 1.0, torch.zeros(8))
+        gate._fp32_gemm = True
         with mock.patch.dict(os.environ, {"DSV4_GATE_FP32": "1"}), mock.patch.object(
             gate_module, "_use_fused_gate", return_value=False
-        ), mock.patch.object(
-            provider_module, "run_dsv4_bf16_fp32_linear"
-        ) as dispatch:
+        ), mock.patch.object(gate, "_bf16_fp32_linear") as dispatch:
             gate(torch.arange(8, dtype=torch.float32).view(1, 8))
             weights, indices = gate(torch.empty((0, 8), dtype=torch.bfloat16))
         dispatch.assert_not_called()
@@ -330,6 +338,9 @@ class RouterActualFusedContractTest(unittest.TestCase):
         gate = _gate_from_logits(
             logits.size(1), 6, 1.5, bias, device=logits.device
         )
+        # Construction freezes this choice; preserve FP32 extreme inputs before
+        # exercising the actual fused router's finite/nonfinite contract.
+        gate._fp32_gemm = True
         actual_fused = gate_module.fused_sqrtsoftplus_gate
         assert actual_fused is not None
         with mock.patch.dict(

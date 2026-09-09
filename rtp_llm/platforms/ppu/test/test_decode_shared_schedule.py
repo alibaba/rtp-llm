@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import MoE
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 
 
 def _combine(routed, shared, dtype, *, out):
@@ -103,20 +104,14 @@ class SharedScheduleTest(unittest.TestCase):
         model._route_and_start_shared(torch.ones(1, 8), torch.zeros(1))
         self.assertEqual(calls, ["route"])
 
-    def test_provider_freezes_schedule_and_requires_overlap(self):
-        options = {
-            "DSV4_SHARED_EXPERT_MODE": "overlap",
-            "DSV4_PPU_DECODE_SHARED_SCHEDULE": "before_route",
-        }
-        provider = PpuDecodeProvider(options)
-        options["DSV4_PPU_DECODE_SHARED_SCHEDULE"] = "after_route"
-        self.assertTrue(provider.build_shared_expert_executor().start_before_routing)
-        self.assertFalse(
-            PpuDecodeProvider({}).build_shared_expert_executor().start_before_routing
+    def test_provider_owns_early_shared_execution(self):
+        provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
+        executor = provider.build_shared_expert_executor()
+        self.assertTrue(executor.start_before_routing)
+        self.assertIsNot(
+            provider.stream_pool,
+            PpuDecodeProvider(DECODE_EXECUTION_OPTIONS).stream_pool,
         )
-        for value in ("before_route", "unknown"):
-            with self.assertRaises(ValueError):
-                PpuDecodeProvider({"DSV4_PPU_DECODE_SHARED_SCHEDULE": value})
 
 
 if __name__ == "__main__":

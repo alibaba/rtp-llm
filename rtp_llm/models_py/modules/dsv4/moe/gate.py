@@ -203,7 +203,12 @@ class Gate(nn.Module):
         Reads ``W.v4_router_w`` and either ``W.v4_router_tid2eid`` (hash
         layers) or ``W.v4_router_bias`` (non-hash)."""
         super().__init__()
-        self._platform_provider = platform_provider
+        from ..platform_provider import build_dsv4_bf16_fp32_linear
+
+        self._bf16_fp32_linear = build_dsv4_bf16_fp32_linear(
+            lambda inputs, weight: F.linear(inputs, weight).float(),
+            platform_provider=platform_provider,
+        )
         options = getattr(platform_provider, "execution_options", os.environ)
         self._fp32_gemm = options.get("DSV4_GATE_FP32", "0") == "1"
         self._fused_gate = options.get("DSV4_GATE_FUSED", "1") != "0"
@@ -275,14 +280,10 @@ class Gate(nn.Module):
         if self._fp32_gemm:
             scores = F.linear(x.float(), self.weight.float())
         else:
-            from ..platform_provider import run_dsv4_bf16_fp32_linear
-
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
-            scores = run_dsv4_bf16_fp32_linear(
-                lambda inputs, weight: F.linear(inputs, weight).float(),
+            scores = self._bf16_fp32_linear(
                 x_bf16,
                 self._weight_bf16(),
-                platform_provider=self._platform_provider,
             )
         router_logits = scores
         if _dbg is not None:

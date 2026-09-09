@@ -254,6 +254,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
             _kv_pool_view = object()
             _kv_eb = 1
             _wkv_wgate_fused = torch.empty((16, 8), dtype=torch.bfloat16)
+            _bf16_fp32_linear = None
 
             def __init__(self):
                 self.meta_args = None
@@ -278,7 +279,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
             dim=0,
         )
 
-        def _fake_linear(inp, weight):
+        def _fake_linear(inp, weight, *, linear_op):
             return torch.zeros((*inp.shape[:-1], 16), dtype=torch.bfloat16)
 
         compressor_mod = sys.modules[CompressorFP8.__module__]

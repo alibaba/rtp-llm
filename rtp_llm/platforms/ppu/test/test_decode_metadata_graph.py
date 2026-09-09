@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.dsv4.platform_provider import (
     build_dsv4_decode_metadata,
 )
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 
 
 class MetadataFactoryTest(unittest.TestCase):
@@ -19,18 +20,7 @@ class MetadataFactoryTest(unittest.TestCase):
             DSv4DecodeFmhaImplFP8,
         )
 
-        options = {
-            "DSV4_PPU_DECODE_METADATA": "graph_fused",
-            "DSV4_PPU_DECODE_ATTN_MODE": "overlap",
-            "DSV4_PPU_DECODE_ROPE": "shared",
-        }
-        for change in (
-            {"DSV4_PPU_DECODE_ROPE": "unknown"},
-            {"DSV4_PPU_DECODE_METADATA": "eager"},
-            {"DSV4_PPU_DECODE_ATTN_MODE": "sequential"},
-        ):
-            with self.assertRaisesRegex(ValueError, "RoPE"):
-                PpuDecodeProvider({**options, **change})
+        options = dict(DECODE_EXECUTION_OPTIONS)
         provider = PpuDecodeProvider(options)
         options["DSV4_PPU_DECODE_ROPE"] = "layer"
         with self.assertRaisesRegex(ValueError, "constructed"):
@@ -75,21 +65,17 @@ class MetadataFactoryTest(unittest.TestCase):
 
     def test_default_and_explicit_factory_contract(self):
         value = object()
-        for provider in (DefaultDsv4PlatformProvider(), PpuDecodeProvider({})):
-            self.assertIs(
-                build_dsv4_decode_metadata(lambda: value, platform_provider=provider),
-                value,
+        self.assertIs(
+            build_dsv4_decode_metadata(
+                lambda: value, platform_provider=DefaultDsv4PlatformProvider()
+            ),
+            value,
+        )
+        with self.assertRaisesRegex(ValueError, "FP8 Decode factory"):
+            build_dsv4_decode_metadata(
+                lambda: value,
+                platform_provider=PpuDecodeProvider(DECODE_EXECUTION_OPTIONS),
             )
-        with self.assertRaisesRegex(ValueError, "metadata mode"):
-            PpuDecodeProvider({"DSV4_PPU_DECODE_METADATA": "unknown"})
-        for mode in ("graph", "graph_fused"):
-            with self.assertRaisesRegex(ValueError, "FP8 Decode factory"):
-                build_dsv4_decode_metadata(
-                    lambda: value,
-                    platform_provider=PpuDecodeProvider(
-                        {"DSV4_PPU_DECODE_METADATA": mode}
-                    ),
-                )
 
 
 def _tensors(value, prefix=""):
@@ -176,14 +162,17 @@ class MetadataGraphTest(unittest.TestCase):
                 )
                 for tag, (_, _, count) in specs.items()
             }
-            options = {"DSV4_PPU_DECODE_METADATA": mode}
             if shared_rope:
-                options.update(
-                    DSV4_PPU_DECODE_ROPE="shared",
-                    DSV4_PPU_DECODE_ATTN_MODE="overlap",
+                provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
+            else:
+                # Keep unfused state-slot and per-layer RoPE numerical references
+                # without exposing additional production provider modes.
+                provider = SimpleNamespace(
+                    capabilities=PpuDecodeProvider.capabilities,
+                    build_decode_metadata=lambda factory, *args, **kwargs: PpuDecodeMetadataGraph(
+                        *args, fused_state_slots=mode == "graph_fused", **kwargs
+                    ),
                 )
-            provider = PpuDecodeProvider(options)
-            options["DSV4_PPU_DECODE_METADATA"] = "eager"
             attention_owners = []
             if shared_rope:
 

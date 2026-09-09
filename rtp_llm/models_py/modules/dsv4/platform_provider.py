@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 from enum import Enum
+from functools import partial
 from typing import Any, Callable, FrozenSet, Iterable, Optional, Protocol
 
 
@@ -313,19 +314,13 @@ def build_dsv4_wo_a_fp8_linear(
     return provider.build_wo_a_fp8_linear(default_factory, *args, **kwargs)
 
 
-def run_dsv4_bf16_fp32_linear(
-    default_factory: Callable[..., Any],
-    *args: Any,
-    platform_provider=None,
-    **kwargs: Any,
-) -> Any:
-    """Dispatch a BF16-input/weight linear with FP32 accumulation and output."""
-
+def build_dsv4_bf16_fp32_linear(default_factory, *, platform_provider=None):
+    """Bind the BF16-input/FP32-output operation once per owning module."""
     provider = resolve_dsv4_operator_provider(platform_provider)
     capabilities = _normalize_capabilities(provider.capabilities)
     if Dsv4ProviderCapability.BF16_FP32_LINEAR not in capabilities:
-        return default_factory(*args, **kwargs)
-    return provider.run_bf16_fp32_linear(default_factory, *args, **kwargs)
+        return default_factory
+    return partial(provider.run_bf16_fp32_linear, default_factory)
 
 
 def run_dsv4_hc_prenorm(*args: Any, platform_provider=None, **kwargs: Any) -> Any:
@@ -409,7 +404,7 @@ __all__ = [
     "prepare_dsv4_fp4_weight_scale",
     "resolve_dsv4_attention_layout",
     "resolve_dsv4_platform_provider",
-    "run_dsv4_bf16_fp32_linear",
+    "build_dsv4_bf16_fp32_linear",
     "run_dsv4_hc_prenorm",
     "run_dsv4_fp8_mqa_logits",
 ]

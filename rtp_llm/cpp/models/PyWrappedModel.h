@@ -248,6 +248,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    if (!py_init_result.cast<bool>()) {
+        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
+    }
     const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                       "forward";
@@ -369,9 +372,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
-        auto py_initialize_method = py_instance.attr("initialize");
         try {
-            py_init_result = py_initialize_method(init_resources);
+            py_init_result = py_initialize_method(py_model_, init_resources);
+            if (!py_init_result.cast<bool>()) {
+                throw std::runtime_error("PyWrappedModel constructor: Python model graph initialization failed.");
+            }
             // Python initialization/JIT can take a different amount of time on
             // each EP/TP rank. Synchronize immediately before capture so every
             // rank enters graph-held collectives in the same order.
@@ -381,11 +386,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;
         }
-    }
-
-    auto py_init_success = py_init_result.cast<bool>();
-    if (!py_init_success) {
-        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
     cache_store_async_writer_ =

@@ -3,6 +3,8 @@
 import ast
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
     import torch
@@ -83,3 +85,51 @@ class SharedWeightPartitionTest(unittest.TestCase):
             self.shard(
                 self.weights, dim=self.dim, inter_dim=self.inter, tp_size=4, tp_rank=0
             )
+
+    def test_builder_uses_logical_tp_rank_when_local_device_ranks_repeat(self):
+        from rtp_llm.platforms.ppu.models.dsv4.pluggable_builders import build_moe_tp
+
+        request = SimpleNamespace(
+            module_id="rtp.dsv4.moe", metadata={"layer_id": 0}, path="v4.layers.0.ffn"
+        )
+        pieces = []
+        for tp_rank, local_rank in enumerate((0, 1, 0, 1)):
+            context = SimpleNamespace(
+                selection=SimpleNamespace(
+                    model_metadata={"hidden_size": self.dim, "tp_size": 4},
+                    platform=SimpleNamespace(local_rank=local_rank),
+                )
+            )
+
+            def construct(**kwargs):
+                self.assertEqual(kwargs["tp_rank"], tp_rank)
+                return self.shard(
+                    self.weights,
+                    dim=self.dim,
+                    inter_dim=self.inter,
+                    tp_size=kwargs["tp_size"],
+                    tp_rank=kwargs["tp_rank"],
+                )
+
+            with patch(
+                "rtp_llm.platforms.ppu.models.dsv4.ppu_tp_moe.PpuTPMoE",
+                side_effect=construct,
+            ):
+                pieces.append(
+                    build_moe_tp(
+                        build_ctx=context,
+                        request=request,
+                        layer_id=0,
+                        dim=self.dim,
+                        tp_size=4,
+                        tp_rank=tp_rank,
+                    )
+                )
+        reconstructed = torch.cat([p["w2_w"].view(torch.uint8) for p in pieces], 1)
+        self.assertTrue(
+            torch.equal(reconstructed, self.weights["w2_w"].view(torch.uint8))
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

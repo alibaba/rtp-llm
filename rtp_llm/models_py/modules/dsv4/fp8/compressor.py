@@ -46,8 +46,15 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
 
 
+def _default_bf16_fp32_linear(activation, linear_weight):
+    assert (
+        _CUBLAS_GEMM_BF16_BF16_FP32 is not None
+    ), "cublas_gemm_bf16_bf16_fp32 op is not built"
+    return _CUBLAS_GEMM_BF16_BF16_FP32(activation, linear_weight)
+
+
 def _linear_bf16_bf16_fp32(
-    x: torch.Tensor, weight: torch.Tensor, *, platform_provider=None
+    x: torch.Tensor, weight: torch.Tensor, *, linear_op=_default_bf16_fp32_linear
 ) -> torch.Tensor:
     """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
     assert x.dtype == torch.bfloat16, f"expected BF16 input, got {x.dtype}"
@@ -56,21 +63,7 @@ def _linear_bf16_bf16_fp32(
     assert weight.is_contiguous(), "expected contiguous weight"
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
-    from rtp_llm.models_py.modules.dsv4.platform_provider import (
-        run_dsv4_bf16_fp32_linear,
-    )
-
-    def _default_factory(
-        activation: torch.Tensor, linear_weight: torch.Tensor
-    ) -> torch.Tensor:
-        assert (
-            _CUBLAS_GEMM_BF16_BF16_FP32 is not None
-        ), "cublas_gemm_bf16_bf16_fp32 op is not built"
-        return _CUBLAS_GEMM_BF16_BF16_FP32(activation, linear_weight)
-
-    out_2d = run_dsv4_bf16_fp32_linear(
-        _default_factory, x_2d, weight, platform_provider=platform_provider
-    )
+    out_2d = linear_op(x_2d, weight)
     expected_shape = (int(x_2d.shape[0]), int(weight.shape[0]))
     if out_2d.dtype != torch.float32 or tuple(out_2d.shape) != expected_shape:
         raise RuntimeError(
@@ -489,6 +482,13 @@ class CompressorFP8(PoolBackedModule):
             "stand-alone construction is not supported (use the BF16 path)."
         )
         self._platform_provider = platform_provider
+        from rtp_llm.models_py.modules.dsv4.platform_provider import (
+            build_dsv4_bf16_fp32_linear,
+        )
+
+        self._bf16_fp32_linear = build_dsv4_bf16_fp32_linear(
+            _default_bf16_fp32_linear, platform_provider=platform_provider
+        )
         self.dim = dim
         self.head_dim = head_dim
         # Which per-forward workspace CP buffer pair this compressor's gather
@@ -1037,7 +1037,7 @@ class CompressorFP8(PoolBackedModule):
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
             fused_out = _linear_bf16_bf16_fp32(
-                x, self._wkv_wgate_fused, platform_provider=self._platform_provider
+                x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
             )
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
@@ -1202,7 +1202,7 @@ class CompressorFP8(PoolBackedModule):
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
             fused_out = _linear_bf16_bf16_fp32(
-                x, self._wkv_wgate_fused, platform_provider=self._platform_provider
+                x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
             )
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
@@ -1304,7 +1304,7 @@ class CompressorFP8(PoolBackedModule):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         fused_out = _linear_bf16_bf16_fp32(
-            x, self._wkv_wgate_fused, platform_provider=self._platform_provider
+            x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
         )
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 

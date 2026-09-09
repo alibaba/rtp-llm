@@ -484,7 +484,7 @@ py::dict serializeResult(const RecordingCacheStore& store, const std::map<std::s
     return result;
 }
 
-py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name) {
+py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name, bool enable_graph) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
@@ -533,6 +533,8 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               manager,
                               scenario.mtp_cache_config_index};
 
+    params.hw_kernel_config.enable_cuda_graph = enable_graph;
+    params.hw_kernel_config.decode_capture_batch_sizes = {1};
     {
         PyWrappedModel model(params, std::move(py_model));
         if (scenario.replace_cp_processor) {
@@ -551,5 +553,6 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),
-          py::arg("scenario_name"));
+          py::arg("scenario_name"),
+          py::arg("enable_graph") = false);
 }

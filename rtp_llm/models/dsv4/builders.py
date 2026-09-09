@@ -80,8 +80,10 @@ def build_attention(*, build_ctx, request, platform_provider=None, **kwargs):
     return AttentionFP8(platform_provider=platform_provider, **kwargs)
 
 
-def build_moe(*, build_ctx, request, platform_provider=None, **kwargs):
+def build_moe(*, build_ctx, request, platform_provider=None, tp_rank=0, **kwargs):
     from rtp_llm.models_py.modules.dsv4.moe.moe_layer import MoE
 
     validate_arguments(build_ctx, request, kwargs)
+    # Baseline strategies own their weight layout; the PPU TP builder consumes
+    # this logical rank when partitioning replicated shared-expert weights.
     return MoE(platform_provider=platform_provider, **kwargs)
