@@ -425,6 +425,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
+        .def_readwrite("enable_gpu_dma", &KVCacheConfig::enable_gpu_dma)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
@@ -561,7 +562,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory_cache_remote_eviction_max_blocks,
                                       self.memory_cache_h2d_copy_mode,
                                       self.memory_cache_h2d_copy_strict,
-                                      self.enable_memory_cache_h2d_3d_batch_auto);
+                                      self.enable_memory_cache_h2d_3d_batch_auto,
+                                      self.enable_gpu_dma);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -657,6 +659,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                 c.memory_cache_h2d_copy_mode            = t[extra_start + 11].cast<std::string>();
                                 c.memory_cache_h2d_copy_strict          = t[extra_start + 12].cast<bool>();
                                 c.enable_memory_cache_h2d_3d_batch_auto = t[extra_start + 13].cast<bool>();
+                            }
+                            if (extra_count >= 15) {
+                                c.enable_gpu_dma = t[extra_start + 14].cast<bool>();
                             }
                         }
                     }

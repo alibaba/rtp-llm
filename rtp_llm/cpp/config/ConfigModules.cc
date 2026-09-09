@@ -141,6 +141,7 @@ std::string KVCacheConfig::to_string() const {
         << "memory_cache_h2d_copy_strict: " << memory_cache_h2d_copy_strict << "\n"
         << "enable_memory_cache_h2d_3d_batch_auto: " << enable_memory_cache_h2d_3d_batch_auto << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "enable_gpu_dma: " << enable_gpu_dma << "\n"
         << "write_cache_sync: " << write_cache_sync << "\n"
         << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
         << "enable_gpu_prefix_tree: " << enable_gpu_prefix_tree << "\n"

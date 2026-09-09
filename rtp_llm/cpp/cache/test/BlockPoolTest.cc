@@ -86,6 +86,22 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
 
 }  // namespace
 
+TEST_F(BlockPoolTest, GpuDmaSkipsHostPool) {
+    auto config = createTestConfig();
+    BlockPool pool(config, AllocationType::HOST, false, false, true);
+    ASSERT_TRUE(pool.init());
+    EXPECT_EQ(-1, pool.getGpuDmaBufFd());
+    EXPECT_EQ(config.total_size_bytes, pool.getTotalSizeBytes());
+}
+
+TEST_F(BlockPoolTest, GpuDmaDisabledDoesNotExport) {
+    auto config = createTestConfig();
+    BlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    EXPECT_EQ(-1, pool.getGpuDmaBufFd());
+    EXPECT_EQ(config.total_size_bytes, pool.getTotalSizeBytes());
+}
+
 // Initialization Test
 TEST_F(BlockPoolTest, ConstructorAndInit) {
     auto config = createTestConfig();

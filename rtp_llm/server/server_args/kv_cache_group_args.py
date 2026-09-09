@@ -31,6 +31,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="KV cache 预留 block 的百分比（仅对首次分配/空 batch_kv_resource 生效），用于保护正在运行的 stream 后续增量申请。",
     )
     kv_cache_group.add_argument(
+        "--enable_gpu_dma",
+        env_name="ENABLE_GPU_DMA",
+        bind_to=(kv_cache_config, "enable_gpu_dma"),
+        type=str2bool,
+        default=False,
+        help="导出 GPU KV pool 的 DMA-BUF 并注册到 PACE，启用 GPU direct 读取",
+    )
+    kv_cache_group.add_argument(
         "--enable_remote_cache",
         env_name="ENABLE_REMOTE_CACHE",
         bind_to=(kv_cache_config, "enable_remote_cache"),

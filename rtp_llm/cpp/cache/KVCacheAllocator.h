@@ -87,6 +87,10 @@ public:
         shared_block_cache_ = std::move(shared_block_cache);
     }
 
+    void setEnableGpuDma(bool enable_gpu_dma) {
+        enable_gpu_dma_ = enable_gpu_dma;
+    }
+
     void setUseCudaMallocBlockPool(bool use_cuda_malloc_block_pool) {
         use_cuda_malloc_block_pool_ = use_cuda_malloc_block_pool;
     }
@@ -149,6 +153,7 @@ protected:
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
     bool                               use_cuda_malloc_block_pool_ = false;
+    bool                               enable_gpu_dma_ = false;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};

@@ -26,7 +26,8 @@ public:
     BlockPool(const BlockPoolConfig& config,
               AllocationType         allocation_type         = AllocationType::DEVICE,
               bool                   use_pinned_cpu_backing  = false,
-              bool                   use_cuda_malloc_backing = false);
+              bool                   use_cuda_malloc_backing = false,
+              bool                   enable_gpu_dma = false);
     ~BlockPool();
 
     bool init();
@@ -74,6 +75,9 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
+    int getGpuDmaBufFd() const { return gpu_dmabuf_fd_; }
+    size_t getGpuDmaBufSize() const { return allocation_size_bytes_; }
+
     void* getBaseAddress() const {
         return cache_base_ptr_;
     }
@@ -91,6 +95,7 @@ private:
     // Helper functions for init()
     void validateConfig() const;
     void initializeCacheBuffer();
+    void exportGpuDmaBuf();
     void initializePinnedCpuBuffer(const char* log_context);
     void initializeCudaMallocBuffer();
     void initializeLayerMappings();
@@ -138,6 +143,9 @@ private:
     AllocationType allocation_type_;
     bool           use_pinned_cpu_backing_;
     bool           use_cuda_malloc_backing_;
+    bool           enable_gpu_dma_;
+    int            gpu_dmabuf_fd_ = -1;
+    size_t         allocation_size_bytes_ = 0;
 
     BlockCachePtr block_cache_;
 

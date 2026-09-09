@@ -41,6 +41,32 @@ private:
     inline static const std::vector<std::string>      init_addresses_ = {"init_address"};
 };
 
+TEST_F(ClientWrapperTest, gpu_memory_registration_passthrough) {
+    auto previous = std::move(ClientWrapper::transfer_client_);
+    auto mock = std::make_unique<kv_cache_manager::MockTransferClient>();
+    auto* ptr = mock.get();
+    ClientWrapper::transfer_client_ = std::move(mock);
+    kv_cache_manager::RegistSpan span;
+    span.fd = 7;
+    span.base = reinterpret_cast<void*>(0x10000);
+    span.size = 8192;
+    span.type = kv_cache_manager::MemoryType::GPU;
+    EXPECT_CALL(*ptr, RegisterGpuMemory(_)).WillOnce(Invoke([&](const kv_cache_manager::RegistSpan& actual) {
+        EXPECT_EQ(actual.fd, span.fd);
+        EXPECT_EQ(actual.base, span.base);
+        EXPECT_EQ(actual.size, span.size);
+        EXPECT_EQ(actual.type, span.type);
+        return kv_cache_manager::ER_OK;
+    }));
+    EXPECT_CALL(*ptr, DeregisterGpuMemory(span.fd)).WillOnce(Return(kv_cache_manager::ER_SDKDEREGISTER_ERROR));
+    EXPECT_TRUE(client_wrapper_->registerGpuMemory(span));
+    EXPECT_FALSE(client_wrapper_->deregisterGpuMemory(span.fd));
+    ClientWrapper::transfer_client_.reset();
+    EXPECT_FALSE(client_wrapper_->registerGpuMemory(span));
+    EXPECT_FALSE(client_wrapper_->deregisterGpuMemory(span.fd));
+    ClientWrapper::transfer_client_ = std::move(previous);
+}
+
 TEST_F(ClientWrapperTest, test_no_need_reinit) {
     EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _)).Times(0);
     EXPECT_CALL(*mock_subscriber_, getAddresses(_)).WillOnce(DoAll(SetArgReferee<0>(init_addresses_), Return(true)));

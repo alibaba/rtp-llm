@@ -20,6 +20,17 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_gpu_dma_config_survives_pickle(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["CHECKPOINT_PATH"] = "/path/to/checkpoint"
+        os.environ["ENABLE_GPU_DMA"] = "1"
+        sys.argv = ["prog"]
+        from rtp_llm.server.server_args import server_args
+
+        config = server_args.setup_args().kv_cache_config
+        self.assertTrue(config.enable_gpu_dma)
+        self.assertTrue(pickle.loads(pickle.dumps(config)).enable_gpu_dma)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

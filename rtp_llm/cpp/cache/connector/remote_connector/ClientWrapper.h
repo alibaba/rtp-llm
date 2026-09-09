@@ -41,6 +41,9 @@ public:
                      const kv_cache_manager::BlockMask& block_mask,
                      const kv_cache_manager::Locations& locations);
 
+    bool registerGpuMemory(const kv_cache_manager::RegistSpan& span);
+    bool deregisterGpuMemory(int fd);
+
     // for transfer client
     bool loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
                       kv_cache_manager::BlockBuffers&                             block_buffers,

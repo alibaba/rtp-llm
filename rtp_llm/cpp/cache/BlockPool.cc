@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -22,6 +23,7 @@
 
 #if USING_CUDA
 #include <cuda_runtime.h>
+#include <cuda.h>
 #endif
 
 namespace rtp_llm {
@@ -237,13 +239,18 @@ void markHostBlockPoolDontDump(void* ptr, size_t size) {
 BlockPool::BlockPool(const BlockPoolConfig& config,
                      AllocationType         allocation_type,
                      bool                   use_pinned_cpu_backing,
-                     bool                   use_cuda_malloc_backing):
+                     bool                   use_cuda_malloc_backing,
+                     bool                   enable_gpu_dma):
     config_(config),
     allocation_type_(allocation_type),
     use_pinned_cpu_backing_(use_pinned_cpu_backing),
-    use_cuda_malloc_backing_(use_cuda_malloc_backing) {}
+    use_cuda_malloc_backing_(use_cuda_malloc_backing),
+    enable_gpu_dma_(enable_gpu_dma) {}
 
 BlockPool::~BlockPool() {
+    if (gpu_dmabuf_fd_ >= 0) {
+        close(gpu_dmabuf_fd_);
+    }
     cache_aligned_buffer_ = torch::Tensor();
 }
 
@@ -268,6 +275,15 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
+    allocation_size_bytes_ = config_.total_size_bytes;
+    if (enable_gpu_dma_ && allocation_type_ == AllocationType::DEVICE && !use_pinned_cpu_backing_) {
+        const long page_size = sysconf(_SC_PAGESIZE);
+        RTP_LLM_CHECK_WITH_INFO(page_size > 0, "cannot query host page size for GPU DMA");
+        const size_t alignment = static_cast<size_t>(page_size);
+        RTP_LLM_CHECK_WITH_INFO(allocation_size_bytes_ <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) - alignment + 1,
+                                "GPU DMA allocation size overflow");
+        allocation_size_bytes_ = (allocation_size_bytes_ + alignment - 1) / alignment * alignment;
+    }
     cache_buffer_registered_host_ = false;
     if (allocation_type_ == AllocationType::HOST) {
         const bool pin_host_pool         = shouldPinHostBlockPool();
@@ -314,11 +330,14 @@ void BlockPool::initializeCacheBuffer() {
     } else if (use_cuda_malloc_backing_) {
         initializeCudaMallocBuffer();
     } else {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(allocation_size_bytes_)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
+    if (enable_gpu_dma_ && cache_aligned_buffer_.is_cuda()) {
+        exportGpuDmaBuf();
+    }
     const bool is_cuda   = cache_aligned_buffer_.is_cuda();
     const bool is_pinned = !is_cuda && (cache_buffer_registered_host_ || cache_aligned_buffer_.is_pinned());
     // REBASE CONFLICT CONTEXT(2413e8e03): keep the new base's pool-name/MB diagnostics
@@ -354,6 +373,28 @@ void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     }
 }
 
+void BlockPool::exportGpuDmaBuf() {
+#if USING_CUDA
+    const long page_size = sysconf(_SC_PAGESIZE);
+    RTP_LLM_CHECK_WITH_INFO(page_size > 0 && reinterpret_cast<uintptr_t>(cache_base_ptr_) % page_size == 0,
+                            "GPU DMA buffer must be host-page aligned, pool=%s, ptr=%p",
+                            config_.pool_name.c_str(), cache_base_ptr_);
+    CUdevice device;
+    int supported = 0;
+    CUresult ret = cuDeviceGet(&device, cache_aligned_buffer_.get_device());
+    RTP_LLM_CHECK_WITH_INFO(ret == CUDA_SUCCESS, "cuDeviceGet failed, ret=%d", static_cast<int>(ret));
+    ret = cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, device);
+    RTP_LLM_CHECK_WITH_INFO(ret == CUDA_SUCCESS && supported, "GPU DMA-BUF export unsupported, ret=%d", static_cast<int>(ret));
+    ret = cuMemGetHandleForAddressRange(&gpu_dmabuf_fd_, reinterpret_cast<CUdeviceptr>(cache_base_ptr_),
+                                       allocation_size_bytes_, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+    RTP_LLM_CHECK_WITH_INFO(ret == CUDA_SUCCESS && gpu_dmabuf_fd_ >= 0,
+                            "GPU DMA-BUF export failed, pool=%s, size=%zu, ret=%d",
+                            config_.pool_name.c_str(), allocation_size_bytes_, static_cast<int>(ret));
+#else
+    RTP_LLM_FAIL("GPU DMA requires a CUDA build");
+#endif
+}
+
 void BlockPool::initializeCudaMallocBuffer() {
 #if USING_CUDA
     RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::DEVICE,
@@ -367,7 +408,7 @@ void BlockPool::initializeCudaMallocBuffer() {
                             cudaGetErrorString(device_err));
 
     void*      ptr = nullptr;
-    const auto err = cudaMalloc(&ptr, config_.total_size_bytes);
+    const auto err = cudaMalloc(&ptr, allocation_size_bytes_);
     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
                             "cudaMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
                             config_.pool_name.c_str(),
@@ -389,7 +430,7 @@ void BlockPool::initializeCudaMallocBuffer() {
     };
     cache_aligned_buffer_ =
         torch::from_blob(ptr,
-                         {static_cast<int64_t>(config_.total_size_bytes)},
+                         {static_cast<int64_t>(allocation_size_bytes_)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
     // REBASE CONFLICT CONTEXT(2413e8e03): source branch added cudaMalloc backing for

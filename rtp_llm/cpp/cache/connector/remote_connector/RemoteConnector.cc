@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -172,6 +173,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  std::shared_ptr<KVCacheAllocator>         allocator,
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
+    allocator_(allocator),
     metrics_reporter_(metrics_reporter) {
     RemoteConnector::InitParams init_params{cache_config,
                                             kv_cache_config,
@@ -210,6 +212,11 @@ RemoteConnector::~RemoteConnector() {
         thread_pool_.reset();
     }
     broadcaster_.reset();
+    for (int fd : registered_gpu_fds_) {
+        if (!client_wrapper_->deregisterGpuMemory(fd)) {
+            RTP_LLM_LOG_ERROR("deregister GPU memory failed, fd=%d", fd);
+        }
+    }
 }
 
 std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,
@@ -393,6 +400,37 @@ bool RemoteConnector::init() {
     if (!client_wrapper_->init(client_config_map, client_init_params)) {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
+    }
+    if (init_params_->kv_cache_config.enable_gpu_dma) {
+        std::vector<BlockPoolPtr> pools;
+        if (auto hybrid = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(allocator_)) {
+            pools = hybrid->groupBlockPools();
+        } else {
+            pools.push_back(allocator_->getBlockPool());
+        }
+        for (const auto& pool : pools) {
+            if (!pool) {
+                RTP_LLM_LOG_ERROR("GPU DMA pool is missing");
+                return false;
+            }
+            if (pool->where() != MemoryType::MEMORY_GPU) {
+                continue;
+            }
+            if (pool->getGpuDmaBufFd() < 0) {
+                RTP_LLM_LOG_ERROR("GPU pool has no exported DMA-BUF");
+                return false;
+            }
+            kv_cache_manager::RegistSpan span;
+            span.base = pool->getBaseAddress();
+            span.size = pool->getGpuDmaBufSize();
+            span.fd = pool->getGpuDmaBufFd();
+            span.type = kv_cache_manager::MemoryType::GPU;
+            if (!client_wrapper_->registerGpuMemory(span)) {
+                RTP_LLM_LOG_ERROR("register GPU pool failed, fd=%d", span.fd);
+                return false;
+            }
+            registered_gpu_fds_.push_back(span.fd);
+        }
     }
     if (tp_rank == 0) {
         size_t thread_num = init_params_->kv_cache_config.reco_asyncwrapper_thread_num;

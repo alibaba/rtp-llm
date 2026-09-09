@@ -75,6 +75,8 @@ private:
 
 class MockTransferClient: public TransferClient {
 public:
+    MOCK_METHOD(ClientErrorCode, RegisterGpuMemory, (const RegistSpan& span), (override));
+    MOCK_METHOD(ClientErrorCode, DeregisterGpuMemory, (int fd), (override));
     MockTransferClient()           = default;
     ~MockTransferClient() override = default;
     MOCK_METHOD(ClientErrorCode,

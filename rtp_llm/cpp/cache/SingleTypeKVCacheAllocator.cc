@@ -79,7 +79,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
 
     pool_config = BlockPoolConfigHelper::createConfig(config_);
     block_pool_ = std::make_shared<BlockPool>(
-        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
+        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_, enable_gpu_dma_);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;

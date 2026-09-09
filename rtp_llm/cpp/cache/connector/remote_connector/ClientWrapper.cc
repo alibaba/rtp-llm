@@ -86,6 +86,14 @@ bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::In
     return true;
 }
 
+bool ClientWrapper::registerGpuMemory(const kv_cache_manager::RegistSpan& span) {
+    return transfer_client_ && transfer_client_->RegisterGpuMemory(span) == kv_cache_manager::ER_OK;
+}
+
+bool ClientWrapper::deregisterGpuMemory(int fd) {
+    return transfer_client_ && transfer_client_->DeregisterGpuMemory(fd) == kv_cache_manager::ER_OK;
+}
+
 bool ClientWrapper::initMetaClient(const std::string& unique_id, RemoteConnectorConfigPtr config) {
     RTP_LLM_LOG_INFO(
         "kvcm unique_id [%s], init config [%s]", unique_id.c_str(), autil::legacy::ToJsonString(config).c_str());

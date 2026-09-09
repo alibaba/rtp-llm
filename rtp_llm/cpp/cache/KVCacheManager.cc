@@ -211,6 +211,10 @@ bool KVCacheManager::init() {
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
     }
 
+    RTP_LLM_CHECK_WITH_INFO(!kv_cache_config_.enable_gpu_dma || kv_cache_config_.enable_remote_cache,
+                            "enable_gpu_dma requires enable_remote_cache");
+    allocator_->setEnableGpuDma(kv_cache_config_.enable_gpu_dma);
+
     if (use_cuda_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
         allocator_->setUseCudaMallocBlockPool(true);

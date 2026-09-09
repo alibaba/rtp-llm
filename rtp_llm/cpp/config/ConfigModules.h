@@ -180,6 +180,7 @@ struct KVCacheConfig {
     bool        memory_cache_h2d_copy_strict              = false;
     bool        enable_memory_cache_h2d_3d_batch_auto     = false;
     bool        enable_remote_cache                       = false;
+    bool        enable_gpu_dma                            = false;
     bool    write_cache_sync                             = false;
     bool    enable_tiered_memory_cache                   = false;
     bool    enable_gpu_prefix_tree                       = true;
