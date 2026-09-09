@@ -354,9 +354,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
+            const bool tiered_remote_eviction = resource_context_.enable_memory_cache_remote_eviction;
             storeCacheAsync(batch_kv_cache_resource_,
                             reuseCache() && enableMemoryCache() && !enableTieredMemoryCache(),
-                            reuseCache() && enableRemoteCache());
+                            reuseCache() && enableRemoteCache() && !tiered_remote_eviction);
             // only evict when succeeds
             if (enableTieredMemoryCache()) {
                 evictDeviceCacheToMemory();
