@@ -425,12 +425,31 @@ class KimiK3LatentMoE(nn.Module):
         # whose previous MegaMoE kernel finishes early must not overwrite that
         # buffer while peers are still consuming it, so rendezvous before pack.
         self._maybe_pre_kernel_barrier(routed_input.device, token_count)
+        record_module(
+            self,
+            "dispatch.input",
+            {
+                "hidden_states": routed_input,
+                "expert_ids": expert_ids,
+                "routing_weights": routing_weights,
+            },
+        )
         self._mega_input_packer.pack(
             routed_input,
             routing_weights,
             expert_ids,
             self._mega_buf,
             token_count,
+        )
+        record_module(
+            self,
+            "dispatch.packed",
+            {
+                "x": self._mega_buf.x[:token_count],
+                "x_sf": self._mega_buf.x_sf[:token_count],
+                "expert_ids": self._mega_buf.topk_idx[:token_count],
+                "routing_weights": self._mega_buf.topk_weights[:token_count],
+            },
         )
         # Packing is rank-local but the peer kernel consumes every rank's
         # symmetric buffer.  Rendezvous again after pack so no rank launches
@@ -451,6 +470,7 @@ class KimiK3LatentMoE(nn.Module):
             ),
             fast_math=True,
         )
+        record_module(self, "dispatch.output", output)
         return output
 
     def _maybe_pre_kernel_barrier(
