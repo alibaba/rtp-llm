@@ -1,5 +1,20 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+
+cc_library(
+    name = "ppu_silu_mul_mxfp4_op",
+    srcs = ["PpuSiluMulMxfp4Op.cc"],
+    hdrs = ["PpuSiluMulMxfp4Op.h"],
+    copts = cuda_copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/common:common",
+        "//rtp_llm/models_py/bindings/ppu/kernels:ppu_silu_mul_mxfp4",
+    ] + torch_deps(),
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
 
 cc_library(
     name = "no_block_copy",
@@ -31,6 +46,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         ":no_block_copy",
+        ":ppu_silu_mul_mxfp4_op",
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,

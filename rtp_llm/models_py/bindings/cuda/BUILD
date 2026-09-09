@@ -180,11 +180,6 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/kernels:user_buffers",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
-        "@//:using_ppu": [
-            "//rtp_llm/models_py/bindings/cuda/kernels:ppu_silu_mul_mxfp4",
-        ],
-        "//conditions:default": [],
-    }) + select({
         # topk_v3's cluster-launch kernels need cooperative_groups::this_cluster,
         # which the PPU toolkit lacks; python indexer.py degrades via hasattr.
         "@//:using_ppu": [],

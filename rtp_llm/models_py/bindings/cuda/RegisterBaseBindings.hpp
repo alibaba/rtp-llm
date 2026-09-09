@@ -18,9 +18,6 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
-#ifdef USE_PPU
-#include "rtp_llm/models_py/bindings/cuda/PpuSiluMulMxfp4Op.h"
-#endif
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
@@ -69,19 +66,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("output"),
                   py::arg("input"),
                   py::arg("cuda_stream") = 0);
-
-#ifdef USE_PPU
-    rtp_ops_m.def("ppu_silu_and_mul_post_quant_mxfp4",
-                  [](torch::Tensor gate_up, py::object swiglu_limit) {
-                      const bool apply_swiglu_limit = !swiglu_limit.is_none();
-                      const double limit = apply_swiglu_limit ? swiglu_limit.cast<double>() : 0.0;
-                      return rtp_llm::PpuSiluAndMulPostQuantMxfp4(
-                          gate_up, limit, apply_swiglu_limit);
-                  },
-                  "PPU fused SwiGLU and compact MXFP4 quantization",
-                  py::arg("gate_up"),
-                  py::arg("swiglu_limit") = py::none());
-#endif
 
     rtp_ops_m.def("fused_qk_rmsnorm",
                   &FusedQKRMSNorm,

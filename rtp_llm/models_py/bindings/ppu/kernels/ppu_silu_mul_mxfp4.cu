@@ -8,7 +8,7 @@
 // Modifications: removed TVM/JIT host wrapper and exposed an RTP AOT launcher.
 // The device quantization algorithm and PPU instructions remain Apache-2.0.
 
-#include "rtp_llm/models_py/bindings/cuda/kernels/ppu_silu_mul_mxfp4.h"
+#include "rtp_llm/models_py/bindings/ppu/kernels/ppu_silu_mul_mxfp4.h"
 
 #include <algorithm>
 #include <cmath>

@@ -4,13 +4,13 @@ import pathlib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
-CUDA = ROOT / "rtp_llm/models_py/bindings/cuda"
-KERNEL = CUDA / "kernels/ppu_silu_mul_mxfp4.cu"
-HEADER = CUDA / "kernels/ppu_silu_mul_mxfp4.h"
-NOTICE = CUDA / "kernels/ppu_silu_mul_mxfp4.NOTICE"
-OP = CUDA / "PpuSiluMulMxfp4Op.cc"
-REGISTER = CUDA / "RegisterBaseBindings.hpp"
-KERNEL_BUILD = CUDA / "kernels/BUILD"
+PPU = ROOT / "rtp_llm/models_py/bindings/ppu"
+KERNEL = PPU / "kernels/ppu_silu_mul_mxfp4.cu"
+HEADER = PPU / "kernels/ppu_silu_mul_mxfp4.h"
+NOTICE = PPU / "kernels/ppu_silu_mul_mxfp4.NOTICE"
+OP = PPU / "PpuSiluMulMxfp4Op.cc"
+REGISTER = PPU / "RegisterPpuOps.cc"
+KERNEL_BUILD = PPU / "kernels/BUILD"
 
 class PpuSiluMulMxfp4SourceTest(unittest.TestCase):
     def test_frozen_apache_provenance(self):
