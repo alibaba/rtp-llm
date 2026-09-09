@@ -285,15 +285,12 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)
 
-    def test_output_allocation_tracks_padding_write_capability(self):
+    def test_output_is_zero_initialized_independent_of_aiter_capability(self):
         kwargs = _make_decode_kwargs(batch=2)
         original_empty = torch.empty
         original_zeros = torch.zeros
 
-        for zeroes_invalid_output, expected_allocator in (
-            (False, "zeros"),
-            (True, "empty"),
-        ):
+        for zeroes_invalid_output in (False, True):
             with self.subTest(zeroes_invalid_output=zeroes_invalid_output):
                 flydsl_decode = _mock_flydsl_decode()
                 if zeroes_invalid_output:
@@ -308,8 +305,17 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
                 ):
                     _call_mock_decode(kwargs, flydsl_decode)
 
-                self.assertEqual(empty.call_count, expected_allocator == "empty")
-                self.assertEqual(zeros.call_count, expected_allocator == "zeros")
+                empty.assert_not_called()
+                zeros.assert_called_once_with(
+                    kwargs["v"].shape,
+                    dtype=kwargs["v"].dtype,
+                    device=kwargs["v"].device,
+                )
+                # A no-op backend emulates skipped rows in the old wheel.
+                output = flydsl_decode.call_args.kwargs["out"]
+                torch.testing.assert_close(
+                    output, torch.zeros_like(output), rtol=0, atol=0
+                )
 
     def test_host_validation_accepts_padding_and_rejects_invalid_real_row(self):
         device_block_map = torch.tensor(
@@ -1093,6 +1099,9 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
             host_block_map,
         )
 
+        # Poison the captured output to verify replay clears skipped rows,
+        # rather than only relying on initialization during capture.
+        graph_output.fill_(float("nan"))
         graph.replay()
         torch.cuda.synchronize()
 
@@ -1101,6 +1110,9 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
         self.assertEqual(invalid_flags.cpu().tolist(), [0, 0])
         self.assertEqual(read_indices[1].item(), -1)
         self.assertEqual(write_indices[1].item(), -1)
+        torch.testing.assert_close(
+            graph_output[1], torch.zeros_like(graph_output[1]), rtol=0, atol=0
+        )
         torch.testing.assert_close(graph_output, eager_output, rtol=0, atol=0)
         torch.testing.assert_close(graph_state, eager_state, rtol=0, atol=0)
         self.assertEqual(graph_output[1].count_nonzero().item(), 0)
