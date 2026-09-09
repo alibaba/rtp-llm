@@ -1,0 +1,492 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: batch_ack_and_execution
+profiles:
+- batch-window
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 10000
+    request_timeout_ms: 30000
+execution:
+  timeout_s: 600
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+variants:
+- id: ack_partial
+  program: ack_partial
+  metadata:
+    findings:
+    - transient_policy.contract
+- id: execution_partial
+  program: execution_partial
+- id: ack_multi_error
+  program: ack_multi_error
+- id: ack_drop
+  program: ack_drop
+  metadata:
+    findings:
+    - quarantine_eventually_drains.contract
+metadata:
+  description: Preserve separate ACK, member-execution, cleanup and recovery boundaries.
+  category: status
+  tags:
+  - protocol
+  - migration
+parameters:
+  ack_partial:
+    setup_timeout_s: 180
+    ledger_cohort:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: deferred
+    ledger_before_timeout_s: 30
+    ledger_before:
+      duration_s: 0
+    partial_on:
+      fault: enqueue_ack_partial_fail
+      config:
+        k: 1
+      enabled: true
+      role: prefill
+    ledger_dispatch_timeout_s: 75
+    ledger_window_timeout_s: 30
+    ledger_window:
+      duration_s: 8
+    failed_member_released_promptly:
+      metric: prefill_requests
+      op: le
+      expected: 3
+      aggregate: max
+    partial_off:
+      fault: enqueue_ack_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+    ledger_drained_timeout_s: 45
+    ledger_drained:
+      duration_s: 30
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    ledger_drained_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    ledger_drained_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    ledger_drained_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    transient_cohort:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+    transient_before_timeout_s: 30
+    transient_before:
+      duration_s: 0
+    transient_partial_on:
+      fault: enqueue_ack_partial_fail
+      config:
+        k: 1
+      enabled: true
+      role: prefill
+    transient_code_on:
+      fault: enqueue_ack_error_code
+      config:
+        code: 13
+      enabled: true
+      role: prefill
+    transient_dispatch_timeout_s: 75
+    transient_wait_timeout_s: 75
+    transient_partial_off:
+      fault: enqueue_ack_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+    transient_code_off:
+      fault: enqueue_ack_error_code
+      config: {}
+      enabled: false
+      role: prefill
+    transient_policy:
+      timeout_or_success: true
+    transient_retry_window_timeout_s: 30
+    transient_retry_window:
+      duration_s: 3
+    permanent_cohort:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      expected_rpc_statuses: []
+    permanent_before_timeout_s: 30
+    permanent_before:
+      duration_s: 0
+    permanent_partial_on:
+      fault: enqueue_ack_partial_fail
+      config:
+        k: 1
+      enabled: true
+      role: prefill
+    permanent_code_on:
+      fault: enqueue_ack_error_code
+      config:
+        code: 8431
+      enabled: true
+      role: prefill
+    permanent_dispatch_timeout_s: 75
+    permanent_wait_timeout_s: 75
+    permanent_partial_off:
+      fault: enqueue_ack_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+    permanent_code_off:
+      fault: enqueue_ack_error_code
+      config: {}
+      enabled: false
+      role: prefill
+    permanent_member_isolation:
+      success_min: 2
+      failure_min: 1
+      failure_max: 2
+      error_code: 8431
+    permanent_member_isolation_phase:
+      failure_phase: schedule
+    permanent_after_timeout_s: 30
+    permanent_after:
+      duration_s: 0
+    permanent_dispatch_nonempty:
+      metric: prefill_enqueue_rpc
+      op: ge
+      expected: 1
+      aggregate: last
+    permanent_no_retry:
+      metric: prefill_enqueue_rpc
+      op: le
+      expected: 2
+      aggregate: last
+    final_drained_timeout_s: 45
+    final_drained:
+      duration_s: 30
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    final_drained_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    final_drained_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    final_drained_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  execution_partial:
+    setup_timeout_s: 180
+    normal_cohort:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    normal_fail_on:
+      fault: prefill_async_partial_fail
+      config:
+        k: 1
+        code: 8500
+      enabled: true
+      role: prefill
+    normal_dispatch_timeout_s: 75
+    normal_wait_timeout_s: 75
+    normal_fail_off:
+      fault: prefill_async_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+    normal_execution_terminal:
+      success_min: 2
+      failure_min: 1
+      failure_max: 2
+      error_code: 8500
+    normal_execution_terminal_phase:
+      failure_phase: execution
+    normal_drained_timeout_s: 135
+    normal_drained:
+      duration_s: 120
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    normal_drained_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    normal_drained_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    normal_drained_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    late_terminal_window_timeout_s: 30
+    late_terminal_window:
+      duration_s: 3
+    no_resurrection:
+      metric: fingerprint
+      op: eq
+      expected: true
+      aggregate: last
+    healthy_recovery:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    healthy_recovery_dispatch_timeout_s: 75
+    healthy_recovery_wait_timeout_s: 75
+    healthy_recovery_success:
+      success_min: 4
+      failure_max: 0
+    serial_perf:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
+    serial_cohort:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    serial_fail_on:
+      fault: prefill_async_partial_fail
+      config:
+        k: 1
+        code: 8500
+      enabled: true
+      role: prefill
+    serial_dispatch_timeout_s: 75
+    serial_wait_timeout_s: 75
+    serial_fail_off:
+      fault: prefill_async_partial_fail
+      config: {}
+      enabled: false
+      role: prefill
+    serial_perf_restore:
+      prefill_fixed_ms: 100
+      restore_prefill_fixed_ms: 100
+    serial_execution_terminal:
+      success_min: 2
+      failure_min: 1
+      failure_max: 2
+      error_code: 8500
+    serial_execution_terminal_phase:
+      failure_phase: execution
+    serial_drained_timeout_s: 135
+    serial_drained:
+      duration_s: 120
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    serial_drained_scheduler:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    serial_drained_prefill_batches:
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
+    serial_drained_decode_load:
+      metric: decode_total_load
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  ack_multi_error:
+    setup_timeout_s: 180
+    code_8431_cohort:
+      count: 2
+      concurrency: 2
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    code_8431_on:
+      fault: enqueue_ack_error_code
+      config:
+        code: 8431
+      enabled: true
+      role: prefill
+    code_8431_dispatch_timeout_s: 75
+    code_8431_wait_timeout_s: 75
+    code_8431_off:
+      fault: enqueue_ack_error_code
+      config: {}
+      enabled: false
+      role: prefill
+    code_8431_passthrough:
+      failure_min: 2
+      failure_max: 2
+      error_code: 8431
+    code_8431_passthrough_phase:
+      failure_phase: schedule
+    code_8510_cohort:
+      count: 2
+      concurrency: 2
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+    code_8510_on:
+      fault: enqueue_ack_error_code
+      config:
+        code: 8510
+      enabled: true
+      role: prefill
+    code_8510_dispatch_timeout_s: 75
+    code_8510_wait_timeout_s: 75
+    code_8510_off:
+      fault: enqueue_ack_error_code
+      config: {}
+      enabled: false
+      role: prefill
+    code_8510_passthrough:
+      failure_min: 2
+      failure_max: 2
+      error_code: 8510
+    code_8510_passthrough_phase:
+      failure_phase: schedule
+    failed_batches_drained_timeout_s: 30
+    failed_batches_drained:
+      duration_s: 15
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    failed_scheduler_drained:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    no_retry_window_timeout_s: 30
+    no_retry_window:
+      duration_s: 3
+    no_resurrection:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last
+  ack_drop:
+    setup_timeout_s: 180
+    uncertain_cohort:
+      count: 4
+      concurrency: 4
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      expected_rpc_statuses:
+      - DEADLINE_EXCEEDED
+      observe_schedule_future_terminal: true
+    drop_on:
+      fault: enqueue_ack_drop
+      config: {}
+      enabled: true
+      role: prefill
+    uncertain_dispatch_timeout_s: 75
+    uncertain_wait_timeout_s: 75
+    drop_off:
+      fault: enqueue_ack_drop
+      config: {}
+      enabled: false
+      role: prefill
+    fence_bound_timeout_s: 35
+    fence_bound:
+      duration_s: 20
+      until:
+        metric: scheduler
+        op: le
+        value: 4
+    fence_residue_bounded:
+      metric: scheduler
+      op: le
+      expected: 4
+      aggregate: last
+    fence_window_timeout_s: 30
+    fence_window:
+      duration_s: 8
+    fence_residue_non_growing:
+      metric: scheduler
+      op: le
+      expected: 0
+      aggregate: last
+    ttl_window_timeout_s: 110
+    ttl_window:
+      duration_s: 95
+      until:
+        metric: scheduler
+        op: eq
+        value: 0
+    quarantine_eventually_drains:
+      metric: scheduler
+      op: eq
+      expected: 0
+      aggregate: last
+    final_health_timeout_s: 30
+    final_health:
+      duration_s: 0
+    master_http_200:
+      metric: master_http
+      op: eq
+      expected: 200
+      aggregate: last

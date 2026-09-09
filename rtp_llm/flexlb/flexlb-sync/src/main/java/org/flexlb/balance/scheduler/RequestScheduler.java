@@ -9,6 +9,8 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.debug.DebugPage;
+import org.flexlb.debug.DebugQuery;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -162,6 +164,12 @@ public final class RequestScheduler {
             }
         }
         return (int) queued;
+    }
+
+    public DebugPage debugQueueSnapshot(DebugQuery query) {
+        return globalQueue == null
+                ? DebugPage.unavailable("component_locked", "not_applicable", System.currentTimeMillis())
+                : globalQueue.debugSnapshot(query);
     }
 
     public List<RequestState> snapshotActiveRequests() {

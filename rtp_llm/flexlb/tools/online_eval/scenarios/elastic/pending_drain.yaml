@@ -1,0 +1,128 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: elastic_pending_drain
+profiles:
+- batch-window
+- single-batch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+    max_inflight_per_prefill_worker: 2
+execution:
+  timeout_s: 1200
+  stage_timeout_s: 40
+  cleanup_timeout_s: 120
+variants:
+- id: legacy_terminal
+  profiles:
+  - batch-window
+  program: legacy_terminal
+- id: zero_errors
+  profiles:
+  - batch-window
+  program: zero_errors
+- id: single_batch_terminal
+  profiles:
+  - single-batch
+  program: single_batch_terminal
+metadata:
+  description: Private pending-wave scale-in; legacy visible terminals and an explicit stronger all-issued
+    zero-error variant.
+  category: elastic
+  requires:
+  - enqueue_batch
+  estimated_duration_s: 120
+parameters:
+  legacy_terminal:
+    setup_timeout_s: 180
+    slow_both_prefills:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 8000
+    perf_sync:
+      seconds: 1.5
+    wave_timeout_s: 450
+    remove_timeout_s: 110
+    collect_timeout_s: 100
+    accounting_timeout_s: 60
+    restore_survivor:
+      operation: set_perf
+      targets:
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    recovery_timeout_s: 100
+    topology_timeout_s: 35
+    topology:
+      role: PREFILL
+      discovered: 1
+      alive: 1
+      present: false
+  zero_errors:
+    setup_timeout_s: 180
+    slow_both_prefills:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 8000
+    perf_sync:
+      seconds: 1.5
+    wave_timeout_s: 450
+    remove_timeout_s: 110
+    collect_timeout_s: 100
+    accounting_timeout_s: 60
+    restore_survivor:
+      operation: set_perf
+      targets:
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    recovery_timeout_s: 100
+    topology_timeout_s: 35
+    topology:
+      role: PREFILL
+      discovered: 1
+      alive: 1
+      present: false
+    all_issued_zero_errors:
+      min_success_rate: 1.0
+  single_batch_terminal:
+    setup_timeout_s: 180
+    slow_both_prefills:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 8000
+    perf_sync:
+      seconds: 1.5
+    wave_timeout_s: 450
+    remove_timeout_s: 110
+    collect_timeout_s: 100
+    accounting_timeout_s: 60
+    restore_survivor:
+      operation: set_perf
+      targets:
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    recovery_timeout_s: 100
+    topology_timeout_s: 35
+    topology:
+      role: PREFILL
+      discovered: 1
+      alive: 1
+      present: false

@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "method": "baseline-only Wilson lower / Poisson upper / empirical holder maximum",
+  "topologies": {
+    "single-batch/p2": {
+      "parameters": {
+        "calibration_runs": 3,
+        "hit_strict": 0.962367,
+        "eviction_strict": 0.126957,
+        "holders_strict": 1,
+        "hit_normal": 0.939481,
+        "eviction_normal": 0.165174,
+        "holders_normal": 1,
+        "hit_loose": 0.885854,
+        "eviction_loose": 0.253913,
+        "holders_loose": 1
+      },
+      "runs": 3,
+      "baseline_windows": 9,
+      "baseline_requests": 42,
+      "baseline_hits": 42,
+      "baseline_seconds": 18.136781658278778,
+      "baseline_evictions": 0,
+      "workload": {
+        "hot_blocks": 10,
+        "background_blocks": 4,
+        "receiver_retention_blocks": 6,
+        "concurrency": 128,
+        "background_every": 8,
+        "normal_ms": 100,
+        "slow_ms": 15000,
+        "window_s": 2,
+        "baseline_windows": 3,
+        "saturation_windows": 6,
+        "recovery_windows": 10,
+        "recovery_consecutive": 2,
+        "require_insufficient_retention": 1,
+        "interval_s": 0.15,
+        "steady_interval_s": 0.4,
+        "min_busy_share": 0.9
+      },
+      "samples": [
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r1/cases/lane0/part0-yaml/instances/instance-121d096a11d41804c5014c77ab98d131bf8c0c9523d34f4bbbeac8e3fd24ff82/cache-storm-summary.json",
+          "sha256": "893cda081a40d005c4fcb9968cfbb269ac959f4900ac7024219b5242dd8672b0"
+        },
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r2/cases/lane0/part0-yaml/instances/instance-121d096a11d41804c5014c77ab98d131bf8c0c9523d34f4bbbeac8e3fd24ff82/cache-storm-summary.json",
+          "sha256": "21978e242555e4ba21c4f275a70bed71dbcd317b8a1cf9dbf5b8a60227be58e8"
+        },
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r3/cases/lane0/part0-yaml/instances/instance-121d096a11d41804c5014c77ab98d131bf8c0c9523d34f4bbbeac8e3fd24ff82/cache-storm-summary.json",
+          "sha256": "82bcb72b95a1d5e283873dbbcc4931cc241740f1e73a82648ff0af99e2dc4059"
+        }
+      ]
+    },
+    "single-batch/p3": {
+      "parameters": {
+        "calibration_runs": 3,
+        "hit_strict": 0.962367,
+        "eviction_strict": 0.127133,
+        "holders_strict": 1,
+        "hit_normal": 0.939481,
+        "eviction_normal": 0.165404,
+        "holders_normal": 1,
+        "hit_loose": 0.885854,
+        "eviction_loose": 0.254267,
+        "holders_loose": 1
+      },
+      "runs": 3,
+      "baseline_windows": 9,
+      "baseline_requests": 42,
+      "baseline_hits": 42,
+      "baseline_seconds": 18.111561045749113,
+      "baseline_evictions": 0,
+      "workload": {
+        "hot_blocks": 10,
+        "background_blocks": 4,
+        "receiver_retention_blocks": 6,
+        "concurrency": 128,
+        "background_every": 8,
+        "normal_ms": 100,
+        "slow_ms": 15000,
+        "window_s": 2,
+        "baseline_windows": 3,
+        "saturation_windows": 6,
+        "recovery_windows": 10,
+        "recovery_consecutive": 2,
+        "require_insufficient_retention": 1,
+        "interval_s": 0.15,
+        "steady_interval_s": 0.4,
+        "min_busy_share": 0.9
+      },
+      "samples": [
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r1/cases/lane0/part0-yaml/instances/instance-e507f252b637f6bfa4510f8ba902ef6570dd3ff5da28e08bdf90bb2ea63046e1/cache-storm-summary.json",
+          "sha256": "8e6e96d9829aec9b093ba913dd734203d022d3a709d3df30ea7b8ec172184220"
+        },
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r2/cases/lane0/part0-yaml/instances/instance-e507f252b637f6bfa4510f8ba902ef6570dd3ff5da28e08bdf90bb2ea63046e1/cache-storm-summary.json",
+          "sha256": "4d36f868e8de03bfbb9bfb0e7a0c1cee896405ec18473718096c82a69fd925b8"
+        },
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r3/cases/lane0/part0-yaml/instances/instance-e507f252b637f6bfa4510f8ba902ef6570dd3ff5da28e08bdf90bb2ea63046e1/cache-storm-summary.json",
+          "sha256": "f9349d55ac5cdba08d8bfedf4330d79a1201b6d62e7cac331c7e79767a74ac8d"
+        }
+      ]
+    },
+    "single-batch/p4": {
+      "parameters": {
+        "calibration_runs": 3,
+        "hit_strict": 0.962367,
+        "eviction_strict": 0.126818,
+        "holders_strict": 1,
+        "hit_normal": 0.939481,
+        "eviction_normal": 0.164994,
+        "holders_normal": 1,
+        "hit_loose": 0.885854,
+        "eviction_loose": 0.253636,
+        "holders_loose": 1
+      },
+      "runs": 3,
+      "baseline_windows": 9,
+      "baseline_requests": 42,
+      "baseline_hits": 42,
+      "baseline_seconds": 18.156584372045472,
+      "baseline_evictions": 0,
+      "workload": {
+        "hot_blocks": 10,
+        "background_blocks": 4,
+        "receiver_retention_blocks": 6,
+        "concurrency": 128,
+        "background_every": 8,
+        "normal_ms": 100,
+        "slow_ms": 15000,
+        "window_s": 2,
+        "baseline_windows": 3,
+        "saturation_windows": 6,
+        "recovery_windows": 10,
+        "recovery_consecutive": 2,
+        "require_insufficient_retention": 1,
+        "interval_s": 0.15,
+        "steady_interval_s": 0.4,
+        "min_busy_share": 0.9
+      },
+      "samples": [
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r1/cases/lane0/part0-yaml/instances/instance-9be16e59a70e1a9d8188b5263f5ccf32dfeec5ada892c0013f37ef65b6e5e045/cache-storm-summary.json",
+          "sha256": "b74ace82c127126663f2e60cc2b5652f146bd6d34eed1f64ce8fdf7f74fdf417"
+        },
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r2/cases/lane0/part0-yaml/instances/instance-9be16e59a70e1a9d8188b5263f5ccf32dfeec5ada892c0013f37ef65b6e5e045/cache-storm-summary.json",
+          "sha256": "f05aa96a25d1dc970acd6ac410c8f7bd4fc157247669aab63d765b6484a9b0a0"
+        },
+        {
+          "path": "/data3/wuran.wzy/flexlb/runs/case_hot_storm_20260908_163306/calibration-final-r3/cases/lane0/part0-yaml/instances/instance-9be16e59a70e1a9d8188b5263f5ccf32dfeec5ada892c0013f37ef65b6e5e045/cache-storm-summary.json",
+          "sha256": "e085a51fdf0b92848e621a86d1ab78e7cc8361cad7d63755b99cad34119a5727"
+        }
+      ]
+    }
+  }
+}

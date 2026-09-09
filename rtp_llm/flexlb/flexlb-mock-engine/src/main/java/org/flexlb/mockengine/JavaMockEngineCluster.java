@@ -26,6 +26,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -287,11 +288,10 @@ public final class JavaMockEngineCluster {
                 ? EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                 : EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
         // Per-role KV pool sizing (capacity model v2): the pool is sized in
-        // blocks — ceil(totalKvTokens/spb), or the --prefill-cache-blocks/
-        // --decode-cache-blocks override (legacy flags repurposed from
-        // key-count caps to pool-size overrides so the load scripts keep
-        // working unchanged) — and the REPORTED token capacity always equals
-        // the pool actually built (totalBlocks x spb).
+        // blocks — ceil(totalKvTokens/spb), or the --prefill-kv-pool-blocks/
+        // --decode-kv-pool-blocks override — and the REPORTED
+        // token capacity always equals the pool actually built (totalBlocks
+        // x spb).
         long roleTotalKvTokens = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillTotalKvTokens : config.decodeTotalKvTokens;
         int blocksOverride = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
@@ -305,7 +305,7 @@ public final class JavaMockEngineCluster {
         // (totalBlocks x blockSize), and every reporting surface here
         // (getCacheStatus.totalKvCache / getWorkerStatus.totalKvCache /
         // /snapshot total_kv_tokens) derives from this one value.  Passing
-        // the raw config token number while a --*-cache-blocks override
+        // the raw config token number while a --*-kv-pool-blocks override
         // shrinks the pool left the master computing used = total -
         // available ~= 99.9% on a 4-block decode pool -> every decode
         // engine read as KV-full and the whole KV family structurally
@@ -318,6 +318,8 @@ public final class JavaMockEngineCluster {
                 services, scheduler, performance, totalBlocks, stats,
                 poolTotalKvTokens, config.decodeMaxConcurrency);
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
+        service.setAutoFetch(config.autoFetch);
+        service.setFetchAttachTimeoutMs(config.fetchAttachTimeoutMs);
         services.put(grpcPort, service);
         try {
             Server server = NettyServerBuilder.forPort(grpcPort)
@@ -572,26 +574,22 @@ public final class JavaMockEngineCluster {
          *  3-strike retire scale. */
         static final long CRASH_PORT_KILL_DELAY_MS = 200L;
         /**
-         * Default completion backlog retain window (records), overridable via
-         * env {@code MOCK_COMPLETION_RETAIN_WINDOW}. The window must
-         * comfortably exceed a 20ms poller's lag: with two masters polling
-         * independently (dual-flexlb HA) each only ever trails by its own
-         * poll cadence, orders of magnitude inside the window, so neither
-         * loses backlog. Memory stays bounded: engines × window ×
-         * per-record bytes.
+         * Real-engine finished capacity: 1000 records, oldest first. Each
+         * consumer retains its own cursor; records evicted before it polls
+         * are permanently lost. Override with MOCK_COMPLETION_RETAIN_WINDOW.
          */
         static final int DEFAULT_COMPLETION_RETAIN_WINDOW = readCompletionRetainWindow();
 
         /**
          * Reads {@code MOCK_COMPLETION_RETAIN_WINDOW} (non-negative int); a
-         * malformed value falls back to 1024 — a load-test tool stays robust
+         * malformed value falls back to 1000 — a load-test tool stays robust
          * on config typos instead of failing the run (same discipline as
          * JavaLoadClient's PRIORITY sanitization).
          */
         private static int readCompletionRetainWindow() {
             String val = System.getenv("MOCK_COMPLETION_RETAIN_WINDOW");
             if (val == null || val.isEmpty()) {
-                return 1024;
+                return 1000;
             }
             try {
                 int parsed = Integer.parseInt(val);
@@ -601,14 +599,14 @@ public final class JavaMockEngineCluster {
                     // starving every consumer — degrade to the default
                     // instead, same as a malformed value.
                     System.err.println("invalid MOCK_COMPLETION_RETAIN_WINDOW=" + val
-                            + " (must be a non-negative int); falling back to 1024");
-                    return 1024;
+                            + " (must be a non-negative int); falling back to 1000");
+                    return 1000;
                 }
                 return parsed;
             } catch (NumberFormatException e) {
                 System.err.println("invalid MOCK_COMPLETION_RETAIN_WINDOW=" + val
-                        + " (must be a non-negative int); falling back to 1024");
-                return 1024;
+                        + " (must be a non-negative int); falling back to 1000");
+                return 1000;
             }
         }
 
@@ -748,7 +746,7 @@ public final class JavaMockEngineCluster {
         // observing — these count the regrouped batches this engine actually
         // ran (not the master-composed batches that arrived). Mirrors the
         // cluster-level ClusterStats batch counters, but per-engine so
-        // /snapshot consumers (flexlb_ft cases, canvas batch-caliber checks)
+        // /snapshot consumers (flexlb_test_framework cases, canvas batch-caliber checks)
         // see one engine's own batch composition without cross-engine
         // contamination in shared-stats topologies.
         private final LongAdder prefillBatchesExecuted = new LongAdder();
@@ -872,17 +870,27 @@ public final class JavaMockEngineCluster {
          * remove entries — each flexlb instance keeps an independent
          * per-worker cursor, so the earliest poller must not destroy records
          * a slower consumer has not read yet. Bounded by the retain window
-         * ({@link #completionRetainWindow}) trimmed in {@link #periodicCleanup()}.
+         * ({@link #completionRetainWindow}) enforced on every insertion.
          */
-        private final ConcurrentLinkedQueue<VersionedTask> completions = new ConcurrentLinkedQueue<>();
+        private final ArrayDeque<VersionedTask> completions = new ArrayDeque<>();
         /**
          * Publishes completion records and their cursor as one ordered operation.
          * A status reader must never observe a latest version whose record has
          * not yet been inserted, otherwise advancing its cursor loses that
          * completion permanently.
          */
-        private final Object completionLock = new Object();
-        private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks = new ConcurrentHashMap<>();
+        // All map mutations take the same monitor as completion publication
+        // and status snapshots. Queue locks may precede this monitor; never
+        // call queue/resource operations while a status snapshot holds it.
+        private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks =
+                Collections.synchronizedMap(new LinkedHashMap<>());
+        private final Object completionLock = runningTasks;
+        private final StatusDeliveryFaults statusDeliveryFaults = new StatusDeliveryFaults();
+        private volatile boolean statusDeliveryFaultsActive;
+        private final boolean statusSnapshotLog = Boolean.parseBoolean(
+                System.getenv().getOrDefault("MOCK_STATUS_SNAPSHOT_LOG", "false"));
+        private long statusSnapshotSequence;
+        private long completionRetentionDrops;
         private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues = new ConcurrentHashMap<>();
         private final Map<Long, String> requestStates = new ConcurrentHashMap<>();
         // Explicit P->D ownership used by the test-only Cancel channel.  A Prefill
@@ -908,6 +916,14 @@ public final class JavaMockEngineCluster {
          *  by cancel / prefill-completion alreadyCancelled / a rejected
          *  hand-off. Absent entry = no live reservation (idempotent release). */
         private final Map<Long, FastRpcService> decodeReservationOwners = new ConcurrentHashMap<>();
+        private final Map<Long, MockPrefillSession> prefillSessions = new ConcurrentHashMap<>();
+        // Decode ALLOCATE has succeeded; KV is owned but no decode execution
+        // slot has been claimed. Guarded by decodeQueueLock with runningTasks.
+        private final Set<Long> decodeWaitingForKv = ConcurrentHashMap.newKeySet();
+        private final Set<Long> decodeAllocationInProgress = ConcurrentHashMap.newKeySet();
+        private volatile boolean autoFetch = false;
+        private volatile long fetchAttachTimeoutMs = 600_000L;
+        private final AtomicLong fetchAttachExpirations = new AtomicLong();
 
         private volatile FaultInjectionConfig faultConfig = FaultInjectionConfig.builder().build();
         private final AtomicInteger enqueueCount = new AtomicInteger();
@@ -964,8 +980,7 @@ public final class JavaMockEngineCluster {
         /**
          * Completion backlog retain window: the number of most-recent
          * completion records (by version) kept in {@link #completions} for
-         * multi-consumer cursor delivery. Trimmed (oldest first) only by
-         * {@link #periodicCleanup()} — reads never remove entries, so two
+         * multi-consumer cursor delivery. Trimmed oldest-first on every insertion — reads never remove entries, so two
          * masters with independent cursors can poll concurrently without one
          * starving the other's backlog. Overridable via
          * {@link #setCompletionRetainWindow(int)} (tests inject small windows
@@ -1026,7 +1041,7 @@ public final class JavaMockEngineCluster {
             this.grpcPort = grpcPort;
             this.services = services;
             this.scheduler = scheduler;
-            this.performance = performance;
+            this.performance = performance.forEngine();
             this.cache = new MockLruBlockCache(totalBlocks);
             this.responseExecutor = Executors.newCachedThreadPool(r -> {
                 Thread thread = new Thread(r, "mock-response-poller-" + grpcPort);
@@ -1050,6 +1065,9 @@ public final class JavaMockEngineCluster {
                 return;
             }
 
+            if (faultConfig.isNoRespond()) {
+                return; // explicit RPC blackhole; not a missing client Fetch
+            }
             if (faultConfig.isFailOnEnqueue()) {
                 for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                     for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
@@ -1232,8 +1250,7 @@ public final class JavaMockEngineCluster {
                         // no DECODE addr / D == self): no reservation — the
                         // hand-off semantics are unchanged for such topologies.
                         FastRpcService decodeEngine = findDecodeEngine(input.getInput());
-                        if (decodeEngine != null
-                                && !decodeEngine.reserveDecodeLease(requestId, shape)) {
+                        if (!prepareDecodeSession(decodeEngine, shape, request.getBatchId(), slot.getDpRank(), autoFetch)) {
                             releaseBlockLease(requestId);
                             int decodeNeedBlocks =
                                     decodeEngine.decodeDemandBlocks(shape.inputLen());
@@ -1252,11 +1269,10 @@ public final class JavaMockEngineCluster {
                             requestStates.put(requestId, "rejected");
                             continue;
                         }
-                        if (decodeEngine != null) {
-                            decodeReservationOwners.put(requestId, decodeEngine);
-                        }
                         shapes.add(shape);
-                        responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
+                        if (!autoFetch || !prefillSessions.containsKey(requestId)) {
+                            responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
+                        }
                         requestStates.put(requestId, "running");
                     }
                     // Phase 2: admission. false = prefill waiting-queue cap hit
@@ -1272,6 +1288,8 @@ public final class JavaMockEngineCluster {
                                 prefillPendingQueueSize(), performance.maxWaitingPrefillBatches());
                         for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
                             long requestId = input.getInput().getRequestId();
+                            closePrefillSession(requestId);
+                            releaseReservedDecode(requestId);
                             responseQueues.remove(requestId);
                             requestStates.put(requestId, "rejected");
                             response.addErrorsBuilder()
@@ -1295,6 +1313,7 @@ public final class JavaMockEngineCluster {
                             continue;
                         }
                         stats.enqueuedRequests.increment();
+                        armFetchExpiry(requestId, request.getFetchAttachTimeoutMs());
                         acceptedCount.incrementAndGet();
                         response.addSuccessesBuilder().setRequestId(requestId);
                         recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
@@ -1354,32 +1373,49 @@ public final class JavaMockEngineCluster {
             long requestedVersion = request.getLatestFinishedVersion();
             long latestVersion;
             List<VersionedTask> visibleCompletions = new ArrayList<>();
-            // Read path is cursor-filter ONLY (no destructive head-trim): each
-            // caller receives exactly its own unconsumed increment (version >
-            // its cursor, <= latest) while the shared backlog survives for
-            // other consumers with independent cursors — dual-flexlb HA has
-            // two masters polling this engine at 20ms each, and the first
-            // poller's read must not consume the second poller's backlog.
-            // Bounding moved to the retain window in periodicCleanup().
-            //
-            // Slow-consumer semantics: a consumer that stayed disconnected far
-            // longer than the retain window (cursor behind the oldest retained
-            // version) will NOT receive its full backlog — records trimmed
-            // past the window are gone. Such a consumer must rebuild from the
-            // RUNNING snapshot below, which is always complete (every in-flight
-            // request, unaffected by completion trimming); its inflight
-            // bookkeeping converges from the running tasks plus whatever
-            // backlog slice remains inside the window.
+            List<EngineRpcService.TaskInfoPB> visibleRunning;
+            ObjectNode snapshotEvent = null;
+            // Readers filter their own cursor without consuming shared records.
+            // A lagging reader permanently loses records evicted from the fixed
+            // retention window; the engine does not compensate for that loss.
             synchronized (completionLock) {
+                if (!stopped && statusDeliveryFaultsActive) {
+                    statusDeliveryFaults.releaseReady(System.nanoTime(), this::publishCompletionNow);
+                }
                 latestVersion = completionVersion.get();
+                visibleRunning = List.copyOf(runningTasks.values());
                 for (VersionedTask completion : completions) {
                     if (completion.version > requestedVersion
                             && completion.version <= latestVersion) {
                         visibleCompletions.add(completion);
                     }
                 }
+                if (statusSnapshotLog && engineEventLog != null) {
+                    snapshotEvent = OBJECT_MAPPER.createObjectNode();
+                    snapshotEvent.put("event", "worker_status_snapshot");
+                    snapshotEvent.put("engine", engineName);
+                    snapshotEvent.put("port", grpcPort);
+                    snapshotEvent.put("role", roleName);
+                    snapshotEvent.put("sequence", ++statusSnapshotSequence);
+                    snapshotEvent.put("requested_version", requestedVersion);
+                    snapshotEvent.put("latest_version", latestVersion);
+                    snapshotEvent.put("retention_drops", completionRetentionDrops);
+                    snapshotEvent.put("alive", !stopped);
+                    var running = snapshotEvent.putArray("running");
+                    visibleRunning.forEach(t -> running.add(t.getRequestId()));
+                    var retained = snapshotEvent.putArray("retained");
+                    completions.forEach(t -> retained.addObject()
+                            .put("rid", t.task.getRequestId()).put("version", t.version));
+                    var returned = snapshotEvent.putArray("returned");
+                    visibleCompletions.forEach(t -> returned.add(t.task.getRequestId()));
+                }
             }
-            long runningCount = runningTasks.values().stream()
+            // Append the captured snapshot only: no extra RPC or debug HTTP
+            // observer, and no file I/O inside the status critical section.
+            if (snapshotEvent != null) {
+                engineEventLog.write(snapshotEvent);
+            }
+            long runningCount = visibleRunning.stream()
                     .filter(task -> task.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .count();
             // Capacity model v2: used/available both derive from the block pool
@@ -1415,7 +1451,7 @@ public final class JavaMockEngineCluster {
                     // implicit unlimited fallback.
                     .setMaxSeqLen(1048576L)
                     .setMaxBatchTokensSize(1048576L);
-            status.addAllRunningTaskInfo(runningTasks.values().stream()
+            status.addAllRunningTaskInfo(visibleRunning.stream()
                     .map(FastRpcService::withLegacyTaskState)
                     .toList());
             for (VersionedTask completion : visibleCompletions) {
@@ -1428,6 +1464,43 @@ public final class JavaMockEngineCluster {
             // cursor advances past it, which is exactly the fault under
             // test. ──
             applyStatusReportFaults(status);
+            ObjectNode deliveryEvent = null;
+            if (statusDeliveryFaultsActive) {
+                synchronized (completionLock) {
+                    List<Long> hidden = statusDeliveryFaults.filter(status);
+                    if (!statusDeliveryFaults.rules.isEmpty() && engineEventLog != null) {
+                        deliveryEvent = OBJECT_MAPPER.createObjectNode();
+                        deliveryEvent.put("event", "worker_status_delivery_fault");
+                        deliveryEvent.put("time_ms", System.currentTimeMillis());
+                        deliveryEvent.put("engine", engineName);
+                        deliveryEvent.put("port", grpcPort);
+                        deliveryEvent.put("role", roleName);
+                        deliveryEvent.put("epoch", crashEpoch.get());
+                        deliveryEvent.put("status_version", status.getStatusVersion());
+                        deliveryEvent.put("requested_version", requestedVersion);
+                        deliveryEvent.put("latest_version", status.getLatestFinishedVersion());
+                        var targets = deliveryEvent.putArray("targets");
+                        statusDeliveryFaults.rules.forEach((rid, rule) -> {
+                            var target = targets.addObject().put("rid", rid)
+                                    .put("hidden", hidden.contains(rid))
+                                    .put("missing_remaining", rule.missingRounds)
+                                    .put("pending_completions", rule.pending.size())
+                                    .put("released_version", rule.releasedVersion);
+                            var running = target.putArray("running");
+                            status.getRunningTaskInfoList().stream().filter(t -> t.getRequestId() == rid)
+                                    .forEach(t -> running.add(t.getPhase().name()));
+                            var finished = target.putArray("finished");
+                            status.getFinishedTaskListList().stream().filter(t -> t.getRequestId() == rid)
+                                    .forEach(t -> finished.addObject().put("batch_id", t.getBatchId())
+                                            .put("error_code", t.getErrorInfo().getErrorCode())
+                                            .put("phase", t.getPhase().name()));
+                        });
+                    }
+                }
+            }
+            // This event describes the post-filter response sent to the client.
+            // It is emitted only for explicitly targeted fault-injection requests.
+            if (deliveryEvent != null) engineEventLog.write(deliveryEvent);
             observer.onNext(status.build());
             observer.onCompleted();
         }
@@ -1530,6 +1603,16 @@ public final class JavaMockEngineCluster {
             };
         }
 
+        private static io.grpc.StatusRuntimeException capacityError(int code, String message) {
+            io.grpc.Metadata trailers = new io.grpc.Metadata();
+            trailers.put(io.grpc.Metadata.Key.of("grpc-status-details-bin",
+                    io.grpc.Metadata.BINARY_BYTE_MARSHALLER),
+                    EngineRpcService.ErrorDetailsPB.newBuilder()
+                            .setErrorCode(code).setErrorMessage(message).build().toByteArray());
+            return io.grpc.Status.RESOURCE_EXHAUSTED.withDescription(message)
+                    .asRuntimeException(trailers);
+        }
+
         @Override
         public void generateStreamCall(EngineRpcService.GenerateInputPB request,
                 StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
@@ -1545,20 +1628,23 @@ public final class JavaMockEngineCluster {
             Context rpcContext = Context.current();
 
             if (faultConfig.isGenerateError()) {
-                observer.onError(new RuntimeException("injected generate_error"));
+                observer.onError(io.grpc.Status.INTERNAL
+                            .withDescription("injected generate_error").asRuntimeException());
                 return;
             }
             // Python compat: inject_config["enqueue_error"] also makes generate_stream
             // raise (the Python mock checked enqueue_error in generate_stream too).
-            if (faultConfig.isFailOnEnqueue()) {
-                observer.onError(new RuntimeException("injected enqueue_error"));
-                return;
-            }
             if (faultConfig.isNoRespond()) {
+                return; // explicit RPC blackhole; not a missing client Fetch
+            }
+            if (faultConfig.isFailOnEnqueue()) {
+                observer.onError(io.grpc.Status.INTERNAL
+                            .withDescription("injected enqueue_error").asRuntimeException());
                 return;
             }
             if (stopped) {
-                observer.onError(new RuntimeException("engine stopped"));
+                observer.onError(io.grpc.Status.UNAVAILABLE
+                            .withDescription("engine stopped").asRuntimeException());
                 return;
             }
 
@@ -1575,7 +1661,7 @@ public final class JavaMockEngineCluster {
             recordEventArrival(requestId);
 
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                    responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
+                    responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
 
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
                 if (!scheduleDecodeCompletion(shape, -1, queue)) {
@@ -1584,7 +1670,8 @@ public final class JavaMockEngineCluster {
                     // retry elsewhere. Clean up the per-request state set up above.
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
-                    observer.onError(new RuntimeException("decode queue full (backpressure)"));
+                    observer.onError(io.grpc.Status.RESOURCE_EXHAUSTED
+                            .withDescription("decode queue full (backpressure)").asRuntimeException());
                     return;
                 }
             } else {
@@ -1594,12 +1681,12 @@ public final class JavaMockEngineCluster {
                 // Same master-visible surface as the enqueue path (synchronous
                 // error on the dispatch RPC, code MALLOC_FAILED=602 in the
                 // EnqueueBatch flavor; generate_stream carries it in the
-                // RuntimeException message).
+                // gRPC status description).
                 if (acquireBlockLease(requestId, shape) == null) {
                     prefillLackMemRejects.increment();
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
-                    observer.onError(new RuntimeException(String.format(
+                    observer.onError(capacityError(602, String.format(
                             "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
                             needBlocks(shape), cache.availableBlocks(), seqSizePerBlock)));
                     return;
@@ -1613,23 +1700,19 @@ public final class JavaMockEngineCluster {
                 // in the message text — production closeGrpcStream rewrite
                 // semantics), the P lease is released, no residue.
                 FastRpcService decodeEngine = findDecodeEngine(request);
-                if (decodeEngine != null
-                        && !decodeEngine.reserveDecodeLease(requestId, shape)) {
+                if (!prepareDecodeSession(decodeEngine, shape, -1L, 0, true)) {
                     releaseBlockLease(requestId);
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
                     int decodeNeedBlocks =
                             decodeEngine.decodeDemandBlocks(shape.inputLen());
-                    observer.onError(new RuntimeException(String.format(
+                    observer.onError(capacityError(8211, String.format(
                             "LACK_MEM (602, master-surface 8211): decode-side KV allocation "
                                     + "rejected by D engine port=%d after its ALLOCATE retry window "
                                     + "(need=%d blocks, avail=%d tokens, spb=%d)",
                             decodeEngine.getGrpcPort(), decodeNeedBlocks,
                             decodeEngine.getAvailableKvTokens(), seqSizePerBlock)));
                     return;
-                }
-                if (decodeEngine != null) {
-                    decodeReservationOwners.put(requestId, decodeEngine);
                 }
                 if (!admitDirectPrefill(shape)) {
                     // Backpressure: direct waiting-queue cap hit — reject so the
@@ -1638,13 +1721,14 @@ public final class JavaMockEngineCluster {
                     // before claiming any counter. The lease provisioned above
                     // returns to the pool too — and so does the decode-side
                     // reservation made just above (release loop closure).
-                    releaseBlockLease(requestId);
+                    closePrefillSession(requestId);
                     releaseReservedDecode(requestId);
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
-                    observer.onError(new RuntimeException(String.format(
+                    observer.onError(io.grpc.Status.RESOURCE_EXHAUSTED
+                            .withDescription(String.format(
                             "prefill waiting queue full (backpressure): waiting=%d cap=%d",
-                            waitingPrefillRequests.get(), directWaitingRequestCap())));
+                            waitingPrefillRequests.get(), directWaitingRequestCap())).asRuntimeException());
                     return;
                 }
             }
@@ -1741,22 +1825,53 @@ public final class JavaMockEngineCluster {
 
             long requestId = request.getRequestId();
 
+            if (faultConfig.isNoRespond()) {
+                return;
+            }
             if (faultConfig.isFetchError()) {
+                // A failed Fetch owns the deferred context just like a failed
+                // finishStream in the real engine. Do not retain P's connector
+                // or D's ALLOCATE until the missing-Fetch TTL after returning.
+                MockPrefillSession failedFetch = prefillSessions.get(requestId);
+                if (failedFetch != null && failedFetch.attach()) {
+                    cancel(requestId, false, false);
+                }
                 observer.onNext(EngineRpcService.GenerateOutputsPB.newBuilder()
                         .setRequestId(requestId)
                         .setFlattenOutput(EngineRpcService.FlattenOutputPB.newBuilder()
                                 .addFinished(false)
                                 .build())
                         .build());
-                observer.onError(new RuntimeException("injected fetch_error"));
+                observer.onError(io.grpc.Status.INTERNAL
+                            .withDescription("injected fetch_error").asRuntimeException());
                 return;
             }
 
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                    responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
+            MockPrefillSession session = prefillSessions.get(requestId);
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue;
+            if (session != null) {
+                if (!session.attach()) {
+                    observer.onError(io.grpc.Status.NOT_FOUND
+                            .withDescription("Fetch context already attached or expired")
+                            .asRuntimeException());
+                    return;
+                }
+                queue = responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
+            } else {
+                queue = responseQueues.get(requestId);
+                if (queue == null || downstreamDecodeOwners.containsKey(requestId)) {
+                    observer.onError(io.grpc.Status.NOT_FOUND
+                            .withDescription("No unconsumed Fetch context")
+                            .asRuntimeException());
+                    return;
+                }
+            }
 
             // Arm the autonomous client-gone detector for this fetch stream.
             registerClientGoneListener(requestId, rpcContext);
+            if (session != null) {
+                continuePrefillSession(session);
+            }
 
             // Loop poll until a finished=true frame or timeout — same pump as
             // generateStreamCall. Under the BATCH dispatcher the client polls
@@ -1834,7 +1949,7 @@ public final class JavaMockEngineCluster {
 
         /**
          * Override the completion backlog retain window (mainly for tests
-         * exercising the periodicCleanup trim path; production keeps the
+         * exercising immediate oldest-first trimming; production keeps the
          * {@link #DEFAULT_COMPLETION_RETAIN_WINDOW} default, itself
          * overridable via env {@code MOCK_COMPLETION_RETAIN_WINDOW}).
          */
@@ -1842,7 +1957,10 @@ public final class JavaMockEngineCluster {
             if (completionRetainWindow < 0) {
                 throw new IllegalArgumentException("completion retain window must be >= 0");
             }
-            this.completionRetainWindow = completionRetainWindow;
+            synchronized (completionLock) {
+                this.completionRetainWindow = completionRetainWindow;
+                trimCompletionsLocked();
+            }
         }
 
         /** Wire the cluster-shared engine_events.jsonl writer (null disables). */
@@ -1885,6 +2003,10 @@ public final class JavaMockEngineCluster {
             if (priorityPreemption) {
                 addPriorityCancelTombstone(requestId);
             }
+            MockPrefillSession session = prefillSessions.remove(requestId);
+            if (session != null) {
+                session.close();
+            }
             recordLifecycleEnd(requestId, true);
             // Queued-vs-running discrimination, the runningTasks removal, the
             // slot/KV release, and the freed-slot drain all run under
@@ -1909,13 +2031,14 @@ public final class JavaMockEngineCluster {
                     // queue it is removed here (wasQueued=true); if it was already
                     // drained into a running slot, removeIf finds nothing and the
                     // request is treated as running (release the slot below).
+                    boolean wasWaitingForKv = decodeWaitingForKv.remove(requestId);
                     boolean wasQueuedDecode = decodePendingQueue.removeIf(
                             t -> t.shape().input().getRequestId() == requestId);
-                    EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
+                    EngineRpcService.TaskInfoPB removed = cancelReportedTask(requestId, priorityPreemption);
                     if (removed != null) {
                         cancelledPhase = removed.getPhase();
                         pendingRequests.decrementAndGet();
-                        if (!wasQueuedDecode) {
+                        if (!wasQueuedDecode && !wasWaitingForKv) {
                             activeDecodeRequests.decrementAndGet();
                             // Capacity model v2: the running stream's block lease
                             // goes back to the pool (no LRU handover — a
@@ -1966,7 +2089,7 @@ public final class JavaMockEngineCluster {
                 // released here for BOTH queued and running members (the
                 // completion callback's alreadyCancelled release is idempotent —
                 // activeBlockLeases.remove() wins exactly once).
-                EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
+                EngineRpcService.TaskInfoPB removed = cancelReportedTask(requestId, priorityPreemption);
                 if (removed != null) {
                     cancelledPhase = removed.getPhase();
                     pendingRequests.decrementAndGet();
@@ -1979,16 +2102,67 @@ public final class JavaMockEngineCluster {
                     releaseReservedDecode(requestId);
                 }
             }
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                releaseBlockLease(requestId);
+                releaseReservedDecode(requestId);
+            }
             requestStates.put(requestId, "cancelled");
             cancelledCount.incrementAndGet();
+            statusVersion.incrementAndGet();
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(requestId);
+            if (queue != null) {
+                queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED)
+                                .setErrorMessage("cancelled by client")
+                                .build())
+                        .build());
+                // The poller already holds a reference to the queue, so it is safe
+                // to remove it from the map after offering the cancel response.
+                responseQueues.remove(requestId);
+            }
+            // (A cancelled running slot's top-up ran under decodeQueueLock inside
+            // the decode branch above — nothing to schedule outside the lock.)
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                synchronized (decodeQueueLock) {
+                    FastRpcService prefill = upstreamPrefillOwners.get(requestId);
+                    if (prefill != null) {
+                        if (prefill.prefillSessions.containsKey(requestId)) {
+                            prefill.cancel(requestId, false, false);
+                        } else {
+                            // After handoff the client queue still belongs to P.
+                            // A cancel winning against link death must close it
+                            // before removing the last propagation route.
+                            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> upstreamQueue =
+                                    prefill.responseQueues.get(requestId);
+                            if (upstreamQueue != null) {
+                                upstreamQueue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                                        .setRequestId(requestId)
+                                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                                .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED)
+                                                .setErrorMessage("cancelled by client"))
+                                        .build());
+                                prefill.responseQueues.remove(requestId, upstreamQueue);
+                            }
+                        }
+                    }
+                    clearUpstreamOwnership(requestId);
+                }
+            }
+            return cancelledPhase;
+        }
+
+        private EngineRpcService.TaskInfoPB cancellationTask(long requestId,
+                EngineRpcService.TaskPhase phase, boolean priorityPreemption) {
             EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     // Pass the ACTUAL phase the request was cancelled in through
                     // to the finished entry (P2-1): a queued opt-in decode
                     // request surfaces KV_ALLOCATED, a queued prefill RECEIVED.
                     // RUNNING remains the fallback when no entry was found.
-                    .setPhase(cancelledPhase != null
-                            ? cancelledPhase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                    .setPhase(phase != null
+                            ? phase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(priorityPreemption
                                     ? PRIORITY_PREEMPTED_ERROR_CODE
@@ -2014,27 +2188,17 @@ public final class JavaMockEngineCluster {
                                 .PRIORITY_PREEMPTION_CANCELED);
             }
             EngineRpcService.TaskInfoPB task = taskBuilder.build();
-            publishCompletion(task);
-            statusVersion.incrementAndGet();
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(requestId);
-            if (queue != null) {
-                queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
-                        .setRequestId(requestId)
-                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
-                                .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED)
-                                .setErrorMessage("cancelled by client")
-                                .build())
-                        .build());
-                // The poller already holds a reference to the queue, so it is safe
-                // to remove it from the map after offering the cancel response.
-                responseQueues.remove(requestId);
+            return task;
+        }
+
+        private EngineRpcService.TaskInfoPB cancelReportedTask(long requestId,
+                boolean priorityPreemption) {
+            synchronized (completionLock) {
+                EngineRpcService.TaskInfoPB tracked = runningTasks.get(requestId);
+                publishCompletion(cancellationTask(requestId,
+                        tracked == null ? null : tracked.getPhase(), priorityPreemption));
+                return runningTasks.remove(requestId);
             }
-            // (A cancelled running slot's top-up ran under decodeQueueLock inside
-            // the decode branch above — nothing to schedule outside the lock.)
-            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
-                clearUpstreamOwnership(requestId);
-            }
-            return cancelledPhase;
         }
 
         /**
@@ -2112,6 +2276,12 @@ public final class JavaMockEngineCluster {
                 return new CancelResult(false, null, false);
             }
             EngineRpcService.TaskInfoPB tracked = runningTasks.get(requestId);
+            if (tracked == null && prefillSessions.containsKey(requestId)
+                    && !downstreamDecodeOwners.containsKey(requestId)) {
+                stats.cancelCensusTracked.increment();
+                cancel(requestId, true, false);
+                return new CancelResult(true, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING, false);
+            }
             if (tracked != null) {
                 // A1 leak-attribution census: cancel landed on a request this
                 // engine still actively tracks (the branch that publishes a
@@ -2175,6 +2345,10 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("decode ownership requires Prefill -> Decode");
             }
             synchronized (decode.decodeQueueLock) {
+                if (decode.stopped || decode.shuttingDown) {
+                    decode.deliverLinkBreak(requestId, this);
+                    return;
+                }
                 FastRpcService previousDecode = downstreamDecodeOwners.put(requestId, decode);
                 if (previousDecode != null && previousDecode != decode) {
                     previousDecode.upstreamPrefillOwners.remove(requestId, this);
@@ -2240,6 +2414,8 @@ public final class JavaMockEngineCluster {
                     stats.cancelCensusClientGone.increment();
                 }
                 expectedPrefill.downstreamDecodeOwners.remove(requestId, this);
+                expectedPrefill.closePrefillSession(requestId);
+                expectedPrefill.decodeReservationOwners.remove(requestId, this);
                 // This is downstream stream cancellation, not a Decode Cancel
                 // RPC.  Preserve ordinary Decode accounting/terminal behavior
                 // without incrementing the Decode RPC counter.
@@ -2355,7 +2531,7 @@ public final class JavaMockEngineCluster {
          * one to claim owns the terminal, later arrivals no-op.
          */
         private void handleClientGone(long requestId) {
-            if (runningTasks.containsKey(requestId)) {
+            if (runningTasks.containsKey(requestId) || prefillSessions.containsKey(requestId)) {
                 stats.cancelCensusClientGone.increment();
                 cancel(requestId, false, false);
                 return;
@@ -2443,6 +2619,13 @@ public final class JavaMockEngineCluster {
                 FastRpcService prefill = upstreamPrefillOwners.remove(requestId);
                 if (prefill != null) {
                     prefill.downstreamDecodeOwners.remove(requestId, this);
+                    prefill.decodeReservationOwners.remove(requestId, this);
+                    prefill.closePrefillSession(requestId);
+                    // An attached response pump owns its queue directly. No
+                    // terminal request may retain a map entry indefinitely.
+                    if (!cancelledRequests.containsKey(requestId)) {
+                        prefill.responseQueues.remove(requestId);
+                    }
                 }
             }
         }
@@ -2995,39 +3178,28 @@ public final class JavaMockEngineCluster {
                 for (BatchMember member : members) {
                     MockPerformanceModel.RequestShape shape = member.shape();
                     long requestId = shape.input().getRequestId();
-                    boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
-                    // This member is one of the batch's first k non-cancelled
-                    // members → injected execution-phase failure (production:
-                    // stream->reportError → dequeue fills task_info.error_code /
-                    // error_message → finished_task_list; independent of the
-                    // same batch's surviving members).
-                    boolean asyncFail = !alreadyCancelled && asyncFaultBudget > 0
-                            && asyncFaultCursor[0]++ < asyncFaultBudget;
-                    EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
-                    // status_zombie_running: re-insert the entry right after the
-                    // removal so this request keeps being reported RUNNING
-                    // forever (its completion record is dropped inside
-                    // publishCompletion). Every counter below still releases
-                    // normally — the zombie poisons only the status report,
-                    // not engine capacity.
-                    if (faultConfig.isStatusZombieRunning() && removed != null) {
-                        runningTasks.put(requestId, removed);
-                    }
-                    // Only count non-cancelled requests toward pendingRequests
-                    // decrement. A cancelled member was re-put to RUNNING by
-                    // startPrefillBatch (which loops all shapes), so removed!=null
-                    // alone would double-decrement pendingRequests (cancel already
-                    // decremented it). The !alreadyCancelled guard fixes this.
-                    if (removed != null && !alreadyCancelled) {
-                        activeCount++;
-                    }
-                    if (asyncFail) {
-                        recordCompletion(shape, member.batchId(), executionMs,
-                                member.dpRank(), asyncFaultCode);
-                        prefillAsyncPartialFails.increment();
-                    } else {
-                        recordCompletion(shape, member.batchId(), executionMs,
-                                member.dpRank());
+                    boolean alreadyCancelled;
+                    boolean asyncFail;
+                    synchronized (completionLock) {
+                        alreadyCancelled = cancelledRequests.containsKey(requestId);
+                        asyncFail = !alreadyCancelled && asyncFaultBudget > 0
+                                && asyncFaultCursor[0]++ < asyncFaultBudget;
+                        EngineRpcService.TaskInfoPB tracked = runningTasks.get(requestId);
+                        if (tracked != null && !alreadyCancelled) {
+                            if (asyncFail) {
+                                recordCompletion(shape, member.batchId(), executionMs,
+                                        member.dpRank(), asyncFaultCode);
+                                prefillAsyncPartialFails.increment();
+                            } else {
+                                recordCompletion(shape, member.batchId(), executionMs,
+                                        member.dpRank());
+                            }
+                            // Keep the deliberate zombie fault as a report fault.
+                            if (!faultConfig.isStatusZombieRunning()) {
+                                runningTasks.remove(requestId);
+                            }
+                            activeCount++;
+                        }
                     }
                     // Per-rid prefill terminal event row (engine_events.jsonl,
                     // replaces the former mock_prefill_done stdout trace line —
@@ -3062,100 +3234,46 @@ public final class JavaMockEngineCluster {
                     } else {
                         recordLifecycleEnd(requestId, alreadyCancelled);
                     }
-                    // Python compat (_run_prefill_batch): an engine
-                    // with inject_config["no_respond"] completes its own work but
-                    // never queues responses nor hands off to decode, so the client
-                    // stream hangs until it times out.
-                    boolean decodeStarted = false;
-                    // asyncFail members never hand off to decode (execution
-                    // failed — nothing to decode) and never emit a success
-                    // output frame (below).
-                    if (!asyncFail && !alreadyCancelled && !faultConfig.isNoRespond()) {
-                        decodeStarted = startDecode(shape, member.batchId());
-                    }
-                    if (decodeStarted) {
-                        // Emit a first-token frame (finished=false) so the
-                        // client stream loop records firstFrameNanos at prefill
-                        // completion. The terminal frame (finished=true) is
-                        // emitted later by scheduleDecodeCompletionInternal
-                        // after decodeMs elapses. Without this frame ttft and
-                        // total collapse to the same nanos value (single-frame
-                        // stream), even though the engine really spent decodeMs
-                        // producing outputs.
-                        LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                                responseQueues.get(requestId);
-                        if (queue != null) {
-                            queue.offer(buildOutput(shape, false));
-                        }
-                    } else {
-                        if (asyncFail) {
-                            // Failed terminal (NOT completed): the typed error
-                            // rides the status channel; no SUCCESS frame is
-                            // ever emitted for this member.
-                            requestStates.put(requestId, "failed");
-                        } else if (!alreadyCancelled) {
-                            completedCount.incrementAndGet();
-                            requestStates.put(requestId, "completed");
-                        }
-                        if (!faultConfig.isNoRespond()) {
-                            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                                    responseQueues.get(requestId);
-                            if (queue != null && !alreadyCancelled && !asyncFail) {
-                                queue.offer(buildOutput(shape, true));
-                            }
-                            if (queue != null && asyncFail) {
-                                // Production stream->reportError is a TWO-channel
-                                // terminal: the typed error_info rides the status
-                                // channel (recordCompletion above, master
-                                // reconcile, slot failure terminal) AND the
-                                // request's output stream terminates with an
-                                // error frame so the client sees the failure
-                                // instead of hanging until its stream deadline.
-                                // Same frame shape as the cancel path's CANCELLED
-                                // frame and the decode LACK_MEM growth-failure
-                                // frame; the pump treats hasErrorInfo frames as
-                                // terminal (onNext then onCompleted). The queue
-                                // was provisioned by the EnqueueBatch Phase-1
-                                // admission (before the batch even started
-                                // executing), so the client's FetchResponse /
-                                // GenerateStreamCall pump -- whichever side got
-                                // there first -- shares this exact queue instance.
-                                // The injected code is NOT a production
-                                // ErrorCodePB value: proto3 open enums keep the
-                                // raw wire number (8500), and the numeric also
-                                // rides the message text so string-level
-                                // assertions survive enum lossiness.
-                                queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
-                                        .setRequestId(requestId)
-                                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
-                                                .setErrorCodeValue((int) asyncFaultCode)
-                                                .setErrorMessage(String.format(
-                                                        "injected prefill_async_partial_fail (error_code=%d)",
-                                                        asyncFaultCode))
-                                                .build())
-                                        .build());
-                            }
-                        }
-                        // Clean up per-request state to prevent unbounded map growth
-                        responseQueues.remove(requestId);
-                        cancelledRequests.remove(requestId);
-                    }
-                    if (alreadyCancelled || asyncFail) {
-                        // Cancelled member: blocks return to the pool directly
-                        // (no LRU handover — a cancelled request leaves no cache).
-                        // asyncFail member: identical physical semantics — a
-                        // failed request leaves no KV cache (production stream
-                        // error paths free the lease) and its D-side decode
-                        // reservation returns too (the failure never hands
-                        // off to decode).
-                        releaseBlockLease(requestId);
-                        // P-enqueue decode-KV pre-alignment (20260903): the
-                        // cancelled member's D-side reservation goes back too
-                        // (idempotent against the cancel branch's release —
-                        // the reservation-owner map remove wins exactly once).
+                    MockPrefillSession session = prefillSessions.get(requestId);
+                    if (alreadyCancelled) {
+                        closePrefillSession(requestId);
                         releaseReservedDecode(requestId);
-                    } else if (admitBlockLease(requestId, shape)) {
+                    } else if (asyncFail) {
+                        // Preserve the deferred error for a Fetch that arrives
+                        // after local failure, while freeing both KV pools now.
+                        releaseBlockLease(requestId);
+                        releaseReservedDecode(requestId);
+                        requestStates.put(requestId, "failed");
+                        if (session != null) {
+                            session.fail(EngineRpcService.GenerateOutputsPB.newBuilder()
+                                    .setRequestId(requestId)
+                                    .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                            .setErrorCodeValue((int) asyncFaultCode)
+                                            .setErrorMessage("injected prefill_async_partial_fail code="
+                                                    + asyncFaultCode))
+                                    .build());
+                            continuePrefillSession(session);
+                        }
+                    } else if (session != null) {
+                        // P's scheduler slot is finished; the RPC context still
+                        // owns connector KV until Fetch/auto-fetch transfers it.
+                        activeBlockLeases.computeIfPresent(requestId, (id, lease) ->
+                                cache.retainComputed(lease, shape.blockKeys()));
                         cacheVersion.incrementAndGet();
+                        requestStates.put(requestId, "waiting_fetch");
+                        session.prefillDone();
+                        continuePrefillSession(session);
+                    } else {
+                        // A cancellation may remove the context after this
+                        // callback took its initial cancellation snapshot.
+                        if (cancelledRequests.containsKey(requestId)) {
+                            releaseBlockLease(requestId);
+                            continue;
+                        }
+                        // The deferred context was already claimed by a
+                        // terminal path. Never manufacture a P-only success.
+                        releaseBlockLease(requestId);
+                        releaseReservedDecode(requestId);
                     }
                 }
                 activePrefillBatches.decrementAndGet();
@@ -3259,9 +3377,14 @@ public final class JavaMockEngineCluster {
                 // with each member's OWN batchId/dpRank (the master reconciles
                 // fetch_response against the delivery batch, not the engine's
                 // internal execution grouping).
-                runningTasks.put(member.shape().input().getRequestId(),
-                        task(member.shape(), member.batchId(), member.dpRank(),
-                                EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
+                synchronized (completionLock) {
+                    if (cancelledRequests.containsKey(member.shape().input().getRequestId())) {
+                        continue; // a delayed batch start must not revive a cancelled report
+                    }
+                    runningTasks.put(member.shape().input().getRequestId(),
+                            task(member.shape(), member.batchId(), member.dpRank(),
+                                    EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
+                }
                 // engine_events.jsonl: execution-start stamp (lane serialization
                 // actually begins for this batch member).
                 recordEventStart(member.shape().input().getRequestId());
@@ -3304,26 +3427,170 @@ public final class JavaMockEngineCluster {
         private void releaseReservedDecode(long requestId) {
             FastRpcService decode = decodeReservationOwners.remove(requestId);
             if (decode != null) {
-                decode.releaseBlockLease(requestId);
+                clearDecodeOwnership(requestId, decode);
+                decode.cancel(requestId, false, false);
             }
+        }
+
+        void setAutoFetch(boolean enabled) {
+            autoFetch = enabled;
+        }
+
+        void setFetchAttachTimeoutMs(long timeoutMs) {
+            if (timeoutMs < 1) {
+                throw new IllegalArgumentException("fetch attach timeout must be positive");
+            }
+            fetchAttachTimeoutMs = timeoutMs;
+        }
+
+        private boolean prepareDecodeSession(FastRpcService decode,
+                MockPerformanceModel.RequestShape shape, long batchId, int dpRank,
+                boolean automaticContinuation) {
+            long id = shape.input().getRequestId();
+            MockPrefillSession session = new MockPrefillSession(shape, batchId, dpRank,
+                    automaticContinuation, decode);
+            if (decode == null) {
+                prefillSessions.put(id, session);
+                return true;
+            }
+            synchronized (decode.decodeQueueLock) {
+                if (decode.runningTasks.containsKey(id) || !decode.decodeAllocationInProgress.add(id)) {
+                    return false; // never overwrite or release another live D request
+                }
+            }
+            try {
+                return allocateDecodeSession(decode, session);
+            } finally {
+                decode.decodeAllocationInProgress.remove(id);
+            }
+        }
+
+        private boolean allocateDecodeSession(FastRpcService decode, MockPrefillSession session) {
+            MockPerformanceModel.RequestShape shape = session.shape;
+            long batchId = session.batchId;
+            long id = shape.input().getRequestId();
+            // Retry without decodeQueueLock: existing completions must be able
+            // to release KV while ALLOCATE waits for capacity.
+            if (decode.stopped || decode.shuttingDown || !decode.reserveDecodeLease(id, shape)) {
+                return false;
+            }
+            synchronized (decode.decodeQueueLock) {
+                if (decode.stopped || decode.shuttingDown || cancelledRequests.containsKey(id)
+                        || decode.cancelledRequests.containsKey(id)) {
+                    decode.releaseBlockLease(id);
+                    return false;
+                }
+                prefillSessions.put(id, session);
+                decodeReservationOwners.put(id, decode);
+                registerDecodeOwnership(id, decode);
+                decode.decodeWaitingForKv.add(id);
+                decode.runningTasks.put(id, task(shape, batchId, 0,
+                        EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED));
+                decode.pendingRequests.incrementAndGet();
+                decode.acceptedCount.incrementAndGet();
+                decode.requestStates.put(id, "waiting_for_kv");
+                decode.recordLifecycleStart(id, batchId, "remote_allocate");
+                synchronized (decode.requestLifecycles) {
+                    decode.requestLifecycles.get(id).put("running_ms", 0L);
+                }
+                decode.recordEventArrival(id);
+                decode.lastEnqueueTime.set(System.nanoTime());
+                return true;
+            }
+        }
+
+        private void armFetchExpiry(long requestId, long requestedTimeoutMs) {
+            MockPrefillSession session = prefillSessions.get(requestId);
+            if (session == null || session.autoFetch) {
+                return;
+            }
+            long timeoutMs = requestedTimeoutMs > 0 ? requestedTimeoutMs : fetchAttachTimeoutMs;
+            long requestTimeoutMs = session.shape.input().getGenerateConfig().getTimeoutMs();
+            if (requestTimeoutMs > 0) {
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(
+                        System.nanoTime() - session.preparationStartedNanos);
+                timeoutMs = Math.min(timeoutMs, Math.max(1L, requestTimeoutMs - elapsedMs));
+            }
+            session.setExpiry(scheduler.schedule(() -> {
+                if (session.expireUnattached() && prefillSessions.remove(requestId, session)) {
+                    fetchAttachExpirations.incrementAndGet();
+                    // The local P compute may already be FINISHED. Its execution
+                    // slot is separate from the retained RPC/KV context; cancel
+                    // must still release P's connector pin and D's ALLOCATE.
+                    cancel(requestId, false, false);
+                }
+            }, timeoutMs, TimeUnit.MILLISECONDS));
+        }
+
+        private void closePrefillSession(long requestId) {
+            MockPrefillSession session = prefillSessions.remove(requestId);
+            if (session != null) {
+                session.close();
+            }
+            releaseBlockLease(requestId);
+        }
+
+        private void continuePrefillSession(MockPrefillSession session) {
+            long id = session.shape.input().getRequestId();
+            if (!session.claimContinuation()) {
+                return;
+            }
+            // Fetch can attach before compute ends, or after it. Both paths
+            // converge here, once, after the local first token is available.
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(id);
+            if (session.failure() != null) {
+                if (queue != null) {
+                    queue.offer(session.failure());
+                }
+                responseQueues.remove(id);
+                prefillSessions.remove(id, session);
+                session.close();
+                releaseBlockLease(id);
+                return;
+            }
+            if (queue != null && session.decode != null) {
+                queue.offer(buildOutput(session.shape, false));
+            }
+            if (!session.isClosed() && !cancelledRequests.containsKey(id)) {
+                if (session.decode == null) {
+                    completedCount.incrementAndGet();
+                    requestStates.put(id, "completed");
+                    if (queue != null) {
+                        queue.offer(buildOutput(session.shape, true));
+                    }
+                    responseQueues.remove(id);
+                } else if (!startDecode(session.shape, session.batchId)) {
+                    requestStates.put(id, "failed");
+                    if (queue != null) {
+                        queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                                .setRequestId(id)
+                                .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                        .setErrorCode(EngineRpcService.ErrorCodePB.UNKNOWN_ERROR)
+                                        .setErrorMessage("prepared decode became unavailable"))
+                                .build());
+                    }
+                }
+            }
+            prefillSessions.remove(id, session);
+            session.close();
+            // KV transfer is instantaneous in the mock; the same transition
+            // that starts Decode releases the P connector's extra reference.
+            releaseBlockLease(id);
         }
 
         private boolean startDecode(MockPerformanceModel.RequestShape shape, long batchId) {
             EngineRpcService.GenerateInputPB input = shape.input();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                     responseQueues.get(input.getRequestId());
-            FastRpcService decode = findDecodeEngine(input);
+            FastRpcService decode = decodeReservationOwners.get(input.getRequestId());
             if (decode == null) {
                 // No routable decode engine — the reservation phase (if any)
                 // found no D either, so nothing to release here.
                 return false;
             }
             // Propagate the decode admission result: true = admitted/queued,
-            // false = backpressure (decode pending queue full). On false the
-            // caller treats decodeStarted=false and delivers the finished
-            // output from the prefill side (degraded but no request lost);
-            // the P-enqueue reservation must be released here — the D-side
-            // lease has no lifecycle owner once the hand-off is rejected.
+            // false = Decode is shutting down. The caller emits a failure;
+            // losing a prepared Decode cannot become a successful P-only result.
             registerDecodeOwnership(input.getRequestId(), decode);
             boolean accepted = decode.scheduleDecodeCompletion(shape, batchId, queue);
             if (!accepted) {
@@ -3345,7 +3612,7 @@ public final class JavaMockEngineCluster {
          * Admission point for a decode request. Returns true if the request was
          * accepted (scheduled immediately, queued behind the concurrency gate,
          * already scheduled previously, or already cancelled); false only while
-         * a shutdown drain is in progress so the caller can degrade.
+         * a shutdown drain is in progress so the caller can fail the request.
          *
          * <p>The hard concurrency gate is UNCONDITIONAL (production semantics:
          * decodeMaxConcurrency caps running requests; once full, new requests
@@ -3378,6 +3645,9 @@ public final class JavaMockEngineCluster {
                 return false;
             }
             synchronized (decodeQueueLock) {
+                if (stopped || shuttingDown) {
+                    return false;
+                }
                 // Cancel raced ahead of scheduling: bail out before claiming
                 // anything. The cancel path has already surfaced the CANCELLED
                 // completion/response, so treat the request as accepted-and-
@@ -3385,10 +3655,23 @@ public final class JavaMockEngineCluster {
                 if (cancelledRequests.containsKey(requestId)) {
                     return true;
                 }
+                if (decodeAllocationInProgress.contains(requestId)) {
+                    return false; // a duplicate direct call raced remote ALLOCATE
+                }
+                boolean prepared = decodeWaitingForKv.remove(requestId);
+                if (prepared) {
+                    pendingRequests.decrementAndGet(); // existing ALLOCATE claim transfers below
+                }
                 // Guard: never schedule the same requestId twice on this engine.
-                EngineRpcService.TaskInfoPB existing = runningTasks.putIfAbsent(
-                        requestId,
-                        task(shape, batchId, 0, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
+                EngineRpcService.TaskInfoPB nextTask =
+                        task(shape, batchId, 0, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING);
+                EngineRpcService.TaskInfoPB existing;
+                if (prepared) {
+                    runningTasks.put(requestId, nextTask);
+                    existing = null;
+                } else {
+                    existing = runningTasks.putIfAbsent(requestId, nextTask);
+                }
                 if (existing != null) {
                     return true; // already accepted/scheduled on this engine
                 }
@@ -3433,7 +3716,6 @@ public final class JavaMockEngineCluster {
                         // documents the retry-semantics divergence).
                         activeDecodeRequests.decrementAndGet();
                         pendingRequests.decrementAndGet();
-                        runningTasks.remove(requestId);
                         clearUpstreamOwnership(requestId);
                         publishDecodeKvFailure(requestId, shape, batchId,
                                 0, responseQueue, "admission");
@@ -3449,6 +3731,7 @@ public final class JavaMockEngineCluster {
                             new DecodeStream(shape, batchId, responseQueue,
                                     performance.decodeSteps(shape.outputLen()), decodeStepScheduled));
                     stats.decodeAdmitted.increment();
+                    recordLifecycleRunning(requestId);
                     recordEventStart(requestId);
                     scheduleDecodeStepLocked();
                 } else {
@@ -3462,7 +3745,7 @@ public final class JavaMockEngineCluster {
                     // running yet) so the scheduler's DecodeEndpoint.trackConfirmed
                     // maps it into the accepted layer. Overwrite is safe: we hold
                     // decodeQueueLock and putIfAbsent above claimed the entry.
-                    if (performance.reportQueuedAsKvAllocated()) {
+                    if (prepared || performance.reportQueuedAsKvAllocated()) {
                         runningTasks.put(requestId, task(shape, batchId, 0,
                                 EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED));
                         // Opt-in KV fidelity (P2-5): a queued request holds its
@@ -3482,7 +3765,6 @@ public final class JavaMockEngineCluster {
                                 acquireDecodeBlockLeaseDetailed(requestId, shape);
                         if (!queuedClaim.success()) {
                             countDecodeKvFailure(queuedClaim.failure());
-                            runningTasks.remove(requestId);
                             clearUpstreamOwnership(requestId);
                             publishDecodeKvFailure(requestId, shape, batchId,
                                     0, responseQueue, "admission");
@@ -3576,13 +3858,13 @@ public final class JavaMockEngineCluster {
                     }
                 }
                 for (DecodeStream stream : finished) {
-                    claimDecodeTerminalLocked(stream);
+                    claimDecodeTerminalLocked(stream, false);
                 }
                 // KV-failure streams claim the SAME terminal machinery (slot /
                 // pendingRequests / runningTasks / ownership) as exhausted
                 // streams — only the post-lock publish differs.
                 for (DecodeStream stream : kvFailed) {
-                    claimDecodeTerminalLocked(stream);
+                    claimDecodeTerminalLocked(stream, true);
                 }
                 topUpDecodeRunningLocked();
                 scheduleDecodeStepLocked();
@@ -3594,7 +3876,7 @@ public final class JavaMockEngineCluster {
             }
             for (DecodeStream stream : kvFailed) {
                 if (stream.owned) {
-                    publishDecodeKvFailure(
+                    finishDecodeKvFailure(
                             stream.shape.input().getRequestId(), stream.shape,
                             stream.batchId, stream.terminalBatchSize,
                             stream.responseQueue, "growth");
@@ -3666,7 +3948,6 @@ public final class JavaMockEngineCluster {
                         // freed slot loops to the NEXT queued candidate.
                         activeDecodeRequests.decrementAndGet();
                         pendingRequests.decrementAndGet();
-                        runningTasks.remove(candidateId);
                         clearUpstreamOwnership(candidateId);
                         publishDecodeKvFailure(candidateId, candidate.shape(),
                                 candidate.batchId(), 0, candidate.responseQueue(), "admission");
@@ -3706,21 +3987,23 @@ public final class JavaMockEngineCluster {
          * winner releases the slot/KV/pendingRequests counters; the loser does
          * nothing (stream.owned stays false and no completion publishes).
          */
-        private void claimDecodeTerminalLocked(DecodeStream stream) {
+        private void claimDecodeTerminalLocked(DecodeStream stream, boolean kvFailure) {
             long requestId = stream.shape.input().getRequestId();
+            synchronized (completionLock) {
+                if (!runningTasks.containsKey(requestId)) {
+                    return; // cancellation already published and removed it
+                }
+                if (kvFailure) {
+                    publishCompletion(decodeKvFailureTask(requestId, "growth"));
+                } else {
+                    recordCompletion(stream.shape, stream.batchId,
+                            Math.round(stream.accumulatedExecMs), 0);
+                }
+                if (!faultConfig.isStatusZombieRunning()) {
+                    runningTasks.remove(requestId);
+                }
+            }
             clearUpstreamOwnership(requestId);
-            EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
-            if (removed == null) {
-                return; // cancel won the terminal race; it released everything
-            }
-            // status_zombie_running: re-insert the entry after the removal so
-            // this request keeps being reported RUNNING forever (its completion
-            // record is dropped inside publishCompletion); the slot/KV/pending
-            // counters below still release normally so the engine keeps
-            // admitting — the zombie poisons only the status report.
-            if (faultConfig.isStatusZombieRunning()) {
-                runningTasks.put(requestId, removed);
-            }
             stream.owned = true;
             stream.terminalBatchSize = decodeRunning.size() + 1;
             activeDecodeRequests.decrementAndGet();
@@ -3743,7 +4026,7 @@ public final class JavaMockEngineCluster {
             MockPerformanceModel.RequestShape shape = stream.shape;
             long requestId = shape.input().getRequestId();
             long executionMs = Math.round(stream.accumulatedExecMs);
-            recordCompletion(shape, stream.batchId, executionMs, 0);
+            // The status terminal was published by claimDecodeTerminalLocked.
             // Feed the per-sample decode completion window (java_mock_stats
             // decode_done / decode_exec_*): Σ actual step durations.
             stats.recordDecodeDone(executionMs);
@@ -3768,9 +4051,8 @@ public final class JavaMockEngineCluster {
                 // (the MTP fold), not the decode batch size.
                 generateTokens.addAndGet(shape.outputLen());
             }
-            // Python compat (_run_decode): no_respond on the decode engine only
-            // suppresses the intermediate first-step output; the finished output
-            // is still delivered, so keep this unconditional.
+            // Completion does not depend on a client Fetch in auto-fetch mode;
+            // strict mode reaches this point only after the client attached.
             if (stream.responseQueue != null && !alreadyCancelled) {
                 stream.responseQueue.offer(buildOutput(shape, true));
             }
@@ -3840,6 +4122,16 @@ public final class JavaMockEngineCluster {
                 int terminalBatchSize,
                 LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue,
                 String stage) {
+            synchronized (completionLock) {
+                publishCompletion(decodeKvFailureTask(requestId, stage));
+                if (!faultConfig.isStatusZombieRunning()) {
+                    runningTasks.remove(requestId);
+                }
+            }
+            finishDecodeKvFailure(requestId, shape, batchId, terminalBatchSize, responseQueue, stage);
+        }
+
+        private EngineRpcService.TaskInfoPB decodeKvFailureTask(long requestId, String stage) {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
@@ -3858,7 +4150,12 @@ public final class JavaMockEngineCluster {
             if (lifecycleBatchId > 0L) {
                 task.setBatchId(lifecycleBatchId);
             }
-            publishCompletion(task.build());
+            return task.build();
+        }
+
+        private void finishDecodeKvFailure(long requestId, MockPerformanceModel.RequestShape shape,
+                long batchId, int terminalBatchSize,
+                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue, String stage) {
             statusVersion.incrementAndGet();
             // engine_events.jsonl failure row (error_code key present →
             // aggregate/canvas joins exclude it from latency calibers).
@@ -3995,14 +4292,38 @@ public final class JavaMockEngineCluster {
                 if (faultConfig.isStatusZombieRunning()) {
                     return;
                 }
-                long version = completionVersion.incrementAndGet();
-                completions.add(new VersionedTask(version, task));
-                // status_duplicate_finished: enqueue the SAME completion twice
-                // under the SAME version — one poll reports the rid twice, and
-                // advancing the cursor past that version consumes both copies.
-                if (faultConfig.isStatusDuplicateFinished()) {
-                    completions.add(new VersionedTask(version, task));
+                if (statusDeliveryFaultsActive && statusDeliveryFaults.defer(task, System.nanoTime())) {
+                    return;
                 }
+                publishCompletionNow(task);
+            }
+        }
+
+        /** Caller holds completionLock. Fault-delayed records get their cursor here. */
+        private void publishCompletionNow(EngineRpcService.TaskInfoPB task) {
+            long version = completionVersion.incrementAndGet();
+            StatusDeliveryFaults.Rule delivery = statusDeliveryFaults.rules.get(task.getRequestId());
+            if (delivery != null) delivery.releasedVersion = version;
+            completions.add(new VersionedTask(version, task));
+            // status_duplicate_finished: enqueue the SAME completion twice
+            // under the SAME version — one poll reports the rid twice, and
+            // advancing the cursor past that version consumes both copies.
+            if (faultConfig.isStatusDuplicateFinished()) {
+                completions.add(new VersionedTask(version, task));
+            }
+            trimCompletionsLocked();
+        }
+
+        private void trimCompletionsLocked() {
+            while (completions.size() > completionRetainWindow) {
+                completions.removeFirst();
+                completionRetentionDrops++;
+            }
+        }
+
+        private Set<Long> runningTaskIds() {
+            synchronized (completionLock) {
+                return new LinkedHashSet<>(runningTasks.keySet());
             }
         }
 
@@ -4049,7 +4370,7 @@ public final class JavaMockEngineCluster {
 
         /**
          * Force-evict block keys from this engine's LRU (control-plane POST
-         * /cache_evict — the flexlb_ft KV family's forced-eviction hook).
+         * /cache_evict — the flexlb_test_framework KV family's forced-eviction hook).
          * Idempotent: evicting keys that are not present is a no-op. When
          * the key set changes the engine's cacheVersion is bumped, so the
          * master's next cache-status poll re-pulls the key set and its
@@ -4277,7 +4598,11 @@ public final class JavaMockEngineCluster {
         private void releaseBlockLease(long requestId) {
             MockLruBlockCache.BlockLease lease = activeBlockLeases.remove(requestId);
             if (lease != null) {
+                long beforeEvictions = cache.retentionEvictions();
                 cache.release(lease);
+                if (cache.retentionEvictions() != beforeEvictions) {
+                    cacheVersion.incrementAndGet();
+                }
             }
         }
 
@@ -4452,7 +4777,15 @@ public final class JavaMockEngineCluster {
             int pending = pendingRequests.get();
             int running = runningTasks.size();
             int activeDecode = activeDecodeRequests.get();
-            if (pending != 0 || running != 0 || activeDecode != 0) {
+            // ALLOCATE may legitimately outlive the drain grace while its P
+            // context waits for Fetch. Only discount reservations with a live
+            // owner; orphan KV must still trigger the leak detector.
+            long ownedWaiting = decodeWaitingForKv.stream().filter(id -> {
+                FastRpcService p = upstreamPrefillOwners.get(id);
+                MockPrefillSession context = p == null ? null : p.prefillSessions.get(id);
+                return context != null && !context.isClosed();
+            }).count();
+            if (pending != ownedWaiting || running != ownedWaiting || activeDecode != 0) {
                 leakDetected.set(true);
                 System.err.printf("LEAK DETECTED on engine %s (port %d): pending=%d running=%d activeDecode=%d%n",
                         roleName, grpcPort, pending, running, activeDecode);
@@ -4465,7 +4798,9 @@ public final class JavaMockEngineCluster {
          * entries that were not cleaned up by the completion or cancel callbacks.
          */
         void periodicCleanup() {
-            Set<Long> activeIds = runningTasks.keySet();
+            Set<Long> activeIds = runningTaskIds();
+            activeIds.addAll(prefillSessions.keySet());
+            activeIds.addAll(downstreamDecodeOwners.keySet());
             // Only prune responseQueues when there are no pending requests. A queue
             // may still be awaiting decode output from another engine even after the
             // local runningTasks entry has been removed (prefill completed, decode in
@@ -4494,18 +4829,9 @@ public final class JavaMockEngineCluster {
                     !runningTasks.containsKey(id) && !responseQueues.containsKey(id));
             eventStartMs.keySet().removeIf(id ->
                     !runningTasks.containsKey(id) && !responseQueues.containsKey(id));
-            // Completion backlog retain window: reads are non-destructive
-            // (multi-consumer cursor delivery, see getWorkerStatus), so the
-            // queue is bounded HERE instead — keep the most recent
-            // completionRetainWindow records by version and trim older ones
-            // off the head. Between 60s cleanups the transient backlog is
-            // bounded by the interval's completion volume; right after a trim
-            // it is exactly the window.
+            // Retention is enforced at insertion; housekeeping is idempotent.
             synchronized (completionLock) {
-                int excess = completions.size() - completionRetainWindow;
-                while (excess-- > 0) {
-                    completions.poll();
-                }
+                trimCompletionsLocked();
             }
         }
 
@@ -4527,13 +4853,16 @@ public final class JavaMockEngineCluster {
          */
         void drainAndShutdown() {
             shuttingDown = true;
-            stopped = true; // same rejection semantics as the control-plane /stop_engine
+            setStopped(true);
+            for (Long requestId : List.copyOf(prefillSessions.keySet())) {
+                cancel(requestId, false, false);
+            } // same rejection semantics as the control-plane /stop_engine
             // Cancel sweep. A pass can promote queued decode tasks into running
             // slots (cancel's slot hand-off) and a racing cross-engine hand-off
             // may slip in before the shuttingDown guard was observed, so retry
             // a bounded number of passes until runningTasks is empty.
             for (int pass = 0; pass < 3 && !runningTasks.isEmpty(); pass++) {
-                for (Long requestId : List.copyOf(runningTasks.keySet())) {
+                for (Long requestId : runningTaskIds()) {
                     cancel(requestId);
                 }
             }
@@ -4608,16 +4937,27 @@ public final class JavaMockEngineCluster {
          * </ol>
          *
          * <p>Contrast: {@code stop_engine} (MockControlServer.handleStopEngine)
-         * closes the port but deliberately KEEPS every pool and queue, so the
-         * engine resumes in place once restarted — a network-level outage, not
-         * a process death. {@link #drainAndShutdown()} is the graceful process
+         * closes the port and its P->D streams, releasing their request resources,
+         * but retains the engine incarnation and cache for an in-place restart
+         * — a network-level outage, not a process death. {@link #drainAndShutdown()} is the graceful process
          * EXIT path and cancels everything through the normal terminal
          * machinery instead of discarding it.
          */
         void crashNow() {
-            stopped = true;
+            setStopped(true);
             crashEpoch.incrementAndGet();
-            runningTasks.clear();
+
+            for (Long requestId : List.copyOf(prefillSessions.keySet())) {
+                closePrefillSession(requestId);
+                releaseReservedDecode(requestId);
+            }
+            decodeWaitingForKv.clear();
+            synchronized (completionLock) {
+                runningTasks.clear();
+                completions.clear();
+                statusDeliveryFaults.rules.clear();
+                statusDeliveryFaultsActive = false;
+            }
             responseQueues.clear();
             requestStates.clear();
             activeBlockLeases.clear();
@@ -4679,7 +5019,7 @@ public final class JavaMockEngineCluster {
             // serving afterwards and a stranded reservation would poison
             // subsequent pool assertions.
             for (Map.Entry<Long, FastRpcService> entry : decodeReservationOwners.entrySet()) {
-                entry.getValue().releaseBlockLease(entry.getKey());
+                entry.getValue().cancel(entry.getKey(), false, false);
             }
             decodeReservationOwners.clear();
             // Admission gauges: nothing is queued or running on a dead process.
@@ -4739,9 +5079,55 @@ public final class JavaMockEngineCluster {
 
         FaultInjectionConfig getFaultConfig() { return faultConfig; }
         void setFaultConfig(FaultInjectionConfig config) { this.faultConfig = config; }
-        void clearFaultConfig() { this.faultConfig = FaultInjectionConfig.builder().build(); }
+        void clearFaultConfig() {
+            synchronized (completionLock) {
+                this.faultConfig = FaultInjectionConfig.builder().build();
+                statusDeliveryFaults.clear(this::publishCompletionNow);
+                statusDeliveryFaultsActive = false;
+            }
+        }
+        void configureStatusDelivery(long rid, int missingRounds, long delayMs) {
+            synchronized (completionLock) {
+                statusDeliveryFaults.configure(rid, missingRounds, delayMs);
+                statusDeliveryFaultsActive = true;
+            }
+        }
         void resetEnqueueCount() { this.enqueueCount.set(0); }
-        void setStopped(boolean s) { this.stopped = s; }
+        void setStopped(boolean s) {
+            synchronized (decodeQueueLock) {
+                this.stopped = s;
+                if (s && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                    // The mock has no P->D socket: explicitly model the broken
+                    // RemoteGenerate stream before teardown discards its owners.
+                    // Normal completion and downstream cancellation claim the
+                    // same ownership under this lock, so only the winner emits.
+                    for (Long requestId : List.copyOf(upstreamPrefillOwners.keySet())) {
+                        FastRpcService prefill = upstreamPrefillOwners.get(requestId);
+                        if (prefill != null) {
+                            deliverLinkBreak(requestId, prefill);
+                            // Closing the stream also releases a prepared D
+                            // allocation: otherwise closing P's deferred context
+                            // strands waiting_for_kv until its lease timeout.
+                            cancel(requestId, false, false);
+                            clearUpstreamOwnership(requestId);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void deliverLinkBreak(long requestId, FastRpcService prefill) {
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
+                    prefill.responseQueues.get(requestId);
+            if (queue != null) {
+                queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                .setErrorCodeValue(8209) // REMOTE_GENERATE_FAILED (C++ ErrorCode)
+                                .setErrorMessage("P->D link closed: decode engine " + grpcPort + " stopped"))
+                        .build());
+            }
+        }
         void setGrpcServer(Server server) { this.grpcServer = server; }
         long getCrashEpoch() { return crashEpoch.get(); }
         boolean isStopped() { return stopped; }
@@ -4771,6 +5157,10 @@ public final class JavaMockEngineCluster {
         long getAvailableKvTokens() { return availableKvTokens(); }
         /** Total pool blocks (ceil(totalKvTokens/spb) or explicit override). */
         int getCacheBlocks() { return cache.totalBlocks(); }
+        void setCacheRetentionBlocks(int limit) {
+            cache.setRetentionBlocks(limit);
+            cacheVersion.incrementAndGet();
+        }
         /** spb — the pool's token<->block conversion factor (reported as block_size). */
         int getSeqSizePerBlock() { return seqSizePerBlock; }
         /** Count of decode-side KV admission/growth failures — each a request
@@ -4956,7 +5346,7 @@ public final class JavaMockEngineCluster {
             lifecycle.put("end_ms", 0L);
             lifecycle.put("end_state", "running");
             synchronized (requestLifecycles) {
-                requestLifecycles.put(requestId, lifecycle);
+                requestLifecycles.putIfAbsent(requestId, lifecycle);
                 // Bounded like Python _prune_lifecycle: evict the oldest entries once over cap.
                 while (requestLifecycles.size() > LIFECYCLE_CAP) {
                     requestLifecycles.remove(requestLifecycles.keySet().iterator().next());
@@ -5226,10 +5616,16 @@ public final class JavaMockEngineCluster {
                 snap.put("prefill_waiting_batches", prefillPendingQueueSize());
             }
             snap.put("accepted", acceptedCount.get());
+            snap.put("auto_fetch", autoFetch);
+            snap.put("active_decode_requests", activeDecodeRequests.get());
+            snap.put("response_buffers", responseQueues.size());
+            snap.put("prefill_contexts", prefillSessions.size());
+            snap.put("decode_waiting_for_kv", decodeWaitingForKv.size());
+            snap.put("fetch_attach_expirations", fetchAttachExpirations.get());
             snap.put("completed", completedCount.get());
             snap.put("cache_keys", cache.snapshotKeys().size());
             snap.put("cache_evictions", cache.evictions());
-            // Full per-engine key list (flexlb_ft KV cases' per-engine key-set
+            // Full per-engine key list (flexlb_test_framework KV cases' per-engine key-set
             // exposure). Debug endpoint — the whole list is exposed by design
             // (default 6000-block caches included); sorted for determinism.
             List<Long> cacheKeySet = new ArrayList<>(cache.snapshotKeys());
@@ -5242,6 +5638,8 @@ public final class JavaMockEngineCluster {
             snap.put("total_kv_tokens", totalKvTokens);
             snap.put("block_size", seqSizePerBlock);
             snap.put("cache_blocks", cache.totalBlocks());
+            snap.put("cache_retention_blocks", cache.retentionBlocks());
+            snap.put("cache_retention_evictions", cache.retentionEvictions());
             snap.put("available_blocks", cache.availableBlocks());
             snap.put("held_blocks", cache.heldBlocks());
             snap.put("referenced_blocks", cache.referencedKeyBlocks());
@@ -5585,10 +5983,9 @@ public final class JavaMockEngineCluster {
         int completionThreads = 8;
         /**
          * Block-count pool overrides (capacity model v2): 0 = derive the pool
-         * from the per-role token capacity (ceil(totalKvTokens/spb)). The legacy
-         * flag NAMES are kept (run_online_eval.sh L861-862 / lib_load_client.sh /
-         * harness.py still pass them) but the MEANING changed from "max cache
-         * keys" to "total pool blocks" — a non-zero value overrides derivation.
+         * from the per-role token capacity (ceil(totalKvTokens/spb)). CLI
+         * names: --prefill-kv-pool-blocks / --decode-kv-pool-blocks — a
+         * non-zero value overrides derivation.
          */
         int prefillCacheBlocks = 0;
         int decodeCacheBlocks = 0;
@@ -5630,6 +6027,8 @@ public final class JavaMockEngineCluster {
          * mock_engine.log.
          */
         boolean statsStdout = false;
+        boolean autoFetch = false;
+        long fetchAttachTimeoutMs = 600_000L;
         /**
          * Unique per-engine loopback advertisement IPs (127.x.y.z), default on:
          * keeps the master-side engineIp Prometheus label distinct per engine.
@@ -5659,8 +6058,10 @@ public final class JavaMockEngineCluster {
                     case "--base-grpc-port" -> config.baseGrpcPort = Integer.parseInt(value);
                     case "--event-loop-threads" -> config.eventLoopThreads = Integer.parseInt(value);
                     case "--completion-threads" -> config.completionThreads = Integer.parseInt(value);
-                    case "--prefill-cache-blocks" -> config.prefillCacheBlocks = Integer.parseInt(value);
-                    case "--decode-cache-blocks" -> config.decodeCacheBlocks = Integer.parseInt(value);
+                    case "--auto-fetch" -> config.autoFetch = parseBooleanFlag(value, key);
+                    case "--fetch-attach-timeout-ms" -> config.fetchAttachTimeoutMs = Long.parseLong(value);
+                    case "--prefill-kv-pool-blocks" -> config.prefillCacheBlocks = Integer.parseInt(value);
+                    case "--decode-kv-pool-blocks" -> config.decodeCacheBlocks = Integer.parseInt(value);
                     case "--host" -> config.host = value;
                     case "--prefill-domain" -> config.prefillDomain = value;
                     case "--decode-domain" -> config.decodeDomain = value;
@@ -5706,6 +6107,9 @@ public final class JavaMockEngineCluster {
             }
             if (config.eventLoopThreads < 1 || config.completionThreads < 1) {
                 throw new IllegalArgumentException("thread counts must be positive");
+            }
+            if (config.fetchAttachTimeoutMs < 1) {
+                throw new IllegalArgumentException("--fetch-attach-timeout-ms must be >= 1");
             }
             if (config.decodeMaxConcurrency < 1) {
                 throw new IllegalArgumentException("--decode-max-concurrency must be >= 1");

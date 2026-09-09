@@ -24,7 +24,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpGet;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.performanceModel;
@@ -125,7 +125,7 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.GenerateInputPB tooBig = inputWithBlockKeys(
                 7L, SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(1, slot(0, tooBig)));
+                enqueueAndFetch(prefill, batch(1, slot(0, tooBig)));
         assertEquals(1, ack.getErrorsCount(), "the oversized request must be rejected");
         assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode());
@@ -166,7 +166,7 @@ class BlockPoolMetricsObservabilityTest {
         // counting) — the pool is not poisoned by the rejection.
         EngineRpcService.GenerateInputPB small =
                 inputWithBlockKeys(8L, SPB, List.of(1L, 2L));
-        assertEquals(0, enqueue(prefill, batch(2, slot(0, small))).getErrorsCount());
+        assertEquals(0, enqueueAndFetch(prefill, batch(2, slot(0, small))).getErrorsCount());
         Map<String, Map<Integer, Long>> after =
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
         assertEquals(1L, after.get("mock_engine_lack_mem_rejects_total")
@@ -188,7 +188,7 @@ class BlockPoolMetricsObservabilityTest {
 
         // in-flight asserted via snapshot before the metrics scrape so the
         // gauge reading cannot race the completion.
-        assertEquals(0, enqueue(prefill, batch(3, slot(0,
+        assertEquals(0, enqueueAndFetch(prefill, batch(3, slot(0,
                 inputWithBlockKeys(30L, 3 * SPB, List.of(31L, 32L, 33L)))))
                 .getErrorsCount());
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -426,7 +426,7 @@ class BlockPoolMetricsObservabilityTest {
                 List.of(301L, 302L, 303L, 304L, 305L,
                         306L, 307L, 308L, 309L, 310L, 311L));
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(6, slot(0, tooBigForDecode)));
+                enqueueAndFetch(prefill, batch(6, slot(0, tooBigForDecode)));
         assertEquals(1, ack.getErrorsCount(),
                 "the D-pool overflow must reject the request synchronously");
         assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
@@ -491,7 +491,7 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.GenerateInputPB first = inputWithDecodeAndKeys(
                 401L, 4 * SPB, decodePort, 26,
                 List.of(401L, 402L, 403L, 404L));
-        assertEquals(0, enqueue(prefill, batch(7, slot(0, first))).getErrorsCount());
+        assertEquals(0, enqueueAndFetch(prefill, batch(7, slot(0, first))).getErrorsCount());
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         while (System.nanoTime() < deadline && prefill.getInflightCount() < 1) {
             Thread.sleep(5);
@@ -554,7 +554,7 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.GenerateInputPB second = inputWithDecodeAndKeys(
                 402L, 4 * SPB, decodePort, 26,
                 List.of(405L, 406L, 407L, 408L));
-        assertEquals(0, enqueue(prefill, batch(8, slot(0, second))).getErrorsCount());
+        assertEquals(0, enqueueAndFetch(prefill, batch(8, slot(0, second))).getErrorsCount());
         while (System.nanoTime() < deadline && prefill.getInflightCount() < 1) {
             Thread.sleep(5);
         }

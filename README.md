@@ -11,6 +11,8 @@
 | [**Documentation**](https://rtp-llm.ai/)
 | [**Contact Us**](#contact-us) |
 
+[FlexLB YAML case tests](CASE_TESTS.md): scene files, runner entry points and migration status.
+
 ## News
 - [2025/09] 🔥 RTP-LLM 0.2.0 release with enhanced performance and new features
 - [2025/01] 🚀 RTP-LLM now supports Prefill/Decode separation with detailed technical report

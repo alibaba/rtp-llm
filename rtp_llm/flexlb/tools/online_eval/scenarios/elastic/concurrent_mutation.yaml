@@ -1,0 +1,101 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: elastic_concurrent_mutation
+profiles:
+- batch-window
+- single-batch
+- single-nonbatch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms:
+      omit: true
+execution:
+  timeout_s: 360
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: default
+  profiles:
+  - batch-window
+  program: default
+- id: single_batch
+  profiles:
+  - single-batch
+  program: single_batch
+- id: single_nonbatch
+  profiles:
+  - single-nonbatch
+  program: single_nonbatch
+- id: window_nonbatch
+  profiles:
+  - window-nonbatch
+  program: window_nonbatch
+- id: single_nonbatch_convergence
+  profiles:
+  - single-nonbatch
+  program: convergence
+- id: window_nonbatch_convergence
+  profiles:
+  - window-nonbatch
+  program: convergence
+- id: batch_convergence
+  profiles:
+  - batch-window
+  program: convergence
+- id: single_batch_convergence
+  profiles:
+  - single-batch
+  program: convergence
+metadata:
+  description: Four concurrent add/remove workers and serial health probes, followed by quiescent discovery
+    validation.
+  category: elastic
+  requires:
+  - queue
+  estimated_duration_s: 90
+parameters:
+  default:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 120
+    health:
+      min_success_rate: 0.5
+  single_batch:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 120
+    protocol:
+      method: FetchResponse
+    health:
+      min_success_rate: 0.5
+  single_nonbatch:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 120
+    protocol:
+      method: GenerateStreamCall
+    health:
+      min_success_rate: 0.5
+  window_nonbatch:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 120
+    protocol:
+      method: GenerateStreamCall
+    health:
+      min_success_rate: 0.5
+  convergence:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 180
+    crossfire:
+      convergence:
+        unique_ports: true
+        margin_s: 2
+        cap_s: 30
+        post_window_s: 10
+        min_post_samples: 2
+        nonbatch_failfast_s: 2
+        batch_failfast_s: 5

@@ -1,0 +1,89 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: request_completion
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+execution:
+  timeout_s: 300
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: immediate
+  program: immediate
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: deferred_fetch
+  profiles:
+  - batch-window
+  - single-batch
+  program: deferred_fetch
+- id: client_no_fetch
+  profiles:
+  - batch-window
+  - single-batch
+  environment:
+    n_prefill: 1
+    n_decode: 1
+    mock_auto_fetch: false
+    mock_fetch_attach_timeout_ms: 4000
+    prefill_perf:
+      fixed_ms: 1000
+      scale: 1.0
+      max_batch_tokens: 32768
+      max_batch_requests: 32
+  execution:
+    timeout_s: 600
+  program: client_no_fetch
+  parameters:
+    output_len: 8
+metadata:
+  description: Submitted requests reach a business terminal without stream errors.
+  category: status
+  tags:
+  - smoke
+  - lifecycle
+parameters:
+  completion:
+    setup_timeout_s: 180
+    step_5:
+      op: eq
+    deferred_consume: deferred
+    expected:
+      completed: true
+      no_errors: 0
+  client_no_fetch:
+    setup_timeout_s: 180
+    automatic_environment_timeout_s: 240
+    automatic_environment:
+      config_overrides: {}
+      mock_auto_fetch: true
+    automatic:
+      mode: automatic
+    automatic_timeout_s: 30
+    step_5_timeout_s: 30
+  input_len: 2048
+  output_len: 2
+  count: 1
+  observe_s: 0.2
+parameter_schema:
+  input_len:
+    minimum: 1
+    maximum: 2147483647
+    integer: true
+  output_len:
+    minimum: 1
+    maximum: 2147483647
+    integer: true
+  count:
+    minimum: 1
+    maximum: 10000
+    integer: true
+  observe_s:
+    minimum: 0.01
+    maximum: 10
+    integer: false

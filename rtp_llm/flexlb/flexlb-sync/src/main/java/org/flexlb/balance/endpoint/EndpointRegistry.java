@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
@@ -147,6 +148,23 @@ public class EndpointRegistry {
             maps.put(role, new ConcurrentHashMap<>());
         }
         return maps;
+    }
+
+    /** Advisory bounded directory; detached retiring generations are outside its scope. */
+    public java.util.List<WorkerEndpoint> debugEndpoints(int limit) {
+        if (limit < 1 || limit > 257) {
+            throw new IllegalArgumentException("endpoint limit must be 1..257");
+        }
+        java.util.List<WorkerEndpoint> result = new java.util.ArrayList<>();
+        for (var role : endpointsByRole.values()) {
+            for (var endpoint : role.values()) {
+                result.add(endpoint);
+                if (result.size() == limit) {
+                    return java.util.List.copyOf(result);
+                }
+            }
+        }
+        return java.util.List.copyOf(result);
     }
 
     private ConcurrentHashMap<String, WorkerEndpoint> endpoints(RoleType role) {

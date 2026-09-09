@@ -125,6 +125,22 @@ final class MockEngineTestSupport {
         return unary(observer -> service.enqueueBatch(request, observer));
     }
 
+    /** A normal client attaches Fetch for each successful batch admission. */
+    static EngineRpcService.EnqueueBatchResponsePB enqueueAndFetch(
+            JavaMockEngineCluster.FastRpcService service,
+            EngineRpcService.EnqueueBatchRequestPB request) {
+        var response = enqueue(service, request);
+        for (var success : response.getSuccessesList()) {
+            service.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+                    .setRequestId(success.getRequestId()).build(), new StreamObserver<>() {
+                public void onNext(EngineRpcService.GenerateOutputsPB value) { }
+                public void onError(Throwable error) { }
+                public void onCompleted() { }
+            });
+        }
+        return response;
+    }
+
     static EngineRpcService.WorkerStatusPB workerStatus(
             JavaMockEngineCluster.FastRpcService service, long sinceVersion) {
         return unary(observer -> service.getWorkerStatus(

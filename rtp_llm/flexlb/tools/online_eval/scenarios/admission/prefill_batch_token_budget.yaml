@@ -1,0 +1,395 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: prefill_batch_token_budget
+profiles:
+- batch-window
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 2
+  perf_preset: default
+  prefill_perf:
+    fixed_ms: 3000
+    scale: 1
+    max_batch_tokens: 1024
+    max_batch_requests: 0
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 60000
+    max_collection_wait_ms: 100
+execution:
+  timeout_s: 600
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: split
+  environment:
+    prefill_perf:
+      fixed_ms: 3000
+      scale: 1
+      max_batch_tokens: 1024
+      max_batch_requests: 0
+  program: split
+- id: split_fifo
+  environment:
+    prefill_perf:
+      fixed_ms: 3000
+      scale: 1
+      max_batch_tokens: 1024
+      max_batch_requests: 0
+  program: split_fifo
+- id: boundary
+  environment:
+    prefill_perf:
+      fixed_ms: 3000
+      scale: 1
+      max_batch_tokens: 2048
+      max_batch_requests: 0
+  program: boundary
+- id: regroup_disabled
+  environment:
+    prefill_perf:
+      fixed_ms: 3000
+      scale: 1
+      max_batch_tokens: 0
+      max_batch_requests: 0
+  program: regroup_disabled
+metadata:
+  description: One master batch, explicit startup engine token budget and observed Master batch/member
+    settlement; construction shape is diagnostic.
+  category: admission
+  requires:
+  - enqueue_batch
+parameters:
+  split:
+    setup_timeout_s: 180
+    before:
+      targets:
+      - prefill-0
+    wave_timeout_s: 60
+    wave:
+      count: 4
+      concurrency: 4
+      input_len: 512
+      output_len: 2
+      consume: deferred
+      spacing_s: 0.01
+      request_timeout_s: 45
+      await_submissions: true
+    park_timeout_s: 15
+    park:
+      targets:
+      - prefill-0
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      duration_s: 10
+      until_op: ge
+      until_value: 1
+      reduce: any
+    park_contract:
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      stat: max_seen
+      op: ge
+      expected: 1
+    ledger_timeout_s: 15
+    ledger:
+      duration_s: 8
+    linkage:
+      n_requests: 4
+      expect_intermediate: true
+    done_timeout_s: 180
+    all_completed:
+      metric: success_count
+      expected: 4
+      op: eq
+      scope: all
+    after:
+      targets:
+      - prefill-0
+    shape:
+      expected:
+      - 2
+      - 4
+      - 2
+    batch_identity:
+      metric: batch_identity
+    empty_timeout_s: 15
+    empty:
+      targets:
+      - prefill-0
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      duration_s: 10
+      until_op: eq
+      until_value: 0
+    park_empty:
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      stat: max_latest
+      op: eq
+      expected: 0
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 40
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+  split_fifo:
+    setup_timeout_s: 180
+    before:
+      targets:
+      - prefill-0
+    wave_timeout_s: 60
+    wave:
+      count: 4
+      concurrency: 4
+      input_len: 512
+      output_len: 2
+      consume: deferred
+      spacing_s: 0.01
+      request_timeout_s: 45
+      await_submissions: true
+    consumers_timeout_s: 45
+    ledger_timeout_s: 15
+    ledger:
+      duration_s: 8
+    linkage:
+      n_requests: 4
+      expect_intermediate: true
+    done_timeout_s: 45
+    all_completed:
+      metric: success_count
+      expected: 4
+      op: eq
+      scope: all
+    client_fifo:
+      metric: client_two_clusters
+    after:
+      targets:
+      - prefill-0
+    shape:
+      expected:
+      - 2
+      - 4
+      - 2
+    empty_timeout_s: 15
+    empty:
+      targets:
+      - prefill-0
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      duration_s: 10
+      until_op: eq
+      until_value: 0
+    park_empty:
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      stat: max_latest
+      op: eq
+      expected: 0
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 40
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+  boundary:
+    setup_timeout_s: 180
+    baseline:
+      count: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+    baseline_done_timeout_s: 45
+    baseline_success:
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+    before:
+      targets:
+      - prefill-0
+    wave_timeout_s: 60
+    wave:
+      count: 4
+      concurrency: 4
+      input_len: 512
+      output_len: 2
+      consume: immediate
+      spacing_s: 0.01
+      request_timeout_s: 15
+      await_submissions: false
+    park_timeout_s: 15
+    park:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      duration_s: 2.5
+    park_contract:
+      fields:
+      - prefill_waiting_batches
+      stat: max_seen
+      op: eq
+      expected: 0
+    ledger_timeout_s: 15
+    ledger:
+      duration_s: 5
+    linkage:
+      n_requests: 4
+      expect_intermediate: false
+    done_timeout_s: 45
+    all_completed:
+      metric: success_count
+      expected: 4
+      op: eq
+      scope: all
+    after:
+      targets:
+      - prefill-0
+    shape:
+      expected:
+      - 1
+      - 4
+      - 4
+    ttft_neutral:
+      metric: ttft_degradation
+    empty_timeout_s: 15
+    empty:
+      targets:
+      - prefill-0
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      duration_s: 10
+      until_op: eq
+      until_value: 0
+    park_empty:
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      stat: max_latest
+      op: eq
+      expected: 0
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 40
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all
+  regroup_disabled:
+    setup_timeout_s: 180
+    before:
+      targets:
+      - prefill-0
+    wave_timeout_s: 60
+    wave:
+      count: 4
+      concurrency: 4
+      input_len: 512
+      output_len: 2
+      consume: deferred
+      spacing_s: 0.01
+      request_timeout_s: 45
+      await_submissions: true
+    park_timeout_s: 15
+    park:
+      targets:
+      - prefill-0
+      fields:
+      - prefill_waiting_batches
+      duration_s: 2.5
+    park_contract:
+      fields:
+      - prefill_waiting_batches
+      stat: max_seen
+      op: eq
+      expected: 0
+    ledger_timeout_s: 15
+    ledger:
+      duration_s: 5
+    linkage:
+      n_requests: 4
+      expect_intermediate: false
+    done_timeout_s: 180
+    all_completed:
+      metric: success_count
+      expected: 4
+      op: eq
+      scope: all
+    after:
+      targets:
+      - prefill-0
+    shape:
+      expected:
+      - 1
+      - 4
+      - 4
+    batch_identity:
+      metric: batch_identity
+    empty_timeout_s: 15
+    empty:
+      targets:
+      - prefill-0
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      duration_s: 10
+      until_op: eq
+      until_value: 0
+    park_empty:
+      fields:
+      - waiting
+      - prefill_waiting_batches
+      stat: max_latest
+      op: eq
+      expected: 0
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 40
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+      scope: all

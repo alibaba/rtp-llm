@@ -1,0 +1,7448 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: cache_affinity
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  perf_preset: default
+execution:
+  timeout_s: 900
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: leader_spill_p2
+  profiles:
+  - single-batch
+  environment:
+    n_prefill: 2
+    n_decode: 2
+    prefill_cache_blocks: 64
+    decode_cache_blocks: 64
+  parameters:
+    receiver_retention_blocks: 6
+    hot_blocks: 10
+    background_blocks: 4
+    interval_s: 0.15
+    steady_interval_s: 0.4
+    slow_ms: 15000
+    normal_ms: 100
+    background_every: 8
+    window_s: 2
+    baseline_windows: 3
+    saturation_windows: 6
+    recovery_windows: 10
+    concurrency: 128
+    recovery_consecutive: 2
+    min_busy_share: 0.9
+    calibration_runs: 3
+    hit_strict: 0.962367
+    eviction_strict: 0.126957
+    holders_strict: 1
+    hit_normal: 0.939481
+    eviction_normal: 0.165174
+    holders_normal: 1
+    hit_loose: 0.885854
+    eviction_loose: 0.253913
+    holders_loose: 1
+  program: leader_spill_multi
+  metadata:
+    findings:
+    - healthy.hit
+    - healthy.eviction
+    - healthy.holders
+- id: leader_spill_p3
+  profiles:
+  - single-batch
+  environment:
+    n_prefill: 3
+    n_decode: 2
+    prefill_cache_blocks: 64
+    decode_cache_blocks: 64
+  parameters:
+    receiver_retention_blocks: 6
+    hot_blocks: 10
+    background_blocks: 4
+    interval_s: 0.15
+    steady_interval_s: 0.4
+    slow_ms: 15000
+    normal_ms: 100
+    background_every: 8
+    window_s: 2
+    baseline_windows: 3
+    saturation_windows: 6
+    recovery_windows: 10
+    concurrency: 128
+    recovery_consecutive: 2
+    min_busy_share: 0.9
+    calibration_runs: 3
+    hit_strict: 0.962367
+    eviction_strict: 0.127133
+    holders_strict: 1
+    hit_normal: 0.939481
+    eviction_normal: 0.165404
+    holders_normal: 1
+    hit_loose: 0.885854
+    eviction_loose: 0.254267
+    holders_loose: 1
+  program: leader_spill_multi
+  metadata:
+    findings:
+    - healthy.hit
+    - healthy.eviction
+    - healthy.holders
+- id: leader_spill_p4
+  profiles:
+  - single-batch
+  environment:
+    n_prefill: 4
+    n_decode: 2
+    prefill_cache_blocks: 64
+    decode_cache_blocks: 64
+  parameters:
+    receiver_retention_blocks: 6
+    hot_blocks: 10
+    background_blocks: 4
+    interval_s: 0.15
+    steady_interval_s: 0.4
+    slow_ms: 15000
+    normal_ms: 100
+    background_every: 8
+    window_s: 2
+    baseline_windows: 3
+    saturation_windows: 6
+    recovery_windows: 10
+    concurrency: 128
+    recovery_consecutive: 2
+    min_busy_share: 0.9
+    calibration_runs: 3
+    hit_strict: 0.962367
+    eviction_strict: 0.126818
+    holders_strict: 1
+    hit_normal: 0.939481
+    eviction_normal: 0.164994
+    holders_normal: 1
+    hit_loose: 0.885854
+    eviction_loose: 0.253636
+    holders_loose: 1
+  program: leader_spill_multi
+  metadata:
+    findings:
+    - healthy.hit
+    - healthy.eviction
+    - healthy.holders
+- id: prefix_batch
+  profiles:
+  - batch-window
+  - single-batch
+  program: prefix_batch
+  metadata:
+    requires:
+    - enqueue_batch
+- id: prefix_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  program: prefix_nonbatch
+- id: hot_tension
+  program: hot_tension
+- id: mixed_tiers
+  program: mixed_tiers
+- id: leader_spill_batch
+  profiles:
+  - batch-window
+  - single-batch
+  execution:
+    timeout_s: 1500
+  environment:
+    n_decode: 2
+    prefill_cache_blocks: 12
+    decode_cache_blocks: 12
+  program: leader_spill_batch
+  metadata:
+    findings:
+    - saturation_hit.M3
+    requires:
+    - enqueue_batch
+- id: leader_spill_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  execution:
+    timeout_s: 1500
+  environment:
+    n_decode: 2
+    prefill_cache_blocks: 12
+    decode_cache_blocks: 12
+  program: leader_spill_nonbatch
+  metadata:
+    findings:
+    - saturation_hit.M3
+metadata:
+  description: Prefix fidelity and free-flow diversity, hot holder total-share tension, and full/half/zero-hit
+    tier contrast.
+  category: kv
+parameters:
+  prefix_batch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 30
+      consume: deferred
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 2001
+      - 2002
+      - 2003
+      - 2004
+      - 2005
+      - 2006
+      - 2007
+      - 2008
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    cache_sync:
+      seconds: 2
+    mixed_0:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_0_terminal_timeout_s: 15
+    mixed_1:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_1_terminal_timeout_s: 15
+    mixed_2:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_2_terminal_timeout_s: 15
+    mixed_3:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97000300
+      - 97000301
+      - 97000302
+      - 97000303
+      - 97000304
+      - 97000305
+      - 97000306
+      - 97000307
+      stream_timeout_s: 15
+    mixed_3_terminal_timeout_s: 15
+    mixed_4:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97000400
+      - 97000401
+      - 97000402
+      - 97000403
+      - 97000404
+      - 97000405
+      - 97000406
+      - 97000407
+      stream_timeout_s: 15
+    mixed_4_terminal_timeout_s: 15
+    mixed_5:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_5_terminal_timeout_s: 15
+    mixed_6:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_6_terminal_timeout_s: 15
+    mixed_7:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_7_terminal_timeout_s: 15
+    mixed_8:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97000800
+      - 97000801
+      - 97000802
+      - 97000803
+      - 97000804
+      - 97000805
+      - 97000806
+      - 97000807
+      stream_timeout_s: 15
+    mixed_8_terminal_timeout_s: 15
+    mixed_9:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97000900
+      - 97000901
+      - 97000902
+      - 97000903
+      - 97000904
+      - 97000905
+      - 97000906
+      - 97000907
+      stream_timeout_s: 15
+    mixed_9_terminal_timeout_s: 15
+    mixed_10:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_10_terminal_timeout_s: 15
+    mixed_11:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_11_terminal_timeout_s: 15
+    mixed_12:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_12_terminal_timeout_s: 15
+    mixed_13:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97001300
+      - 97001301
+      - 97001302
+      - 97001303
+      - 97001304
+      - 97001305
+      - 97001306
+      - 97001307
+      stream_timeout_s: 15
+    mixed_13_terminal_timeout_s: 15
+    mixed_14:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97001400
+      - 97001401
+      - 97001402
+      - 97001403
+      - 97001404
+      - 97001405
+      - 97001406
+      - 97001407
+      stream_timeout_s: 15
+    mixed_14_terminal_timeout_s: 15
+    mixed_15:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_15_terminal_timeout_s: 15
+    mixed_16:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_16_terminal_timeout_s: 15
+    mixed_17:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_17_terminal_timeout_s: 15
+    mixed_18:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97001800
+      - 97001801
+      - 97001802
+      - 97001803
+      - 97001804
+      - 97001805
+      - 97001806
+      - 97001807
+      stream_timeout_s: 15
+    mixed_18_terminal_timeout_s: 15
+    mixed_19:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97001900
+      - 97001901
+      - 97001902
+      - 97001903
+      - 97001904
+      - 97001905
+      - 97001906
+      - 97001907
+      stream_timeout_s: 15
+    mixed_19_terminal_timeout_s: 15
+    mixed_20:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_20_terminal_timeout_s: 15
+    mixed_21:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_21_terminal_timeout_s: 15
+    mixed_22:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_22_terminal_timeout_s: 15
+    mixed_23:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97002300
+      - 97002301
+      - 97002302
+      - 97002303
+      - 97002304
+      - 97002305
+      - 97002306
+      - 97002307
+      stream_timeout_s: 15
+    mixed_23_terminal_timeout_s: 15
+    mixed_24:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97002400
+      - 97002401
+      - 97002402
+      - 97002403
+      - 97002404
+      - 97002405
+      - 97002406
+      - 97002407
+      stream_timeout_s: 15
+    mixed_24_terminal_timeout_s: 15
+    mixed_25:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_25_terminal_timeout_s: 15
+    mixed_26:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_26_terminal_timeout_s: 15
+    mixed_27:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_27_terminal_timeout_s: 15
+    mixed_28:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97002800
+      - 97002801
+      - 97002802
+      - 97002803
+      - 97002804
+      - 97002805
+      - 97002806
+      - 97002807
+      stream_timeout_s: 15
+    mixed_28_terminal_timeout_s: 15
+    mixed_29:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97002900
+      - 97002901
+      - 97002902
+      - 97002903
+      - 97002904
+      - 97002905
+      - 97002906
+      - 97002907
+      stream_timeout_s: 15
+    mixed_29_terminal_timeout_s: 15
+    family_fidelity:
+      min_samples: 18
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+    free_spread:
+      holders:
+      - prefill-0
+      - prefill-1
+      min_samples: 12
+      min_used: 2
+  prefix_nonbatch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 30
+      consume: immediate
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 2001
+      - 2002
+      - 2003
+      - 2004
+      - 2005
+      - 2006
+      - 2007
+      - 2008
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    cache_sync:
+      seconds: 2
+    mixed_0:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_0_terminal_timeout_s: 15
+    mixed_1:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_1_terminal_timeout_s: 15
+    mixed_2:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_2_terminal_timeout_s: 15
+    mixed_3:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97000300
+      - 97000301
+      - 97000302
+      - 97000303
+      - 97000304
+      - 97000305
+      - 97000306
+      - 97000307
+      stream_timeout_s: 15
+    mixed_3_terminal_timeout_s: 15
+    mixed_4:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97000400
+      - 97000401
+      - 97000402
+      - 97000403
+      - 97000404
+      - 97000405
+      - 97000406
+      - 97000407
+      stream_timeout_s: 15
+    mixed_4_terminal_timeout_s: 15
+    mixed_5:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_5_terminal_timeout_s: 15
+    mixed_6:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_6_terminal_timeout_s: 15
+    mixed_7:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_7_terminal_timeout_s: 15
+    mixed_8:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97000800
+      - 97000801
+      - 97000802
+      - 97000803
+      - 97000804
+      - 97000805
+      - 97000806
+      - 97000807
+      stream_timeout_s: 15
+    mixed_8_terminal_timeout_s: 15
+    mixed_9:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97000900
+      - 97000901
+      - 97000902
+      - 97000903
+      - 97000904
+      - 97000905
+      - 97000906
+      - 97000907
+      stream_timeout_s: 15
+    mixed_9_terminal_timeout_s: 15
+    mixed_10:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_10_terminal_timeout_s: 15
+    mixed_11:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_11_terminal_timeout_s: 15
+    mixed_12:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_12_terminal_timeout_s: 15
+    mixed_13:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97001300
+      - 97001301
+      - 97001302
+      - 97001303
+      - 97001304
+      - 97001305
+      - 97001306
+      - 97001307
+      stream_timeout_s: 15
+    mixed_13_terminal_timeout_s: 15
+    mixed_14:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97001400
+      - 97001401
+      - 97001402
+      - 97001403
+      - 97001404
+      - 97001405
+      - 97001406
+      - 97001407
+      stream_timeout_s: 15
+    mixed_14_terminal_timeout_s: 15
+    mixed_15:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_15_terminal_timeout_s: 15
+    mixed_16:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_16_terminal_timeout_s: 15
+    mixed_17:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_17_terminal_timeout_s: 15
+    mixed_18:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97001800
+      - 97001801
+      - 97001802
+      - 97001803
+      - 97001804
+      - 97001805
+      - 97001806
+      - 97001807
+      stream_timeout_s: 15
+    mixed_18_terminal_timeout_s: 15
+    mixed_19:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97001900
+      - 97001901
+      - 97001902
+      - 97001903
+      - 97001904
+      - 97001905
+      - 97001906
+      - 97001907
+      stream_timeout_s: 15
+    mixed_19_terminal_timeout_s: 15
+    mixed_20:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_20_terminal_timeout_s: 15
+    mixed_21:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_21_terminal_timeout_s: 15
+    mixed_22:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_22_terminal_timeout_s: 15
+    mixed_23:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97002300
+      - 97002301
+      - 97002302
+      - 97002303
+      - 97002304
+      - 97002305
+      - 97002306
+      - 97002307
+      stream_timeout_s: 15
+    mixed_23_terminal_timeout_s: 15
+    mixed_24:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97002400
+      - 97002401
+      - 97002402
+      - 97002403
+      - 97002404
+      - 97002405
+      - 97002406
+      - 97002407
+      stream_timeout_s: 15
+    mixed_24_terminal_timeout_s: 15
+    mixed_25:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_25_terminal_timeout_s: 15
+    mixed_26:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_26_terminal_timeout_s: 15
+    mixed_27:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 1001
+      - 1002
+      - 1003
+      - 1004
+      - 1005
+      - 1006
+      - 1007
+      - 1008
+      stream_timeout_s: 15
+    mixed_27_terminal_timeout_s: 15
+    mixed_28:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97002800
+      - 97002801
+      - 97002802
+      - 97002803
+      - 97002804
+      - 97002805
+      - 97002806
+      - 97002807
+      stream_timeout_s: 15
+    mixed_28_terminal_timeout_s: 15
+    mixed_29:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 97002900
+      - 97002901
+      - 97002902
+      - 97002903
+      - 97002904
+      - 97002905
+      - 97002906
+      - 97002907
+      stream_timeout_s: 15
+    mixed_29_terminal_timeout_s: 15
+    family_fidelity:
+      min_samples: 18
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+    free_spread:
+      holders:
+      - prefill-0
+      - prefill-1
+      min_samples: 12
+      min_used: 2
+  hot_tension:
+    setup_timeout_s: 180
+    seed:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    seed_terminal_timeout_s: 15
+    cache_sync:
+      seconds: 2
+    mixed_0:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_0_terminal_timeout_s: 15
+    mixed_1:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_1_terminal_timeout_s: 15
+    mixed_2:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_2_terminal_timeout_s: 15
+    mixed_3:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_3_terminal_timeout_s: 15
+    mixed_4:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_4_terminal_timeout_s: 15
+    mixed_5:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_5_terminal_timeout_s: 15
+    mixed_6:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_6_terminal_timeout_s: 15
+    mixed_7:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98000700
+      - 98000701
+      - 98000702
+      - 98000703
+      - 98000704
+      - 98000705
+      - 98000706
+      - 98000707
+      - 98000708
+      - 98000709
+      - 98000710
+      - 98000711
+      - 98000712
+      - 98000713
+      - 98000714
+      - 98000715
+      stream_timeout_s: 15
+    mixed_7_terminal_timeout_s: 15
+    mixed_8:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98000800
+      - 98000801
+      - 98000802
+      - 98000803
+      - 98000804
+      - 98000805
+      - 98000806
+      - 98000807
+      - 98000808
+      - 98000809
+      - 98000810
+      - 98000811
+      - 98000812
+      - 98000813
+      - 98000814
+      - 98000815
+      stream_timeout_s: 15
+    mixed_8_terminal_timeout_s: 15
+    mixed_9:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98000900
+      - 98000901
+      - 98000902
+      - 98000903
+      - 98000904
+      - 98000905
+      - 98000906
+      - 98000907
+      - 98000908
+      - 98000909
+      - 98000910
+      - 98000911
+      - 98000912
+      - 98000913
+      - 98000914
+      - 98000915
+      stream_timeout_s: 15
+    mixed_9_terminal_timeout_s: 15
+    mixed_10:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_10_terminal_timeout_s: 15
+    mixed_11:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_11_terminal_timeout_s: 15
+    mixed_12:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_12_terminal_timeout_s: 15
+    mixed_13:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_13_terminal_timeout_s: 15
+    mixed_14:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_14_terminal_timeout_s: 15
+    mixed_15:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_15_terminal_timeout_s: 15
+    mixed_16:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_16_terminal_timeout_s: 15
+    mixed_17:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98001700
+      - 98001701
+      - 98001702
+      - 98001703
+      - 98001704
+      - 98001705
+      - 98001706
+      - 98001707
+      - 98001708
+      - 98001709
+      - 98001710
+      - 98001711
+      - 98001712
+      - 98001713
+      - 98001714
+      - 98001715
+      stream_timeout_s: 15
+    mixed_17_terminal_timeout_s: 15
+    mixed_18:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98001800
+      - 98001801
+      - 98001802
+      - 98001803
+      - 98001804
+      - 98001805
+      - 98001806
+      - 98001807
+      - 98001808
+      - 98001809
+      - 98001810
+      - 98001811
+      - 98001812
+      - 98001813
+      - 98001814
+      - 98001815
+      stream_timeout_s: 15
+    mixed_18_terminal_timeout_s: 15
+    mixed_19:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98001900
+      - 98001901
+      - 98001902
+      - 98001903
+      - 98001904
+      - 98001905
+      - 98001906
+      - 98001907
+      - 98001908
+      - 98001909
+      - 98001910
+      - 98001911
+      - 98001912
+      - 98001913
+      - 98001914
+      - 98001915
+      stream_timeout_s: 15
+    mixed_19_terminal_timeout_s: 15
+    mixed_20:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_20_terminal_timeout_s: 15
+    mixed_21:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_21_terminal_timeout_s: 15
+    mixed_22:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_22_terminal_timeout_s: 15
+    mixed_23:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_23_terminal_timeout_s: 15
+    mixed_24:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_24_terminal_timeout_s: 15
+    mixed_25:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_25_terminal_timeout_s: 15
+    mixed_26:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_26_terminal_timeout_s: 15
+    mixed_27:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98002700
+      - 98002701
+      - 98002702
+      - 98002703
+      - 98002704
+      - 98002705
+      - 98002706
+      - 98002707
+      - 98002708
+      - 98002709
+      - 98002710
+      - 98002711
+      - 98002712
+      - 98002713
+      - 98002714
+      - 98002715
+      stream_timeout_s: 15
+    mixed_27_terminal_timeout_s: 15
+    mixed_28:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98002800
+      - 98002801
+      - 98002802
+      - 98002803
+      - 98002804
+      - 98002805
+      - 98002806
+      - 98002807
+      - 98002808
+      - 98002809
+      - 98002810
+      - 98002811
+      - 98002812
+      - 98002813
+      - 98002814
+      - 98002815
+      stream_timeout_s: 15
+    mixed_28_terminal_timeout_s: 15
+    mixed_29:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98002900
+      - 98002901
+      - 98002902
+      - 98002903
+      - 98002904
+      - 98002905
+      - 98002906
+      - 98002907
+      - 98002908
+      - 98002909
+      - 98002910
+      - 98002911
+      - 98002912
+      - 98002913
+      - 98002914
+      - 98002915
+      stream_timeout_s: 15
+    mixed_29_terminal_timeout_s: 15
+    mixed_30:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_30_terminal_timeout_s: 15
+    mixed_31:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_31_terminal_timeout_s: 15
+    mixed_32:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_32_terminal_timeout_s: 15
+    mixed_33:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_33_terminal_timeout_s: 15
+    mixed_34:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_34_terminal_timeout_s: 15
+    mixed_35:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_35_terminal_timeout_s: 15
+    mixed_36:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 3001
+      - 3002
+      - 3003
+      - 3004
+      - 3005
+      - 3006
+      - 3007
+      - 3008
+      - 3009
+      - 3010
+      - 3011
+      - 3012
+      - 3013
+      - 3014
+      - 3015
+      - 3016
+      stream_timeout_s: 15
+    mixed_36_terminal_timeout_s: 15
+    mixed_37:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98003700
+      - 98003701
+      - 98003702
+      - 98003703
+      - 98003704
+      - 98003705
+      - 98003706
+      - 98003707
+      - 98003708
+      - 98003709
+      - 98003710
+      - 98003711
+      - 98003712
+      - 98003713
+      - 98003714
+      - 98003715
+      stream_timeout_s: 15
+    mixed_37_terminal_timeout_s: 15
+    mixed_38:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98003800
+      - 98003801
+      - 98003802
+      - 98003803
+      - 98003804
+      - 98003805
+      - 98003806
+      - 98003807
+      - 98003808
+      - 98003809
+      - 98003810
+      - 98003811
+      - 98003812
+      - 98003813
+      - 98003814
+      - 98003815
+      stream_timeout_s: 15
+    mixed_38_terminal_timeout_s: 15
+    mixed_39:
+      count: 1
+      input_len: 16384
+      output_len: 2
+      block_keys:
+      - 98003900
+      - 98003901
+      - 98003902
+      - 98003903
+      - 98003904
+      - 98003905
+      - 98003906
+      - 98003907
+      - 98003908
+      - 98003909
+      - 98003910
+      - 98003911
+      - 98003912
+      - 98003913
+      - 98003914
+      - 98003915
+      stream_timeout_s: 15
+    mixed_39_terminal_timeout_s: 15
+    family_fidelity:
+      min_samples: 28
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+    holder_total:
+      min_samples: 41
+      bands:
+        strict: 0.88
+        normal: 0.93
+        loose: 0.96
+    free_not_starved:
+      min_samples: 12
+  mixed_tiers:
+    setup_timeout_s: 180
+    full_seed:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_seed_terminal_timeout_s: 15
+    full_sync:
+      seconds: 2
+    full_0:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_0_terminal_timeout_s: 15
+    full_1:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_1_terminal_timeout_s: 15
+    full_2:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_2_terminal_timeout_s: 15
+    full_3:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_3_terminal_timeout_s: 15
+    full_4:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_4_terminal_timeout_s: 15
+    full_5:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_5_terminal_timeout_s: 15
+    full_6:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_6_terminal_timeout_s: 15
+    full_7:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_7_terminal_timeout_s: 15
+    full_8:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_8_terminal_timeout_s: 15
+    full_9:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 4001
+      - 4002
+      - 4003
+      - 4004
+      - 4005
+      - 4006
+      - 4007
+      - 4008
+      stream_timeout_s: 15
+    full_9_terminal_timeout_s: 15
+    half_seed:
+      count: 1
+      input_len: 4096
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      stream_timeout_s: 15
+    half_seed_terminal_timeout_s: 15
+    half_sync:
+      seconds: 2
+    half_0:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000000
+      - 99000001
+      - 99000002
+      - 99000003
+      stream_timeout_s: 15
+    half_0_terminal_timeout_s: 15
+    half_1:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000100
+      - 99000101
+      - 99000102
+      - 99000103
+      stream_timeout_s: 15
+    half_1_terminal_timeout_s: 15
+    half_2:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000200
+      - 99000201
+      - 99000202
+      - 99000203
+      stream_timeout_s: 15
+    half_2_terminal_timeout_s: 15
+    half_3:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000300
+      - 99000301
+      - 99000302
+      - 99000303
+      stream_timeout_s: 15
+    half_3_terminal_timeout_s: 15
+    half_4:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000400
+      - 99000401
+      - 99000402
+      - 99000403
+      stream_timeout_s: 15
+    half_4_terminal_timeout_s: 15
+    half_5:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000500
+      - 99000501
+      - 99000502
+      - 99000503
+      stream_timeout_s: 15
+    half_5_terminal_timeout_s: 15
+    half_6:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000600
+      - 99000601
+      - 99000602
+      - 99000603
+      stream_timeout_s: 15
+    half_6_terminal_timeout_s: 15
+    half_7:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000700
+      - 99000701
+      - 99000702
+      - 99000703
+      stream_timeout_s: 15
+    half_7_terminal_timeout_s: 15
+    half_8:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000800
+      - 99000801
+      - 99000802
+      - 99000803
+      stream_timeout_s: 15
+    half_8_terminal_timeout_s: 15
+    half_9:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 5001
+      - 5002
+      - 5003
+      - 5004
+      - 99000900
+      - 99000901
+      - 99000902
+      - 99000903
+      stream_timeout_s: 15
+    half_9_terminal_timeout_s: 15
+    zero_0:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500000
+      - 99500001
+      - 99500002
+      - 99500003
+      - 99500004
+      - 99500005
+      - 99500006
+      - 99500007
+      stream_timeout_s: 15
+    zero_0_terminal_timeout_s: 15
+    zero_1:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500100
+      - 99500101
+      - 99500102
+      - 99500103
+      - 99500104
+      - 99500105
+      - 99500106
+      - 99500107
+      stream_timeout_s: 15
+    zero_1_terminal_timeout_s: 15
+    zero_2:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500200
+      - 99500201
+      - 99500202
+      - 99500203
+      - 99500204
+      - 99500205
+      - 99500206
+      - 99500207
+      stream_timeout_s: 15
+    zero_2_terminal_timeout_s: 15
+    zero_3:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500300
+      - 99500301
+      - 99500302
+      - 99500303
+      - 99500304
+      - 99500305
+      - 99500306
+      - 99500307
+      stream_timeout_s: 15
+    zero_3_terminal_timeout_s: 15
+    zero_4:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500400
+      - 99500401
+      - 99500402
+      - 99500403
+      - 99500404
+      - 99500405
+      - 99500406
+      - 99500407
+      stream_timeout_s: 15
+    zero_4_terminal_timeout_s: 15
+    zero_5:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500500
+      - 99500501
+      - 99500502
+      - 99500503
+      - 99500504
+      - 99500505
+      - 99500506
+      - 99500507
+      stream_timeout_s: 15
+    zero_5_terminal_timeout_s: 15
+    zero_6:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500600
+      - 99500601
+      - 99500602
+      - 99500603
+      - 99500604
+      - 99500605
+      - 99500606
+      - 99500607
+      stream_timeout_s: 15
+    zero_6_terminal_timeout_s: 15
+    zero_7:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500700
+      - 99500701
+      - 99500702
+      - 99500703
+      - 99500704
+      - 99500705
+      - 99500706
+      - 99500707
+      stream_timeout_s: 15
+    zero_7_terminal_timeout_s: 15
+    zero_8:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500800
+      - 99500801
+      - 99500802
+      - 99500803
+      - 99500804
+      - 99500805
+      - 99500806
+      - 99500807
+      stream_timeout_s: 15
+    zero_8_terminal_timeout_s: 15
+    zero_9:
+      count: 1
+      input_len: 8192
+      output_len: 2
+      block_keys:
+      - 99500900
+      - 99500901
+      - 99500902
+      - 99500903
+      - 99500904
+      - 99500905
+      - 99500906
+      - 99500907
+      stream_timeout_s: 15
+    zero_9_terminal_timeout_s: 15
+    full_concentration:
+      min_samples: 10
+      bands:
+        strict: 0.8
+        normal: 0.7
+        loose: 0.6
+    half_concentration:
+      min_samples: 10
+      bands:
+        strict: 0.8
+        normal: 0.7
+        loose: 0.6
+    zero_spread:
+      holders:
+      - prefill-0
+      - prefill-1
+      min_samples: 10
+      min_used: 2
+  leader_spill_batch:
+    setup_timeout_s: 180
+    slow_second:
+      operation: set_perf
+      targets:
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 3000
+    steer_a_settle:
+      seconds: 1.5
+    steer_a:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    steer_a_done_timeout_s: 15
+    steer_a_placement:
+      second: prefill-0
+    steer_a_quiet_timeout_s: 8
+    steer_a_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    restore_second:
+      operation: set_perf
+      targets:
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    slow_first:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+    steer_b_settle:
+      seconds: 1.5
+    steer_b:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    steer_b_done_timeout_s: 15
+    steer_b_placement:
+      second: prefill-1
+    restore_first:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+    steer_restore_settle:
+      seconds: 1.5
+    steer_quiet_timeout_s: 8
+    steer_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    steer_family_0:
+      engine: prefill-0
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: all
+    steer_family_1:
+      engine: prefill-1
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      relation: all
+    baseline_w0_r0_before_timeout_s: 10
+    baseline_w0_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w0_r0_done_timeout_s: 15
+    baseline_w0_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w0_r1_before_timeout_s: 10
+    baseline_w0_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w0_r1_done_timeout_s: 15
+    baseline_w0_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w0_r2_before_timeout_s: 10
+    baseline_w0_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w0_r2_done_timeout_s: 15
+    baseline_w0_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w0_r3_before_timeout_s: 10
+    baseline_w0_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w0_r3_done_timeout_s: 15
+    baseline_w0_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w0_end_timeout_s: 10
+    baseline_w0_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_sync:
+      seconds: 2
+    baseline_w1_r0_before_timeout_s: 10
+    baseline_w1_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w1_r0_done_timeout_s: 15
+    baseline_w1_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w1_r1_before_timeout_s: 10
+    baseline_w1_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w1_r1_done_timeout_s: 15
+    baseline_w1_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w1_r2_before_timeout_s: 10
+    baseline_w1_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w1_r2_done_timeout_s: 15
+    baseline_w1_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w1_r3_before_timeout_s: 10
+    baseline_w1_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w1_r3_done_timeout_s: 15
+    baseline_w1_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w1_end_timeout_s: 10
+    baseline_w1_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_sync:
+      seconds: 2
+    baseline_w2_r0_before_timeout_s: 10
+    baseline_w2_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w2_r0_done_timeout_s: 15
+    baseline_w2_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w2_r1_before_timeout_s: 10
+    baseline_w2_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w2_r1_done_timeout_s: 15
+    baseline_w2_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w2_r2_before_timeout_s: 10
+    baseline_w2_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w2_r2_done_timeout_s: 15
+    baseline_w2_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w2_r3_before_timeout_s: 10
+    baseline_w2_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w2_r3_done_timeout_s: 15
+    baseline_w2_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w2_end_timeout_s: 10
+    baseline_w2_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_sync:
+      seconds: 2
+    baseline_digest_timeout_s: 10
+    baseline_digest:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturate_leader:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+    saturation_settle:
+      seconds: 1.5
+    saturation_w0_r0_before_timeout_s: 10
+    saturation_w0_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w0_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w0_r0_spacing:
+      seconds: 0.12
+    saturation_w0_r1_before_timeout_s: 10
+    saturation_w0_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w0_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w0_r1_spacing:
+      seconds: 0.12
+    saturation_w0_r2_before_timeout_s: 10
+    saturation_w0_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w0_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w0_r2_spacing:
+      seconds: 0.12
+    saturation_w0_r3_before_timeout_s: 10
+    saturation_w0_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w0_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w0_r0_done_timeout_s: 30
+    saturation_w0_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w0_r1_done_timeout_s: 30
+    saturation_w0_r1_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w0_r2_done_timeout_s: 30
+    saturation_w0_r2_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w0_r3_done_timeout_s: 30
+    saturation_w0_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w0_end_timeout_s: 10
+    saturation_w0_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r0_before_timeout_s: 10
+    saturation_w1_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w1_r0_spacing:
+      seconds: 0.12
+    saturation_w1_r1_before_timeout_s: 10
+    saturation_w1_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w1_r1_spacing:
+      seconds: 0.12
+    saturation_w1_r2_before_timeout_s: 10
+    saturation_w1_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w1_r2_spacing:
+      seconds: 0.12
+    saturation_w1_r3_before_timeout_s: 10
+    saturation_w1_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w1_r0_done_timeout_s: 30
+    saturation_w1_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w1_r1_done_timeout_s: 30
+    saturation_w1_r1_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w1_r2_done_timeout_s: 30
+    saturation_w1_r2_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w1_r3_done_timeout_s: 30
+    saturation_w1_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w1_end_timeout_s: 10
+    saturation_w1_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r0_before_timeout_s: 10
+    saturation_w2_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w2_r0_spacing:
+      seconds: 0.12
+    saturation_w2_r1_before_timeout_s: 10
+    saturation_w2_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w2_r1_spacing:
+      seconds: 0.12
+    saturation_w2_r2_before_timeout_s: 10
+    saturation_w2_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w2_r2_spacing:
+      seconds: 0.12
+    saturation_w2_r3_before_timeout_s: 10
+    saturation_w2_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w2_r0_done_timeout_s: 30
+    saturation_w2_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w2_r1_done_timeout_s: 30
+    saturation_w2_r1_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w2_r2_done_timeout_s: 30
+    saturation_w2_r2_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w2_r3_done_timeout_s: 30
+    saturation_w2_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w2_end_timeout_s: 10
+    saturation_w2_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r0_before_timeout_s: 10
+    saturation_w3_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w3_r0_spacing:
+      seconds: 0.12
+    saturation_w3_r1_before_timeout_s: 10
+    saturation_w3_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w3_r1_spacing:
+      seconds: 0.12
+    saturation_w3_r2_before_timeout_s: 10
+    saturation_w3_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w3_r2_spacing:
+      seconds: 0.12
+    saturation_w3_r3_before_timeout_s: 10
+    saturation_w3_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: deferred
+      stream_timeout_s: 30
+    saturation_w3_r0_done_timeout_s: 30
+    saturation_w3_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w3_r1_done_timeout_s: 30
+    saturation_w3_r1_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w3_r2_done_timeout_s: 30
+    saturation_w3_r2_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w3_r3_done_timeout_s: 30
+    saturation_w3_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w3_end_timeout_s: 10
+    saturation_w3_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recover_leader:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+    recovery_settle:
+      seconds: 1.5
+    saturation_quiet_timeout_s: 8
+    saturation_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    recovery_w0_r0_before_timeout_s: 10
+    recovery_w0_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w0_r0_done_timeout_s: 15
+    recovery_w0_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w0_r1_before_timeout_s: 10
+    recovery_w0_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w0_r1_done_timeout_s: 15
+    recovery_w0_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w0_r2_before_timeout_s: 10
+    recovery_w0_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w0_r2_done_timeout_s: 15
+    recovery_w0_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w0_r3_before_timeout_s: 10
+    recovery_w0_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w0_r3_done_timeout_s: 15
+    recovery_w0_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w0_end_timeout_s: 10
+    recovery_w0_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_sync:
+      seconds: 2
+    recovery_w1_r0_before_timeout_s: 10
+    recovery_w1_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w1_r0_done_timeout_s: 15
+    recovery_w1_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w1_r1_before_timeout_s: 10
+    recovery_w1_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w1_r1_done_timeout_s: 15
+    recovery_w1_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w1_r2_before_timeout_s: 10
+    recovery_w1_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w1_r2_done_timeout_s: 15
+    recovery_w1_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w1_r3_before_timeout_s: 10
+    recovery_w1_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w1_r3_done_timeout_s: 15
+    recovery_w1_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w1_end_timeout_s: 10
+    recovery_w1_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_sync:
+      seconds: 2
+    recovery_w2_r0_before_timeout_s: 10
+    recovery_w2_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w2_r0_done_timeout_s: 15
+    recovery_w2_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w2_r1_before_timeout_s: 10
+    recovery_w2_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w2_r1_done_timeout_s: 15
+    recovery_w2_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w2_r2_before_timeout_s: 10
+    recovery_w2_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w2_r2_done_timeout_s: 15
+    recovery_w2_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w2_r3_before_timeout_s: 10
+    recovery_w2_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w2_r3_done_timeout_s: 15
+    recovery_w2_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w2_end_timeout_s: 10
+    recovery_w2_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_sync:
+      seconds: 2
+    recovery_w3_r0_before_timeout_s: 10
+    recovery_w3_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w3_r0_done_timeout_s: 15
+    recovery_w3_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w3_r1_before_timeout_s: 10
+    recovery_w3_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w3_r1_done_timeout_s: 15
+    recovery_w3_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w3_r2_before_timeout_s: 10
+    recovery_w3_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w3_r2_done_timeout_s: 15
+    recovery_w3_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w3_r3_before_timeout_s: 10
+    recovery_w3_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w3_r3_done_timeout_s: 15
+    recovery_w3_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w3_end_timeout_s: 10
+    recovery_w3_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_sync:
+      seconds: 2
+    recovery_w4_r0_before_timeout_s: 10
+    recovery_w4_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w4_r0_done_timeout_s: 15
+    recovery_w4_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w4_r1_before_timeout_s: 10
+    recovery_w4_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w4_r1_done_timeout_s: 15
+    recovery_w4_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w4_r2_before_timeout_s: 10
+    recovery_w4_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w4_r2_done_timeout_s: 15
+    recovery_w4_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w4_r3_before_timeout_s: 10
+    recovery_w4_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w4_r3_done_timeout_s: 15
+    recovery_w4_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w4_end_timeout_s: 10
+    recovery_w4_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_sync:
+      seconds: 2
+    recovery_w5_r0_before_timeout_s: 10
+    recovery_w5_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w5_r0_done_timeout_s: 15
+    recovery_w5_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w5_r1_before_timeout_s: 10
+    recovery_w5_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w5_r1_done_timeout_s: 15
+    recovery_w5_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w5_r2_before_timeout_s: 10
+    recovery_w5_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w5_r2_done_timeout_s: 15
+    recovery_w5_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w5_r3_before_timeout_s: 10
+    recovery_w5_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w5_r3_done_timeout_s: 15
+    recovery_w5_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w5_end_timeout_s: 10
+    recovery_w5_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_sync:
+      seconds: 2
+    recovery_digest_timeout_s: 10
+    recovery_digest:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    phase_observations:
+      family_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      leader: prefill-0
+      ready_rate: 0.75
+      families:
+      - - 810000
+        - 810001
+        - 810002
+        - 810003
+        - 810004
+        - 810005
+        - 810006
+        - 810007
+        - 810008
+        - 810009
+      - - 811000
+        - 811001
+        - 811002
+        - 811003
+        - 811004
+        - 811005
+        - 811006
+        - 811007
+        - 811008
+        - 811009
+    holder_flips:
+      families:
+      - - 810000
+        - 810001
+        - 810002
+        - 810003
+        - 810004
+        - 810005
+        - 810006
+        - 810007
+        - 810008
+        - 810009
+      - - 811000
+        - 811001
+        - 811002
+        - 811003
+        - 811004
+        - 811005
+        - 811006
+        - 811007
+        - 811008
+        - 811009
+    all_phase_requests:
+      min_samples: 52
+    baseline_hit:
+      min_samples: 12
+      bands:
+        strict: 0.9
+        normal: 0.85
+        loose: 0.8
+    saturation_hit:
+      min_samples: 16
+      bands:
+        strict: 0.5
+        normal: 0.4
+        loose: 0.3
+    recovery_steady_hit:
+      min_samples: 8
+      bands:
+        strict: 0.85
+        normal: 0.8
+        loose: 0.75
+    replication:
+      families:
+      - - 810000
+        - 810001
+        - 810002
+        - 810003
+        - 810004
+        - 810005
+        - 810006
+        - 810007
+        - 810008
+        - 810009
+      - - 811000
+        - 811001
+        - 811002
+        - 811003
+        - 811004
+        - 811005
+        - 811006
+        - 811007
+        - 811008
+        - 811009
+      bands:
+        strict: 1.5
+        normal: 1.75
+        loose: 2
+      max_holders: 2
+  leader_spill_nonbatch:
+    setup_timeout_s: 180
+    slow_second:
+      operation: set_perf
+      targets:
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 3000
+    steer_a_settle:
+      seconds: 1.5
+    steer_a:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    steer_a_done_timeout_s: 15
+    steer_a_placement:
+      second: prefill-0
+    steer_a_quiet_timeout_s: 8
+    steer_a_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    restore_second:
+      operation: set_perf
+      targets:
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    slow_first:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+    steer_b_settle:
+      seconds: 1.5
+    steer_b:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    steer_b_done_timeout_s: 15
+    steer_b_placement:
+      second: prefill-1
+    restore_first:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+    steer_restore_settle:
+      seconds: 1.5
+    steer_quiet_timeout_s: 8
+    steer_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    steer_family_0:
+      engine: prefill-0
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: all
+    steer_family_1:
+      engine: prefill-1
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      relation: all
+    baseline_w0_r0_before_timeout_s: 10
+    baseline_w0_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w0_r0_done_timeout_s: 15
+    baseline_w0_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w0_r1_before_timeout_s: 10
+    baseline_w0_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w0_r1_done_timeout_s: 15
+    baseline_w0_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w0_r2_before_timeout_s: 10
+    baseline_w0_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w0_r2_done_timeout_s: 15
+    baseline_w0_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w0_r3_before_timeout_s: 10
+    baseline_w0_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w0_r3_done_timeout_s: 15
+    baseline_w0_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w0_end_timeout_s: 10
+    baseline_w0_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w0_sync:
+      seconds: 2
+    baseline_w1_r0_before_timeout_s: 10
+    baseline_w1_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w1_r0_done_timeout_s: 15
+    baseline_w1_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w1_r1_before_timeout_s: 10
+    baseline_w1_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w1_r1_done_timeout_s: 15
+    baseline_w1_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w1_r2_before_timeout_s: 10
+    baseline_w1_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w1_r2_done_timeout_s: 15
+    baseline_w1_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w1_r3_before_timeout_s: 10
+    baseline_w1_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w1_r3_done_timeout_s: 15
+    baseline_w1_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w1_end_timeout_s: 10
+    baseline_w1_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w1_sync:
+      seconds: 2
+    baseline_w2_r0_before_timeout_s: 10
+    baseline_w2_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w2_r0_done_timeout_s: 15
+    baseline_w2_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w2_r1_before_timeout_s: 10
+    baseline_w2_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w2_r1_done_timeout_s: 15
+    baseline_w2_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w2_r2_before_timeout_s: 10
+    baseline_w2_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w2_r2_done_timeout_s: 15
+    baseline_w2_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    baseline_w2_r3_before_timeout_s: 10
+    baseline_w2_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    baseline_w2_r3_done_timeout_s: 15
+    baseline_w2_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    baseline_w2_end_timeout_s: 10
+    baseline_w2_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    baseline_w2_sync:
+      seconds: 2
+    baseline_digest_timeout_s: 10
+    baseline_digest:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturate_leader:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 3000
+    saturation_settle:
+      seconds: 1.5
+    saturation_w0_r0_before_timeout_s: 10
+    saturation_w0_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w0_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w0_r0_spacing:
+      seconds: 0.12
+    saturation_w0_r1_before_timeout_s: 10
+    saturation_w0_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w0_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w0_r1_spacing:
+      seconds: 0.12
+    saturation_w0_r2_before_timeout_s: 10
+    saturation_w0_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w0_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w0_r2_spacing:
+      seconds: 0.12
+    saturation_w0_r3_before_timeout_s: 10
+    saturation_w0_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w0_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w0_r0_done_timeout_s: 30
+    saturation_w0_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w0_r1_done_timeout_s: 30
+    saturation_w0_r1_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w0_r2_done_timeout_s: 30
+    saturation_w0_r2_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w0_r3_done_timeout_s: 30
+    saturation_w0_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w0_end_timeout_s: 10
+    saturation_w0_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r0_before_timeout_s: 10
+    saturation_w1_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w1_r0_spacing:
+      seconds: 0.12
+    saturation_w1_r1_before_timeout_s: 10
+    saturation_w1_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w1_r1_spacing:
+      seconds: 0.12
+    saturation_w1_r2_before_timeout_s: 10
+    saturation_w1_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w1_r2_spacing:
+      seconds: 0.12
+    saturation_w1_r3_before_timeout_s: 10
+    saturation_w1_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w1_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w1_r0_done_timeout_s: 30
+    saturation_w1_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w1_r1_done_timeout_s: 30
+    saturation_w1_r1_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w1_r2_done_timeout_s: 30
+    saturation_w1_r2_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w1_r3_done_timeout_s: 30
+    saturation_w1_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w1_end_timeout_s: 10
+    saturation_w1_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r0_before_timeout_s: 10
+    saturation_w2_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w2_r0_spacing:
+      seconds: 0.12
+    saturation_w2_r1_before_timeout_s: 10
+    saturation_w2_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w2_r1_spacing:
+      seconds: 0.12
+    saturation_w2_r2_before_timeout_s: 10
+    saturation_w2_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w2_r2_spacing:
+      seconds: 0.12
+    saturation_w2_r3_before_timeout_s: 10
+    saturation_w2_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w2_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w2_r0_done_timeout_s: 30
+    saturation_w2_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w2_r1_done_timeout_s: 30
+    saturation_w2_r1_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w2_r2_done_timeout_s: 30
+    saturation_w2_r2_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w2_r3_done_timeout_s: 30
+    saturation_w2_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w2_end_timeout_s: 10
+    saturation_w2_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r0_before_timeout_s: 10
+    saturation_w3_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w3_r0_spacing:
+      seconds: 0.12
+    saturation_w3_r1_before_timeout_s: 10
+    saturation_w3_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w3_r1_spacing:
+      seconds: 0.12
+    saturation_w3_r2_before_timeout_s: 10
+    saturation_w3_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w3_r2_spacing:
+      seconds: 0.12
+    saturation_w3_r3_before_timeout_s: 10
+    saturation_w3_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    saturation_w3_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w3_r0_done_timeout_s: 30
+    saturation_w3_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w3_r1_done_timeout_s: 30
+    saturation_w3_r1_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    saturation_w3_r2_done_timeout_s: 30
+    saturation_w3_r2_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w3_r3_done_timeout_s: 30
+    saturation_w3_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    saturation_w3_end_timeout_s: 10
+    saturation_w3_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recover_leader:
+      operation: set_perf
+      targets:
+      - prefill-0
+      perf:
+        prefill_fixed_ms: 100
+    recovery_settle:
+      seconds: 1.5
+    saturation_quiet_timeout_s: 8
+    saturation_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    recovery_w0_r0_before_timeout_s: 10
+    recovery_w0_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w0_r0_done_timeout_s: 15
+    recovery_w0_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w0_r1_before_timeout_s: 10
+    recovery_w0_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w0_r1_done_timeout_s: 15
+    recovery_w0_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w0_r2_before_timeout_s: 10
+    recovery_w0_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w0_r2_done_timeout_s: 15
+    recovery_w0_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w0_r3_before_timeout_s: 10
+    recovery_w0_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w0_r3_done_timeout_s: 15
+    recovery_w0_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w0_end_timeout_s: 10
+    recovery_w0_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w0_sync:
+      seconds: 2
+    recovery_w1_r0_before_timeout_s: 10
+    recovery_w1_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w1_r0_done_timeout_s: 15
+    recovery_w1_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w1_r1_before_timeout_s: 10
+    recovery_w1_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w1_r1_done_timeout_s: 15
+    recovery_w1_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w1_r2_before_timeout_s: 10
+    recovery_w1_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w1_r2_done_timeout_s: 15
+    recovery_w1_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w1_r3_before_timeout_s: 10
+    recovery_w1_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w1_r3_done_timeout_s: 15
+    recovery_w1_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w1_end_timeout_s: 10
+    recovery_w1_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w1_sync:
+      seconds: 2
+    recovery_w2_r0_before_timeout_s: 10
+    recovery_w2_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w2_r0_done_timeout_s: 15
+    recovery_w2_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w2_r1_before_timeout_s: 10
+    recovery_w2_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w2_r1_done_timeout_s: 15
+    recovery_w2_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w2_r2_before_timeout_s: 10
+    recovery_w2_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w2_r2_done_timeout_s: 15
+    recovery_w2_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w2_r3_before_timeout_s: 10
+    recovery_w2_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w2_r3_done_timeout_s: 15
+    recovery_w2_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w2_end_timeout_s: 10
+    recovery_w2_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w2_sync:
+      seconds: 2
+    recovery_w3_r0_before_timeout_s: 10
+    recovery_w3_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w3_r0_done_timeout_s: 15
+    recovery_w3_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w3_r1_before_timeout_s: 10
+    recovery_w3_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w3_r1_done_timeout_s: 15
+    recovery_w3_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w3_r2_before_timeout_s: 10
+    recovery_w3_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w3_r2_done_timeout_s: 15
+    recovery_w3_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w3_r3_before_timeout_s: 10
+    recovery_w3_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w3_r3_done_timeout_s: 15
+    recovery_w3_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w3_end_timeout_s: 10
+    recovery_w3_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w3_sync:
+      seconds: 2
+    recovery_w4_r0_before_timeout_s: 10
+    recovery_w4_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w4_r0_done_timeout_s: 15
+    recovery_w4_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w4_r1_before_timeout_s: 10
+    recovery_w4_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w4_r1_done_timeout_s: 15
+    recovery_w4_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w4_r2_before_timeout_s: 10
+    recovery_w4_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w4_r2_done_timeout_s: 15
+    recovery_w4_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w4_r3_before_timeout_s: 10
+    recovery_w4_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w4_r3_done_timeout_s: 15
+    recovery_w4_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w4_end_timeout_s: 10
+    recovery_w4_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w4_sync:
+      seconds: 2
+    recovery_w5_r0_before_timeout_s: 10
+    recovery_w5_r0_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_r0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w5_r0_done_timeout_s: 15
+    recovery_w5_r0_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w5_r1_before_timeout_s: 10
+    recovery_w5_r1_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_r1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w5_r1_done_timeout_s: 15
+    recovery_w5_r1_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w5_r2_before_timeout_s: 10
+    recovery_w5_r2_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_r2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w5_r2_done_timeout_s: 15
+    recovery_w5_r2_hit:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+    recovery_w5_r3_before_timeout_s: 10
+    recovery_w5_r3_before:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_r3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    recovery_w5_r3_done_timeout_s: 15
+    recovery_w5_r3_hit:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+    recovery_w5_end_timeout_s: 10
+    recovery_w5_end:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    recovery_w5_sync:
+      seconds: 2
+    recovery_digest_timeout_s: 10
+    recovery_digest:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    phase_observations:
+      family_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      leader: prefill-0
+      ready_rate: 0.75
+      families:
+      - - 810000
+        - 810001
+        - 810002
+        - 810003
+        - 810004
+        - 810005
+        - 810006
+        - 810007
+        - 810008
+        - 810009
+      - - 811000
+        - 811001
+        - 811002
+        - 811003
+        - 811004
+        - 811005
+        - 811006
+        - 811007
+        - 811008
+        - 811009
+    holder_flips:
+      families:
+      - - 810000
+        - 810001
+        - 810002
+        - 810003
+        - 810004
+        - 810005
+        - 810006
+        - 810007
+        - 810008
+        - 810009
+      - - 811000
+        - 811001
+        - 811002
+        - 811003
+        - 811004
+        - 811005
+        - 811006
+        - 811007
+        - 811008
+        - 811009
+    all_phase_requests:
+      min_samples: 52
+    baseline_hit:
+      min_samples: 12
+      bands:
+        strict: 0.9
+        normal: 0.85
+        loose: 0.8
+    saturation_hit:
+      min_samples: 16
+      bands:
+        strict: 0.5
+        normal: 0.4
+        loose: 0.3
+    recovery_steady_hit:
+      min_samples: 8
+      bands:
+        strict: 0.85
+        normal: 0.8
+        loose: 0.75
+    replication:
+      families:
+      - - 810000
+        - 810001
+        - 810002
+        - 810003
+        - 810004
+        - 810005
+        - 810006
+        - 810007
+        - 810008
+        - 810009
+      - - 811000
+        - 811001
+        - 811002
+        - 811003
+        - 811004
+        - 811005
+        - 811006
+        - 811007
+        - 811008
+        - 811009
+      bands:
+        strict: 1.5
+        normal: 1.75
+        loose: 2
+      max_holders: 2
+  leader_spill_multi:
+    setup_timeout_s: 180
+    prepare_timeout_s: 90
+    all_requests_timeout_s: 65
+    validity_timeout_s: 30
+    baseline_drain_timeout_s: 60
+    slow_leader:
+      slow: true
+    restore_leader:
+      slow: false
+    numeric_parameters:
+    - hot_blocks
+    - background_blocks
+    - receiver_retention_blocks
+    - concurrency
+    - background_every
+    - normal_ms
+    - slow_ms
+    - window_s
+    - baseline_windows
+    - saturation_windows
+    - recovery_windows
+    - recovery_consecutive
+    - require_insufficient_retention
+    - calibration_runs
+    - interval_s
+    - steady_interval_s
+    - min_busy_share
+    - hit_strict
+    - hit_normal
+    - hit_loose
+    - eviction_strict
+    - eviction_normal
+    - eviction_loose
+    - holders_strict
+    - holders_normal
+    - holders_loose
+    window_timeout_margin_s: 5
+    topology:
+      min_prefill: 2
+      min_decode: 1
+      max_decode: 2
+  hot_blocks: 10
+  background_blocks: 4
+  receiver_retention_blocks: 6
+  concurrency: 128
+  background_every: 8
+  normal_ms: 100
+  slow_ms: 15000
+  window_s: 2
+  baseline_windows: 3
+  saturation_windows: 6
+  recovery_windows: 10
+  recovery_consecutive: 2
+  require_insufficient_retention: 1
+  calibration_runs: 3
+  interval_s: 0.15
+  steady_interval_s: 0.4
+  min_busy_share: 0.9
+  hit_strict: 0.962367
+  hit_normal: 0.939481
+  hit_loose: 0.885854
+  eviction_strict: 0.126957
+  eviction_normal: 0.165174
+  eviction_loose: 0.253913
+  holders_strict: 1
+  holders_normal: 1
+  holders_loose: 1
+parameter_schema:
+  hot_blocks:
+    minimum: 2
+    maximum: 64
+    integer: true
+  background_blocks:
+    minimum: 1
+    maximum: 32
+    integer: true
+  receiver_retention_blocks:
+    minimum: 1
+    maximum: 64
+    integer: true
+  concurrency:
+    minimum: 2
+    maximum: 256
+    integer: true
+  background_every:
+    minimum: 2
+    maximum: 100
+    integer: true
+  normal_ms:
+    minimum: 1
+    maximum: 1000
+    integer: true
+  slow_ms:
+    minimum: 1000
+    maximum: 30000
+    integer: true
+  window_s:
+    minimum: 1
+    maximum: 10
+    integer: true
+  baseline_windows:
+    minimum: 2
+    maximum: 10
+    integer: true
+  saturation_windows:
+    minimum: 2
+    maximum: 20
+    integer: true
+  recovery_windows:
+    minimum: 2
+    maximum: 30
+    integer: true
+  recovery_consecutive:
+    minimum: 1
+    maximum: 5
+    integer: true
+  require_insufficient_retention:
+    minimum: 0
+    maximum: 1
+    integer: true
+  calibration_runs:
+    minimum: 0
+    maximum: 100
+    integer: true
+  interval_s:
+    minimum: 0.05
+    maximum: 2
+    integer: false
+  steady_interval_s:
+    minimum: 0.1
+    maximum: 2
+    integer: false
+  min_busy_share:
+    minimum: 0
+    maximum: 1
+    integer: false
+  hit_strict:
+    minimum: 0
+    maximum: 1
+    integer: false
+  hit_normal:
+    minimum: 0
+    maximum: 1
+    integer: false
+  hit_loose:
+    minimum: 0
+    maximum: 1
+    integer: false
+  eviction_strict:
+    minimum: 0
+    maximum: 10000
+    integer: false
+  eviction_normal:
+    minimum: 0
+    maximum: 10000
+    integer: false
+  eviction_loose:
+    minimum: 0
+    maximum: 10000
+    integer: false
+  holders_strict:
+    minimum: 0
+    maximum: 32
+    integer: false
+  holders_normal:
+    minimum: 0
+    maximum: 32
+    integer: false
+  holders_loose:
+    minimum: 0
+    maximum: 32
+    integer: false

@@ -1,0 +1,1635 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: cache_local_index
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  decode_cache_blocks: 12
+  perf_preset: default
+execution:
+  timeout_s: 360
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: continuity_batch
+  profiles:
+  - batch-window
+  - single-batch
+  program: continuity_batch
+  metadata:
+    requires:
+    - enqueue_batch
+- id: continuity_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  program: continuity_nonbatch
+- id: evict_batch
+  profiles:
+  - batch-window
+  - single-batch
+  environment:
+    prefill_cache_blocks: 16
+  program: evict_batch
+  metadata:
+    requires:
+    - enqueue_batch
+- id: isolation_batch
+  profiles:
+  - batch-window
+  - single-batch
+  execution:
+    timeout_s: 600
+  program: isolation_batch
+  metadata:
+    requires:
+    - enqueue_batch
+- id: evict_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  environment:
+    prefill_cache_blocks: 16
+  program: evict_nonbatch
+  metadata:
+    requires: []
+- id: isolation_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  execution:
+    timeout_s: 600
+  program: isolation_nonbatch
+  metadata:
+    requires: []
+metadata:
+  description: Ledger-separated shared seeding, explicit per-engine gap/tail eviction, contiguous-prefix
+    checks and five serial routing continuations.
+  category: kv
+parameters:
+  continuity_batch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    carve_gap:
+      keys:
+      - 810001
+    carve_tail:
+      keys:
+      - 810008
+      - 810009
+    carve_quiet_timeout_s: 8
+    carve_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    gap_prefix:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      expected: 1
+    tail_prefix:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      expected: 8
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    affinity:
+      min_samples: 5
+      bands:
+        strict: 0.8
+        normal: 0.7
+        loose: 0.6
+  continuity_nonbatch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_first:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+    first_pending_timeout_s: 6
+    first_holder:
+      phase: scheduled
+    seed_second:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    second_terminal_timeout_s: 15
+    first_terminal_timeout_s: 30
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    seed_quiet_timeout_s: 8
+    seed_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    carve_gap:
+      keys:
+      - 810001
+    carve_tail:
+      keys:
+      - 810008
+      - 810009
+    carve_quiet_timeout_s: 8
+    carve_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    gap_prefix:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      expected: 1
+    tail_prefix:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      expected: 8
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    affinity:
+      min_samples: 5
+      bands:
+        strict: 0.8
+        normal: 0.7
+        loose: 0.6
+  evict_batch:
+    setup_timeout_s: 180
+    prime:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    prime_terminal_timeout_s: 15
+    holder:
+      phase: terminal
+    prime_quiet_timeout_s: 8
+    prime_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    positive:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    positive_terminal_timeout_s: 15
+    positive_holder:
+      phase: terminal
+    evict:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    eviction_quiet_timeout_s: 8
+    eviction_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    eviction_membership:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+    wave:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+      post_issue_delay_s: 0.12
+    wave_terminal_timeout_s: 30
+    spread:
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  isolation_batch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_a:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+    a_pending_timeout_s: 6
+    a_terminal_timeout_s: 30
+    a_holder:
+      phase: terminal
+    seed_b:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 815000
+      - 815001
+      - 815002
+      - 815003
+      - 815004
+      - 815005
+      - 815006
+      - 815007
+      - 815008
+      - 815009
+      consume: immediate
+      stream_timeout_s: 15
+    b_terminal_timeout_s: 15
+    b_holder:
+      phase: terminal
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    slow_b:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 5000
+    b_perf_sync:
+      seconds: 1.5
+    admit_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    admit_0_terminal_timeout_s: 15
+    admit_0_holder:
+      phase: terminal
+    admit_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+    admit_1_terminal_timeout_s: 15
+    admit_1_holder:
+      phase: terminal
+    admit_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+    admit_2_terminal_timeout_s: 15
+    admit_2_holder:
+      phase: terminal
+    admit_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+    admit_3_terminal_timeout_s: 15
+    admit_3_holder:
+      phase: terminal
+    restore_b:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    admission_quiet_timeout_s: 8
+    admission_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    a_membership:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      relation: all
+    b_isolation:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      relation: none
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    continuation_5:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_5_terminal_timeout_s: 15
+    continuation_6:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_6_terminal_timeout_s: 15
+    continuation_7:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_7_terminal_timeout_s: 15
+    continuation_8:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_8_terminal_timeout_s: 15
+    continuation_9:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_9_terminal_timeout_s: 15
+    fidelity:
+      min_samples: 10
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+    final_b_isolation:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+  evict_nonbatch:
+    setup_timeout_s: 180
+    prime:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    prime_terminal_timeout_s: 15
+    holder:
+      phase: terminal
+    prime_quiet_timeout_s: 8
+    prime_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    positive:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    positive_terminal_timeout_s: 15
+    positive_holder:
+      phase: terminal
+    evict:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+    eviction_quiet_timeout_s: 8
+    eviction_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    eviction_membership:
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+    wave:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+      post_issue_delay_s: 0.12
+    wave_terminal_timeout_s: 30
+    spread:
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  isolation_nonbatch:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    slow:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+    perf_sync:
+      seconds: 1.5
+    seed_a:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    a_pending_timeout_s: 6
+    a_terminal_timeout_s: 30
+    a_holder:
+      phase: terminal
+    seed_b:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 815000
+      - 815001
+      - 815002
+      - 815003
+      - 815004
+      - 815005
+      - 815006
+      - 815007
+      - 815008
+      - 815009
+      consume: immediate
+      stream_timeout_s: 15
+    b_terminal_timeout_s: 15
+    b_holder:
+      phase: terminal
+    restore_perf:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+    slow_b:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 5000
+    b_perf_sync:
+      seconds: 1.5
+    admit_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    admit_0_terminal_timeout_s: 15
+    admit_0_holder:
+      phase: terminal
+    admit_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+    admit_1_terminal_timeout_s: 15
+    admit_1_holder:
+      phase: terminal
+    admit_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+    admit_2_terminal_timeout_s: 15
+    admit_2_holder:
+      phase: terminal
+    admit_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+    admit_3_terminal_timeout_s: 15
+    admit_3_holder:
+      phase: terminal
+    restore_b:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    admission_quiet_timeout_s: 8
+    admission_quiet:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    a_membership:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      relation: all
+    b_isolation:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      relation: none
+    continuation_0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_0_terminal_timeout_s: 15
+    continuation_1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_1_terminal_timeout_s: 15
+    continuation_2:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_2_terminal_timeout_s: 15
+    continuation_3:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_3_terminal_timeout_s: 15
+    continuation_4:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_4_terminal_timeout_s: 15
+    continuation_5:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_5_terminal_timeout_s: 15
+    continuation_6:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_6_terminal_timeout_s: 15
+    continuation_7:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_7_terminal_timeout_s: 15
+    continuation_8:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_8_terminal_timeout_s: 15
+    continuation_9:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+    continuation_9_terminal_timeout_s: 15
+    fidelity:
+      min_samples: 10
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+    final_b_isolation:
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none

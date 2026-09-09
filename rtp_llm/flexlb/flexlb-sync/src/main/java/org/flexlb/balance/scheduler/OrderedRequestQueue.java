@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.ArrayList;
@@ -60,6 +61,27 @@ final class OrderedRequestQueue {
         Bucket bucket = priority < 0
                 ? null : priorityBuckets[priority];
         return bucket == null ? null : bucket.head;
+    }
+
+    /** Visits actual queue order without allocating a full prefix. Caller holds coordinator lock. */
+    void debugVisit(java.util.function.Predicate<GlobalQueueEntry> visitor) {
+        if (!priorityOrdering) {
+            for (GlobalQueueEntry entry = fifo.head; entry != null; entry = entry.next) {
+                if (!visitor.test(entry)) {
+                    return;
+                }
+            }
+            return;
+        }
+        for (int priority = nonEmptyPriorities.previousSetBit(PRIORITY_LEVELS - 1);
+                priority >= 0; priority = nonEmptyPriorities.previousSetBit(priority - 1)) {
+            for (GlobalQueueEntry entry = priorityBuckets[priority].head;
+                    entry != null; entry = entry.next) {
+                if (!visitor.test(entry)) {
+                    return;
+                }
+            }
+        }
     }
 
     List<GlobalQueueEntry> snapshotPrefix(

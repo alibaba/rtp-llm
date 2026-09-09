@@ -11,6 +11,7 @@ import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.debug.DebugRows;
 
 import java.util.Objects;
 import java.util.OptionalLong;
@@ -30,6 +31,11 @@ import java.util.function.Function;
  * capabilities, never a writable state field or a generic transition API.
  */
 final class RequestSlot {
+
+    // Diagnostic identity is never used for admission or lifecycle decisions.
+    private static final java.util.concurrent.atomic.AtomicLong DEBUG_GENERATIONS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final long debugGeneration = DEBUG_GENERATIONS.incrementAndGet();
 
     private final RequestCompletionPublisher completionPublisher;
     private final long requestId;
@@ -198,6 +204,27 @@ final class RequestSlot {
             transition(RequestState.Phase.CANCEL_REQUESTED, message);
         }
         return transition(RequestState.Phase.CANCELLED, message);
+    }
+
+    synchronized java.util.Map<String, Object> debugSnapshot() {
+        return DebugRows.fields(
+                "request_id", Long.toString(requestId),
+                "request_generation", Long.toString(debugGeneration),
+                "lifecycle_phase", state.name(), "storage_phase", slotPhase.name(),
+                "delivery_claim_kind", deliveryClaimKind.name(),
+                "batch_id", Long.toString(batchId),
+                "created_at_ms", createdAtMs, "updated_at_ms", updatedAtMs,
+                "effective_admission_priority", item == null ? null : item.priority(),
+                "engine_ownership", engineOwnership.name(),
+                "future_done", future.isDone(), "admission_open", admissionOpen,
+                "has_item", item != null, "has_engine_fence", false,
+                "has_preemption", preemption != null,
+                "has_admission_mutation", admissionMutation != null,
+                "has_request_deadline", requestDeadline != null,
+                "has_decision_deadline", decisionDeadline != null,
+                "has_inactivity_deadline", inactivityDeadline != null,
+                "has_cancel_reason", cancellationReason != null,
+                "has_pending_admission_cancel", pendingAdmissionCancelReason != null);
     }
 
     synchronized RequestState snapshot() {

@@ -17,6 +17,9 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.debug.DebugPage;
+import org.flexlb.debug.DebugQuery;
+import org.flexlb.debug.DebugRows;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
@@ -1170,6 +1173,36 @@ public class RequestRegistry {
         }
         return oldest == Long.MAX_VALUE ? 0L
                 : Math.max(0L, now - oldest);
+    }
+
+    /** Per-slot immutable sample. Map traversal is weakly consistent, not a global cut. */
+    public DebugPage debugSnapshot(DebugQuery query) {
+        DebugRows rows = new DebugRows(query);
+        if (query.requestId() != null) {
+            RequestSlot slot = requestSlots.get(query.requestId());
+            if (slot != null && rows.visit()) {
+                synchronized (slot) {
+                    if (requestSlots.get(query.requestId()) != slot) {
+                        return DebugPage.unavailable("per_entry", "generation_changed", System.currentTimeMillis());
+                    }
+                    rows.add(slot.debugSnapshot());
+                }
+            }
+        } else {
+            for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
+                if (!rows.visit()) {
+                    break;
+                }
+                RequestSlot slot = candidate.getValue();
+                synchronized (slot) {
+                    if (requestSlots.get(candidate.getKey()) == slot) {
+                        rows.add(slot.debugSnapshot());
+                    }
+                }
+            }
+        }
+        return rows.finish("per_entry", Map.of("scope", "retained_scheduler_slots",
+                "order", "unspecified", "includes_tombstones", true));
     }
 
     /**

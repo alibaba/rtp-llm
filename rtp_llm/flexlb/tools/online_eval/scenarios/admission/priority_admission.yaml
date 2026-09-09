@@ -1,0 +1,107 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: priority_admission
+profiles:
+- batch-window
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 1
+  perf_preset: default
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 60000
+execution:
+  timeout_s: 420
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: permit_released_without_preemption
+  program: permit_released_without_preemption
+metadata:
+  description: 'No preemption: after the victim reaches decode running, its acceptance permit is free
+    and a higher-priority incomer is admitted alongside it.'
+  category: admission
+  requires:
+  - enqueue_batch
+parameters:
+  permit_released_without_preemption:
+    setup_timeout_s: 180
+    victim:
+      count: 1
+      consume: immediate
+      input_len: 512
+      output_len: 200
+      priority: 30
+      keys_per_request: 1
+      spacing_s: 0
+      request_timeout_s: 30
+    victim_admitted:
+      metric: admitted_count
+      expected: 1
+      op: eq
+    running_timeout_s: 15
+    running:
+      targets:
+      - decode-0
+      fields:
+      - running
+      duration_s: 10
+      until_op: ge
+      until_value: 1
+    victim_running:
+      fields:
+      - running
+      stat: max_seen
+      op: ge
+      expected: 1
+    incomer:
+      count: 1
+      consume: immediate
+      input_len: 512
+      output_len: 2
+      priority: 70
+      keys_per_request: 1
+      spacing_s: 0
+      request_timeout_s: 30
+    incomer_admitted:
+      metric: admitted_count
+      expected: 1
+      op: eq
+    incomer_code:
+      metric: all_schedule_code
+      expected: 200
+      op: eq
+    accepted_fast:
+      metric: schedule_latency_max
+      expected: 3
+      op: lt
+    victim_done_timeout_s: 40
+    victim_unmolested:
+      metric: success_count
+      expected: 1
+      op: eq
+    incomer_done_timeout_s: 40
+    incomer_completed:
+      metric: success_count
+      expected: 1
+      op: eq
+    recovery:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      request_timeout_s: 30
+    recovery_done_timeout_s: 40
+    recovered:
+      metric: success_count
+      expected: 1
+      op: eq
+    master_clean_timeout_s: 30
+    master_clean:
+      target: single
+      inflight_zero: true
+    engine_clean_timeout_s: 15
+    engine_clean:
+      targets:
+      - prefill-0
+      - decode-0

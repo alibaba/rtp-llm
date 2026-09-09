@@ -15,7 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -78,7 +78,7 @@ class MultiShardRoutingTest {
                 int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
                 EngineRpcService.GenerateInputPB input = inputWithDecode(requestId++, 10, decodePort);
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(batchId++, slot(0, input)));
+                        enqueueAndFetch(prefill, batch(batchId++, slot(0, input)));
                 assertEquals(0, response.getErrorsCount(),
                         "no errors expected for request " + (requestId - 1));
                 assertEquals(1, response.getSuccessesCount(),
@@ -166,7 +166,7 @@ class MultiShardRoutingTest {
                 int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
                 EngineRpcService.GenerateInputPB input = inputWithDecode(requestId++, 10, decodePort);
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(batchId++, slot(0, input)));
+                        enqueueAndFetch(prefill, batch(batchId++, slot(0, input)));
                 assertEquals(0, response.getErrorsCount(),
                         "no errors expected for shard " + shard + " request " + i);
                 assertEquals(1, response.getSuccessesCount(),

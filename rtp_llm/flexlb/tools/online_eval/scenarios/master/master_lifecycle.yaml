@@ -1,0 +1,234 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: master_lifecycle
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  discovery: discovery_file
+  perf_preset: fault_env
+  config_overrides: {}
+execution:
+  timeout_s: 420
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: kill_single
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  environment:
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+  program: kill_single
+- id: freeze_short_long
+  environment:
+    master_layout: dual_standalone
+    discovery: file
+    perf_preset: default
+    config_overrides: {}
+  program: freeze_short_long
+- id: kill_dual_b_to_a
+  profiles:
+  - batch-window
+  execution:
+    timeout_s: 1080
+    stage_timeout_s: 60
+    cleanup_timeout_s: 120
+  environment:
+    master_layout: dual_standalone
+    discovery: file
+    perf_preset: default
+    config_overrides: {}
+  program: kill_dual_b_to_a
+metadata:
+  description: Cold restart of the owned master, clean scheduler state, topology and request recovery.
+  category: master
+parameters:
+  kill_single:
+    setup_timeout_s: 180
+    baseline:
+      count: 1
+      output_len: 2
+    baseline_complete:
+      op: eq
+      expected: true
+    baseline_no_errors:
+      op: eq
+      expected: 0
+    kill:
+      mode: kill
+      target: single
+    restart_timeout_s: 180
+    restored_topology_timeout_s: 60
+    restored_topology:
+      target: single
+      inflight_zero: false
+    restored_inflight_timeout_s: 10
+    restored_inflight:
+      target: single
+      inflight_zero: true
+    recovery:
+      count: 1
+      output_len: 2
+    recovery_complete:
+      op: eq
+      expected: true
+    recovery_no_errors:
+      op: eq
+      expected: 0
+  freeze_short_long:
+    setup_timeout_s: 180
+    flow:
+      targets:
+      - B
+      - A
+      duration_s: 100
+    short_begin:
+      wait_s: 12
+    short_freeze:
+      mode: freeze
+      target: B
+    short_end:
+      wait_s: 6
+    post_short_end:
+      wait_s: 8
+    before:
+      target: B
+    long_begin:
+      wait_s: 0
+    long_freeze:
+      mode: freeze
+      target: B
+    deadline_probe_timeout_s: 10
+    deadline_probe:
+      target: B
+      count: 1
+      concurrency: 1
+      request_timeout_s: 2
+      sample_topology: false
+    long_end:
+      wait_s: 46
+    after:
+      target: B
+    post_long_end:
+      wait_s: 10
+    ready_b:
+      target: B
+    finish_timeout_s: 120
+    short_post:
+      until_offset_s: -0.5
+    short_burst:
+      until_offset_s: -0.5
+    short_verdict:
+      target: B
+    judged:
+      from_offset_s: 29
+    pre_freeze:
+      from_offset_s: -2
+    deadline_straddle:
+      from_offset_s: -4
+    retry_seen:
+      metric: failover_count
+      op: ge
+      expected: 1
+    switch_to_a:
+      metric: target_count
+      op: ge
+      expected: 1
+      target: A
+    visible_terminal:
+      metric: visible_terminal_share
+      op: eq
+      expected: 1
+    post_success:
+      metric: success_rate
+      op: ge
+      expected: 0.9
+    post_on_a:
+      metric: target_share
+      op: ge
+      expected: 0.8
+      target: A
+    unique_requests:
+      metric: duplicate_ids
+      op: eq
+      expected: 0
+  kill_dual_b_to_a:
+    setup_timeout_s: 180
+    flow:
+      targets:
+      - B
+      - A
+      duration_s: 90
+    kill_time:
+      wait_s: 12
+    kill_b:
+      target: B
+      mode: kill
+    switched:
+      wait_s: 10
+    restart_b_timeout_s: 180
+    ready_b_timeout_s: 60
+    ready_b:
+      target: B
+      inflight_zero: false
+    clean_b_timeout_s: 10
+    clean_b:
+      target: B
+      inflight_zero: true
+    recovery_a_timeout_s: 630
+    recovery_a:
+      target: A
+      count: 20
+      concurrency: 1
+      request_timeout_s: 30
+    recovery_rate:
+      op: ge
+      expected: 0.95
+    finish_timeout_s: 120
+    steady_plain:
+      failover: false
+    straddle:
+      from_offset_s: -10
+    steady_b:
+      metric: target_share
+      op: eq
+      expected: 1
+      target: B
+      min_samples: 10
+    retry_seen:
+      metric: failover_count
+      op: ge
+      expected: 1
+    switch_to_a:
+      metric: target_count
+      op: ge
+      expected: 1
+      target: A
+    switch_errors:
+      metric: failed_rate_above_one
+      op: le
+      expected: 0.05
+    after_a:
+      metric: target_share
+      op: ge
+      expected: 0.95
+      target: A
+    after_success:
+      metric: success_rate
+      op: ge
+      expected: 0.9
+    unique_requests:
+      metric: duplicate_ids
+      op: eq
+      expected: 0

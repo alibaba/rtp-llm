@@ -1,0 +1,350 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: balance_distribution
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+execution:
+  timeout_s: 1800
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: uniform_serial
+  program: uniform_serial
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: concurrent_mix
+  program: concurrent_mix
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: decode_spread
+  program: decode_spread
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+- id: length_mixed
+  program: length_mixed
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+metadata:
+  category: balance
+  description: Explicit balance stages preserving client landing, token share, Decode deltas and latency
+    contracts.
+parameters:
+  uniform_serial:
+    setup_timeout_s: 180
+    fleet_timeout_s: 60
+    fleet:
+      role: prefill
+    plain_timeout_s: 60
+    plain:
+      count: 20
+    plain_terminal_timeout_s: 120
+    plain_p6_timeout_s: 60
+    plain_p6:
+      metric: complete
+      property: P6
+    plain_p1_timeout_s: 60
+    plain_p1:
+      metric: max_share
+      property: P1
+      diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
+    plain_p2_timeout_s: 60
+    plain_p2:
+      metric: workers
+      property: P2
+      diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
+    slow_second_timeout_s: 60
+    slow_second:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 200
+    perf_sync_timeout_s: 6.5
+    perf_sync:
+      seconds: 1.5
+    speed_hetero_timeout_s: 60
+    speed_hetero:
+      count: 20
+    speed_hetero_terminal_timeout_s: 120
+    speed_hetero_p6_timeout_s: 60
+    speed_hetero_p6:
+      metric: complete
+      property: P6
+    speed_hetero_p1_timeout_s: 60
+    speed_hetero_p1:
+      metric: max_share
+      property: P1
+      diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
+    speed_hetero_p2_timeout_s: 60
+    speed_hetero_p2:
+      metric: workers
+      property: P2
+      diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
+    restore_speed_timeout_s: 60
+    restore_speed:
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+    teardown_timeout_s: 120
+  concurrent_mix:
+    setup_timeout_s: 180
+    fleet_timeout_s: 60
+    fleet:
+      role: prefill
+    burst_timeout_s: 60
+    burst:
+      count: 20
+      concurrency: 20
+    terminal_timeout_s: 120
+    p6_timeout_s: 60
+    p6:
+      metric: complete
+      property: P6
+      min_success: 8
+      allow_admission: true
+    p1_timeout_s: 60
+    p1:
+      metric: max_share
+      property: P1
+      diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
+      relax: 1
+    p2_timeout_s: 60
+    p2:
+      metric: workers
+      property: P2
+      diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
+    teardown_timeout_s: 120
+  decode_spread:
+    setup_timeout_s: 180
+    n10_before_timeout_s: 60
+    n10_before:
+      role: decode
+    n10_timeout_s: 60
+    n10:
+      count: 10
+    n10_terminal_timeout_s: 120
+    n10_after_timeout_s: 60
+    n10_after:
+      role: decode
+    n10_p6_timeout_s: 60
+    n10_p6:
+      metric: decode_complete
+      property: P6
+    n10_p2_timeout_s: 60
+    n10_p2:
+      metric: decode_workers
+      property: P2
+      min_workers: 2
+    n10_p1_timeout_s: 60
+    n10_p1:
+      metric: decode_share
+      property: P1
+      bands:
+        strict: 0.6
+        normal: 0.7
+        loose: 0.8
+    n50_before_timeout_s: 60
+    n50_before:
+      role: decode
+    n50_timeout_s: 60
+    n50:
+      count: 50
+    n50_terminal_timeout_s: 120
+    n50_after_timeout_s: 60
+    n50_after:
+      role: decode
+    n50_p6_timeout_s: 60
+    n50_p6:
+      metric: decode_complete
+      property: P6
+    n50_p2_timeout_s: 60
+    n50_p2:
+      metric: decode_workers
+      property: P2
+      min_workers: 3
+    n50_p1_timeout_s: 60
+    n50_p1:
+      metric: decode_share
+      property: P1
+      bands:
+        strict: 0.4
+        normal: 0.5
+        loose: 0.6
+    teardown_timeout_s: 120
+  length_mixed:
+    setup_timeout_s: 180
+    fleet_timeout_s: 60
+    fleet:
+      role: prefill
+    wave1_long1_timeout_s: 60
+    wave1_long1:
+      input_len: 131072
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave1_long1_pending_timeout_s: 6
+    wave1_long2_timeout_s: 60
+    wave1_long2:
+      input_len: 135168
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave1_long2_pending_timeout_s: 6
+    wave1_short_timeout_s: 60
+    wave1_short:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave1_long1_terminal_timeout_s: 120
+    wave1_long2_terminal_timeout_s: 120
+    wave1_short_terminal_timeout_s: 120
+    wave1_p6_timeout_s: 60
+    wave1_p6:
+      metric: complete
+      property: P6
+    wave1_master_clean_timeout_s: 30
+    wave1_master_clean: {}
+    wave2_long1_timeout_s: 60
+    wave2_long1:
+      input_len: 139264
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave2_long1_pending_timeout_s: 6
+    wave2_long2_timeout_s: 60
+    wave2_long2:
+      input_len: 143360
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave2_long2_pending_timeout_s: 6
+    wave2_short_timeout_s: 60
+    wave2_short:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave2_long1_terminal_timeout_s: 120
+    wave2_long2_terminal_timeout_s: 120
+    wave2_short_terminal_timeout_s: 120
+    wave2_p6_timeout_s: 60
+    wave2_p6:
+      metric: complete
+      property: P6
+    wave2_master_clean_timeout_s: 30
+    wave2_master_clean: {}
+    wave3_long1_timeout_s: 60
+    wave3_long1:
+      input_len: 147456
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave3_long1_pending_timeout_s: 6
+    wave3_long2_timeout_s: 60
+    wave3_long2:
+      input_len: 131072
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave3_long2_pending_timeout_s: 6
+    wave3_short_timeout_s: 60
+    wave3_short:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave3_long1_terminal_timeout_s: 120
+    wave3_long2_terminal_timeout_s: 120
+    wave3_short_terminal_timeout_s: 120
+    wave3_p6_timeout_s: 60
+    wave3_p6:
+      metric: complete
+      property: P6
+    wave3_master_clean_timeout_s: 30
+    wave3_master_clean: {}
+    wave4_long1_timeout_s: 60
+    wave4_long1:
+      input_len: 135168
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave4_long1_pending_timeout_s: 6
+    wave4_long2_timeout_s: 60
+    wave4_long2:
+      input_len: 139264
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave4_long2_pending_timeout_s: 6
+    wave4_short_timeout_s: 60
+    wave4_short:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave4_long1_terminal_timeout_s: 120
+    wave4_long2_terminal_timeout_s: 120
+    wave4_short_terminal_timeout_s: 120
+    wave4_p6_timeout_s: 60
+    wave4_p6:
+      metric: complete
+      property: P6
+    wave4_master_clean_timeout_s: 30
+    wave4_master_clean: {}
+    wave5_long1_timeout_s: 60
+    wave5_long1:
+      input_len: 143360
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave5_long1_pending_timeout_s: 6
+    wave5_long2_timeout_s: 60
+    wave5_long2:
+      input_len: 147456
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave5_long2_pending_timeout_s: 6
+    wave5_short_timeout_s: 60
+    wave5_short:
+      count: 6
+      input_len: 512
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 30
+    wave5_long1_terminal_timeout_s: 120
+    wave5_long2_terminal_timeout_s: 120
+    wave5_short_terminal_timeout_s: 120
+    wave5_p6_timeout_s: 60
+    wave5_p6:
+      metric: complete
+      property: P6
+    wave5_master_clean_timeout_s: 30
+    wave5_master_clean: {}
+    token_p3_timeout_s: 60
+    token_p3:
+      metric: token_share
+      property: P3
+    short_p2_timeout_s: 60
+    short_p2:
+      metric: short_workers
+      property: P2
+      diagnostic_reason: Schema 3 uses deterministic BEST_ONLY; random landing spread is no longer a product contract.
+    teardown_timeout_s: 120

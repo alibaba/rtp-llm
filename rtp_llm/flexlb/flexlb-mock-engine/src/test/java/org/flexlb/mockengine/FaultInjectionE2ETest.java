@@ -192,7 +192,7 @@ class FaultInjectionE2ETest {
 
     @Test
     @Timeout(30)
-    void c06_no_respond_hangs_stream_but_dispatch_ack_succeeds_and_engine_drains() throws Exception {
+    void c06_no_respond_is_transport_blackhole_and_clears() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT + 50, 1, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
             arm(h);
@@ -201,10 +201,17 @@ class FaultInjectionE2ETest {
                     .noRespond(true)
                     .build());
 
-            // 控制面语义：enqueue ack 不受 noRespond 影响 → 调度器视角成功
-            Response response = submitTo(h, 0, 9601);
-            assertTrue(response.isSuccess(),
-                    "noRespond does not affect the enqueue ack: " + response.getErrorMessage());
+            java.util.concurrent.CountDownLatch enqueueReturned = new java.util.concurrent.CountDownLatch(1);
+            prefill.enqueueBatch(MockEngineTestSupport.batch(9601,
+                    MockEngineTestSupport.slot(0, MockEngineTestSupport.input(9601, 10))),
+                    new StreamObserver<>() {
+                        public void onNext(EngineRpcService.EnqueueBatchResponsePB value) { enqueueReturned.countDown(); }
+                        public void onError(Throwable error) { enqueueReturned.countDown(); }
+                        public void onCompleted() { enqueueReturned.countDown(); }
+                    });
+            assertFalse(enqueueReturned.await(150, TimeUnit.MILLISECONDS),
+                    "RPC blackhole must suppress Enqueue responses too");
+            assertEquals(0, prefill.getAcceptedCount());
 
             // 数据面语义：流上永远没有任何事件（不完成、不报错）
             StreamResult silent = callGenerateStream(prefill, 9602);

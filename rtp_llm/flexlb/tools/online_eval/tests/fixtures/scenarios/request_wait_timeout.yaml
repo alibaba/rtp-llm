@@ -1,0 +1,31 @@
+schema_version: 1
+id: request_wait_timeout
+description: Intentional timeout fixture; a real pending stream must be cancelled and owned processes reaped.
+category: status
+profiles: [batch-window]
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+execution:
+  timeout_s: 240
+  cleanup_timeout_s: 120
+stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: submit
+    action: request
+    timeout_s: 30
+    params: {count: 1, input_len: 2048, output_len: 256, consume: immediate}
+  - id: terminal
+    action: wait
+    timeout_s: 0.01
+    params:
+      requests: {$ref: stages.submit.output.requests}
+  - id: completed
+    action: check
+    params:
+      actual: {$ref: stages.terminal.output.completed}
+      op: eq
+      expected: true

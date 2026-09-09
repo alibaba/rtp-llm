@@ -466,7 +466,8 @@ class TransientCapacityQueueContractTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"FIFO,BATCH", "FIFO,NON_BATCH", "PRIORITY,BATCH", "PRIORITY,NON_BATCH"})
+    // Schema 3 PRIORITY always enables preemption; it is not a non-preemptive mode.
+    @CsvSource({"FIFO,BATCH", "FIFO,NON_BATCH"})
     @Timeout(20)
     void nonPreemptiveQueueWaitsForDecodeAtDelivery(String ordering, DispatcherConfig.Type delivery)
             throws Exception {

@@ -1,0 +1,264 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: client_fallback_failback
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  master_layout: dual_standalone
+execution:
+  timeout_s: 720
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: all_masters_down
+  program: all_masters_down
+- id: wraparound
+  parameters:
+    checkpoint_window_s: 5
+    max_owner_load: 128
+  program: wraparound
+- id: negative_errorcode
+  profiles:
+  - batch-window
+  program: negative_errorcode
+- id: direct_generate_error
+  environment:
+    master_layout: single
+  program: direct_generate_error
+metadata:
+  description: 'Explicit client routing programs: all-master outage, wraparound recovery, no fallback
+    for business/deadline errors, and direct GenerateStreamCall fault recovery.'
+  category: master
+parameters:
+  all_masters_down:
+    setup_timeout_s: 180
+    flow:
+      targets:
+      - A
+      - B
+      duration_s: 60
+      fallback: true
+    kill_a_time:
+      wait_s: 12
+    kill_a:
+      mode: kill
+      target: A
+    kill_b_time:
+      wait_s: 0.5
+    kill_b:
+      mode: kill
+      target: B
+    outage_end:
+      wait_s: 10
+    finish_timeout_s: 90
+    fallback_rows:
+      route: fallback
+    steady_master:
+      metric: route_share
+      op: eq
+      expected: 1
+      route: master
+      min_samples: 10
+    fallback_success:
+      metric: success_rate
+      op: ge
+      expected: 0.9
+      min_samples: 10
+    fallback_share:
+      metric: route_share
+      op: ge
+      expected: 0.8
+      route: fallback
+    no_master_during_outage:
+      metric: route_count
+      op: eq
+      expected: 0
+      route: master
+    outage_errors:
+      metric: failed_rate_above_one
+      op: le
+      expected: 0.05
+    unique_requests:
+      metric: duplicate_ids
+      op: eq
+      expected: 0
+  wraparound:
+    params:
+      min_samples: 30
+    setup_timeout_s: 180
+    flow:
+      targets:
+      - A
+      - B
+      duration_s: 150
+      live_events: true
+    kill_a:
+      mode: kill
+      target: A
+    restart_a_timeout_s: 180
+    ready_a_timeout_s: 60
+    ready_a:
+      target: A
+    recovery_a_timeout_s: 330
+    recovery_a:
+      target: A
+      count: 20
+      concurrency: 10
+    idle_a_timeout_s: 30
+    idle_a:
+      target: A
+    kill_b:
+      mode: kill
+      target: B
+    finish_timeout_s: 180
+    overall_success:
+      metric: success_rate
+      op: ge
+      expected: 0.95
+    clean_a_timeout_s: 35
+    clean_a:
+      target: A
+    checkpoint:
+      min_target_share: 0.5
+      min_success: 0.9
+      max_prefill_share: 1
+    checkpoint_timeout_margin_s: 35
+  negative_errorcode:
+    setup_timeout_s: 180
+    flow:
+      targets:
+      - A
+      - B
+      duration_s: 75
+      timeout_ms: 800
+      fallback: true
+    freeze_begin:
+      wait_s: 10
+    freeze_a:
+      target: A
+      mode: freeze
+    freeze_end:
+      wait_s: 8
+    settled:
+      wait_s: 8
+    business_fault:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: enqueue_ack_error_code
+      options:
+        code: 8431
+    business_begin:
+      wait_s: 0
+    business_end:
+      wait_s: 10
+    finish_timeout_s: 120
+    schedule_errors:
+      status: schedule_error
+    deadlines:
+      error_kind: deadline
+    business_errors_seen:
+      metric: sample_count
+      op: ge
+      expected: 5
+      min_samples: 5
+    business_code:
+      metric: wrong_error_code
+      op: eq
+      expected: 0
+      code: 8431
+      min_samples: 5
+    business_route:
+      metric: route_share
+      op: eq
+      expected: 1
+      route: master
+    business_no_fallback:
+      metric: route_count
+      op: eq
+      expected: 0
+      route: fallback
+    business_no_failed:
+      metric: route_count
+      op: eq
+      expected: 0
+      route: failed
+    business_no_retry:
+      metric: failover_count
+      op: eq
+      expected: 0
+    deadlines_seen:
+      metric: sample_count
+      op: ge
+      expected: 3
+      min_samples: 3
+    deadline_route:
+      metric: route_share
+      op: eq
+      expected: 1
+      route: failed
+      min_samples: 3
+    deadline_no_retry:
+      metric: failover_count
+      op: eq
+      expected: 0
+      min_samples: 3
+    deadline_no_fallback:
+      metric: route_count
+      op: eq
+      expected: 0
+      route: fallback
+    tail_settle_timeout_s: 150
+    tail_settle:
+      target: A
+      op: le
+      value: 8
+  direct_generate_error:
+    setup_timeout_s: 180
+    baseline_timeout_s: 30
+    baseline:
+      engine: prefill-0
+    baseline_finished:
+      op: eq
+      expected: true
+    baseline_no_error:
+      op: eq
+      expected: false
+    generate_fault:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: generate_error
+      options: {}
+    injected_timeout_s: 30
+    injected:
+      engine: prefill-0
+    injected_error:
+      op: eq
+      expected: true
+    recovery_timeout_s: 30
+    recovery:
+      engine: prefill-0
+    recovered_finished:
+      op: eq
+      expected: true
+    recovered_no_error:
+      op: eq
+      expected: false
+  checkpoint_window_s: 5
+  max_owner_load: 128
+parameter_schema:
+  checkpoint_window_s:
+    minimum: 3
+    maximum: 10
+    integer: true
+  max_owner_load:
+    minimum: 1
+    maximum: 5000
+    integer: true

@@ -134,7 +134,7 @@ class PreemptionPhasesE2ETest {
                 // Dispatch through the canonical queue-to-ledger transfer. The
                 // engine receives the request, while the external ACK remains gated.
                 CompletableFuture<Response> low = h.scheduler.submit(h.context(301, 30));
-                AutoTpmE2EHarness.await(() -> decodeEngine.getRunningCount() >= 1, 2_000,
+                AutoTpmE2EHarness.await(() -> decodeEngine.getActiveDecodeCount() >= 1, 2_000,
                         "victim running on decode mock");
                 h.pumpDecodeOnce(0); // mock v1 equals the discovered fixture cursor
                 h.pumpDecodeOnce(0); // mock v2 publishes the canonical RUNNING owner
@@ -220,7 +220,7 @@ class PreemptionPhasesE2ETest {
 
             try (AutoCloseable ignored = h.holdBatchAck(311)) {
                 CompletableFuture<Response> low = h.scheduler.submit(h.context(311, 30));
-                AutoTpmE2EHarness.await(() -> decodeEngine.getRunningCount() >= 1, 2_000,
+                AutoTpmE2EHarness.await(() -> decodeEngine.getActiveDecodeCount() >= 1, 2_000,
                         "victim running on decode mock");
                 h.pumpDecodeOnce(0); // consume mock v1 at the discovered fixture cursor
                 h.pumpDecodeOnce(0); // apply mock v2 and publish the canonical RUNNING owner

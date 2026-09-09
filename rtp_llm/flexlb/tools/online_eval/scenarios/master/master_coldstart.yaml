@@ -1,0 +1,35 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: master_coldstart
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  master_layout: single
+  master_stable_window_s: 0
+execution:
+  timeout_s: 480
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: burst_twenty
+  program: burst_twenty
+metadata:
+  description: Twenty requests with ten concurrent clients immediately after readiness, retaining topology
+    samples and placement evidence.
+  category: master
+parameters:
+  burst_twenty:
+    setup_timeout_s: 180
+    burst:
+      target: single
+      count: 20
+      concurrency: 10
+      request_timeout_s: 15
+      sample_after_s: 10
+      coldstart: true

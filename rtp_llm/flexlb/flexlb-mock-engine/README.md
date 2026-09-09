@@ -2,6 +2,48 @@
 
 A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU inference timing with configurable performance formulas, fault injection, and monitoring.
 
+## P/D continuation and Fetch
+
+BATCH defaults to `--auto-fetch false`: Decode reserves KV and reports
+`KV_ALLOCATED` before Prefill execution. Prefill completion releases its
+compute slot but retains the deferred context and connector KV until Fetch,
+cancellation or expiry. Fetch can attach before or after Prefill completes.
+`--fetch-attach-timeout-ms` defaults to 600000; an Enqueue override and the
+request timeout can shorten it. NON_BATCH already has a client stream.
+
+The schedule-only benchmark explicitly opts into `--auto-fetch true` when
+`FETCH_OUTPUT_STREAM=0`. `no_respond` is a server RPC blackhole, not a client
+that omitted Fetch. See [protocol, ownership and case design](../tools/online_eval/docs/mock-pd-fetch-lifecycle.md).
+
+## WorkerStatus completion reporting
+
+Prefill and Decode publish a terminal record before removing the request from
+`running_task_info`. The running list, retained completions and finished cursor
+are captured under one monitor, so a normal completion cannot disappear between
+the two lists in a status response. Queue/resource operations and file writes
+stay outside the snapshot critical section. Explicit status fault injections
+still produce their requested faulty reports.
+
+`MOCK_COMPLETION_RETAIN_WINDOW` sets the completion capacity (default **1000**
+records). Every insertion immediately evicts the oldest excess records; reads
+filter `requestedVersion < version <= latestVersion` without consuming records.
+A slow consumer permanently loses evicted records. The engine does not replay
+or compensate for them. Zero capacity intentionally retains nothing; invalid
+or negative environment values fall back to 1000.
+
+For a completion-race investigation, set `MOCK_STATUS_SNAPSHOT_LOG=true` and
+provide `--events-file`. The engine appends `worker_status_snapshot` rows to that
+file for the existing status RPCs, with per-engine sequence, requested/latest
+versions, running IDs, retained IDs/versions, returned IDs and eviction count.
+Logging defaults to off. Sort each engine's rows by `sequence` when auditing,
+because file writes happen after releasing the snapshot monitor. This probe
+adds no diagnostic HTTP polling. Under capacity pressure, distinguish intentional
+retention loss from an atomicity violation.
+
+The tests `CompletionSnapshotAtomicityTest` and `CompletionRetainWindowTest`
+cover concurrent P/D execution and the 1000/1001 boundary, respectively. This
+alignment does not change the master's handling of late or lost completions.
+
 ## Features
 
 - **Realistic timing simulation**: Uses `ScheduledExecutorService.schedule()` to wait for formula-computed prefill/decode durations
@@ -279,7 +321,7 @@ entirely through environment variables (`Config.fromEnv`):
 | LIMIT | 0 | Max requests to replay (0 = all) |
 | TIMEOUT_MS | 3600000 | Global run timeout in ms |
 | SLA_TTFT_MS | 500.0 | TTFT SLA threshold for the report |
-| FETCH_OUTPUT_STREAM | true | Client reads engine output streams after Schedule; 0 skips the client-side stream read while the engine still executes prefill+decode in full (BATCH dispatcher only) |
+| FETCH_OUTPUT_STREAM | true | Client reads output streams. With `0/false`, `run_online_eval.sh` also sets Mock `--auto-fetch true`; direct launchers must set both ends explicitly (BATCH only). |
 | LOOP | false | Loop the trace |
 | N_CHANNELS | 8 | gRPC channels |
 | EVENT_LOOP_THREADS | 32 | Netty event-loop threads |
@@ -443,17 +485,19 @@ master-side curves are indistinguishable from production:
   executes). Net-demand caliber, same as hand-off admission; the reservation is
   ADOPTED (not re-charged) at hand-off and released on prefill cancel /
   alreadyCancelled completion / a rejected hand-off. A reservation reject is a
-  request-level synchronous 602 in the enqueue ack (message marks it
+  request-level synchronous 8211 in the enqueue ack (message retains raw 602 and marks it
   decode-side), counted on the D engine's `kv_admission_fails` — the P-side
   `lack_mem_rejects` counter stays the P-POOL rejection surface. Single-engine
   / self-routed topologies (no resolvable DECODE in role_addrs) reserve
   nothing; the D engine is located from role_addrs exactly as `startDecode`
   does (mock routing parity: same resolver, same target).
-- **Flag semantics change**: `--prefill-cache-blocks` / `--decode-cache-blocks` have
-  RETIRED their old meaning ("max cached key count") and now override the pool
-  block count (default `0` = derive from token capacity). The 6000/3000 defaults
-  still passed by `run_online_eval.sh` / `lib_load_client.sh` / `harness.py` remain
-  valid — they now size the pools (6,000 blocks = 6,144,000 tokens prefill;
+- **Flag rename + semantics change**: the pool-block overrides are
+  `--prefill-kv-pool-blocks` / `--decode-kv-pool-blocks` (default `0` = derive
+  from token capacity). The old names `--prefill-cache-blocks` /
+  `--decode-cache-blocks` were removed outright — passing either one now fails
+  fast with an unknown-argument error. The 6000/3000 defaults still
+  passed by `run_online_eval.sh` / `lib_load_client.sh` / `harness.py` remain
+  valid — they size the pools (6,000 blocks = 6,144,000 tokens prefill;
   3,000 = 3,072,000 decode) instead of capping key counts.
 - **Surface alignment**: `block_size` in snapshots now reports the actual spb (was
   hardcoded 1024); `/snapshot` and `/metrics` expose `total_kv_tokens`,
@@ -563,7 +607,7 @@ that (production reference: FIFOScheduler.cc:371-481):
   the stress caliber needs no extra opt-in.
 - **Observation surface**: `/snapshot` exposes `prefill_batches` /
   `prefill_batch_requests` / `max_prefill_batch_size` per prefill
-  engine — the executed-batch counters the flexlb_ft regroup cases
+  engine — the executed-batch counters the flexlb_test_framework regroup cases
   assert on.
 
 **Caliber break note**: `avg_batch_size` and the whole
@@ -625,30 +669,20 @@ The Python mock engine / Python load client implementations have been
 `flexlb_load_client.py`, `run_single_engine.py`, `test_resolve_decode.py` and
 `tests/test_mock_engine.py`), together with `tools/online_eval/run_batch_smoke_only.sh`
 (a matrix subset with no CI references — its coverage is subsumed by
-`run_online_eval.sh` / `run_matrix_smoke.sh`) and the stale
+`run_online_eval.sh`) and the stale
 `tools/online_eval/BUILD` filegroup that still referenced the deleted Python
 files: nine files in total. The `MOCK_ENGINE_IMPL` / `LOAD_CLIENT_IMPL`
 orchestration switches and their Python branches are gone as well, so the
 Java stack described in this README is the only implementation.
 
-All seven orchestration test scripts have been converted to the Java stack and
-now drive JavaMockEngineCluster / JavaLoadClient through the shared
-`tools/online_eval/lib_load_client.sh` helpers
-(`start_java_mock_cluster` / `wait_mock_cluster_ready` / `mock_http` /
-`stop_java_mock_cluster` / `run_java_load_client`):
-
-- `flexlb_behavior_test.sh`
-- `engine_kill_restart_test.sh`
-- `run_cancel_smoke.sh`
-- `run_matrix_smoke.sh`
-- `master_kill_restart_test.sh`
-- `master_recovery_ttft_test.sh`
-- `engine_disconnect_ttft_test.sh`
+`run_online_eval.sh` drives JavaLoadClient through the shared
+`tools/online_eval/lib_load_client.sh` helper `run_java_load_client`
+(the single source of truth for the JavaLoadClient env-var mapping).
 
 The Python **smoke client family** has been retired and removed (it was
 tooling, not the mock engine): `flexlb_smoke_base.py`,
 `priority_preemption_smoke.py` and their tests are gone — their coverage
-lives in the `tools/online_eval/flexlb_ft/` functional-test framework,
+lives in the `tools/online_eval/flexlb_test_framework/` functional-test framework,
 which talks to the Java cluster over its gRPC + HTTP control plane.
 `encode_unique_key` now lives in
 `online_eval/proto_utils.py`, used by the remaining analysis tooling.
@@ -672,3 +706,11 @@ counting) is now faithful — since the Java mock implements gRPC `Cancel`,
 cancels issued on the master's active-eviction path really reach the engine
 and are counted. Historical "undercounted PASS" baselines will turn red;
 that is a semantic alignment, not a regression.
+
+### P→D 断链
+
+Mock 的 P→D 数据通道使用进程内队列。停止 Decode 端口、崩溃或强制移除时，
+通过已有请求所有权向 Prefill 响应队列即时投递 `8209 REMOTE_GENERATE_FAILED`，
+附带断链说明；不等待客户端 deadline，不通过 Master Cancel。正常排空不产生断链错误。
+响应队列只接受一个终态，后续取消、完成或输出帧不再写入。此错误以现有
+`error_info` 数据帧传递，模拟业务错误语义，不模拟真实 gRPC trailing status 或 keepalive 时延。

@@ -125,6 +125,7 @@ public final class JavaLoadClient {
     final AtomicInteger sentTotal = new AtomicInteger();
     final List<RequestResult> completedResults = Collections.synchronizedList(new ArrayList<>());
     private volatile ScheduledExecutorService pushgatewayExecutor;
+    private ClientEventJournal liveJournal;
     private volatile double lastGradientLogS = -10.0;
     final List<String> fallbackPrefillAddrs = new ArrayList<>();
     final List<String> fallbackDecodeAddrs = new ArrayList<>();
@@ -237,6 +238,9 @@ public final class JavaLoadClient {
         }
 
         Files.createDirectories(Path.of(config.outputDir));
+        if ("true".equalsIgnoreCase(System.getenv("LIVE_CLIENT_EVENTS"))) {
+            liveJournal = new ClientEventJournal(Path.of(config.outputDir, "client_lifecycle.jsonl"));
+        }
         if (!config.skipServerLatency) {
             resetServerLatency();
         }
@@ -625,6 +629,9 @@ public final class JavaLoadClient {
             result.sendStartEpochMs = sendStartEpochMs;
             result.pacingLagMs = Math.max(0.0, sendStartEpochMs - sendDueEpochMs);
             actualSentCount.incrementAndGet();
+            if (liveJournal != null) {
+                liveJournal.record("issued", perRequestNode(result));
+            }
 
             inputPb = buildGenerateInput(record);
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
@@ -867,6 +874,9 @@ public final class JavaLoadClient {
     }
 
     private void tallyResult(RequestResult result) {
+        if (liveJournal != null) {
+            liveJournal.record("terminal", perRequestNode(result));
+        }
         completedResults.add(result);
         if ("ok".equals(result.status) || "scheduled".equals(result.status)) {
             successCount.incrementAndGet();
@@ -1695,6 +1705,9 @@ public final class JavaLoadClient {
     // ---- Cleanup ----
 
     private void close() {
+        if (liveJournal != null) {
+            liveJournal.close();
+        }
         if (router != null) {
             router.shutdown();
         }

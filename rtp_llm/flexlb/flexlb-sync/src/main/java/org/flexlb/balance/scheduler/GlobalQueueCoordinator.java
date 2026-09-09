@@ -7,6 +7,9 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.debug.DebugPage;
+import org.flexlb.debug.DebugQuery;
+import org.flexlb.debug.DebugRows;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -131,6 +134,35 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             future.whenComplete((ignored, failure) -> markCompleted(entry));
             changed.signal();
             return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    DebugPage debugSnapshot(DebugQuery query) {
+        long started = System.currentTimeMillis();
+        if (!lock.tryLock()) {
+            return DebugPage.unavailable("component_locked", "busy", started);
+        }
+        try {
+            DebugRows rows = new DebugRows(query);
+            orderedQueue.debugVisit(entry -> {
+                if (!rows.visit()) {
+                    return false;
+                }
+                long id = entry.context.getRequestId();
+                if (query.matches(id)) {
+                    rows.add(DebugRows.fields("request_id", Long.toString(id),
+                            "queue_sequence", Long.toString(entry.sequence),
+                            "effective_priority", entry.priority,
+                            "routing_group", entry.routingGroup,
+                            "blocked", blockedRequests.debugEntry(entry)));
+                }
+                return true;
+            });
+            return rows.finish("component_locked", DebugRows.fields(
+                    "scope", "linked_global_queue", "queue_size", orderedQueue.size(),
+                    "order", priorityOrdering ? "priority_then_fifo" : "fifo"));
         } finally {
             lock.unlock();
         }

@@ -17,6 +17,8 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.debug.DebugPage;
+import org.flexlb.debug.DebugQuery;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -327,6 +329,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Requests owned by a local Prefill lifecycle: admitted QUEUE batch members
      * plus individually tracked DIRECT and QUEUE_ROUTE requests.
      */
+    public DebugPage debugSnapshot(DebugQuery query) {
+        return prefillState.debugSnapshot(query);
+    }
+
     public int getLocallyOwnedRequestCount() {
         PrefillState.Stats stats = prefillState.stats();
         return stats.locallyOwnedRequests();

@@ -6,6 +6,9 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.debug.DebugPage;
+import org.flexlb.debug.DebugQuery;
+import org.flexlb.debug.DebugRows;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -1311,6 +1314,55 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (committed) {
                 publishCapacityRelease();
             }
+        }
+    }
+
+    /** Copy only bounded primitive leaves under the admission lock, without routing projections. */
+    public DebugPage debugSnapshot(DebugQuery query) {
+        long started = System.currentTimeMillis();
+        if (!admissionLock.tryLock()) {
+            return DebugPage.unavailable("component_locked", "busy", started);
+        }
+        try {
+            DebugRows rows = new DebugRows(query);
+            var candidates = query.requestId() == null
+                    ? decodeRequests.entrySet()
+                    : decodeRequests.containsKey(query.requestId())
+                        ? java.util.Set.of(Map.entry(query.requestId(), decodeRequests.get(query.requestId())))
+                        : java.util.Set.<Map.Entry<Long, DecodeRequestState>>of();
+            for (var candidate : candidates) {
+                if (!rows.visit()) {
+                    break;
+                }
+                var task = candidate.getValue();
+                rows.add(DebugRows.fields(
+                        "request_id", Long.toString(candidate.getKey()),
+                        "owns_request", task.ownsRequest(),
+                        "ownership", !task.ownsRequest() ? "retained_non_owner"
+                                : task.confirmed() ? "confirmed" : "reserved",
+                        "phase", task.phase() == null ? "NONE" : task.phase().name(), "queued", task.queued(),
+                        "reservation_token", Long.toString(task.reservationToken()),
+                        "has_protocol_owner", task.hasProtocolOwner(),
+                        "has_dispatch_permit", task.dispatchPermit() != null,
+                        "kv_tokens", task.kvTokens(), "expected_kv_tokens", task.expectedKvTokens(),
+                        "settled_at_ms", task.settledAtMs,
+                        "priority_known", task.priorityKnown(),
+                        "priority", task.priorityKnown() ? task.priority() : null));
+            }
+            int reserved = reservedRequestCount.get();
+            int queued = queuedPhaseCount.get();
+            int engineLoad = confirmedEngineOwnedCount + Math.max(0, reserved - queued);
+            return rows.finish("component_locked", DebugRows.fields(
+                    "scope", "decode_request_ownership",
+                    "retained_request_count", decodeRequests.size(),
+                    "reserved_total", reserved, "master_queued", queued,
+                    "confirmed_total", confirmedEngineOwnedCount,
+                    "active_dispatch_permits", activeEngineDispatchPermitCount,
+                    "engine_load", engineLoad,
+                    "engine_capacity_used", engineLoad + activeEngineDispatchPermitCount,
+                    "admission_version", Long.toString(admissionVersion.get())));
+        } finally {
+            admissionLock.unlock();
         }
     }
 

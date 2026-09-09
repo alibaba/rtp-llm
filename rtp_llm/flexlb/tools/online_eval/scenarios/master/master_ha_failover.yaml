@@ -1,0 +1,76 @@
+# YAML owns all case data; Python owns execution order and result references.
+schema_version: 2
+case: master_ha_failover
+profiles:
+- batch-window
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+  master_layout: dual_standalone
+execution:
+  timeout_s: 480
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: standalone_a_to_b
+  program: standalone_a_to_b
+metadata:
+  description: 'Actual dual standalone masters: sticky A to B through same-request failover, with per-request
+    route evidence.'
+  category: master
+parameters:
+  standalone_a_to_b:
+    setup_timeout_s: 180
+    flow:
+      targets:
+      - A
+      - B
+      duration_s: 60
+    lookback:
+      wait_s: 2
+    kill_time:
+      wait_s: 10
+    kill_a:
+      mode: kill
+      target: A
+    switched:
+      wait_s: 10
+    b_ready:
+      target: B
+      inflight_zero: false
+    finish_timeout_s: 90
+    steady_a:
+      metric: target_share
+      op: eq
+      expected: 1
+      target: A
+      min_samples: 10
+    failover_seen:
+      metric: failover_count
+      op: ge
+      expected: 1
+    switch_to_b:
+      metric: target_count
+      op: ge
+      expected: 1
+      target: B
+    switch_errors:
+      metric: failed_rate_above_one
+      op: le
+      expected: 0.05
+    after_b:
+      metric: target_share
+      op: ge
+      expected: 0.95
+      target: B
+      min_samples: 20
+    after_success:
+      metric: success_rate
+      op: ge
+      expected: 0.9
+      min_samples: 20
+    unique_requests:
+      metric: duplicate_ids
+      op: eq
+      expected: 0

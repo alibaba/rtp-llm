@@ -181,7 +181,7 @@ final class MockEngineTestCluster implements AutoCloseable {
             int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
             inputs[i] = MockEngineTestSupport.inputWithDecode(startRequestId + i, 10, decodePort);
         }
-        MockEngineTestSupport.enqueue(
+        MockEngineTestSupport.enqueueAndFetch(
                 prefill,
                 MockEngineTestSupport.batch(batchId, MockEngineTestSupport.slot(0, inputs)));
     }

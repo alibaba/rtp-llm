@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
@@ -89,7 +89,7 @@ class MockEngineCancelChannelTest {
             inputs[i] = inputWithDecode(i + 1, 10, decodeServices.get(0).getGrpcPort());
         }
         EngineRpcService.EnqueueBatchResponsePB response =
-                enqueue(prefill, batch(9000, slot(0, inputs)));
+                enqueueAndFetch(prefill, batch(9000, slot(0, inputs)));
         assertEquals(n, response.getSuccessesCount());
         awaitInflight(prefill, 1, 1_000);
 
@@ -124,7 +124,7 @@ class MockEngineCancelChannelTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
-        enqueue(prefill, batch(9050, slot(0,
+        enqueueAndFetch(prefill, batch(9050, slot(0,
                 inputWithDecode(51, 10, decode.getGrpcPort()))));
         awaitInflight(decode, 1, 1_000);
         awaitNoInflight(prefill, 1_000);
@@ -153,6 +153,12 @@ class MockEngineCancelChannelTest {
                         .PRIORITY_PREEMPTION_CANCELED);
         assertTrue(typedCanceledReported,
                 "original Prefill must report authoritative typed CANCELED+8429");
+        // P execution success and its later priority-control terminal are distinct
+        // phases. D has only one execution terminal; never count globally by rid.
+        assertTerminalSet(prefill, 51L, 9050L, List.of(0L, 8429L), List.of(0,
+                EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED.getNumber()));
+        assertTerminalSet(decode, 51L, 9050L,
+                List.of((long) EngineRpcService.ErrorCodePB.CANCELLED.getNumber()), List.of(0));
     }
 
     // ---- not found after natural completion / idempotent cancel tombstone ----
@@ -163,7 +169,7 @@ class MockEngineCancelChannelTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
-        enqueue(prefill, batch(9100, slot(0,
+        enqueueAndFetch(prefill, batch(9100, slot(0,
                 inputWithDecode(11, 10, decodeServices.get(0).getGrpcPort()))));
         awaitAllInflightZero(5_000);
 
@@ -179,6 +185,8 @@ class MockEngineCancelChannelTest {
         assertEquals(0, prefill.getInflightCount());
         assertEquals(0, prefill.getDownstreamOwnershipCount());
         assertEquals(0, decodeServices.get(0).getUpstreamOwnershipCount());
+        assertTerminalSet(prefill, 11L, 9100L, List.of(0L), List.of(0));
+        assertTerminalSet(decodeServices.get(0), 11L, 9100L, List.of(0L), List.of(0));
     }
 
     @Test
@@ -187,7 +195,7 @@ class MockEngineCancelChannelTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
-        enqueue(prefill, batch(9200, slot(0,
+        enqueueAndFetch(prefill, batch(9200, slot(0,
                 inputWithDecode(21, 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
@@ -211,6 +219,37 @@ class MockEngineCancelChannelTest {
         assertEquals(1L, terminalCount,
                 "a retry must not publish a second CANCELED+8429 terminal");
         awaitAllInflightZero(10_000);
+        // Zero request owners alone is insufficient: the cancelled P batch's
+        // scheduled completion callback must also have run before counting terminals.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (prefill.getActivePrefillBatchCount() != 0 && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(0, prefill.getActivePrefillBatchCount(), "P callback did not drain");
+        assertTerminalSet(prefill, 21L, 9200L, List.of(8429L), List.of(
+                EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED.getNumber()));
+        assertTerminalSet(decodeServices.get(0), 21L, 9200L,
+                List.of((long) EngineRpcService.ErrorCodePB.CANCELLED.getNumber()), List.of(0));
+    }
+
+    /** Full retained set on one engine incarnation, not just filtered cancel records. */
+    private void assertTerminalSet(JavaMockEngineCluster.FastRpcService service,
+                                   long rid, long batchId, List<Long> codes, List<Integer> progress) {
+        EngineRpcService.WorkerStatusPB status = workerStatus(service, 0);
+        var terminals = status.getFinishedTaskListList().stream()
+                .filter(task -> task.getRequestId() == rid).toList();
+        String identity = service.getEngineName() + ":" + service.getGrpcPort()
+                + " epoch=" + service.getCrashEpoch() + " rid=" + rid;
+        assertEquals(codes.size(), terminals.size(), identity + " full terminal set: " + terminals);
+        assertEquals(codes, terminals.stream().map(t -> t.getErrorInfo().getErrorCode()).toList(), identity);
+        assertEquals(progress, terminals.stream().map(t -> t.getPriorityPreemptionProgressValue()).toList(), identity);
+        for (var task : terminals) assertEquals(batchId, task.getBatchId(), identity);
+        // A repeated read is not an additional logical event; an acknowledged cursor
+        // returns none, while replaying the original cursor returns the same set.
+        assertEquals(0L, workerStatus(service, status.getLatestFinishedVersion()).getFinishedTaskListList()
+                .stream().filter(t -> t.getRequestId() == rid).count(), identity);
+        assertEquals(terminals, workerStatus(service, 0).getFinishedTaskListList().stream()
+                .filter(t -> t.getRequestId() == rid).toList(), identity);
     }
 
     // ---- not found: unknown request id / wrong worker ----
@@ -238,7 +277,7 @@ class MockEngineCancelChannelTest {
         // The absent fence rejects a racing later Enqueue of the same rid
         // with the typed 8429 error, pre-admission: no success ack, no
         // engine state, no inflight residue.
-        EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
+        EngineRpcService.EnqueueBatchResponsePB response = enqueueAndFetch(prefill,
                 batch(9101, slot(0,
                         inputWithDecode(424242L, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(0, response.getSuccessesCount(),
@@ -258,7 +297,7 @@ class MockEngineCancelChannelTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
-        enqueue(prefill, batch(9300, slot(0,
+        enqueueAndFetch(prefill, batch(9300, slot(0,
                 inputWithDecode(31, 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
@@ -301,7 +340,7 @@ class MockEngineCancelChannelTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
-        enqueue(prefill, batch(9400, slot(0,
+        enqueueAndFetch(prefill, batch(9400, slot(0,
                 inputWithDecode(41, 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
@@ -367,7 +406,7 @@ class MockEngineCancelChannelTest {
 
         // No fence was installed: the same never-seen rid enqueues cleanly
         // (an ABSENT_FENCE would have rejected it with the typed 8429).
-        EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
+        EngineRpcService.EnqueueBatchResponsePB response = enqueueAndFetch(prefill,
                 batch(9401, slot(0,
                         inputWithDecode(424243L, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, response.getSuccessesCount(),
@@ -402,7 +441,7 @@ class MockEngineCancelChannelTest {
         }
 
         // Engine state untouched: the never-seen rid enqueues cleanly.
-        EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
+        EngineRpcService.EnqueueBatchResponsePB response = enqueueAndFetch(prefill,
                 batch(9402, slot(0,
                         inputWithDecode(424244L, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, response.getSuccessesCount(),

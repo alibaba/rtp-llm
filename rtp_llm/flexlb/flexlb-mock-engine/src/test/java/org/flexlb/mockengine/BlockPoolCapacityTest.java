@@ -16,7 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
-import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -258,7 +258,7 @@ class BlockPoolCapacityTest {
         EngineRpcService.GenerateInputPB tooBig = inputWithBlockKeys(
                 7L, SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(1, slot(0, tooBig)));
+                enqueueAndFetch(prefill, batch(1, slot(0, tooBig)));
         assertEquals(1, ack.getErrorsCount(), "the oversized request must be rejected");
         assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
                 ack.getErrors(0).getErrorInfo().getErrorCode(),
@@ -272,7 +272,7 @@ class BlockPoolCapacityTest {
         EngineRpcService.GenerateInputPB small =
                 inputWithBlockKeys(8L, SPB, List.of(1L, 2L));
         EngineRpcService.EnqueueBatchResponsePB ack2 =
-                enqueue(prefill, batch(2, slot(0, small)));
+                enqueueAndFetch(prefill, batch(2, slot(0, small)));
         assertEquals(0, ack2.getErrorsCount());
         assertEquals(1, ack2.getSuccessesCount());
     }

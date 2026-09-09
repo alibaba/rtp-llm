@@ -7,6 +7,10 @@ import org.flexlb.balance.projection.WorkSnapshot.Phase;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.debug.DebugPage;
+import org.flexlb.debug.DebugQuery;
+import org.flexlb.debug.DebugRows;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.util.PriorityNormalizer;
@@ -1835,6 +1839,46 @@ public final class PrefillState {
                 nowMs,
                 active,
                 captureWorkUnderLock(nowMs));
+    }
+
+    /** One row per owned request; batch members consume the same row budget. */
+    public DebugPage debugSnapshot(DebugQuery query) {
+        long started = System.currentTimeMillis();
+        if (!lock.tryLock()) {
+            return DebugPage.unavailable("component_locked", "busy", started);
+        }
+        try {
+            DebugRows rows = new DebugRows(query);
+            Iterable<RequestEntry> candidates = query.requestId() == null
+                    ? requests.values()
+                    : requests.containsKey(query.requestId())
+                        ? java.util.List.of(requests.get(query.requestId())) : java.util.List.of();
+            for (RequestEntry entry : candidates) {
+                if (!rows.visit()) {
+                    break;
+                }
+                rows.add(DebugRows.fields(
+                        "request_id", Long.toString(entry.requestId),
+                        "ownership", entry.isActive() ? "queued" : "committed",
+                        "delivery", entry.batchWork != null ? "batch" : "individual",
+                        "phase", entry.isActive() ? "QUEUED"
+                                : entry.batchWork != null ? entry.batchWork.servicePhase.name()
+                                : entry.individualPhase.name(),
+                        "batch_id", entry.batchWork == null ? null
+                                : Long.toString(entry.batchWork.lease.batchId),
+                        "protected", false,
+                        "deferred_terminal", false,
+                        "queue_membership", entry.queueMembership.name()));
+            }
+            return rows.finish("component_locked", DebugRows.fields(
+                    "scope", "prefill_request_ownership",
+                    "retained_request_count", requests.size(),
+                    "batch_leases_in_use", batchLeasesInUse,
+                    "mutation_version", Long.toString(mutationVersion),
+                    "unknown_engine_request_count", unknownEngineRequestCount));
+        } finally {
+            lock.unlock();
+        }
     }
 
     public WorkSnapshot committedSnapshot() {
