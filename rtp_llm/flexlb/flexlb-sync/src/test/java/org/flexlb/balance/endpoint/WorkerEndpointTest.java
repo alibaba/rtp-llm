@@ -44,10 +44,11 @@ class WorkerEndpointTest {
                 EndpointTestSupport.requestRuntime();
         endpoint = new PrefillEndpoint(
                 status,
-                config,
+                () -> config,
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 requestRuntime.events(),
-                Mockito.mock(BatchSchedulerReporter.class));
+                Mockito.mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         endpoint.startGeneration();
     }
 

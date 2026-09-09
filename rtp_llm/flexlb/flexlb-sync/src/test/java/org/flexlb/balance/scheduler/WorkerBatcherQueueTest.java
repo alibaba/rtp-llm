@@ -167,7 +167,7 @@ class WorkerBatcherQueueTest {
         WorkerBatcher runtime = new WorkerBatcher(
                 "test-worker",
                 prefillEndpoint,
-                config,
+                () -> config,
                 deliveryStrategy,
                 mock(EndpointEventProjector.class));
         runtimes.add(runtime);
