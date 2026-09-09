@@ -246,6 +246,54 @@ class StartBackendServerLifecycleTest(unittest.TestCase):
         self.assertTrue(stubborn_rank.killed)
         exit_mock.assert_called_once_with(1)
 
+    def test_fake_gang_env_waits_for_ranks_and_reports_backend_ready(self):
+        """Fake gang mode must use the same rank-ready handshake as normal mode."""
+        process = _AliveProcess()
+        reader = _TrackedConnection()
+        processes = []
+        rank_pipe_readers = []
+
+        def create_rank_processes(
+            _controller, _configs, _ctx, out_processes, out_readers
+        ):
+            out_processes.append(process)
+            out_readers.append(reader)
+
+        configs = SimpleNamespace(
+            distribute_config=SimpleNamespace(fake_gang_env=True),
+            server_config=SimpleNamespace(shutdown_timeout=1, monitor_interval=0.01),
+        )
+        pipe_writer = Mock()
+        manager = Mock()
+
+        with patch(
+            "rtp_llm.start_backend_server._create_rank_processes",
+            side_effect=create_rank_processes,
+        ), patch(
+            "rtp_llm.start_backend_server._wait_for_ranks_startup"
+        ) as wait_for_ranks_startup, patch(
+            "rtp_llm.start_backend_server.ProcessManager", return_value=manager
+        ) as process_manager, patch(
+            "rtp_llm.start_backend_server._send_pipe_status"
+        ) as send_pipe_status, patch(
+            "rtp_llm.start_backend_server._close_readers"
+        ) as close_readers:
+            result = multi_rank_start(None, configs, pipe_writer)
+
+        self.assertEqual(result, [process])
+        wait_for_ranks_startup.assert_called_once_with([process], [reader], 1)
+        process_manager.assert_called_once_with(
+            shutdown_timeout=1, monitor_interval=0.01
+        )
+        manager.set_processes.assert_called_once_with(
+            [process], shutdown_group="backend"
+        )
+        send_pipe_status.assert_called_once_with(
+            pipe_writer, "success", "All 1 backend ranks started successfully"
+        )
+        manager.monitor_and_release_processes.assert_called_once_with()
+        close_readers.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

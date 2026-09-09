@@ -327,10 +327,6 @@ def multi_rank_start(
         )
         local_world_size = len(processes)
 
-        if py_env_configs.distribute_config.fake_gang_env:
-            _close_readers(rank_pipe_readers)
-            return processes
-
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
 
         manager = ProcessManager(
