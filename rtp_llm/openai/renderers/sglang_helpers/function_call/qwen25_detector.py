@@ -74,6 +74,9 @@ class Qwen25Detector(BaseFormatDetector):
                     f"Failed to parse JSON part: {match_result}, JSON parse error: {str(e)}"
                 )
                 continue
+        if not calls and not normal_text:
+            # Preserve unusable tool-only output instead of returning an empty message.
+            normal_text = text
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
     def parse_streaming_increment(
