@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 
 import torch
 from pydantic import BaseModel
-
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -94,6 +93,42 @@ class FrontendServerTest(TestCase):
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res
+
+    def test_admission_boundary_and_local_rejection_use_http_token(self):
+        from unittest.mock import Mock, patch
+
+        from rtp_llm.frontend.frontend_request_metrics import (
+            CURRENT_FRONTEND_REQUEST,
+            FrontendRequestRegistry,
+            FrontendRequestToken,
+        )
+        from rtp_llm.utils.concurrency_controller import ConcurrencyException
+
+        async def check(rejected):
+            registry = FrontendRequestRegistry(0, 0, reporter=Mock())
+            token = FrontendRequestToken(registry, "inference")
+            marker = CURRENT_FRONTEND_REQUEST.set(token)
+            try:
+                with patch.object(
+                    self.frontend_server._global_controller,
+                    "increment",
+                    wraps=self.frontend_server._global_controller.increment,
+                    side_effect=ConcurrencyException("full") if rejected else None,
+                ):
+                    await self.frontend_server.inference(
+                        {"prompt": "hello"}, FakeRawRequest()
+                    )
+                self.assertEqual(
+                    token.outcome, "reject_concurrency" if rejected else "admitted"
+                )
+                self.assertFalse(token.closed)
+            finally:
+                token.close_once()
+                CURRENT_FRONTEND_REQUEST.reset(marker)
+            self.assertEqual(sum(registry.snapshot().values()), 0)
+
+        for rejected in (False, True):
+            asyncio.run(check(rejected))
 
     def test_simple(self):
         loop = asyncio.new_event_loop()

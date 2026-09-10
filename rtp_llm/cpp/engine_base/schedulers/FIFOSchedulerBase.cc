@@ -128,12 +128,13 @@ FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     return {std::move(enqueue_successes), streams};
 }
 
-size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
+size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>&     streams,
+                                                   const SchedulerRoundContext* round) {
     RTP_LLM_PROFILE_FUNCTION();
     size_t moved_count = 0;
     for (auto it = streams.begin(); it != streams.end();) {
         auto state     = (*it)->getStatus();
-        auto new_state = (*it)->moveToNext();
+        auto new_state = (*it)->moveToNext(round);
         if (new_state != state) {
             if (state == StreamState::LOADING_CACHE && new_state == StreamState::WAITING) {
                 (*it)->clearCanRun();

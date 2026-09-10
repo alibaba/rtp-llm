@@ -24,6 +24,8 @@ class FakeController:
 class StreamingFrontendServer:
     def __init__(self, chunk_delay=0.5):
         self._global_controller = FakeController()
+        self.rank_id = 0
+        self.server_id = 0
         self.is_embedding = False
         self.chunk_delay = chunk_delay
         self.first_chunk_sent = threading.Event()

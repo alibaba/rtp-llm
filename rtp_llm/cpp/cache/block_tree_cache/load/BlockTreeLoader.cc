@@ -48,7 +48,8 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_keys) {
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
-        return {};
+        BlockTreeMatchResult result;
+        return result;
     }
 
     std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
@@ -207,6 +208,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                     evictor_.suspendCandidate(path[i], group_set_id, source_tier);
                 }
             }
+            result.has_async_cache_dependency |= source_tier == Tier::HOST || source_tier == Tier::DISK || is_joined;
             pending_load_descs.emplace_back(std::move(desc));
             joined_loads.push_back(is_joined);
         }

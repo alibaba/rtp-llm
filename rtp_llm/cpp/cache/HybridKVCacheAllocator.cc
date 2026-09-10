@@ -69,6 +69,7 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
     }
     const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys);
+    prepared.has_async_cache_dependency            = match_result.has_async_cache_dependency;
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -144,6 +145,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(prepared.matched_device_blocks);
     }
 
+    const auto evidence = prepared.has_async_cache_dependency;
     const auto rollback = [&]() -> MallocResult {
         load_attempted = load_attempted || load_context != nullptr;
         if (load_context != nullptr) {
@@ -158,6 +160,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         if (prepared.materialize_status != MallocStatus::NONE) {
             result.status = prepared.materialize_status;
         }
+        result.has_async_cache_dependency = evidence;
         return result;
     };
 
@@ -176,6 +179,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                             load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
+        result.has_async_cache_dependency = evidence;
         return result;
     }
 
@@ -186,6 +190,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
+    result.has_async_cache_dependency = evidence;
     return result;
 }
 

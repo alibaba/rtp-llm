@@ -84,8 +84,10 @@ public:
     bool         done() const override;
     bool         success() const override;
     MallocStatus mallocStatus() const;
+    std::optional<CacheLoadTerminalSnapshot> cacheLoadMetricsSnapshot() const override;
 
 private:
+    void publishTerminalLocked(State state);
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
@@ -113,6 +115,8 @@ private:
     bool                            backend_pending_{false};
     std::atomic<bool>               commit_started_{false};
     bool                            committed_{false};
+
+    CacheLoadTerminalSnapshot metrics_snapshot_;
 
     std::mutex backend_match_mutex_;
 

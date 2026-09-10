@@ -249,7 +249,9 @@ TEST(LoadAsyncContextTest, EmptyStorageMatchStillRunsDeferredAllocationAndCommit
         return current.commit();
     });
 
+    EXPECT_FALSE(context->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
     context->startBackendMatch();
+    EXPECT_TRUE(context->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
     EXPECT_FALSE(context->done());
     backend->completeMatch(0);
     EXPECT_TRUE(context->done());
@@ -296,6 +298,7 @@ TEST(LoadAsyncContextTest, JoinWaitCompletesOnLastJoinedDependency) {
     std::shared_ptr<LoadAsyncContext> context = coordinator->create({first, second}, {true, true}, 1);
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(coordinator->registerContext(context));
+    EXPECT_TRUE(context->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
     context->startJoinWait(1);
     ASSERT_TRUE(context->commit());
 
@@ -340,12 +343,18 @@ TEST(LoadAsyncContextTest, SettlementBarrierDefersTerminalNotificationUntilSettl
     EXPECT_TRUE(context->aggregateSuccess());
     EXPECT_FALSE(context->done());
     EXPECT_EQ(callback_count, 0u);
+    EXPECT_FALSE(context->cacheLoadMetricsSnapshot()->terminal_time_us);
 
     EXPECT_TRUE(context->settle(true));
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     EXPECT_EQ(callback_count, 1u);
-    EXPECT_FALSE(context->settle(true));
+    const auto snapshot = context->cacheLoadMetricsSnapshot();
+    EXPECT_TRUE(snapshot->success);
+    ASSERT_TRUE(snapshot->terminal_time_us);
+    EXPECT_FALSE(context->settle(false));
+    EXPECT_FALSE(context->onTaskFail());
+    EXPECT_EQ(context->cacheLoadMetricsSnapshot()->terminal_time_us, snapshot->terminal_time_us);
     EXPECT_EQ(ready_count, 1u);
     coordinator->shutdown();
 }
@@ -400,6 +409,10 @@ TEST(LoadAsyncContextTest, BackendMatchFailureAbortsWithoutRunningAllocatorCallb
 
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    const auto snapshot = context->cacheLoadMetricsSnapshot();
+    EXPECT_TRUE(snapshot->has_async_cache_dependency);
+    EXPECT_TRUE(snapshot->terminal_time_us);
+    EXPECT_FALSE(snapshot->success);
     EXPECT_EQ(context->mallocStatus(), MallocStatus::INTERNAL_ERROR);
     EXPECT_EQ(callbacks, 0u);
     EXPECT_EQ(commits, 0u);
@@ -424,6 +437,7 @@ TEST(LoadAsyncContextTest, AllocatorCallbackPreservesRetryableCapacityStatus) {
 
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->cacheLoadMetricsSnapshot()->has_async_cache_dependency);
     EXPECT_EQ(context->mallocStatus(), MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
     EXPECT_EQ(commits, 0u);
     EXPECT_EQ(aborts, 1u);

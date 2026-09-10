@@ -232,8 +232,21 @@ class TraceTelemetryLifecycleTest(TestCase):
             bg_app, "_init_trace_telemetry"
         ) as init_trace, patch.object(
             bg_app, "_shutdown_trace_telemetry"
-        ) as shutdown_trace:
+        ) as shutdown_trace, patch.object(
+            bg_app, "get_frontend_request_registry"
+        ) as get_registry:
             app.start()
+            registry = get_registry.return_value
+            registry.start.assert_called_once_with()
+            self.assertIs(
+                app._grpc_server.start_on_loop.call_args.kwargs[
+                    "frontend_request_registry"
+                ],
+                registry,
+            )
+            app._stop_request_metrics()
+            app._stop_request_metrics()
+            registry.stop.assert_called_once_with()
 
         init_trace.assert_called_once_with()
         shutdown_trace.assert_called_once_with()

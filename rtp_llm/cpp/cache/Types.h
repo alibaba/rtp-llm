@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/CacheLoadMetrics.h"
 
 #include <cstddef>
 #include <memory>
@@ -122,6 +123,7 @@ struct MallocResult {
     int64_t load_prepare_latency_us    = 0;
     int64_t block_aligned_input_length = 0;
     bool    load_attempted             = false;
+    bool    has_async_cache_dependency = false;
 };
 
 struct FreeInfo {

@@ -20,6 +20,7 @@ class BlockTransferDispatcher;
 class BlockTreeTaskPool;
 
 struct BlockTreeMatchResult {
+    bool                                                has_async_cache_dependency = false;
     size_t                                              matched_device_blocks{0};
     std::vector<MultiNodeResource>                      matched_device_resources;
     std::shared_ptr<LoadAsyncContext>                   async_context;

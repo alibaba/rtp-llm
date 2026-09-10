@@ -41,7 +41,8 @@ std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
                                                                    Tier::HOST,
                                                                    Tier::DEVICE,
                                                                    BlockIndicesType{1}}};
-    auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
+    auto context =
+        std::make_shared<LoadAsyncContext>(std::move(descriptors), std::vector<bool>{false}, 1, 1000, coordinator);
     if (!coordinator->registerContext(context)) {
         throw std::runtime_error("failed to register controlled allocator context");
     }
@@ -201,7 +202,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/false);
 
+    scheduler->activateCacheScheduleMetrics(stream);
+    NormalGenerateStream copy(*stream);
+    EXPECT_FALSE(copy.cacheScheduleMetricsWithoutLock().active());
+    copy.setIsFakeStream(true);
+    copy.activateCacheScheduleMetrics(1);
+    EXPECT_FALSE(copy.cacheScheduleMetricsWithoutLock().active());
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    stream->resetBeginTime(currentTimeUs());
     auto result = scheduler->schedule();
 
     ASSERT_TRUE(result.ok());
@@ -210,6 +218,10 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
     EXPECT_EQ(scheduler->runningStreamsSize(), 1);
+    const auto sample = stream->cacheScheduleMetricsWithoutLock().takeReport();
+    ASSERT_TRUE(sample);
+    EXPECT_FALSE(sample->has_async_cache_dependency);
+    EXPECT_EQ(sample->schedule_rounds, 1);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithAllocatorReadiness_EntersLoadingCache) {
@@ -234,6 +246,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_Mo
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
     auto context   = makeControlledAllocatorContext();
+    scheduler->activateCacheScheduleMetrics(stream);
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
@@ -252,6 +265,11 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_Mo
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
     EXPECT_EQ(scheduler->runningStreamsSize(), 1);
     EXPECT_FALSE(stream->hasError());
+    const auto sample = stream->cacheScheduleMetricsWithoutLock().takeReport();
+    ASSERT_TRUE(sample);
+    EXPECT_TRUE(sample->has_async_cache_dependency);
+    EXPECT_EQ(sample->schedule_rounds, 2);
+    EXPECT_LE(sample->ready_wait_us, sample->loading_latency_us);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorFailure_Evicted) {
@@ -604,6 +622,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedGroupFinishesLoadingInOneRound) 
     auto context        = makeControlledAllocatorContext();
     ASSERT_TRUE(context->completeTransfers(1, true));
 
+    scheduler->activateCacheScheduleMetrics(direct_stream);
+    scheduler->activateCacheScheduleMetrics(loading_stream);
     ASSERT_EQ(scheduler->enqueueGroup({direct_stream, loading_stream}).first, std::vector<bool>({true, true}));
     installReadinessAllocator([context, loading_stream](const MallocInfo& info) {
         return info.request_id == loading_stream->streamId() ? context : nullptr;
@@ -622,6 +642,12 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPreparedGroupFinishesLoadingInOneRound) 
     EXPECT_EQ(waiting_stream->getStatus(), StreamState::WAITING);
     EXPECT_TRUE(scheduler->loading_cache_group_queue_.empty());
     EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+
+    EXPECT_EQ(direct_stream->cacheScheduleMetricsWithoutLock().takeReport()->schedule_rounds, 1);
+    const auto sample = loading_stream->cacheScheduleMetricsWithoutLock().takeReport();
+    ASSERT_TRUE(sample);
+    EXPECT_TRUE(sample->has_async_cache_dependency);
+    EXPECT_EQ(sample->schedule_rounds, 2);
 
     direct_stream->reportEvent(StreamEvents::GenerateDone);
     loading_stream->reportEvent(StreamEvents::GenerateDone);

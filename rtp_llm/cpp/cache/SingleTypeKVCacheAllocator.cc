@@ -84,6 +84,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     size_t                            total_logical_blocks  = 0;
     std::shared_ptr<LoadAsyncContext> load_context;
     bool                              load_attempted     = false;
+    bool                              evidence{};
     MallocStatus                      materialize_status = MallocStatus::NONE;
     auto                              rollback           = [&]() -> MallocResult {
         if (load_context != nullptr) {
@@ -98,6 +99,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         result.match_cost_time_us = match_cost_time_us;
         result.match_end_time_us  = match_end_time_us;
         result.load_attempted     = load_attempted;
+        result.has_async_cache_dependency = evidence;
         return result;
     };
 
@@ -110,6 +112,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         BlockTreeMatchResult match_result        = block_tree_cache_->match(match_keys);
         match_end_time_us                        = currentTimeUs();
         match_cost_time_us                       = match_end_time_us - match_begin_time_us;
+        evidence                                 = match_result.has_async_cache_dependency;
         load_attempted                           = match_result.async_context != nullptr;
         load_context = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
         match_result.async_context.reset();
@@ -158,6 +161,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             true, static_cast<int>(matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
+        result.has_async_cache_dependency = evidence;
         return result;
     }
 
@@ -168,6 +172,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     MallocResult result{true, reuse_len, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
+    result.has_async_cache_dependency = evidence;
     return result;
 }
 

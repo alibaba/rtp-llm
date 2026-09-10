@@ -65,6 +65,12 @@ from rtp_llm.dash_sc.inference.servicer import (
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.server import DashScFrontendMetricsInterceptor
+from rtp_llm.frontend.frontend_request_metrics import (
+    CURRENT_FRONTEND_REQUEST,
+    FrontendRequestRegistry,
+    FrontendRequestToken,
+)
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
@@ -1471,6 +1477,12 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_deepseek_v4_token1_forces_empty_think_phase2_prompt(self) -> None:
+        token = FrontendRequestToken(
+            FrontendRequestRegistry(2, 3, reporter=MagicMock()),
+            "inference",
+            protocol="grpc",
+        )
+        observed_tokens = []
         req = self._minimal_request()
         req.parameters["payload"].string_param = json.dumps(
             {
@@ -1504,6 +1516,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         class _RoutingVisitor(_MultiStreamVisitor):
             async def enqueue(self, generate_input):
+                observed_tokens.append(CURRENT_FRONTEND_REQUEST.get())
                 if self.enqueue_called == 0:
                     generate_input.generate_config.role_addrs = [
                         RoleAddr(
@@ -1528,24 +1541,30 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         env_cfg = _GenerateEnvCfg()
-        chunks = await _drain(
-            iter_real_model_stream_infer(
-                req,
-                [7, 8, 128821],
-                SamplingParams(
-                    response_format=json.dumps({"type": "json_object"}),
-                ),
-                DashScRequestControls(enable_thinking=True),
-                visitor,
-                rtp_llm_request_id=100,
-                echo_prefix_ids=[128821, 198],
-                tokenizer=tok,
-                generate_env_config=env_cfg,
-                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
-                phase2_request_id_factory=lambda: 200,
-                mm_inputs=mm_inputs,
+        binding = CURRENT_FRONTEND_REQUEST.set(token)
+        try:
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [7, 8, 128821],
+                    SamplingParams(
+                        response_format=json.dumps({"type": "json_object"}),
+                    ),
+                    DashScRequestControls(enable_thinking=True),
+                    visitor,
+                    rtp_llm_request_id=100,
+                    echo_prefix_ids=[128821, 198],
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                    phase2_request_id_factory=lambda: 200,
+                    mm_inputs=mm_inputs,
+                )
             )
-        )
+        finally:
+            CURRENT_FRONTEND_REQUEST.reset(binding)
+            token.close_once()
+        self.assertEqual(observed_tokens, [token, token])
 
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertEqual(visitor.generate_inputs[0].request_id, 100)
@@ -2654,6 +2673,61 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertIn(str(error), message)
 
+    async def test_frontend_metrics_grpc_wire_without_http_or_shutdown_manager(self):
+        import socket
+        from types import SimpleNamespace
+
+        import grpc
+
+        from rtp_llm.dash_sc.app import DashScShutdownManager
+        from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
+        from rtp_llm.dash_sc.server import DashScGrpcServer
+
+        for draining in (False, True):
+            reporter = MagicMock()
+            registry = FrontendRequestRegistry(2, 3, reporter=reporter)
+            manager = DashScShutdownManager() if draining else None
+            if manager is not None:
+                manager.start_draining("test")
+            visitor = self._terminal_visitor()
+            owner = DashScGrpcServer(SimpleNamespace(get_server_config=lambda: {}))
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            server = await owner.start(
+                port,
+                servicer=DashScInferenceServicer(backend_visitor=visitor),
+                shutdown_manager=manager,
+                frontend_request_registry=registry,
+            )
+            try:
+                async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+                    call = predict_v2_pb2_grpc.GRPCInferenceServiceStub(
+                        channel
+                    ).ModelStreamInfer(_areq_iter([self._valid_infer_request()]))
+                    if draining:
+                        with self.assertRaises(grpc.aio.AioRpcError) as caught:
+                            await _drain(call)
+                        self.assertEqual(
+                            caught.exception.code(), grpc.StatusCode.UNAVAILABLE
+                        )
+                    else:
+                        self.assertEqual(len(await _drain(call)), 1)
+            finally:
+                await server.stop(0)
+            self.assertEqual(visitor.enqueue_called, 0 if draining else 1)
+            self.assertEqual(sum(registry.snapshot().values()), 0)
+            self.assertEqual(
+                [c.args[2]["event"] for c in reporter.report.call_args_list],
+                ["received", "reject_unavailable" if draining else "admitted"],
+            )
+            self.assertTrue(
+                all(
+                    c.args[2]["protocol"] == "grpc"
+                    for c in reporter.report.call_args_list
+                )
+            )
+
     async def test_model_stream_infer_passes_multimodal_payload_to_backend(
         self,
     ) -> None:
@@ -2845,7 +2919,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             ["emit_access_log", "report_frontend_rpc_done"],
         )
 
-    def _capture_kmonitor_calls(self):
+    def _capture_kmonitor_calls(self, servicer=None, admission=None):
         # Patch the kmonitor the grpc_metrics leaf functions report through;
         # the servicer calls them by imported name, so the module-global
         # kmonitor reference is the single choke point.
@@ -2856,6 +2930,25 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         mock_kmon.report.side_effect = lambda m, v=1, tags=None: calls.append(
             (m, v, dict(tags or {}))
         )
+        if servicer is not None:
+            registry = FrontendRequestRegistry(2, 3, reporter=mock_kmon)
+            servicer.ModelStreamInfer = DashScFrontendMetricsInterceptor(registry).wrap(
+                servicer.ModelStreamInfer
+            )
+
+            def check_admission():
+                self.assertEqual(
+                    [
+                        c[2]["event"]
+                        for c in calls
+                        if c[0] == AccMetrics.FRONTEND_ADMISSION_QPS
+                    ],
+                    ["received", admission],
+                )
+                self.assertEqual(sum(registry.snapshot().values()), 0)
+                self.assertIsNone(CURRENT_FRONTEND_REQUEST.get())
+
+            self.addCleanup(check_admission)
         return calls
 
     @staticmethod
@@ -2881,7 +2974,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         req.parameters["ds_header_attributes"].string_param = json.dumps(
             {"x-dashscope-inner-qos-level": 7}
         )
-        calls = self._capture_kmonitor_calls()
+        calls = self._capture_kmonitor_calls(servicer, "admitted")
 
         await _drain(servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext()))
 
@@ -2908,7 +3001,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         bad = predict_v2_pb2.ModelInferRequest()
         bad.id = "x"
         bad.model_name = "m"
-        calls = self._capture_kmonitor_calls()
+        calls = self._capture_kmonitor_calls(servicer, "reject_invalid")
 
         await _drain(servicer.ModelStreamInfer(_areq_iter([bad]), _FakeGrpcContext()))
 
@@ -2924,7 +3017,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         servicer = DashScInferenceServicer(
             backend_visitor=_FakeVisitor(_FakeAsyncStream([]))
         )
-        calls = self._capture_kmonitor_calls()
+        calls = self._capture_kmonitor_calls(servicer, "reject_other")
 
         await _drain(servicer.ModelStreamInfer(_areq_iter([]), _FakeGrpcContext()))
 
@@ -3043,6 +3136,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         servicer = DashScInferenceServicer(backend_visitor=visitor)
+        self._capture_kmonitor_calls(servicer, "reject_other")
         req = self._valid_infer_request()
 
         with patch(
@@ -3801,6 +3895,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             _LateCancelStream([GenerateOutputs(generate_outputs=[out])])
         )
         servicer = DashScInferenceServicer(backend_visitor=visitor)
+        self._capture_kmonitor_calls(servicer, "admitted")
 
         with patch.object(
             logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"

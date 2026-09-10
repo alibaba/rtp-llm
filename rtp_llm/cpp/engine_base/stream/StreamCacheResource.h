@@ -21,6 +21,7 @@ struct MallocResult;
 
 class StreamCacheResource {
 public:
+    void captureCacheLoadEvidenceWithoutLock();
     StreamCacheResource(GenerateStream*        stream,
                         const ResourceContext& resource_context,
                         bool                   need_release_resource = true,
