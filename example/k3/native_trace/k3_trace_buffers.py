@@ -3,6 +3,7 @@
 import torch
 
 ABI_VERSION = 2
+SHARED_ABI_VERSION = 1
 
 
 class K3TraceBuffers:
@@ -50,3 +51,39 @@ class K3TraceBuffers:
                 mask = valid.reshape(valid.shape + (1,) * (value.ndim - valid.ndim))
                 result[name] = torch.where(mask, value, 0)
         return result
+
+
+class K3SharedTraceBuffers:
+    def __init__(self, capacity, width, device):
+        if capacity <= 0 or width <= 0 or width % 128:
+            raise ValueError("Positive capacity and width divisible by 128 required")
+        elements = capacity * 2 * width
+        self.buffer = torch.empty(
+            capacity * (12 * width + 4) + 4, dtype=torch.uint8, device=device
+        )
+        offset = elements * 4
+        self.tensors = {
+            "fc1_accumulator": self.buffer[:offset]
+            .view(torch.float32)
+            .view(capacity, 2, width),
+            "fc1_rounded": self.buffer[offset : offset + elements * 2]
+            .view(torch.bfloat16)
+            .view(capacity, 2, width),
+        }
+        offset += elements * 2
+        self.valid = self.buffer[offset : offset + capacity * 4].view(torch.int32)
+        self.overflow = self.buffer[offset + capacity * 4 :].view(torch.int32)
+
+    def reset(self):
+        self.valid.zero_()
+        self.overflow.zero_()
+
+    def snapshot(self):
+        valid = self.valid != 0
+        return {
+            "valid": valid.clone(),
+            **{
+                name: torch.where(valid[:, None, None], value, 0)
+                for name, value in self.tensors.items()
+            },
+        }

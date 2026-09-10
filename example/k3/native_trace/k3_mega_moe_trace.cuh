@@ -43,6 +43,30 @@ struct K3MegaMoETrace {
     }
 };
 
+// Independent ABI 1 for fused BF16 shared experts. Rows are rank-local tokens.
+// The full activation consumed by FC2 is retained in shared_l2_acts by the
+// original kernel; this side buffer preserves FC1 before its registers expire.
+struct K3SharedMoETrace {
+    float*    fc1;
+    uint16_t* rounded;
+    int32_t*  valid;
+    int32_t*  overflow;
+
+    K3_TRACE_HD static constexpr size_t bytes(size_t tokens, size_t width) {
+        return tokens * (12 * width + sizeof(int32_t)) + sizeof(int32_t);
+    }
+
+    K3_TRACE_HD K3SharedMoETrace(void* raw, size_t tokens, size_t width) {
+        auto p = reinterpret_cast<uint8_t*>(raw);
+        fc1    = reinterpret_cast<float*>(p);
+        p += tokens * 2 * width * sizeof(float);
+        rounded = reinterpret_cast<uint16_t*>(p);
+        p += tokens * 2 * width * sizeof(uint16_t);
+        valid    = reinterpret_cast<int32_t*>(p);
+        overflow = valid + tokens;
+    }
+};
+
 }  // namespace deep_gemm
 
 #undef K3_TRACE_HD

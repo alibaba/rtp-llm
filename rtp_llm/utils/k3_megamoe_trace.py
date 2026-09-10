@@ -29,14 +29,19 @@ _AUDITED_HEADERS = {
         "90fdb8f27898b1ce1bead6bc4ae3e54ce5edc9d4f6ee47e3169dbbf2d859ff53",
         "169600e438a24d09665f278beb64c68ee390482c787a9030bf22b3769c99cec1",
     ),  # vLLM with the ABI 2 observation-only patch
+    (
+        "f77e3d70460314db39c47a35d5b95289b92e3eb769351859b488ae3a06e95cfe",
+        "0d76d83c7776e100a8b64ad0f06615d3acd1bc2efeeeed8870c0146f4afb398f",
+    ),  # RTP routed ABI 2 plus shared observer ABI 1; combine layout unchanged
 }
 
 
 def prepare_expert_output_view(buffer, deep_gemm):
     """Validate once at buffer creation; retain a view for eager/graph recording.
 
-    K3 runs routed experts here and its shared branch separately. A fused shared
-    combine slot, an unknown layout, or debug zeroing must fail explicitly.
+    The fused BF16 shared branch has a separate rank-local output and does not
+    add a routed combine slot. A shared combine slot from another layout, an
+    unknown layout, or debug zeroing must fail explicitly.
     """
     if int(os.environ.get("DG_COMM_KERNEL_DEBUG", "0")):
         raise RuntimeError("DG_COMM_KERNEL_DEBUG erases the FC2 trace buffer")
@@ -120,3 +125,15 @@ def native_trace_tensors(trace):
                 mask = valid.reshape(valid.shape + (1,) * (value.ndim - valid.ndim))
                 value = torch.where(mask, value, 0)
             yield f"source_rank.{rank}.{name}", value
+
+
+def prepare_shared_trace_factory(deep_gemm):
+    """Require the optional fused shared observer independently of routed ABI."""
+    native = importlib.import_module(deep_gemm.__name__ + "._C")
+    buffers = importlib.import_module(deep_gemm.__name__ + ".mega.k3_trace")
+    if (
+        getattr(buffers, "SHARED_ABI_VERSION", None) != 1
+        or getattr(native, "k3_shared_trace_abi", lambda: None)() != 1
+    ):
+        raise RuntimeError("K3 mega_moe_se tracing requires shared observer ABI 1")
+    return buffers.K3SharedTraceBuffers

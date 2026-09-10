@@ -215,6 +215,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument(
+        "--shared-expert",
+        action="store_true",
+        help="Observe the RTP fused BF16 shared expert as well",
+    )
     args = parser.parse_args()
     expected = json.loads(args.manifest.read_text())
     transforms = {
@@ -229,6 +234,17 @@ def main():
         if hashlib.sha256(data).hexdigest() != expected["files"][name]:
             raise ValueError(f"Unrecognized source contents: {name}")
         outputs[name] = transform(data.decode()).encode()
+    if args.shared_expert:
+        import patch_deepgemm_shared as shared
+
+        for name, transform in (
+            (KERNEL, shared.patch_kernel),
+            (RUNTIME, shared.patch_runtime),
+            (API, shared.patch_api),
+            (PYTHON, shared.patch_python),
+        ):
+            outputs[name] = transform(outputs[name].decode()).encode()
+        ast.parse(outputs[PYTHON].decode())
     header = Path(__file__).with_name("k3_mega_moe_trace.cuh").read_bytes()
     header_path = "deep_gemm/include/deep_gemm/layout/k3_mega_moe_trace.cuh"
     if (args.source / header_path).exists():

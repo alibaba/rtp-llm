@@ -25,7 +25,15 @@ from rtp_llm.models_py.modules.kimi_k3.mega_se_buf import (
 )
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.ops import ParallelismConfig
+from rtp_llm.utils.k3_megamoe_trace import (
+    expert_output_tensors,
+    native_trace_tensors,
+    prepare_expert_output_view,
+    prepare_native_trace_factory,
+    prepare_shared_trace_factory,
+)
 from rtp_llm.utils.k3_model_trace import record_module
+from rtp_llm.utils.k3_tensor_trace import enabled as trace_enabled
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
@@ -248,6 +256,12 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             shared_intermediate_hidden=shared_intermediate,
             activation="situ",
         )
+        if trace_enabled():
+            self._k3_expert_output_view = prepare_expert_output_view(
+                self._mega_buf, deep_gemm
+            )
+            self._k3_native_trace_factory = prepare_native_trace_factory(deep_gemm)
+            self._k3_shared_trace_factory = prepare_shared_trace_factory(deep_gemm)
         capacity = int(self._mega_buf.num_max_tokens_per_rank)
         (
             self._mega_y,
@@ -291,6 +305,8 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         shared_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        *,
+        trace_token_capacity: Optional[int] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         import deep_gemm
 
@@ -307,6 +323,16 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
                 f"got={tuple(shared_input.shape)} expected="
                 f"({token_count}, {self._mega_shared_hidden})"
             )
+        record_module(
+            self,
+            "dispatch.input",
+            {
+                "hidden_states": routed_input,
+                "expert_ids": expert_ids,
+                "routing_weights": routing_weights,
+                "shared_input": shared_input,
+            },
+        )
         self._mega_input_packer.pack(
             routed_input,
             routing_weights,
@@ -316,6 +342,39 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         )
         self._mega_shared_x[:token_count].copy_(shared_input)
         routed_output = self._mega_y[:token_count]
+        native_trace = shared_trace = None
+        if trace_enabled():
+            record_module(
+                self,
+                "dispatch.packed",
+                {
+                    "x": self._mega_buf.x[:token_count],
+                    "x_sf": self._mega_buf.x_sf[:token_count],
+                    "expert_ids": self._mega_buf.topk_idx[:token_count],
+                    "routing_weights": self._mega_buf.topk_weights[:token_count],
+                },
+            )
+            native_trace = self._k3_native_trace_factory(
+                self._mega_group.size(),
+                max(
+                    1,
+                    (
+                        token_count
+                        if trace_token_capacity is None
+                        else trace_token_capacity
+                    ),
+                ),
+                self._mega_buf.num_topk,
+                self._mega_buf.intermediate_hidden,
+                routed_output.device,
+            )
+            shared_trace = self._k3_shared_trace_factory(
+                max(1, token_count),
+                self._mega_shared_intermediate,
+                routed_output.device,
+            )
+            native_trace.reset()
+            shared_trace.reset()
         deep_gemm.fp8_fp4_mega_moe(
             routed_output,
             (self._mega_l1_w, self._mega_l1_sf),
@@ -333,7 +392,42 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
                 None if self.linear_beta is None else float(self.linear_beta)
             ),
             fast_math=True,
+            **(
+                {
+                    "k3_trace": native_trace.buffer,
+                    "k3_shared_trace": shared_trace.buffer,
+                }
+                if native_trace is not None
+                else {}
+            ),
         )
+        if native_trace is not None:
+            record_module(
+                self, "experts.native.overflow", native_trace.overflow, assert_zero=True
+            )
+            for name, value in native_trace_tensors(native_trace):
+                record_module(self, f"experts.native.{name}", value)
+            record_module(
+                self,
+                "experts.fc2",
+                expert_output_tensors(
+                    self._k3_expert_output_view,
+                    self._mega_buf.topk_idx[:token_count],
+                ),
+            )
+            record_module(
+                self, "shared.native.overflow", shared_trace.overflow, assert_zero=True
+            )
+            record_module(
+                self,
+                "shared.native.missing_rows",
+                shared_trace.valid[:token_count] != 1,
+                assert_zero=True,
+            )
+            record_module(self, "shared.native", shared_trace.snapshot())
+            record_module(
+                self, "shared.activation", self._mega_buf.shared_l2_acts[:token_count]
+            )
         return routed_output, self._mega_shared_y[:token_count]
 
     def _mega_expert_sum_with_shared(
@@ -362,6 +456,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             shared_input.narrow(0, begin, size),
             expert_ids.narrow(0, begin, size),
             routing_weights.narrow(0, begin, size),
+            trace_token_capacity=tokens_per_tp_rank,
         )
         return (
             self._tp_gather(local_routed, token_count, tokens_per_tp_rank),
