@@ -157,12 +157,11 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         }
     }
 
-    return insertNodeImpl(cache_keys, resources, /*enable_hard_stop=*/true, collect_path, is_resident);
+    return insertNodeImpl(cache_keys, resources, collect_path, is_resident);
 }
 
 BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&                              cache_keys,
                                                 const std::vector<std::vector<GroupSetResource>>& resources,
-                                                bool                                              enable_hard_stop,
                                                 bool                                              collect_path,
                                                 bool                                              is_resident) {
     BlockTreeInsertResult result;
@@ -193,47 +192,45 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 RTP_LLM_LOG_WARNING("resident insert stopped at busy prefix: key_index=%zu key=%ld", i, key);
                 break;
             }
-            if (enable_hard_stop) {
-                bool full_path_ready = true;
-                for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
-                    if (group_sets_[group_set_id]->groupType() != CacheGroupType::FULL) {
-                        continue;
-                    }
-                    const GroupSetResource& incoming = resources[i][group_set_id];
-                    if (!incoming.hasTier(Tier::DEVICE)) {
-                        continue;
-                    }
-                    const GroupSetResource& existing = child->group_set_resources[group_set_id];
-                    const bool can_reuse = existing.isValidSteadyState() && existing.hasCompleteDeviceValue();
-                    const bool              can_adopt = existing.is_removable();
-                    if (!can_reuse && !can_adopt) {
-                        RTP_LLM_LOG_WARNING("event=block_tree_insert_hard_stop key_index=%zu key=%ld "
-                                            "group_set_id=%zu existing_tier=%s transfer_state=%d serving_tiers=%zu",
-                                            i,
-                                            key,
-                                            group_set_id,
-                                            tierName(existing.getTopTier()),
-                                            static_cast<int>(existing.transfer_state),
-                                            existing.servingTierCount());
-                        full_path_ready = false;
-                        break;
-                    }
+            bool full_path_ready = true;
+            for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+                if (group_sets_[group_set_id]->groupType() != CacheGroupType::FULL) {
+                    continue;
                 }
-                if (!full_path_ready) {
-                    if (collect_path) {
-                        current = child;
-                        result.path.push_back(current);
-                        for (size_t path_index = i + 1; path_index < cache_keys.size(); ++path_index) {
-                            auto path_it = current->children.find(cache_keys[path_index]);
-                            if (path_it == current->children.end()) {
-                                break;
-                            }
-                            current = path_it->second;
-                            result.path.push_back(current);
-                        }
-                    }
+                const GroupSetResource& incoming = resources[i][group_set_id];
+                if (!incoming.hasTier(Tier::DEVICE)) {
+                    continue;
+                }
+                const GroupSetResource& existing  = child->group_set_resources[group_set_id];
+                const bool              can_reuse = existing.isValidSteadyState() && existing.hasCompleteDeviceValue();
+                const bool              can_adopt = existing.is_removable();
+                if (!can_reuse && !can_adopt) {
+                    RTP_LLM_LOG_WARNING("event=block_tree_insert_hard_stop key_index=%zu key=%ld "
+                                        "group_set_id=%zu existing_tier=%s transfer_state=%d serving_tiers=%zu",
+                                        i,
+                                        key,
+                                        group_set_id,
+                                        tierName(existing.getTopTier()),
+                                        static_cast<int>(existing.transfer_state),
+                                        existing.servingTierCount());
+                    full_path_ready = false;
                     break;
                 }
+            }
+            if (!full_path_ready) {
+                if (collect_path) {
+                    current = child;
+                    result.path.push_back(current);
+                    for (size_t path_index = i + 1; path_index < cache_keys.size(); ++path_index) {
+                        auto path_it = current->children.find(cache_keys[path_index]);
+                        if (path_it == current->children.end()) {
+                            break;
+                        }
+                        current = path_it->second;
+                        result.path.push_back(current);
+                    }
+                }
+                break;
             }
 
             current                                = child;
