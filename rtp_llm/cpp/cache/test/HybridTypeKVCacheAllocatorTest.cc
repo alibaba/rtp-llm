@@ -1191,7 +1191,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     }
     seed_resource->cacheResource(0).setBlockDependencies(
         {BlockDependency{true, 9999, 41}, BlockDependency{false, 0, 7}});
-    allocator->insertIntoCache(InsertInfo{seed_resource, nullptr, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(InsertInfo{seed_resource, nullptr, /*is_resident=*/false}, resident_prefix_length);
+    }
     for (size_t group_id = 0; group_id < cache_groups.size(); ++group_id) {
         cache_groups[group_id]->unreference(seeded_blocks[group_id]);
     }
@@ -1623,7 +1626,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     ASSERT_EQ(batch_res->blocksNum(0, linear_group_id), 3);
 
     InsertInfo insert_info{batch_res, token_ids, /*is_resident=*/false};
-    allocator->insertIntoCache(insert_info);
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(insert_info, resident_prefix_length);
+    }
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(match.matched_device_blocks, 3u);
@@ -1651,7 +1657,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLinearHoleAndPubl
     batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/0).assign({blocks[0], NULL_BLOCK_IDX, blocks[1]});
     batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/1).assign({blocks[2], blocks[3], blocks[4]});
 
-    EXPECT_NO_THROW(allocator->insertIntoCache(InsertInfo{batch_res, nullptr, /*is_resident=*/false}));
+    {
+        size_t resident_prefix_length = 0;
+        EXPECT_NO_THROW(
+            allocator->insertIntoCache(InsertInfo{batch_res, nullptr, /*is_resident=*/false}, resident_prefix_length));
+    }
     const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101, 102});
     ASSERT_EQ(path.size(), 3u);
     EXPECT_EQ(path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{blocks[0]}));
@@ -1685,7 +1695,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheStopsBeforeFullHole) {
     batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/0).assign({blocks[0], blocks[1], blocks[2]});
     batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/1).assign({blocks[3], NULL_BLOCK_IDX, blocks[4]});
 
-    allocator->insertIntoCache(InsertInfo{batch_res, nullptr, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(InsertInfo{batch_res, nullptr, /*is_resident=*/false}, resident_prefix_length);
+    }
     const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101, 102});
     ASSERT_EQ(path.size(), 1u);
     EXPECT_EQ(path.front()->group_set_resources[0].device_blocks, (BlockIndicesType{blocks[0]}));
@@ -1710,7 +1723,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     seed_malloc.reuse_cache         = false;
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
-    allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
     auto seed_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(seed_match.matched_device_blocks, 3u);
     EXPECT_EQ(allocator->blockTreeCacheOwner()

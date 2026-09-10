@@ -586,7 +586,26 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ResidentInsertProtectsAllReusableGroups) 
     MallocInfo                              malloc_info{seed, tokens};
     malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(allocator->malloc(malloc_info).success);
-    allocator->insertIntoCache(InsertInfo{seed, tokens, /*is_resident=*/true});
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(InsertInfo{seed, tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
+    const std::vector<TreeNode*> seeded_path = allocator->blockTreeCacheOwner()->tree()->findNode({100, 200});
+    ASSERT_EQ(seeded_path.size(), 2u);
+    seeded_path.back()->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(InsertInfo{seed, tokens, /*is_resident=*/true}, resident_prefix_length);
+        EXPECT_EQ(resident_prefix_length, 1u);
+    }
+    EXPECT_TRUE(seeded_path.front()->is_resident);
+    EXPECT_FALSE(seeded_path.back()->is_resident);
+    seeded_path.back()->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(InsertInfo{seed, tokens, /*is_resident=*/true}, resident_prefix_length);
+        EXPECT_EQ(resident_prefix_length, 2u);
+    }
     allocator->free(FreeInfo{seed, tokens});
 
     const BlockTreeCachePtr&     cache = allocator->blockTreeCacheOwner();
@@ -629,7 +648,11 @@ static void runStorageRoundTrip(const CacheConfig&                      config,
     writer_malloc.reuse_cache                  = true;
     writer_malloc.enable_remove_skipped_blocks = false;
     ASSERT_TRUE(writer->malloc(writer_malloc).success);
-    writer->insertIntoCache(InsertInfo{writer_resource, writer_tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        writer->insertIntoCache(InsertInfo{writer_resource, writer_tokens, /*is_resident=*/false},
+                                resident_prefix_length);
+    }
     EXPECT_EQ(writer_backend->writeGroupIds(), expected_write_groups);
 
     auto reader_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
@@ -1715,7 +1738,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
             host_sources.emplace_back(group_set, source_block);
         }
     }
-    cache->insert(cached_keys, slots, Tier::HOST, /*is_resident=*/false);
+    cache->insert(cached_keys, slots, Tier::HOST);
 
     const auto counters_before = snapshotPoolCounters(allocator);
     for (const auto& [group_set, source_block] : host_sources) {
@@ -2258,7 +2281,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
 
     InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};
     allocator->setCPSlotMapper(cp_mapper);
-    allocator->insertIntoCache(insert_info);
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(insert_info, resident_prefix_length);
+    }
 
     FreeInfo seed_free{seed_res, seed_tokens};
     allocator->free(seed_free);
@@ -2309,7 +2335,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
     InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};
-    allocator->insertIntoCache(insert_info);
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(insert_info, resident_prefix_length);
+    }
 
     const std::string target_tag      = "csa_kv";
     const int         target_group_id = config.groupIdForTag(target_tag);
