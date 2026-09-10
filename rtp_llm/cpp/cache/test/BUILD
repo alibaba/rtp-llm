@@ -247,7 +247,6 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
     env = {},
     exec_properties = {'gpu':'A10'},

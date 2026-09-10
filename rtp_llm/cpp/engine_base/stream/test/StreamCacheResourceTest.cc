@@ -77,7 +77,11 @@ protected:
                                         RoleType                role_type) {
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
-        ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+        size_t expected_free_blocks = 0;
+        for (size_t gid = 0; gid < static_cast<size_t>(cache_config.groupNums()); ++gid) {
+            expected_free_blocks += cache_config.blockNumForGroup(gid) - 1;
+        }
+        ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_free_blocks);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;

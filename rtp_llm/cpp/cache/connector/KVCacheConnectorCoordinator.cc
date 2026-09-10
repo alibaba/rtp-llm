@@ -234,9 +234,9 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
 
 std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
 #ifdef USE_REMOTE_KV_CACHE
-    RTP_LLM_CHECK_WITH_INFO(!cache_config_.use_independent_block_pools,
+    RTP_LLM_CHECK_WITH_INFO(cache_config_.groupNums() == 1,
                             "remote connector does not support independent KV cache block pools");
-    const auto block_pool = allocator_->getBlockPool();
+    const auto block_pool = allocator_->soleGroupBlockPool();
     RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "remote connector requires a contiguous KV cache block pool");
     // TODO : get lora info map
     auto remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,

@@ -2,7 +2,6 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -164,7 +163,7 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(cache_config_);
+            auto allocator = std::make_shared<KVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
@@ -228,6 +227,17 @@ private:
         const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
         cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
                                                          static_cast<int>(per_layer_stride_bytes));
+
+        std::vector<uint32_t> group_block_nums(all_group_num, static_cast<uint32_t>(block_num));
+        std::vector<size_t>   group_kv_strides;
+        std::vector<size_t>   group_scale_strides;
+        group_kv_strides.reserve(all_group_num);
+        group_scale_strides.reserve(all_group_num);
+        for (const auto& spec : specs) {
+            group_kv_strides.push_back(spec->block_size_bytes());
+            group_scale_strides.push_back(spec->scale_block_size_bytes());
+        }
+        cache_config_.setGroupBlockLayout(group_block_nums, group_kv_strides, group_scale_strides);
     }
 };
 
