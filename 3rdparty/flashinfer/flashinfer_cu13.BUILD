@@ -130,17 +130,26 @@ single_prefill = ['single_prefill_head_qk_128_head_vo_128_posenc_0_fp16qkred_0_m
 
 single_prefill_256 = ['single_prefill_head_qk_256_head_vo_256_posenc_0_fp16qkred_0_mask_1_dtypeq_bf16_dtypekv_bf16_dtypeout_bf16.cu', 'single_prefill_head_qk_256_head_vo_256_posenc_0_fp16qkred_0_mask_1_dtypeq_bf16_dtypekv_e4m3_dtypeout_bf16.cu', 'single_prefill_head_qk_256_head_vo_256_posenc_0_fp16qkred_0_mask_1_dtypeq_bf16_dtypekv_e5m2_dtypeout_bf16.cu', 'single_prefill_head_qk_256_head_vo_256_posenc_0_fp16qkred_0_mask_1_dtypeq_f16_dtypekv_e4m3_dtypeout_f16.cu', 'single_prefill_head_qk_256_head_vo_256_posenc_0_fp16qkred_0_mask_1_dtypeq_f16_dtypekv_e5m2_dtypeout_f16.cu', 'single_prefill_head_qk_256_head_vo_256_posenc_0_fp16qkred_0_mask_1_dtypeq_f16_dtypekv_f16_dtypeout_f16.cu']
 
-sub_lib('flashinfer_batch_paged_prefill', batch_paged_prefill, cuda_copts() + common_copts)
-sub_lib('flashinfer_batch_paged_prefill_256', batch_paged_prefill_256, cuda_copts() + common_copts)
-sub_lib('flashinfer_batch_paged_decode', batch_paged_decode, cuda_copts() + common_copts)
-sub_lib('flashinfer_batch_paged_decode_256', batch_paged_decode_256, cuda_copts() + common_copts)
-sub_lib('flashinfer_batch_ragged_prefill', batch_ragged_prefill, cuda_copts() + common_copts)
-sub_lib('flashinfer_batch_ragged_prefill_256', batch_ragged_prefill_256, cuda_copts() + common_copts)
-sub_lib('flashinfer_single_decode', single_prefill, cuda_copts() + common_copts)
-sub_lib('flashinfer_single_decode_256', single_prefill_256, cuda_copts() + common_copts)
-sub_lib('flashinfer_single_prefill', single_decode, cuda_copts() + common_copts)
-sub_lib('flashinfer_single_prefill_256', single_decode_256, cuda_copts() + common_copts)
-sub_lib('flashinfer_sm90', [":generated_sm90"], sm90_cuda_copts)
+# Reuse the same shared-library targets for linking and wheel packaging.
+_flashinfer_shared_libs = [
+    sub_lib('flashinfer_single_decode', single_prefill, cuda_copts() + common_copts),
+    sub_lib('flashinfer_single_decode_256', single_prefill_256, cuda_copts() + common_copts),
+    sub_lib('flashinfer_single_prefill', single_decode, cuda_copts() + common_copts),
+    sub_lib('flashinfer_single_prefill_256', single_decode_256, cuda_copts() + common_copts),
+    sub_lib('flashinfer_batch_paged_prefill', batch_paged_prefill, cuda_copts() + common_copts),
+    sub_lib('flashinfer_batch_paged_prefill_256', batch_paged_prefill_256, cuda_copts() + common_copts),
+    sub_lib('flashinfer_batch_paged_decode', batch_paged_decode, cuda_copts() + common_copts),
+    sub_lib('flashinfer_batch_paged_decode_256', batch_paged_decode_256, cuda_copts() + common_copts),
+    sub_lib('flashinfer_batch_ragged_prefill', batch_ragged_prefill, cuda_copts() + common_copts),
+    sub_lib('flashinfer_batch_ragged_prefill_256', batch_ragged_prefill_256, cuda_copts() + common_copts),
+    sub_lib('flashinfer_sm90', [":generated_sm90"], sm90_cuda_copts),
+]
+
+filegroup(
+    name = "flashinfer_shared_libs",
+    srcs = _flashinfer_shared_libs,
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "flashinfer_mla",
@@ -150,19 +159,7 @@ cc_library(
     ] + glob([
         "csrc/*.h",
         "csrc/*.inc",
-    ]) + [
-        "flashinfer_single_decode",
-        "flashinfer_single_decode_256",
-        "flashinfer_single_prefill",
-        "flashinfer_single_prefill_256",
-        "flashinfer_batch_paged_prefill",
-        "flashinfer_batch_paged_prefill_256",
-        "flashinfer_batch_paged_decode",
-        "flashinfer_batch_paged_decode_256",
-        "flashinfer_batch_ragged_prefill",
-        "flashinfer_batch_ragged_prefill_256",
-        "flashinfer_sm90"
-    ],
+    ]) + _flashinfer_shared_libs,
     implementation_deps = [
         ":dispatch",
         ":flashinfer_hdrs",
@@ -199,19 +196,7 @@ cc_library(
     ] + glob([
         "csrc/*.h",
         "csrc/*.inc",
-    ]) + [
-        "flashinfer_single_decode",
-        "flashinfer_single_decode_256",
-        "flashinfer_single_prefill",
-        "flashinfer_single_prefill_256",
-        "flashinfer_batch_paged_prefill",
-        "flashinfer_batch_paged_prefill_256",
-        "flashinfer_batch_paged_decode",
-        "flashinfer_batch_paged_decode_256",
-        "flashinfer_batch_ragged_prefill",
-        "flashinfer_batch_ragged_prefill_256",
-        "flashinfer_sm90"
-    ],
+    ]) + _flashinfer_shared_libs,
     implementation_deps = [
         ":flashinfer_mla",
         ":dispatch",
