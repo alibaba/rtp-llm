@@ -96,9 +96,7 @@ def load_json(path):
 def is_ok(d):
     """Success row predicate (same rule as per_second bucketing below)."""
     err = d.get("error") or ""
-    return d.get("status") == "ok" or (
-        not err and d.get("status") not in ("schedule_error",)
-    )
+    return d.get("status") == "ok" and not err
 
 
 # ---- err_other 细分：具名子桶匹配规则（先具名、后残渣） ----

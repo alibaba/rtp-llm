@@ -15,6 +15,7 @@
   "balance_distribution::length_mixed::single-batch",
   "balance_distribution::length_mixed::single-nonbatch",
   "balance_distribution::length_mixed::window-nonbatch",
+  "balance_distribution::sustained_mix::batch-window",
   "balance_distribution::uniform_serial::batch-window",
   "balance_distribution::uniform_serial::single-batch",
   "balance_distribution::uniform_serial::single-nonbatch",

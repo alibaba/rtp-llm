@@ -159,6 +159,10 @@ class RecordedRequests(ClientRecords):
         stream_timeout_s=60.0,
     ):
         ops, clock = self.ops, self.clock
+        self.update(
+            record,
+            **{key: shape[key] for key in ("input_len", "output_len") if key in shape},
+        )
         end = clock() + timeout_s
         phase = "schedule"
 
@@ -173,13 +177,21 @@ class RecordedRequests(ClientRecords):
             self.update(
                 record, schedule=dict(started_s=clock(), deadline_s=clock() + limit)
             )
-            stub = ops.schedule_pb2_grpc.FlexlbServiceStub(
-                ops._channel(ops.master_target())
-            )
-            call = stub.Schedule.future(
-                ops.build_schedule_request(record["wire_request_id"], **shape),
-                timeout=limit,
-            )
+            master_target = ops.master_target()
+            self.update(record, master_target=master_target)
+            stub = ops.schedule_pb2_grpc.FlexlbServiceStub(ops._channel(master_target))
+            request = ops.build_schedule_request(record["wire_request_id"], **shape)
+            # Read the serialized request shape, including builder defaults.
+            actual_shape = {
+                key: getattr(request, field)
+                for key, field in (
+                    ("input_len", "seq_len"),
+                    ("output_len", "max_new_tokens"),
+                )
+                if hasattr(request, field)
+            }
+            self.update(record, **actual_shape)
+            call = stub.Schedule.future(request, timeout=limit)
             self._activate(record, call)
             response = call.result()
             self.update(record, schedule=dict(ended_s=clock(), status="OK"))

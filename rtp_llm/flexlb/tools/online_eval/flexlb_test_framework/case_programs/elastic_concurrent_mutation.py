@@ -1,4 +1,4 @@
-"""Four concurrent add/remove workers and serial health probes, followed by quiescent discovery validation."""
+"""Four concurrent add/remove workers under bounded concurrent request load, followed by quiescent discovery validation."""
 
 from ..case_config import output
 
@@ -9,6 +9,7 @@ def default(case):
         "crossfire",
         "elastic_crossfire",
         timeout_s=case.value("default.crossfire_timeout_s"),
+        params=case.value("default.crossfire"),
     )
     case.step(
         "health",
@@ -25,6 +26,7 @@ def single_batch(case):
         "crossfire",
         "elastic_crossfire",
         timeout_s=case.value("single_batch.crossfire_timeout_s"),
+        params=case.value("single_batch.crossfire"),
     )
     case.step(
         "protocol",
@@ -50,6 +52,7 @@ def single_nonbatch(case):
         "crossfire",
         "elastic_crossfire",
         timeout_s=case.value("single_nonbatch.crossfire_timeout_s"),
+        params=case.value("single_nonbatch.crossfire"),
     )
     case.step(
         "protocol",
@@ -75,6 +78,7 @@ def window_nonbatch(case):
         "crossfire",
         "elastic_crossfire",
         timeout_s=case.value("window_nonbatch.crossfire_timeout_s"),
+        params=case.value("window_nonbatch.crossfire"),
     )
     case.step(
         "protocol",

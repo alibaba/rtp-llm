@@ -84,12 +84,18 @@ class ConvergenceTest(unittest.TestCase):
         self.assertFalse(result["coverage_ok"])
 
     def test_wildcard_listener_port_reuse_is_rejected_as_ambiguous(self):
+        from pathlib import Path
         from types import SimpleNamespace
 
         from flexlb_test_framework.scenario.actions.elastic_concurrent import (
             crossfire_validate,
         )
+        from flexlb_test_framework.scenario.loader import load_document
 
+        workers = load_document(
+            Path(__file__).resolve().parents[1]
+            / "scenarios/elastic/concurrent_mutation.yaml"
+        )["parameters"]["default"]["crossfire"]["workers"]
         config = dict(
             margin_s=2,
             cap_s=30,
@@ -100,10 +106,40 @@ class ConvergenceTest(unittest.TestCase):
             unique_ports=False,
         )
         with self.assertRaisesRegex(ValueError, "unique ports"):
-            crossfire_validate(dict(convergence=config), SimpleNamespace(path="test"))
+            crossfire_validate(
+                dict(
+                    convergence=config,
+                    mutation_window_s=30,
+                    workers=workers,
+                    traffic=dict(
+                        max_concurrency=8,
+                        interval_s=0.1,
+                        timeout_s=40,
+                        stream_timeout_s=10,
+                        health_interval_s=1,
+                        input_len=2048,
+                        output_len=2,
+                    ),
+                ),
+                SimpleNamespace(path="test"),
+            )
         config["unique_ports"] = True
         self.assertTrue(
-            crossfire_validate(dict(convergence=config), SimpleNamespace(path="test"))[
-                "convergence"
-            ]["unique_ports"]
+            crossfire_validate(
+                dict(
+                    convergence=config,
+                    mutation_window_s=30,
+                    workers=workers,
+                    traffic=dict(
+                        max_concurrency=8,
+                        interval_s=0.1,
+                        timeout_s=40,
+                        stream_timeout_s=10,
+                        health_interval_s=1,
+                        input_len=2048,
+                        output_len=2,
+                    ),
+                ),
+                SimpleNamespace(path="test"),
+            )["convergence"]["unique_ports"]
         )

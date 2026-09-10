@@ -85,8 +85,36 @@ python3 -m flexlb_test_framework.workload.compare \
 
 ## 已落地的覆盖治理
 
-基线为 `3eb8044340` 的 394 实例。当前 288 个 functional、97 个 workload，共 385 个实例。
+基线为 `3eb8044340` 的 394 实例。当前 320 个 functional、66 个 workload，共 386 个实例，其中新增一个持续负载实例。
 
 `priority_queue` 的 `normalize_channels`、`normalize_default30`、`normalize_metrics`，原来各展开四个 profile，但覆盖配置后环境与全部步骤完全相同。各保留 `single-nonbatch` 一个真实匹配的执行，9 个旧实例记录在 `covered_instances`。没有把错误码、边界或其他不同前置条件的检查删除。
 
-其余实例保持公开 ID、环境、时间预算和检查项；已审查的末尾独立检查改用 observe。未确认安全的检查仍按操作前置条件处理。不能为了减少执行数，强行把不同构造和不同故障时机塞成一条流程。
+`balance_distribution` 的四个有限请求组归为功能测试：短突发不能仅因检查分布就标成持续负载。公开实例 ID 保持不变。
+
+新增 `balance_distribution::sustained_mix::batch-window` 使用独立 4P/8D 拓扑、12 个请求窗口，每窗口 50 个请求。窗口内发射间隔为 0.1 秒，并发上限 20；每个窗口完整排空后检查 50 个请求成功。它保留完整请求与引擎关联，适用于同配置 A/B。所有这些值均由场景 YAML 声明。
+
+持续场景强化包括：wraparound 使用 4P/8D、420 秒连续流量和三轮切换；并发弹性使用 4P/8D 与 30 秒变更窗口，请求按 YAML 中的 0.1 秒间隔发射，最多 8 个并发请求，健康采样独立于请求完成；结束时等待全部消费者退出。双 master 全故障场景使用 4P/8D、90 秒流量，并在摘除 A/B 前分别保留 30/15 秒观测窗口。规模、时长和收尾预算均在 YAML，既有业务阈值保留；扩大后的行为须独立验证，不能沿用旧版本通过结论。
+
+已审查的末尾独立检查改用 observe。未确认安全的检查仍按操作前置条件处理。不能为了减少执行数，强行把不同构造和不同故障时机塞成一条流程。
+
+## 采集和证据边界
+
+Mock `/metrics` 含有读后清零的指标，每个环境只有一个采集者访问该端点。断言采样器与报告消费同一序列，保留源时间戳并去重；采集失败不能回退为再次请求端点。Master 指标分别保存，不能把异步采样直接相加。曲线使用连续数值时间轴，采集错误处断线。
+
+采样日志逐轮对应原始数据；日志丢失、轮次跳跃和原始样本不匹配都会使证据无效。静默间隔超过 `suites.yaml` 的 `max_sample_gap_s` 同样断线并标记无效。无效运行可以展示曲线，但不参与 A/B 变化排名。
+
+`request-engine-evidence.json` 按环境、请求和尝试关联引擎终态与 batch。重试保留各目标、时间和结果。Mock 进程 incarnation、测试管理的 Master 进程代数与产品 endpoint generation 是不同身份；未观测到的值保留空值，跨重启边界的尝试不强行归代。
+
+`aggregate/<env_epoch>/` 复用 `aggregate_canvas_run.py` 和 `canvas_report_gen.py` 的统计链。各 Master 的指标、日志和报告分别保留；单独 Master 报告中的客户端统计仍属于整个环境。读取实例拥有的 `application.log`，不能仅凭控制台输出判断周期日志缺失。
+
+成熟聚合器的 `test_valid` 包含零错误等压测门禁，故障注入用例可能因此为 false。该值原样保留，不等同于框架的证据完整性，也不会改写为 true。报告生成成功同样不代表业务合同或性能通过。
+
+## 客户端并发口径
+
+Java 客户端的 `MAX_CONCURRENCY` 限制客户端尚未结束的整条请求，包含 Schedule、Fetch 和已明确开启的直接回退。Schedule 返回不会释放许可；请求正常结束或异常退出才释放。不 Fetch 模式的客户端请求在 Schedule 返回后结束，其许可不代表引擎计算已完成。
+
+`flexlb_client_inflight` 与许可的整请求范围一致，`flexlb_client_schedule_inflight` 只统计 Schedule RPC。历史版本的前一个指标只统计 Schedule，不能直接与修复后的同名曲线比较。协议和旧单目标回退行为保留原测试；并发验证额外挂住真实 Fetch，检查许可与两个计数的边界。
+
+有限请求的过载转移、加机服务/重启、扩容前后分布合同属于功能套件，不强制等待压测统计窗口。证据为 INVALID 时，PASS 或探针裁决不能进入成功出口：报告改为 ERROR，原裁决保存在 `workload.prior_status`；原有 FAIL/TIMEOUT 不被覆盖。
+
+采集缓存由 `sample_history_limit` 限定内存中的最近样本数，历史数据仍保留在原始文件中，落后的消费者按原始偏移流式回读。采集生命周期校验覆盖首拍和尾拍；指标标签缺值只使对应曲线断开，不等于采集源离线。直接缓存预热请求带 `purpose: preconditioning`，进入请求关联表并单独留档，正式聚合的计数范围见 `request-scope.json`。

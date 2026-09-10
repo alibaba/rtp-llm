@@ -13,9 +13,6 @@ import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from ..contracts import CheckResult, StageHandler, StageOutput
-
-
 # Compatibility exports for existing case extensions. New infrastructure imports
 # online_eval.requests directly.
 from online_eval.requests import (
@@ -24,9 +21,9 @@ from online_eval.requests import (
     completeness,
     request_success,
 )
-
-
 from online_eval.traffic import BoundedFlow, ColdFlow
+
+from ..contracts import CheckResult, StageHandler, StageOutput
 
 
 def _cold_flow_validate(params, plan):
@@ -891,7 +888,8 @@ class ElasticMetrics:
 
     def __init__(self, ctx, max_duration_s=600):
         self.ctx, self.env_epoch = ctx, ctx.env_epoch
-        self.end = ctx.clock() + max_duration_s
+        self.start = ctx.clock()
+        self.end = self.start + max_duration_s
         self.samples, self.errors = [], []
         self._lock, self._stop = threading.Lock(), threading.Event()
         self.done = threading.Event()
@@ -921,15 +919,38 @@ class ElasticMetrics:
                 if self.ctx.env_epoch != self.env_epoch:
                     raise ValueError("environment epoch changed during measurement")
                 url = f"http://127.0.0.1:{self.ctx.ops.mock_http_port}/metrics?per_engine=true"
-                with urllib.request.urlopen(
-                    url, timeout=min(2, self.end - now)
-                ) as response:
-                    body = response.read(2_000_001)
-                    if len(body) > 2_000_000:
+                from online_eval.telemetry import http_text, shared_samples_since
+
+                batch = shared_samples_since(url, getattr(self, "_metric_sequence", 0))
+                if batch is None:
+                    batch = [
+                        dict(
+                            body=http_text(url, timeout=min(2, self.end - now)),
+                            monotonic_s=self.ctx.clock(),
+                            error=None,
+                        )
+                    ]
+                for sample in batch:
+                    if "sequence" in sample:
+                        self._metric_sequence = sample["sequence"]
+                    if sample["monotonic_s"] < self.start:
+                        continue
+                    if sample["error"] is not None:
+                        with self._lock:
+                            self.errors.append(
+                                dict(
+                                    time_s=sample["monotonic_s"], error=sample["error"]
+                                )
+                            )
+                        continue
+                    body = sample["body"]
+                    if len(body.encode()) > 2_000_000:
                         raise ValueError("metrics response exceeds byte budget")
-                    values = parse_metrics(body.decode())
-                with self._lock:
-                    self.samples.append(dict(time_s=self.ctx.clock(), engines=values))
+                    values = parse_metrics(body)
+                    with self._lock:
+                        self.samples.append(
+                            dict(time_s=sample["monotonic_s"], engines=values)
+                        )
             except Exception as exc:
                 with self._lock:
                     self.errors.append(dict(time_s=self.ctx.clock(), error=repr(exc)))

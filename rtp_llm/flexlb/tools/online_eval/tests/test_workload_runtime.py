@@ -4,12 +4,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+
 from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
 from flexlb_test_framework.scenario.catalog import handlers
 from flexlb_test_framework.scenario.runtime import execute_instance
-from flexlb_test_framework.workload.runtime import execute_workload
 from flexlb_test_framework.suites import classify
-from test_scenario_runtime import source, Backend, Clock
+from flexlb_test_framework.workload.runtime import execute_workload
+from test_scenario_runtime import Backend, Clock, source
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,4 +83,13 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertEqual(f | w, {p["id"] for p in plans})
         self.assertTrue(any("wraparound" in x for x in w))
         self.assertTrue(any("client_no_fetch" in x for x in f))
-        self.assertEqual(len(plans), 385)
+        self.assertTrue(
+            all(
+                p["id"] in f
+                for p in plans
+                if p["id"].startswith("balance_distribution::")
+                and "::sustained_mix::" not in p["id"]
+            )
+        )
+        self.assertTrue(any("::sustained_mix::" in identity for identity in w))
+        self.assertEqual(len(plans), 386)

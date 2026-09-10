@@ -38,6 +38,8 @@ python3 parallel_runner.py \
 
 - [框架设计、术语与分层图](docs/framework-design.md)
 - [添加配置与 Python case](docs/adding-cases.md)
+- [功能与持续负载套件分类](docs/test-suites.md)
+- [本轮框架验证与 A/B 结果](docs/framework-validation-20260911.md)
 - [多 P 缓存热点溢出探针、指标与校准](docs/cache-hotspot-storm.md)
 - [9 个业务入口的收缩分析，尚未实施](docs/case-consolidation-analysis.md)
 

@@ -31,10 +31,39 @@ from test_scenario_runtime import Backend, Clock, source
 
 
 class StormTest(unittest.TestCase):
+    def test_direct_seed_keeps_terminal_evidence_on_stream_failure(self):
+        from unittest.mock import Mock, patch
+
+        storm = Storm.__new__(Storm)
+        ops = Mock()
+        ops.next_request_id.return_value = 7
+        ops.pb2_grpc.RpcServiceStub.return_value.GenerateStreamCall.side_effect = (
+            RuntimeError("seed disconnected")
+        )
+        storm.ctx = SimpleNamespace(ops=ops)
+        storm.seeds = []
+        engines = {
+            "prefill-0": dict(grpc_addr="P:10"),
+            "decode-0": dict(grpc_addr="D:20", http_addr="D:21"),
+        }
+        with patch(
+            "flexlb_test_framework.scenario.actions.cache_storm._snapshot",
+            return_value=engines,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "seed disconnected"):
+                storm.seed("prefill-0", [1, 2], SimpleNamespace(remaining=lambda: 20))
+        row = storm.seeds[0]
+        self.assertEqual(row["status"], "exception")
+        self.assertEqual(row["request_id"], 7)
+        self.assertEqual(row["purpose"], "preconditioning")
+        self.assertEqual((row["prefill"], row["decode"]), ("P:10", "D:20"))
+        self.assertGreaterEqual(row["wall_clock_ts"] * 1000, row["send_start_epoch_ms"])
+        self.assertIn("seed disconnected", row["error"])
 
     def test_slow_observer_does_not_serialize_emissions(self):
         from concurrent.futures import Future
         from unittest.mock import Mock
+
         from flexlb_test_framework.scenario.runtime import Deadline
 
         clock = Clock()

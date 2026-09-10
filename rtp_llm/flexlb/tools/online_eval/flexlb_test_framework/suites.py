@@ -17,14 +17,28 @@ def classify(plans, suite="all", catalog=CATALOG):
         raise ScenarioError("invalid suite catalog")
     runtime = data.get("workload_runtime", {})
     if (
-        set(runtime) != {"capture_metrics", "sample_interval_s", "collector_shutdown_s"}
+        set(runtime)
+        != {
+            "capture_metrics",
+            "sample_interval_s",
+            "collector_shutdown_s",
+            "max_sample_gap_s",
+            "sample_history_limit",
+        }
         or type(runtime["capture_metrics"]) is not bool
     ):
         raise ScenarioError("invalid workload runtime configuration")
-    for key in ("sample_interval_s", "collector_shutdown_s"):
+    for key in ("sample_interval_s", "collector_shutdown_s", "max_sample_gap_s"):
         value = runtime[key]
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
             raise ScenarioError("invalid workload budget: " + key)
+    if runtime["max_sample_gap_s"] < runtime["sample_interval_s"]:
+        raise ScenarioError("maximum sample gap is shorter than sampling interval")
+    if (
+        type(runtime["sample_history_limit"]) is not int
+        or runtime["sample_history_limit"] < 1
+    ):
+        raise ScenarioError("sample_history_limit must be a positive integer")
     entries = data["cases"]
     for key, entry in entries.items():
         if (

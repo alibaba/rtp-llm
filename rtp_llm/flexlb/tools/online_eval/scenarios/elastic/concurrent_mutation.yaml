@@ -8,8 +8,8 @@ profiles:
 - window-nonbatch
 environment:
   backend: java_mock
-  n_prefill: 2
-  n_decode: 4
+  n_prefill: 4
+  n_decode: 8
   discovery: discovery_file
   perf_preset: fault_env
   config_overrides:
@@ -54,7 +54,7 @@ variants:
   - single-batch
   program: convergence
 metadata:
-  description: Four concurrent add/remove workers and serial health probes, followed by quiescent discovery
+  description: Four concurrent add/remove workers under bounded concurrent request load, followed by quiescent discovery
     validation.
   category: elastic
   requires:
@@ -62,27 +62,87 @@ metadata:
   estimated_duration_s: 90
 parameters:
   default:
+    crossfire:
+      mutation_window_s: 30
+      workers:
+      - {operation: add, role: prefill, max_operations: 40, interval_s: 0.75, seed: 0}
+      - {operation: add, role: decode, max_operations: 25, interval_s: 1.2, seed: 977}
+      - {operation: remove, role: prefill, max_operations: 25, interval_s: 1.2, seed: 0}
+      - {operation: remove, role: decode, max_operations: 19, interval_s: 1.6, seed: 977}
+      traffic:
+        max_concurrency: 8
+        interval_s: 0.1
+        timeout_s: 40
+        stream_timeout_s: 10
+        health_interval_s: 1
+        input_len: 2048
+        output_len: 2
     setup_timeout_s: 180
-    crossfire_timeout_s: 120
+    crossfire_timeout_s: 180
     health:
       min_success_rate: 0.5
   single_batch:
+    crossfire:
+      mutation_window_s: 30
+      workers:
+      - {operation: add, role: prefill, max_operations: 40, interval_s: 0.75, seed: 0}
+      - {operation: add, role: decode, max_operations: 25, interval_s: 1.2, seed: 977}
+      - {operation: remove, role: prefill, max_operations: 25, interval_s: 1.2, seed: 0}
+      - {operation: remove, role: decode, max_operations: 19, interval_s: 1.6, seed: 977}
+      traffic:
+        max_concurrency: 8
+        interval_s: 0.1
+        timeout_s: 40
+        stream_timeout_s: 10
+        health_interval_s: 1
+        input_len: 2048
+        output_len: 2
     setup_timeout_s: 180
-    crossfire_timeout_s: 120
+    crossfire_timeout_s: 180
     protocol:
       method: FetchResponse
     health:
       min_success_rate: 0.5
   single_nonbatch:
+    crossfire:
+      mutation_window_s: 30
+      workers:
+      - {operation: add, role: prefill, max_operations: 40, interval_s: 0.75, seed: 0}
+      - {operation: add, role: decode, max_operations: 25, interval_s: 1.2, seed: 977}
+      - {operation: remove, role: prefill, max_operations: 25, interval_s: 1.2, seed: 0}
+      - {operation: remove, role: decode, max_operations: 19, interval_s: 1.6, seed: 977}
+      traffic:
+        max_concurrency: 8
+        interval_s: 0.1
+        timeout_s: 40
+        stream_timeout_s: 10
+        health_interval_s: 1
+        input_len: 2048
+        output_len: 2
     setup_timeout_s: 180
-    crossfire_timeout_s: 120
+    crossfire_timeout_s: 180
     protocol:
       method: GenerateStreamCall
     health:
       min_success_rate: 0.5
   window_nonbatch:
+    crossfire:
+      mutation_window_s: 30
+      workers:
+      - {operation: add, role: prefill, max_operations: 40, interval_s: 0.75, seed: 0}
+      - {operation: add, role: decode, max_operations: 25, interval_s: 1.2, seed: 977}
+      - {operation: remove, role: prefill, max_operations: 25, interval_s: 1.2, seed: 0}
+      - {operation: remove, role: decode, max_operations: 19, interval_s: 1.6, seed: 977}
+      traffic:
+        max_concurrency: 8
+        interval_s: 0.1
+        timeout_s: 40
+        stream_timeout_s: 10
+        health_interval_s: 1
+        input_len: 2048
+        output_len: 2
     setup_timeout_s: 180
-    crossfire_timeout_s: 120
+    crossfire_timeout_s: 180
     protocol:
       method: GenerateStreamCall
     health:
@@ -91,6 +151,20 @@ parameters:
     setup_timeout_s: 180
     crossfire_timeout_s: 180
     crossfire:
+      mutation_window_s: 30
+      workers:
+      - {operation: add, role: prefill, max_operations: 40, interval_s: 0.75, seed: 0}
+      - {operation: add, role: decode, max_operations: 25, interval_s: 1.2, seed: 977}
+      - {operation: remove, role: prefill, max_operations: 25, interval_s: 1.2, seed: 0}
+      - {operation: remove, role: decode, max_operations: 19, interval_s: 1.6, seed: 977}
+      traffic:
+        max_concurrency: 8
+        interval_s: 0.1
+        timeout_s: 40
+        stream_timeout_s: 10
+        health_interval_s: 1
+        input_len: 2048
+        output_len: 2
       convergence:
         unique_ports: true
         margin_s: 2

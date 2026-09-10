@@ -26,6 +26,7 @@ the process exits.
 
 import argparse
 import collections
+import json
 import os
 import signal
 import subprocess
@@ -183,21 +184,42 @@ def run_master_prometheus_poller(port, out_path, interval_s):
         for path in ("actuator/prometheus", "prometheus")
     ]
     prefixes = MASTER_PROMETHEUS_PREFIXES
-    with open(out_path, "a", encoding="utf-8") as out:
+    with open(out_path, "a", encoding="utf-8") as out, open(
+        str(out_path) + ".samples.jsonl", "a", encoding="utf-8"
+    ) as journal:
+        sequence = 0
         while not _STOP.is_set():
             started = time.time()
+            errors, captured = [], False
             for url in urls:
                 try:
                     with urllib.request.urlopen(url, timeout=2) as response:
                         body = response.read().decode("utf-8", "replace")
-                except Exception:
-                    continue  # try the next path / skip this sample
-                kept = [line for line in body.splitlines() if line.startswith(prefixes)]
-                if kept:
+                    kept = [
+                        line for line in body.splitlines() if line.startswith(prefixes)
+                    ]
+                    if not kept:
+                        raise ValueError("no expected master metrics")
                     out.write(f"# ts={int(started * 1000)}\n")
                     out.write("\n".join(kept) + "\n")
                     out.flush()
-                break
+                    captured = True
+                    break
+                except Exception as exc:
+                    errors.append(repr(exc))
+            sequence += 1
+            journal.write(
+                json.dumps(
+                    dict(
+                        sequence=sequence,
+                        epoch_s=started,
+                        ended_epoch_s=time.time(),
+                        error=None if captured else "; ".join(errors),
+                    )
+                )
+                + "\n"
+            )
+            journal.flush()
             _sleep_remaining(started, interval_s)
 
 

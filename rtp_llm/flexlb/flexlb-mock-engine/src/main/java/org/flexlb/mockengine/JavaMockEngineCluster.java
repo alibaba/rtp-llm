@@ -611,6 +611,8 @@ public final class JavaMockEngineCluster {
         }
 
         private final String engineName;
+        // Mock process identity, deliberately distinct from master endpoint generation.
+        private final String engineIncarnation = java.util.UUID.randomUUID().toString();
         private final String host;
         private final String roleName;
         private final EngineRpcService.RoleTypePB roleType;
@@ -5449,6 +5451,8 @@ public final class JavaMockEngineCluster {
             row.put("event", "prefill_done");
             row.put("rid", requestId);
             row.put("engine_name", engineName);
+            row.put("engine_incarnation", engineIncarnation);
+            row.put("engine_address", host + ":" + grpcPort);
             row.put("batch_id", batchId);
             row.put("engine_arrival_ms", arrivalMs);
             row.put("prefill_start_ms", startMs);
@@ -5506,6 +5510,8 @@ public final class JavaMockEngineCluster {
             row.put("event", "decode_done");
             row.put("rid", requestId);
             row.put("engine_name", engineName);
+            row.put("engine_incarnation", engineIncarnation);
+            row.put("engine_address", host + ":" + grpcPort);
             row.put("batch_id", batchId);
             row.put("engine_arrival_ms", arrivalMs);
             row.put("decode_start_ms", startMs);
@@ -5589,6 +5595,13 @@ public final class JavaMockEngineCluster {
          * ~L327-358), followed by the pre-existing Java-only fields. Python field names and
          * nesting must not be renamed.
          */
+        Map<String, Object> getTopologySnapshot() {
+            return Map.of("name", engineName, "role", roleName.toLowerCase(),
+                    "grpc_addr", host + ":" + grpcPort,
+                    "http_addr", host + ":" + (grpcPort - 1),
+                    "engine_incarnation", engineIncarnation);
+        }
+
         Map<String, Object> getSnapshot() {
             Map<String, Object> snap = new LinkedHashMap<>();
             // Capacity model v2: one pool-derived caliber everywhere —

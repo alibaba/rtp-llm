@@ -121,13 +121,25 @@ class ExecutionEvidenceTests(unittest.TestCase):
 
     def test_rotation_guards_sticky_and_consecutive_runs(self):
         def run(seq, limit):
-            return rotation([dict(engine=x) for x in seq], limit)["passed"]
+            return rotation([dict(engine=x) for x in seq], limit, 2)["passed"]
 
         self.assertTrue(run("ABAB", 1))
         self.assertFalse(run("ABBA", 1))
         self.assertTrue(run("ABBA", 2))
         self.assertFalse(run("ABBBA", 2))
         self.assertFalse(run("AAAA", 2))
+
+    def test_rotation_uses_declared_topology_size(self):
+        for seq, expected in [
+            ("ABCDABCD", True),
+            ("ABABABAB", False),
+            ("ABCCCDA", False),
+            ("ABCDE", False),
+        ]:
+            with self.subTest(sequence=seq):
+                self.assertEqual(
+                    expected, rotation([dict(engine=x) for x in seq], 2, 4)["passed"]
+                )
 
     def test_three_batches_allow_three_failures_and_missing_sidecar_is_explicit(self):
         e = [

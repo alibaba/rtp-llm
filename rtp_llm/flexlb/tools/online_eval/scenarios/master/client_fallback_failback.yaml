@@ -17,9 +17,16 @@ execution:
   cleanup_timeout_s: 120
 variants:
 - id: all_masters_down
+  environment:
+    n_prefill: 4
+    n_decode: 8
   program: all_masters_down
 - id: wraparound
+  environment:
+    n_prefill: 4
+    n_decode: 8
   parameters:
+    restart_cycles: 3
     checkpoint_window_s: 5
     max_owner_load: 128
   program: wraparound
@@ -42,21 +49,21 @@ parameters:
       targets:
       - A
       - B
-      duration_s: 60
+      duration_s: 90
       fallback: true
     kill_a_time:
-      wait_s: 12
+      wait_s: 30
     kill_a:
       mode: kill
       target: A
     kill_b_time:
-      wait_s: 0.5
+      wait_s: 15
     kill_b:
       mode: kill
       target: B
     outage_end:
-      wait_s: 10
-    finish_timeout_s: 90
+      wait_s: 20
+    finish_timeout_s: 120
     fallback_rows:
       route: fallback
     steady:
@@ -98,16 +105,17 @@ parameters:
       targets:
       - A
       - B
-      duration_s: 150
-      # ~7.9 requests/s: sustained below native two-P throughput (~9/s),
-      # still enough for >=30 samples in each unchanged five-second window.
-      replay_speed: 0.75
+      duration_s: 420
+      # Four prefill workers: scale offered traffic with topology; retain checkpoint bands.
+      replay_speed: 1.5
       live_events: true
     kill_a:
       mode: kill
       target: A
     restart_a_timeout_s: 180
     ready_a_timeout_s: 60
+    ready_b:
+      target: B
     ready_a:
       target: A
     recovery_distribution:
@@ -136,7 +144,8 @@ parameters:
     kill_b:
       mode: kill
       target: B
-    finish_timeout_s: 180
+    # Must cover the 420 s producer lifetime plus its final in-flight drain.
+    finish_timeout_s: 450
     overall_success:
       metric: success_rate
       op: ge
@@ -271,9 +280,14 @@ parameters:
     recovered_no_error:
       op: eq
       expected: false
+  restart_cycles: 1
   checkpoint_window_s: 5
   max_owner_load: 128
 parameter_schema:
+  restart_cycles:
+    integer: true
+    minimum: 1
+    maximum: 10
   checkpoint_window_s:
     minimum: 3
     maximum: 10

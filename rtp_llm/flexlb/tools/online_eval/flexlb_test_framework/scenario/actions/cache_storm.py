@@ -225,18 +225,42 @@ class Storm:
             grpc_port=int(port),
             http_port=int(decode["http_addr"].rsplit(":", 1)[1]),
         )
-        row = dict(rid=rid, engine=name, keys=keys, successful=False)
+        started = time.time()
+        row = dict(
+            rid=rid,
+            request_id=rid,
+            engine=name,
+            keys=keys,
+            successful=False,
+            purpose="preconditioning",
+            route_path="direct",
+            prefill=target,
+            decode=decode["grpc_addr"],
+            input_len=len(keys) * 1024,
+            output_len=2,
+            send_start_epoch_ms=started * 1000,
+            status="pending",
+            error="",
+        )
         self.seeds.append(row)
         finished = False
-        for out in ops.pb2_grpc.RpcServiceStub(ops._channel(target)).GenerateStreamCall(
-            inp, timeout=min(20, deadline.remaining())
-        ):
-            if out.HasField("error_info") and out.error_info.error_code:
-                raise ValueError("seed request returned business error")
-            finished |= any(out.flatten_output.finished)
-        if not finished:
-            raise ValueError("seed request did not finish")
-        row["successful"] = True
+        try:
+            for out in ops.pb2_grpc.RpcServiceStub(
+                ops._channel(target)
+            ).GenerateStreamCall(inp, timeout=min(20, deadline.remaining())):
+                if out.HasField("error_info") and out.error_info.error_code:
+                    raise ValueError("seed request returned business error")
+                finished |= any(out.flatten_output.finished)
+            if not finished:
+                raise ValueError("seed request did not finish")
+            row.update(successful=True, status="ok")
+        except BaseException as exc:
+            row.update(status="exception", error=f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            row.update(
+                wall_clock_ts=time.time(), total_ms=(time.time() - started) * 1000
+            )
 
     def issue(self, phase, window, before):
         self.futures = [f for f in self.futures if not f.done()]
@@ -283,6 +307,20 @@ class Storm:
         for future in done:
             future.result()
         self.futures.clear()
+
+    def evidence_snapshot(self):
+        from online_eval.requests import completeness
+
+        rows = self.records.snapshot_records()
+        complete = completeness(rows)["complete"] and all(
+            "wall_clock_ts" in r for r in self.seeds
+        )
+        return dict(
+            records=[*rows, *[dict(r) for r in self.seeds]],
+            complete=complete,
+            errors=[] if complete else ["storm producer did not complete all requests"],
+            producer_kind="python",
+        )
 
     def save(self):
         path = self.ctx.artifact_dir / "cache-storm-raw.json"

@@ -214,10 +214,11 @@ final class MockControlServer {
             sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
             return;
         }
+        boolean topologyOnly = "view=topology".equals(exchange.getRequestURI().getQuery());
         // Python cluster.snapshot() shape: {"engines": [...]}
         List<Map<String, Object>> engines = new ArrayList<>();
         for (JavaMockEngineCluster.FastRpcService service : orderedServices()) {
-            engines.add(service.getSnapshot());
+            engines.add(topologyOnly ? service.getTopologySnapshot() : service.getSnapshot());
         }
         Map<String, Object> response = new LinkedHashMap<>();
         // Sampling timestamp for cross-source alignment with client epoch_ms

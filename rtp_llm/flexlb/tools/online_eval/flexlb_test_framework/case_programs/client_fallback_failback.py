@@ -186,6 +186,45 @@ def wraparound(case):
     case.step("kill_b", "master_fault", params=case.value("wraparound.kill_b"))
     checkpoint("switch_to_a", "A", fault="kill_b")
     checkpoint("steady_a", "A")
+    previous_b_fault = "kill_b"
+    for cycle in range(2, case.number("restart_cycles") + 1):
+        prefix = f"cycle_{cycle}_"
+        case.step(
+            prefix + "restore_b",
+            "master_restore",
+            timeout_s=case.value("wraparound.restart_a_timeout_s"),
+            params={"fault": output(previous_b_fault, "fault")},
+        )
+        case.step(
+            prefix + "ready_b",
+            "master_topology_ready",
+            timeout_s=case.value("wraparound.ready_a_timeout_s"),
+            params=case.value("wraparound.ready_b"),
+        )
+        checkpoint(prefix + "steady_a", "A")
+        case.step(
+            prefix + "kill_a", "master_fault", params=case.value("wraparound.kill_a")
+        )
+        checkpoint(prefix + "switch_to_b", "B", fault=prefix + "kill_a")
+        checkpoint(prefix + "steady_b", "B")
+        case.step(
+            prefix + "restore_a",
+            "master_restore",
+            timeout_s=case.value("wraparound.restart_a_timeout_s"),
+            params={"fault": output(prefix + "kill_a", "fault")},
+        )
+        case.step(
+            prefix + "ready_a",
+            "master_topology_ready",
+            timeout_s=case.value("wraparound.ready_a_timeout_s"),
+            params=case.value("wraparound.ready_a"),
+        )
+        previous_b_fault = prefix + "kill_b"
+        case.step(
+            previous_b_fault, "master_fault", params=case.value("wraparound.kill_b")
+        )
+        checkpoint(prefix + "switch_to_a", "A", fault=previous_b_fault)
+        checkpoint(prefix + "recovered_a", "A")
     case.step(
         "finish",
         "master_client_finish",

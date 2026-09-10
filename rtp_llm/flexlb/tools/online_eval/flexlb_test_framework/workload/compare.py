@@ -5,6 +5,7 @@ import hashlib
 import json
 import statistics
 from pathlib import Path
+
 from stress.canvas_report_render_html import render
 
 
@@ -52,9 +53,19 @@ def compare(a, b):
                 candidate=right,
                 verdict="DESCRIPTIVE_ONLY",
             )
-            if not left or not right:
+            if not left or not right or any(v is None for _, v in left + right):
                 row.update(
                     status="MISSING_DATA",
+                    absolute_delta=None,
+                    relative_delta=None,
+                    rank_score=None,
+                )
+            elif any(
+                report["workload"].get("runtime_validity") != "VALID"
+                for report in (a, b)
+            ):
+                row.update(
+                    status="INVALID_EVIDENCE",
                     absolute_delta=None,
                     relative_delta=None,
                     rank_score=None,
@@ -91,7 +102,15 @@ def main(argv=None):
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--max-panels",
+        type=int,
+        default=50,
+        help="HTML panel limit; full comparison.json retains every metric",
+    )
     args = parser.parse_args(argv)
+    if args.max_panels < 1:
+        parser.error("--max-panels must be positive")
     result = compare(
         json.loads(args.baseline.read_text()), json.loads(args.candidate.read_text())
     )
@@ -100,7 +119,7 @@ def main(argv=None):
         json.dumps(result, indent=2, allow_nan=False) + "\n"
     )
     panels = []
-    for row in result["changes"]:
+    for row in result["changes"][: args.max_panels]:
         axis = sorted(
             set(t for field in ("baseline", "candidate") for t, v in row[field])
         )
@@ -119,7 +138,7 @@ def main(argv=None):
                 series=[
                     dict(
                         name=field,
-                        data=[dict(row[field]).get(t) for t in axis],
+                        points=[dict(x=t, y=v) for t, v in row[field]],
                         color=color,
                     )
                     for field, color in [
@@ -134,8 +153,23 @@ def main(argv=None):
             dict(
                 run_id=result["id"],
                 title="Workload A/B: " + result["id"],
-                subtitle=result["ranking"] + "; differences are not a product verdict",
+                timeOriginLabel="t=0 = 当前阶段开始",
+                subtitle=result["ranking"]
+                + f"; showing {len(panels)} of {len(result['changes'])} panels; all data in comparison.json; differences are not a product verdict",
                 panels=panels,
+                timeAxis=dict(
+                    min=0,
+                    max=max(
+                        (
+                            t
+                            for row in result["changes"]
+                            for field in ("baseline", "candidate")
+                            for t, _ in row[field]
+                        ),
+                        default=1,
+                    )
+                    or 1,
+                ),
             )
         )
     )

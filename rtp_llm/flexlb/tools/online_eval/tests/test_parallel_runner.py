@@ -75,6 +75,10 @@ class LaneEnvTest(unittest.TestCase):
             3,
         )
 
+    @mock.patch.dict(
+        os.environ,
+        {"FLEXLB_FT_PARALLEL_MASTER_BASE": "", "FLEXLB_FT_PARALLEL_MOCK_BASE": ""},
+    )
     def test_formulas_match_documented_strides(self):
         for i in range(DEFAULT_LANES):
             env = parallel_runner.lane_env(i)
@@ -167,6 +171,10 @@ class MockStrideTest(unittest.TestCase):
         # default band: 55151 + 500*20 + 151 = 65302 → 21 lanes
         self.assertEqual(21, parallel_runner.max_lanes(500, 55151))
 
+    @mock.patch.dict(
+        os.environ,
+        {"FLEXLB_FT_PARALLEL_MASTER_BASE": "", "FLEXLB_FT_PARALLEL_MOCK_BASE": ""},
+    )
     def test_lane_env_honors_mock_stride(self):
         e = parallel_runner.lane_env(3, mock_stride=500)
         self.assertEqual(

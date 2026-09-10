@@ -977,6 +977,7 @@ class FlexEnv:
         self.victims: dict[str, ManagedProcess] = {}  # name -> process
         self.load_clients: list[ManagedProcess] = []
         self.master_start_count = 0
+        self.master_incarnations = []
         # HA dual-master registry (empty on the legacy single-master path —
         # env.master stays the single source of truth there).  A value of
         # None means "slot exists, process dead" (post-kill, pre-restart).
@@ -1408,6 +1409,15 @@ class EnvManager:
             env.pv_log_offset = 0
         proc = ProcessOps.start(argv, self._master_env(env), env.run_dir / log_name)
         env.master = proc
+        env.master_incarnations.append(
+            dict(
+                name="single",
+                target=f"127.0.0.1:{env.master_http_port + 2}",
+                generation=env.master_start_count,
+                pid=proc.pid,
+                started_epoch_ms=time.time() * 1000,
+            )
+        )
 
         def _app_log_tail_this_start(lines: int = 60) -> str:
             try:
@@ -1624,6 +1634,15 @@ class EnvManager:
         )
         env.masters[mspec.name] = proc
         env.master_specs[mspec.name] = mspec
+        env.master_incarnations.append(
+            dict(
+                name=mspec.name,
+                target=f"{mspec.bind_ip}:{mspec.grpc_port()}",
+                generation=n,
+                pid=proc.pid,
+                started_epoch_ms=time.time() * 1000,
+            )
+        )
 
         base_url = f"http://{mspec.bind_ip}:{mspec.http_port}"
 
@@ -2055,10 +2074,10 @@ BALANCE_MOCK_SERIES = (
 
 
 def _http_get_text(url: str, timeout: float = 5.0) -> Optional[str]:
-    """Plain-text GET (None on any failure) — the /metrics scrape channel."""
+    from online_eval.telemetry import http_text
+
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", "replace")
+        return http_text(url, timeout)
     except Exception:
         return None
 
@@ -2135,9 +2154,22 @@ class BalanceSampler:
             per_key.setdefault(metric, []).append((t_rel, value))
 
     def _poll_mock(self, t_rel: float) -> None:
-        body = _http_get_text(self._mock_url, timeout=2.0)
-        if body is None:
+        from online_eval.telemetry import shared_samples_since
+
+        samples = shared_samples_since(
+            self._mock_url, getattr(self, "_mock_sequence", 0)
+        )
+        if samples is not None:
+            for sample in samples:
+                self._mock_sequence = sample["sequence"]
+                if sample["error"] is None and sample["monotonic_s"] >= self._t0:
+                    self._ingest_mock(sample["body"], sample["monotonic_s"] - self._t0)
             return
+        body = _http_get_text(self._mock_url, timeout=2.0)
+        if body is not None:
+            self._ingest_mock(body, t_rel)
+
+    def _ingest_mock(self, body, t_rel):
         for name, labels, value in _parse_per_engine_lines(body):
             engine = labels.get("engine_name")
             if not engine:

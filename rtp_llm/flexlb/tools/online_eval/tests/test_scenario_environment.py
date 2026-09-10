@@ -315,6 +315,7 @@ class EnvironmentTest(unittest.TestCase):
             spec=spec,
             master=None,
             master_start_count=0,
+            master_incarnations=[],
             master_http_port=28000,
             master_management_port=28001,
             run_dir=directory,
@@ -324,7 +325,7 @@ class EnvironmentTest(unittest.TestCase):
         def launch(*args, **kwargs):
             with app_log.open("a") as stream:
                 stream.write("ConfigValidationException from owned start\n")
-            return NS(alive=lambda: False, tail_log=lambda: "owned stdout")
+            return NS(pid=123, alive=lambda: False, tail_log=lambda: "owned stdout")
 
         with patch("flexlb_test_framework.harness.API_JAR", jar), patch(
             "flexlb_test_framework.harness.resolve_java21", return_value="unused-java"

@@ -41,14 +41,14 @@ class ProfileTests(unittest.TestCase):
             )
             self.assertEqual(new.perf, old.perf)
             for field in [
-                "n_prefill",
-                "n_decode",
                 "discovery",
                 "prefill_cache_blocks",
                 "decode_cache_blocks",
             ]:
                 self.assertEqual(getattr(new, field), getattr(old, field))
-            self.assertEqual(plan["resource_budget"]["initial_workers"], 6)
+            self.assertEqual((new.n_prefill, new.n_decode), (4, 8))
+            self.assertEqual(plan["stages"][1]["params"]["mutation_window_s"], 30)
+            self.assertEqual(plan["resource_budget"]["initial_workers"], 12)
             self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 65)
             self.assertEqual(len(plan["stages"]), 5 if profile == "batch-window" else 6)
             self.assertEqual(

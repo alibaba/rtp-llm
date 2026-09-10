@@ -763,3 +763,37 @@ def length_mixed(case):
     case.step(
         "teardown", "teardown", timeout_s=case.value("length_mixed.teardown_timeout_s")
     )
+
+
+def sustained_mix(case):
+    case.step("setup", "setup", timeout_s=case.value("sustained_mix.setup_timeout_s"))
+    case.step("fleet", "balance_snapshot", params=case.value("sustained_mix.fleet"))
+    for index in range(case.number("sustained_mix.windows")):
+        wave = f"window_{index + 1}"
+        case.step(wave, "balance_start", params=case.value("sustained_mix.load"))
+        case.step(
+            wave + "_drain",
+            "balance_wait",
+            timeout_s=case.value("sustained_mix.drain_timeout_s"),
+            params={"requests": output(wave, "requests")},
+        )
+        case.observe(
+            wave + "_complete",
+            "balance_check",
+            params=case.params(
+                "sustained_mix.complete",
+                {
+                    "requests": [output(wave, "requests")],
+                    "fleet": output("fleet", "snapshot"),
+                },
+            ),
+        )
+        if index + 1 < case.number("sustained_mix.windows"):
+            case.step(
+                wave + "_interval",
+                "balance_pause",
+                params=case.value("sustained_mix.interval"),
+            )
+    case.step(
+        "teardown", "teardown", timeout_s=case.value("sustained_mix.teardown_timeout_s")
+    )

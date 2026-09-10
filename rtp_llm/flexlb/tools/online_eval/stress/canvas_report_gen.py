@@ -1382,7 +1382,9 @@ def main():
             cond_parts.append("replay")
     else:
         cond_parts.append(
-            ("uniform " + str(nominal_qps) + " QPS") if nominal_qps else "uniform"
+            ("uniform " + str(nominal_qps) + " QPS")
+            if nominal_qps and send_mode == "uniform"
+            else send_mode
         )
     if ramp_s:
         cond_parts.append("ramp " + str(ramp_s) + "s")
@@ -4360,6 +4362,8 @@ def main():
         time_axis=time_axis,
     )
     spec["meta"] = meta_spec
+    if send_mode == "case program":
+        spec["timeOriginLabel"] = "t=0 = 首个请求发出"
     html_out = canvas_report_render_html.render(spec)
 
     # ---- 时间轴自检（fail-closed）----

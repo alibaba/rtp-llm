@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
 import io.grpc.netty.NettyChannelBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -122,6 +123,7 @@ public final class JavaLoadClient {
     final AtomicInteger successCount = new AtomicInteger();
     final AtomicInteger errorCount = new AtomicInteger();
     final AtomicInteger inflightCount = new AtomicInteger();
+    final AtomicInteger scheduleInflightCount = new AtomicInteger();
     final AtomicInteger sentTotal = new AtomicInteger();
     final List<RequestResult> completedResults = Collections.synchronizedList(new ArrayList<>());
     private volatile ScheduledExecutorService pushgatewayExecutor;
@@ -621,9 +623,10 @@ public final class JavaLoadClient {
             return result;
         }
 
+        inflightCount.incrementAndGet();
         try {
             Exception scheduleExc = null;
-            inflightCount.incrementAndGet();
+            scheduleInflightCount.incrementAndGet();
             try {
                 double sendStartEpochMs = replayStartedEpochMs
                         + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
@@ -649,6 +652,7 @@ public final class JavaLoadClient {
                     scheduleResponse = outcome.response;
                     result.masterTarget = outcome.lastTarget;
                     result.failover = outcome.failover;
+                    result.scheduleAttempts = outcome.attempts;
                     result.errorKind = outcome.errorKind.label;
                     result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
                     result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
@@ -668,7 +672,20 @@ public final class JavaLoadClient {
                 } else {
                     FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
                             .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-                    scheduleResponse = stub.schedule(scheduleReq);
+                    long attemptEpochMs = System.currentTimeMillis();
+                    long attemptNanos = System.nanoTime();
+                    String attemptStatus = "OK";
+                    Integer attemptCode = null;
+                    try {
+                        scheduleResponse = stub.schedule(scheduleReq);
+                        attemptCode = scheduleResponse.getCode();
+                    } catch (RuntimeException e) {
+                        attemptStatus = Status.fromThrowable(e).getCode().name();
+                        throw e;
+                    } finally {
+                        result.scheduleAttempts = List.of(new MasterTargetRouter.ScheduleAttempt(
+                                config.grpcTarget, attemptEpochMs, attemptNanos, attemptStatus, attemptCode));
+                    }
 
                     result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
                     // sched_done epoch-ms (client_events.jsonl): the absolute moment the
@@ -738,7 +755,7 @@ public final class JavaLoadClient {
                 // untouched).
                 result.errorKind = MasterTargetRouter.classifyThrowable(e);
             } finally {
-                inflightCount.decrementAndGet();
+                scheduleInflightCount.decrementAndGet();
             }
 
             // Escape hatch (default OFF — see enableFallback javadoc): on schedule
@@ -845,6 +862,7 @@ public final class JavaLoadClient {
             responseCount.incrementAndGet();
             return result;
         } finally {
+            inflightCount.decrementAndGet();
             semaphore.release();
         }
     }
@@ -1393,6 +1411,19 @@ public final class JavaLoadClient {
         // also covers phase-2 stream failures, where the master leg itself
         // succeeded).
         node.put("master_target", result.masterTarget);
+        var attempts = node.putArray("schedule_attempts");
+        for (int index = 0; index < result.scheduleAttempts.size(); index++) {
+            MasterTargetRouter.ScheduleAttempt attempt = result.scheduleAttempts.get(index);
+            ObjectNode observed = attempts.addObject();
+            observed.put("attempt", index + 1);
+            observed.put("master_target", attempt.target);
+            observed.put("started_epoch_ms", attempt.startedEpochMs);
+            observed.put("ended_epoch_ms", attempt.endedEpochMs);
+            observed.put("status", attempt.status);
+            if (attempt.responseCode != null) {
+                observed.put("response_code", attempt.responseCode);
+            }
+        }
         node.put("failover", result.failover);
         node.put("error_kind", result.errorKind);
         node.put("wall_clock_ts", result.wallClockTs);
@@ -1540,6 +1571,7 @@ public final class JavaLoadClient {
     String buildPushMetricsBody() {
         List<String> lines = new ArrayList<>();
         int inflight = inflightCount.get();
+        lines.add("flexlb_client_schedule_inflight{route_path=\"master\"} " + scheduleInflightCount.get());
         lines.add("flexlb_client_send_total{route_path=\"master\"} " + sentTotal.get());
         lines.add("flexlb_client_actual_send_total{route_path=\"master\"} " + actualSentCount.get());
         lines.add("flexlb_client_completed_total{route_path=\"master\"} " + completedResults.size());
@@ -2242,6 +2274,7 @@ public final class JavaLoadClient {
         /** Actually-served (or last-attempted) flexlb gRPC address; empty on
          *  synthetic rows (collector timeout / dead-future fallbacks). */
         String masterTarget = "";
+        List<MasterTargetRouter.ScheduleAttempt> scheduleAttempts = List.of();
         /** True when the same request was retried on another GRPC_TARGETS
          *  target (transport-failure failover). Always false in the legacy
          *  single-target mode. */

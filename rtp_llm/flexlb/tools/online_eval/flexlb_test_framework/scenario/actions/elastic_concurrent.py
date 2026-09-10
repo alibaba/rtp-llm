@@ -6,6 +6,7 @@ import random
 import threading
 import time
 import urllib.request
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from ..contracts import CheckResult, StageHandler, StageOutput
 
@@ -20,9 +21,71 @@ def crossfire_validate(params, plan):
     from .elastic import _validate
 
     # Optional tail_s: extend ONLY the main-loop request emission past the
-    # 10s mutation storm window (mutation workers still stop at `end`).
+    # configured mutation storm window (workers still stop at `end`).
     # Absent tail_s (or 0) keeps the behavior identical to the legacy stage.
-    p = _validate(params, plan, {"tail_s", "convergence"})
+    p = _validate(
+        params,
+        plan,
+        {"tail_s", "convergence", "mutation_window_s", "traffic", "workers"},
+        {"mutation_window_s", "traffic", "workers"},
+    )
+    if "mutation_window_s" in p and (
+        type(p["mutation_window_s"]) not in (int, float)
+        or not math.isfinite(p["mutation_window_s"])
+        or p["mutation_window_s"] <= 0
+    ):
+        raise ValueError("mutation_window_s must be positive and finite")
+    workers = p["workers"]
+    if not isinstance(workers, list) or len(workers) != 4:
+        raise ValueError("crossfire requires four explicit worker configurations")
+    for worker in workers:
+        if not isinstance(worker, dict) or set(worker) != {
+            "operation",
+            "role",
+            "max_operations",
+            "interval_s",
+            "seed",
+        }:
+            raise ValueError("worker requires operation, role, count, cadence and seed")
+        if worker["operation"] not in {"add", "remove"} or worker["role"] not in {
+            "prefill",
+            "decode",
+        }:
+            raise ValueError("unsupported mutation worker")
+        if (
+            type(worker["max_operations"]) is not int
+            or worker["max_operations"] < 1
+            or type(worker["seed"]) is not int
+        ):
+            raise ValueError("worker operation count and seed must be integers")
+        if (
+            type(worker["interval_s"]) not in (int, float)
+            or not math.isfinite(worker["interval_s"])
+            or worker["interval_s"] <= 0
+        ):
+            raise ValueError("worker interval must be positive and finite")
+    if sum(w["max_operations"] for w in workers if w["operation"] == "add") > 65:
+        raise ValueError("mutation additions exceed reserved port budget")
+    traffic = p["traffic"]
+    fields = {
+        "max_concurrency",
+        "interval_s",
+        "timeout_s",
+        "stream_timeout_s",
+        "health_interval_s",
+        "input_len",
+        "output_len",
+    }
+    if not isinstance(traffic, dict) or set(traffic) != fields:
+        raise ValueError(
+            "traffic requires explicit YAML concurrency, cadence, shape and budgets"
+        )
+    for name, value in traffic.items():
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"traffic.{name} must be positive and finite")
+    for name in ("max_concurrency", "input_len", "output_len"):
+        if type(traffic[name]) is not int:
+            raise ValueError(f"traffic.{name} must be an integer")
     if "tail_s" in p and (
         type(p["tail_s"]) not in (int, float)
         or not math.isfinite(p["tail_s"])
@@ -88,7 +151,14 @@ def crossfire(ctx, params, deadline):
     added_attempts = 0
     errors = []
     records = RecordedRequests(ctx.ops, ctx.env_epoch, ctx.clock)
-    end = ctx.clock() + 10
+    traffic = params["traffic"]
+    pool = ThreadPoolExecutor(
+        max_workers=traffic["max_concurrency"],
+        thread_name_prefix="elastic-crossfire-request",
+    )
+    pending = set()
+    peak_outstanding = 0
+    end = ctx.clock() + params["mutation_window_s"]
     # Diagnostic tail observation: mutation workers still stop at `end`
     # (mutation_end); only the main-loop request emission extends to
     # mutation_end + tail_s. Storm-phase = issued before mutation_end.
@@ -116,6 +186,8 @@ def crossfire(ctx, params, deadline):
                 errors=list(errors),
                 mutation_end_s=mutation_end,
                 bound_s=bound_s,
+                traffic=dict(traffic),
+                peak_outstanding=peak_outstanding,
             )
         data.update(
             requests=records.snapshot_records(), workers_done=[e.is_set() for e in done]
@@ -127,10 +199,16 @@ def crossfire(ctx, params, deadline):
         gate.set()
         records.cancel_active("crossfire_cleanup")
         try:
+            if pending:
+                _, unfinished = wait(pending, timeout=max(0, d.remaining()))
+                if unfinished:
+                    raise TimeoutError("crossfire request consumers did not terminate")
+            pool.shutdown(wait=True)
             for event in done:
                 if not event.wait(max(0, d.remaining())):
                     raise TimeoutError("crossfire mutation worker did not terminate")
         finally:
+            pool.shutdown(wait=False, cancel_futures=True)
             persist()
 
     request_handle = ctx.register_resource("requests", records, cleanup=finish)
@@ -139,20 +217,15 @@ def crossfire(ctx, params, deadline):
         nonlocal added_attempts
         try:
             gate.wait()
-            adder = index < 2
-            worker = index % 2
-            # At most ceil(10/.25)+ceil(10/.40)=65 add attempts. Failed
-            # attempts also consume the budget; the mock may allocate a port
-            # before a failing response reaches this caller.
-            cap = (40 if worker == 0 else 25) if adder else (25 if worker == 0 else 19)
-            interval = (0.25 if adder else 0.4) + 0.15 * worker
-            rng = random.Random(worker * 977)
+            worker = params["workers"][index]
+            adder = worker["operation"] == "add"
+            cap = worker["max_operations"]
+            interval = worker["interval_s"]
+            rng = random.Random(worker["seed"])
             for _ in range(cap):
                 if stop.is_set() or ctx.clock() >= end:
                     break
-                body = (
-                    dict(role="prefill" if worker == 0 else "decode") if adder else None
-                )
+                body = dict(role=worker["role"]) if adder else None
                 if adder and convergence:
                     # Mock listeners bind wildcard addresses. Reusing a port with
                     # a new advertised IP would let stale-IP traffic reach the new
@@ -272,26 +345,49 @@ def crossfire(ctx, params, deadline):
                 )
             return ctx.clock() < issue_end
 
+        next_issue = ctx.clock()
+        next_health = next_issue
         while keep_issuing():
             deadline.check()
+            completed = {future for future in pending if future.done()}
+            for future in completed:
+                future.result()
+            pending.difference_update(completed)
+            if len(pending) >= traffic["max_concurrency"]:
+                wait(
+                    pending,
+                    timeout=min(traffic["interval_s"], deadline.remaining()),
+                    return_when=FIRST_COMPLETED,
+                )
+                continue
+            if ctx.clock() < next_issue:
+                stop.wait(min(next_issue - ctx.clock(), deadline.remaining()))
+                continue
             rid = ctx.ops.next_request_id()
             record = records.issue(rid, ctx.clock)
             records.update(
                 record,
                 phase=("storm" if record["issued_s"] < mutation_end else "tail"),
             )
-            records.run(
-                record,
-                dict(output_len=2, block_keys=[rid * 100 + 1]),
-                timeout_s=min(40, deadline.remaining()),
-                stream_timeout_s=10,
+            records.update(record, send_due_s=next_issue)
+            pending.add(
+                pool.submit(
+                    records.run,
+                    record,
+                    dict(
+                        input_len=traffic["input_len"],
+                        output_len=traffic["output_len"],
+                        block_keys=[rid * 100 + 1],
+                    ),
+                    timeout_s=min(traffic["timeout_s"], deadline.remaining()),
+                    stream_timeout_s=traffic["stream_timeout_s"],
+                )
             )
-            # Health probing follows the SAME phase source as the request
-            # record: a storm request still samples after its run() returns
-            # (even when the post-run clock has already passed mutation_end),
-            # while tail-phase requests never sample — the master_http check
-            # population stays exactly the storm rounds under every tail_s.
-            if record.get("phase") == "storm":
+            peak_outstanding = max(peak_outstanding, len(pending))
+            next_issue += traffic["interval_s"]
+            # Sample storm health independently of slow request completion.
+            if record.get("phase") == "storm" and ctx.clock() >= next_health:
+                next_health = ctx.clock() + traffic["health_interval_s"]
                 sample = dict(time_s=ctx.clock())
                 try:
                     _master_get(ctx, "rtp_llm/inflight_status", deadline)
@@ -300,8 +396,10 @@ def crossfire(ctx, params, deadline):
                     sample.update(status=None, error=f"{type(exc).__name__}: {exc}")
                 with lock:
                     health.append(sample)
-            stop.wait(max(0, min(1, issue_end - ctx.clock())))
-        # Graceful mutation calls may finish after the 10s admission window.
+        for future in pending:
+            future.result(timeout=max(0, deadline.remaining()))
+        pool.shutdown(wait=True)
+        # Graceful mutation calls may finish after the mutation admission window.
         # Independent completion events prove they have stopped changing the
         # discovery file before the following consistency measurement.
         for event in done:

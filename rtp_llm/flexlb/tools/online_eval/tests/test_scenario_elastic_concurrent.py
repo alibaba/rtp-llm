@@ -29,6 +29,7 @@ class ConcurrentTests(unittest.TestCase):
         bad_master=False,
         bad_discovery=False,
         slow_remove=False,
+        slow_request=False,
         profile="batch-window",
         driver_factory=None,
     ):
@@ -42,7 +43,14 @@ class ConcurrentTests(unittest.TestCase):
         lock = threading.Lock()
         barrier = threading.Barrier(2)
         state = dict(
-            engines={}, added=0, removed=0, active=0, max_active=0, cleaned=False
+            engines={},
+            added=0,
+            removed=0,
+            active=0,
+            max_active=0,
+            cleaned=False,
+            active_requests=0,
+            peak_requests=0,
         )
         start = time.monotonic()
         # Real threads run against a faster monotonic clock; no ordering is
@@ -124,6 +132,15 @@ class ConcurrentTests(unittest.TestCase):
                         state["active"] -= 1
 
             def run(records, record, shape, **kwargs):
+                with lock:
+                    state["active_requests"] += 1
+                    state["peak_requests"] = max(
+                        state["peak_requests"], state["active_requests"]
+                    )
+                if slow_request:
+                    time.sleep(0.15)
+                with lock:
+                    state["active_requests"] -= 1
                 records.update(
                     record,
                     business_finished=True,
@@ -186,6 +203,13 @@ class ConcurrentTests(unittest.TestCase):
                     NS(mock_http_port=1234), endpoint, deadline, {"port": 1235}
                 )
                 self.assertEqual(opening.call_args.kwargs["timeout"], expected)
+
+    def test_slow_requests_overlap_with_bounded_concurrency_and_drain(self):
+        result, state = self.run_program(slow_request=True)
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertGreater(state["peak_requests"], 1)
+        self.assertLessEqual(state["peak_requests"], 8)
+        self.assertEqual(state["active_requests"], 0)
 
     def test_slow_removal_finishes_after_window_before_discovery(self):
         result, state = self.run_program(slow_remove=True)

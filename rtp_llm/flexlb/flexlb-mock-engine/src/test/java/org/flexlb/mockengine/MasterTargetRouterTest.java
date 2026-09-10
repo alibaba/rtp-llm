@@ -95,6 +95,13 @@ class MasterTargetRouterTest {
         assertTrue(outcome.failover);
         assertEquals(MasterTargetRouter.ErrorKind.NONE, outcome.errorKind);
         assertEquals(200, outcome.response.getCode());
+        assertEquals(2, outcome.attempts.size());
+        assertEquals(TARGET_A, outcome.attempts.get(0).target);
+        assertEquals("UNAVAILABLE", outcome.attempts.get(0).status);
+        assertEquals(TARGET_B, outcome.attempts.get(1).target);
+        assertEquals("OK", outcome.attempts.get(1).status);
+        assertEquals(Integer.valueOf(200), outcome.attempts.get(1).responseCode);
+        assertTrue(outcome.attempts.get(0).endedEpochMs >= outcome.attempts.get(0).startedEpochMs);
         // Sticky pointer moved to B: the NEXT request goes straight to B.
         assertEquals(TARGET_B, router.stickyTarget());
         verify(stubA).schedule(any());

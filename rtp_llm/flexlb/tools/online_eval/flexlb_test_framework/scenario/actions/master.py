@@ -61,6 +61,8 @@ class MasterFault:
     started_s: float
     restored: bool = False
     started_epoch_s: float = 0.0
+    injected: bool = False
+    restored_epoch_s: float = 0.0
 
     def cleanup(self, deadline):
         # Keep the original Popen even after EnvManager removes its registry
@@ -93,6 +95,7 @@ def _fault(ctx, params, deadline):
         manager.kill_master9(ctx.env)
     else:
         manager.kill_master9_instance(ctx.env, fault.target)
+    fault.injected = True
     if fault.mode == "kill":
         _invalidate_master_channel(ctx, fault.target)
     deadline.check()
@@ -135,6 +138,7 @@ def _restore(ctx, params, deadline):
         else:
             current = ctx.backend.manager.restart_master_instance(ctx.env, fault.target)
     fault.restored = True
+    fault.restored_epoch_s = time.time()
     deadline.check()
     same = current.pid == fault.process.pid
     if fault.mode == "kill" and not same:
@@ -523,7 +527,7 @@ def _ha_validate(params, plan):
     if p["targets"] not in (["A", "B"], ["B", "A"]):
         raise ValueError("HA targets must explicitly order A and B")
     for key, default, lower, upper in (
-        ("duration_s", 60, 1, 180),
+        ("duration_s", 60, 1, 3600),
         ("timeout_ms", 30000, 100, 30000),
     ):
         p.setdefault(key, default)
@@ -551,6 +555,52 @@ def _ha_validate(params, plan):
 class OwnedHaClient:
     def __init__(self, flow):
         self.flow = flow
+        self.finished = False
+
+    def evidence_snapshot(self):
+        """Persist partial rows even when a failed prerequisite skips finish."""
+        path = self.flow.out_dir / "client_events.jsonl"
+        rows, errors = [], []
+        if path.is_file():
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    if not isinstance(row, dict):
+                        raise ValueError("request event is not an object")
+                    rows.append(row)
+                except (ValueError, TypeError) as exc:
+                    errors.append(f"line {number}: {exc}")
+        else:
+            errors.append("missing client_events.jsonl")
+        # Java writes the final event file only on natural exit. A failed
+        # checkpoint can terminate the producer earlier; keep its live journal
+        # instead of discarding all requests observed before the failure.
+        lifecycle = self.flow.out_dir / "client_lifecycle.jsonl"
+        if not path.is_file() and lifecycle.is_file():
+            from ...ha import LiveClientEvents
+
+            journal = LiveClientEvents(lifecycle)
+            try:
+                journal.read()
+                if journal.pending:
+                    errors.append("incomplete live client journal tail")
+            except (ValueError, TypeError) as exc:
+                errors.append(f"live client journal: {exc}")
+            rows = [
+                journal.terminal.get(rid, issued)
+                for rid, issued in journal.issued.items()
+            ]
+            path = lifecycle
+        if not self.finished:
+            errors.append("HA client finish was not validated")
+        return dict(
+            records=rows,
+            complete=self.finished and bool(rows) and not errors,
+            errors=errors,
+            path=str(path),
+        )
 
     def cleanup(self, deadline):
         process = self.flow.proc
@@ -599,6 +649,7 @@ class OwnedHaClient:
                 or timestamp <= 0
             ):
                 raise ValueError("HA request has no valid issue timestamp")
+        self.finished = True
         return rows, path
 
 

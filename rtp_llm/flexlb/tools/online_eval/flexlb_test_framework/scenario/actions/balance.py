@@ -171,6 +171,7 @@ class Traffic:
             for batch in self.batches:
                 for record in batch.snapshot_records():
                     record["input_len"] = self.params["input_len"]
+                    record["send_due_s"] = batch.send_due_s
                     records.append(record)
             return records
 
@@ -188,7 +189,7 @@ class Traffic:
             + "\n"
         )
 
-    def _one(self):
+    def _one(self, send_due_s):
         from ..backend import RequestBatch
         from ..runtime import Deadline
 
@@ -223,6 +224,7 @@ class Traffic:
                 consume="deferred" if deferred else "immediate",
             ),
         )
+        batch.send_due_s = send_due_s
         batch.artifact = (
             self.ctx.artifact_dir / f"balance-request-{uuid.uuid4().hex}.json"
         )
@@ -250,11 +252,14 @@ class Traffic:
         try:
             with ThreadPoolExecutor(max_workers=self.params["concurrency"]) as pool:
                 futures = []
+                started_s = self.ctx.clock()
                 for i in range(self.params["count"]):
                     if self.cancelled.is_set():
                         break
                     deadline.check()
-                    future = pool.submit(self._one)
+                    future = pool.submit(
+                        self._one, started_s + i * self.params["interval_s"]
+                    )
                     futures.append(future)
                     if self.params["concurrency"] == 1:
                         future.result()

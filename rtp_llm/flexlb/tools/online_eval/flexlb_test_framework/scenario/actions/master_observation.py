@@ -107,7 +107,7 @@ def measurements(rows, pools):
 
 
 def _pools(ctx, deadline, address_field="grpc_addr"):
-    raw = _http(ctx.ops, "snapshot", deadline)
+    raw = _http(ctx.ops, "snapshot?view=topology", deadline)
     pools = {
         role: sorted(r[address_field] for r in raw["engines"] if r["role"] == role)
         for role in ("prefill", "decode")
@@ -365,7 +365,7 @@ def probe_distribution(ctx, p, deadline):
             detail = avoidance(events, ids, engine_names)
             good = healthy and detail["violations"] == 0
         else:
-            detail = rotation(batches, p["max_consecutive"])
+            detail = rotation(batches, p["max_consecutive"], len(pools["prefill"]))
             detail["batches"] = batches
             good = good and healthy and detail["passed"]
         actual["execution"] = detail

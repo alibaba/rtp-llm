@@ -65,9 +65,10 @@ PROMETHEUS_READY_INTERVAL_S = 2.0
 
 
 def _http_get_text(url: str, timeout: float = 5.0) -> Optional[str]:
+    from online_eval.telemetry import http_text
+
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", "replace")
+        return http_text(url, timeout)
     except Exception:
         return None
 

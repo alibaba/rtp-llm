@@ -132,6 +132,7 @@ def render(spec):
             ],
         },
         "timeAxis": spec.get("timeAxis"),
+        "timeOriginLabel": spec.get("timeOriginLabel"),
         "meta": spec.get("meta"),
         "panels": [
             {
@@ -148,6 +149,7 @@ def render(spec):
                     {
                         "name": s.get("name", ""),
                         "data": s.get("data", []),
+                        "points": s.get("points"),
                         "color": s.get("color") or series_color(s.get("tone"), i),
                     }
                     for i, s in enumerate(p.get("series", []))
@@ -176,7 +178,7 @@ _TEMPLATE = r"""<!doctype html>
 body{margin:0;padding:24px;background:var(--bg);color:var(--fg);
   font:14px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
 header{margin-bottom:20px}
-h1{margin:0 0 6px;font-size:22px}
+h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .sub{color:var(--sub)}
 /* KPI 两行（指标五连 + 结果五连）：wrapper 纵向叠行，每行 grid 随
    行内 chip 数自适应列数（JS 注入 inline grid-template-columns）。 */
@@ -221,9 +223,9 @@ h1{margin:0 0 6px;font-size:22px}
   text-transform:uppercase;color:rgba(0,0,0,.38)}
 .detail-env{max-height:280px;overflow:auto;border:1px solid var(--border);
   border-radius:6px;padding:6px 10px;background:rgba(0,0,0,.015)}
-.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}
-.panel h3{margin:0 0 4px;font-size:15px}
+.panel h3{margin:0 0 4px;font-size:15px;overflow-wrap:anywhere}
 .panel .cap{color:var(--sub);font-size:12px;margin-bottom:8px}
 .panel .box{height:280px;position:relative}
 .hint{margin-top:24px;color:var(--sub);font-size:12px}
@@ -273,10 +275,10 @@ if (SPEC.summary.kpis.length)
   const t = meta.timeAxis;
   if (t && typeof t.tEnd==='number' && t.tEnd>0){
     const line=(html)=>{ const p=document.createElement('p'); p.innerHTML=html; box.appendChild(p); };
-    line('t=0 = 压测正式开始（warmup 后）');
+    line(SPEC.timeOriginLabel || 't=0 = 压测正式开始（warmup 后）');
     line('T_END=<b>'+t.tEnd+'s</b> 含收尾排空');
     line('全部时序面板统一 <b>[0, '+t.tEnd+']</b>');
-    line('warmup 负值段被轴裁剪（数据保留）');
+    line('负值区间不显示，原始数据保留');
   } else {
     box.textContent='无统一时间轴（报告不含时序面板）';
   }
@@ -415,7 +417,7 @@ SPEC.panels.forEach(p=>{
       labels: isTime ? undefined : p.x,
       datasets:p.series.map(s=>({
         label:s.name,
-        data: isTime ? s.data.map((v,i)=>({x:p.xNums[i], y:v})) : s.data,
+        data: isTime ? (s.points || s.data.map((v,i)=>({x:p.xNums[i], y:v}))) : s.data,
         borderColor:s.color, backgroundColor:s.color+'33',
         borderWidth:1.5, pointRadius:0, tension:0.15, fill:false,
       }))
@@ -488,7 +490,7 @@ SPEC.panels.forEach(p=>{
 if (TIME_AXIS){
   // 页脚时间轴口径声明（与头部元数据面板标注一致，防止报告被断章取义）
   const note=document.createElement('div');
-  note.textContent='时间轴口径：t=0 = 压测正式开始（warmup 后）；T_END='+TA_MAX+'s = 全部时序面板最后采样点（含收尾排空）；全部时序面板 x 轴统一 [0, '+TA_MAX+']，warmup 负值段被轴裁剪（数据保留）。';
+  note.textContent='时间轴口径：'+(SPEC.timeOriginLabel || 't=0 = 压测正式开始（warmup 后）')+'；T_END='+TA_MAX+'s = 全部时序面板最后采样点（含收尾排空）；全部时序面板 x 轴统一 [0, '+TA_MAX+']，负值区间不显示，原始数据保留。';
   document.getElementById('hint').appendChild(note);
 }
 </script></body></html>

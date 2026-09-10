@@ -555,7 +555,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate  # Fetch during dispatch; do not hold the wave behind its own leases.
       stream_timeout_s: 30
       post_issue_delay_s: 0.12
     wave_terminal_timeout_s: 30

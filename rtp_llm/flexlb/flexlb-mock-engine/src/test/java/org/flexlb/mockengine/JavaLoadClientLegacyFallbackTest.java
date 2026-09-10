@@ -53,10 +53,14 @@ class JavaLoadClientLegacyFallbackTest {
     private static final String UNREACHABLE_ENGINE = "127.0.0.1:2";
 
     private JavaLoadClient legacyClient(boolean enableFallback) {
+        return legacyClient(enableFallback, false);
+    }
+
+    private JavaLoadClient legacyClient(boolean enableFallback, boolean fetch) {
         JavaLoadClient.Config config = new JavaLoadClient.Config(
                 "trace.jsonl", "127.0.0.1:7001", UNREACHABLE_MASTER,
                 0, 4, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
-                2_000L, 500.0, false, false, 1, 1, 0L, 120, true,
+                2_000L, 500.0, fetch, false, 1, 1, 0L, 120, true,
                 "engine_service", "",
                 false, 10, 1000, 0, 0, "",
                 enableFallback, "", false);
@@ -123,6 +127,10 @@ class JavaLoadClientLegacyFallbackTest {
             assertTrue(result.error.startsWith("master="), result.error);
             assertTrue(result.error.contains("; fallback="), result.error);
             assertEquals("transport", result.errorKind);
+            assertEquals(1, result.scheduleAttempts.size());
+            assertEquals(UNREACHABLE_MASTER, result.scheduleAttempts.get(0).target);
+            assertEquals("UNAVAILABLE", result.scheduleAttempts.get(0).status);
+            assertTrue(result.scheduleAttempts.get(0).endedEpochMs >= result.scheduleAttempts.get(0).startedEpochMs);
         } finally {
             closeClient(client);
         }
@@ -149,4 +157,58 @@ class JavaLoadClientLegacyFallbackTest {
             closeClient(client);
         }
     }
+    @Test
+    @Timeout(30)
+    void permitAndInflightRemainHeldUntilFetchCompletes() throws Exception {
+        var opened = new java.util.concurrent.CountDownLatch(1);
+        var observer = new java.util.concurrent.atomic.AtomicReference<
+                io.grpc.stub.StreamObserver<org.flexlb.engine.grpc.EngineRpcService.GenerateOutputsPB>>();
+        io.grpc.Server engine = io.grpc.netty.NettyServerBuilder.forPort(0).addService(
+                new org.flexlb.engine.grpc.RpcServiceGrpc.RpcServiceImplBase() {
+                    @Override public void fetchResponse(
+                            org.flexlb.engine.grpc.EngineRpcService.FetchRequestPB request,
+                            io.grpc.stub.StreamObserver<org.flexlb.engine.grpc.EngineRpcService.GenerateOutputsPB> output) {
+                        observer.set(output);
+                        opened.countDown();
+                    }
+                }).build().start();
+        JavaLoadClient client = legacyClient(false, true);
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        Semaphore permit = new Semaphore(1);
+        try {
+            Field field = JavaLoadClient.class.getDeclaredField("scheduleStubs");
+            field.setAccessible(true);
+            var stubs = (FlexlbServiceGrpc.FlexlbServiceBlockingStub[]) field.get(client);
+            var stub = mock(FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
+                    withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
+            org.mockito.Mockito.when(stub.schedule(any())).thenReturn(
+                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                            .setCode(200).setSuccess(true).setEnqueuedByMaster(true)
+                            .addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                                    .setRole("PREFILL").setServerIp("127.0.0.1").setGrpcPort(engine.getPort()))
+                            .build());
+            stubs[0] = stub;
+            Method method = JavaLoadClient.class.getDeclaredMethod("handleRequest",
+                    JavaLoadClient.TraceRecord.class, Semaphore.class, double.class);
+            method.setAccessible(true);
+            var future = executor.submit(() -> (JavaLoadClient.RequestResult)
+                    method.invoke(client, rec(1), permit, 0.0));
+            assertTrue(opened.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(1, client.inflightCount.get());
+            assertEquals(0, client.scheduleInflightCount.get());
+            assertFalse(permit.tryAcquire(), "a held Fetch must retain the request permit");
+            observer.get().onNext(org.flexlb.engine.grpc.EngineRpcService.GenerateOutputsPB.newBuilder()
+                    .setFlattenOutput(org.flexlb.engine.grpc.EngineRpcService.FlattenOutputPB.newBuilder()
+                            .addFinished(true)).build());
+            observer.get().onCompleted();
+            assertEquals("ok", future.get(5, java.util.concurrent.TimeUnit.SECONDS).status);
+            assertEquals(0, client.inflightCount.get());
+            assertEquals(1, permit.availablePermits());
+        } finally {
+            executor.shutdownNow();
+            closeClient(client);
+            engine.shutdownNow().awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+        }
+    }
+
 }

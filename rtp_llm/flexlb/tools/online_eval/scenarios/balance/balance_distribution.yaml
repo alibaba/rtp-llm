@@ -9,7 +9,19 @@ execution:
   timeout_s: 1800
   stage_timeout_s: 60
   cleanup_timeout_s: 120
+parameter_schema:
+  sustained_mix.windows:
+    integer: true
+    minimum: 1
+    maximum: 60
 variants:
+- id: sustained_mix
+  program: sustained_mix
+  profiles:
+  - batch-window
+  environment:
+    n_prefill: 4
+    n_decode: 8
 - id: uniform_serial
   program: uniform_serial
   profiles:
@@ -43,6 +55,30 @@ metadata:
   description: Explicit balance stages preserving client landing, token share, Decode deltas and latency
     contracts.
 parameters:
+  sustained_mix:
+    setup_timeout_s: 180
+    fleet:
+      role: prefill
+    windows: 12
+    load:
+      count: 50
+      concurrency: 20
+      input_len: 2048
+      output_len: 2
+      interval_s: 0.1
+      stream_timeout_s: 15
+      unique_keys: true
+      defer_batch: false
+      await_completion: true
+    drain_timeout_s: 90
+    complete:
+      metric: complete
+      property: P6
+      allow_admission: false
+      min_success: 50
+    interval:
+      seconds: 0.2
+    teardown_timeout_s: 120
   uniform_serial:
     setup_timeout_s: 180
     fleet_timeout_s: 60

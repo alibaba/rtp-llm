@@ -228,6 +228,23 @@ class PythonCompatControlApiTest {
     // ════════════════════════════════════════════════════════════════
 
     @Test
+    void topologyViewOmitsUnboundedHistoryAndRetainsEngineIdentity() throws Exception {
+        startCluster(model("10", 0.1), 1, 2);
+        JsonNode topology = MAPPER.readTree(httpGet("/snapshot?view=topology"));
+        assertEquals(3, topology.get("engines").size());
+        JsonNode engine = topology.get("engines").get(0);
+        assertEquals("prefill-0", engine.get("name").asText());
+        assertEquals("prefill", engine.get("role").asText());
+        assertTrue(engine.has("grpc_addr"));
+        assertTrue(engine.has("http_addr"));
+        assertFalse(engine.get("engine_incarnation").asText().isEmpty());
+        assertFalse(engine.has("request_lifecycle"));
+        assertEquals(5, engine.size());
+        assertTrue(MAPPER.readTree(httpGet("/snapshot")).get("engines").get(0)
+                .has("request_lifecycle"));
+    }
+
+    @Test
     void snapshotHasPythonSchemaAndFields() throws Exception {
         startCluster(model("10", 0.1), 1, 2);
 

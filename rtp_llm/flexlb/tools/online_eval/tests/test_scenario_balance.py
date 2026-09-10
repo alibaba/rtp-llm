@@ -225,11 +225,11 @@ class BalanceTests(unittest.TestCase):
                 sleeper=clock.sleep,
             )
 
-    def test_shipped_catalog_six_contracts_all_profiles(self):
+    def test_shipped_catalog_contracts_and_sustained_window(self):
         plans = self.plans()
         self.assertEqual(
             plan_counts(plans),
-            dict(logical_scenarios=2, variants=6, instances=24, checks=180),
+            dict(logical_scenarios=2, variants=7, instances=25, checks=192),
         )
         for plan in plans:
             with self.subTest(plan=plan["id"]):

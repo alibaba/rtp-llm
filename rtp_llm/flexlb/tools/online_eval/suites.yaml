@@ -3,8 +3,13 @@ schema_version: 1
 workload_runtime:
   capture_metrics: true
   sample_interval_s: 1.0
+  sample_history_limit: 128
+  max_sample_gap_s: 5.0
   collector_shutdown_s: 10.0
 cases:
+  balance_distribution::sustained_mix:
+    kind: workload
+    reason: Twelve paced windows with full request completion and continuous telemetry
   admission_queue::queue_depth:
     kind: functional
     reason: Bounded protocol, state or admission contract
@@ -48,23 +53,23 @@ cases:
     kind: functional
     reason: Bounded protocol, state or admission contract
   balance_distribution::uniform_serial:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite request cohorts test placement and completion; no sustained traffic window
   balance_distribution::concurrent_mix:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite request cohorts test placement and completion; no sustained traffic window
   balance_distribution::decode_spread:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite request cohorts test placement and completion; no sustained traffic window
   balance_distribution::length_mixed:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite request cohorts test placement and completion; no sustained traffic window
   balance_overload_transfer::decode_pressure:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite capacity-pressure routing contract with a bounded request cohort
   balance_overload_transfer::prefill_pressure:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite occupied-engine routing contract with a bounded request cohort
   cancel_fence_settlement::engine_notfound_settle_batch:
     kind: functional
     reason: Bounded protocol, state or admission contract
@@ -159,17 +164,17 @@ cases:
     kind: functional
     reason: Bounded protocol, state or admission contract
   elastic_added_worker_fault::default:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Bounded added-worker serve, stop and restart contracts
   elastic_added_worker_fault::single_batch:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Bounded added-worker serve, stop and restart contracts
   elastic_added_worker_fault::single_nonbatch:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Bounded added-worker serve, stop and restart contracts
   elastic_added_worker_fault::window_nonbatch:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Bounded added-worker serve, stop and restart contracts
   elastic_concurrent_mutation::default:
     kind: workload
     reason: Multi-window load, topology or recovery lifecycle
@@ -204,8 +209,8 @@ cases:
     kind: workload
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::rebalance:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite before/after-add placement contract; no sustained producer
   elastic_lifecycle::kv_skew_hot:
     kind: workload
     reason: Multi-window load, topology or recovery lifecycle
@@ -222,14 +227,14 @@ cases:
     kind: workload
     reason: Multi-window load, topology or recovery lifecycle
   elastic_lifecycle::rebalance_single_batch:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite before/after-add placement contract; no sustained producer
   elastic_lifecycle::rebalance_single_nonbatch:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite before/after-add placement contract; no sustained producer
   elastic_lifecycle::rebalance_window_nonbatch:
-    kind: workload
-    reason: Multi-window load, topology or recovery lifecycle
+    kind: functional
+    reason: Finite before/after-add placement contract; no sustained producer
   elastic_lifecycle::normal_single_batch:
     kind: workload
     reason: Multi-window load, topology or recovery lifecycle

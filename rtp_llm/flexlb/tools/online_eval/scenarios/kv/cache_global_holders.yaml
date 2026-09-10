@@ -1083,7 +1083,7 @@ parameters:
       - 810008
       - 810009
       stream_timeout_s: 30
-      consume: deferred
+      consume: immediate  # Fetch during dispatch; do not hold the wave behind its own leases.
       post_issue_delay_s: 0.12
     wave_terminal_timeout_s: 30
     spread:
@@ -2501,7 +2501,7 @@ parameters:
       - 810008
       - 810009
       stream_timeout_s: 30
-      consume: deferred
+      consume: immediate  # Fetch during dispatch; do not hold the wave behind its own leases.
       post_issue_delay_s: 0.12
     wave_terminal_timeout_s: 30
     spread:

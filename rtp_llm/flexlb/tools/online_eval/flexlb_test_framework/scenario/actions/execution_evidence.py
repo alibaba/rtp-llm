@@ -80,7 +80,7 @@ def avoidance(events, request_ids, engines):
     return dict(batches=evidence, violations=sum(x["violation"] for x in evidence))
 
 
-def rotation(batches, max_consecutive):
+def rotation(batches, max_consecutive, expected_engine_count):
     sequence = [b["engine"] for b in batches]
     longest = run = 0
     previous = None
@@ -91,7 +91,8 @@ def rotation(batches, max_consecutive):
     return dict(
         sequence=sequence,
         max_consecutive=longest,
-        passed=len(set(sequence)) == 2 and longest <= max_consecutive,
+        passed=len(set(sequence)) == expected_engine_count
+        and longest <= max_consecutive,
     )
 
 

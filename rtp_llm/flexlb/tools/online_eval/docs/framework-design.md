@@ -73,7 +73,21 @@ YAML 保存全部用例配置：P/D 规模、profile、输入数据、时间预�
 | observation / snapshot / window | 观测、某一时刻的状态快照及采样区间。每项检查必须定义采样起点与窗口。 |
 | evidence / artifact | 判定依据及保存这些依据、日志、配置和结果的文件。 |
 | fixture / fake backend | 使用可控返回值验证框架行为的测试准备，不代表真实 Java 业务通过。 |
-| legacy / migration / baseline | 保留的旧 Python 用例、向新结构迁移的过程及冻结的契约基线。 |
+| legacy / migration / baseline | 历史实现、迁移过程及冻结的对照基线；旧用例目录已删除，不是当前可选执行入口。 |
+
+### 两类测试与观测完整性
+
+| 术语 | 含义 |
+|---|---|
+| functional | 有限请求和可控前置条件下的功能合同；操作失败后依赖步骤停止。 |
+| workload | 多窗口、持续发射或多轮故障/恢复场景；独立观测可以继续，前置操作失败仍阻断依赖。 |
+| suite | 按测试目的选择的集合，由 `suites.yaml` 登记；与业务 category、运行 profile 独立。 |
+| collector / shared sample | 每个环境的采集器；Mock 的破坏性计数只由一个采集器读取，断言和报告共用同一序列。 |
+| collection gap | 采集失败或采样间隔超预算。非预期缺口使运行证据 INVALID。动态标签暂时没有值属于指标缺值，曲线保留断点。 |
+| runtime validity | 证据是否完整，与业务断言是否通过独立。INVALID 不能产生 PASS 或有效探针裁决，原裁决保留在 `prior_status`。 |
+| attempt | 一次实际 Schedule RPC，包括目标、时间、传输结果；同一请求重试保留多次 attempt。 |
+| master incarnation / engine incarnation | 测试侧观察到的进程代次。与产品维护的 endpoint generation 分开；未观测到的值保持空，不用猜测值补齐。 |
+| preconditioning | 为构造缓存等前置状态而发出的请求；保留请求及引擎关联，单独统计，不混入正式测量的 master 调度计数。 |
 
 ## 2. 分层与执行路径
 
