@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"

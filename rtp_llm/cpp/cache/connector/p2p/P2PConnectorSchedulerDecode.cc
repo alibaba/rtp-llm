@@ -126,7 +126,15 @@ P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        pl
                                      std::min(logical_count, window_begin + static_cast<size_t>(block_range.second)) :
                                      logical_count;
 
+    // route 按 destination worker_rank 下发，物理块投影必须用该 worker 的本地 CP rank
+    // （ShardLayout::cpRank 语义：rank % cpSize）。config_.cp_rank 只是当前 scheduler
+    // 实例的投影，不能代表所有 broadcast 目标。CP size 与 planner 的 ShardLayout::cpSize()
+    // 保持一致（kv_cache_sharded ? tp_size : 1）。
+    const int cp_size = config_.parallelism_config.prefill_cp_config.kv_cache_sharded ?
+                            static_cast<int>(config_.parallelism_config.tp_size) :
+                            1;
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
+        const int worker_cp_rank = cp_size > 1 ? static_cast<int>(worker_rank % cp_size) : 0;
         for (const auto* route : plan.forDecodeRank(static_cast<int>(worker_rank))) {
             auto positions = KVCacheTransferPlanner::resolveKeys(route->src_keys, logical_count);
             // block_range 窗口只在 decode 侧叠加在 resolveKeys 结果之上。
@@ -142,8 +150,8 @@ P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        pl
                                                                          *config_.topology,
                                                                          route->cache_tag,
                                                                          positions,
-                                                                         config_.cp_rank,
-                                                                         config_.cp_size);
+                                                                         worker_cp_rank,
+                                                                         cp_size);
             if (layer_buffers.empty()) {
                 continue;
             }

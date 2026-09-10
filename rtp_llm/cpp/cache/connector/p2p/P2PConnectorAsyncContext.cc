@@ -184,7 +184,11 @@ void P2PConnectorAsyncReadContext::applyMergedReadOutcome(const MergedReadOutcom
 
     const bool read_result_unconfirmed =
         !no_transfer_ && tp_sync_result_ && tp_sync_result_->done() && !tp_sync_result_->success();
-    if (!success && lease_query_timeout_ms_ > 0 && read_result_unconfirmed) {
+    // StartLoad can report an unconfirmed transfer even when the READ RPC succeeded.
+    // Inspect the original outcome before its deadline error is normalized above.
+    const bool holdable_outcome = outcome.error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE
+                                  || outcome.error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED;
+    if (!success && lease_query_timeout_ms_ > 0 && (read_result_unconfirmed || holdable_outcome)) {
         beginLeaseHold();
         const int64_t hold_until_ms = lease_hold_until_ms_.load(std::memory_order_relaxed);
         RTP_LLM_LOG_WARNING("[PD-DIAG] %s, retaining Decode target blocks until physical completion, unique_key=%s, "

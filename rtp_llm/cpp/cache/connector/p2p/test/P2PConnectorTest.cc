@@ -358,7 +358,10 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
 
-    auto* layer_block = p2p_request->add_layer_blocks();
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("group0");
+    auto* layer_block = route->add_layer_blocks();
     layer_block->set_layer_id(3);
     layer_block->add_cache_keys(101);
     layer_block->add_cache_keys(102);
@@ -371,7 +374,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     EXPECT_NE(response.p2p_response().error_message().find("cache_keys size 2 != block_ids size 1"), std::string::npos);
 }
 
-TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestIsImplicitlyEmpty) {
+TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRouteHasNoLayerBlocks) {
     auto decode_connector =
         std::make_unique<P2PConnector>(createDecodeConfig(), mock_layer_block_converter_, nullptr);
     ASSERT_TRUE(decode_connector->init());
@@ -379,13 +382,20 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestIsImplicitl
     FunctionRequestPB request;
     auto* p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
-    p2p_request->set_unique_key("empty-read");
+    p2p_request->set_unique_key("empty-route-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
+    // 「routes 为空」是权威的"本 worker 无任务"信号（见
+    // ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplicit）；但声明了 route 却不带
+    // 任何 layer_blocks 仍是 malformed 请求。
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("group0");
 
     FunctionResponsePB response;
     EXPECT_FALSE(decode_connector->executeFunction(request, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_NE(response.p2p_response().error_message().find("no layer blocks"), std::string::npos);
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplicit) {
@@ -445,7 +455,10 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidB
     p2p_request->set_unique_key("invalid-block-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
-    auto* layer_block = p2p_request->add_layer_blocks();
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("full");
+    auto* layer_block = route->add_layer_blocks();
     layer_block->set_layer_id(0);
     layer_block->set_cache_tag("full");
     layer_block->add_cache_keys(101);
@@ -477,8 +490,11 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLaye
     p2p_request->set_unique_key("duplicate-layer-tag-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("full");
     for (int block_id = 1; block_id <= 2; ++block_id) {
-        auto* layer_block = p2p_request->add_layer_blocks();
+        auto* layer_block = route->add_layer_blocks();
         layer_block->set_layer_id(0);
         layer_block->set_cache_tag("full");
         layer_block->add_cache_keys(100 + block_id);
