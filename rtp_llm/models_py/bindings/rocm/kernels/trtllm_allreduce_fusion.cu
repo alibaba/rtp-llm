@@ -21,6 +21,7 @@
 #include <torch/all.h>
 
 #include "rtp_llm/models_py/bindings/rocm/kernels/trtllm_allreduce_fusion.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/trtllm_allreduce_sync.cuh"
 
 using namespace std;
 using namespace at;
@@ -41,18 +42,6 @@ static_assert(!shouldUseOneStageAllReduce(64, 8, 80 * 1024));
 namespace details {
 
 static constexpr int kBytesPerAccess = 16;
-
-template<bool RELAXED = true>
-__device__ __forceinline__ void st_flag(int* addr, int flag) {
-    __scoped_atomic_store_n(addr, flag, RELAXED ? __ATOMIC_RELAXED : __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-}
-
-template<bool RELAXED = true>
-__device__ __forceinline__ int ld_flag(int* addr) {
-    int flag;
-    flag = __scoped_atomic_load_n(addr, RELAXED ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
-    return flag;
-}
 
 }  // namespace details
 
@@ -256,14 +245,6 @@ using namespace kernel_utils;
 #define WARP_SIZE 32
 #define MAX_RANKS 8
 
-template<int NRanks>
-struct CommDeviceMeta {
-    void* barrier_flag_ptrs[NRanks];
-    void* sync_clock;
-    int   rank;
-    int   nranks;
-};
-
 struct CommMeta {
     void* barrier_flag_ptrs[MAX_RANKS];
     void* sync_clock;
@@ -284,41 +265,6 @@ struct CachedSlot {
     CommPtrs* comm_ptrs;
     void*     range_start;
     size_t    range_size;
-};
-
-template<int NRanks>
-struct SyncComm {
-    __device__ __forceinline__ SyncComm(CommDeviceMeta<NRanks>& meta) {
-        flag_ptr = ((int*)meta.sync_clock) + blockIdx.x;
-        int rank = meta.rank;
-        if (threadIdx.x < NRanks) {
-            int target_rank = threadIdx.x;
-            target_flag     = reinterpret_cast<int*>(meta.barrier_flag_ptrs[target_rank]) + blockIdx.x * NRanks + rank;
-            current_flag    = reinterpret_cast<int*>(meta.barrier_flag_ptrs[rank]) + blockIdx.x * NRanks + target_rank;
-        }
-        flag = *flag_ptr;
-    }
-
-    template<bool RELAXED = true, bool FINAL = true>
-    __device__ __forceinline__ void sync() {
-        __syncthreads();
-        flag += 1;
-        if (threadIdx.x < NRanks) {
-            details::st_flag<RELAXED>(target_flag, flag);
-            while (details::ld_flag<RELAXED>(current_flag) < flag) {}
-        }
-        __syncthreads();
-        if constexpr (FINAL) {
-            if (threadIdx.x == 0) {
-                *flag_ptr = flag;
-            }
-        }
-    }
-
-    int* flag_ptr;
-    int* target_flag;
-    int* current_flag;
-    int  flag;
 };
 
 enum QuantType {
@@ -1016,8 +962,8 @@ public:
                         hipGetErrorString(err));
         };
 
-        size_t sync_clock_bytes    = max_thread_blocks_ * sizeof(int);
-        size_t barrier_flags_bytes = max_thread_blocks_ * world_size_ * sizeof(int);
+        size_t sync_clock_bytes    = max_thread_blocks_ * sizeof(SyncEpoch);
+        size_t barrier_flags_bytes = max_thread_blocks_ * world_size_ * sizeof(SyncEpoch);
         size_t data_bytes          = static_cast<size_t>(size_in_bytes_) * 2;
         size_t comm_ptrs_bytes     = comm_ptrs_buf_len_ * sizeof(CommPtrs);
 
