@@ -473,7 +473,9 @@ class TransientCapacityQueueContractTest {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering("FIFO".equals(ordering)
                 ? new QueueOrderingConfig() : QueueOrderingConfig.priority());
+        ((QueueOrderingConfig) config.queueScheduler().getOrdering()).setPreemption(null);
         config.getDispatcher().setType(delivery);
+        assertEquals(DecodeMode.WAIT_AT_DISPATCH, DecodeMode.from(config));
 
         try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
             CompletableFuture<Response> waiting = fixture.runtime.scheduler().submit(
