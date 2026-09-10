@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <thread>
 #include <gtest/gtest.h>
@@ -6,6 +7,7 @@
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
@@ -23,6 +25,15 @@ namespace rtp_llm {
 
 class P2PConnectorSchedulerTest: public ::testing::Test {
 protected:
+    struct AllocatedConnectorResource {
+        CacheConfig                                 config;
+        std::shared_ptr<SingleTypeKVCacheAllocator> allocator;
+        KVCacheResourcePtr                          resource;
+        BlockIdList                                 blocks;
+        size_t                                      free_blocks_before{0};
+        size_t                                      held_blocks{0};
+    };
+
     void SetUp() override {
         // 创建测试用的 RPC 服务器（用于 P2PBroadcastClient）
         for (int i = 0; i < 2; ++i) {
@@ -92,6 +103,62 @@ protected:
     KVCacheResourcePtr createInvalidKVCacheResource() {
         auto resource = std::make_shared<KVCacheResource>();
         return resource;
+    }
+
+    AllocatedConnectorResource createAllocatedConnectorResource() {
+        AllocatedConnectorResource result;
+        result.config = test::makeSimpleMhaCacheConfig(
+            /*layer_num=*/2, /*block_num=*/8, /*tokens_per_block=*/1, DataType::TYPE_FP16);
+        result.allocator = std::make_shared<SingleTypeKVCacheAllocator>(result.config, AllocationType::HOST);
+        EXPECT_TRUE(result.allocator->init());
+
+        auto block_pool = result.allocator->getDeviceBlockPool();
+        EXPECT_NE(block_pool, nullptr);
+        result.free_blocks_before = result.allocator->freeBlocksNum();
+        result.blocks             = block_pool->malloc(2).value();
+        result.held_blocks        = result.blocks.size();
+        block_pool->incRef(result.blocks);
+
+        KVCacheResource source;
+        source.initGroups(result.config.topologyPtr());
+        source.cacheKeys() = {101, 102};
+        source.mutableBlockIds(0).assign(result.blocks);
+        result.resource = result.allocator->incrKVCacheRef(source, source.cacheKeys(), /*is_connector=*/true);
+        block_pool->decRef(result.blocks);
+        EXPECT_NE(result.resource, nullptr);
+        EXPECT_EQ(result.allocator->freeBlocksNum(), result.free_blocks_before - result.held_blocks);
+        for (const auto block : result.blocks) {
+            EXPECT_EQ(block_pool->refCount(block), 1);
+        }
+        return result;
+    }
+
+    bool allBlockRefsEqual(const AllocatedConnectorResource& allocated, uint32_t expected) const {
+        const auto block_pool = allocated.allocator->getDeviceBlockPool();
+        return std::all_of(allocated.blocks.begin(), allocated.blocks.end(), [&](BlockIdxType block) {
+            return block_pool->refCount(block) == expected;
+        });
+    }
+
+    void rebuildSchedulerForDeadlineTest(const std::shared_ptr<const CacheTopology>& topology) {
+        P2PConnectorSchedulerConfig cfg;
+        cfg.worker_grpc_addrs                  = tp_broadcast_addrs_;
+        cfg.worker_addrs                       = {
+            "127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort())};
+        cfg.topology                           = topology;
+        cfg.load_cache_timeout_ms              = 80;
+        cfg.p2p_cancel_broadcast_timeout_ms    = 50;
+        cfg.p2p_lease_query_timeout_ms         = 10000;
+        rebuildSchedulers(std::move(cfg));
+    }
+
+    template<typename Predicate>
+    bool waitUntil(Predicate predicate, int timeout_ms = 2000) {
+        const int64_t deadline_ms = currentTimeMs() + timeout_ms;
+        while (!predicate() && currentTimeMs() < deadline_ms) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return predicate();
     }
 
     // 等待 async context 完成，调用 checkDone() 以便异常在测试线程中抛出
@@ -1031,6 +1098,155 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroTimeoutStillReta
     EXPECT_FALSE(async_context->success());
     EXPECT_EQ(async_context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
     EXPECT_TRUE(async_context->resourceHoldPending());
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_StartLoadTimeout_HoldsTargetUntilAllRanksStop) {
+    auto allocated = createAllocatedConnectorResource();
+    rebuildSchedulerForDeadlineTest(allocated.config.topologyPtr());
+    prefill_server_->service()->setStartLoadSleepMillis(500);
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setLeaseStatus(true, 1, 0, false);
+    }
+
+    auto result = decode_scheduler_->asyncRead(
+        allocated.resource, createMockMeta(5100, "start_load_timeout_hold", currentTimeMs() + 5000), {0, -1});
+    allocated.resource.reset();
+    ASSERT_TRUE(result.ok());
+    auto context = result.context;
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(waitUntil([&]() { return context->done(); }));
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    ASSERT_TRUE(waitUntil([&]() {
+        return tp_broadcast_servers_[0]->service()->getP2PRequestCallCount(
+                   P2PConnectorBroadcastType::QUERY_LEASE_STATUS)
+               > 0;
+    }));
+    EXPECT_EQ(allocated.allocator->freeBlocksNum(), allocated.free_blocks_before - allocated.held_blocks);
+    EXPECT_TRUE(allBlockRefsEqual(allocated, 1));
+
+    std::weak_ptr<P2PConnectorAsyncReadContext> weak_context = context;
+    context.reset();
+    result.context.reset();
+    EXPECT_FALSE(weak_context.expired());
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setLeaseStatus(true, 1, 1, true);
+    }
+    EXPECT_TRUE(waitUntil([&]() { return allocated.allocator->freeBlocksNum() == allocated.free_blocks_before; }));
+    EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
+    EXPECT_TRUE(weak_context.expired());
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReadPerRankTimeout_WaitsForEveryRankLease) {
+    auto allocated = createAllocatedConnectorResource();
+    rebuildSchedulerForDeadlineTest(allocated.config.topologyPtr());
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::READ, 500);
+        server->service()->setLeaseStatus(true, 1, 0, false);
+    }
+
+    auto result = decode_scheduler_->asyncRead(
+        allocated.resource, createMockMeta(5101, "read_per_rank_timeout_hold", currentTimeMs() + 5000), {0, -1});
+    allocated.resource.reset();
+    ASSERT_TRUE(result.ok());
+    auto context = result.context;
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(waitUntil([&]() { return context->done(); }));
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    ASSERT_TRUE(waitUntil([&]() {
+        return tp_broadcast_servers_[1]->service()->getP2PRequestCallCount(
+                   P2PConnectorBroadcastType::QUERY_LEASE_STATUS)
+               > 0;
+    }));
+
+    tp_broadcast_servers_[0]->service()->setLeaseStatus(true, 1, 1, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_EQ(allocated.allocator->freeBlocksNum(), allocated.free_blocks_before - allocated.held_blocks);
+    EXPECT_TRUE(allBlockRefsEqual(allocated, 1));
+
+    tp_broadcast_servers_[1]->service()->setLeaseStatus(true, 1, 1, true);
+    ASSERT_TRUE(waitUntil([&]() { return !context->resourceHoldPending(); }));
+    context.reset();
+    result.context.reset();
+    EXPECT_TRUE(waitUntil([&]() { return allocated.allocator->freeBlocksNum() == allocated.free_blocks_before; }));
+    EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelTimeout_DoesNotQueryOrReleaseTargetEarly) {
+    auto allocated = createAllocatedConnectorResource();
+    rebuildSchedulerForDeadlineTest(allocated.config.topologyPtr());
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::READ, 500);
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::CANCEL_READ, 200);
+        server->service()->setLeaseStatus(true, 1, 1, true);
+    }
+
+    auto result = decode_scheduler_->asyncRead(
+        allocated.resource, createMockMeta(5102, "cancel_timeout_hold", currentTimeMs() + 5000), {0, -1});
+    allocated.resource.reset();
+    ASSERT_TRUE(result.ok());
+    auto context = result.context;
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(waitUntil([&]() { return context->done(); }));
+    ASSERT_TRUE(waitUntil([&]() {
+        return tp_broadcast_servers_[0]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::CANCEL_READ)
+               > 0;
+    }));
+    EXPECT_EQ(tp_broadcast_servers_[0]->service()->getP2PRequestCallCount(
+                  P2PConnectorBroadcastType::QUERY_LEASE_STATUS),
+              0);
+    EXPECT_EQ(allocated.allocator->freeBlocksNum(), allocated.free_blocks_before - allocated.held_blocks);
+    EXPECT_TRUE(allBlockRefsEqual(allocated, 1));
+
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::CANCEL_READ, 0);
+    }
+    ASSERT_TRUE(waitUntil([&]() {
+        return tp_broadcast_servers_[0]->service()->getP2PRequestCallCount(
+                   P2PConnectorBroadcastType::QUERY_LEASE_STATUS)
+               > 0;
+    }));
+    ASSERT_TRUE(waitUntil([&]() { return !context->resourceHoldPending(); }));
+    context.reset();
+    result.context.reset();
+    EXPECT_TRUE(waitUntil([&]() { return allocated.allocator->freeBlocksNum() == allocated.free_blocks_before; }));
+    EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_QueryTimeout_RetainsTargetUntilRetryConfirmsStop) {
+    auto allocated = createAllocatedConnectorResource();
+    rebuildSchedulerForDeadlineTest(allocated.config.topologyPtr());
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::READ, 500);
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::QUERY_LEASE_STATUS, 700);
+        server->service()->setLeaseStatus(true, 1, 1, true);
+    }
+
+    auto result = decode_scheduler_->asyncRead(
+        allocated.resource, createMockMeta(5103, "query_timeout_hold", currentTimeMs() + 5000), {0, -1});
+    allocated.resource.reset();
+    ASSERT_TRUE(result.ok());
+    auto context = result.context;
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(waitUntil([&]() { return context->done(); }));
+    ASSERT_TRUE(waitUntil([&]() {
+        return tp_broadcast_servers_[0]->service()->getP2PRequestCallCount(
+                   P2PConnectorBroadcastType::QUERY_LEASE_STATUS)
+               > 0;
+    }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(550));
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_EQ(allocated.allocator->freeBlocksNum(), allocated.free_blocks_before - allocated.held_blocks);
+    EXPECT_TRUE(allBlockRefsEqual(allocated, 1));
+
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::QUERY_LEASE_STATUS, 0);
+    }
+    ASSERT_TRUE(waitUntil([&]() { return !context->resourceHoldPending(); }));
+    context.reset();
+    result.context.reset();
+    EXPECT_TRUE(waitUntil([&]() { return allocated.allocator->freeBlocksNum() == allocated.free_blocks_before; }));
+    EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
 }
 
 }  // namespace rtp_llm

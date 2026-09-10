@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <atomic>
+#include <map>
 #include <mutex>
 
 namespace rtp_llm {
@@ -21,6 +22,9 @@ public:
                                       const ::GenerateInputPB*                   request,
                                       ::grpc::ServerWriter<::GenerateOutputsPB>* writer) override;
     void           setSleepMillis(int ms);
+    void           setStartLoadSleepMillis(int ms);
+    void           setP2PRequestSleepMillis(P2PConnectorBroadcastType type, int ms);
+    void           setLeaseStatus(bool sealed, int started_ops, int finished_ops, bool stopped);
     void           setP2PResponseSuccess(bool success);
     void           setOmitP2PResponse(bool omit);
     void           setStartLoadResponseSuccess(bool success);
@@ -34,6 +38,7 @@ public:
     // 调用计数相关方法
     int  getBroadcastTpCallCount() const;
     int  getBroadcastTpCancelCallCount() const;
+    int  getP2PRequestCallCount(P2PConnectorBroadcastType type) const;
     P2PConnectorBroadcastTpRequestPB getLastBroadcastTpRequest() const;
     int  getStartLoadCallCount() const;
     P2PConnectorStartLoadRequestPB getLastStartLoadRequest() const;
@@ -42,6 +47,10 @@ public:
 
 private:
     int              sleep_millis_{0};
+    int              start_load_sleep_millis_{-1};
+    std::map<int, int> p2p_request_sleep_millis_;
+    std::map<int, int> p2p_request_call_count_;
+    LeaseStatusResponsePB lease_status_;
     bool             p2p_response_success_{true};
     bool             omit_p2p_response_{false};
     bool             start_load_response_success_{true};
@@ -53,6 +62,7 @@ private:
     ::grpc::Status   rpc_response_status_{::grpc::Status::OK};
     std::atomic<int> broadcast_tp_call_count_{0};
     std::atomic<int> broadcast_tp_cancel_call_count_{0};
+    mutable std::mutex              behavior_mutex_;
     mutable std::mutex              last_broadcast_tp_request_mutex_;
     P2PConnectorBroadcastTpRequestPB last_broadcast_tp_request_;
     mutable std::mutex              last_start_load_request_mutex_;

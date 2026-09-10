@@ -39,6 +39,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_transfer_service",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/metrics:metrics",

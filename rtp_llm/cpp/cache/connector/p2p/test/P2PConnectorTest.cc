@@ -646,6 +646,55 @@ TEST_F(P2PConnectorTest, HandleRead_HoldsRank0RequestResourceUntilAllRanksReturn
     EXPECT_TRUE(weak_resource.expired());
 }
 
+TEST_F(P2PConnectorTest, HandleRead_TimeoutReleasesPrefillResourceAfterCancelBroadcast) {
+    const std::string unique_key  = "test_prefill_timeout_resource_release";
+    const int64_t     request_id  = 5014;
+    const int64_t     timeout_ms  = 120;
+    const int64_t     deadline_ms = currentTimeMs() + timeout_ms;
+    auto resource = createValidKVCacheResource(2, 2);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+    auto stream = createGenerateStream(unique_key, request_id, 5000);
+    auto meta   = createMockMeta(stream.get());
+    ASSERT_NE(connector_->asyncRead(resource, meta, 0, 0), nullptr);
+
+    P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token = true;
+    data.first_token_id  = 12345;
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::HANDLE_READ, 300);
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::CANCEL_HANDLE_READ, 0);
+    }
+
+    auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
+    auto handle_read_future = std::async(std::launch::async, [&]() {
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response);
+        return response;
+    });
+    for (int i = 0; i < 100 && tp_broadcast_servers_[0]->service()->getP2PRequestCallCount(
+                                    P2PConnectorBroadcastType::HANDLE_READ) == 0;
+         ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    resource.reset();
+    EXPECT_FALSE(weak_resource.expired());
+
+    ASSERT_EQ(handle_read_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto response = handle_read_future.get();
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT));
+    EXPECT_TRUE(weak_resource.expired());
+    for (const auto& server : tp_broadcast_servers_) {
+        for (int i = 0;
+             i < 500
+             && server->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::CANCEL_HANDLE_READ) == 0;
+             ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        EXPECT_GT(server->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::CANCEL_HANDLE_READ), 0);
+    }
+}
+
 TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideChannel) {
     std::string unique_key  = "test_no_transfer";
     int64_t     request_id  = 5012;

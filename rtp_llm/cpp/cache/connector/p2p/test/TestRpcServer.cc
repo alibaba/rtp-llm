@@ -34,11 +34,28 @@ std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
 ::grpc::Status TestRpcService::ExecuteFunction(::grpc::ServerContext*     context,
                                                const ::FunctionRequestPB* request,
                                                ::FunctionResponsePB*      response) {
+    int p2p_sleep_millis = 0;
     // 处理 p2p_request
     if (request->has_p2p_request()) {
+        const int type = static_cast<int>(request->p2p_request().type());
+        {
+            std::lock_guard<std::mutex> lock(behavior_mutex_);
+            ++p2p_request_call_count_[type];
+            const auto it  = p2p_request_sleep_millis_.find(type);
+            const bool is_cancel = request->p2p_request().type() == P2PConnectorBroadcastType::CANCEL_READ
+                                   || request->p2p_request().type()
+                                          == P2PConnectorBroadcastType::CANCEL_HANDLE_READ;
+            p2p_sleep_millis = it != p2p_request_sleep_millis_.end() ? it->second : (is_cancel ? 0 : sleep_millis_);
+        }
         {
             std::lock_guard<std::mutex> lock(last_broadcast_tp_request_mutex_);
             last_broadcast_tp_request_.CopyFrom(request->p2p_request());
+        }
+        if (p2p_sleep_millis > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(p2p_sleep_millis));
+        }
+        if (context->IsCancelled()) {
+            return ::grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
         }
         // 区分 CANCEL_READ 请求
         if (request->p2p_request().type() == P2PConnectorBroadcastType::CANCEL_READ
@@ -53,7 +70,7 @@ std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
 
     broadcast_tp_call_count_++;
 
-    if (sleep_millis_ > 0) {
+    if (!request->has_p2p_request() && sleep_millis_ > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
     }
 
@@ -67,6 +84,10 @@ std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
         if (p2p_response_success_) {
             p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
             p2p_response->set_error_message("");
+            if (request->p2p_request().type() == P2PConnectorBroadcastType::QUERY_LEASE_STATUS) {
+                std::lock_guard<std::mutex> lock(behavior_mutex_);
+                p2p_response->mutable_lease_status()->CopyFrom(lease_status_);
+            }
         } else {
             p2p_response->set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
             p2p_response->set_error_message("test p2p response failed");
@@ -85,8 +106,13 @@ std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
         last_start_load_request_ = *request;
     }
 
-    if (sleep_millis_ > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
+    int start_load_sleep_millis = 0;
+    {
+        std::lock_guard<std::mutex> lock(behavior_mutex_);
+        start_load_sleep_millis = start_load_sleep_millis_ < 0 ? sleep_millis_ : start_load_sleep_millis_;
+    }
+    if (start_load_sleep_millis > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(start_load_sleep_millis));
     }
 
     if (context->IsCancelled()) {
@@ -167,7 +193,26 @@ std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
 }
 
 void TestRpcService::setSleepMillis(int ms) {
+    std::lock_guard<std::mutex> lock(behavior_mutex_);
     sleep_millis_ = ms;
+}
+
+void TestRpcService::setStartLoadSleepMillis(int ms) {
+    std::lock_guard<std::mutex> lock(behavior_mutex_);
+    start_load_sleep_millis_ = ms;
+}
+
+void TestRpcService::setP2PRequestSleepMillis(P2PConnectorBroadcastType type, int ms) {
+    std::lock_guard<std::mutex> lock(behavior_mutex_);
+    p2p_request_sleep_millis_[static_cast<int>(type)] = ms;
+}
+
+void TestRpcService::setLeaseStatus(bool sealed, int started_ops, int finished_ops, bool stopped) {
+    std::lock_guard<std::mutex> lock(behavior_mutex_);
+    lease_status_.set_sealed(sealed);
+    lease_status_.set_started_ops(started_ops);
+    lease_status_.set_finished_ops(finished_ops);
+    lease_status_.set_stopped(stopped);
 }
 
 void TestRpcService::setP2PResponseSuccess(bool success) {
@@ -211,6 +256,12 @@ int TestRpcService::getBroadcastTpCancelCallCount() const {
     return broadcast_tp_cancel_call_count_.load();
 }
 
+int TestRpcService::getP2PRequestCallCount(P2PConnectorBroadcastType type) const {
+    std::lock_guard<std::mutex> lock(behavior_mutex_);
+    const auto                  it = p2p_request_call_count_.find(static_cast<int>(type));
+    return it == p2p_request_call_count_.end() ? 0 : it->second;
+}
+
 P2PConnectorBroadcastTpRequestPB TestRpcService::getLastBroadcastTpRequest() const {
     std::lock_guard<std::mutex> lock(last_broadcast_tp_request_mutex_);
     return last_broadcast_tp_request_;
@@ -245,6 +296,8 @@ void TestRpcService::resetCallCounts() {
     use_legacy_start_load_response_ = false;
     start_load_app_error_pb_        = ErrorCodePB::NONE_ERROR;
     start_load_app_error_message_.clear();
+    std::lock_guard<std::mutex> lock(behavior_mutex_);
+    p2p_request_call_count_.clear();
 }
 
 bool TestRpcServer::start() {
