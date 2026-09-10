@@ -12,7 +12,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
@@ -449,7 +449,7 @@ TEST_F(CacheStoreAsyncWriterTest, LatePublicationCallbackAfterTimeoutIsIgnored) 
 
 TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicationCompletes) {
     auto config    = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/2);
-    auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
     const auto initial_free_blocks = allocator->freeBlocksNum();
     ASSERT_GT(initial_free_blocks, 0u);

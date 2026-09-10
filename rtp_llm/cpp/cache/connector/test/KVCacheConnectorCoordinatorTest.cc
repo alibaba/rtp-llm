@@ -152,7 +152,7 @@ protected:
                 cache_config_.layer_all_num, cache_config_.block_num, block_stride_bytes, cache_config_.dtype);
             auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
             RTP_LLM_CHECK(pool->init());
-            allocator_->block_pool_ = pool;
+            allocator_->group_block_pools_ = {pool};
         }
 
         coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(cache_config_,
@@ -369,7 +369,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
             cache_config.layer_all_num, cache_config.block_num, block_stride_bytes, cache_config.dtype);
         auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
-        allocator->block_pool_ = pool;
+        allocator->group_block_pools_ = {pool};
     }
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
@@ -452,7 +452,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
                                                                /*dtype=*/cache_config_.dtype);
         auto pool        = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
-        allocator_->block_pool_ = pool;
+        allocator_->group_block_pools_ = {pool};
     }
 
     KVCacheResource resource;
