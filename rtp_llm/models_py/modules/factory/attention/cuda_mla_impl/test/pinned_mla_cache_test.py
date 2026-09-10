@@ -37,6 +37,40 @@ def _gather_bf16(KV, Indices, Out, N: tl.constexpr):
 
 
 class PinnedMlaCacheTest(unittest.TestCase):
+    def test_concurrent_admissions_with_sparse_victims(self):
+        # Keep the cache full while misses in separate CTAs compete for a few
+        # victims at the end of the ring. Include the B64 x 4 x 2048 capacity.
+        for capacity in (512, 8192, 524288):
+            cache, reference = self.make_cache(capacity=capacity, width=16, layers=2)
+            ids = torch.arange(capacity, dtype=torch.int32, device="cuda")
+            self.assert_rows(cache, reference, ids, cache.begin(ids))
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=self.stream):
+                physical = cache.begin(ids)
+                cache.layer_cache(1)
+            victims = min(capacity // 256, 32)
+            positions = torch.arange(victims, device="cuda") * 256
+            keep = torch.ones(capacity, dtype=torch.bool, device="cuda")
+            keep[positions] = False
+            # Exercise long-running counters across the int32 boundary too.
+            cache.epoch.fill_((1 << 31) - 4)
+            timings = []
+            for step in range(32):
+                old = cache.tags.clone()
+                ids[keep] = old[:-victims]
+                ids[positions] = torch.arange(victims, dtype=ids.dtype, device="cuda") + capacity + step * victims
+                cache.clock.fill_((1 << 32) * (step % 2))
+                start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+                start.record()
+                graph.replay()
+                end.record()
+                end.synchronize()
+                timings.append(start.elapsed_time(end))
+                self.assert_rows(cache, reference, ids, physical, joined=True)
+                self.assertTrue(torch.all(cache.mapping[old[-victims:].long()] == -1).item())
+                self.assertEqual(physical.unique().numel(), capacity)
+            self.assertLess(max(timings), 100.0)
+
     def setUp(self):
         self.stream = torch.cuda.Stream()
         self.stream.wait_stream(torch.cuda.current_stream())
@@ -587,6 +621,43 @@ class PinnedMlaCacheTest(unittest.TestCase):
                     resident.flatten(0, 1)[refreshed.long()],
                     reference[layer].flatten(0, 1)[ids.long()],
                 ))
+
+    def test_high_concurrency_random_selection(self):
+        # 48 independent 42K contexts, four target-verify rows each. Random
+        # histories expose UVA latency hidden by contiguous microbenchmarks.
+        batch, context, topk, rows = 48, 42048, 2048, 4
+        capacity = batch * rows * topk
+        torch.manual_seed(2718)
+        host = torch.randint(0, 256, (batch * context // 64, 64, 656), dtype=torch.uint8).pin_memory()
+        generations = torch.zeros(host.shape[0], dtype=torch.int64, pin_memory=True)
+        cache = PinnedMlaWorkingSet([host], capacity, 64, self.stream.device,
+                                    block_generations=generations)
+        indices = (torch.randint(context, (batch, rows, topk), device="cuda", dtype=torch.int32)
+                   + torch.arange(batch, device="cuda", dtype=torch.int32)[:, None, None] * context)
+        indices[:, :, -1] = -1
+        slots = cache.begin(indices)
+        cache.layer_cache(0)
+        self.stream.synchronize()
+        valid = indices >= 0
+        torch.testing.assert_close(cache.resident[0].reshape(-1, 656)[slots[valid].long()].cpu(),
+                                   host.reshape(-1, 656)[indices[valid].cpu().long()], rtol=0, atol=0)
+        # Compare the original and candidate paths with identical selections.
+        for snapshot, fetch_rows in ((False, 0), (True, 0), (True, 4), (True, 8), (True, 16)):
+            cache.snapshot_generations = snapshot
+            if snapshot and cache.generation_snapshot is None:
+                cache.generation_snapshot = torch.empty_like(generations, device="cuda")
+            cache.fetch_rows = fetch_rows
+            cache.fetch_tiled = fetch_rows > 0
+            # Replay after external reuse must fetch the new bytes, including
+            # duplicate selections. Updates happen only after stream completion.
+            self.stream.synchronize()
+            host[0].fill_(fetch_rows + 17)
+            generations[0] += 1
+            slots = cache.begin(indices)
+            cache.layer_cache(0)
+            self.stream.synchronize()
+            torch.testing.assert_close(cache.resident[0].reshape(-1, 656)[slots[valid].long()].cpu(),
+                                       host.reshape(-1, 656)[indices[valid].cpu().long()], rtol=0, atol=0)
 
     def test_report_transfer_cost(self):
         cache, reference = self.make_cache(layers=1, capacity=65536)

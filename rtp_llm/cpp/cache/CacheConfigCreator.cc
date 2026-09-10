@@ -115,7 +115,11 @@ void configurePinnedMla(CacheConfig& config, const RuntimeConfig& runtime, size_
     const size_t tokens_per_block = config.seq_size_per_block;
     const size_t mla_bytes = (config.block_size_bytes - scale_bytes) / tokens_per_block;
     const size_t resident_bytes = mla_bytes + groups * 20;
-    const size_t logical_block_hbm = scale_bytes + groups * tokens_per_block * 8;
+    // Optional GPU snapshots of the allocator generations cost one int64 per
+    // logical block and shared-index group in addition to token maps.
+    const size_t generation_block_bytes =
+        nonnegativeEnv("RTP_LLM_DSA_MLA_GENERATION_SNAPSHOT") == 1 ? groups * sizeof(int64_t) : 0;
+    const size_t logical_block_hbm = scale_bytes + groups * tokens_per_block * 8 + generation_block_bytes;
     const size_t budget = static_cast<size_t>(config.block_num) * config.block_size_bytes;
     const size_t requested = nonnegativeEnv("RTP_LLM_DSA_MLA_RESIDENT_TOKENS");
     const size_t selected = static_cast<size_t>(runtime.max_generate_batch_size) * topk * query_tokens;

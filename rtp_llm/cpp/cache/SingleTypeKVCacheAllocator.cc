@@ -157,7 +157,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         return {false, 0, match_cost_time_us, capacity_status};
     }
 
-    if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len)) {
+    if (!full_kv_cache_group_->initMalloc(block_ids_0, common_seq_len)) {
         return {false, 0};
     }
 

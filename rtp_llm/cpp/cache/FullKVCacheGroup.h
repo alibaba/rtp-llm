@@ -17,6 +17,7 @@ public:
 	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter) {}
 
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    bool initMalloc(BlockIds& block_ids, int seq_len);
     MatchResult match(const CacheKeysType& cache_keys) override;
     void        free(const BlockIndicesType& block_indices) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
@@ -29,6 +30,7 @@ public:
     void           reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
 
 private:
+    bool mallocBlocks(BlockIds& block_ids, int seq_len, int reserve_step, BlockIdxType last_block);
 };
 
 }  // namespace rtp_llm

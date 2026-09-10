@@ -8,6 +8,7 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -275,6 +276,111 @@ TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
     EXPECT_EQ(evicted.evicted_keys, (CacheKeysType{10, 11}));
     EXPECT_EQ(pool.freeBlocksNum(), 2u);
     EXPECT_TRUE(tree_cache.empty());
+}
+
+// Scale the 48 x 16K + 16 x 192K workload to one/twelve blocks per query.
+// Under long-first arrival, adaptive admission leaves HBM available for short queries.
+TEST_F(BlockPoolTest, PinnedMlaLengthAwareAllocation) {
+    auto model = makeTestModelConfig(1);
+    model.model_type = "glm_5";
+    model.attn_config.use_mla = true;
+    model.attn_config.is_sparse = true;
+    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank = 512;
+    model.attn_config.rope_head_dim = 64;
+    model.attn_config.indexer_head_dim = 128;
+    auto config = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
+    config.block_num = 241;
+    config.dsa_mla_hbm_blocks = 49;
+    config.dsa_mla_resident_tokens = config.seq_size_per_block;
+    for (const auto denominator : {"0", "3"}) {
+        autil::EnvGuard guard("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR", denominator);
+        auto pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
+        ASSERT_TRUE(pool->init());
+        FullKVCacheGroup group({0}, config.cache_specs[0], pool, 0);
+        ASSERT_TRUE(group.init());
+        for (int round = 0; round < 3; ++round) {
+            std::vector<BlockIds> requests(64);
+            int host_queries = 0;
+            for (int i = 0; i < 64; ++i) {
+                const bool is_long = round == 1 ? i >= 48 : i < 16;
+                ASSERT_TRUE(group.initMalloc(requests[i], (is_long ? 12 : 1) * config.seq_size_per_block));
+                const auto& blocks = requests[i].blocks();
+                const bool on_host = std::any_of(blocks.begin(), blocks.end(), [](int id) { return id >= 49; });
+                host_queries += on_host;
+            }
+            EXPECT_EQ(host_queries, std::string(denominator) == "0" ? (round == 1 ? 16 : 60) :
+                                                                    (round == 1 ? 18 : 38));
+            EXPECT_EQ(pool->freeBlocksNum(), 0u);
+            EXPECT_TRUE(pool->malloc(1, 48).empty());
+            for (const auto& request : requests) {
+                group.free(request.blocks());
+            }
+            EXPECT_EQ(pool->freeBlocksNum(), 240u);
+        }
+        const auto* generations = pool->blockGenerations().data_ptr<int64_t>();
+        for (int id = 1; id < 241; ++id) {
+            EXPECT_EQ(generations[id], 3);
+        }
+    }
+}
+
+TEST_F(BlockPoolTest, PinnedMlaLengthAwareGrowthAndFallback) {
+    autil::EnvGuard guard("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR", "3");
+    auto model = makeTestModelConfig(1);
+    model.model_type = "glm_5";
+    model.attn_config.use_mla = true;
+    model.attn_config.is_sparse = true;
+    model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank = 512;
+    model.attn_config.rope_head_dim = 64;
+    model.attn_config.indexer_head_dim = 128;
+    auto config = SingleConfigCreator::createSingleConfig(model, ParallelismConfig(), false);
+    config.block_num = 20;
+    config.dsa_mla_hbm_blocks = 10;
+    config.dsa_mla_resident_tokens = config.seq_size_per_block;
+    auto pool = std::make_shared<BlockPool>(BlockPoolConfigHelper::createConfig(config));
+    ASSERT_TRUE(pool->init());
+    FullKVCacheGroup group({0}, config.cache_specs[0], pool, 0);
+    ASSERT_TRUE(group.init());
+    BlockIds long_query, short_query;
+    ASSERT_TRUE(group.malloc(long_query, 16));  // Four blocks > nine free HBM / 3.
+    EXPECT_EQ(long_query.blocks(), (BlockIndicesType{10, 11, 12, 13}));
+    ASSERT_TRUE(group.malloc(short_query, 8));
+    EXPECT_EQ(short_query.blocks(), (BlockIndicesType{1, 2}));
+    ASSERT_TRUE(group.malloc(long_query, 20));  // Incremental allocation follows host.
+    EXPECT_EQ(long_query.blocks(), (BlockIndicesType{10, 11, 12, 13, 14}));
+    ASSERT_TRUE(group.malloc(short_query, 12));  // HBM query keeps its tier.
+    EXPECT_EQ(short_query.blocks(), (BlockIndicesType{1, 2, 3}));
+    const auto free_before = pool->freeBlocksNum();
+    EXPECT_TRUE(pool->malloc(12, 48).empty());
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    EXPECT_EQ(pool->malloc(11, 48), (BlockIndicesType{15, 16, 17, 18, 19, 4, 5, 6, 7, 8, 9}));
+    pool->connectorReference(10);
+    group.free(long_query.blocks());
+    EXPECT_EQ(pool->malloc(4, 8), (BlockIndicesType{11, 12, 13, 14}));  // HBM exhausted.
+    EXPECT_TRUE(pool->malloc(1, 48).empty());  // In-flight RDMA still owns 10.
+    pool->connectorFree(10);
+    EXPECT_EQ(pool->malloc(1, 48), (BlockIndicesType{10}));
+    EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[10], 2);
+
+    // Every reference kind must update free HBM exactly once, even when
+    // references overlap; freeing an active connector cannot inflate capacity.
+    group.free(short_query.blocks());
+    pool->requestFree({4, 5, 6, 7, 8, 9});
+    pool->blockCacheReference({1, 2, 3});
+    pool->connectorReference({1, 2, 3});
+    pool->blockCacheFree({1, 2, 3});
+    pool->requestFree({10, 11, 12, 13, 14, 15, 16, 17, 18, 19});
+    EXPECT_EQ(pool->malloc(3, 12), (BlockIndicesType{10, 11, 12}));  // Six free HBM / 3 = two.
+    pool->connectorFree({1, 2, 3});
+    EXPECT_EQ(pool->malloc(3, 12), (BlockIndicesType{1, 2, 3}));  // Exact nine / 3 boundary.
+    BlockIds reused_query;
+    group.reference(reused_query, {1, 2, 3});
+    ASSERT_TRUE(group.initMalloc(reused_query, 16));
+    EXPECT_EQ(reused_query.blocks(), (BlockIndicesType{1, 2, 3, 13}));  // Long suffix goes to host.
+    EXPECT_EQ(pool->blockGenerations().data_ptr<int64_t>()[1], 2);  // Prefix was only referenced.
+
 }
 
 TEST_F(BlockPoolTest, PinnedMlaRoundsAutomaticWorkingSetToPhysicalBlocks) {

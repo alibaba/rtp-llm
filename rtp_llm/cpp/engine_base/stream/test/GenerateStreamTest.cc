@@ -1,5 +1,6 @@
 
 #include "gtest/gtest.h"
+#include <thread>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -91,6 +92,61 @@ private:
 class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
+
+TEST_F(GenerateStreamTest, testAsyncReleaseHandoffAfterWorkerDrains) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2});
+    stream->incPendingAsyncBookkeeping();
+    ASSERT_TRUE(stream->hasPendingAsyncBookkeeping());
+    // The last worker can drain after the old caller's pending-count check.
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_FALSE(stream->markDeferredRelease());
+    EXPECT_FALSE(stream->isDeferredReleasePending());
+}
+
+TEST_F(GenerateStreamTest, testAsyncReleaseWaitsForLastWorker) {
+    auto stream = GenerateStreamBuilder().createComplexContextStream({1, 2});
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
+    stream->incPendingAsyncBookkeeping();
+    stream->incPendingAsyncBookkeeping();
+    {
+        std::lock_guard<std::mutex> lock(*stream->mutex_);
+        stream->generate_status_->releaseResource();
+    }
+    EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+    EXPECT_FALSE(stream->isDeferredReleasePending());
+}
+
+TEST_F(GenerateStreamTest, testAsyncReleaseConcurrentHandoff) {
+    auto stream = GenerateStreamBuilder().createComplexContextStream({1, 2});
+    for (int trial = 0; trial < 2000; ++trial) {
+        stream->stream_cache_resource_->init(2);
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        ASSERT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
+        stream->incPendingAsyncBookkeeping();
+        std::atomic<bool> start{false};
+        std::thread worker([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        });
+        start.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(*stream->mutex_);
+            stream->generate_status_->releaseResource();
+        }
+        worker.join();
+        ASSERT_TRUE(stream->stream_cache_resource_->isResourceReleased()) << "trial=" << trial;
+        ASSERT_EQ(stream->stream_cache_resource_->curBlocksNum(), 0) << "trial=" << trial;
+        ASSERT_FALSE(stream->hasPendingAsyncBookkeeping());
+        ASSERT_FALSE(stream->isDeferredReleasePending());
+    }
+}
 
 TEST_F(GenerateStreamTest, testMtpMinNewTokensIgnoresEarlyStopWithinAcceptedBatch) {
     for (bool use_eos : {false, true}) {

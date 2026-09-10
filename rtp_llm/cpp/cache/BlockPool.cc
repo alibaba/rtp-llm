@@ -699,6 +699,23 @@ BlockCachePtr BlockPool::blockCache() {
 }
 
 void BlockPool::initFreeBlocks() {
+    if (config_.mla_tiered_cache) {
+        const char* value = std::getenv("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR");
+        const std::string denominator = value ? value : "3";
+        RTP_LLM_CHECK_WITH_INFO(!denominator.empty()
+                                   && std::all_of(denominator.begin(), denominator.end(),
+                                                  [](char c) { return c >= '0' && c <= '9'; }),
+                               "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or an integer >= 2");
+        mla_hbm_share_denominator_ = std::stoull(denominator);
+        RTP_LLM_CHECK_WITH_INFO(mla_hbm_share_denominator_ != 1,
+                               "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or >= 2");
+        mla_hbm_blocks_ = config_.memory_layouts.front().mla_hbm_blocks;
+        for (const auto& layout : config_.memory_layouts) {
+            RTP_LLM_CHECK_WITH_INFO(layout.mla_hbm_blocks == static_cast<uint32_t>(mla_hbm_blocks_),
+                                   "MLA layouts must share the HBM block boundary");
+        }
+        free_hbm_blocks_ = mla_hbm_blocks_ > 0 ? mla_hbm_blocks_ - 1 : 0;
+    }
     // block 0 is reserved
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
         free_block_ids_.insert(i);
@@ -719,7 +736,7 @@ std::vector<torch::Tensor> BlockPool::allLayerScaleCacheBase() const {
     return global_layer_kv_scale_tensors_;
 }
 
-BlockIndicesType BlockPool::malloc(int num_blocks) {
+BlockIndicesType BlockPool::malloc(int num_blocks, int seq_len, BlockIdxType last_block) {
     RTP_LLM_PROFILE_FUNCTION();
     if (num_blocks <= 0) {
         return {};
@@ -735,15 +752,31 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
             return {};
         }
         auto first = free_block_ids_.begin();
-        auto last  = std::next(first, num_blocks);
-        block_ids.assign(first, last);
+        if (mla_hbm_share_denominator_ > 0 && seq_len > 0) {
+            const size_t block_size = config_.memory_layouts.front().seq_size_per_block;
+            const size_t query_blocks = (static_cast<size_t>(seq_len) + block_size - 1) / block_size;
+            // Decide from the complete sequence at admission. Growth follows the
+            // last allocated tier so a host query cannot grab HBM one block at a time.
+            const bool prefer_host = last_block > 0 ? last_block >= mla_hbm_blocks_ :
+                                     query_blocks > free_hbm_blocks_ / mla_hbm_share_denominator_;
+            if (prefer_host) {
+                first = free_block_ids_.lower_bound(mla_hbm_blocks_);
+            }
+        }
+        while (block_ids.size() < static_cast<size_t>(num_blocks)) {
+            if (first == free_block_ids_.end()) {
+                first = free_block_ids_.begin();
+            }
+            block_ids.push_back(*first);
+            free_hbm_blocks_ -= *first < mla_hbm_blocks_;
+            first = free_block_ids_.erase(first);
+        }
         if (block_generations_.defined()) {
             auto* generations = block_generations_.data_ptr<int64_t>();
             for (const auto block_id : block_ids) {
                 ++generations[block_id];
             }
         }
-        free_block_ids_.erase(first, last);
         request_ref_counter_.incrementRefCounter(block_ids);
         req_con_ref_counter_.incrementRefCounter(block_ids);
         req_cache_ref_counter_.incrementRefCounter(block_ids);
@@ -798,7 +831,8 @@ void BlockPool::tryFreeBlocks(const BlockIndicesType& block_ids) {
     for (const auto& block_id : block_ids) {
         if (req_con_ref_counter_.getRefCounter(block_id) == 0
             && block_cache_ref_counter_.getRefCounter(block_id) == 0) {
-            free_block_ids_.insert(block_id);
+            const bool inserted = free_block_ids_.insert(block_id).second;
+            free_hbm_blocks_ += inserted && block_id < mla_hbm_blocks_;
         }
     }
 }
@@ -815,7 +849,8 @@ void BlockPool::requestReference(const BlockIndicesType& block_ids) {
     req_con_ref_counter_.incrementRefCounter(block_ids);
     req_cache_ref_counter_.incrementRefCounter(block_ids);
     for (const auto& block_id : block_ids) {
-        free_block_ids_.erase(block_id);
+        const bool erased = free_block_ids_.erase(block_id) != 0;
+        free_hbm_blocks_ -= erased && block_id < mla_hbm_blocks_;
     }
 }
 
@@ -830,7 +865,8 @@ void BlockPool::connectorReference(const BlockIndicesType& block_indices) {
     connector_ref_counter_.incrementRefCounter(block_indices);
     req_con_ref_counter_.incrementRefCounter(block_indices);
     for (const auto& block_id : block_indices) {
-        free_block_ids_.erase(block_id);
+        const bool erased = free_block_ids_.erase(block_id) != 0;
+        free_hbm_blocks_ -= erased && block_id < mla_hbm_blocks_;
     }
 }
 
@@ -845,7 +881,8 @@ void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     block_cache_ref_counter_.incrementRefCounter(block_ids);
     req_cache_ref_counter_.incrementRefCounter(block_ids);
     for (const auto& block_id : block_ids) {
-        free_block_ids_.erase(block_id);
+        const bool erased = free_block_ids_.erase(block_id) != 0;
+        free_hbm_blocks_ -= erased && block_id < mla_hbm_blocks_;
     }
 }
 

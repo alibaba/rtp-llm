@@ -20,6 +20,16 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
 
 bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     (void)enable_reuse_cache;
+    return mallocBlocks(block_ids, seq_len, reserve_step, block_ids.blocks().empty() ? 0 : block_ids.blocks().back());
+}
+
+bool FullKVCacheGroup::initMalloc(BlockIds& block_ids, int seq_len) {
+    // Reused prefix blocks retain their addresses; admission of the new suffix
+    // still considers the complete query, independently of the prefix's tier.
+    return mallocBlocks(block_ids, seq_len, 0, 0);
+}
+
+bool FullKVCacheGroup::mallocBlocks(BlockIds& block_ids, int seq_len, int reserve_step, BlockIdxType last_block) {
     int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_ids.blocksNum()), reserve_step);
     if (need_blocks_num == 0) {
         return true;
@@ -33,7 +43,7 @@ bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reus
         }
     }
 
-    auto result = block_pool_->malloc(need_blocks_num);
+    auto result = block_pool_->malloc(need_blocks_num, seq_len, last_block);
     if (result.empty()) {
         return false;
     }

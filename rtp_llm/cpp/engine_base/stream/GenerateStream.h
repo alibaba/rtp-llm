@@ -598,7 +598,7 @@ public:
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
     void waitPendingAsyncBookkeeping();
-    void markDeferredRelease();
+    bool markDeferredRelease();
     bool isDeferredReleasePending() const;
 
     // Per-stream CUDA state used to prepare the next MTP decode step while host

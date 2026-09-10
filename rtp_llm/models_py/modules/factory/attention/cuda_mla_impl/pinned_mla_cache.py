@@ -8,6 +8,7 @@ call write for newly computed KV. CPU access to backing storage must wait for
 the compute stream. This component does not change the attention KV format.
 """
 
+import os
 from typing import Sequence
 
 import torch
@@ -99,9 +100,9 @@ def _admit(
     tokens = tl.sort(tl.where(pending, token, 0x7FFFFFFF), descending=False)
     admitted = 0
     scan: tl.constexpr = min(B, CAPACITY)
+    first_ticket = tl.atomic_add(Clock, count, sem="relaxed")
     while admitted < count:
         remaining = count - admitted
-        first_ticket = tl.atomic_add(Clock, remaining, sem="relaxed")
         ticket = first_ticket + tl.arange(0, B)
         candidate = (ticket % CAPACITY).to(tl.int32)
         available = (tl.arange(0, B) < scan) & (tl.load(Protected + candidate) != epoch)
@@ -119,10 +120,11 @@ def _admit(
         tl.store(Map + token, candidate, claimed)
         claimed_count = tl.sum(claimed.to(tl.int32), 0)
         admitted += claimed_count
-        # Skip a blocked tile, but do not skip unused slots on small admissions.
-        # Overlapping lookahead is safe: only the atomic winner owns a slot.
-        if claimed_count == 0:
-            tl.atomic_add(Clock, scan - remaining, sem="relaxed")
+        # Reserve each retry tile in one operation: split cursor increments can
+        # interleave and repeatedly skip the only victims. Initial reservations
+        # stay compact so small admissions use the entire cache.
+        if admitted < count:
+            first_ticket = tl.atomic_add(Clock, scan, sem="relaxed")
 
 
 @triton.jit
@@ -155,6 +157,42 @@ def _fetch(
         x = tl.arange(0, B)
         data = tl.load(Host + (token - HBM_TOKENS) * WIDTH + x, x < WIDTH, other=0)
         tl.store(Device + (slot + HBM_TOKENS) * WIDTH + x, data, x < WIDTH)
+
+
+@triton.jit
+def _fetch_tiled(
+    Host, Device, Ids, Slots, Map, Owners, Epoch, Misses, MissCount,
+    WIDTH: tl.constexpr, B: tl.constexpr, N: tl.constexpr, REMAP: tl.constexpr,
+    HBM_TOKENS: tl.constexpr, ROWS: tl.constexpr,
+):
+    # Transfer independent rows together, exposing enough outstanding system
+    # memory reads to hide PCIe latency. int32 moves preserve the original bits.
+    count = tl.load(MissCount)
+    if REMAP:
+        if count > 0:
+            for start in range(tl.program_id(0) * 256, N, tl.num_programs(0) * 256):
+                i = start + tl.arange(0, 256)
+                refresh = tl.load(Slots + i, i < N, other=-1) == -2
+                token = tl.load(Ids + i, refresh, other=-1)
+                slot = tl.load(Map + token, refresh, other=-1)
+                tl.store(Slots + i, slot + HBM_TOKENS, refresh)
+        if tl.program_id(0) == 0:
+            tl.store(Epoch, tl.load(Epoch) + 1)
+    host = Host.to(tl.pointer_type(tl.int32))
+    device = Device.to(tl.pointer_type(tl.int32))
+    for start in range(tl.program_id(0) * ROWS, count, tl.num_programs(0) * ROWS):
+        entry = start + tl.arange(0, ROWS)
+        valid = entry < count
+        i = tl.load(Misses + entry, valid, other=0)
+        token = tl.load(Ids + i, valid, other=HBM_TOKENS).to(tl.int64)
+        slot = tl.load(Map + token, valid, other=0).to(tl.int64)
+        if REMAP:
+            tl.store(Owners + token, 0x7FFFFFFF, valid)
+        x = tl.arange(0, B)
+        data = tl.load(host + (token[:, None] - HBM_TOKENS) * (WIDTH // 4) + x[None, :],
+                       valid[:, None] & (x[None, :] < WIDTH // 4), other=0)
+        tl.store(device + (slot[:, None] + HBM_TOKENS) * (WIDTH // 4) + x[None, :],
+                 data, valid[:, None] & (x[None, :] < WIDTH // 4))
 
 
 @triton.jit
@@ -297,6 +335,21 @@ class PinnedMlaWorkingSet:
             raise ValueError(
                 "block generations must be contiguous int64 on CUDA or pinned CPU"
             )
+        self.snapshot_generations = (
+            os.environ.get("RTP_LLM_DSA_MLA_GENERATION_SNAPSHOT", "0") == "1"
+            and not self.generations.is_cuda
+        )
+        self.generation_snapshot = (
+            torch.empty_like(self.generations, device=self.device)
+            if self.snapshot_generations else None
+        )
+        self.fetch_rows = int(os.environ.get("RTP_LLM_DSA_MLA_FETCH_ROWS", "0"))
+        if self.fetch_rows not in (0, 1, 2, 4, 8, 16):
+            raise ValueError("MLA fetch rows must be 0, 1, 2, 4, 8 or 16")
+        self.fetch_tiled = (
+            self.fetch_rows > 0 and self.width % 4 == 0
+            and all(tensor.data_ptr() % 4 == 0 for tensor in (*self.backing, *self.resident))
+        )
         self.protected = torch.zeros(
             (resident_tokens,), dtype=torch.int64, device=self.device
         )
@@ -343,27 +396,42 @@ class PinnedMlaWorkingSet:
         with torch.cuda.stream(self.transfer_stream):
             # Admission is independent of Q projection too. Keep both metadata
             # and KV fetch off the compute stream until this layer consumes KV.
+            generations = self.generations
+            if n and self.snapshot_generations:
+                # Snapshot on every replay, after the caller's allocator and
+                # transfer dependencies. Never reuse a stale host generation.
+                self.generation_snapshot.copy_(generations, non_blocking=True)
+                generations = self.generation_snapshot
             if n:
                 grid = (triton.cdiv(n, 256),)
                 _protect[grid](
                     logical_indices, slots, self.owners, self.mapping, self.protected,
-                    self.epoch, miss_count, self.generations, self.versions,
+                    self.epoch, miss_count, generations, self.versions,
                     self.allocator_block_size, n, 256, self.hbm_tokens,
                 )
                 _admit[grid](
                     logical_indices, slots, self.owners, self.mapping, self.tags,
                     self.protected, self.epoch, self.clock, misses, miss_count,
-                    self.generations, self.versions, self.allocator_block_size,
+                    generations, self.versions, self.allocator_block_size,
                     n, self.capacity, 256,
                 )
             for layer, (host, resident, ready) in enumerate(zip(self.backing, self.resident, self.ready)):
                 if n:
-                    _fetch[(min(n, 128),)](
-                        host.view(torch.uint8), resident.view(torch.uint8),
-                        logical_indices, slots, self.mapping, self.owners, self.epoch,
-                        misses, miss_count, self.width, triton.next_power_of_2(self.width),
-                        n, layer == 0, self.hbm_tokens,
-                    )
+                    if self.fetch_tiled:
+                        _fetch_tiled[(min(triton.cdiv(n, self.fetch_rows), 128),)](
+                            host.view(torch.uint8), resident.view(torch.uint8),
+                            logical_indices, slots, self.mapping, self.owners, self.epoch,
+                            misses, miss_count, self.width,
+                            triton.next_power_of_2(self.width // 4),
+                            n, layer == 0, self.hbm_tokens, self.fetch_rows,
+                        )
+                    else:
+                        _fetch[(min(n, 128),)](
+                            host.view(torch.uint8), resident.view(torch.uint8),
+                            logical_indices, slots, self.mapping, self.owners, self.epoch,
+                            misses, miss_count, self.width, triton.next_power_of_2(self.width),
+                            n, layer == 0, self.hbm_tokens,
+                        )
                 ready.record(self.transfer_stream)
         for tensor in (logical_indices, slots, misses, miss_count):
             tensor.record_stream(self.transfer_stream)
