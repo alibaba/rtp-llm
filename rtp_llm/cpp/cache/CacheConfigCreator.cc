@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
-#include "rtp_llm/cpp/config/PPLayout.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -656,14 +656,14 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
                             pp_size);
 
     // The partition is materialized by the Python startup decision point;
-    // the PPLayout even-split fallback serves pp_size=1 and stale pickles.
+    // the RankLayout even-split fallback serves pp_size=1 and stale pickles.
     RTP_LLM_CHECK_WITH_INFO(!parallelism_config.pp_stage_layer_counts.empty(),
                             "pp_size=%ld requires a materialized layer partition "
                             "(pp_stage_layer_counts); it must be written by the Python startup decision point",
                             pp_size);
 
-    const PPLayout layout   = PPLayout::fromParallelismConfig(parallelism_config, model_config.num_layers);
-    const auto [begin, end] = layout.myLayerRange();
+    const auto layout       = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto [begin, end] = layout.myLayerRange(model_config.num_layers);
     RTP_LLM_CHECK_WITH_INFO(end > begin,
                             "pp stage %ld owns no layers: num_layers=%ld pp_size=%ld",
                             parallelism_config.pp_rank,

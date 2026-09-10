@@ -160,7 +160,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
         params.parallelism_config.world_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr)),
     parallelism_config_(params.parallelism_config),
     // Stage-role flags and materialized partition, shared with cache creation and the Python side.
-    pp_layout_(PPLayout::fromParallelismConfig(parallelism_config_, params.model_config_.num_layers)),
+    pp_layout_(RankLayout::fromParallelismConfig(parallelism_config_)),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     slots_(parallelism_config_.pp_size + 1) {

@@ -7,7 +7,7 @@ purely as data everywhere else — weight loading
 (LoadConfig.pp_layer_range / has_pp_embedding / has_pp_lm_head), model
 construction (GptModelBase.pp_layer_ids / pp_has_embedding /
 pp_has_lm_head), cache geometry and the C++ side
-(rtp_llm/cpp/config/PPLayout.h, prefix-sum lookup). Consumers never
+(rtp_llm/cpp/config/RankLayout.h, prefix-sum lookup). Consumers never
 re-derive the partition rule (see stage_layer_range).
 """
 

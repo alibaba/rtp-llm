@@ -28,6 +28,10 @@ enum class ParallelMode {
     FFN_TP = 3,
     EP     = 4,
     EPLB   = 5,
+    // STAGE: one pipeline stage's dp*tp ranks (WORLD narrowed per stage). At
+    // pp=1 it aliases WORLD; a distinct group is materialized only when both
+    // pp_size>1 and dp_size>1 (otherwise it coincides with TP).
+    STAGE = 6,
 };
 
 // A batch includes two parts: context batch and decoder batch.

@@ -11,7 +11,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/config/PPLayout.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/stream/SamplingState.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -121,7 +121,7 @@ private:
     bool                    enable_detail_log_ = false;
     const ParallelismConfig parallelism_config_;
     // Stage-role flags and materialized partition, shared with cache creation and the Python side.
-    const PPLayout                             pp_layout_;
+    const RankLayout                           pp_layout_;
     std::unique_ptr<PPTransport>               transport_;
     std::function<void()>                      profile_step_start_;
     std::function<void()>                      profile_step_finish_;

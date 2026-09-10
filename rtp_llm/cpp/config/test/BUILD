@@ -7,11 +7,11 @@ test_copts = [
 ] + copts()
 
 cc_test(
-    name = "pp_layout_test",
-    srcs = ["PPLayoutTest.cc"],
+    name = "rank_layout_test",
+    srcs = ["RankLayoutTest.cc"],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/config:pp_layout",
+        "//rtp_llm/cpp/config:rank_layout",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

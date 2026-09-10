@@ -17,6 +17,7 @@ from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_WORLD = 2
+_CPP_PARALLEL_MODE_STAGE = 6
 _UDS_SUN_PATH_LIMIT = 108
 
 
@@ -320,6 +321,30 @@ def _create_process_groups(
                 )
             torch.distributed.barrier()
 
+    if pp_size > 1 and dp_size > 1:
+        # STAGE groups: all dp*tp ranks of one pipeline stage. Materialized only
+        # when a stage spans more than its TP group (dp>1); otherwise STAGE is
+        # aliased to TP (pp>1) or WORLD (pp=1) at registration, so no extra
+        # communicator is created.
+        for stage_ranks in layout.groups(Group.STAGE):
+            first = layout.coord_of(stage_ranks[0])
+            logging.info(
+                f"[rank: {world_rank}] Creating STAGE group for pp_rank {first.pp} "
+                f"with ranks: {stage_ranks}"
+            )
+            stage_group = torch.distributed.new_group(
+                ranks=stage_ranks,
+                backend=backend,
+                timeout=timedelta(days=36500),
+            )
+            if world_rank in stage_ranks:
+                group_key = Group.STAGE.name + str(first.pp)
+                _group_map[group_key] = stage_group
+                logging.info(
+                    f"[rank: {world_rank}] Stored STAGE group with key: {group_key} {stage_group} with ranks: {stage_ranks}"
+                )
+            torch.distributed.barrier()
+
 
 def _register_process_groups_to_cpp():
     """Register Python comm op callbacks for C++ to call back into."""
@@ -375,6 +400,15 @@ def _register_process_groups_to_cpp():
                     ):
                         mode_to_group[_CPP_PARALLEL_MODE_DP] = pg
                         registered_modes.add(_CPP_PARALLEL_MODE_DP)
+            elif group_key.startswith(Group.STAGE.name):
+                if my_coord is not None:
+                    expected_key = Group.STAGE.name + str(my_coord.pp)
+                    if (
+                        group_key == expected_key
+                        and _CPP_PARALLEL_MODE_STAGE not in registered_modes
+                    ):
+                        mode_to_group[_CPP_PARALLEL_MODE_STAGE] = pg
+                        registered_modes.add(_CPP_PARALLEL_MODE_STAGE)
 
     # If world_size == tp_size, WORLD is also TP group.
     if (
@@ -386,6 +420,21 @@ def _register_process_groups_to_cpp():
         pg_world = _group_map.get(Group.WORLD)
         if pg_world is not None:
             mode_to_group[_CPP_PARALLEL_MODE_TP] = pg_world
+
+    # STAGE aliases when no distinct stage group was materialized: at pp=1 the
+    # single stage is the whole WORLD; at pp>1 with dp=1 a stage coincides with
+    # its TP group.
+    if (
+        _parallelism_config is not None
+        and _CPP_PARALLEL_MODE_STAGE not in registered_modes
+    ):
+        if _parallelism_config.pp_size <= 1:
+            alias_pg = _group_map.get(Group.WORLD)
+        else:
+            alias_pg = mode_to_group.get(_CPP_PARALLEL_MODE_TP)
+        if alias_pg is not None:
+            mode_to_group[_CPP_PARALLEL_MODE_STAGE] = alias_pg
+            registered_modes.add(_CPP_PARALLEL_MODE_STAGE)
 
     # NOTE: These callbacks are NOT thin wrappers around the module-level broadcast()/
     # all_reduce()/all_gather() because the C++ calling convention differs significantly:

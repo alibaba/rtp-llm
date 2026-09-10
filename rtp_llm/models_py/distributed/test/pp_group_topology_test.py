@@ -116,6 +116,8 @@ class PPGroupTopologyTest(unittest.TestCase):
         self.assertEqual(membership["DP0"], [0, 2])
         self.assertEqual(membership["DP1"], [1, 3])
         self.assertFalse(any(k.startswith("PP") for k in membership))
+        # pp=1: STAGE aliases WORLD at registration, no distinct group created.
+        self.assertFalse(any(k.startswith("STAGE") for k in membership))
 
     def test_pp2_dp1_tp2_stage_local_tp_and_lane_pp(self):
         results = _run_topology(self, pp_size=2, dp_size=1, tp_size=2)
@@ -127,6 +129,8 @@ class PPGroupTopologyTest(unittest.TestCase):
         self.assertEqual(membership["PP0"], [0, 2])
         self.assertEqual(membership["PP1"], [1, 3])
         self.assertFalse(any(k.startswith("DP") for k in membership))
+        # dp=1: a stage coincides with its TP group, aliased at registration.
+        self.assertFalse(any(k.startswith("STAGE") for k in membership))
         self.assertEqual(results[0][0], 0)
         self.assertEqual(results[3][0], 1)
         self.assertEqual(results[0][4]["TP"], [0, 1])
@@ -152,6 +156,10 @@ class PPGroupTopologyTest(unittest.TestCase):
         self.assertEqual(membership["PP1"], [1, 5])
         self.assertEqual(membership["PP2"], [2, 6])
         self.assertEqual(membership["PP3"], [3, 7])
+        # pp>1 & dp>1: a distinct STAGE group per stage, each the stage's dp*tp
+        # ranks as one contiguous interval.
+        self.assertEqual(membership["STAGE0"], [0, 1, 2, 3])
+        self.assertEqual(membership["STAGE1"], [4, 5, 6, 7])
         self.assertEqual(results[0][4]["TP"], [0, 1])
         self.assertEqual(results[0][4]["DP"], [0, 2])
         self.assertEqual(results[0][4]["PP"], [0, 4])
@@ -160,7 +168,7 @@ class PPGroupTopologyTest(unittest.TestCase):
         results = _run_topology(self, pp_size=2, dp_size=1, tp_size=1)
         membership = self._merge(results)
         self.assertEqual(membership["PP0"], [0, 1])
-        self.assertFalse(any(k.startswith(("TP", "DP")) for k in membership))
+        self.assertFalse(any(k.startswith(("TP", "DP", "STAGE")) for k in membership))
         self.assertEqual(results[0][4]["PP"], [0, 1])
 
 
