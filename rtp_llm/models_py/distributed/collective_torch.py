@@ -851,9 +851,7 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(
-    tensor: torch.Tensor, group: Group, *, inplace: bool = False
-) -> torch.Tensor:
+def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:

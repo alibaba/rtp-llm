@@ -717,7 +717,9 @@ class CompressorFP8(PoolBackedModule):
             )
         pool_rows = 0
         if self._kv_pool_view is not None:
-            pool_rows = int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1])
+            pool_rows = int(
+                self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
+            )
         cp_ctx = self._cp_ctx if self._kv_cache_sharded else None
         cp_size = int(cp_ctx.cp_size) if cp_ctx is not None else 1
         cp_rank = int(cp_ctx.cp_rank) if cp_ctx is not None else 0
@@ -741,7 +743,9 @@ class CompressorFP8(PoolBackedModule):
             cp_size=cp_size,
             cp_rank=cp_rank,
             kv_owner_tokens_per_block=int(
-                getattr(self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block)
+                getattr(
+                    self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block
+                )
             ),
         )
         meta = CompressorMeta(

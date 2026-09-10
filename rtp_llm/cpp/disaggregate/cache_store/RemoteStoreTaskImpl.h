@@ -8,9 +8,9 @@ namespace rtp_llm {
 
 class RemoteStoreTaskImpl: public RemoteStoreTask, public std::enable_shared_from_this<RemoteStoreTaskImpl> {
 public:
-    RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>&                    request,
-                        const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                        CheckCancelFunc                                               check_cancel_func);
+    RemoteStoreTaskImpl(const std::shared_ptr<RemoteStoreRequest>& request,
+                        const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector >& collector,
+                        CheckCancelFunc check_cancel_func);
     ~RemoteStoreTaskImpl();
 
 public:

@@ -851,7 +851,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         rank = dist.get_rank(group)
         world_size = dist.get_world_size(group)
         device = self._mega_l1_w.device
-        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
+        _log_pre_kernel_barrier(
+            "enter", cfg.layer_id, rank, world_size, tokens, device
+        )
 
         if device.type == "cuda":
             with torch.cuda.device(device):
@@ -866,4 +868,6 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         else:
             dist.barrier(group=group)
 
-        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)
+        _log_pre_kernel_barrier(
+            "leave", cfg.layer_id, rank, world_size, tokens, device
+        )

@@ -300,7 +300,9 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         del gate_up
 
         # GEMM 2: down
-        down_out = torch.empty(all_tokens, D, device=device, dtype=torch.bfloat16)
+        down_out = torch.empty(
+            all_tokens, D, device=device, dtype=torch.bfloat16
+        )
         m_grouped_fp8_fp4_gemm_nt_contiguous(
             (h_fp8, h_scale),
             (self._w2, self._s2),
@@ -357,7 +359,9 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                     .squeeze(0)
                     .transpose(0, 1)
                 )
-                gate_up = torch.empty(1, 2 * inter, device=device, dtype=torch.bfloat16)
+                gate_up = torch.empty(
+                    1, 2 * inter, device=device, dtype=torch.bfloat16
+                )
                 fp8_fp4_gemm_nt(
                     (x_fp8, x_scale),
                     (w13, s13),

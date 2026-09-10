@@ -42,9 +42,9 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers, int64_t timeout_ms) = 0;
 
     virtual std::shared_ptr<RemoteStoreTask>
-                 submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
+                 submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
                                        const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                       RemoteStoreTask::CheckCancelFunc                              check_cancel_func) = 0;
+                                       RemoteStoreTask::CheckCancelFunc           check_cancel_func) = 0;
     virtual void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task)      = 0;
 
     virtual bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) = 0;

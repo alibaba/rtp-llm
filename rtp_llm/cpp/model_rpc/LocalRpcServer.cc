@@ -671,8 +671,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
-    auto input                         = QueryConverter::transQuery(request);
-    generate_context.request_info      = input->request_info;
+    auto input                    = QueryConverter::transQuery(request);
+    generate_context.request_info = input->request_info;
     if (applyTimelineGate(generate_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,

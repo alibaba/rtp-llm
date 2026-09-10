@@ -281,8 +281,8 @@ void BlockPool::initializeCacheBuffer() {
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
-    const bool              is_cuda     = cache_aligned_buffer_.is_cuda();
-    const bool              is_pinned   = !is_cuda && cache_aligned_buffer_.is_pinned();
+    const bool is_cuda   = cache_aligned_buffer_.is_cuda();
+    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
@@ -303,7 +303,7 @@ void BlockPool::initializeCacheBuffer() {
 void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     RTP_LLM_LOG_WARNING(
         "%s, pool_name=%s, total_size=%zu bytes", log_context, config_.pool_name.c_str(), config_.total_size_bytes);
-    auto       cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+    auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
     const auto pin_start  = std::chrono::steady_clock::now();
     try {

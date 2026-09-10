@@ -48,11 +48,10 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                  int64_t                                                 timeout_ms) override;
 
-    std::shared_ptr<RemoteStoreTask>
-         submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
-                               const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                               RemoteStoreTask::CheckCancelFunc                              check_cancel_func) override;
-    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
+    std::shared_ptr<RemoteStoreTask> submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+                                                           const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+                                                           RemoteStoreTask::CheckCancelFunc check_cancel_func) override;
+    void                             releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
 
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key) override;

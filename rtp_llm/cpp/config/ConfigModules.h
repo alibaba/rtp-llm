@@ -325,8 +325,8 @@ struct SpeculativeExecutionConfig {
     std::string     checkpoint_path               = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
-    int64_t     sp_dspark_mask_token_id = -1;
-    std::string to_string() const;
+    int64_t         sp_dspark_mask_token_id       = -1;
+    std::string     to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -378,7 +378,6 @@ struct FIFOSchedulerConfig {
     int64_t     max_context_batch_size         = 1;
     int64_t     max_batch_tokens_size          = 0;
     int64_t     max_batch_tokens_without_cache = 0;
-    bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     std::string to_string() const;
 };
@@ -429,7 +428,7 @@ struct RuntimeConfig {
     // weights region's cpu_backup at allocation time, so the level cannot change per
     // request). 1 = weights backed to pinned host on sleep (fast wake, holds host
     // RAM). 2 = weights discarded entirely (frees GPU + host); wake reloads them from
-    // a local-disk raw backup. A /sleep request's level must match this value.
+    // the original checkpoint. A /sleep request's level must match this value.
     int64_t sleep_mode_level = 1;
 
     // Scheduler configuration

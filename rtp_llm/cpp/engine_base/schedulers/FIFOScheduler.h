@@ -58,12 +58,12 @@ private:
     };
 
     struct ScheduleRuntime {
-        size_t admitted_running_stream_count             = 0;
-        size_t admitted_prefill_token_size_with_cache    = 0;
-        size_t admitted_prefill_max_seq_len_with_cache   = 0;
-        size_t admitted_prefill_sequence_count           = 0;
-        size_t admitted_prefill_token_size_without_cache = 0;
-        size_t newly_inited_kv_streams                   = 0;
+        size_t  admitted_running_stream_count             = 0;
+        size_t  admitted_prefill_token_size_with_cache    = 0;
+        size_t  admitted_prefill_max_seq_len_with_cache   = 0;
+        size_t  admitted_prefill_sequence_count           = 0;
+        size_t  admitted_prefill_token_size_without_cache = 0;
+        size_t  newly_inited_kv_streams                   = 0;
     };
 
     int64_t lastScheduleTime() override;
@@ -74,16 +74,16 @@ private:
                                    const GenerateStreamPtr& candidate) const;
     bool    evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
-    size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
-    size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
-    size_t countInitedKVCacheStreams() const;
-    size_t groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
-    void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
-    bool   waitPredicate();
-    void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    bool   checkInputLength(const GenerateStreamPtr& stream);
-    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
+    size_t  prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
+    size_t  prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
+    size_t  prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
+    size_t  countInitedKVCacheStreams() const;
+    size_t  groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
+    void    accountBatchMetrics(const GenerateStreamPtr& new_stream);
+    bool    waitPredicate();
+    void    addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    bool    checkInputLength(const GenerateStreamPtr& stream);
+    void    evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
                                   const std::list<GenerateStreamPtr>& already_admitted_streams);
     void   evaluateWaitingGroupQueue();
     void   evaluateLoadingCacheGroupQueue();
@@ -92,9 +92,8 @@ private:
     void   moveGroupToNewStreams(StreamGroup& group);
     void   moveGroupToAllocatingGroup(StreamGroup& group);
     void   dispatchPreparedGroup(StreamGroup& group);
-    void   cancelStreams(std::list<GenerateStreamPtr>& streams);
-    void   cancelGroups(StreamGroupQueue& group_queue);
-
+    void    cancelStreams(std::list<GenerateStreamPtr>& streams);
+    void    cancelGroups(StreamGroupQueue& group_queue);
 protected:
     void                            evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
     PDSepConfig                     pd_sep_config_;
@@ -106,7 +105,7 @@ protected:
     StreamGroupQueue                waiting_group_queue_;
     StreamGroupQueue                loading_cache_group_queue_;
     std::shared_ptr<KVCacheManager> cache_manager_;
-    std::atomic<int64_t>            last_schedule_time_             = autil::TimeUtility::currentTimeInMilliSeconds();
+    std::atomic<int64_t>            last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_                    = 0;
     size_t                          max_batch_tokens_size_          = 0;
     size_t                          max_batch_tokens_without_cache_ = 0;

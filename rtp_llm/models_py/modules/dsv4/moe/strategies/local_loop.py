@@ -260,10 +260,10 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
 
     def _forward_eager(
         self,
-        x: torch.Tensor,  # [N, D]
+        x: torch.Tensor,        # [N, D]
         weights: torch.Tensor,  # [N, k] fp32
         indices: torch.Tensor,  # [N, k] int64 — GLOBAL expert IDs
-        y: torch.Tensor,  # [N, D] fp32, accumulator
+        y: torch.Tensor,        # [N, D] fp32, accumulator
         local_start: int,
         local_end: int,
     ) -> torch.Tensor:
@@ -283,10 +283,10 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
 
     def _forward_graph_safe(
         self,
-        x: torch.Tensor,  # [N, D]
+        x: torch.Tensor,        # [N, D]
         weights: torch.Tensor,  # [N, k] fp32
         indices: torch.Tensor,  # [N, k] int64 — GLOBAL expert IDs
-        y: torch.Tensor,  # [N, D] fp32, accumulator
+        y: torch.Tensor,        # [N, D] fp32, accumulator
         local_start: int,
         local_end: int,
     ) -> torch.Tensor:
@@ -331,10 +331,10 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
     # ------------------------------------------------------------------
     def _forward_topk_bs1(
         self,
-        x: torch.Tensor,  # [1, D] bf16
+        x: torch.Tensor,        # [1, D] bf16
         weights: torch.Tensor,  # [1, K] fp32
         indices: torch.Tensor,  # [1, K] int64 — GLOBAL expert IDs (== local for ep=1)
-        y: torch.Tensor,  # [1, D] fp32, accumulator
+        y: torch.Tensor,        # [1, D] fp32, accumulator
     ) -> torch.Tensor:
         """bs=1 hot path: K (≈top-6) expert calls instead of E (=256).
 
@@ -399,9 +399,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
 
             # Gather expert eid's weight slices (graph-safe, fixed-shape output).
             # Use squeeze(0) on dim 0 to drop the [1, ...] from index_select.
-            w1_w = torch.index_select(self._W1_w, 0, eid_t).squeeze(
-                0
-            )  # [inter, D/2] int8
+            w1_w = torch.index_select(self._W1_w, 0, eid_t).squeeze(0)  # [inter, D/2] int8
             w1_s = _select_mn_major_scale_for_index(self._W1_s_gemm_t, eid_t)
             w3_w = torch.index_select(self._W3_w, 0, eid_t).squeeze(0)
             w3_s = _select_mn_major_scale_for_index(self._W3_s_gemm_t, eid_t)
@@ -474,10 +472,10 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
     # ------------------------------------------------------------------
     def _forward_topk_bsN(
         self,
-        x: torch.Tensor,  # [N, D] bf16
+        x: torch.Tensor,        # [N, D] bf16
         weights: torch.Tensor,  # [N, K] fp32
         indices: torch.Tensor,  # [N, K] int64 — GLOBAL expert IDs
-        y: torch.Tensor,  # [N, D] fp32, accumulator
+        y: torch.Tensor,        # [N, D] fp32, accumulator
     ) -> torch.Tensor:
         """N>1 hot path: N*K (≈N*6) expert calls instead of E (=256).
 
@@ -552,8 +550,8 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
                 scale_ue8m0=True,
             )
             for k in range(K):
-                eid_t = indices[n, k : k + 1]  # [1] long
-                router_w = weights[n, k : k + 1, None]  # [1, 1] fp32
+                eid_t = indices[n, k : k + 1]            # [1] long
+                router_w = weights[n, k : k + 1, None]   # [1, 1] fp32
 
                 # Gather expert eid's weight slices (graph-safe).
                 w1_w = torch.index_select(self._W1_w, 0, eid_t).squeeze(0)

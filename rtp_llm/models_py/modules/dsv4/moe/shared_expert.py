@@ -100,9 +100,7 @@ def _get_shared_expert_stream(
 
 
 def _find_module_cuda_device(module: nn.Module) -> torch.device | None:
-    for tensor in list(module.parameters(recurse=True)) + list(
-        module.buffers(recurse=True)
-    ):
+    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
         if tensor.is_cuda:
             return tensor.device
 
@@ -308,9 +306,7 @@ class FusedSharedExpertFastPath:
         if self.dim is None:
             self.dim = D
         if D != self.dim:
-            raise RuntimeError(
-                f"shared expert dim mismatch: got {D}, expected {self.dim}"
-            )
+            raise RuntimeError(f"shared expert dim mismatch: got {D}, expected {self.dim}")
         inter: int = self.inter_dim  # type: ignore[assignment]
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
         workspace = self._workspace
@@ -408,7 +404,9 @@ class FusedSharedExpertFastPath:
             )
         return self._run_prepared(shared_experts, x)
 
-    def _run_prepared(self, shared_experts: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    def _run_prepared(
+        self, shared_experts: nn.Module, x: torch.Tensor
+    ) -> torch.Tensor:
         if self._prepared_shared_experts is not shared_experts:
             self.prepare(shared_experts)
         w13_parts: tuple[torch.Tensor, torch.Tensor] = (

@@ -530,7 +530,9 @@ def multi_rank_start(
 
     # Wait for all ranks to report startup status
     try:
-        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size, manager)
+        _wait_for_ranks_startup(
+            processes, rank_pipe_readers, local_world_size, manager
+        )
 
         # Report success via external pipe
         _send_pipe_status(
