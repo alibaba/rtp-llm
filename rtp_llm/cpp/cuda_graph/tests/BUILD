@@ -31,6 +31,16 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+cc_test(
+    name = "prepared_attention_inputs_guard_test",
+    srcs = ["prepared_attention_inputs_guard_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:prepared_attention_inputs_guard",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

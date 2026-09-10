@@ -32,6 +32,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         )
         model.kv_cache = None
         model._dspark_width = 3
+        model._dspark_query_width = 3
         model._dspark_hidden_dim = 8
         propose_inputs = PyModelInputs()
         propose_inputs.input_ids = torch.zeros(3, dtype=torch.int32)

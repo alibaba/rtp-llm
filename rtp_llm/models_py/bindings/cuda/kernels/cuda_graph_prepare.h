@@ -12,6 +12,8 @@ struct CudaGraphPrepareFillRegion {
     const int32_t* value_ptr = nullptr;
     int64_t        count     = 0;
     int32_t        value     = 0;
+    int32_t        value_offset = 0;
+    int32_t        step         = 0;
 };
 
 struct CudaGraphPrepareFillParams {

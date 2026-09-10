@@ -24,6 +24,7 @@
     "output_len": 50,
     "step_output_len": 50,
     "iter_count": 44,
+    "iter_count_tolerance": 2,
     "cum_log_probs": [],
     "beam_responses": [],
     "pd_sep": false,

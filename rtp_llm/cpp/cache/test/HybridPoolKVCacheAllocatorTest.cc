@@ -139,6 +139,14 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     return config;
 }
 
+static CacheConfig makeTinyDSV4HybridPoolConfig(uint32_t block_num = 8) {
+    auto              mc = makeTinyDSV4ModelConfig();
+    ParallelismConfig pc;
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    config.finalizeBlockNums(block_num, RuntimeConfig{});
+    return config;
+}
+
 static void setExplicitBlocksForGroup(CacheConfig& config, size_t group_id, uint32_t block_num) {
     ASSERT_LT(group_id, static_cast<size_t>(config.groupNums()));
     std::vector<CacheGroupPolicy> policies;
@@ -1079,7 +1087,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedTagPoolsUseGpuBacking) {
 // memory_placement=HOST_PINNED must move only the opted-in pools off HBM; every other pool of
 // the same DSV4 config stays on the device.
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedTagPoolsUsePinnedHostBackingWhenPlacementIsHostPinned) {
-    auto       config      = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    // This test validates residency routing, not production-size capacity.
+    // Use the seven-pool tiny DSV4 topology so CI does not need to pin the
+    // Pro model's multi-GiB HCA-state pool merely to inspect MemoryType.
+    auto       config      = makeTinyDSV4HybridPoolConfig();
     const auto pinned_gids = setPinnedHostPlacementForExplicitIndependentGroups(config);
     ASSERT_FALSE(pinned_gids.empty());
     ASSERT_LT(pinned_gids.size(), static_cast<size_t>(config.groupNums()));

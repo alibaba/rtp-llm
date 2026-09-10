@@ -24,6 +24,10 @@ public:
         decoder_layer_hidden_states_ = hidden_states;
     };
 
+    void setMtpTargetHiddenStates(at::Tensor hidden_states) {
+        mtp_target_hidden_states_ = hidden_states;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
@@ -67,6 +71,7 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
+    at::Tensor               mtp_target_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

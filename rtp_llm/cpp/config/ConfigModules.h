@@ -171,7 +171,11 @@ struct KVCacheConfig {
     int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
+    // "auto" preserves a model-declared recurrent-state dtype. Models
+    // without such a declaration keep LinearAttentionConfig's BF16 default;
+    // the legacy remote connector falls back to BF16 because it requires one
+    // contiguous shared cache pool.
+    std::string ssm_state_dtype           = "auto";
     int64_t     kv_cache_mem_mb           = -1;
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;
@@ -334,6 +338,9 @@ struct SpeculativeExecutionConfig {
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
     int64_t     sp_dspark_mask_token_id = -1;
+    // True: gamma query rows, including the anchor prediction. False:
+    // one conditioning anchor followed by gamma prediction rows.
+    bool        sp_dspark_sample_from_anchor = true;
     std::string to_string() const;
 
     // Helper functions for enum conversion

@@ -85,6 +85,8 @@ protected:
     bool                                  retryable_ = true;
     std::chrono::system_clock::time_point request_begin_time_;
 
+    static constexpr int64_t kStopStreamWaitTimeoutMs = 2000;
+
 protected:
     void stopStream();
 };

@@ -16,6 +16,14 @@ py_test(
     ],
 )
 
+py_test(
+    name = "comparison_utils_test",
+    srcs = [
+        "comparison_utils.py",
+        "comparison_utils_test.py",
+    ],
+)
+
 exports_files([
     "entry.py",
     "data/prompt_candidates.json",

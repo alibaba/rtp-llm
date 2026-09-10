@@ -76,10 +76,14 @@ public:
         // Production PyWrappedModel creates these device mirrors. Python tests
         // cannot assign them because the bindings intentionally expose them as
         // read-only, so reproduce that input-building step in the test wrapper.
-        inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
-        inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
-        refreshTaggedAttentionInputs(inputs);
+        prepareDeviceMirrors(inputs);
         return runner_->forward(inputs, state_);
+    }
+
+    void prepareAttentionInputs(torch_ext::PyModelInputs& inputs) {
+        c10::InferenceMode inference_guard(true);
+        prepareDeviceMirrors(inputs);
+        runner_->prepareAttentionInputs(inputs, state_);
     }
 
     int getCurrentRealGraphSize() {
@@ -91,6 +95,12 @@ public:
     }
 
 private:
+    void prepareDeviceMirrors(torch_ext::PyModelInputs& inputs) {
+        inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
+        inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
+        refreshTaggedAttentionInputs(inputs);
+    }
+
     void reset_runner() {
         if (runner_ != nullptr) {
             delete runner_;
@@ -131,5 +141,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("num_tokens_per_bs") = 1)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
+        .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }
