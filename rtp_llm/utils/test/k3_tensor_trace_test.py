@@ -33,6 +33,27 @@ class TensorTraceTest(unittest.TestCase):
     def read(self, frame=0):
         return torch.load(self.root / f"frame-{frame:08d}.pt", weights_only=True)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_eager_d2h_preserves_source_without_retaining_device_snapshots(self):
+        trace = self.trace()
+        value = torch.arange(1024 * 1024, dtype=torch.float32, device="cuda")
+        expected = value.cpu()
+        torch.accelerator.synchronize()
+        allocated = torch.accelerator.memory_allocated()
+        trace.begin({"case": "direct-d2h"})
+        trace.record("before", value)
+        self.assertEqual(torch.accelerator.memory_allocated(), allocated)
+        value.fill_(-1)
+        trace.record("after", value)
+        self.assertEqual(torch.accelerator.memory_allocated(), allocated)
+        trace.end()
+        trace.close()
+        tensors = self.read()["tensors"]
+        torch.testing.assert_close(tensors[0]["value"], expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            tensors[1]["value"], torch.full_like(expected, -1), rtol=0, atol=0
+        )
+
     def test_snapshot_failure_preserves_original_cause_and_releases_budget(self):
         trace = self.trace()
         tensor = torch.zeros(4)

@@ -59,7 +59,8 @@ def _json_copy(value: Any) -> Any:
 class TensorTrace:
     """One producer thread and one asynchronous, lossless file writer.
 
-    CUDA record() takes device snapshots on the producer stream. Frames spill
+    Outside Graph capture, CUDA record() copies directly to pinned CPU memory
+    on the producer stream; the writer waits for the copy event. Frames spill
     into ordered fragments as the pending budget fills; the producer waits for
     the writer before taking further snapshots. end() marks the final fragment.
     max_pending_bytes bounds live snapshots plus staged CPU copies. Exhaustion
@@ -252,17 +253,27 @@ class TensorTrace:
         # original strides remain in metadata for layout reconstruction.
         # Reserve staging storage up front so flushing cannot itself overflow.
         capturing = self._frame.capture_key is not None
-        reserved = nbytes * (2 if tensor.is_cuda and not capturing else 1)
+        reserved = nbytes
         if not capturing:
             self._make_room(reserved, nbytes)
         self._reserve(reserved)
         try:
-            value = tensor.detach().clone(memory_format=torch.contiguous_format)
             ready = None
-            if tensor.is_cuda and self._frame.capture_key is None:
+            if tensor.is_cuda and not capturing:
+                # Copy on the producer stream before any later kernel can
+                # overwrite this source. Keep only pinned CPU storage pending
+                # IO; a second device snapshot can exhaust full-model VRAM.
                 with torch.accelerator.device_index(tensor.device.index):
+                    stream = torch.cuda.current_stream(tensor.device)
+                    value = torch.empty(
+                        tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=True
+                    )
+                    value.copy_(tensor.detach(), non_blocking=True)
+                    tensor.record_stream(stream)
                     ready = torch.cuda.Event()
-                    ready.record(torch.cuda.current_stream(tensor.device))
+                    ready.record(stream)
+            else:
+                value = tensor.detach().clone(memory_format=torch.contiguous_format)
         except BaseException as exc:
             self._release(reserved)
             self._fail(f"failed to snapshot {name}: {type(exc).__name__}: {exc}")
@@ -302,6 +313,8 @@ class TensorTrace:
                         events.append(done)
                 else:
                     host = value
+                    if snapshot.ready is not None:
+                        events.append(snapshot.ready)
                 staged.append((snapshot.name, host, snapshot.metadata))
         except BaseException as exc:
             # A staging failure is terminal; no successful close marker can be
@@ -345,8 +358,8 @@ class TensorTrace:
         for name, tensor in (live_tensors or {}).items():
             self.record(name, tensor, origin="live_replay_input")
         for snapshot in self._graphs[key]:
-            # The clone runs after replay, before the next replay on the same
-            # stream. It decouples the writer from reusable capture storage.
+            # D2H runs after replay and before the next replay on this stream.
+            # The writer owns CPU storage, independent of Graph buffer reuse.
             self.record(
                 snapshot.name,
                 snapshot.value,
