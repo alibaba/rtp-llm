@@ -1395,3 +1395,120 @@ HANDLERS += [
         {"matches": "boolean"},
     ),
 ]
+
+
+def _engine_probe_validate(params, plan):
+    keys = {
+        "engine",
+        "expected_error_code",
+        "input_len",
+        "output_len",
+        "keys_per_request",
+        "rpc_timeout_s",
+        "fetch_attach_timeout_ms",
+    }
+    p = _fields(params, keys, keys)
+    if not isinstance(p["engine"], str) or not p["engine"].startswith("prefill-"):
+        raise ValueError("engine probe requires a prefill target")
+    for k in keys - {"engine"}:
+        if (
+            type(p[k]) is not int
+            or not 0 <= p[k] <= 65536
+            or (k not in {"keys_per_request", "expected_error_code"} and p[k] == 0)
+        ):
+            raise ValueError("invalid engine probe parameter: " + k)
+    return p
+
+
+def _engine_probe(ctx, params, deadline):
+    from .elastic import ClientRecords
+
+    engine = _engines(_http(ctx.ops, "snapshot", deadline), [params["engine"]])[
+        params["engine"]
+    ]
+    rid = ctx.ops.next_request_id()
+    shape = dict(input_len=params["input_len"], output_len=params["output_len"])
+    if params["keys_per_request"]:
+        shape["block_keys"] = [
+            rid * 2048 + i for i in range(params["keys_per_request"])
+        ]
+    inp = ctx.ops.build_generate_input(rid, **shape)
+    req = ctx.ops.pb2.EnqueueBatchRequestPB(
+        batch_id=rid,
+        dp_slots=[
+            ctx.ops.pb2.EnqueueBatchDpSlotPB(
+                dp_rank=0, requests=[ctx.ops.pb2.EnqueueBatchExternalInputPB(input=inp)]
+            )
+        ],
+        fetch_attach_timeout_ms=params["fetch_attach_timeout_ms"],
+    )
+    stub = ctx.ops.pb2_grpc.RpcServiceStub(ctx.ops._channel(engine["grpc_addr"]))
+    records = ClientRecords(ctx.env_epoch)
+    row = records.issue(rid, ctx.clock)
+    started = ctx.clock()
+    ack = stub.EnqueueBatch(
+        req, timeout=min(params["rpc_timeout_s"], deadline.remaining())
+    )
+    ended = ctx.clock()
+    errors = [e for e in ack.errors if e.request_id == rid]
+    rejected = (
+        not ack.successes
+        and len(errors) == len(ack.errors) == 1
+        and int(errors[0].error_info.error_code) == params["expected_error_code"]
+    )
+    if ack.successes:
+        stub.Cancel(
+            ctx.ops.pb2.CancelRequestPB(request_id=rid),
+            timeout=min(params["rpc_timeout_s"], deadline.remaining()),
+        )
+    message = errors[0].error_info.error_message if errors else ""
+    code = int(errors[0].error_info.error_code) if errors else None
+    records.update(
+        row,
+        schedule=dict(
+            method="EnqueueBatch",
+            started_s=started,
+            ended_s=ended,
+            status="REJECTED" if rejected else "OK",
+            error=message,
+        ),
+        prefill_addr=engine["grpc_addr"],
+        consumer_exit_s=ended,
+        transport_terminal_s=ended,
+        business_error_code=code,
+        business_error_message=message,
+    )
+    row["probe_owner"] = "prefill_engine_direct"
+    row["schedule_response"] = None
+    rows = records.snapshot_records()
+    path = ctx.artifact_dir / ("admission-engine-probe-" + str(rid) + ".json")
+    path.write_text(
+        json.dumps(
+            dict(records=rows, errors=len(ack.errors), successes=len(ack.successes)),
+            indent=2,
+        )
+    )
+    return StageOutput(
+        {"rows": ctx.register_resource("admission_rows", rows, historical=True)},
+        [
+            CheckResult(
+                "rejected",
+                "PASS" if rejected else "FAIL",
+                actual=rejected,
+                expected=True,
+            )
+        ],
+        [str(path)],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "admission_engine_probe",
+        _engine_probe_validate,
+        _engine_probe,
+        {"rows": "admission_rows"},
+        checks=frozenset({"rejected"}),
+        requires=frozenset({"enqueue_batch"}),
+    )
+)

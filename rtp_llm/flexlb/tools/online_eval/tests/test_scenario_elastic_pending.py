@@ -89,6 +89,9 @@ class PendingTests(unittest.TestCase):
                 self.response = response
 
             def result(self):
+                if self.response.pending:
+                    if not removed.wait(timeout=3):
+                        raise TimeoutError("pending request was never released")
                 return self.response
 
             def cancel(self):
@@ -141,6 +144,7 @@ class PendingTests(unittest.TestCase):
                 if recovery:
                     state["recovery_count"] += 1
                 response = NS(
+                    pending=not recovery and request.rid > 4 + int(reject_first),
                     code=503 if reject_first and request.rid == 1 else 200,
                     success=not (reject_first and request.rid == 1),
                     error_message="rejected",
@@ -204,7 +208,7 @@ class PendingTests(unittest.TestCase):
             def http(ops, endpoint, deadline, body=None):
                 if endpoint == "snapshot":
                     result = copy.deepcopy(list(engines.values()))
-                    if completed_interference and len(state["issued"]) >= 7:
+                    if completed_interference and len(state["issued"]) >= 6:
                         next(v for v in result if v["name"] == "prefill-0")[
                             "completed"
                         ] = 1
@@ -403,6 +407,9 @@ class PendingTests(unittest.TestCase):
             if k.startswith("elastic-pending-outcomes-")
         )
         self.assertEqual(outcome["records"][0]["schedule"]["status"], "REJECTED")
+        rejected_outcome = next(r for r in outcome["outcomes"] if r["rid"] == 1)
+        self.assertEqual(rejected_outcome["kind"], "error")
+        self.assertIsNone(rejected_outcome["route"])
         strict, _ = self.run_program("zero_errors", wave_error=False, reject_first=True)
         self.assertEqual(
             next(r for r in strict["stages"] if r["id"] == "all_issued_zero_errors")[

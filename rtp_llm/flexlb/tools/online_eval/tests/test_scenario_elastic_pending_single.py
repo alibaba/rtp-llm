@@ -139,6 +139,8 @@ class SingleBatchTests(unittest.TestCase):
                 self.response = response
 
             def result(self):
+                if self.response.pending and not removed.wait(timeout=3):
+                    raise TimeoutError("pending Schedule never released")
                 return self.response
 
             def cancel(self):
@@ -199,6 +201,7 @@ class SingleBatchTests(unittest.TestCase):
                     else:
                         state["queued"][name].append(request.rid)
                 response = NS(
+                    pending=not recovery and request.rid in state["queued"][name],
                     code=200,
                     success=True,
                     error_message="",
@@ -284,7 +287,7 @@ class SingleBatchTests(unittest.TestCase):
                             )
                             if (
                                 completed_interference
-                                and state["rid"] >= 7
+                                and state["rid"] >= 6
                                 and name == "prefill-0"
                             ):
                                 row["completed"] += 1
@@ -371,11 +374,11 @@ class SingleBatchTests(unittest.TestCase):
         result, state = self.run_program()
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(state["pre_remove_ledgers"]["prefill-0"], [[1], [3]])
-        self.assertEqual(state["pre_remove_queued"]["prefill-0"], [5, 7])
+        self.assertEqual(state["pre_remove_queued"]["prefill-0"], [5])
         self.assertTrue(
             all(len(batch["members"]) == 1 for batch in state["enqueue_batches"])
         )
-        self.assertEqual(len(state["fetch"]), 27)
+        self.assertEqual(len(state["fetch"]), 26)
         self.assertFalse(state["generate"])
         self.assertEqual(state["recovery"], 20)
         self.assertEqual(state["peak"], 10)
@@ -389,7 +392,7 @@ class SingleBatchTests(unittest.TestCase):
         self.assertEqual(construction["engine_waiting_running"], [0, 2])
         self.assertEqual(
             construction["inference"],
-            "aggregate only; not exact pending request identities",
+            "Schedule started but has not returned; engine counts are diagnostic only",
         )
 
     def test_capacity_bypass_and_completed_interference_cannot_manufacture_pending(

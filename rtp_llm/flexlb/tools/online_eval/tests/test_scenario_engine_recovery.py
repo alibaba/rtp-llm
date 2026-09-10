@@ -167,9 +167,35 @@ class Model:
             self.worker_cancel_attempts += 1
             return NS(status=0)
 
+        for name in (
+            "EnqueueBatchRequestPB",
+            "EnqueueBatchDpSlotPB",
+            "EnqueueBatchExternalInputPB",
+        ):
+            setattr(self.ops.pb2, name, lambda **kw: NS(**kw))
+
+        def enqueue_crash(channel, request, timeout):
+            name = channel.split(":")[0]
+            engine = self.engines[name]
+            engine["rpc_counts"]["enqueue_batch"] += 1
+            if not engine.get("crash_after"):
+                raise AssertionError("crash must be armed before direct trigger")
+            engine["stopped"] = True
+            self.wiped.update(self.routed.get(name, set()))
+            self.append(
+                f"worker {name}:9000 marked dead after 3 consecutive gRPC failures"
+            )
+            for field in ["accepted", "running", "inflight", "held_blocks"]:
+                engine[field] = 0
+            engine["cache_key_set"] = []
+            return NS(successes=[], errors=[])
+
         def worker_service(channel):
             stub = worker_factory(channel)
             stub.Cancel = worker_cancel
+            stub.EnqueueBatch = lambda request, timeout: enqueue_crash(
+                channel, request, timeout
+            )
             return stub
 
         self.ops.pb2_grpc.RpcServiceStub = worker_service

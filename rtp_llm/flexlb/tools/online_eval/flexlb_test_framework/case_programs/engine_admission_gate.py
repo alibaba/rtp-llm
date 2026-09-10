@@ -229,28 +229,23 @@ def prefill_waiting_cap(case):
     )
     case.step(
         "probe",
-        "admission_wave",
-        params=case.value("prefill_waiting_cap.probe"),
-    )
-    case.step(
-        "probe_done",
-        "admission_wait",
+        "admission_engine_probe",
         timeout_s=case.value("prefill_waiting_cap.probe_done_timeout_s"),
-        params={"wave": output("probe", "wave")},
+        params=case.value("prefill_waiting_cap.probe"),
     )
     case.step(
         "backpressure_error",
         "admission_check",
         params=case.params(
             "prefill_waiting_cap.backpressure_error",
-            {"rows": output("probe_done", "rows")},
+            {"rows": output("probe", "rows")},
         ),
     )
     case.step(
         "fast_reject",
         "admission_check",
         params=case.params(
-            "prefill_waiting_cap.fast_reject", {"rows": output("probe_done", "rows")}
+            "prefill_waiting_cap.fast_reject", {"rows": output("probe", "rows")}
         ),
     )
     case.step(
@@ -387,27 +382,22 @@ def kv_pool_capacity(case):
     )
     case.step(
         "probe",
-        "admission_wave",
-        params=case.value("kv_pool_capacity.probe"),
-    )
-    case.step(
-        "probe_done",
-        "admission_wait",
+        "admission_engine_probe",
         timeout_s=case.value("kv_pool_capacity.probe_done_timeout_s"),
-        params={"wave": output("probe", "wave")},
+        params=case.value("kv_pool_capacity.probe"),
     )
     case.step(
         "lack_mem_error",
         "admission_check",
         params=case.params(
-            "kv_pool_capacity.lack_mem_error", {"rows": output("probe_done", "rows")}
+            "kv_pool_capacity.lack_mem_error", {"rows": output("probe", "rows")}
         ),
     )
     case.step(
         "fast_reject",
         "admission_check",
         params=case.params(
-            "kv_pool_capacity.fast_reject", {"rows": output("probe_done", "rows")}
+            "kv_pool_capacity.fast_reject", {"rows": output("probe", "rows")}
         ),
     )
     case.step(

@@ -116,6 +116,9 @@ class Storm:
         self.pool = ThreadPoolExecutor(max_workers=config["concurrency"])
         self.futures, self.windows, self.seeds, self.controls = [], [], [], []
         self.issue_index = 0
+        self.sampler = ThreadPoolExecutor(max_workers=1)
+        self.sample_future = None
+        self.latest_sample = None
         self.next_issue = None
         self.last_phase = None
         self.master_config = ctx.env.run_dir / "master_config.json"
@@ -123,6 +126,7 @@ class Storm:
         self.summary = None
 
     def snapshot(self, deadline):
+        sample_started = self.ctx.clock()
         all_engines = _snapshot(self.ctx, deadline)
         engines = {}
         for name, row in all_engines.items():
@@ -157,7 +161,28 @@ class Storm:
             engines[name] = selected
         if len(engines) != self.ctx.env.spec.n_prefill:
             raise ValueError("prefill membership changed")
-        return dict(time_s=self.ctx.clock(), epoch_s=time.time(), engines=engines)
+        return dict(
+            time_s=self.ctx.clock(),
+            started_s=sample_started,
+            epoch_s=time.time(),
+            engines=engines,
+        )
+
+    def sample_async(self, deadline):
+        # One bounded observer; HTTP latency must not serialize request emission.
+        if self.latest_sample is None:
+            self.latest_sample = self.snapshot(deadline)
+        if self.sample_future is not None and self.sample_future.done():
+            self.latest_sample = self.sample_future.result()
+            self.sample_future = None
+        if self.sample_future is None:
+            self.sample_future = self.sampler.submit(self.snapshot, deadline)
+        if (
+            self.ctx.clock() - self.latest_sample["started_s"]
+            > self.config["max_sample_age_s"]
+        ):
+            raise ValueError("storm engine observation became stale")
+        return self.latest_sample
 
     def control(self, name, deadline, **fields):
         before = digest(self.master_config)
@@ -278,8 +303,11 @@ class Storm:
     def close(self, deadline):
         self.records.cancel_active("cleanup")
         try:
+            if self.sample_future is not None:
+                self.sample_future.result(timeout=deadline.remaining())
             self.drain(deadline)
         finally:
+            self.sampler.shutdown(wait=False, cancel_futures=True)
             self.pool.shutdown(wait=False, cancel_futures=True)
             self.save()
 
@@ -305,7 +333,7 @@ CONFIG_LIMITS = {
 def _prepare_validate(params, plan):
     allowed = (
         set(CONFIG_LIMITS)
-        | {"interval_s", "steady_interval_s", "min_busy_share"}
+        | {"interval_s", "steady_interval_s", "min_busy_share", "max_sample_age_s"}
         | {
             f"{m}_{g}"
             for m in ("hit", "eviction", "holders")
@@ -319,6 +347,8 @@ def _prepare_validate(params, plan):
     for key in allowed - set(CONFIG_LIMITS):
         if type(p[key]) not in (int, float) or not math.isfinite(p[key]) or p[key] < 0:
             raise ValueError(f"invalid storm configuration {key}")
+    if not 0 < p["max_sample_age_s"] < p["window_s"]:
+        raise ValueError("snapshot age budget must be smaller than a window")
     for metric in ("hit", "eviction", "holders"):
         values = [p[f"{metric}_{g}"] for g in ("strict", "normal", "loose")]
         if values != sorted(values, reverse=metric == "hit"):
@@ -373,12 +403,20 @@ def _window_validate(params, plan):
 
 def _window(ctx, params, deadline):
     storm = ctx.resource(params["storm"], "flow")
+    if storm.last_phase != params["phase"]:
+        # Drains and speed controls between phases are deliberate quiet periods.
+        # Start their next observation/cadence clock only after a fresh snapshot.
+        if storm.sample_future is not None:
+            storm.sample_future.result(timeout=deadline.remaining())
+            storm.sample_future = None
+        storm.latest_sample = storm.snapshot(deadline)
+    state = storm.sample_async(deadline)
     started = ctx.clock()
     row = dict(
         id=f'{params["phase"]}-{params["index"]}',
         phase=params["phase"],
         index=params["index"],
-        samples=[],
+        samples=[state],
     )
     storm.windows.append(row)
     interval = storm.config[
@@ -388,16 +426,20 @@ def _window(ctx, params, deadline):
         storm.next_issue = started
         storm.last_phase = params["phase"]
     while ctx.clock() - started < storm.config["window_s"]:
-        state = storm.snapshot(deadline)
-        row["samples"].append(state)
+        state = storm.sample_async(deadline)
+        if state is not row["samples"][-1]:
+            row["samples"].append(state)
         if ctx.clock() >= storm.next_issue:
             if ctx.clock() - storm.next_issue > interval:
                 raise ValueError("arrival cadence missed a complete interval")
             storm.issue(params["phase"], row["id"], state)
             storm.next_issue += interval
         deadline.sleep(0.03)
-    row["samples"].append(storm.snapshot(deadline))
-    storm.save()
+    # Keep cadence across adjacent windows. Synchronous final sampling and JSON
+    # persistence used to consume the next window's first emission interval.
+    state = storm.sample_async(deadline)
+    if state is not row["samples"][-1]:
+        row["samples"].append(state)
     return StageOutput()
 
 

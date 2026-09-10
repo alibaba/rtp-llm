@@ -78,6 +78,54 @@ class AdmissionTests(unittest.TestCase):
             ).status,
         )
 
+    def test_direct_probe_does_not_turn_unexpected_admission_into_rejection(self):
+        ns = SimpleNamespace
+        params = dict(
+            expected_error_code=602,
+            engine="prefill-0",
+            input_len=512,
+            output_len=2,
+            keys_per_request=0,
+            rpc_timeout_s=5,
+            fetch_attach_timeout_ms=1000,
+        )
+        stub = Mock()
+        self.ctx.ops = ns(
+            next_request_id=lambda: 7,
+            _channel=lambda x: x,
+            build_generate_input=lambda rid, **kw: ns(request_id=rid, **kw),
+            pb2=ns(
+                **{
+                    k: (lambda **kw: ns(**kw))
+                    for k in (
+                        "EnqueueBatchRequestPB",
+                        "EnqueueBatchDpSlotPB",
+                        "EnqueueBatchExternalInputPB",
+                        "CancelRequestPB",
+                    )
+                }
+            ),
+            pb2_grpc=ns(RpcServiceStub=lambda target: stub),
+        )
+        rejection = ns(
+            request_id=7, error_info=ns(error_code=602, error_message="LACK_MEM")
+        )
+        with patch.object(admission, "_http", return_value={}), patch.object(
+            admission, "_engines", return_value={"prefill-0": dict(grpc_addr="p:1")}
+        ):
+            for successes, errors, expected in [
+                ([ns(request_id=7)], [], "FAIL"),
+                ([], [], "FAIL"),
+                ([], [rejection], "PASS"),
+            ]:
+                stub.EnqueueBatch.return_value = ns(successes=successes, errors=errors)
+                result = admission._engine_probe(self.ctx, params, self.deadline)
+                self.assertEqual(result.checks[0].status, expected)
+            stub.Cancel.assert_called_once()
+            stub.EnqueueBatch.side_effect = RuntimeError("transport broken")
+            with self.assertRaisesRegex(RuntimeError, "transport broken"):
+                admission._engine_probe(self.ctx, params, self.deadline)
+
     def test_consumer_fifo_ignores_late_waiter_thread_return_order(self):
         rows = [self.row(elapsed=1), self.row(elapsed=2)]
         rows[0]["await_return_s"], rows[1]["await_return_s"] = 20.0001, 20.0
@@ -333,10 +381,55 @@ class AdmissionProgramsTest(unittest.TestCase):
             "master_direct_clean",
         ]:
             registry[name] = external(registry[name])
+
+        def enqueue(request, timeout):
+            state.sent += 1
+            state.waited += 1
+            # The direct engine path, unlike master Schedule, rejects at the gate.
+            text = (
+                "prefill waiting queue full backpressure"
+                if variant == "prefill_waiting_cap"
+                else "enqueuebatch rejected LACK_MEM insufficient kv cache"
+            )
+            rid = request.dp_slots[0].requests[0].input.request_id
+            return SimpleNamespace(
+                successes=[],
+                errors=[
+                    SimpleNamespace(
+                        request_id=rid,
+                        error_info=SimpleNamespace(
+                            error_code=0 if variant == "prefill_waiting_cap" else 602,
+                            error_message=text,
+                        ),
+                    )
+                ],
+            )
+
+        probe_ops = SimpleNamespace(
+            next_request_id=Mock(side_effect=range(1000, 2000)),
+            build_generate_input=lambda rid, **kw: SimpleNamespace(
+                request_id=rid, **kw
+            ),
+            _channel=lambda target: target,
+            pb2=SimpleNamespace(
+                **{
+                    k: (lambda **kw: SimpleNamespace(**kw))
+                    for k in (
+                        "EnqueueBatchRequestPB",
+                        "EnqueueBatchDpSlotPB",
+                        "EnqueueBatchExternalInputPB",
+                        "CancelRequestPB",
+                    )
+                }
+            ),
+            pb2_grpc=SimpleNamespace(
+                RpcServiceStub=lambda target: SimpleNamespace(EnqueueBatch=enqueue)
+            ),
+        )
         backend = SimpleNamespace(
             setup=lambda *args: (
                 SimpleNamespace(),
-                SimpleNamespace(next_request_id=Mock(side_effect=range(1000, 2000))),
+                probe_ops,
             ),
             teardown=lambda *args: None,
         )
@@ -355,6 +448,7 @@ class AdmissionProgramsTest(unittest.TestCase):
             pending = state.waited < state.sent
             return {
                 name: dict(
+                    grpc_addr=name + ":9001",
                     waiting=int(pending),
                     running=280 if pending else 0,
                     active_decode_requests=128 if pending else 0,

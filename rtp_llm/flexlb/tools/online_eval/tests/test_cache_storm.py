@@ -14,6 +14,8 @@ from calibrate_cache_storm import calibrate, poisson_upper, wilson_lower
 from flexlb_test_framework.scenario import compile_scenarios, load_scenarios
 from flexlb_test_framework.scenario.actions.cache_storm import (
     HANDLERS,
+    Storm,
+    _window,
     recovery_window,
     summarize,
 )
@@ -29,6 +31,60 @@ from test_scenario_runtime import Backend, Clock, source
 
 
 class StormTest(unittest.TestCase):
+
+    def test_slow_observer_does_not_serialize_emissions(self):
+        from concurrent.futures import Future
+        from unittest.mock import Mock
+        from flexlb_test_framework.scenario.runtime import Deadline
+
+        clock = Clock()
+        storm = Storm.__new__(Storm)
+        storm.ctx = SimpleNamespace(clock=clock)
+        storm.config = dict(
+            interval_s=0.1, steady_interval_s=0.1, window_s=0.4, max_sample_age_s=0.3
+        )
+        storm.latest_sample = dict(time_s=clock(), started_s=clock(), engines={})
+        future = Future()
+        storm.sample_future = future
+        storm.sampler = Mock()
+        storm.windows, storm.last_phase, storm.next_issue = [], "saturation", clock()
+        issued = []
+        storm.issue = lambda *args: issued.append(clock())
+        ctx = SimpleNamespace(clock=clock, resource=lambda *args: storm)
+        # A blocked observer cannot queue more observers or stall emissions.
+        # Stale evidence still invalidates the construction.
+        with self.assertRaisesRegex(ValueError, "observation became stale"):
+            _window(
+                ctx,
+                dict(storm="x", phase="saturation", index=0),
+                Deadline(1, clock, clock.sleep),
+            )
+        self.assertGreaterEqual(len(issued), 3)
+        storm.sampler.submit.assert_not_called()
+        future.set_exception(RuntimeError("snapshot transport failure"))
+        with self.assertRaisesRegex(RuntimeError, "snapshot transport failure"):
+            storm.sample_async(Deadline(1, clock, clock.sleep))
+
+    def test_actual_emission_miss_still_invalidates_window(self):
+        from flexlb_test_framework.scenario.runtime import Deadline
+
+        clock = Clock()
+        state = dict(time_s=clock(), engines={})
+        storm = SimpleNamespace(
+            config=dict(interval_s=0.1, window_s=0.4),
+            windows=[],
+            last_phase="saturation",
+            next_issue=clock() - 0.2,
+            sample_async=lambda deadline: state,
+        )
+        ctx = SimpleNamespace(clock=clock, resource=lambda *args: storm)
+        with self.assertRaisesRegex(ValueError, "cadence missed"):
+            _window(
+                ctx,
+                dict(storm="x", phase="saturation", index=1),
+                Deadline(1, clock, clock.sleep),
+            )
+
     def data(self):
         engine = dict(
             grpc_addr="host:1",

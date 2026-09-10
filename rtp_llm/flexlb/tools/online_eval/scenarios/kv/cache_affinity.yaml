@@ -7704,6 +7704,7 @@ parameters:
     - calibration_runs
     - interval_s
     - steady_interval_s
+    - max_sample_age_s
     - min_busy_share
     - hit_strict
     - hit_normal
@@ -7719,6 +7720,7 @@ parameters:
       min_prefill: 2
       min_decode: 1
       max_decode: 2
+  max_sample_age_s: 1
   hot_blocks: 10
   background_blocks: 4
   receiver_retention_blocks: 6

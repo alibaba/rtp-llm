@@ -1155,10 +1155,15 @@ parameters:
     batch_dispatch:
       duration_s: 0.5
     arm_next_enqueue:
-      mode: next_enqueue
+      mode: first_enqueue
     trigger_all_targets_timeout_s: 50
     trigger_all_targets:
       duration_s: 15
+      direct_enqueue: true
+      input_len: 64
+      output_len: 2
+      rpc_timeout_s: 5
+      fetch_attach_timeout_ms: 1000
     all_targets_crashed:
       metric: target_stopped
     retire_all_timeout_s: 90

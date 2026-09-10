@@ -30,10 +30,13 @@ def standalone_a_to_b(case):
     case.step(
         "steady",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "until": output("kill_time", "epoch_s"),
-        },
+        params=case.params(
+            "standalone_a_to_b.steady",
+            {
+                "rows": output("finish", "rows"),
+                "until": output("kill_time", "epoch_s"),
+            },
+        ),
     )
     case.step(
         "switch",

@@ -40,6 +40,8 @@ parameters:
       target: B
       inflight_zero: false
     finish_timeout_s: 90
+    steady:
+      until_offset_s: -1
     steady_a:
       metric: target_share
       op: eq

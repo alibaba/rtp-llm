@@ -207,7 +207,7 @@ parameters:
       - prefill-0
       operation: set_perf
       perf:
-        prefill_fixed_ms: 3000
+        prefill_fixed_ms: 8000
         max_waiting_batches: 1
     occupants_timeout_s: 180
     occupants:
@@ -241,12 +241,13 @@ parameters:
       op: ge
       expected: 1
     probe:
-      count: 1
-      concurrency: 1
+      engine: prefill-0
+      expected_error_code: 0
       input_len: 512
       output_len: 2
-      request_timeout_s: 10
       keys_per_request: 0
+      rpc_timeout_s: 10
+      fetch_attach_timeout_ms: 1000
     probe_done_timeout_s: 120
     backpressure_error:
       metric: all_error_contains
@@ -345,7 +346,7 @@ parameters:
       - prefill-0
       operation: set_perf
       perf:
-        prefill_fixed_ms: 3000
+        prefill_fixed_ms: 8000
     occupants_timeout_s: 180
     occupants:
       count: 2
@@ -378,12 +379,13 @@ parameters:
       op: ge
       expected: 16
     probe:
-      count: 1
-      concurrency: 1
+      engine: prefill-0
+      expected_error_code: 602
       input_len: 512
       output_len: 2
-      request_timeout_s: 10
       keys_per_request: 8
+      rpc_timeout_s: 10
+      fetch_attach_timeout_ms: 1000
     probe_done_timeout_s: 120
     lack_mem_error:
       metric: all_error_contains
@@ -392,7 +394,6 @@ parameters:
       text:
       - lack_mem
       - insufficient kv cache
-      - enqueuebatch rejected
     fast_reject:
       metric: latency_max
       expected: 3

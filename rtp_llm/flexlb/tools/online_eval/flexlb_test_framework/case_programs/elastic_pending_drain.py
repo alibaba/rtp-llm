@@ -17,6 +17,7 @@ def legacy_terminal(case):
         "wave",
         "elastic_pending_wave",
         timeout_s=case.value("legacy_terminal.wave_timeout_s"),
+        params=case.value("legacy_terminal.wave"),
     )
     case.step(
         "remove",
@@ -75,6 +76,7 @@ def zero_errors(case):
         "wave",
         "elastic_pending_wave",
         timeout_s=case.value("zero_errors.wave_timeout_s"),
+        params=case.value("zero_errors.wave"),
     )
     case.step(
         "remove",
@@ -145,6 +147,7 @@ def single_batch_terminal(case):
         "wave",
         "elastic_pending_wave",
         timeout_s=case.value("single_batch_terminal.wave_timeout_s"),
+        params=case.value("single_batch_terminal.wave"),
     )
     case.step(
         "batch_path",

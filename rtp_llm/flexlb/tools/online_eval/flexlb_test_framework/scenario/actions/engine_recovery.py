@@ -1192,6 +1192,30 @@ HANDLERS += [
 ]
 
 
+def validate_crash_trigger(params, plan):
+    extra = {
+        "direct_enqueue",
+        "input_len",
+        "output_len",
+        "rpc_timeout_s",
+        "fetch_attach_timeout_ms",
+    }
+    p = status._validate(
+        params, plan, {"selection", "duration_s", *extra}, {"selection", "duration_s"}
+    )
+    validate_pump({k: p[k] for k in ("selection", "duration_s")}, plan)
+    if p.get("direct_enqueue") is not None and type(p["direct_enqueue"]) is not bool:
+        raise ValueError("direct_enqueue must be boolean")
+    if p.get("direct_enqueue"):
+        if not extra <= set(p):
+            raise ValueError("direct crash trigger requires explicit RPC parameters")
+        for k in extra - {"direct_enqueue"}:
+            status._number(p[k], plan, k, 1, 60000)
+            if k != "rpc_timeout_s" and type(p[k]) is not int:
+                raise ValueError("direct crash trigger requires integer " + k)
+    return p
+
+
 def execute_crash_trigger(ctx, params, deadline):
     targets = _snapshot(ctx, params["selection"])["targets"]
     if not targets:
@@ -1207,6 +1231,59 @@ def execute_crash_trigger(ctx, params, deadline):
             break
         if len(attempts) >= 256:
             raise RuntimeError("crash trigger exceeds 256-attempt budget")
+        if params.get("direct_enqueue"):
+            for name in targets:
+                if engines[name]["stopped"]:
+                    continue
+                rid = ctx.ops.next_request_id()
+                inp = ctx.ops.build_generate_input(
+                    rid, input_len=params["input_len"], output_len=params["output_len"]
+                )
+                req = ctx.ops.pb2.EnqueueBatchRequestPB(
+                    batch_id=rid,
+                    dp_slots=[
+                        ctx.ops.pb2.EnqueueBatchDpSlotPB(
+                            dp_rank=0,
+                            requests=[
+                                ctx.ops.pb2.EnqueueBatchExternalInputPB(input=inp)
+                            ],
+                        )
+                    ],
+                    fetch_attach_timeout_ms=params["fetch_attach_timeout_ms"],
+                )
+                stub = ctx.ops.pb2_grpc.RpcServiceStub(
+                    ctx.ops._channel(engines[name]["grpc_addr"])
+                )
+                receipt = dict(engine=name, rid=rid, started_s=ctx.clock())
+                attempts.append(receipt)
+                try:
+                    ack = stub.EnqueueBatch(
+                        req, timeout=min(params["rpc_timeout_s"], deadline.remaining())
+                    )
+                    receipt.update(
+                        successes=len(ack.successes),
+                        errors=len(ack.errors),
+                        rpc_status="OK",
+                    )
+                    if ack.successes:
+                        stub.Cancel(
+                            ctx.ops.pb2.CancelRequestPB(request_id=rid),
+                            timeout=min(params["rpc_timeout_s"], deadline.remaining()),
+                        )
+                        raise RuntimeError(
+                            "armed crash trigger unexpectedly admitted a request"
+                        )
+                except Exception as exc:
+                    code = getattr(exc, "code", None)
+                    if (
+                        not callable(code)
+                        or getattr(code(), "name", None) != "UNAVAILABLE"
+                    ):
+                        raise
+                    receipt["rpc_status"] = "UNAVAILABLE"
+                receipt["ended_s"] = ctx.clock()
+            deadline.sleep(0.2)
+            continue
         p = dict(
             count=1,
             concurrency=1,
@@ -1254,7 +1331,7 @@ def execute_crash_trigger(ctx, params, deadline):
 HANDLERS.append(
     StageHandler(
         "recovery_crash_trigger",
-        validate_pump,
+        validate_crash_trigger,
         execute_crash_trigger,
         {"snapshot": "snapshot"},
     )

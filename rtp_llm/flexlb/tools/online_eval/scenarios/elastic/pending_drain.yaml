@@ -51,7 +51,18 @@ parameters:
         prefill_fixed_ms: 8000
     perf_sync:
       seconds: 1.5
-    wave_timeout_s: 450
+    wave_timeout_s: 45
+    wave:
+      count: 6
+      input_len: 1024
+      output_len: 2
+      spacing_s: 0.3
+      ready_timeout_s: 3
+      min_victim_routed: 2
+      min_pending: 1
+      request_timeout_s: 90
+      schedule_timeout_s: 30
+      stream_timeout_s: 60
     remove_timeout_s: 110
     collect_timeout_s: 100
     accounting_timeout_s: 60
@@ -79,7 +90,18 @@ parameters:
         prefill_fixed_ms: 8000
     perf_sync:
       seconds: 1.5
-    wave_timeout_s: 450
+    wave_timeout_s: 45
+    wave:
+      count: 6
+      input_len: 1024
+      output_len: 2
+      spacing_s: 0.3
+      ready_timeout_s: 3
+      min_victim_routed: 2
+      min_pending: 1
+      request_timeout_s: 90
+      schedule_timeout_s: 30
+      stream_timeout_s: 60
     remove_timeout_s: 110
     collect_timeout_s: 100
     accounting_timeout_s: 60
@@ -109,7 +131,18 @@ parameters:
         prefill_fixed_ms: 8000
     perf_sync:
       seconds: 1.5
-    wave_timeout_s: 450
+    wave_timeout_s: 45
+    wave:
+      count: 6
+      input_len: 1024
+      output_len: 2
+      spacing_s: 0.3
+      ready_timeout_s: 3
+      min_victim_routed: 2
+      min_pending: 1
+      request_timeout_s: 90
+      schedule_timeout_s: 30
+      stream_timeout_s: 60
     remove_timeout_s: 110
     collect_timeout_s: 100
     accounting_timeout_s: 60

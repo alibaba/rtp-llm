@@ -13,6 +13,32 @@ def validate_empty(params, plan):
     return _validate(params, plan, set())
 
 
+def wave_validate(params, plan):
+    from .elastic import _validate
+
+    keys = {
+        "count",
+        "input_len",
+        "output_len",
+        "spacing_s",
+        "ready_timeout_s",
+        "min_victim_routed",
+        "min_pending",
+        "request_timeout_s",
+        "schedule_timeout_s",
+        "stream_timeout_s",
+    }
+    p = _validate(params, plan, keys, keys)
+    for k in keys:
+        if type(p[k]) not in (int, float) or not 0 < p[k] <= 120:
+            if k != "input_len" or type(p[k]) is not int or not 1 <= p[k] <= 65536:
+                raise ValueError("invalid pending construction parameter: " + k)
+    for k in ("count", "input_len", "output_len", "min_victim_routed", "min_pending"):
+        if type(p[k]) is not int:
+            raise ValueError("pending counts must be integers")
+    return p
+
+
 def wave(ctx, params, deadline):
     from .elastic import RecordedRequests, _snapshot
 
@@ -41,7 +67,7 @@ def wave(ctx, params, deadline):
             )
 
     handle = ctx.register_resource("requests", records, cleanup=finish)
-    for _ in range(14):
+    for _ in range(params["count"]):
         deadline.check()
         rid = ctx.ops.next_request_id()
         record = records.issue(rid, ctx.clock)
@@ -53,15 +79,15 @@ def wave(ctx, params, deadline):
                 records.run(
                     record,
                     dict(
-                        input_len=1024,
-                        output_len=2,
+                        input_len=params["input_len"],
+                        output_len=params["output_len"],
                         block_keys=[
                             record["wire_request_id"] * 100 + j for j in range(3)
                         ],
                     ),
-                    timeout_s=90,
-                    schedule_timeout_s=30,
-                    stream_timeout_s=60,
+                    timeout_s=params["request_timeout_s"],
+                    schedule_timeout_s=params["schedule_timeout_s"],
+                    stream_timeout_s=params["stream_timeout_s"],
                 )
             finally:
                 event.set()
@@ -73,25 +99,29 @@ def wave(ctx, params, deadline):
         except BaseException:
             event.set()
             raise
-        # Schedule submission is serial; stream consumption remains concurrent.
-        while True:
-            snap = records.snapshot_records()[-1]
-            if snap.get("prefill_addr") or snap["consumer_exit_s"] is not None:
-                break
-            deadline.sleep(0.01)
-        if snap.get("prefill_addr"):
-            if snap["prefill_addr"] not in addresses.values():
-                raise ValueError(
-                    "pending wave routed outside its private 2P environment"
-                )
-            deadline.sleep(0.3)
+        # Keep enqueue windows distinct without waiting for a parked Schedule.
+        deadline.sleep(params["spacing_s"])
+    ready_end = min(deadline.expires_at, ctx.clock() + params["ready_timeout_s"])
+    while True:
+        rows = records.snapshot_records()
         victim_rows = [
-            r
-            for r in records.snapshot_records()
-            if r.get("prefill_addr") == addresses["prefill-0"]
+            r for r in rows if r.get("prefill_addr") == addresses["prefill-0"]
         ]
-        if len(victim_rows) >= 4:
+        pending_rows = [
+            r
+            for r in rows
+            if r["schedule"]["started_s"] is not None
+            and r["schedule"]["ended_s"] is None
+            and r["consumer_exit_s"] is None
+        ]
+        if (
+            len(victim_rows) >= params["min_victim_routed"]
+            and len(pending_rows) >= params["min_pending"]
+        ):
             break
+        if ctx.clock() >= ready_end:
+            break
+        deadline.sleep(0.01)
     snap = _snapshot(ctx, deadline)["prefill-0"]
     completed = snap.get("completed")
     if type(completed) is not int or completed < baseline_completed:
@@ -99,24 +129,29 @@ def wave(ctx, params, deadline):
     counters = [snap.get(k) for k in ("waiting", "running")]
     if any(type(v) is not int or v < 0 for v in counters):
         raise ValueError("pending construction lacks victim waiting/running counters")
-    victim_rows = [
+    rows = records.snapshot_records()
+    victim_rows = [r for r in rows if r.get("prefill_addr") == addresses["prefill-0"]]
+    pending_rows = [
         r
-        for r in records.snapshot_records()
-        if r.get("prefill_addr") == addresses["prefill-0"]
+        for r in rows
+        if r["schedule"]["started_s"] is not None
+        and r["schedule"]["ended_s"] is None
+        and r["consumer_exit_s"] is None
     ]
     exited = [
         r["wire_request_id"]
         for r in victim_rows
         if r["transport_terminal_s"] is not None
     ]
-    estimate = len(victim_rows) - sum(counters)
+    estimate = len(pending_rows)
     evidence = dict(
         victim_routed=len(victim_rows),
         engine_waiting_running=counters,
         pending_estimate=estimate,
         terminal_before_removal=exited,
         engine_completed_delta=completed - baseline_completed,
-        inference="aggregate only; not exact pending request identities",
+        inference="Schedule started but has not returned; engine counts are diagnostic only",
+        pending_request_ids=[r["wire_request_id"] for r in pending_rows],
         snapshot=snap,
         records=records.snapshot_records(),
     )
@@ -126,15 +161,15 @@ def wave(ctx, params, deadline):
         checks=[
             CheckResult(
                 "victim_routed",
-                "PASS" if len(victim_rows) >= 3 else "FAIL",
+                "PASS" if len(victim_rows) >= params["min_victim_routed"] else "FAIL",
                 actual=len(victim_rows),
-                expected=">=3",
+                expected=params["min_victim_routed"],
             ),
             CheckResult(
                 "pending_nonempty",
-                "PASS" if estimate >= 1 else "FAIL",
+                "PASS" if estimate >= params["min_pending"] else "FAIL",
                 actual=estimate,
-                expected=">=1",
+                expected=params["min_pending"],
                 evidence=evidence,
             ),
             CheckResult(
@@ -164,9 +199,14 @@ def classify(record, removed_s, timed_out=False):
 
     terminal = record["transport_terminal_s"]
     latency = terminal - removed_s if terminal is not None else None
-    explicit_error = record["business_error_code"] not in (None, 0) or record["stream"][
-        "status"
-    ] not in (None, "OK")
+    explicit_error = (
+        record["business_error_code"] not in (None, 0)
+        or record["stream"]["status"] not in (None, "OK")
+        or (
+            record["schedule"]["status"] == "REJECTED"
+            and bool(record["schedule"]["error"])
+        )
+    )
     if timed_out or terminal is None or record["cancel"]["requested_s"] is not None:
         kind = "hang"
     elif request_success(record):
@@ -417,7 +457,7 @@ HANDLERS = [
     ),
     StageHandler(
         "elastic_pending_wave",
-        validate_empty,
+        wave_validate,
         wave,
         {"requests": "requests"},
         checks=frozenset(
