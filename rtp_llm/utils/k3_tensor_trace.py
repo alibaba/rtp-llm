@@ -263,9 +263,9 @@ class TensorTrace:
                 with torch.accelerator.device_index(tensor.device.index):
                     ready = torch.cuda.Event()
                     ready.record(torch.cuda.current_stream(tensor.device))
-        except BaseException:
+        except BaseException as exc:
             self._release(reserved)
-            self._fail(f"failed to snapshot {name}")
+            self._fail(f"failed to snapshot {name}: {type(exc).__name__}: {exc}")
         self._frame.snapshots.append(_Snapshot(name, value, meta, nbytes, ready))
         self._frame.payload_bytes += nbytes
 

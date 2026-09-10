@@ -33,6 +33,24 @@ class TensorTraceTest(unittest.TestCase):
     def read(self, frame=0):
         return torch.load(self.root / f"frame-{frame:08d}.pt", weights_only=True)
 
+    def test_snapshot_failure_preserves_original_cause_and_releases_budget(self):
+        trace = self.trace()
+        tensor = torch.zeros(4)
+        trace.begin({"case": "allocation-failure"})
+        with patch.object(
+            torch.Tensor, "clone", side_effect=torch.OutOfMemoryError("test allocation")
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "OutOfMemoryError: test allocation"
+            ):
+                trace.record("layer.72.activation", tensor)
+        self.assertEqual(trace._pending, 0)
+        error = json.loads((self.root / "incomplete.json").read_text())["error"]
+        self.assertIn("layer.72.activation: OutOfMemoryError: test allocation", error)
+        with self.assertRaisesRegex(RuntimeError, "OutOfMemoryError: test allocation"):
+            trace.close()
+        self.assertFalse((self.root / "recorder_closed.json").exists())
+
     def test_file_fragment_limit_is_independent_of_total_snapshot_budget(self):
         trace = self.trace(max_pending_bytes=1024, max_fragment_bytes=16)
         trace.begin({"case": "separate-file-budget"})
