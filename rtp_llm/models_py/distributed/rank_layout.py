@@ -13,15 +13,19 @@ from typing import List
 
 
 class Group(Enum):
-    """Parallel dimensions plus the whole world. Single enum shared by the
+    """Parallel dimensions plus composite groups. Single enum shared by the
     layout model and collective communication. WORLD spans all ranks
-    (torch.distributed WORLD; the former "DP_AND_TP", named before PP existed).
+    (torch.distributed WORLD; the former "DP_AND_TP", named before PP existed);
+    STAGE spans one pipeline stage's dp*tp ranks (WORLD narrowed per stage).
+    Both are composite groups, not single-axis slices. STAGE is layout-level
+    only: its torch process group is materialized when a consumer appears.
     PCP is reserved, not materialized yet."""
 
     TP = "TP"
     DP = "DP"
     PP = "PP"
     WORLD = "WORLD"
+    STAGE = "STAGE"
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,7 @@ class RankLayout:
             Group.DP: self._dp_size,
             Group.PP: self._pp_size,
             Group.WORLD: self.world_size(),
+            Group.STAGE: self.lane_stride(),
         }[group]
 
     def world_size(self) -> int:
@@ -158,6 +163,15 @@ class RankLayout:
                     )
         elif group is Group.WORLD:
             groups.append(list(range(self.world_size())))
+        elif group is Group.STAGE:
+            for pp in range(self._pp_size):
+                groups.append(
+                    [
+                        self.world_rank_of(Coord(tp=t, dp=d, pp=pp))
+                        for d in range(self._dp_size)
+                        for t in range(self._tp_size)
+                    ]
+                )
         else:  # pragma: no cover - guarded by the Group enum
             raise ValueError(f"unknown group: {group}")
         return groups
@@ -173,13 +187,15 @@ class RankLayout:
         )
 
     def rank_in_group(self, group: Group, world_rank: int) -> int:
-        """Position inside the `group` group; equals the coordinate along that axis."""
+        """Position inside the `group` group; equals the coordinate along that
+        axis, the lane-local position for STAGE, or world_rank for WORLD."""
         coord = self.coord_of(world_rank)
         return {
             Group.TP: coord.tp,
             Group.DP: coord.dp,
             Group.PP: coord.pp,
             Group.WORLD: world_rank,
+            Group.STAGE: coord.dp * self._tp_size + coord.tp,
         }[group]
 
     def ep_rank_of(self, world_rank: int, ep_size: int) -> int:
@@ -199,15 +215,9 @@ class RankLayout:
 
     def ep_groups(self) -> List[List[int]]:
         """EP communication rosters: one group per PP stage holding all its
-        dp*tp ranks (WORLD narrowed per stage; equals [WORLD] at pp=1)."""
-        return [
-            [
-                self.world_rank_of(Coord(tp=t, dp=d, pp=pp))
-                for d in range(self._dp_size)
-                for t in range(self._tp_size)
-            ]
-            for pp in range(self._pp_size)
-        ]
+        dp*tp ranks (WORLD narrowed per stage; equals [WORLD] at pp=1).
+        Identical to groups(Group.STAGE); kept as the EP-view alias."""
+        return self.groups(Group.STAGE)
 
     def __repr__(self) -> str:
         return (
