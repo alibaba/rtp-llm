@@ -16,9 +16,11 @@ import itertools
 import json
 import os
 import queue
+import shutil
 import socket
 import threading
 import time
+import zipfile
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import wraps
@@ -75,9 +77,13 @@ class TensorTrace:
         *,
         identity: dict[str, Any],
         max_pending_bytes: int = 4 * 1024**3,
+        compression: str = "none",
     ) -> None:
         if max_pending_bytes <= 0:
             raise ValueError("max_pending_bytes must be positive")
+        if compression not in {"none", "deflate"}:
+            raise ValueError("compression must be none or deflate")
+        self._compression = compression
         self.identity = _json_copy(identity)
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=False)
@@ -354,6 +360,20 @@ class TensorTrace:
                         },
                         temporary,
                     )
+                    if self._compression == "deflate":
+                        compressed = path.with_suffix(".pt.deflate.part")
+                        with zipfile.ZipFile(temporary) as source, zipfile.ZipFile(
+                            compressed,
+                            "x",
+                            compression=zipfile.ZIP_DEFLATED,
+                            compresslevel=1,
+                        ) as destination:
+                            for member in source.infolist():
+                                with source.open(member) as src, destination.open(
+                                    member.filename, "w", force_zip64=True
+                                ) as dst:
+                                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                        compressed.replace(temporary)
                     digest = hashlib.sha256()
                     with temporary.open("rb") as data:
                         for block in iter(lambda: data.read(1024 * 1024), b""):
@@ -369,6 +389,7 @@ class TensorTrace:
                                 "bytes": size,
                                 "metadata": metadata,
                                 "tensor_count": len(staged),
+                                "compression": self._compression,
                             },
                             allow_nan=False,
                         )
@@ -450,6 +471,7 @@ def _runtime() -> dict[str, Any]:
             max_pending_bytes=int(
                 os.environ.get("K3_TRACE_MAX_PENDING_BYTES", str(4 * 1024**3))
             ),
+            compression=os.environ.get("K3_TRACE_COMPRESSION", "none"),
         )
         _runtimes[key] = {"trace": trace, "stack": [], "next_scope": 0}
     return _runtimes[key]

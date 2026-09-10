@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import zipfile
 from collections import Counter
 from pathlib import Path
 
@@ -24,6 +25,13 @@ def sha256(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def load_frame(path):
+    # PyTorch mmap requires uncompressed tensor storage ZIP members.
+    with zipfile.ZipFile(path) as archive:
+        mmap = all(m.compress_type == zipfile.ZIP_STORED for m in archive.infolist())
+    return torch.load(path, map_location="cpu", weights_only=True, mmap=mmap)
 
 
 def audit_recorder(directory, *, require_closed=True):
@@ -63,7 +71,7 @@ def audit_recorder(directory, *, require_closed=True):
         path = directory / filename
         require(path.stat().st_size == row["bytes"], f"size mismatch: {filename}")
         require(sha256(path) == row["sha256"], f"digest mismatch: {filename}")
-        frame = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        frame = load_frame(path)
         require(frame["schema_version"] == 1, "unsupported frame schema")
         require(frame["sequence"] == sequence, "payload sequence differs from index")
         metadata = frame["metadata"]

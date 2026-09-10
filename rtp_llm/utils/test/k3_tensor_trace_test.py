@@ -131,6 +131,23 @@ class TensorTraceTest(unittest.TestCase):
             trace.close()
         self.assertFalse((self.root / "recorder_closed.json").exists())
 
+    def test_compression_failure_cannot_publish_a_successful_frame(self):
+        trace = self.trace(compression="deflate")
+        trace.begin({"case": "compression-failure"})
+        trace.record("output", torch.ones(2))
+        with patch.object(
+            trace_module.zipfile,
+            "ZipFile",
+            side_effect=OSError("compression disk full"),
+        ):
+            trace.end()
+            with self.assertRaisesRegex(RuntimeError, "compression disk full"):
+                trace.close()
+        self.assertTrue((self.root / "incomplete.json").exists())
+        self.assertFalse((self.root / "recorder_closed.json").exists())
+        self.assertFalse((self.root / "frame-00000000.pt").exists())
+        self.assertEqual((self.root / "index.jsonl").read_text(), "")
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires pinned D2H")
     def test_cuda_long_frame_spills_before_device_and_host_budget_is_exhausted(self):
         trace = self.trace(max_pending_bytes=128)

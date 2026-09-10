@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 import torch
@@ -51,12 +52,17 @@ class NativeTraceBufferTest(unittest.TestCase):
 
 
 class TraceAuditTest(unittest.TestCase):
+    compression = "none"
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.directory = Path(temp.name) / "trace"
         trace = recorder.TensorTrace(
-            self.directory, identity={"rank": 0}, max_pending_bytes=8
+            self.directory,
+            identity={"rank": 0},
+            max_pending_bytes=8,
+            compression=self.compression,
         )
         trace.begin({"step": 0})
         for layer in range(3):
@@ -97,6 +103,46 @@ class TraceAuditTest(unittest.TestCase):
             audit.audit_recorder(self.directory)
         result = audit.audit_recorder(self.directory, require_closed=False)
         self.assertFalse(result["recorder_closed"])
+
+
+class CompressedTraceAuditTest(TraceAuditTest):
+    compression = "deflate"
+
+    def test_compressed_storage_preserves_raw_bits_through_auto_reader(self):
+        directory = self.directory.parent / "native-outputs"
+        values = {
+            "fc1": torch.tensor([0x7FC00001, -2147483648], dtype=torch.int32).view(
+                torch.float32
+            ),
+            "bf16": torch.arange(256, dtype=torch.int16).view(torch.bfloat16),
+            "fp8": torch.arange(256, dtype=torch.uint8).view(torch.float8_e4m3fn),
+            "scale": torch.arange(256, dtype=torch.uint8),
+            "inactive": torch.zeros(65536, dtype=torch.float32),
+        }
+        trace = recorder.TensorTrace(
+            directory, identity={"rank": 0}, compression="deflate"
+        )
+        trace.begin({"step": 0})
+        for name, value in values.items():
+            trace.record(name, value)
+        trace.end()
+        trace.close()
+        result = audit.audit_recorder(directory)
+        self.assertEqual(result["tensor_count"], len(values))
+        self.assertLess(result["file_bytes"], result["tensor_bytes"] // 10)
+        path = directory / "frame-00000000.pt"
+        with zipfile.ZipFile(path) as archive:
+            self.assertTrue(
+                all(m.compress_type == zipfile.ZIP_DEFLATED for m in archive.infolist())
+            )
+        frame = audit.load_frame(path)
+        for item in frame["tensors"]:
+            expected = values[item["name"]]
+            actual = item["value"]
+            self.assertEqual(actual.dtype, expected.dtype)
+            self.assertTrue(
+                torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+            )
         self.assertFalse(result["coverage_verified"])
 
 

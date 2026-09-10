@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 import torch
-from kimi_k3_trace_audit import AuditError, audit_recorder, require
+from kimi_k3_trace_audit import AuditError, audit_recorder, load_frame, require
 
 
 def check_history(history, lengths, model_tokens, streams, propose_step):
@@ -85,9 +85,7 @@ def observations(directory):
     values = {}
     for line in (directory / "index.jsonl").read_text().splitlines():
         row = json.loads(line)
-        frame = torch.load(
-            directory / row["path"], map_location="cpu", weights_only=True, mmap=True
-        )
+        frame = load_frame(directory / row["path"])
         metadata = frame["metadata"]
         if current != metadata["observation_id"]:
             current = metadata["observation_id"]
