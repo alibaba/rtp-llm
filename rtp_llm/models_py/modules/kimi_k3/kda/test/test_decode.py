@@ -20,8 +20,14 @@ class KimiK3KDATargetVerifyTest(TestCase):
         nn.Module.__init__(module)
         module.attn_tp_size = tp_size
         module.attn_tp_rank = 0
+        module.ktp_size = 1
+        module.ktp_rank = 0
         module.projection_size = 2
         module.eps = 1e-6
+        module._fp8_enabled = False
+        module._fp8_projections = {}
+        module._fp8_strided_forget = False
+        module.output_norm = lambda output, output_gate, mode: output
         module.weights = {
             W.linear_attn_norm_w: torch.ones(2),
             W.linear_attn_out_w: torch.eye(2),
