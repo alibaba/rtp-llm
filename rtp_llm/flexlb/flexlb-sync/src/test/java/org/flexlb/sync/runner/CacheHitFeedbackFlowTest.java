@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
@@ -164,6 +165,24 @@ class CacheHitFeedbackFlowTest {
         assertEquals(1200, status.path("firstTokenTimeMs").asLong());
         assertEquals(100, status.path("runningToFirstTokenMs").asLong());
         assertEquals(70, status.path("schedulerWaitMs").asLong());
+    }
+
+    @Test
+    void truncatedPrefillLengthPreservesLogicalDenominatorAndReportsOnce() throws Exception {
+        select("truncated");
+        EngineRpcService.TaskInfoPB feedback = task("truncated", true, 500).toBuilder().setInputLength(996).build();
+        poll(worker, feedback, false, 2);
+        poll(worker, feedback, true, 3);
+        assertEquals(1, events("cache_hit_comparison").size());
+        JsonNode comparison = events("cache_hit_comparison").getFirst();
+        assertEquals(1000, comparison.path("inputTokens").asLong());
+        assertEquals(500, comparison.path("actual").path("hit").asLong());
+        verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_ACTUAL_RATIO), any(), eq(0.5));
+        assertEquals(1, events("prefill_worker_status").size());
+        JsonNode status = events("prefill_worker_status").getFirst();
+        assertEquals(1000, status.path("inputTokens").asLong());
+        assertEquals(996, status.path("engineInputTokens").asLong());
+        assertEquals(-4, status.path("inputTokensDelta").asLong());
     }
 
     @Test
