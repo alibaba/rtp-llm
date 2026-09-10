@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/cache/CacheStoreTransferLayout.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
@@ -216,6 +217,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const size_t kv_block_transfer_bytes         = group.kvBlockStrideBytes();
     const size_t kv_scale_transfer_bytes         = group.kvScaleStrideBytes();
     const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1;
+    const auto   transfer_segments = cacheStoreTransferSegments(group, hasLinearCacheGroup(cache_config.topology()));
 
     RTP_LLM_CHECK_WITH_INFO(
         seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", layer_kv.tag.c_str());
@@ -396,7 +398,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                                || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention;
             void*                 kv_addr = kv_cache_data + static_cast<size_t>(block_id) * kv_block_stride_bytes;
             std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
-            RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_WRITE_BLOCK key=kv_%s request_id=%ld tag=%s layer=%d cp_rank=%d "
+            RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_WRITE_BLOCK cache_key=%s request_id=%ld tag=%s layer=%d cp_rank=%d "
                               "cp_size=%d cp_slice=%d key_index=%d offset_index=%d block_id=%d addr=%p "
                               "physical_stride=%zu len=%zu",
                               cache_key.c_str(),
@@ -412,7 +414,33 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                               kv_addr,
                               kv_block_stride_bytes,
                               kv_block_transfer_bytes);
-            if (use_opaque_key_prefix) {
+            if (!transfer_segments.empty()) {
+                for (const auto& segment : transfer_segments) {
+                    auto*        base   = segment.is_scale ? kv_scale_data : kv_cache_data;
+                    const auto&  owner  = segment.is_scale ? kv_scale_owner : kv_cache_owner;
+                    const size_t stride = segment.is_scale ? kv_scale_stride_bytes : kv_block_stride_bytes;
+                    RTP_LLM_CHECK_WITH_INFO(base != nullptr && segment.offset_bytes <= stride
+                                                && segment.size_bytes <= stride - segment.offset_bytes,
+                                            "invalid cache-store segment %s for tag=%s",
+                                            segment.key_prefix.c_str(),
+                                            layer_kv.tag.c_str());
+                    void* addr = base + static_cast<size_t>(block_id) * stride + segment.offset_bytes;
+                    RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_WRITE_SEGMENT key=%s request_id=%ld tag=%s layer=%d "
+                                      "block_id=%d addr=%p len=%zu",
+                                      (segment.key_prefix + cache_key).c_str(),
+                                      static_cast<long>(request_id),
+                                      layer_kv.tag.c_str(),
+                                      layer_kv.layer_id,
+                                      block_id,
+                                      addr,
+                                      segment.size_bytes);
+                    request_blocks->addBlock(segment.key_prefix + cache_key,
+                                             std::shared_ptr<void>(owner, addr),
+                                             static_cast<uint32_t>(segment.size_bytes),
+                                             segment.is_scale ? kv_scale_gpu_mem : kv_gpu_mem,
+                                             true);
+                }
+            } else if (use_opaque_key_prefix) {
                 request_blocks->addBlock(
                     "kv_" + cache_key, kv_block_addr, static_cast<uint32_t>(kv_block_transfer_bytes), kv_gpu_mem, true);
             } else {
@@ -425,7 +453,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, kv_gpu_mem, true);
             }
 
-            if (kv_scale_data) {
+            if (kv_scale_data && transfer_segments.empty()) {
                 void* kv_scale_addr = kv_scale_data + static_cast<size_t>(block_id) * kv_scale_stride_bytes;
                 std::shared_ptr<void> kv_scale_block_addr(kv_scale_owner, kv_scale_addr);
                 if (use_opaque_key_prefix) {

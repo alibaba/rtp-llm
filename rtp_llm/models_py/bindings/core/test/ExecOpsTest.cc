@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
+#include "rtp_llm/cpp/cache/CacheStoreTransferLayout.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -14,10 +15,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 
 using namespace rtp_llm;
 
@@ -1194,6 +1197,169 @@ TEST_F(ExecOpsTest, testLoadContextFailureDebugInfoContainsEveryBlockKey) {
     ASSERT_EQ(debug_infos.size(), 1u);
     EXPECT_NE(debug_infos[0].find("kv_key_0"), std::string::npos);
     EXPECT_NE(debug_infos[0].find("kv_key_1"), std::string::npos);
+}
+
+// Build real specs, and fill each logical head with a distinct byte pattern.
+// The expected tensors follow the kernel layouts, independently of transfer segments.
+static GroupBase makeTpTransferGroup(int tp, bool linear_cache, DataType mha_dtype) {
+    ParallelismConfig parallelism;
+    parallelism.tp_size = tp;
+    LinearAttentionConfig linear{};
+    linear.linear_num_key_heads   = 4;
+    linear.linear_num_value_heads = 8;
+    linear.linear_key_head_dim    = 2;
+    linear.linear_value_head_dim  = 2;
+    linear.linear_conv_kernel_dim = 4;
+    linear.ssm_state_dtype        = TYPE_FP32;
+    linear.conv_state_dtype       = TYPE_BF16;
+    AttentionConfigs attn{};
+    attn.kv_head_num   = 4;
+    attn.size_per_head = 2;
+    KVCacheSpecDesc desc;
+    desc.tag   = linear_cache ? "linear" : "full";
+    desc.dtype = linear_cache ? TYPE_BF16 : mha_dtype;
+    SpecBuildContext ctx;
+    ctx.dtype                   = desc.dtype;
+    ctx.seq_size_per_block      = 2048;
+    ctx.kernel_tokens_per_block = 64;
+    desc.cache_type = linear_cache ? KVCacheSpecType::LinearAttention : KVCacheSpecType::MultiHeadAttention;
+    ctx.parallelism_config      = &parallelism;
+    ctx.linear_attention_config = &linear;
+    ctx.attn_config             = &attn;
+
+    GroupBase group;
+    group.tag                = desc.tag;
+    group.spec               = linear_cache ? LinearKVCacheSpec::build(desc, ctx) : MHAKVCacheSpec::build(desc, ctx);
+    group.policy             = defaultCacheGroupPolicy(linear_cache ? CacheGroupType::LINEAR : CacheGroupType::FULL);
+
+
+    group.block_num          = 3;
+    return group;
+}
+
+static std::vector<uint8_t>
+tpTransferContents(int tp, int rank, bool linear_cache, DataType dtype, bool scale = false) {
+    std::vector<uint8_t> bytes;
+    auto                 appendHeads = [&](int heads, int bytes_per_head, int seed) {
+        for (int head = rank * heads / tp; head < (rank + 1) * heads / tp; ++head) {
+            for (int byte = 0; byte < bytes_per_head; ++byte) {
+                bytes.push_back(static_cast<uint8_t>(seed + head * 13 + byte % 11));
+            }
+        }
+    };
+    if (linear_cache) {
+        appendHeads(8, 2 * 2 * 4, 1);  // FP32 SSM [value_heads, v_dim, k_dim]
+        for (int history = 0; history < 3; ++history) {
+            appendHeads(4, 2 * 2, 30 + history * 19);   // BF16 Q
+            appendHeads(4, 2 * 2, 70 + history * 19);   // BF16 K
+            appendHeads(8, 2 * 2, 110 + history * 19);  // BF16 V
+        }
+    } else {
+        for (int page = 0; page < 32; ++page) {
+            const int head_bytes = scale ? 64 * sizeof(float) : 64 * 2 * getTypeSize(dtype);
+            appendHeads(4, head_bytes, 1 + page * 3);
+            appendHeads(4, head_bytes, 101 + page * 3);
+        }
+    }
+    return bytes;
+}
+
+static void
+checkTpCacheStoreRoundTrip(int prefill_tp, int decode_tp, bool linear_cache, DataType dtype) {
+    auto inputs = makePyCacheStoreInputs(/*tokens_per_block=*/2048, /*block_num=*/1);
+    inputs.host_kv_cache_offset.fill_(1);  // Nonzero physical block, not a kernel page.
+    const int   layer_id     = linear_cache ? 0 : 1;
+    const auto  source_group = makeTpTransferGroup(prefill_tp, linear_cache, dtype);
+    const auto  full_group   = makeTpTransferGroup(prefill_tp, false, dtype);
+    const auto  linear_group = makeTpTransferGroup(prefill_tp, true, dtype);
+    CacheConfig config;
+    config.layer_num          = 2;
+    config.seq_size_per_block = 2048;
+    config.setTopology({linear_group, full_group}, {{0, {"linear"}}, {1, {"full"}}});
+
+    const size_t source_stride = source_group.kvBlockStrideBytes();
+    std::vector<torch_ext::LayerKVCache>     sources;
+    std::vector<MockCacheStore::StoreRecord> records;
+    for (int rank = 0; rank < prefill_tp; ++rank) {
+        torch_ext::LayerKVCache source;
+        source.layer_id           = layer_id;
+        source.tag                = source_group.tag;
+        source.seq_size_per_block = linear_cache ? 2048 : 64;
+        source.kv_cache_base      = torch::full({3, static_cast<int64_t>(source_stride)}, 0xee, torch::kUInt8);
+        const auto contents       = tpTransferContents(prefill_tp, rank, linear_cache, dtype);
+        ASSERT_EQ(contents.size(), source_group.kvBlockStrideBytes());
+        std::memcpy(source.kv_cache_base.data_ptr<uint8_t>() + source_stride, contents.data(), contents.size());
+        if (source_group.kvScaleStrideBytes() > 0) {
+            const size_t stride  = source_group.kvScaleStrideBytes();
+            source.kv_scale_base = torch::full({3, static_cast<int64_t>(stride)}, 0xee, torch::kUInt8);
+            const auto scales    = tpTransferContents(prefill_tp, rank, false, dtype, true);
+            ASSERT_EQ(scales.size(), stride);
+            std::memcpy(source.kv_scale_base.data_ptr<uint8_t>() + stride, scales.data(), scales.size());
+        }
+        auto store = std::make_shared<MockCacheStore>();
+        ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, source, config, store, 0, 0, 1, nullptr));
+        ASSERT_EQ(store->records.size(), 1u);
+        records.push_back(store->records.front());
+        sources.push_back(source);  // Own every published pointer until transfer completes.
+    }
+
+    const auto destination_group = makeTpTransferGroup(decode_tp, linear_cache, dtype);
+    const auto segments          = cacheStoreTransferSegments(destination_group, true);
+    const auto key               = cacheKeyAt(inputs, 0, layer_id, destination_group.tag);
+    for (int rank = 0; rank < decode_tp; ++rank) {
+        const auto             expected = tpTransferContents(decode_tp, rank, linear_cache, dtype);
+        std::vector<uint8_t>   destination(expected.size() + 32, 0xee);
+        std::vector<uint8_t>   scales(destination_group.kvScaleStrideBytes() + 32, 0xee);
+        std::vector<BlockInfo> buffers{{false, 0, 0, destination.data(), destination.size()}};
+        if (destination_group.kvScaleStrideBytes() > 0) {
+            buffers.push_back({false, 0, 0, scales.data(), scales.size()});
+        }
+        const int peer_count        = std::max(1, prefill_tp / decode_tp);
+        const int remote_part_count = std::max(1, decode_tp / prefill_tp);
+        const int remote_part_id    = rank % remote_part_count;
+        for (int peer = 0; peer < peer_count; ++peer) {
+            const int  source_rank = prefill_tp >= decode_tp ? rank * peer_count + peer : rank / remote_part_count;
+            const auto parts = cacheStoreDestinationSegments(destination_group, segments, buffers, peer_count, peer);
+            ASSERT_EQ(parts.size(), segments.size());
+            ASSERT_EQ(records[source_rank].blocks.size(), segments.size());
+            for (size_t i = 0; i < segments.size(); ++i) {
+                const auto it = records[source_rank].blocks.find(segments[i].key_prefix + key);
+                ASSERT_NE(it, records[source_rank].blocks.end());
+                const auto& source = it->second;
+                // CacheStore's real D>P protocol slices each registered key separately.
+                ASSERT_EQ(source.len % remote_part_count, 0);
+                ASSERT_EQ(source.len / remote_part_count, parts[i].size_bytes);
+                std::memcpy(parts[i].addr,
+                            static_cast<uint8_t*>(source.addr) + parts[i].size_bytes * remote_part_id,
+                            parts[i].size_bytes);
+            }
+        }
+        EXPECT_TRUE(std::equal(expected.begin(), expected.end(), destination.begin()));
+        EXPECT_TRUE(std::all_of(
+            destination.begin() + expected.size(), destination.end(), [](uint8_t byte) { return byte == 0xee; }));
+        if (destination_group.kvScaleStrideBytes() > 0) {
+            const auto expected_scales = tpTransferContents(decode_tp, rank, false, dtype, true);
+            EXPECT_TRUE(std::equal(expected_scales.begin(), expected_scales.end(), scales.begin()));
+            EXPECT_TRUE(std::all_of(
+                scales.begin() + expected_scales.size(), scales.end(), [](uint8_t byte) { return byte == 0xee; }));
+        }
+    }
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreLinearAsymmetricTpPreservesStateHeads) {
+    for (const auto& [prefill_tp, decode_tp] : {std::pair{2, 1}, {1, 2}, {4, 2}, {2, 4}, {2, 2}}) {
+        SCOPED_TRACE(testing::Message() << "P=" << prefill_tp << " D=" << decode_tp);
+        checkTpCacheStoreRoundTrip(prefill_tp, decode_tp, true, TYPE_BF16);
+    }
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreHybridMhaAsymmetricTpPreservesKernelPages) {
+    for (const auto& [prefill_tp, decode_tp] : {std::pair{2, 1}, {1, 2}, {4, 2}, {2, 4}, {2, 2}}) {
+        for (const auto dtype : {TYPE_BF16, TYPE_INT8}) {
+            SCOPED_TRACE(testing::Message() << "P=" << prefill_tp << " D=" << decode_tp << " dtype=" << dtype);
+            checkTpCacheStoreRoundTrip(prefill_tp, decode_tp, false, dtype);
+        }
+    }
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreTag_LinearGroup) {

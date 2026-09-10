@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheStoreTransferLayout.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
@@ -847,9 +848,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
 
-    if (load_context.prefill_cp_size > 1) {
-        // CP-sharded prefill: every decode rank must pull the shard owned by
-        // every prefill CP peer.
+    const bool linear_fan_in =
+        load_context.prefill_cp_size <= 1 && maga_init_params_.parallelism_config.get_attn_tp_size() == 1
+        && hasLinearCacheGroup(engine_->resourceContext().cache_manager->cacheConfig().topology());
+    if (load_context.prefill_cp_size > 1 || linear_fan_in) {
+        // CP-sharded prefill, or head-sharded linear state: pull every peer.
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
@@ -1239,7 +1242,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     auto shouldLoadGroupFromPeer =
         [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx) {
             if (!is_page_level_rr) {
-                return true;
+                return peer_idx == 0 || !hasLinearCacheGroup(cfg.topology())
+                       || cfg.group(tag).spec->type != KVCacheSpecType::MultiHeadLatentAttention;
             }
             if (group_type == CacheGroupType::FULL) {
                 return true;
@@ -1301,6 +1305,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
                     cache_config.topology().group(tag).seqSizePerBlock(), cache_config.seq_size_per_block);
 
+                const auto& transfer_group = cache_config.topology().group(tag);
+                const auto  transfer_segments =
+                    cacheStoreTransferSegments(transfer_group, hasLinearCacheGroup(cache_config.topology()));
                 if (!shouldLoadGroupFromPeer(cache_config, group_type, tag, i)) {
                     continue;
                 }
@@ -1322,7 +1329,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
                     const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
-                    if (use_whole_kv_block) {
+                    if (!transfer_segments.empty()) {
+                        parts = cacheStoreDestinationSegments(
+                            transfer_group,
+                            transfer_segments,
+                            cache_manager->convertIndexToBuffer(layer_id, tag, block_id),
+                            is_page_level_rr ? 1 : peer_cnt,
+                            is_page_level_rr ? 0 : i);
+                    } else if (use_whole_kv_block) {
                         parts = cache_manager->convertIndexToBuffer(layer_id, tag, block_id);
                     } else {
                         parts = cache_manager->convertIndexToBuffer(layer_id, tag, block_id, peer_cnt, i);
@@ -1352,7 +1366,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                     };
 
-                    if (use_kv_key_prefix) {
+                    if (!transfer_segments.empty()) {
+                        for (size_t segment_id = 0; segment_id < transfer_segments.size(); ++segment_id) {
+                            addBufBlock(transfer_segments[segment_id].key_prefix + cache_key, parts[segment_id]);
+                        }
+                    } else if (use_kv_key_prefix) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                 "unexpected mla convertIndexToBuffer parts size=%zu",
                                                 parts.size());
@@ -1434,6 +1452,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 cacheKeysPerPhysicalBlock(mtp_cache_cfg.topology().group(tag).seqSizePerBlock(),
                                                           mtp_cache_cfg.seq_size_per_block);
 
+                            const auto& transfer_group    = mtp_cache_cfg.topology().group(tag);
+                            const auto  transfer_segments = cacheStoreTransferSegments(
+                                transfer_group, hasLinearCacheGroup(mtp_cache_cfg.topology()));
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, tag, i)) {
                                 continue;
                             }
@@ -1458,7 +1479,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
                                 const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
-                                if (mtp_use_whole_kv_block) {
+                                if (!transfer_segments.empty()) {
+                                    parts = cacheStoreDestinationSegments(
+                                        transfer_group,
+                                        transfer_segments,
+                                        cache_manager->convertIndexToBuffer(global_layer_id, tag, block_id),
+                                        is_page_level_rr ? 1 : peer_cnt,
+                                        is_page_level_rr ? 0 : i);
+                                } else if (mtp_use_whole_kv_block) {
                                     parts = cache_manager->convertIndexToBuffer(global_layer_id, tag, block_id);
                                 } else {
                                     parts = cache_manager->convertIndexToBuffer(
@@ -1493,7 +1521,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                         key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                                 };
 
-                                if (mtp_use_kv_key_prefix) {
+                                if (!transfer_segments.empty()) {
+                                    for (size_t segment_id = 0; segment_id < transfer_segments.size(); ++segment_id) {
+                                        addBufBlock(transfer_segments[segment_id].key_prefix + cache_key,
+                                                    parts[segment_id]);
+                                    }
+                                } else if (mtp_use_kv_key_prefix) {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                             "unexpected mtp mla convertIndexToBuffer parts size=%zu",
                                                             parts.size());
