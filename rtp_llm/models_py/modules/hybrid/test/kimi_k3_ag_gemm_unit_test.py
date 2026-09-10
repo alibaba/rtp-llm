@@ -78,6 +78,8 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         nn.Module.__init__(module)
         module.attn_tp_size = tp_size
         module.attn_tp_rank = tp_size - 1
+        module.ktp_size = 1
+        module.ktp_rank = 0
         module.total_heads = total_heads
         module.local_heads = local_heads
         module.projection_size = projection_size
@@ -89,6 +91,9 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             dtype=torch.bfloat16,
         )
         module._full_column_weights = {}
+        module._fp8_enabled = False
+        module._fp8_projections = {}
+        module._fp8_strided_forget = False
         module.weights = {
             W.linear_attn_f_b_w: torch.randn(
                 forget_rank,
@@ -267,6 +272,8 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         module.attn_tp_size = 2
         module.attn_tp_rank = 0
         module.eps = 1e-6
+        module._fp8_enabled = False
+        module._fp8_projections = {}
         module.weights = {
             W.linear_attn_out_w: torch.empty(
                 (8, 16), dtype=torch.bfloat16, device="cuda"
@@ -645,7 +652,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         torch.testing.assert_close(partial, torch.mm(x, weight), rtol=0, atol=0)
         torch.testing.assert_close(actual, partial[:1], rtol=0, atol=0)
 
-    def test_latent_moe_drops_invalid_rows_before_ep_and_zeroes_output(self) -> None:
+    def test_latent_moe_routes_invalid_rows_to_zero_weight_expert_zero(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
 
@@ -755,7 +762,11 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             torch.count_nonzero(captured["routing_weights"][1]).item(),
             0,
         )
-        self.assertEqual(torch.count_nonzero(output[1]).item(), 0)
+        # Padding is kept numerically independent by its reserved block-0 cache
+        # mapping and is trimmed before sampling. MegaMoE still receives the
+        # physical row, so only its routed contribution is neutralized here;
+        # the shared expert output is intentionally not masked in modeling.
+        self.assertGreater(torch.count_nonzero(output[1]).item(), 0)
 
     def test_decoder_delegates_cuda_prefill_shard_to_attention(self) -> None:
         if not torch.cuda.is_available():
