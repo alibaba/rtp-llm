@@ -349,7 +349,7 @@ void launchPpuSiluMulMxfp4(const __nv_bfloat16* input,
                            int num_tokens,
                            float swiglu_limit,
                            cudaStream_t stream) {
-    const int hidden_padded = ((hidden_size + kBlockN - 1) / kBlockN) * kBlockN;
+    const int hidden_padded = ((int64_t(hidden_size) + kBlockN - 1) / kBlockN) * kBlockN;
     const int hidden_blocks = hidden_padded / kBlockN;
     int token_blocks = kBlocksTargetDefault / hidden_blocks;
     const int amortized_cap = (num_tokens + 1) / 2;

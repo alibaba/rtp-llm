@@ -280,6 +280,7 @@ class PpuFp8Linear(nn.Module):
         *,
         share_input_quantization: bool = False,
         quantization: str = "auto",
+        scale_is_prepared: bool = False,
     ):
         super().__init__()
         _validate_fp8_quantization(quantization)
@@ -292,7 +293,23 @@ class PpuFp8Linear(nn.Module):
             raise TypeError(f"weight must be torch.float8_e4m3fn, got {weight.dtype}")
         _require_m890p(weight, "weight")
         self.n, self.k = (int(weight.shape[0]), int(weight.shape[1]))
-        weight_scale = checkpoint_ue8m0_scale_to_fp32(checkpoint_scale, weight.shape)
+        if scale_is_prepared:
+            if self.n <= 0 or self.k <= 0 or self.n % 128 or self.k % 128:
+                raise ValueError(
+                    "Prepared FP8 weights must preserve block-128 geometry"
+                )
+            if checkpoint_scale.dtype != torch.float32:
+                raise TypeError("Prepared FP8 scale must be FP32")
+            if tuple(checkpoint_scale.shape) != (self.n // 128, self.k // 128):
+                raise ValueError(
+                    "Prepared FP8 scale must match the block-128 weight grid"
+                )
+            _require_m890p(checkpoint_scale, "prepared weight scale")
+            weight_scale = checkpoint_scale
+        else:
+            weight_scale = checkpoint_ue8m0_scale_to_fp32(
+                checkpoint_scale, weight.shape
+            )
         if weight_scale.device != weight.device:
             raise ValueError(
                 f"weight and checkpoint scale must share a device, got "

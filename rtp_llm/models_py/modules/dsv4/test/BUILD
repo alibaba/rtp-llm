@@ -12,6 +12,19 @@ _DSV4_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        deps = [
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm:testlib",
+        ],
+        visibility = ["//visibility:public"],
+    )
+    for name in ["test_tp_norm", "test_tp_prefill_workspace_dims", "test_chunk_options"]
+]
+
 py_test(
     name = "test_platform_provider",
     srcs = ["test_platform_provider.py"],

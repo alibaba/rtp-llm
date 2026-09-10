@@ -46,3 +46,7 @@ class FrozenChunkOptionsTest(unittest.TestCase):
         return _MODULE.dsv4_chunk_tokens_from_env(
             "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS", options=options
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

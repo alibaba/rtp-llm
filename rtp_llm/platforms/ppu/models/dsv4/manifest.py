@@ -271,7 +271,7 @@ def register_modules(registry):
                     else None
                 ),
                 prepare_weights=(
-                    "rtp_llm.platforms.ppu.models.dsv4.resources:routed_tp_preparation"
+                    "rtp_llm.platforms.ppu.models.dsv4.resources:tp_moe_shared_fp32_preparation"
                     if kind == "moe"
                     else None
                 ),

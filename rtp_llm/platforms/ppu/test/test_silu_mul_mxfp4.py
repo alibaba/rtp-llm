@@ -27,7 +27,9 @@ class SiluMulMxfp4Test(unittest.TestCase):
                 with self.subTest(hidden=hidden, limit=limit):
                     x = torch.ones((2, 2 * hidden), device="cuda", dtype=torch.bfloat16)
                     x[:, :hidden] = 16
-                    packed, scales = rtp_llm_ops.ppu_silu_and_mul_post_quant_mxfp4(x, limit)
+                    packed, scales = rtp_llm_ops.ppu_silu_and_mul_post_quant_mxfp4(
+                        x, limit
+                    )
                     self.assertEqual(packed.shape, (2, hidden // 2))
                     self.assertTrue(bool((packed == packed_byte).all()))
                     self.assertEqual(scales.shape, (2, (hidden + 63) // 64))
@@ -37,13 +39,36 @@ class SiluMulMxfp4Test(unittest.TestCase):
                         (scale_words & 255, scale_words >> 8), dim=-1
                     ).reshape(2, -1)
                     valid_groups = (hidden + 31) // 32
-                    self.assertTrue(bool((scale_bytes[:, :valid_groups] == exponent).all()))
+                    self.assertTrue(
+                        bool((scale_bytes[:, :valid_groups] == exponent).all())
+                    )
+
+    def test_storage_offset_alignment(self):
+        for offset in (1, 8):
+            with self.subTest(offset=offset):
+                raw = torch.ones(1024 + offset, device="cuda", dtype=torch.bfloat16)
+                x = raw[offset:].view(2, 512)
+                x[:, :256] = 16
+                self.assertTrue(x.is_contiguous())
+                self.assertEqual(x.storage_offset(), offset)
+                if offset == 1:
+                    with self.assertRaisesRegex(RuntimeError, "aligned to 16 bytes"):
+                        rtp_llm_ops.ppu_silu_and_mul_post_quant_mxfp4(x)
+                else:
+                    packed, scales = rtp_llm_ops.ppu_silu_and_mul_post_quant_mxfp4(x)
+                    self.assertTrue(bool((packed == 0x66).all()))
+                    self.assertTrue(bool((scales.to(torch.int32) == 0x8181).all()))
 
     def test_empty_batch_retains_layout(self):
         x = torch.empty((0, 160), device="cuda", dtype=torch.bfloat16)
         packed, scales = rtp_llm_ops.ppu_silu_and_mul_post_quant_mxfp4(x)
         self.assertEqual(packed.shape, (0, 40))
         self.assertEqual(scales.shape, (0, 2))
+
+    def test_padded_launcher_dimension_rejected_without_large_allocation(self):
+        x = torch.empty((0, 2 * 2147483632), device="cuda", dtype=torch.bfloat16)
+        with self.assertRaisesRegex(RuntimeError, "padded hidden size exceeds"):
+            rtp_llm_ops.ppu_silu_and_mul_post_quant_mxfp4(x)
 
 
 if __name__ == "__main__":

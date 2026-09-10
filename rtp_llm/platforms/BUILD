@@ -277,5 +277,8 @@ test_suite(
         ":topk_padding_test",
         ":ppu_hc_head_options_test",
         ":silu_mul_mxfp4_test",
+        "//rtp_llm/models_py/modules/dsv4/test:test_tp_norm",
+        "//rtp_llm/models_py/modules/dsv4/test:test_tp_prefill_workspace_dims",
+        "//rtp_llm/models_py/modules/dsv4/test:test_chunk_options",
     ],
 )

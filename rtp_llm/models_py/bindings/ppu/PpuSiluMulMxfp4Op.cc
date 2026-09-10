@@ -4,6 +4,7 @@
 #ifdef USE_PPU
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/ppu/kernels/ppu_silu_mul_mxfp4.h"
+#include <cstdint>
 #include <limits>
 namespace rtp_llm {
 std::tuple<torch::Tensor, torch::Tensor> PpuSiluAndMulPostQuantMxfp4(
@@ -19,11 +20,18 @@ std::tuple<torch::Tensor, torch::Tensor> PpuSiluAndMulPostQuantMxfp4(
     TORCH_CHECK(two_hidden > 0 && two_hidden % 32 == 0,
                 "2H must be positive and H must be a multiple of 16");
     const int64_t hidden = two_hidden / 2;
+    // A contiguous view can still have a misaligned storage offset. The full
+    // blocks use 16-byte cp.async reads from both halves of each input row.
+    TORCH_CHECK(num_tokens == 0 ||
+                    reinterpret_cast<std::uintptr_t>(gate_up.data_ptr()) % 16 == 0,
+                "gate_up data must be aligned to 16 bytes");
     TORCH_CHECK(hidden <= std::numeric_limits<int>::max() &&
                     num_tokens <= std::numeric_limits<int>::max(),
                 "shape exceeds PPU launcher limits");
     const int block_n = hidden % 512 == 0 ? 512 : (hidden % 256 == 0 ? 256 : 128);
     const int64_t hidden_padded = (hidden + block_n - 1) / block_n * block_n;
+    TORCH_CHECK(hidden_padded <= std::numeric_limits<int>::max(),
+                "padded hidden size exceeds PPU launcher limits");
     const int64_t scale_alloc = hidden_padded / 64;
     const int64_t scale_valid = (hidden + 63) / 64;
     auto packed = torch::empty({num_tokens, hidden / 2},
