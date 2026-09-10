@@ -26,9 +26,58 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.test.fp8_linear_test imp
     init_quant_config,
 )
 from rtp_llm.models_py.utils.arch import is_sm12x
+from rtp_llm.utils.model_weight import (
+    W,
+    sp_0,
+    sp_head_gemm_a8,
+    sp_head_s_gemm_a8_block,
+    sp_neg1,
+)
 
 
 class CudaFp8DeepGEMMLinearSM120Test(CudaFp8GEMMLinearTestBase, unittest.TestCase):
+    def _split_online_weight(
+        self,
+        kernel,
+        scale,
+        kernel_split_func,
+        scale_split_func,
+        load_config,
+        scale_name="test_dense_scale",
+    ):
+        def split(tensor, split_func):
+            return split_func(
+                t=tensor,
+                tp=load_config.tp_size,
+                tp_rank=load_config.tp_rank,
+                ep=1,
+                ep_rank=0,
+                dp=1,
+                dp_rank=0,
+                ffn_tp_size=load_config.tp_size,
+                ffn_tp_rank=load_config.tp_rank,
+                head_num=getattr(load_config, "head_num", 0),
+                head_num_kv=getattr(load_config, "head_num_kv", 0),
+                size_per_head=getattr(load_config, "size_per_head", 0),
+            ).contiguous()
+
+        loader = object.__new__(LoadQuantPerBlockFp8Weight)
+        loader.group_size = 128
+        loader.kernel = Mock(name="kernel")
+        loader.kernel.name = "test_dense_weight"
+        loader.kernel._split.side_effect = lambda tensor, _: {
+            loader.kernel.name: split(tensor, kernel_split_func)
+        }
+        loader.scale = Mock(name="scale")
+        loader.scale.name = scale_name
+        loader.scale._get_split_func.return_value = scale_split_func
+        loader.scale._split.side_effect = lambda tensor, _: {
+            loader.scale.name: split(tensor, scale_split_func)
+        }
+        return loader._split(
+            {loader.kernel.name: kernel, loader.scale.name: scale}, load_config
+        )
+
     def test_sm120(self):
         self.assertTrue(is_sm12x())
         self.assertTrue(has_deep_gemm())
@@ -134,6 +183,118 @@ class CudaFp8DeepGEMMLinearSM120Test(CudaFp8GEMMLinearTestBase, unittest.TestCas
                 device="cuda",
                 load_config=Mock(),
             )
+
+    def test_online_loader_splits_unaligned_packed_scale(self):
+        torch.manual_seed(20260910)
+        weight = torch.randn((256, 13824), device="cuda", dtype=torch.bfloat16)
+        kernel, scale = quant_weight_ue8m0_packed(weight)
+        self.assertEqual(tuple(scale.shape), (256, 27))
+        for rank in range(2):
+            with self.subTest(rank=rank):
+                k_start = rank * 6912
+                actual = self._split_online_weight(
+                    kernel,
+                    scale,
+                    sp_neg1,
+                    sp_neg1,
+                    SimpleNamespace(
+                        tp_size=2,
+                        tp_rank=rank,
+                        dp_size=1,
+                        ep_size=1,
+                    ),
+                )
+                _, expected_scale = quant_weight_ue8m0_packed(
+                    weight[:, k_start : k_start + 6912]
+                )
+
+                self.assertEqual(tuple(actual["test_dense_scale"].shape), (256, 14))
+                self.assertEqual(
+                    actual["test_dense_scale"].stride(), expected_scale.stride()
+                )
+                self.assertTrue(torch.equal(actual["test_dense_scale"], expected_scale))
+
+    def test_online_loader_splits_non_block_aligned_output_rows(self):
+        from deep_gemm.utils.layout import (
+            get_mn_major_tma_aligned_packed_ue8m0_tensor,
+        )
+
+        torch.manual_seed(20260910)
+        weight = torch.randn((1376, 256), device="cuda", dtype=torch.bfloat16)
+        kernel, scale = quant_weight_ue8m0_packed(weight)
+        _, block_scale = per_block_cast_to_fp8(weight, use_ue8m0=True)
+        expanded_scale = block_scale.index_select(
+            0, torch.arange(weight.shape[0], device="cuda") // 128
+        )
+
+        for rank in range(2):
+            with self.subTest(rank=rank):
+                load_config = SimpleNamespace(
+                    tp_size=2,
+                    tp_rank=rank,
+                    dp_size=1,
+                    ep_size=1,
+                )
+                actual = self._split_online_weight(
+                    kernel, scale, sp_0, sp_0, load_config
+                )
+                expected_scale = get_mn_major_tma_aligned_packed_ue8m0_tensor(
+                    sp_0(expanded_scale, 2, rank).contiguous()
+                )
+
+                self.assertEqual(tuple(actual["test_dense_weight"].shape), (688, 256))
+                self.assertEqual(tuple(actual["test_dense_scale"].shape), (688, 1))
+                self.assertEqual(
+                    actual["test_dense_scale"].stride(), expected_scale.stride()
+                )
+                self.assertTrue(torch.equal(actual["test_dense_scale"], expected_scale))
+
+    def test_online_loader_splits_qkv_heads(self):
+        torch.manual_seed(20260910)
+        weight = torch.randn((1024, 256), device="cuda", dtype=torch.bfloat16)
+        kernel, scale = quant_weight_ue8m0_packed(weight)
+
+        def split(tensor, split_func, rank):
+            return split_func(
+                t=tensor,
+                tp=2,
+                tp_rank=rank,
+                head_num=4,
+                head_num_kv=2,
+                size_per_head=128,
+            ).contiguous()
+
+        for rank in range(2):
+            with self.subTest(rank=rank):
+                load_config = SimpleNamespace(
+                    tp_size=2,
+                    tp_rank=rank,
+                    dp_size=1,
+                    ep_size=1,
+                    head_num=4,
+                    head_num_kv=2,
+                    size_per_head=128,
+                )
+                actual = self._split_online_weight(
+                    kernel,
+                    scale,
+                    sp_head_gemm_a8,
+                    sp_head_s_gemm_a8_block,
+                    load_config,
+                    W.attn_qkv_s,
+                )
+                local_weight = split(weight, sp_head_gemm_a8, rank)
+                expected_kernel, expected_scale = quant_weight_ue8m0_packed(
+                    local_weight
+                )
+
+                self.assertTrue(
+                    torch.equal(actual["test_dense_weight"], expected_kernel)
+                )
+                self.assertEqual(
+                    actual[W.attn_qkv_s].stride(), expected_scale.stride()
+                )
+                self.assertTrue(torch.equal(actual[W.attn_qkv_s], expected_scale))
 
     def test_direct_weight_runs_sm120_deepgemm(self):
         torch.manual_seed(20260811)
