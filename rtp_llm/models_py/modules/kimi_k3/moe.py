@@ -79,6 +79,7 @@ class KimiK3LatentMoE(nn.Module):
         self.local_expert_count = self.expert_num // self.ep_size
         self.attn_tp_size = int(parallelism_config.get_attn_tp_size())
         self.attn_tp_rank = int(parallelism_config.get_attn_tp_rank())
+        self.ktp_size = int(getattr(parallelism_config, "ktp_size", 1))
         self.ffn_tp_size = int(parallelism_config.get_ffn_tp_size())
         self.ffn_tp_rank = int(parallelism_config.get_ffn_tp_rank())
         self.shared_expert_weight_shard = shared_expert_weight_shard_enabled(
@@ -123,7 +124,18 @@ class KimiK3LatentMoE(nn.Module):
         if not dist.is_initialized():
             raise RuntimeError(f"{label} requires torch.distributed initialization")
         world_size = int(dist.get_world_size())
-        if self.attn_tp_size != self.ep_size or self.ep_size != world_size:
+        if self.ktp_size > 1:
+            if not (
+                self.attn_tp_size == 1
+                and self.ktp_size == self.ep_size == world_size
+            ):
+                raise RuntimeError(
+                    f"{label} projection-KTP Decode requires attention TP=1 and "
+                    "KTP=EP=world; got "
+                    f"TP={self.attn_tp_size}, KTP={self.ktp_size}, "
+                    f"EP={self.ep_size}, world={world_size}"
+                )
+        elif self.attn_tp_size != self.ep_size or self.ep_size != world_size:
             raise RuntimeError(
                 f"{label} requires attention TP, EP, and the full distributed "
                 "world to have the same size; got "
@@ -226,7 +238,7 @@ class KimiK3LatentMoE(nn.Module):
         )
 
     def _setup_deep_gemm_mega(self) -> None:
-        """Transform K3's EP-local MXFP4 weights for SiTU MegaMoE."""
+        """Transform K3's EP-local MXFP4 weights for DeepGEMM MegaMoE."""
 
         max_tokens_per_rank = int(
             os.environ.get("MEGA_MOE_MAX_TOKENS_PER_RANK", "65536")
@@ -553,6 +565,47 @@ class KimiK3LatentMoE(nn.Module):
             )
         return expert_ids, expert_weights * self.routed_scaling_factor
 
+    @staticmethod
+    def _mask_padding_routes(
+        expert_ids: torch.Tensor,
+        routing_weights: torch.Tensor,
+        *,
+        token_count: int,
+        valid_token_count: Optional[int],
+        valid_token_mask: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Route padding through legal expert IDs with zero contribution."""
+
+        if valid_token_mask is not None:
+            if valid_token_mask.ndim != 1 or valid_token_mask.numel() != token_count:
+                raise ValueError(
+                    "valid_token_mask must contain one entry per local token: "
+                    f"mask={tuple(valid_token_mask.shape)}, rows={token_count}"
+                )
+            valid = valid_token_mask.to(
+                device=expert_ids.device,
+                dtype=torch.bool,
+            )
+            expert_ids = torch.where(valid.unsqueeze(-1), expert_ids, 0)
+            routing_weights = routing_weights * valid.to(
+                routing_weights.dtype
+            ).unsqueeze(-1)
+
+        if valid_token_count is None:
+            return expert_ids, routing_weights
+        if valid_token_count < 0 or valid_token_count > token_count:
+            raise ValueError(
+                "valid_token_count is outside the local token shard: "
+                f"valid={valid_token_count}, rows={token_count}"
+            )
+        if valid_token_count < token_count:
+            expert_ids = expert_ids.clone()
+            routing_weights = routing_weights.clone()
+            # DeepGEMM validates expert IDs before applying routing weights.
+            expert_ids[valid_token_count:] = 0
+            routing_weights[valid_token_count:] = 0
+        return expert_ids, routing_weights
+
     def _tp_token_slice(
         self,
         routed_input: torch.Tensor,
@@ -629,25 +682,19 @@ class KimiK3LatentMoE(nn.Module):
         *,
         sequence_parallel: bool = False,
         valid_token_count: Optional[int] = None,
+        valid_token_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         sp_active = (
             sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
         )
         expert_ids, routing_weights = self._route(hidden_states)
-        if valid_token_count is not None:
-            if valid_token_count < 0 or valid_token_count > hidden_states.shape[0]:
-                raise ValueError(
-                    "valid_token_count is outside the local token shard: "
-                    f"valid={valid_token_count}, rows={hidden_states.shape[0]}"
-                )
-            if valid_token_count < hidden_states.shape[0]:
-                expert_ids = expert_ids.clone()
-                routing_weights = routing_weights.clone()
-                # DeepGEMM validates every expert id before applying its
-                # routing weight. Padding rows still need an in-range id;
-                # zero weights and the output clear below keep them inert.
-                expert_ids[valid_token_count:] = 0
-                routing_weights[valid_token_count:] = 0
+        expert_ids, routing_weights = self._mask_padding_routes(
+            expert_ids,
+            routing_weights,
+            token_count=hidden_states.shape[0],
+            valid_token_count=valid_token_count,
+            valid_token_mask=valid_token_mask,
+        )
         routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
         routed_output = self._mega_expert_sum(
             routed_input,
@@ -660,9 +707,6 @@ class KimiK3LatentMoE(nn.Module):
         routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
         shared_output = self._shared_expert_forward(hidden_states)
         output = routed_output + shared_output
-        if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
-            output = output.clone()
-            output[valid_token_count:] = 0
         return output
 
 

@@ -1,6 +1,5 @@
 """K3-only load-time block FP8 policy; native MoE remains outside this manifest."""
 
-import logging
 from typing import Dict
 
 import torch
@@ -82,21 +81,38 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
 
     def _split(self, tensor, load_config):
         weight, scale = tensor[self.kernel.name], tensor[self.scale.name]
-        tp, rank = load_config.tp_size, load_config.tp_rank
-        if not 0 <= rank < tp:
-            raise ValueError(f"invalid K3 FP8 TP rank: {rank}/{tp}")
-        if tp not in (1, 2, 4, 8, 16):
-            raise ValueError(f"K3 FP8 supports TP1/2/4/8/16, got {tp}")
+        tp, tp_rank = load_config.tp_size, load_config.tp_rank
+        ktp = getattr(load_config, "ktp_size", 1)
+        ktp_rank = getattr(load_config, "ktp_rank", 0)
+        projection_ktp = (
+            bool(getattr(self.source, "projection_ktp", False)) and ktp > 1
+        )
+        parallel, rank = (ktp, ktp_rank) if projection_ktp else (tp, tp_rank)
+        parallel_name = "KTP" if projection_ktp else "TP"
+        if not 0 <= rank < parallel:
+            raise ValueError(
+                f"invalid K3 FP8 {parallel_name} rank: {rank}/{parallel}"
+            )
+        supported = (8, 16) if projection_ktp else (1, 2, 4, 8, 16)
+        if parallel not in supported:
+            raise ValueError(
+                f"K3 FP8 supports {parallel_name} sizes {supported}, got {parallel}"
+            )
         name = self.kernel.name
         if name == W.linear_attn_qkvg_fa_beta_w:
             cfg = self.source.config
             widths = [cfg.linear_num_key_heads * cfg.linear_key_head_dim] * 2
             widths += [cfg.linear_num_value_heads * cfg.linear_value_head_dim] * 2
             rows, blocks, offset = [], [], 0
-            self.tp_ranges = {"axis": 0, "sharded": [], "replicated": []}
+            self.tp_ranges = {
+                "axis": 0,
+                "parallel": parallel_name,
+                "sharded": [],
+                "replicated": [],
+            }
             for width in widths:
-                local = width // tp
-                if width % tp or local % 128:
+                local = width // parallel
+                if width % parallel or local % 128:
                     raise ValueError("KDA head shards must align to FP8 blocks")
                 begin = offset + rank * local
                 self.tp_ranges["sharded"].append((begin, begin + local))
@@ -110,17 +126,25 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
         elif name != W.mla_fusedqkrope_w:
             axis = 1 if name in (W.attn_o_w, W.linear_attn_out_w) else 0
             width = weight.shape[axis]
-            if width % tp or (width // tp) % 128:
-                raise ValueError(f"unaligned K3 FP8 shard: {name}, {width=}, {tp=}")
-            local = width // tp
+            if width % parallel or (width // parallel) % 128:
+                raise ValueError(
+                    f"unaligned K3 FP8 shard: {name}, {width=}, "
+                    f"{parallel_name}={parallel}"
+                )
+            local = width // parallel
             self.tp_ranges = {
                 "axis": axis,
+                "parallel": parallel_name,
                 "sharded": [(rank * local, (rank + 1) * local)],
             }
             weight = weight.narrow(axis, rank * local, local)
             scale = scale.narrow(axis, rank * local // 128, local // 128)
         else:
-            self.tp_ranges = {"axis": 0, "replicated": [(0, weight.shape[0])]}
+            self.tp_ranges = {
+                "axis": 0,
+                "parallel": parallel_name,
+                "replicated": [(0, weight.shape[0])],
+            }
 
         # Row slices can be contiguous views of a full TP-global allocation.
         # Tail cropping can likewise retain the quantizer's temporary padding.
@@ -165,17 +189,4 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
             scale = scale.reshape(scale.shape[1], scale.shape[0])
         result[self.kernel.name] = weight
         result[self.scale.name] = scale
-        logging.info(
-            "K3_FP8_WEIGHT layer=%d name=%s logical_shape=%s scale_shape=%s "
-            "scale_dtype=%s TP=%d rank=%d derived_mla=%s weight_padding=0 tp_ranges=%s",
-            self.layer_id,
-            self.kernel.name,
-            tuple(tensor[self.kernel.name].shape),
-            tuple(scale.shape),
-            scale.dtype,
-            load_config.tp_size,
-            load_config.tp_rank,
-            self.derive_mla,
-            self.tp_ranges,
-        )
         return result

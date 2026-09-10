@@ -95,6 +95,17 @@ if TYPE_CHECKING:
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
+from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
+    KtpForwardMode,
+    KtpStepPlan,
+    coordinate_ktp_step as coordinate_ktp_step_collective,
+    default_decode_capture_buckets,
+    normalize_capture_buckets,
+    pad_ktp_decode_inputs,
+)
+from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
+    validate_projection_ktp_sp_type,
+)
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     collective_gemm_workspace_global_tokens,
@@ -128,6 +139,7 @@ class KimiK3DecoderMetadata:
     prefill_sp_layout: Optional[TokenShardLayout] = None
     kda_prefill_metadata: Optional[KimiKDAPrefillMetadata] = None
     kda_current_state_registry: Optional[KimiKDACurrentStateRegistry] = None
+    valid_token_mask: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -364,11 +376,19 @@ class KimiK3DecoderLayer(nn.Module):
             delta=attention_delta,
             num_blocks=active_blocks,
         )
-        mlp_output = self.mlp(
-            normalized_mlp_input,
-            sequence_parallel=sequence_parallel,
-            valid_token_count=local_valid_tokens,
-        )
+        if isinstance(self.mlp, (KimiK3LatentMoE, KimiK3LatentMoESE)):
+            mlp_output = self.mlp(
+                normalized_mlp_input,
+                sequence_parallel=sequence_parallel,
+                valid_token_count=local_valid_tokens,
+                valid_token_mask=attn_meta.valid_token_mask,
+            )
+        else:
+            mlp_output = self.mlp(
+                normalized_mlp_input,
+                sequence_parallel=sequence_parallel,
+                valid_token_count=local_valid_tokens,
+            )
         output = prefix_sum + mlp_output
         if decode_sp:
             output = all_gather_trim(output, logical_tokens, group=Group.TP)
@@ -457,6 +477,7 @@ class KimiK3Model(GptModelBase):
         self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
         self._k3_page_tokens: Optional[int] = None
         self._kda_checkpoint_tokens: Optional[int] = None
+        self._ktp_capture_buckets: tuple[int, ...] = ()
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         """Bind runtime resources and reserve Prefill collective workspaces."""
@@ -465,6 +486,37 @@ class KimiK3Model(GptModelBase):
         self._is_decode_role = bool(init_resource.is_decode_role)
         self._initialize_k3_cache_geometry()
         self._validate_page_rr_target()
+        ktp_size = int(getattr(self.parallelism_config, "ktp_size", 1))
+        if ktp_size > 1:
+            if not self._is_decode_role:
+                raise RuntimeError("Projection KTP is supported only by Decode")
+            topology = (
+                int(self.parallelism_config.get_attn_tp_size()),
+                int(self.parallelism_config.dp_size),
+                ktp_size,
+                int(self.parallelism_config.ep_size),
+                int(self.parallelism_config.world_size),
+            )
+            if topology != (1, ktp_size, ktp_size, ktp_size, ktp_size):
+                raise RuntimeError(
+                    "Projection KTP requires TP=1 and DP=KTP=EP=world; "
+                    f"got TP/DP/KTP/EP/world={topology}"
+                )
+            validate_projection_ktp_sp_type(os.environ.get("SP_TYPE", ""))
+            configured = tuple(int(value) for value in init_resource.decode_capture_batch_sizes)
+            self._ktp_capture_buckets = (
+                normalize_capture_buckets(configured)
+                if configured
+                else default_decode_capture_buckets(
+                    int(init_resource.max_decode_graph_batch_size)
+                )
+            )
+            logging.info(
+                "[K3_PROJECTION_KTP] size=%d rank=%d capture_buckets=%s",
+                ktp_size,
+                int(getattr(self.parallelism_config, "ktp_rank", 0)),
+                self._ktp_capture_buckets,
+            )
         if self._is_decode_role and os.environ.get("SP_TYPE", "").lower() in (
             "eagle3",
             "mtp",
@@ -567,6 +619,96 @@ class KimiK3Model(GptModelBase):
             self._k3_page_tokens,
             self._kda_checkpoint_tokens,
         )
+
+    def cuda_graph_capture_barrier(self) -> None:
+        """Rendezvous Projection-KTP ranks before the first graph replay.
+
+        CUDA Graph capture is rank-local and can finish at very different
+        times across hosts. A graph containing NCCL collectives must be
+        launched collectively, so the one-time replay validation waits until
+        every Decode rank has completed capture. Normal request replay remains
+        coordinated by ``coordinate_ktp_step`` and does not call this method.
+        """
+
+        ktp_size = int(getattr(self.parallelism_config, "ktp_size", 1))
+        if self._is_decode_role and ktp_size > 1:
+            # Keep graph-external capture synchronization on a CPU control
+            # communicator.  The KTP NCCL communicator is captured by both
+            # projection and EP operations; issuing a post-capture NCCL
+            # barrier on it can spin indefinitely even after every rank has
+            # reached this callsite.
+            barrier(Group.KTP_CONTROL)
+
+    def coordinate_ktp_step_plan(
+        self,
+        inputs: PyModelInputs,
+        cuda_graph_enabled: bool,
+        is_fake_stream: bool,
+        local_graph_eligible: bool | None = None,
+    ) -> KtpStepPlan:
+        """Synchronize one Decode target wave and return its physical plan."""
+
+        ktp_size = int(getattr(self.parallelism_config, "ktp_size", 1))
+        if ktp_size <= 1:
+            raise RuntimeError("KTP step planning requires ktp_size > 1")
+        attention = inputs.attention_inputs
+        if attention.is_mtp_draft_update:
+            forward_mode = KtpForwardMode.MTP_DRAFT_UPDATE
+        elif attention.is_target_verify:
+            forward_mode = KtpForwardMode.TARGET_VERIFY
+        elif attention.is_prefill:
+            forward_mode = KtpForwardMode.PREFILL
+        else:
+            forward_mode = KtpForwardMode.DECODE
+        request_rows = int(attention.input_lengths.shape[0])
+        token_rows = int(inputs.input_ids.numel())
+        if request_rows <= 0 or token_rows % request_rows:
+            raise RuntimeError(
+                "Projection KTP requires a uniform positive token width per request; "
+                f"requests={request_rows} tokens={token_rows}"
+            )
+        tokens_per_batch = token_rows // request_rows
+        local_real_batch = 0 if is_fake_stream else request_rows
+        graph_eligible = bool(
+            cuda_graph_enabled
+            and forward_mode
+            in (KtpForwardMode.DECODE, KtpForwardMode.TARGET_VERIFY)
+        )
+        if local_graph_eligible is not None:
+            graph_eligible = graph_eligible and bool(local_graph_eligible)
+        plan = coordinate_ktp_step_collective(
+            local_real_batch=local_real_batch,
+            graph_eligible=graph_eligible,
+            forward_mode=forward_mode,
+            tokens_per_batch=tokens_per_batch,
+            capture_buckets=self._ktp_capture_buckets,
+            device=attention.input_lengths.device,
+            ktp_size=ktp_size,
+        )
+        if forward_mode not in (KtpForwardMode.DECODE, KtpForwardMode.TARGET_VERIFY):
+            raise RuntimeError(
+                "Projection KTP supports ordinary Decode and speculative target verify only; "
+                f"forward_mode={forward_mode.name}"
+            )
+        return plan
+
+    def apply_ktp_step_plan(
+        self,
+        inputs: PyModelInputs,
+        plan: KtpStepPlan,
+    ) -> PyModelInputs:
+        """Apply an already synchronized KTP plan without another collective."""
+
+        pad_ktp_decode_inputs(
+            inputs,
+            plan,
+            ktp_rank=int(getattr(self.parallelism_config, "ktp_rank", 0)),
+        )
+        # Pybind may pass a value object when C++ invokes a Python method.
+        # Return the coordinated object explicitly so C++ observes the padded
+        # tensors and common graph decision instead of the pre-coordination
+        # defaults.
+        return inputs
 
     def _write_mtp_hidden_buffer(
         self, hidden_states: torch.Tensor, *, is_cuda_graph: bool
@@ -1157,6 +1299,9 @@ class KimiK3Model(GptModelBase):
                     f"got TP={tp_size}, EP={ep_size}"
                 )
         hidden_states = self._embed(input_ids, inputs.multimodal_inputs)
+        valid_token_mask = getattr(inputs, "ktp_valid_row_mask", None)
+        if valid_token_mask is None or not valid_token_mask.numel():
+            valid_token_mask = None
         if prefill_sp:
             assert prefill_sp_layout is not None
             hidden_states = shard_tokens(
@@ -1237,6 +1382,7 @@ class KimiK3Model(GptModelBase):
             prefill_sp_layout=prefill_sp_layout,
             kda_prefill_metadata=kda_prefill_metadata,
             kda_current_state_registry=kda_current_state_registry,
+            valid_token_mask=valid_token_mask,
         )
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache

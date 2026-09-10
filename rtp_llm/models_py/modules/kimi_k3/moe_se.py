@@ -373,22 +373,19 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         *,
         sequence_parallel: bool = False,
         valid_token_count: Optional[int] = None,
+        valid_token_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         sp_active = (
             sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
         )
         expert_ids, routing_weights = self._route(hidden_states)
-        if valid_token_count is not None:
-            if valid_token_count < 0 or valid_token_count > hidden_states.shape[0]:
-                raise ValueError(
-                    "valid_token_count is outside the local token shard: "
-                    f"valid={valid_token_count}, rows={hidden_states.shape[0]}"
-                )
-            if valid_token_count < hidden_states.shape[0]:
-                expert_ids = expert_ids.clone()
-                routing_weights = routing_weights.clone()
-                expert_ids[valid_token_count:] = 0
-                routing_weights[valid_token_count:] = 0
+        expert_ids, routing_weights = self._mask_padding_routes(
+            expert_ids,
+            routing_weights,
+            token_count=hidden_states.shape[0],
+            valid_token_count=valid_token_count,
+            valid_token_mask=valid_token_mask,
+        )
 
         routed_input = torch.matmul(
             hidden_states,
@@ -408,9 +405,6 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             self.weights[K3W.MOE_ROUTED_UP],
         )
         output = routed_output + shared_output
-        if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
-            output = output.clone()
-            output[valid_token_count:] = 0
         return output
 
 
