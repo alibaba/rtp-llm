@@ -30,7 +30,35 @@ def _mode() -> str:
 
 def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
+
+
+# (c) SM120 fused shared-expert fast path (DSV4_SM120_SHARED_EXPERT_FUSED, default off).
+#
+# `_requires_sm120_linear` came from the SM120-enablement commit (3773c95d68, Aug 24),
+# when the bundled deep_gemm wheel had NO SM120 kernels at all: the fused path's two
+# `deepgemm_wrapper.fp8_gemm_nt` calls (L391 w13, L399 w2 — plain fp8xfp8) could not
+# run, so cap-12 devices were routed to the generic per-expert path instead. The wheel
+# is now pinned to +ee6161b and a standalone probe (bench/probe_fp8_gemm_sm120.py)
+# built this path's exact operands — the tree's own triton
+# `quant_bf16_fp8_packed_ue8m0` activations plus the loader's
+# `_repack_v4_fp8_scale_to_int32` weight scales — and ran `fp8_gemm_nt` on SM120 with
+# no wheel shadow. So the gate is stale. Flag-gated rather than removed so one binary
+# A/Bs it and the shipped path stays byte-identical by default.
+#
+# SECOND EFFECT, deliberate: this also re-arms the DSV4_MOE_STRICT_FUSED check at
+# L526 (it is guarded by `not _requires_sm120_linear(x)`), so a fused-path failure
+# RAISES instead of silently degrading to the generic path. For an A/B that is the
+# wanted behaviour - a loud answer beats a quiet slowdown - but it does mean an
+# unsupported shape is fatal rather than slow. Set DSV4_MOE_STRICT_FUSED=0 alongside
+# the flag if a degrading arm is ever needed.
+_SM120_SHARED_EXPERT_FUSED = (
+    os.environ.get("DSV4_SM120_SHARED_EXPERT_FUSED", "0") == "1"
+)
+
+
 def _requires_sm120_linear(x: torch.Tensor) -> bool:
+    if _SM120_SHARED_EXPERT_FUSED:
+        return False
     return x.is_cuda and torch.cuda.get_device_capability(x.device)[0] == 12
 
 
