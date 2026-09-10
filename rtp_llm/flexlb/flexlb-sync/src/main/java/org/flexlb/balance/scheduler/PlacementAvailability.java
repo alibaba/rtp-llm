@@ -68,12 +68,14 @@ public final class PlacementAvailability {
     private void publish(PlacementKey key, ChangeKind kind) {
         Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();
-        lastChanged.put(key, next);
+        // Publishers may reach these keys out of sequence; every edge retains
+        // the newest version even when an older publication finishes later.
+        lastChanged.merge(key, next, Math::max);
         if (key.endpoint() != null) {
-            lastChanged.put(new PlacementKey(key.role(), key.group()), next);
+            lastChanged.merge(new PlacementKey(key.role(), key.group()), next, Math::max);
         }
         if (key.group() != null) {
-            lastChanged.put(PlacementKey.anyGroup(key.role()), next);
+            lastChanged.merge(PlacementKey.anyGroup(key.role()), next, Math::max);
         }
         Event event = new Event(key, next, kind);
         // One physical capacity edge produces one callback. The exact key is

@@ -128,7 +128,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             // Completion unlinks this exact intrusive node in O(1), so
             // cancellation never scans the queue or leaves historical nodes
             // behind a blocked head.
-            future.whenComplete((ignored, failure) -> markCompleted(entry));
+            future.whenComplete((ignored, failure) -> removeAndWakeNext(entry));
             changed.signal();
             return true;
         } finally {
@@ -192,7 +192,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                         outcome = commit(plan);
                     } catch (Throwable failure) {
                         closePlan(plan);
-                        remove(plan.entry);
+                        removeAndWakeNext(plan.entry);
                         completeDecisionResponse(plan.entry, error(
                                 StrategyErrorType.DISPATCH_FAILED,
                                 "Placement failed: " + failure.getMessage()));
@@ -268,7 +268,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             int frontierSize = planningFrontierSize();
             lock.lock();
             try {
-                orderedQueue.pruneCompletedHeads();
+                removeCompletedHeadsUnderLock();
                 List<GlobalQueueEntry> frontier = orderedQueue.snapshotPrefix(
                         frontierSize, this::isEligible);
                 if (!frontier.isEmpty()) {
@@ -315,6 +315,14 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             return Plan.done(entry, availabilitySequence);
         }
         try {
+            BlockedRequestIndex.WaitTarget source = retrySource(entry);
+            if (source != null && RouteAdmission.mustWaitForCapacity(
+                    entry.context, source.endpoint())) {
+                // Stop at the full source instead of routing each waiter to another full endpoint.
+                // Parking still rechecks the version in case capacity changed during this check.
+                mutation.close();
+                return Plan.blockedOn(entry, source, availabilitySequence);
+            }
             PlacementResult<RouteAdmission, PlacementKey> result =
                     router.select(entry.context, entry.routingGroup);
             if (result.status() == PlacementResult.Status.SUCCESS) {
@@ -329,15 +337,24 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
+    private BlockedRequestIndex.WaitTarget retrySource(GlobalQueueEntry entry) {
+        lock.lock();
+        try {
+            return blockedRequests.retrySource(entry);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private Outcome commit(Plan plan) {
         GlobalQueueEntry entry = plan.entry;
         if (entry.removed || entry.future.isDone()) {
             plan.close();
-            remove(entry);
+            removeAndWakeNext(entry);
             return Outcome.DONE;
         }
         if (plan.failure != null) {
-            remove(entry);
+            removeAndWakeNext(entry);
             completeDecisionResponse(entry, error(
                     StrategyErrorType.DISPATCH_FAILED,
                     "Placement failed: " + plan.failure.getMessage()));
@@ -345,7 +362,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         PlacementResult<RouteAdmission, PlacementKey> result = plan.result;
         if (result.status() == PlacementResult.Status.REJECTED) {
-            remove(entry);
+            removeAndWakeNext(entry);
             completeDecisionResponse(entry, result.rejection());
             return Outcome.DONE;
         }
@@ -354,7 +371,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             return Outcome.BLOCKED;
         }
         if (result.status() == PlacementResult.Status.CLOSED) {
-            remove(entry);
+            removeAndWakeNext(entry);
             return Outcome.DONE;
         }
         RouteAdmission admission = plan.admission;
@@ -362,13 +379,13 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             PlacementResult<ScheduledRequest, PlacementKey> publication =
                     admission.tryEnqueue(entry.context, entry.future, lifecycle);
             if (publication.status() == PlacementResult.Status.SUCCESS) {
-                removeCommitted(entry, admission);
+                removeAndWakeNext(entry);
                 reportRouteSubmitted(entry.context, publication.value());
                 return Outcome.DONE;
             }
             if (publication.status() == PlacementResult.Status.REJECTED
                     || publication.status() == PlacementResult.Status.CLOSED) {
-                remove(entry);
+                removeAndWakeNext(entry);
                 return Outcome.DONE;
             }
             entry.blockedKey = publication.blocker();
@@ -378,7 +395,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 return Outcome.REPLAN;
             }
             if (tryPriorityRescue(plan)) {
-                remove(entry);
+                removeAndWakeNext(entry);
                 return Outcome.DONE;
             }
             return Outcome.BLOCKED;
@@ -435,15 +452,15 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             if (blockedRequests.isSelectorBlocked(plan.entry)) {
                 return true;
             }
-            BlockedRequestIndex.Conflict conflict =
-                    blockedRequests.conflict(plan.entry, admission);
-            if (conflict == null) {
+            BlockedRequestIndex.WaitTarget target =
+                    blockedRequests.findBlockingEndpoint(plan.entry, admission);
+            if (target == null) {
                 return false;
             }
             parkEndpointUnderLock(
                     plan.entry,
-                    conflict.blocker(),
-                    conflict.endpoint());
+                    target.key(),
+                    target.endpoint());
             return true;
         } finally {
             lock.unlock();
@@ -493,48 +510,38 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         changed.signal();
     }
 
-    private void remove(GlobalQueueEntry entry) {
-        lock.lock();
-        try {
-            if (!orderedQueue.remove(entry)) {
-                return;
-            }
-            blockedRequests.clearEntry(entry);
-            changed.signal();
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private void removeCommitted(
-            GlobalQueueEntry entry,
-            RouteAdmission admission) {
-        lock.lock();
-        try {
-            if (!orderedQueue.remove(entry)) {
-                return;
-            }
-            blockedRequests.routeCommitted(entry, admission);
-            changed.signal();
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /** Unlink a completed request from its ordering bucket in O(1). */
-    private void markCompleted(GlobalQueueEntry entry) {
+    private void removeAndWakeNext(GlobalQueueEntry entry) {
         if (entry.removed) {
             return;
         }
         lock.lock();
         try {
-            if (!orderedQueue.remove(entry)) {
-                return;
-            }
-            blockedRequests.clearEntry(entry);
-            changed.signal();
+            removeAndWakeNextUnderLock(entry);
         } finally {
             lock.unlock();
+        }
+    }
+
+    /**
+     * Remove from both indexes atomically and wake the next waiter once.
+     * Publication, completion callbacks and head pruning share this boundary.
+     * Caller holds {@link #lock}.
+     */
+    private void removeAndWakeNextUnderLock(GlobalQueueEntry entry) {
+        if (orderedQueue.remove(entry)) {
+            blockedRequests.removeAndWakeNext(entry);
+            changed.signal();
+        }
+    }
+
+    /** Caller holds {@link #lock}; completion callbacks may still be pending. */
+    private void removeCompletedHeadsUnderLock() {
+        while (true) {
+            GlobalQueueEntry head = orderedQueue.peekHead();
+            if (head == null || !head.future.isDone()) {
+                return;
+            }
+            removeAndWakeNextUnderLock(head);
         }
     }
 
@@ -776,6 +783,14 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                            long availabilitySequence) {
             return new Plan(entry, null, null, result, null,
                     availabilitySequence);
+        }
+
+        static Plan blockedOn(GlobalQueueEntry entry,
+                              BlockedRequestIndex.WaitTarget target,
+                              long availabilitySequence) {
+            Plan plan = result(entry, PlacementResult.blocked(target.key()), availabilitySequence);
+            plan.blockedEndpoint = target.endpoint();
+            return plan;
         }
 
         static Plan done(GlobalQueueEntry entry, long availabilitySequence) {
