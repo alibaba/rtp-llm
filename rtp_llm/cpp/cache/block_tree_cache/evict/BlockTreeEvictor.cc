@@ -318,17 +318,8 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>     de
     return true;
 }
 
-bool BlockTreeEvictor::batchEvictLocked(size_t  group_set_id,
-                                        Tier    source_tier,
-                                        size_t  max_victim_count,
-                                        size_t& scheduled_count) {
-    const BatchEvictResult result = batchEvictStepLocked(group_set_id, source_tier, max_victim_count);
-    scheduled_count               = result.scheduled_count;
-    return result.madeProgress();
-}
-
 BlockTreeEvictor::BatchEvictResult
-BlockTreeEvictor::batchEvictStepLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count) {
+BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count) {
     if (max_victim_count == 0) {
         return {};
     }
@@ -541,7 +532,7 @@ void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, const TierWat
         while (required_count > 0) {
             const Tier   target_tier      = watermarkTargetTier(tier);
             const size_t batch_count      = std::min(required_count, watermarkLogicalBatchLimit(tier, target_tier));
-            const BatchEvictResult result = batchEvictStepLocked(group_set->groupSetId(), tier, batch_count);
+            const BatchEvictResult result = batchEvictLocked(group_set->groupSetId(), tier, batch_count);
             round.scheduled_count += result.scheduled_count;
             if (result.madeProgress() && !eviction_reported) {
                 metrics_reporter_->reportEvictionTriggered(tier, group_set->groupType(), /*force_drop=*/false);
