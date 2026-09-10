@@ -285,7 +285,7 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)
 
-    def test_output_is_zero_initialized_independent_of_aiter_capability(self):
+    def test_unverified_backend_keeps_zeros_independent_of_capability(self):
         kwargs = _make_decode_kwargs(batch=2)
         original_empty = torch.empty
         original_zeros = torch.zeros
@@ -987,6 +987,57 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
 class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)
+
+    def test_packaged_padding_backport_overwrites_poison_without_rtp_zeros(self):
+        from rtp_llm.models_py.triton_kernels.fla.aiter_gdn_padding_backport import (
+            padding_safe_backend,
+        )
+
+        backend = padding_safe_backend()
+        self.assertIsNotNone(
+            backend, "ROCm build must package the pinned padding backport"
+        )
+        kwargs = _make_decode_kwargs(batch=2)
+        aiter_flydsl_gdn_decode(**kwargs)  # Compile before checking allocation.
+        for read, write in ((-1, -1), (-1, 4), (4, -1)):
+            with self.subTest(read=read, write=write):
+                kwargs["read_indices"] = torch.tensor(
+                    [1, read], device="cuda", dtype=torch.int32
+                )
+                kwargs["write_indices"] = torch.tensor(
+                    [1, write], device="cuda", dtype=torch.int32
+                )
+                before = kwargs["state"].clone()
+                poisoned = torch.full_like(kwargs["v"], float("nan"))
+                with (
+                    mock.patch.object(torch, "empty", return_value=poisoned),
+                    mock.patch.object(
+                        torch,
+                        "zeros",
+                        side_effect=AssertionError("unexpected RTP zeros"),
+                    ),
+                ):
+                    output = aiter_flydsl_gdn_decode(**kwargs)
+                self.assertIs(output, poisoned)
+                torch.testing.assert_close(
+                    output[1], torch.zeros_like(output[1]), rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    kwargs["state"][4], before[4], rtol=0, atol=0
+                )
+
+    def test_backport_source_mismatch_retains_safe_backend(self):
+        from rtp_llm.models_py.triton_kernels.fla import (
+            aiter_gdn_padding_backport as patch,
+        )
+
+        patch.padding_safe_backend.cache_clear()
+        self.addCleanup(patch.padding_safe_backend.cache_clear)
+        with mock.patch.object(patch, "_matches", return_value=False):
+            self.assertIsNone(patch.padding_safe_backend())
+            backend = adapter._get_aiter_flydsl_gdn_decode()
+            self.assertTrue(callable(backend))
+            self.assertFalse(patch.output_is_initialized_by_kernel(backend))
 
     def test_required_aiter_symbol_is_available(self):
         adapter._get_aiter_flydsl_gdn_decode.cache_clear()

@@ -8,7 +8,10 @@ alias(
 
 py_library(
     name = "fla",
-    srcs = glob(["fla/*.py"]),
+    srcs = glob(["fla/*.py"]) + select({
+        "@rtp_llm//:using_rocm": [":aiter_gdr_decode_padding_source"],
+        "//conditions:default": [],
+    }),
     deps = [":common"] + select({
         "@rtp_llm//:using_rocm": [
             requirement_gpu_rocm("aiter"),
@@ -17,6 +20,14 @@ py_library(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"]
+)
+
+# Include the patched source in the RTP wheel, not just Bazel's external tree.
+genrule(
+    name = "aiter_gdr_decode_padding_source",
+    srcs = ["@aiter//:gdr_decode_source"],
+    outs = ["fla/_aiter_gdr_decode_padding.py"],
+    cmd = "cp $(location @aiter//:gdr_decode_source) $@",
 )
 
 py_library(

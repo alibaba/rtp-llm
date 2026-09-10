@@ -230,7 +230,9 @@ def _get_aiter_flydsl_gdn_decode() -> Callable | None:
             actual_signature,
         )
         return None
-    return flydsl_gdr_decode
+    from .aiter_gdn_padding_backport import padding_safe_backend
+
+    return padding_safe_backend() or flydsl_gdr_decode
 
 
 def _callable_signature_incompatibility(
@@ -724,11 +726,16 @@ def aiter_flydsl_gdn_decode(
 
     batch, query_length = q.shape[:2]
     value_heads = v.shape[2]
-    # The pinned AITER kernel skips negative-index Graph-padding rows without
-    # writing their output. Initialize every replay's output to zero in RTP;
-    # valid rows are overwritten by GDN. Kernel-side zeroing is a separate
-    # optimization and must not be assumed from an optional capability flag.
-    output = torch.zeros(v.shape, dtype=v.dtype, device=v.device)
+    from .aiter_gdn_padding_backport import output_is_initialized_by_kernel
+
+    # Only the hash-verified packaged backport guarantees a store for padding.
+    # Unpatched/unknown wheels keep the safe output initialization on replay.
+    allocate = (
+        torch.empty
+        if output_is_initialized_by_kernel(flydsl_gdr_decode)
+        else torch.zeros
+    )
+    output = allocate(v.shape, dtype=v.dtype, device=v.device)
     flydsl_gdr_decode(
         query=q,
         key=k,
