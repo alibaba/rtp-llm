@@ -1446,7 +1446,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // StreamGroups snapshots scheduling metadata. Wait for any mutable
     // bookkeeping/KV-swap state that has not yet reached a safe snapshot.
-    waitPreviousBookkeepingAndKvSwaps(streams);
+    waitPreviousBookkeepingBeforeStreamPreparation(streams);
     StreamGroups stream_groups(streams);
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
