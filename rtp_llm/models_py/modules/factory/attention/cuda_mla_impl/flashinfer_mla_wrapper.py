@@ -475,8 +475,6 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
             if parallelism_config is None or parallelism_config.tp_size <= 1:
                 raise ValueError("Page-RR Prefill requires a parallelism configuration")
             cp_size, cp_rank = parallelism_config.tp_size, parallelism_config.tp_rank
-        if cp_size > 1 and attn_configs.kv_cache_dtype != KvCacheDataType.BASE:
-            raise ValueError("Page-RR Prefill currently requires BASE KV cache")
         self.cache_group_id = cache_group_id
         MlaFlashInferImplBase.__init__(
             self,

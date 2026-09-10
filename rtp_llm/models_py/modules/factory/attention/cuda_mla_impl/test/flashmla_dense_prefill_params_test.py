@@ -22,6 +22,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_pr
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_forward_plan import (
     FlashMLAForwardRoute,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fp8_kernels import (
+    quantize_fp8,
+)
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -30,6 +33,13 @@ if _TEST_TMPDIR:
     os.environ.setdefault("DG_JIT_CACHE_DIR", os.path.join(_TEST_TMPDIR, "deep_gemm"))
 
 CUDA_AVAILABLE = torch.cuda.is_available()
+
+
+def fp8_mla_available() -> bool:
+    """FP8 MLA compute only exists for the Blackwell targets its kernel accepts."""
+    if not CUDA_AVAILABLE:
+        return False
+    return torch.cuda.get_device_capability() in ((10, 0), (10, 3))
 
 
 class FlashMlaWorkspaceLifetimeTest(TestCase):
@@ -70,6 +80,7 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
         configs.softmax_extra_scale = 1.0
         configs.use_mla = True
         configs.mla_prefill_expanded_kv_budget_bytes = 5 * 1024**3
+        configs.mla_fp8_q_scale, configs.mla_fp8_kv_scale = 0.5, 0.25
         captured: dict[str, object] = {}
 
         def make_op(*args: object, **kwargs: object) -> object:
@@ -79,6 +90,8 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
             )
             captured["cp_size"] = kwargs["cp_size"]
             captured["cp_rank"] = kwargs["cp_rank"]
+            captured["fp8_compute"] = kwargs["fp8_compute"]
+            captured["scales"] = (kwargs["q_scale"], kwargs["kv_scale"])
             return object()
 
         with (
@@ -109,31 +122,37 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
                 [],
                 torch.empty(0),
             )
-            # The new upstream FP8 path stays available without cache CP.
             parallel = ParallelismConfig()
             parallel.tp_size, parallel.tp_rank = 8, 3
-            for cache_group_id, dtype in (
-                (0, KvCacheDataType.BASE), (None, KvCacheDataType.FP8)
+            for cache_group_id, dtype, fp8_compute in (
+                (0, KvCacheDataType.BASE, False),
+                (None, KvCacheDataType.FP8, True),
+                (0, KvCacheDataType.FP8, True),
             ):
                 configs.kv_cache_dtype = dtype
-                configs.mla_fp8_compute = dtype == KvCacheDataType.FP8
+                configs.mla_fp8_compute = fp8_compute
                 MlaFlashMLAPrefillImpl(
                     configs, SimpleNamespace(), [], torch.empty(0),
                     cache_group_id=cache_group_id,
                     parallelism_config=parallel,
                 )
                 self.assertEqual(captured["kv_cache_dtype"], dtype)
+                self.assertEqual(captured["fp8_compute"], fp8_compute)
+                self.assertEqual(captured["scales"], (0.5, 0.25))
                 self.assertEqual(
                     (captured["cp_size"], captured["cp_rank"]),
                     (8, 3) if cache_group_id is not None else (1, 0),
                 )
-            with self.assertRaisesRegex(ValueError, "Page-RR Prefill.*BASE"):
-                MlaFlashMLAPrefillImpl(
-                    configs, SimpleNamespace(), [], torch.empty(0),
-                    cache_group_id=0, parallelism_config=parallel,
-                )
 
         self.assertEqual(captured["expanded_kv_budget_bytes"], 5 * 1024**3)
+
+    def test_op_rejects_mismatched_cache_and_compute_dtype(self) -> None:
+        for fp8, cache_dtype in ((True, KvCacheDataType.BASE), (False, KvCacheDataType.FP8)):
+            with self.subTest(fp8=fp8), self.assertRaises(ValueError):
+                MlaFlashMLAPrefillOp(
+                    12, 512, 64, 128, 128, 128, 1.0, True,
+                    weights=[], fp8_compute=fp8, kv_cache_dtype=cache_dtype,
+                )
 
 
 def _indptr(lengths: list[int]) -> torch.Tensor:
@@ -485,6 +504,13 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         )
 
     def test_factory_prefill_writes_only_owned_cp_pages(self) -> None:
+        self._check_factory_prefill_writes_only_owned_cp_pages(fp8=False)
+
+    @skipUnless(fp8_mla_available(), "FP8 MLA compute requires SM100 or SM103")
+    def test_fp8_factory_prefill_writes_only_owned_cp_pages(self) -> None:
+        self._check_factory_prefill_writes_only_owned_cp_pages(fp8=True)
+
+    def _check_factory_prefill_writes_only_owned_cp_pages(self, fp8) -> None:
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.model_loader.model_weight_info import ModelWeights
         from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
@@ -493,6 +519,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
         from rtp_llm.utils.model_weight import W
 
+        kv_scale = 16.0
         for page, kernel_page, cp_size in ((4, 2, 2), (4096, 128, 8)):
             config = ModelConfig()
             config.num_layers, config.max_seq_len = 3, 4 * page
@@ -503,7 +530,12 @@ class FlashMlaDensePrefillParamsTest(TestCase):
             attn.kv_lora_rank, attn.nope_head_dim = 512, 128
             attn.rope_head_dim, attn.v_head_dim = 64, 128
             attn.tokens_per_block, attn.kernel_tokens_per_block = page, kernel_page
-            attn.kv_cache_dtype = KvCacheDataType.BASE
+            attn.kv_cache_dtype = (
+                KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE
+            )
+            attn.mla_fp8_compute = fp8
+            attn.mla_fp8_kv_scale = kv_scale
+            cache_dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
             hybrid = config.hybrid_attention_config
             hybrid.enable_hybrid_attention = hybrid.enable_independent_kv_cache_pools = True
             hybrid.hybrid_attention_types = [
@@ -515,10 +547,11 @@ class FlashMlaDensePrefillParamsTest(TestCase):
             )
             lengths, prefixes = [4, 2], [page - 2, 3 * page - 1]
             payload = torch.arange(6 * 576, device="cuda").reshape(6, 576).to(torch.bfloat16)
+            cached = quantize_fp8(payload, kv_scale) if fp8 else payload
             table_width = 4 * page // kernel_page
             for sharded in (False, True):
                 for rank in range(cp_size) if sharded else (0,):
-                    with self.subTest(page=page, sharded=sharded, rank=rank):
+                    with self.subTest(page=page, sharded=sharded, rank=rank, fp8=fp8):
                         parallel = ParallelismConfig()
                         parallel.tp_size = parallel.world_size = cp_size
                         parallel.tp_rank = parallel.world_rank = rank
@@ -541,7 +574,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
                         cache = LayerKVCache()
                         cache.kv_cache_base = torch.full(
                             (3 * table_width, kernel_page, 576), -7,
-                            dtype=torch.bfloat16, device="cuda",
+                            dtype=cache_dtype, device="cuda",
                         )
                         impl = AttnImplFactory.get_fmha_impl(config, parallel, weights, inputs)
                         if sharded:
@@ -588,7 +621,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
                                         if not sharded or physical > 0:
                                             slot = physical * kernel_page + local_position % kernel_page
                                             if slot >= 0:
-                                                expected[slot] = payload[token]
+                                                expected[slot] = cached[token]
                                     expected_slots.append(slot)
                                     token += 1
                             torch.testing.assert_close(
@@ -600,7 +633,10 @@ class FlashMlaDensePrefillParamsTest(TestCase):
                                 slot_mapping_override=slots,
                             )
                             torch.testing.assert_close(
-                                cache.kv_cache_base.view(-1, 576), expected, atol=0, rtol=0
+                                cache.kv_cache_base.view(-1, 576).float(),
+                                expected.float(),
+                                atol=0,
+                                rtol=0,
                             )
                             self.assertTrue(torch.all(table_storage[:, table_width:] == -1))
 

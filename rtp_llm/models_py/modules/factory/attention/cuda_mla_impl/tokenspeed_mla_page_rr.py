@@ -50,10 +50,12 @@ def tokenspeed_mla_page_rr_decode(
     batch, query_count, heads, dim = query.shape
     rows = batch * query_count
     if (
-        query.dtype not in (torch.bfloat16, torch.float16)
+        query.dtype not in (torch.bfloat16, torch.float16, torch.float8_e4m3fn)
         or kv_cache.dtype != query.dtype
     ):
-        raise ValueError("Page-RR MLA requires matching BF16 or FP16 query/cache")
+        raise ValueError(
+            "Page-RR MLA requires matching BF16, FP16 or E4M3 query/cache"
+        )
     if dim != kv_lora_rank + qk_rope_head_dim or max_local_seq_len <= 0:
         raise ValueError("invalid Page-RR MLA dimensions or maximum local length")
     if (
@@ -80,16 +82,19 @@ def tokenspeed_mla_page_rr_decode(
     if workspace_buffer.dtype != torch.int8 or not workspace_buffer.is_contiguous():
         raise ValueError("Page-RR MLA requires a contiguous int8 workspace")
     shape = (batch, query_count, heads, kv_lora_rank)
+    # TokenSpeed returns BF16 for E4M3 inputs.
+    result_dtype = torch.bfloat16 if query.dtype == torch.float8_e4m3fn else query.dtype
     if out is None:
-        out = torch.empty(shape, device=query.device, dtype=query.dtype)
+        out = torch.empty(shape, device=query.device, dtype=result_dtype)
     elif (
         out.shape != shape
-        or out.dtype != query.dtype
+        or out.dtype != result_dtype
         or out.device != query.device
         or not out.is_contiguous()
     ):
         raise ValueError(
-            "Page-RR output must be contiguous [B,Q,H,L] with query dtype/device"
+            "Page-RR output must be contiguous [B,Q,H,L] with the result dtype "
+            "on the query device"
         )
     _, lse = backend.tokenspeed_mla_decode(
         query=query.view(rows, 1, heads, dim),

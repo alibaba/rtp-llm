@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, cast
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather_into
 from rtp_llm.models_py.modules.factory.attention.common import mla_cache_block_table
@@ -176,6 +178,26 @@ class _CpGatherPlan:
 def _owned_before(position: int, owner: int, page: int, size: int) -> int:
     cycles, tail = divmod(position, page * size)
     return cycles * page + min(max(tail - owner * page, 0), page)
+
+
+@triton.jit
+def _pack_cp_prefix(
+    CACHE, TABLE, REQUEST, COLUMN, OFFSET, OUT,
+    TABLE_ROW_STRIDE: tl.constexpr, TABLE_COL_STRIDE: tl.constexpr,
+    CACHE_PAGE_STRIDE: tl.constexpr, CACHE_TOKEN_STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr, SCALE: tl.constexpr, BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    request = tl.load(REQUEST + row)
+    column = tl.load(COLUMN + row)
+    offset = tl.load(OFFSET + row)
+    page = tl.load(TABLE + request * TABLE_ROW_STRIDE + column * TABLE_COL_STRIDE)
+    features = tl.arange(0, BLOCK)
+    # Keep the producer's padded page stride and dequantize directly into BF16 scratch.
+    address = page.to(tl.int64) * CACHE_PAGE_STRIDE + offset * CACHE_TOKEN_STRIDE
+    values = tl.load(CACHE + address + features, features < WIDTH, other=0.0)
+    values = values.to(tl.float32) * SCALE
+    tl.store(OUT + row * WIDTH + features, values, features < WIDTH)
 
 
 def _build_cp_gather_plan(
@@ -738,9 +760,11 @@ class MlaFlashMLAPrefillOp:
         if plan.local_count:
             table = self._direct_attn_inputs.kv_cache_kernel_block_id_device
             cache = cast(LayerKVCache, kv_cache).kv_cache_base
-            physical = table[plan.pack_request, plan.pack_column].to(torch.int64)
-            local[:plan.local_count].copy_(
-                cache[physical, plan.pack_offset, :width]
+            _pack_cp_prefix[(plan.local_count,)](
+                cache, table, plan.pack_request, plan.pack_column, plan.pack_offset,
+                local, table.stride(0), table.stride(1), cache.stride(0), cache.stride(1),
+                width, self.kv_scale if self.fp8_compute else 1.0,
+                triton.next_power_of_2(width),
             )
         all_gather_into(local, gathered, Group.TP)
         torch.index_select(gathered, 0, plan.restore_source, out=rows)

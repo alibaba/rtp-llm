@@ -1,6 +1,10 @@
-"""Eight-rank Page-RR adapter history against independent dense MLA math."""
+"""Eight-rank Page-RR histories against dense MLA math and native FP8 attention."""
 
+import itertools
+import os
+import sys
 import unittest
+from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
@@ -38,8 +42,13 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.test.utils.port_util import PortManager
 from rtp_llm.utils.model_weight import W
 
+# Give DeepGEMM JIT an absolute, writable cache inside the Bazel test sandbox.
+_TEST_TMPDIR = os.environ.get("TEST_TMPDIR")
+if _TEST_TMPDIR:
+    os.environ.setdefault("DG_JIT_CACHE_DIR", os.path.join(_TEST_TMPDIR, "deep_gemm"))
 
-def _run_history(rank, port, queries=7, mla_layers=1):
+
+def _run_history(rank, port, queries=7, mla_layers=1, fp8=False):
     from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 
     torch.cuda.set_device(rank)
@@ -59,6 +68,21 @@ def _run_history(rank, port, queries=7, mla_layers=1):
         latent, nope, rope, value = 512, 128, 64, 128
         tokens = batch * queries
         dtype, device = torch.bfloat16, torch.device("cuda", rank)
+        cache_dtype = torch.float8_e4m3fn if fp8 else dtype
+        q_scale, kv_scale = (0.5, 0.25) if fp8 else (1.0, 1.0)
+        if fp8:
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_impl import (
+                _get_tokenspeed_workspace,
+                _load_tokenspeed_mla,
+            )
+            assert _load_tokenspeed_mla()
+            from tokenspeed_mla.mla_decode import tokenspeed_mla_decode
+
+            dense_workspace = _get_tokenspeed_workspace(device, heads, latent, 1)
+            owned_positions = [p for p in range(max_seq_len) if p // page % 8 == rank]
+            dense_pages = torch.arange(
+                batch * len(owned_positions) // kernel_page, dtype=torch.int32, device=device
+            ).view(batch, -1).repeat_interleave(queries, dim=0)
         base_cache = torch.randn(batch, max_seq_len, latent + rope, device=device).to(
             dtype
         )
@@ -90,7 +114,9 @@ def _run_history(rank, port, queries=7, mla_layers=1):
             selected = slice(None) if replicated else slice(rank * 12, (rank + 1) * 12)
             config = AttentionConfigs()
             config.use_mla = True
-            config.kv_cache_dtype = KvCacheDataType.BASE
+            config.kv_cache_dtype = KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE
+            config.mla_fp8_compute = fp8
+            config.mla_fp8_q_scale, config.mla_fp8_kv_scale = q_scale, kv_scale
             config.head_num = 96 if replicated else 12
             config.kv_lora_rank, config.nope_head_dim = latent, nope
             config.rope_head_dim = rope
@@ -150,13 +176,16 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                 inputs.kv_cache_layer_to_group_host = inputs.kv_cache_layer_to_group
             inputs.kv_cache_kernel_block_id_device = linear_table
             layer_caches = []
-            for _ in layer_ids:
+            # Match the cache producer's per-kernel-page padding and layer offsets.
+            cache_storage = torch.full(
+                (mla_layers + 1, 5 * pages_per_block, kernel_page * (latent + rope) + 64),
+                float("nan"), dtype=cache_dtype, device=device,
+            )
+            for i, _ in enumerate(layer_ids):
                 layer_cache = LayerKVCache()
-                layer_cache.kv_cache_base = torch.empty(
-                    (5 * pages_per_block, kernel_page, latent + rope),
-                    dtype=dtype,
-                    device=device,
-                )
+                layer_cache.kv_cache_base = cache_storage[
+                    i + 1, :, :kernel_page * (latent + rope)
+                ].view(-1, kernel_page, latent + rope)
                 layer_caches.append(layer_cache)
             q = torch.empty_like(query[:, selected].contiguous())
             ckv = append[:, :latent].contiguous()
@@ -199,9 +228,10 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                         physical_pages[b, owned // (page * 8)].long() * page
                         + owned % page
                     )
-                    layer_cache.kv_cache_base.view(-1, latent + rope)[slots] = dense[
-                        b, owned
-                    ]
+                    prefix = dense[b, owned]
+                    if fp8:
+                        prefix = (prefix.float() / kv_scale).clamp(-448, 448).to(cache_dtype)
+                    layer_cache.kv_cache_base[slots // kernel_page, slots % kernel_page] = prefix
                     dense[b, start : start + queries, :latent] = ckv[
                         b * queries : (b + 1) * queries
                     ]
@@ -215,15 +245,51 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                     query[:, :, :nope].transpose(0, 1), kcs[layer_index]
                 ).transpose(0, 1)
                 q_dense = torch.cat((absorbed, q_rotated), -1).float()
-                reference = []
-                for b, start in enumerate(starts):
-                    for j in range(queries):
-                        keys = dense[b, : start + j + 1].float()
-                        scores = (
-                            q_dense[b * queries + j] @ keys.T * ((nope + rope) ** -0.5)
-                        )
-                        reference.append(torch.softmax(scores, -1) @ keys[:, :latent])
-                merged = torch.stack(reference).to(dtype)[:, selected]
+                if fp8:
+                    q_dense = (q_dense / q_scale).clamp(-448, 448).to(cache_dtype)
+                    dense = (dense.float() / kv_scale).clamp(-448, 448).to(cache_dtype)
+                    # FP8 rounds P within local attention. Use contiguous owner KV
+                    # with the native kernel, then merge independently in PyTorch.
+                    local_lengths = torch.tensor(
+                        [bisect_right(owned_positions, start + j)
+                         for start in starts for j in range(queries)],
+                        dtype=torch.int32, device=device,
+                    )
+                    partial, lse = tokenspeed_mla_decode(
+                        query=q_dense.view(tokens, 1, heads, latent + rope),
+                        kv_cache=dense[:, owned_positions].contiguous().view(-1, kernel_page, latent + rope),
+                        workspace_buffer=dense_workspace,
+                        kv_lora_rank=latent, qk_rope_head_dim=rope,
+                        block_tables=dense_pages,
+                        seq_lens=local_lengths,
+                        max_seq_len=len(owned_positions),
+                        softmax_scale=(nope + rope)**-0.5 * q_scale * kv_scale,
+                        output_scale=kv_scale, is_var_seq=True, causal_mask=True,
+                        enable_pdl=False, return_lse=True,
+                    )
+                    partial = torch.where(local_lengths[:, None, None] > 0,
+                                          partial.view(tokens, heads, latent), 0.0)
+                    lse = torch.where(local_lengths[:, None] > 0,
+                                      lse.view(tokens, heads), -torch.inf)
+                    partials = [torch.empty_like(partial) for _ in range(8)]
+                    lses = [torch.empty_like(lse) for _ in range(8)]
+                    torch.distributed.all_gather(partials, partial, group=get_process_group(Group.TP))
+                    torch.distributed.all_gather(lses, lse, group=get_process_group(Group.TP))
+                    all_lse = torch.stack(lses)
+                    factors = torch.exp2(all_lse - all_lse.amax(dim=0))
+                    factors /= factors.sum(dim=0)
+                    reference = (torch.stack(partials).float() * factors[..., None]).sum(dim=0)
+                else:
+                    reference = []
+                    for b, start in enumerate(starts):
+                        for j in range(queries):
+                            keys = dense[b, : start + j + 1].float()
+                            scores = (
+                                q_dense[b * queries + j] @ keys.T * ((nope + rope) ** -0.5)
+                            )
+                            reference.append(torch.softmax(scores, -1) @ keys[:, :latent])
+                    reference = torch.stack(reference)
+                merged = reference.to(dtype)[:, selected]
                 output = torch.bmm(
                     merged.transpose(0, 1), vcs[layer_index][selected]
                 ).transpose(0, 1)
@@ -299,14 +365,15 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                     physical_pages = torch.tensor(physical[b], device=device)
                     slots = physical_pages[owned // (page * 8)] * page + owned % page
                     torch.testing.assert_close(
-                        layer_caches[layer_index].kv_cache_base.view(-1, latent + rope)[
-                            slots
-                        ],
-                        dense[b, owned],
+                        layer_caches[layer_index].kv_cache_base[
+                            slots // kernel_page, slots % kernel_page
+                        ].float() * kv_scale,
+                        dense[b, owned].float() * kv_scale,
                         atol=0.015,
                         rtol=0.01,
                     )
                 assert torch.all(table_storage[:, table_width:] == -1)
+                assert torch.isnan(cache_storage[:, :, kernel_page * (latent + rope):].float()).all()
 
             for i, actual in enumerate(invoke()):
                 check(actual, expected[i], i)
@@ -327,8 +394,15 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                 for step in range(3):
                     expected = [prepare(step, i) for i in range(mla_layers)]
                     impl.prepare_cuda_graph(inputs)
+                    if fp8:
+                        eager = [output.clone() for output in invoke()]
+                        # Undo eager writes so replay must append the current KV itself.
+                        expected = [prepare(step, i) for i in range(mla_layers)]
+                        impl.prepare_cuda_graph(inputs)
                     graph.replay()
                     for i, actual in enumerate(captured):
+                        if fp8:
+                            torch.testing.assert_close(actual, eager[i], atol=0, rtol=0)
                         check(actual, expected[i], i)
             finally:
                 graph.reset()
@@ -379,6 +453,8 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                 )
                 captured_table = runner_model.captured_metadata.query_block_tables
                 table_pointer = captured_table.data_ptr()
+                # Native capture reserves the maximum sequence width, beyond this batch's live pages.
+                captured_width = runner_model.captured_metadata.block_tables.shape[1]
                 compute_stream = torch.cuda.current_stream()
                 prepare_stream = torch.cuda.Stream()
 
@@ -481,25 +557,28 @@ def _run_history(rank, port, queries=7, mla_layers=1):
                                     torch.testing.assert_close(
                                         layer_caches[i].kv_cache_base[
                                             begin : begin + pages_per_block
-                                        ],
-                                        before[i][begin : begin + pages_per_block],
+                                        ].float(),
+                                        before[i][begin : begin + pages_per_block].float(),
                                         atol=0,
                                         rtol=0,
                                     )
                         assert captured_table.data_ptr() == table_pointer
-                        assert captured_table.shape == (batch * queries, table_width)
+                        assert captured_table.shape == (batch * queries, captured_width)
                         torch.testing.assert_close(
-                            captured_table[:real_tokens],
+                            captured_table[:real_tokens, :table_width],
                             full_table[:actual_batch].repeat_interleave(queries, dim=0),
                             atol=0,
                             rtol=0,
                         )
+                        assert torch.all(captured_table[:real_tokens, table_width:] == 0)
             finally:
                 del runner
             torch.cuda.synchronize()
             torch.distributed.barrier()
     finally:
-        destroy_distributed_environment()
+        # Let mp.spawn report failures and terminate peers still inside collectives.
+        if sys.exc_info()[0] is None:
+            destroy_distributed_environment()
 
 
 def _run_merge_history(rank, port):
@@ -590,13 +669,17 @@ def _run_merge_history(rank, port):
             torch.distributed.barrier()
         torch.cuda.synchronize()
     finally:
-        destroy_distributed_environment()
+        if sys.exc_info()[0] is None:
+            destroy_distributed_environment()
 
 
 def _run_prefill_gather(rank, port):
     from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
         flashmla_dense_prefill,
+    )
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fp8_kernels import (
+        quantize_fp8,
     )
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.flashmla_forward_test_utils import (
         DeterministicPackedProjection,
@@ -671,14 +754,22 @@ def _run_prefill_gather(rank, port):
         native_unit = {}
         table_width = (max(prefixes) + max(lengths) + kernel_page - 1) // kernel_page
         saw_empty_owner = False
-        for sharded in (False, True):
+        kv_scale = 16.0
+        # Compare every lifecycle scenario against the same non-sharded attention path.
+        for fp8, sharded in itertools.product((False, True), repeat=2):
+            attn.kv_cache_dtype = (
+                KvCacheDataType.FP8 if fp8 else KvCacheDataType.BASE
+            )
+            attn.mla_fp8_compute = fp8
+            attn.mla_fp8_kv_scale = kv_scale
+            cache_dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
             parallel.prefill_cp_config.kv_cache_sharded = sharded
             cp_size = 8 if sharded else 1
             # Preserve the C++ producer's kernel-page padding and layer offsets.
             padding = 64
             raw_stride = page * width + pages_per_block * padding
             raw = torch.full(
-                (3, 16, raw_stride), float("nan"), device="cuda", dtype=torch.bfloat16
+                (3, 16, raw_stride), float("nan"), device="cuda", dtype=cache_dtype
             )
             kv_cache = KVCache()
             kv_cache.kv_cache_base_by_layer = [raw[i] for i in range(3)]
@@ -738,14 +829,25 @@ def _run_prefill_gather(rank, port):
             def populate(prefix_lengths, scale, remap):
                 raw.fill_(float("nan"))
                 table.zero_()
-                history_by_layer = {
+                logical = {
                     i: [
                         old[:n] * (scale * 0.5 ** (i - 1))
                         for old, n in zip(history, prefix_lengths)
                     ]
                     for i in (1, 2)
                 }
-                fresh_by_layer = {i: fresh * (scale * 0.5 ** (i - 1)) for i in (1, 2)}
+                cache_by_layer = {
+                    i: [quantize_fp8(row, kv_scale) if fp8 else row for row in logical[i]]
+                    for i in (1, 2)
+                }
+                history_by_layer = {
+                    i: [(row.float() * kv_scale).bfloat16() if fp8 else row
+                        for row in cache_by_layer[i]]
+                    for i in (1, 2)
+                }
+                fresh_by_layer = {
+                    i: fresh * (scale * 0.5 ** (i - 1)) for i in (1, 2)
+                }
                 physical_page = 15 - remap
                 for request, n in enumerate(prefix_lengths):
                     for global_page in range((n + page - 1) // page):
@@ -769,7 +871,7 @@ def _run_prefill_gather(rank, port):
                                 physical_page * pages_per_block + rows // kernel_page,
                                 rows % kernel_page,
                                 :width,
-                            ] = history_by_layer[i][request][
+                            ] = cache_by_layer[i][request][
                                 global_page * page : global_page * page + count
                             ]
                         physical_page -= 1
@@ -909,15 +1011,14 @@ def _run_prefill_gather(rank, port):
                                     layer_caches[layer_id],
                                     layer_id,
                                 ).clone()
-                                if scenario == 0:
-                                    key = (capacity, layer_id)
-                                    if sharded:
-                                        torch.testing.assert_close(
-                                            output, native_unit[key], atol=0, rtol=0
-                                        )
-                                    else:
-                                        native_unit[key] = output
+                                key = (fp8, capacity, scenario, layer_id)
+                                if sharded:
+                                    torch.testing.assert_close(
+                                        output, native_unit[key], atol=0, rtol=0
+                                    )
                                 else:
+                                    native_unit[key] = output
+                                if not fp8 and scenario != 0:
                                     torch.testing.assert_close(
                                         output.float(),
                                         reference(active_history, suffix),
@@ -1079,7 +1180,8 @@ def _run_prefill_gather(rank, port):
         torch.distributed.all_reduce(empties)
         assert int(empties) > 0
     finally:
-        destroy_distributed_environment()
+        if sys.exc_info()[0] is None:
+            destroy_distributed_environment()
 
 
 class PageRRMlaDecodeTest(unittest.TestCase):
@@ -1102,6 +1204,12 @@ class PageRRMlaDecodeTest(unittest.TestCase):
 
     def test_two_mla_layers_share_prepared_query_tables(self):
         self._run(_run_history, 7, 2)
+
+    def test_fp8_q1_writer_projection_attention_graph_history(self):
+        self._run(_run_history, 1, 1, True)
+
+    def test_fp8_verify_two_layers_writer_projection_attention_graph_history(self):
+        self._run(_run_history, 7, 2, True)
 
     def test_partial_merge_graph_history(self):
         self._run(_run_merge_history)

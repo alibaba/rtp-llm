@@ -1,5 +1,6 @@
 """K3 ordinary FP8 MLA: cache, ragged Prefill, Decode and Verify contracts."""
 
+import os
 import unittest
 
 import torch
@@ -9,12 +10,45 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fp8_kernels i
     quantize_fp8,
 )
 
+_TEST_TMPDIR = os.environ.get("TEST_TMPDIR")
+if _TEST_TMPDIR:
+    os.environ.setdefault("DG_JIT_CACHE_DIR", os.path.join(_TEST_TMPDIR, "deep_gemm"))
+
 
 class MlaFp8Test(unittest.TestCase):
     def setUp(self):
         self.assertTrue(torch.cuda.is_available(), "requires CUDA; no passing by skip")
         self.assertEqual(torch.cuda.get_device_capability()[0], 10)
         torch.manual_seed(101)
+
+    def test_cp_prefix_pack_padded_cache(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_prefill import (
+            _pack_cp_prefix,
+        )
+
+        logical = torch.randn(6, 128, 576, device="cuda").bfloat16()
+        request = torch.tensor([0, 1, 1, 0], dtype=torch.int64, device="cuda")
+        column = torch.tensor([1, 0, 2, 3], dtype=torch.int64, device="cuda")
+        offset = torch.tensor([127, 0, 67, 63], dtype=torch.int64, device="cuda")
+        for dtype, scale in ((torch.bfloat16, 1.0), (torch.float8_e4m3fn, 16.0)):
+            storage = torch.full((7, 128 * 576 + 64), float("nan"), dtype=dtype, device="cuda")
+            cache = storage[1:, :128 * 576].view(6, 128, 576)
+            cache.copy_((logical.float() / scale).clamp(-448, 448).to(dtype))
+            table_storage = torch.full((2, 7), -1, dtype=torch.int32, device="cuda")
+            table = table_storage[:, :4]
+            output = torch.full((7, 576), -123.0, dtype=torch.bfloat16, device="cuda")
+            for pages in ([[3, 1, 5, 2], [4, 2, 1, 5]], [[2, 5, 1, 3], [5, 3, 4, 2]]):
+                table.copy_(torch.tensor(pages, dtype=torch.int32, device="cuda"))
+                _pack_cp_prefix[(4,)](
+                    cache, table, request, column, offset, output,
+                    table.stride(0), table.stride(1), cache.stride(0), cache.stride(1),
+                    576, scale, 1024,
+                )
+                expected = (cache.float()[table[request, column].long(), offset] * scale).bfloat16()
+                torch.testing.assert_close(output[:4], expected, atol=0, rtol=0)
+                self.assertTrue(torch.all(output[4:] == -123))
+                self.assertTrue(torch.all(table_storage[:, 4:] == -1))
+                self.assertTrue(torch.isnan(storage[:, 128 * 576:].float()).all())
 
     def test_quantizer_saturation_noncontiguous_and_graph(self):
         x = (
