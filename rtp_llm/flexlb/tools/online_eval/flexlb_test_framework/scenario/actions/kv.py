@@ -118,7 +118,9 @@ def snapshot(ctx, params, deadline):
 
 
 def _landing_validate(params, plan):
-    p = _fields(params, {"requests", "phase"}, {"requests"})
+    p = _fields(params, {"requests", "phase", "identity_snapshot"}, {"requests"})
+    if "identity_snapshot" in p:
+        plan.reference(p["identity_snapshot"], "kv_snapshot")
     plan.reference(p["requests"], "requests")
     p.setdefault("phase", "terminal")
     if p["phase"] not in ("scheduled", "terminal"):
@@ -136,7 +138,13 @@ def landing(ctx, params, deadline):
         or record.get("consumer_completion_verified") is not True
     ):
         raise ValueError("terminal landing lacks successful consumer completion")
-    raw = _http(ctx.ops, "snapshot", deadline)
+    deadline.check()
+    if "identity_snapshot" in params:
+        # Only resolve a stable endpoint identity here; never reuse cached KV counters.
+        fleet = ctx.resource(params["identity_snapshot"], "kv_snapshot")
+        raw = {"engines": list(fleet["engines"].values())}
+    else:
+        raw = _http(ctx.ops, "snapshot", deadline)
     matches = [
         row
         for row in raw.get("engines", [])

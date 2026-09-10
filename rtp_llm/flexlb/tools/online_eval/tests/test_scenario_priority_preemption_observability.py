@@ -27,10 +27,10 @@ class ObservabilityBackend(programs.Backend):
         missing_lifecycle=False,
         expired_first=False,
     ):
-        terminals = {i: 8511 for i in range(3, 10)}
+        terminals = {i: 8511 for i in range(2, 10) if i != 6}
         if expired_first:
-            terminals[2] = 8511
-            terminals.pop(6)
+            terminals[6] = 8511
+            terminals.pop(2)
         super().__init__(terminals=terminals)
         self.missing_bucket, self.foreign_pv = missing_bucket, foreign_pv
         self.reverse_pair, self.missing_log = reverse_pair, missing_log
@@ -57,7 +57,7 @@ class ObservabilityBackend(programs.Backend):
         run_dir.mkdir()
         (run_dir / "flexlb_master.log").write_text("startup\n")
         (private / "flexlb.log").write_text(
-            "ordinary\n" if self.missing_log else "[priority-scheduler] fixture\n"
+            "ordinary\n" if self.missing_log else "[request-scheduler] fixture\n"
         )
         (private / "pv.log").write_text(
             "2026-09-08 [publisher] INFO pvLogger - "
@@ -72,10 +72,14 @@ class ObservabilityBackend(programs.Backend):
 
     def http(self, ops, endpoint, deadline, body=None):
         raw = super().http(ops, endpoint, deadline, body)
-        if endpoint == "snapshot" and self.reverse_pair:
-            raw["engines"][0]["request_lifecycle"]["2"]["running_ms"] = 100000
+        if endpoint == "snapshot":
+            lifecycle = raw["engines"][0]["request_lifecycle"]
+            lifecycle["10"]["running_ms"] = 8000
+            lifecycle["6"]["running_ms"] = 12000
+            if self.reverse_pair:
+                lifecycle["10"]["running_ms"] = 100000
         if endpoint == "snapshot" and self.missing_lifecycle:
-            raw["engines"][0]["request_lifecycle"].pop("2", None)
+            raw["engines"][0]["request_lifecycle"].pop("6", None)
         return raw
 
     def metrics(self, ctx, server, endpoint, deadline, **kwargs):
@@ -172,7 +176,7 @@ class ObservabilityPrograms(unittest.TestCase):
         self.assertTrue(actual_spec.master_debug_log)
         self.assertTrue(env["master_debug_log"])
         self.assertEqual("flexlb_auto_tpm", env["metric_whitelist"])
-        self.assertEqual(["ph", "30a", "90"], obs[0]["completed"])
+        self.assertEqual(["ph", "70a", "90"], obs[0]["completed"])
         self.assertEqual(7, len(obs[0]["expired"]))
         self.assertIsNone(obs[0]["victim_total"])
         self.assertEqual(0, obs[0]["latency_success"])
@@ -185,12 +189,12 @@ class ObservabilityPrograms(unittest.TestCase):
     def test_missing_lifecycle_keeps_source_evidence_and_error(self):
         result, _, _, backend, _ = self.run_program(missing_lifecycle=True)
         self.assertEqual(result["status"], "ERROR")
-        self.assertIn("request_id=2, matches=0", result["error"])
+        self.assertIn("request_id=6, matches=0", result["error"])
         self.assertIn("preemption-o1-input-", result["error"])
         self.assertEqual(len(backend.input_evidence), 1)
         evidence = backend.input_evidence[0]
         self.assertEqual(len(evidence["wave"]), 9)
-        self.assertNotIn("2", evidence["snapshot"]["engines"][0]["request_lifecycle"])
+        self.assertNotIn("6", evidence["snapshot"]["engines"][0]["request_lifecycle"])
         self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
 
     def test_witnessed_expiry_of_expected_completed_request_is_contract_failure(self):
@@ -198,7 +202,7 @@ class ObservabilityPrograms(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL", result)
         self.assertIsNone(result["error"])
         self.assertIsNone(obs[0]["dispatch"][0])
-        self.assertEqual(obs[0]["completed"], ["ph", "70a", "90"])
+        self.assertEqual(obs[0]["completed"], ["ph", "30a", "90"])
         self.assertEqual(checks["P6"], "FAIL")
         self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
 

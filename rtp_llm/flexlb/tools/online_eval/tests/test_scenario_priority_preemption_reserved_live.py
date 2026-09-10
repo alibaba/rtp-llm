@@ -78,8 +78,8 @@ class ReservedBackend(LiveBackend):
         return env, ops
 
     def debug(self, **kwargs):
-        from test_debug_client import snapshot
         from flexlb_test_framework.debug_client import Capture
+        from test_debug_client import snapshot
 
         raw = snapshot()
         page = raw["components"].pop("scheduler")
@@ -98,7 +98,7 @@ class ReservedBackend(LiveBackend):
 
 
 class ReservedPrograms(unittest.TestCase):
-    def run_program(self, variant="decode_reserved_live_single", **kwargs):
+    def run_program(self, variant="decode_reserved_live_window", **kwargs):
         plan, registry = programs.PreemptionPrograms().plan(variant)
         backend = ReservedBackend(**kwargs)
         with tempfile.TemporaryDirectory() as tmp, patch.object(
@@ -129,7 +129,7 @@ class ReservedPrograms(unittest.TestCase):
         return result, observations, checks, backend, plan
 
     def test_both_profiles_use_five_block_pool_and_master_local_layout(self):
-        for variant in ("decode_reserved_live_single", "decode_reserved_live_window"):
+        for variant in ("decode_reserved_live_window",):
             with self.subTest(variant=variant):
                 result, obs, checks, backend, plan = self.run_program(variant)
                 self.assertEqual("PASS", result["status"], result)
@@ -142,7 +142,7 @@ class ReservedPrograms(unittest.TestCase):
                 expected["scheduler"]["decision"] = dict(
                     type="FIXED_WINDOW",
                     maxRequests=32,
-                    maxCollectionWaitMs=3000,
+                    maxCollectionWaitMs=400,
                     maxPredictedExecutionMs=550,
                 )
                 self.assertEqual(expected, env["resolved_config"])
@@ -164,7 +164,7 @@ class ReservedPrograms(unittest.TestCase):
                 )
                 self.assertEqual(5, actual.decode_cache_blocks)
                 self.assertEqual(
-                    [(90, 512, 2), (30, 1536, 2), (70, 3500, 2)],
+                    [(90, 512, 2), (30, 512, 2), (70, 3500, 2)],
                     [
                         (r["priority"], r["input_len"], r["output_len"])
                         for r in backend.shapes[:3]

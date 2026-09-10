@@ -24,7 +24,7 @@ class EffectiveAxesTests(unittest.TestCase):
                 ordering="priority",
                 decision="single",
                 dispatcher="non_batch",
-                max_inflight_requests_per_worker=1,
+                max_inflight_per_prefill_worker=1,
             )
         )
         source["requires"] = ["priority", "single", "generate_stream"]
@@ -61,7 +61,7 @@ class EffectiveAxesTests(unittest.TestCase):
                 "DECODE_RESERVED",
                 "DECODE_ENGINE_OWNED",
             ],
-            engine_cancellation=dict(ack_timeout_ms=500, completion_timeout_ms=2000),
+            timeout_ms=2000,
         )
         source = self.source(dict(ordering="priority", preemption=preemption))
         source["requires"] = ["preemption", "engine_cancellation"]
@@ -80,7 +80,6 @@ class EffectiveAxesTests(unittest.TestCase):
             {"allowed_victim_stages": []},
             {"allowed_victim_stages": ["invented"]},
             {"allowed_victim_stages": ["PREFILL_QUEUED"] * 2},
-            {"allowed_victim_stages": ["DECODE_ENGINE_OWNED"]},
             {
                 "allowed_victim_stages": ["PREFILL_QUEUED"],
                 "engine_cancellation": {

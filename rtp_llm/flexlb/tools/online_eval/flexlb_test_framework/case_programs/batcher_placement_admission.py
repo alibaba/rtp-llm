@@ -15,22 +15,10 @@ def batcher_queue_capacity_park(case):
         params=case.value("batcher_queue_capacity_park.slow"),
     )
     case.step(
-        "sampling",
-        "admission_park_start",
-        timeout_s=case.value("batcher_queue_capacity_park.sampling_timeout_s"),
-        params=case.value("batcher_queue_capacity_park.sampling"),
-    )
-    case.step(
         "wave",
         "admission_tracked_fire",
         timeout_s=case.value("batcher_queue_capacity_park.wave_timeout_s"),
         params=case.value("batcher_queue_capacity_park.wave"),
-    )
-    case.step(
-        "sampled",
-        "admission_park_stop",
-        timeout_s=case.value("batcher_queue_capacity_park.sampled_timeout_s"),
-        params={"sampler": output("sampling", "sampler")},
     )
     case.step(
         "all_admitted",
@@ -38,11 +26,6 @@ def batcher_queue_capacity_park(case):
         params=case.params(
             "batcher_queue_capacity_park.all_admitted", {"rows": output("wave", "rows")}
         ),
-    )
-    case.step(
-        "park_proven",
-        "admission_park_check",
-        params={"samples": output("sampled", "samples")},
     )
     case.step(
         "done",
@@ -122,22 +105,10 @@ def batcher_queue_deadline(case):
         params=case.value("batcher_queue_deadline.slow"),
     )
     case.step(
-        "sampling",
-        "admission_park_start",
-        timeout_s=case.value("batcher_queue_deadline.sampling_timeout_s"),
-        params=case.value("batcher_queue_deadline.sampling"),
-    )
-    case.step(
         "wave",
         "admission_tracked_fire",
         timeout_s=case.value("batcher_queue_deadline.wave_timeout_s"),
         params=case.value("batcher_queue_deadline.wave"),
-    )
-    case.step(
-        "sampled",
-        "admission_park_stop",
-        timeout_s=case.value("batcher_queue_deadline.sampled_timeout_s"),
-        params={"sampler": output("sampling", "sampler")},
     )
     case.step(
         "six_admitted",
@@ -173,14 +144,6 @@ def batcher_queue_deadline(case):
         params=case.params(
             "batcher_queue_deadline.deadline_max", {"rows": output("wave", "rows")}
         ),
-    )
-    case.step(
-        "park_proven",
-        "admission_park_check",
-        params={
-            "samples": output("sampled", "samples"),
-            "overflow_rows": output("wave", "rows"),
-        },
     )
     case.step(
         "done",
@@ -277,22 +240,10 @@ def placement_pool_wait(case):
         params=case.value("placement_pool_wait.lease_before_b"),
     )
     case.step(
-        "sampling",
-        "admission_park_start",
-        timeout_s=case.value("placement_pool_wait.sampling_timeout_s"),
-        params=case.value("placement_pool_wait.sampling"),
-    )
-    case.step(
         "b",
         "admission_tracked_fire",
         timeout_s=case.value("placement_pool_wait.b_timeout_s"),
         params=case.value("placement_pool_wait.b"),
-    )
-    case.step(
-        "sampled",
-        "admission_park_stop",
-        timeout_s=case.value("placement_pool_wait.sampled_timeout_s"),
-        params={"sampler": output("sampling", "sampler")},
     )
     case.step(
         "b_admitted",
@@ -307,11 +258,6 @@ def placement_pool_wait(case):
         params=case.params(
             "placement_pool_wait.b_rpc_parked", {"rows": output("b", "rows")}
         ),
-    )
-    case.step(
-        "park_proven",
-        "admission_park_check",
-        params={"samples": output("sampled", "samples")},
     )
     case.step(
         "done",

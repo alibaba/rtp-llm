@@ -177,7 +177,7 @@ class AdmissionTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "scenarios/admission"
         plans = compile_scenarios(load_scenarios(root), handlers=h)
         plans = [p for p in plans if p["scenario_id"] == "admission_queue"]
-        self.assertEqual(6, len(plans))
+        self.assertEqual(4, len(plans))
         for plan in plans:
             self.assertIn(plan["profile"], ("batch-window", "single-batch"))
             variant = plan["variant_id"]
@@ -376,7 +376,7 @@ class AdmissionProgramsTest(unittest.TestCase):
             )
 
     def test_all_six_compiled_programs_execute_every_declared_check(self):
-        for variant in ("queue_depth", "slo_deadline", "master_capacity"):
+        for variant in ("queue_depth", "slo_deadline"):
             for profile in ("batch-window", "single-batch"):
                 with self.subTest(variant=variant, profile=profile):
                     result = self.run_program(variant, profile)
@@ -420,13 +420,7 @@ class AdmissionProgramsTest(unittest.TestCase):
         self.assertTrue(all(s["status"] == "PASS" for s in result["stages"]))
         self.assertNotIn("preemption", result["resolved_config"]["scheduler"])
         cfg = result["resolved_config"]["scheduler"]
-        self.assertEqual(1, cfg["lifecycle"]["maxDeliveredNotAcceptedRequestsGlobal"])
-
-    def test_wrong_numeric_capacity_code_fails_its_actual_program_check(self):
-        result = self.run_program("master_capacity", bad_code=True)
-        self.assertEqual("FAIL", result["status"], result)
-        stage = next(s for s in result["stages"] if s["id"] == "typed_code")
-        self.assertEqual("FAIL", stage["checks"][0]["status"])
+        self.assertNotIn("lifecycle", cfg)
 
     def test_too_early_slo_failure_is_not_a_valid_queue_deadline(self):
         result = self.run_program("slo_deadline", bad_latency=True)
@@ -439,7 +433,7 @@ class AdmissionProgramsTest(unittest.TestCase):
         )
 
     def test_green_business_checks_cannot_hide_consumer_cleanup_error(self):
-        result = self.run_program("master_capacity", cleanup_error=True)
+        result = self.run_program("queue_depth", cleanup_error=True)
         self.assertEqual("ERROR", result["status"], result)
         self.assertTrue(any(c["status"] == "ERROR" for c in result["cleanup"]))
 

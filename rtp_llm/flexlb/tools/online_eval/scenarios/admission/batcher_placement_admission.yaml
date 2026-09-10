@@ -14,7 +14,6 @@ environment:
   config_overrides:
     ordering: priority
     queue_timeout_ms: 60000
-    max_waiting_requests_per_prefill_worker: 2
 execution:
   timeout_s: 600
   stage_timeout_s: 60
@@ -46,7 +45,7 @@ variants:
   environment:
     config_overrides:
       ordering: fifo
-      max_inflight_requests_per_worker: 1
+      max_inflight_per_prefill_worker: 1
   program: placement_pool_wait
   metadata:
     requires:
@@ -64,12 +63,6 @@ parameters:
       - prefill-0
       perf:
         prefill_fixed_ms: 3000
-    sampling_timeout_s: 15
-    sampling:
-      targets:
-      - prefill-0
-      - decode-0
-      - decode-1
     wave_timeout_s: 90
     wave:
       count: 7
@@ -79,7 +72,6 @@ parameters:
       request_timeout_s: 45
       schedule_timeout_s: 30
       spacing_s: 0.4
-    sampled_timeout_s: 15
     all_admitted:
       metric: admitted_count
       expected: 7
@@ -142,12 +134,6 @@ parameters:
       - prefill-0
       perf:
         prefill_fixed_ms: 3000
-    sampling_timeout_s: 15
-    sampling:
-      targets:
-      - prefill-0
-      - decode-0
-      - decode-1
     wave_timeout_s: 90
     wave:
       count: 8
@@ -157,7 +143,6 @@ parameters:
       request_timeout_s: 30
       schedule_timeout_s: 30
       spacing_s: 0.15
-    sampled_timeout_s: 15
     six_admitted:
       metric: admitted_count
       expected: 6
@@ -258,12 +243,6 @@ parameters:
       - prefill-0
       - decode-0
       - decode-1
-    sampling_timeout_s: 15
-    sampling:
-      targets:
-      - prefill-0
-      - decode-0
-      - decode-1
     b_timeout_s: 90
     b:
       count: 1
@@ -273,7 +252,6 @@ parameters:
       request_timeout_s: 30
       schedule_timeout_s: 60
       spacing_s: 0
-    sampled_timeout_s: 15
     b_admitted:
       metric: admitted_count
       expected: 1

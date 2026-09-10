@@ -331,6 +331,35 @@ variants: [{id: default}]
             self.assertEqual("ERROR", result[0]["status"])
             self.assertTrue(result[0]["error"])
 
+    def test_diagnostic_skip_is_valid_but_does_not_replace_executed_checks(self):
+        group = parse_catalog(self.data, source="yaml", profile="batch-window")[:1]
+        path = self.root / "diagnostic.json"
+        diagnostic = {
+            "id": "retired",
+            "status": "PASS",
+            "checks": [
+                {"id": "diagnostic", "status": "SKIP", "detail": "retired contract"}
+            ],
+        }
+        behavioral = {
+            "id": "completion",
+            "status": "PASS",
+            "checks": [{"id": "complete", "status": "PASS"}],
+        }
+        for stages, expected in (
+            ([diagnostic, behavioral], "PASS"),
+            ([diagnostic], "ERROR"),
+        ):
+            payload = {
+                **group[0].metadata,
+                "status": "PASS",
+                "stages": stages,
+                "cleanup": [],
+            }
+            path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
+            result = runner._read_results(path, group)
+            self.assertEqual(expected, result[0]["status"])
+
     def test_nested_execution_errors_cannot_be_hidden_by_green_rows(self):
         group = parse_catalog(self.data, source="yaml", profile="batch-window")[:1]
         path = self.root / "nested.json"

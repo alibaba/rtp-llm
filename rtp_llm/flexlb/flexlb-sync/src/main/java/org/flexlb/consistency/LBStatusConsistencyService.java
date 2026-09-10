@@ -1,7 +1,6 @@
 package org.flexlb.consistency;
 
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.flexlb.domain.consistency.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
@@ -49,17 +48,8 @@ public class LBStatusConsistencyService implements MasterElectService {
             serverPort = System.getProperty("server.port", "7001");
         }
         log.info("hostIp:{}, serverPort:{}.", localHostIp, serverPort);
+        lbConsistencyConfig = zookeeperMasterElectService.getLbConsistencyConfig();
         roleId = System.getenv("HIPPO_ROLE");
-        if (StringUtils.isBlank(roleId)) {
-            throw new RuntimeException("HIPPO_ROLE env is blank");
-        }
-        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
-        log.info("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
-        if (configStr == null) {
-            lbConsistencyConfig = new LBConsistencyConfig();
-        } else {
-            lbConsistencyConfig = JsonUtils.toObject(configStr, LBConsistencyConfig.class);
-        }
         if (!isNeedConsistency()) {
             log.warn("LBStatusConsistencyService is not need.");
             return;
@@ -138,7 +128,7 @@ public class LBStatusConsistencyService implements MasterElectService {
      */
     public MasterChangeNotifyResp handleMasterChange(MasterChangeNotifyReq req) {
         log.warn("recv MasterChangeNotifyReq:{}.", req);
-        if (!roleId.equals(req.getRoleId())) {
+        if (!isNeedConsistency() || !roleId.equals(req.getRoleId())) {
             MasterChangeNotifyResp resp = new MasterChangeNotifyResp();
             resp.setSuccess(false);
             resp.setMsg("roleId not match this:" + roleId);

@@ -67,20 +67,10 @@ VERDICT_LABELS = {
 # ---------------------------------------------------------------------------
 
 GRADE_BANDS: Dict[str, dict] = {
-    # P1 request-uniformity max-share (fraction of requests on the busiest
-    # engine).  Calibration: 2 engines, 20 serial samples, uniform random
-    # tie-window sampling — P(share > 0.85) = 2 * P(X >= 17 | B(20, .5))
-    # ~= 0.26% (< 1% mandated false-fail floor); 0.75 corresponds to
-    # P(X >= 15) ~= 4.1%, 0.65 to P(X >= 13) ~= 26% (strict tier is a
-    # quality bar, not a statistical guarantee).
-    # end-to-end observed (balance_uniform_serial, 4 profiles x normal):
-    # plain 0.50-0.70 (13/20..15/20), speed_hetero 0.50 — tiers separate
-    # exactly as the binomial model predicts (strict sometimes, normal
-    # sometimes, never near loose).
-    "P1": {
-        "kind": "upper",
-        "bands": {"strict": 0.65, "normal": 0.75, "loose": 0.85},
-    },
+    # P1 is retained only for cases with explicit YAML bands (e.g. Decode rotation).
+    # Schema 3 has no global random-Prefill spread contract.
+    "P1": {"kind": "upper", "bands": {}},
+    "M2": {"kind": "upper", "bands": {}},
     # P2 no-starvation: hard invariant (an engine receiving zero of the
     # offered homogeneous traffic is starved).
     "P2": {"kind": "invariant"},
@@ -92,7 +82,7 @@ GRADE_BANDS: Dict[str, dict] = {
     # Calibration rationale: the wave choreography deterministically pairs
     # each long request with ~1.5 shorts on its engine and ~4.5 shorts on the
     # other (ledger diversion), so the aggregate share concentrates near 0.5
-    # with only the uniform-split tail adding binomial noise — the design
+    # with the short-request tail accounting for the remaining variation — the design
     # bands (0.65/0.70/0.80) keep ~0.15 of headroom above the deterministic
     # baseline, tolerating a whole wave's diversion failing before the normal
     # tier trips; request-count balance is deliberately NOT asserted (it
@@ -127,49 +117,14 @@ GRADE_BANDS: Dict[str, dict] = {
         "kind": "upper",
         "bands": {"strict": 2.0, "normal": 3.0, "loose": 5.0},
     },
-    # P9 affinity fidelity (fraction of prefix-reuse requests that land on
-    # the engine holding the prefix cache).
-    # end-to-end observed (kv_prefix_stickiness, 4 profiles): 10/10
-    # hits every run — cache-affinity leader selection is deterministic in
-    # the serial single-family form; the lower tiers tolerate tie-window
-    # overrides observed historically in concurrent forms.
+    # Prefix-reuse requests landing on their cache holder. Cases construct
+    # a cache advantage within the explicit cache-affinity TTFT budget.
     "P9": {
         "kind": "lower",
         "bands": {"strict": 0.95, "normal": 0.90, "loose": 0.80},
     },
-    # M2 concentration cap (upper bound on the hot-family holder's TOTAL
-    # request share).  First end-to-end calibration: kv_hot_prefix_tension — 70%
-    # family traffic pinned to the holder + 30% uniform free flow.  The
-    # holder's share = (29 + k)/41 with k ~ B(12, .5) over the free requests
-    # scattered onto it (29 = seed + 28 continuations under perfect P9
-    # stickiness), i.e. expected ~0.854 ± 0.042 (1σ).
-    # First measured (four profiles): 0.805 / 0.902 / 0.902 / 0.829
-    # (batch-window / single-nonbatch / single-batch / window-nonbatch; the
-    # free flow scattered 4/12, 8/12, 8/12, 5/12 onto the holder — all inside
-    # 2σ of the binomial model; an extra batch-window run measured 0.878,
-    # free 7/12, same distribution).
-    # Band derivation (false-fail probabilities from B(12, .5)):
-    #   strict 0.88 -> P(k >= 8)  ≈ 19.4% (quality bar, same philosophy as
-    #                                P1's strict: not a statistical guarantee)
-    #   normal 0.93 -> P(k >= 10) ≈ 1.93% (standard regression stays green)
-    #   loose   0.96 -> P(k >= 11) ≈ 0.317% (< the 1% false-fail floor)
-    # The bands police the CAP only — a share far above ~0.9 means the free
-    # flow collapsed onto the holder (tie-window spread gone wrong), while
-    # P9 separately polices the floor (stickiness itself).
-    "M2": {
-        "kind": "upper",
-        "bands": {"strict": 0.88, "normal": 0.93, "loose": 0.96},
-    },
-    # M3 hit-tier concentration (lower bound on the same-engine share of the
-    # full-hit / half-hit tiers, kv_match_mixed).  Design values:
-    # the estimate discount (0.7 * hitTokens ms — ~5.0s full-hit, ~2.9s
-    # half-hit) dwarfs the tie window (~0.3s), so a correct affinity router
-    # concentrates both tiers deterministically; a value near 0.5 is the
-    # zero-hit baseline (no affinity signal at all).
-    # First measured (four profiles): 1.00 / 1.00 on every profile
-    # for BOTH tiers — concentration is fully deterministic (same caliber as
-    # P9's 10/10 above); the lower tiers tolerate tie-window overrides
-    # observed historically in concurrent forms.
+    # Full/partial-hit requests landing on a valid cache holder under a
+    # constructed cost advantage. Zero-hit ties have no share requirement.
     "M3": {
         "kind": "lower",
         "bands": {"strict": 0.8, "normal": 0.7, "loose": 0.6},
@@ -263,7 +218,7 @@ GRADE_BANDS: Dict[str, dict] = {
     # schedule-completion order arbitrates same-millisecond collisions).
     # Deterministic choreography (single prefill + serial injection +
     # slow-prefill backlog window with
-    # dispatcher.maxInflightRequestsPerPrefillWorker=1 — consecutive
+    # a token budget for one request — consecutive
     # dispatches are separated by one full prefill execution) makes the
     # expected value exactly 0, same caliber as P5: nonzero tiers only
     # tolerate observation races.  initial values, pending first e2e
@@ -283,15 +238,9 @@ GRADE_BANDS: Dict[str, dict] = {
         "kind": "upper",
         "bands": {"strict": 1.25, "normal": 1.50, "loose": 2.00},
     },
-    # AT5 preemption-closure latency: incoming's first engine running
-    # time minus the victim terminal time (client/engine clock
-    # crossover).  Bound semantics =
-    # engineCancellation.completionTimeoutMs(1000) + cancel settlement
-    # chain + SINGLE decision-cycle margin; the mock engine cancels
-    # near-instantly so the latency body is orchestration polling.  The
-    # analysis report's "50ms bandwidth" is CI-noise unsafe — tiers are
-    # set on total closure latency instead.  initial values, pending
-    # first e2e calibration.
+    # AT5 measures incoming execution start minus the victim's terminal.
+    # This is post-terminal scheduling latency. Maximum Decode TPOT belongs
+    # to the preceding cancellation phase and comes from its explicit profile.
     "AT5": {
         "kind": "upper",
         "bands": {"strict": 2000, "normal": 3500, "loose": 6000},
@@ -348,7 +297,7 @@ GRADE_BANDS: Dict[str, dict] = {
 class PropertyResult:
     """One measured property (or one batch/variant of it)."""
 
-    prop: str  # "P1".."P9", "M2"
+    prop: str  # Registered property identifier from GRADE_BANDS
     context: str  # in-case batch label ("" when the case measures it once)
     value: Optional[float]  # None for invariant checks without a scalar
     achieved: str  # strict|normal|loose|fail  (invariant: strict|fail)
@@ -372,6 +321,10 @@ def _resolve_bands(
     if spec["kind"] == "invariant":
         raise ValueError(f"property {prop} is an invariant and has no bands")
     bands = dict(override or spec["bands"])
+    if set(bands) != set(GRADES):
+        raise ValueError(
+            f"property {prop} requires explicit strict/normal/loose case bands"
+        )
     if relax > 0:
         ordered = list(GRADES)  # strict, normal, loose
         shifted = {}

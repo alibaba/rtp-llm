@@ -5,9 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.util.Prioritized;
@@ -41,17 +39,12 @@ public final class ScheduledRequest implements Prioritized {
     private final DecodeBinding decodeBinding;
     private final long enqueuedAtMs;
     private final long enqueueSequence;
-    private final long requestId;
-    private final int priority;
     private final long expiresAtMs;
-    private final long seqLen;
     private final long hitCache;
-    private final long maxDecodeEngineRequests;
-    private final long maxDecodeKvUsagePercent;
-    private final int maxInflightDeliveriesPerPrefillWorker;
+    private final int maxInflightBatchesPerPrefillWorker;
     private final boolean routeDelivery;
     /**
-     * Publish-time NON_BATCH credit. It has exactly one downstream owner:
+     * Publish-time NON_BATCH ownership. It has exactly one downstream owner:
      * this ACTIVE item until RouteDeliveryStrategy takes it, then the route
      * transaction. ACTIVE terminal paths take and close the same capability.
      */
@@ -67,38 +60,35 @@ public final class ScheduledRequest implements Prioritized {
                      DecodeEndpoint decodeEp,
                      DecodeEndpoint.ReservationHandle decodeReservation,
                      long enqueuedAtMs) {
+        this(ctx, future, routeResponse, prefill, decode, prefillEp, decodeEp, decodeReservation,
+                enqueuedAtMs, DecodeBinding.capture(ctx));
+    }
+
+    public ScheduledRequest(BalanceContext ctx,
+                     CompletableFuture<Response> future,
+                     Response routeResponse,
+                     ServerStatus prefill,
+                     ServerStatus decode,
+                     PrefillEndpoint prefillEp,
+                     DecodeEndpoint decodeEp,
+                     DecodeEndpoint.ReservationHandle decodeReservation,
+                     long enqueuedAtMs,
+                     DecodeBinding frozenDecode) {
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
         this.routeResponse = routeResponse;
         this.prefill = prefill;
         this.prefillEp = prefillEp;
-        this.decodeBinding = new DecodeBinding(
-                decode, decodeEp, decodeReservation);
+        this.decodeBinding = frozenDecode.bind(decode, decodeEp, decodeReservation);
         this.enqueuedAtMs = enqueuedAtMs;
         this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
-        Request request = ctx.getRequest();
-        this.requestId = request == null ? 0L : request.getRequestId();
-        this.priority = request == null && ctx.schedulingMetadata() == null
-                ? 0 : ctx.getPriority();
         this.expiresAtMs = ctx.getRequestExpiresAtMs();
-        this.seqLen = request == null ? 0L : request.getSeqLen();
         this.hitCache = hitCacheOf(prefill);
         FlexlbConfig schedulingConfig = Objects.requireNonNull(
                 ctx.getConfig(), "request scheduling config");
-        RoutingConfig.DecodeAvailabilityConfig decodeAvailability =
-                schedulingConfig.getRouter().getRoles()
-                .getDecode().getAvailability();
-        Long configuredDecodeLimit = decodeAvailability.getMaxEngineRequests();
-        this.maxDecodeEngineRequests = configuredDecodeLimit == null
-                ? 0L : configuredDecodeLimit;
-        this.maxDecodeKvUsagePercent =
-                decodeAvailability.getMaxKvUsagePercent();
-        Integer configuredDeliveryLimit = schedulingConfig.getDispatcher()
-                .maxInflightDeliveriesPerPrefillWorker();
-        this.maxInflightDeliveriesPerPrefillWorker =
-                configuredDeliveryLimit == null ? 0 : configuredDeliveryLimit;
-        this.routeDelivery = schedulingConfig.getDispatcher().getType()
-                == DispatcherConfig.Type.NON_BATCH;
+        this.routeDelivery = schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
+        this.maxInflightBatchesPerPrefillWorker = routeDelivery ? 0
+                : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker();
     }
 
     // -- accessors --
@@ -114,7 +104,7 @@ public final class ScheduledRequest implements Prioritized {
         return decodeBinding.reservation();
     }
 
-    DecodeBinding decodeBinding() {
+    public DecodeBinding decodeBinding() {
         return decodeBinding;
     }
     public long enqueuedAtMs() { return enqueuedAtMs; }
@@ -122,30 +112,28 @@ public final class ScheduledRequest implements Prioritized {
     public boolean requestExpired(long nowMs) {
         return expiresAtMs <= 0L || nowMs >= expiresAtMs;
     }
-    public long maxDecodeEngineRequests() { return maxDecodeEngineRequests; }
-    public long maxDecodeKvUsagePercent() { return maxDecodeKvUsagePercent; }
-    public int maxInflightDeliveriesPerPrefillWorker() {
-        return maxInflightDeliveriesPerPrefillWorker;
+    public int maxInflightBatchesPerPrefillWorker() {
+        return maxInflightBatchesPerPrefillWorker;
     }
 
-    /** Whether ACTIVE publication must atomically own one request credit. */
+    /** Whether ACTIVE publication must atomically own one route reservation. */
     public boolean requiresRouteReservation() {
         return routeDelivery;
     }
 
-    /** Bind the sole publish-time route credit before ACTIVE becomes visible. */
+    /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
     boolean bindPublishedRouteReservation(
             PrefillState.RouteReservation reservation) {
         return publishedRouteReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }
 
-    /** Transfer the sole uncommitted route credit to delivery or cleanup. */
+    /** Transfer the sole uncommitted route reservation to delivery or cleanup. */
     PrefillState.RouteReservation takePublishedRouteReservation() {
         return publishedRouteReservation.getAndSet(null);
     }
 
-    /** Observe without transferring; optimistic preparation owns no credit. */
+    /** Observe without transferring; optimistic preparation does not transfer ownership. */
     PrefillState.RouteReservation publishedRouteReservation() {
         return publishedRouteReservation.get();
     }
@@ -170,7 +158,7 @@ public final class ScheduledRequest implements Prioritized {
      */
     @Override
     public int priority() {
-        return priority;
+        return decodeBinding.priority();
     }
 
     /**
@@ -186,12 +174,12 @@ public final class ScheduledRequest implements Prioritized {
     // -- derived accessors --
 
     public long requestId() {
-        return requestId;
+        return decodeBinding.requestId();
     }
 
     /** Total sequence length of this request. */
     public long seqLen() {
-        return seqLen;
+        return decodeBinding.hardKvTokens();
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
@@ -205,10 +193,58 @@ public final class ScheduledRequest implements Prioritized {
                 ? ss.getDebugInfo().getHitCacheLen() : 0;
     }
 
-    record DecodeBinding(
+    public enum DecodeMode {
+        IMMEDIATE,
+        WAIT_AT_DISPATCH,
+        PREEMPT_AT_PLACEMENT;
+
+        public static DecodeMode from(FlexlbConfig config) {
+            if (config.isDirect()) { return IMMEDIATE; }
+            return config.queueScheduler().getOrdering().preemptionPolicy().isPresent()
+                    ? PREEMPT_AT_PLACEMENT : WAIT_AT_DISPATCH;
+        }
+    }
+
+    /** Request values are frozen before selection; selected ownership is attached once known. */
+    public record DecodeBinding(
             ServerStatus status,
             DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle reservation) {
+            DecodeEndpoint.ReservationHandle reservation,
+            long requestId,
+            int priority,
+            long hardKvTokens,
+            long expectedKvTokens,
+            DecodeEndpoint.AdmissionCapacity capacity,
+            DecodeMode mode) {
+        public DecodeBinding {
+            Objects.requireNonNull(capacity, "capacity");
+            Objects.requireNonNull(mode, "mode");
+            if (reservation != null && reservation.requestId() != requestId) {
+                throw new IllegalArgumentException("Decode reservation belongs to another request");
+            }
+        }
+
+        public static DecodeBinding capture(BalanceContext context) {
+            var request = Objects.requireNonNull(context.getRequest(), "request");
+            var config = Objects.requireNonNull(context.getConfig(), "request config");
+            var availability = config.getRouter().getRoles().getDecode().getAvailability();
+            long promptTokens = Math.max(0L, request.getSeqLen());
+            long outputTokens = Math.max(0L, request.getMaxNewTokens());
+            long expectedTokens = promptTokens > Long.MAX_VALUE - outputTokens
+                    ? Long.MAX_VALUE : promptTokens + outputTokens;
+            return new DecodeBinding(null, null, null, request.getRequestId(), context.getPriority(),
+                    promptTokens, expectedTokens,
+                    new DecodeEndpoint.AdmissionCapacity(
+                            availability.getMaxEngineRequests() == null ? 0L : availability.getMaxEngineRequests(),
+                            availability.getMaxKvUsagePercent()), DecodeMode.from(config));
+        }
+
+        DecodeBinding bind(ServerStatus selectedStatus, DecodeEndpoint selectedEndpoint,
+                           DecodeEndpoint.ReservationHandle selectedReservation) {
+            return new DecodeBinding(selectedStatus, selectedEndpoint, selectedReservation,
+                    requestId, priority, hardKvTokens, expectedKvTokens, capacity, mode);
+        }
+
         /** Absence is a topology choice; a partial binding is still an error. */
         boolean isAbsent() {
             return status == null && endpoint == null && reservation == null;

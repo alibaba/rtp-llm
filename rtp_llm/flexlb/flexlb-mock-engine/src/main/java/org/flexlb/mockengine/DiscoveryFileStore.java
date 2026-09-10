@@ -15,7 +15,7 @@ import java.util.Map;
 
 /**
  * Writer-side owner of the file-based service discovery mapping consumed by
- * {@code org.flexlb.discovery.FileServiceDiscovery} on the master side.
+ * {@code org.flexlb.discovery.LocalServiceDiscovery} on the master side.
  *
  * <p>The file is derived wholesale from the live services map on every
  * mutation (add/remove engine), so its content can never drift from the set
@@ -29,7 +29,7 @@ import java.util.Map;
  * }</pre>
  *
  * <p>Entries carry the HTTP port (grpc port − 1), matching the legacy
- * DOMAIN_ADDRESS env values produced by {@code writeDiscoveryFiles} and the
+ * HTTP address values produced by {@code writeDiscoveryFiles} and the
  * http→grpc (+1) conversion in {@code WorkerAddressService}.
  *
  * <p>Atomicity: write {@code <path>.tmp} in the same directory, then

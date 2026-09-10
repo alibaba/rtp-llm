@@ -589,9 +589,10 @@ class Tests(unittest.TestCase):
                     expected = spec.resolved_config
                     topology = (spec.n_prefill, spec.n_decode)
                     if variant == "normalize_metrics":
-                        self.assertEqual(
-                            plan["environment"]["metric_whitelist"],
-                            spec.master_env["FLEXLB_MONITOR_METRIC_WHITELIST"],
+                        self.assertIn(
+                            "--flexlb.monitor.metric-whitelist="
+                            + plan["environment"]["metric_whitelist"],
+                            spec.master_extra_args,
                         )
                 self.assertEqual(plan["environment"]["resolved_config"], expected)
                 self.assertEqual(

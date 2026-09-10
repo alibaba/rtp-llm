@@ -24,8 +24,7 @@ variants:
       ordering: priority
       queue_timeout_ms:
         omit: true
-      max_inflight_requests_per_worker: 1
-      max_waiting_requests_per_prefill_worker: 8
+      max_inflight_per_prefill_worker: 1
   program: same_level_fifo
 - id: low_no_starvation
   profiles:
@@ -43,8 +42,7 @@ variants:
     config_overrides:
       ordering: priority
       queue_timeout_ms: 8000
-      max_inflight_requests_per_worker: 1
-      max_waiting_requests_per_prefill_worker: 8
+      max_inflight_per_prefill_worker: 1
   program: queue_timeout_terminal
 - id: order_basic
   profiles:
@@ -55,8 +53,7 @@ variants:
       ordering: priority
       queue_timeout_ms:
         omit: true
-      max_inflight_requests_per_worker: 1
-      max_waiting_requests_per_prefill_worker: 8
+      max_inflight_per_prefill_worker: 1
   program: order_basic
 - id: normalize_default50
   profiles:
@@ -80,8 +77,7 @@ variants:
       ordering: priority
       queue_timeout_ms:
         omit: true
-      max_inflight_requests_per_worker: 1
-      max_waiting_requests_per_prefill_worker: 8
+      max_inflight_per_prefill_worker: 1
       decision: single
       dispatcher: non_batch
   program: normalize_channels
@@ -100,8 +96,7 @@ variants:
       ordering: priority
       queue_timeout_ms:
         omit: true
-      max_inflight_requests_per_worker: 1
-      max_waiting_requests_per_prefill_worker: 8
+      max_inflight_per_prefill_worker: 1
       decision: single
       dispatcher: non_batch
       default_priority: 30
@@ -121,8 +116,7 @@ variants:
       ordering: priority
       queue_timeout_ms:
         omit: true
-      max_inflight_requests_per_worker: 1
-      max_waiting_requests_per_prefill_worker: 8
+      max_inflight_per_prefill_worker: 1
       decision: single
       dispatcher: non_batch
     metric_whitelist: flexlb_auto_tpm_request_count

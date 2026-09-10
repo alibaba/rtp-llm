@@ -47,7 +47,7 @@ class CrashStream:
 class TombstoneBackend(programs.Backend):
     def __init__(
         self,
-        fence_code=8429,
+        fence_code=8211,
         grow=False,
         victim_completed=False,
         lose_final_count=False,
@@ -74,6 +74,11 @@ class TombstoneBackend(programs.Backend):
 
         def future(req, timeout, metadata=None):
             call = original(req, timeout, metadata)
+            if req[0] == 3:
+                response = self.ops.responses[-1]
+                response.code = 8431
+                response.success = False
+                response.error_message = "victim_inflight_gone"
             if req[0] == 2:
                 if not self.armed:
                     raise AssertionError("sacrifice issued before crash_after")
@@ -151,7 +156,7 @@ class TombstoneBackend(programs.Backend):
         cancel = 0
         if arrived:
             self.after_snapshots += 1
-            cancel = 0 if self.lose_final_count and self.after_snapshots > 1 else 1
+            cancel = int(self.lose_final_count and self.after_snapshots == 1)
         return dict(
             engines=[
                 dict(
@@ -340,10 +345,10 @@ class TombstonedPrograms(unittest.TestCase):
                         for r in b.shapes
                     ],
                 )
-                self.assertEqual([1, 3, 4], [f["rid"] for f in b.fetches])
+                self.assertEqual([1, 4], [f["rid"] for f in b.fetches])
                 self.assertEqual(1, b.fetches[0]["scheduled"])
                 self.assertEqual(0, b.ops.generate_count)
-                self.assertTrue(all(59 < f["timeout"] <= 60 for f in b.fetches[:2]))
+                self.assertTrue(all(59 < f["timeout"] <= 60 for f in b.fetches[:1]))
                 row = a["cut"][0]["row"]
                 self.assertTrue(a["cut"][0]["cut"])
                 self.assertTrue(
@@ -367,7 +372,7 @@ class TombstonedPrograms(unittest.TestCase):
                 )
                 self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
 
-    def test_wrong_fence_code_does_not_pass_exact_8429(self):
+    def test_wrong_fence_code_does_not_pass_exact_8211(self):
         result, _, checks, _, _ = self.run_program(fence_code=8400)
         self.assertEqual("FAIL", result["status"], result)
         self.assertEqual(
@@ -390,13 +395,13 @@ class TombstonedPrograms(unittest.TestCase):
             ("FAIL", "PASS", "PASS"), tuple(checks[k] for k in ("PR10", "PR6", "P6"))
         )
 
-    def test_reached_poll_and_final_delta_are_separate_expected_facts(self):
+    def test_transient_cancel_is_not_hidden_by_zero_final_delta(self):
         result, a, checks, _, _ = self.run_program(lose_final_count=True)
         self.assertEqual("FAIL", result["status"], result)
         self.assertTrue(a["cancel"][0]["reached"])
         self.assertEqual(0, a["cancel"][0]["delta"])
         self.assertEqual(
-            ("FAIL", "PASS", "PASS"), tuple(checks[k] for k in ("PR10", "PR6", "P6"))
+            ("PASS", "FAIL", "PASS"), tuple(checks[k] for k in ("PR10", "PR6", "P6"))
         )
 
     def test_sacrificial_rpc_error_does_not_replace_health_crash_proof(self):
@@ -404,3 +409,111 @@ class TombstonedPrograms(unittest.TestCase):
         self.assertEqual("PASS", result["status"], result)
         self.assertIn("sacrificial RPC cut", a["trigger"][0]["error"])
         self.assertTrue(b.restarted)
+
+
+class AbsentFenceTests(unittest.TestCase):
+    def run_probe(self, status=3, code=8429, control_status=2, increment=1):
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / "mock_engine.log"
+            log.write_text("java_mock_stats ts_epoch_ms=1 cancel_census_unknown=0\n")
+            call_count = [0]
+
+            def cancel(req, timeout):
+                call_count[0] += 1
+                log.write_text(
+                    f"java_mock_stats ts_epoch_ms={int(time.time()*1000)+1000} cancel_census_unknown={increment}\n"
+                )
+                return NS(status=status if call_count[0] == 1 else control_status)
+
+            def enqueue(req, timeout):
+                rid = req.dp_slots[0].requests[0].input.request_id
+                return NS(
+                    successes=[] if rid == 2 else [NS(request_id=rid)],
+                    errors=(
+                        [NS(request_id=rid, error_info=NS(error_code=code))]
+                        if rid == 2
+                        else []
+                    ),
+                )
+
+            class Fetch:
+                def __iter__(self):
+                    return iter(
+                        [
+                            NS(
+                                flatten_output=NS(finished=[True]),
+                                HasField=lambda x: False,
+                            )
+                        ]
+                    )
+
+                def cancel(self):
+                    pass
+
+            pb = NS(
+                CancelRequestPB=lambda **p: NS(**p),
+                EnqueueBatchRequestPB=lambda **p: NS(**p),
+                EnqueueBatchDpSlotPB=lambda **p: NS(**p),
+                EnqueueBatchExternalInputPB=lambda **p: NS(**p),
+                FetchRequestPB=lambda **p: NS(**p),
+                CANCEL_STATUS_TOMBSTONED=3,
+                CANCEL_STATUS_NOT_FOUND=2,
+            )
+            serial = iter([2, 3, 4])
+            ops = NS(
+                next_request_id=lambda: next(serial),
+                prefill_addr=lambda x: "P0",
+                _channel=lambda t: t,
+                _copy_role_addrs=lambda a, b: None,
+                pb2=pb,
+                build_generate_input=lambda rid, **p: NS(request_id=rid),
+                pb2_grpc=NS(
+                    RpcServiceStub=lambda t: NS(
+                        Cancel=cancel,
+                        EnqueueBatch=enqueue,
+                        FetchResponse=lambda *a, **k: Fetch(),
+                    )
+                ),
+            )
+            wave = NS(
+                complete=True,
+                records=lambda: [{"wire_request_id": 1}],
+                entries=[{"batch": NS(entries=[{"response": NS()}])}],
+            )
+            ctx = NS(ops=ops, env=NS(run_dir=root), artifact_dir=root)
+            params = dict(
+                requests={},
+                input_len=512,
+                output_len=2,
+                rpc_timeout_s=15,
+                poll_s=0.5,
+                fetch_attach_timeout_ms=30000,
+            )
+
+            def encode(x, **kw):
+                # Preserve the probe's protocol operations without generating stubs.
+                return {"repr": repr(x)}
+
+            with patch.object(preempt, "_cohort", return_value=wave), patch.object(
+                preempt, "request_success", return_value=True
+            ), patch("google.protobuf.json_format.MessageToDict", encode):
+                result = preempt._absent_contract(
+                    ctx,
+                    params,
+                    NS(check=lambda: None, remaining=lambda: 20, sleep=lambda s: None),
+                )
+            return [c.status for c in result.checks]
+
+    def test_unknown_fence_and_completed_control(self):
+        self.assertEqual(["PASS", "PASS"], self.run_probe())
+
+    def test_missing_tombstone_or_wrong_code_fails(self):
+        for kwargs in [dict(status=2), dict(code=8211), dict(increment=0)]:
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(["FAIL", "PASS"], self.run_probe(**kwargs))
+
+    def test_completed_request_must_not_be_tombstoned(self):
+        self.assertEqual(["PASS", "FAIL"], self.run_probe(control_status=3))

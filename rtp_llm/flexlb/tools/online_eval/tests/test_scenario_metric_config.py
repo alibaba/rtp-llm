@@ -20,9 +20,13 @@ class MetricConfigTest(unittest.TestCase):
         self.assertEqual(
             spec.master_env,
             {
-                "FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_auto_tpm_request_count",
                 "FLEXLB_DEBUG_ENABLED": "true",
             },
+        )
+        self.assertIn("--flexlb.debug.enabled=true", spec.master_extra_args)
+        self.assertIn(
+            "--flexlb.monitor.metric-whitelist=flexlb_auto_tpm_request_count",
+            spec.master_extra_args,
         )
         self.assertEqual(
             plan["resolved_config"],

@@ -57,7 +57,7 @@ class PendingTests(unittest.TestCase):
             dict(
                 ordering="priority",
                 queue_timeout_ms={"omit": True},
-                max_inflight_batches=2,
+                max_inflight_per_prefill_worker=2,
             ),
         )
         clock, removed = Clock(), threading.Event()

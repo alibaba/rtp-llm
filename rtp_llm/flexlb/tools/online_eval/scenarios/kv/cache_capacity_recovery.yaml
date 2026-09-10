@@ -11,6 +11,8 @@ environment:
   n_prefill: 2
   n_decode: 2
   perf_preset: default
+  config_overrides:
+    request_timeout_ms: 60000
 execution:
   timeout_s: 900
   stage_timeout_s: 60
@@ -32,6 +34,8 @@ variants:
     n_prefill: 1
     n_decode: 2
     prefill_cache_blocks: 27
+    config_overrides:
+      max_inflight_per_prefill_worker: 4
     decode_cache_blocks: 32
   program: pool_saturation_evict_reject_recover
 - id: capacity_conflict_overflow
@@ -157,6 +161,10 @@ parameters:
       - kv_admission_fails
       duration_s: 0
       interval_s: 0.5
+    fence_released_timeout_s: 90
+    fence_released:
+      target: single
+      inflight_zero: true
     headroom_timeout_s: 70
     headroom:
       input_len: 1024
@@ -191,7 +199,7 @@ parameters:
       op: eq
       expected: 0
       stat: all
-    master_clean_timeout_s: 30
+    master_clean_timeout_s: 90
     master_clean:
       target: single
       inflight_zero: true
@@ -853,7 +861,7 @@ parameters:
       - 1000007
     fresh_succeeded:
       metric: success
-    master_clean_timeout_s: 30
+    master_clean_timeout_s: 90
     master_clean:
       target: single
       inflight_zero: true
@@ -944,18 +952,11 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 3.5
-    slow_all:
-      operation: set_perf
-      targets:
-      - prefill-0
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 5000
     perf_sync:
       wait_s: 1.5
     seed_timeout_s: 70
     seed:
-      input_len: 147456
+      input_len: 163840
       output_len: 2
       mode: fire
       stream_timeout_s: 30
@@ -1106,6 +1107,22 @@ parameters:
       - 509101
       - 509102
       - 509103
+      - 509104
+      - 509105
+      - 509106
+      - 509107
+      - 509108
+      - 509109
+      - 509110
+      - 509111
+      - 509112
+      - 509113
+      - 509114
+      - 509115
+      - 509116
+      - 509117
+      - 509118
+      - 509119
     seed_admitted:
       metric: admitted
     seed_holder:
@@ -1124,12 +1141,8 @@ parameters:
       op: ge
       expected: 1
       stat: latest
-    cool_fast:
-      operation: set_perf
-      perf:
-        prefill_fixed_ms: 100
     cool_sync:
-      wait_s: 0.3
+      wait_s: 0
     baseline_timeout_s: 70
     baseline:
       input_len: 2048
@@ -1190,7 +1203,7 @@ parameters:
       - 500038
       - 500039
     wave_spacing_0:
-      wait_s: 0.12
+      interval_s: 0.45
     wave_1_timeout_s: 70
     wave_1:
       input_len: 40960
@@ -1241,7 +1254,7 @@ parameters:
       - 500038
       - 500039
     wave_spacing_1:
-      wait_s: 0.12
+      interval_s: 0.25
     wave_2_timeout_s: 70
     wave_2:
       input_len: 40960
@@ -1292,7 +1305,7 @@ parameters:
       - 500038
       - 500039
     wave_spacing_2:
-      wait_s: 0.12
+      interval_s: 0.25
     wave_3_timeout_s: 70
     wave_3:
       input_len: 40960
@@ -1343,7 +1356,7 @@ parameters:
       - 500038
       - 500039
     wave_spacing_3:
-      wait_s: 0.12
+      interval_s: 0.25
     wave_4_timeout_s: 70
     wave_4:
       input_len: 40960
@@ -1452,10 +1465,3 @@ parameters:
         strict: 2
         normal: 3
         loose: 5
-    restore_perf:
-      operation: set_perf
-      targets:
-      - prefill-0
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 100

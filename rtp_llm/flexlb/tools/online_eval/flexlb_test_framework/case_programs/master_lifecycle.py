@@ -315,7 +315,9 @@ def kill_dual_b_to_a(case):
         "clean_b",
         "master_ready",
         timeout_s=case.value("kill_dual_b_to_a.clean_b_timeout_s"),
-        params=case.value("kill_dual_b_to_a.clean_b"),
+        params=case.params(
+            "kill_dual_b_to_a.clean_b", {"client": output("flow", "client")}
+        ),
     )
     case.step(
         "recovery_a",

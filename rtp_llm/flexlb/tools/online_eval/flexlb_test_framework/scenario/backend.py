@@ -513,8 +513,12 @@ def make_env_spec(plan, profile, lease):
     ):
         if key in plan:
             setattr(spec, key, plan[key])
+    if plan["debug_enabled"]:
+        spec.master_extra_args.append("--flexlb.debug.enabled=true")
     if "metric_whitelist" in plan:
-        spec.master_env["FLEXLB_MONITOR_METRIC_WHITELIST"] = plan["metric_whitelist"]
+        spec.master_extra_args.append(
+            "--flexlb.monitor.metric-whitelist=" + plan["metric_whitelist"]
+        )
     if "prefill_perf" in plan:
         spec.perf["prefill"] = dict(plan["prefill_perf"])
     if "prefill_max_waiting_batches" in plan:

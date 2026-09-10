@@ -2,9 +2,11 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.grpc.stub.StreamObserver;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
@@ -12,6 +14,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -280,6 +283,51 @@ class InflightLeakTest {
     }
 
     // ──────────── Cluster setup ────────────
+
+    @Test
+    @Timeout(15)
+    void firstPollSettlesBatchesThatFinishedBeforeAnyStatusPump() throws Exception {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(63400, 1, 1, "5", 1.0, false)) {
+            h.fixedWindowDecision().setMaxRequests(2);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000L);
+            List<CompletableFuture<Response>> firstWave = new ArrayList<>();
+            for (long requestId = 90_001L; requestId <= 90_004L; requestId++) {
+                firstWave.add(h.scheduler.submit(h.context(requestId, 50)));
+            }
+
+            // Read Engine counters, not getWorkerStatus: this must be the first
+            // poll after discovery, with every completion already in its delta.
+            AutoTpmE2EHarness.await(() -> h.decodeEngines.getFirst().getCompletedCount() == 4L,
+                    5_000L, "all four requests must finish before the first status pump");
+            assertEquals(2, h.prefillEndpoint(0).getInflightBatchCount());
+            assertEquals(4, h.prefillEndpoint(0).observedRequestCount());
+
+            h.pumpPrefillOnce(0);
+            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount(),
+                    "the first real status response must release both completed batches");
+            assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
+            h.pumpDecodeOnce(0);
+            h.pumpPrefillOnce(0);
+            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount(),
+                    "repeated polls must not restore or double-release completed ownership");
+
+            List<CompletableFuture<Response>> secondWave = new ArrayList<>();
+            for (long requestId = 90_005L; requestId <= 90_006L; requestId++) {
+                secondWave.add(h.scheduler.submit(h.context(requestId, 50)));
+            }
+            AutoTpmE2EHarness.await(() -> h.decodeEngines.getFirst().getCompletedCount() == 6L,
+                    5_000L, "returned batch slots must allow the next requests to dispatch");
+            h.pumpOnce();
+            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount());
+            assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
+            for (CompletableFuture<Response> future : firstWave) {
+                assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
+            }
+            for (CompletableFuture<Response> future : secondWave) {
+                assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
+            }
+        }
+    }
 
     private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode) throws IOException {
         cluster = MockEngineTestCluster.start(model, BASE_PORT, nPrefill, nDecode);

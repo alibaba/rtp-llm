@@ -107,10 +107,10 @@ class DebugClientTest(unittest.TestCase):
             has_item=False,
             has_engine_fence=False,
             has_preemption=False,
-            has_admission_resources=False,
             has_admission_mutation=False,
             has_request_deadline=False,
-            has_acceptance_deadline=False,
+            has_decision_deadline=False,
+            has_inactivity_deadline=False,
             has_cancel_reason=False,
             has_pending_admission_cancel=False,
         )

@@ -41,8 +41,8 @@ class SpillModel(churn_test.LruModel):
 
     def http(self, ops, endpoint, deadline, body=None):
         if endpoint == "snapshot" and (
-            (self.saturation_collapse and 14 <= self.rid < 30)
-            or (self.break_recovery and self.rid >= 30)
+            (self.saturation_collapse and 18 <= self.rid < 42)
+            or (self.break_recovery and self.rid >= 42)
         ):
             for name in self.keys:
                 self.keys[name].clear()
@@ -53,11 +53,11 @@ class SpillModel(churn_test.LruModel):
         result = super().wait_requests(ctx, records, deadline)
         if self.lose_terminal:
             for row in records.rows:
-                if row["wire_request_id"] == 15:
+                if row["wire_request_id"] == 21:
                     records.update(row, consumer_completion_verified=False)
         if self.fail_early_recovery:
             for row in records.rows:
-                if row["wire_request_id"] == 31:
+                if row["wire_request_id"] == 43:
                     records.update(row, business_finished=False)
         return result
 
@@ -92,7 +92,7 @@ class SpillTests(unittest.TestCase):
                         "FINDING-CONFIRMED" if collapse else "FINDING-RESOLVED",
                         result["error"],
                     )
-                    self.assertEqual(model.rid, 54)
+                    self.assertEqual(model.rid, 66)
                     self.assertEqual(plan["findings"], ["saturation_hit.M3"])
                     for name, count in [
                         ("baseline_hit", 12),
@@ -130,7 +130,7 @@ class SpillTests(unittest.TestCase):
             final_snapshots = 0
 
             def http(self, ops, endpoint, deadline, body=None):
-                if endpoint == "snapshot" and self.rid == 54:
+                if endpoint == "snapshot" and self.rid == 66:
                     self.final_snapshots += 1
                     if self.final_snapshots >= 2:
                         # A delayed cache update after the final 2s sync changes

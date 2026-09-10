@@ -167,6 +167,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         long kvTokens() { return kvTokens; }
         long expectedKvTokens() { return expectedKvTokens; }
+        CapacityRelease capacityRelease() {
+            return new CapacityRelease(1L, kvTokens, expectedKvTokens);
+        }
         long createdAtMs() { return createdAtMs; }
         int priority() { return priority; }
         long reservationToken() { return reservationToken; }
@@ -394,6 +397,85 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         "Decode admission limits are outside their domain");
             }
         }
+
+        public CapacityDeficit evaluate(CapacityUsage usage, long hardKvTokens, long expectedKvTokens) {
+            return evaluate(usage, hardKvTokens, expectedKvTokens, CapacityRelease.NONE);
+        }
+
+        /** Use the same occupancy scope for the observation and every exact victim release. */
+        public CapacityDeficit evaluate(CapacityUsage usage, long hardKvTokens, long expectedKvTokens,
+                                        CapacityRelease release) {
+            java.util.Objects.requireNonNull(usage, "usage");
+            java.util.Objects.requireNonNull(release, "release");
+            if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
+                throw new IllegalArgumentException("Decode demand must satisfy expected >= hard >= 0");
+            }
+            long requests = maxEngineRequests == 0L ? 0L
+                    : shortfall(Math.max(0L, usage.occupiedRequests - release.requests),
+                            1L, maxEngineRequests, 0L);
+            if (usage.totalKvTokens == 0L && maxKvUsagePercent > 0L) {
+                return new CapacityDeficit(requests, 0L, 0L);
+            }
+            return new CapacityDeficit(requests,
+                    shortfall(usage.hardReservedKvTokens, hardKvTokens,
+                            usage.availableKvTokens, release.hardKvTokens),
+                    shortfall(Math.max(0L, usage.expectedKvUsed - release.expectedKvTokens),
+                            expectedKvTokens, kvBudget(usage.totalKvTokens), 0L));
+        }
+
+        /** Integer arithmetic never rounds the configured KV budget up. */
+        public long kvBudget(long totalKv) {
+            if (totalKv < 0L) {
+                throw new IllegalArgumentException("negative KV capacity");
+            }
+            return totalKv / 100L * maxKvUsagePercent + totalKv % 100L * maxKvUsagePercent / 100L;
+        }
+
+        private static long shortfall(long used, long incoming, long capacity, long released) {
+            long remainingUsed = Math.max(0L, used - released);
+            long remainingCapacity = saturatedAddNonNegative(capacity, Math.max(0L, released - used));
+            return remainingUsed > remainingCapacity
+                    ? saturatedAddNonNegative(remainingUsed - remainingCapacity, incoming)
+                    : Math.max(0L, incoming - (remainingCapacity - remainingUsed));
+        }
+    }
+
+    /** Physical supply and local charges remain separate so existing KV debt survives projection. */
+    public record CapacityUsage(long occupiedRequests, long totalKvTokens, long availableKvTokens,
+                                long hardReservedKvTokens, long expectedKvUsed) {
+        public CapacityUsage {
+            if (occupiedRequests < 0L || totalKvTokens < 0L || availableKvTokens < 0L
+                    || hardReservedKvTokens < 0L || expectedKvUsed < 0L) {
+                throw new IllegalArgumentException("Decode occupancy must be non-negative");
+            }
+        }
+
+        public long hardKvAvailable() {
+            return Math.max(0L, availableKvTokens - hardReservedKvTokens);
+        }
+    }
+
+    /** Capacity reclaimed from the same ownership scope as the evaluated observation. */
+    public record CapacityRelease(long requests, long hardKvTokens, long expectedKvTokens) {
+        public static final CapacityRelease NONE = new CapacityRelease(0L, 0L, 0L);
+
+        public CapacityRelease {
+            if (requests < 0L || hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
+                throw new IllegalArgumentException("invalid Decode capacity release");
+            }
+        }
+
+        public CapacityRelease plus(CapacityRelease other) {
+            return new CapacityRelease(saturatedAddNonNegative(requests, other.requests),
+                    saturatedAddNonNegative(hardKvTokens, other.hardKvTokens),
+                    saturatedAddNonNegative(expectedKvTokens, other.expectedKvTokens));
+        }
+    }
+
+    public record CapacityDeficit(long requests, long hardKvTokens, long expectedKvTokens) {
+        public boolean fits() { return requests == 0L && !needsKv(); }
+        public boolean needsKv() { return hardKvTokens > 0L || expectedKvTokens > 0L; }
+        public long kvTokens() { return Math.max(hardKvTokens, expectedKvTokens); }
     }
 
     /** One exact fact interpreted by canonical Decode accounting. */
@@ -543,6 +625,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    public boolean isReservationAccepted(ReservationHandle handle) {
+        if (handle == null) {
+            return false;
+        }
+        admissionLock.lock();
+        try {
+            DecodeRequestState state = confirmedRequest(handle.requestId());
+            return handle.endpointGenerationId() == getStatus().getGenerationId()
+                    && state != null && state.reservationToken() == handle.reservationToken();
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
     /** Caller holds admissionLock. */
     private ReservationHandle reserveLocked(long requestId,
                                             long kvTokens,
@@ -572,12 +668,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Acquire a soft queued hold for placement, or report that this request id
+     * Reserve placement before Engine-facing delivery, or report that this request id
      * is still fenced by the exact endpoint generation. The fence is a
      * transient placement blocker: WorkerStatus cannot distinguish a reused
      * request id until its settlement tombstone expires.
      */
-    public ReservationHandle tryReserveQueuedPinned(
+    public ReservationHandle tryReservePlacementPinned(
             GenerationPin pin,
             long requestId,
             long kvTokens,
@@ -599,10 +695,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Acquire queued ownership only if this exact generation can still accept
+     * Reserve placement only if this exact generation can still accept
      * the request. A null result mutates nothing.
      */
-    public ReservationHandle tryReserveQueuedPinned(
+    public ReservationHandle tryReservePlacementPinned(
             GenerationPin pin,
             long requestId,
             long kvTokens,
@@ -1167,8 +1263,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return false;
             }
             Set<Long> uniqueVictims = new HashSet<>(victims.size());
-            long freedHardKv = 0L;
-            long freedExpectedUsage = 0L;
+            CapacityRelease released = CapacityRelease.NONE;
             for (ReservationHandle victim : victims) {
                 if (victim == null
                         || victim.endpointGenerationId()
@@ -1188,19 +1283,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         || permit != null) {
                     return false;
                 }
-                freedHardKv = saturatedAddNonNegative(
-                        freedHardKv, held.kvTokens());
-                freedExpectedUsage = saturatedAddNonNegative(
-                        freedExpectedUsage, held.expectedKvTokens());
+                released = released.plus(held.capacityRelease());
             }
             if (projectedEvictionCapacityFitsLocked(
-                    capacity, kvTokens, expectedKvTokens,
-                    0L, 0L, 0L)) {
+                    capacity, kvTokens, expectedKvTokens, CapacityRelease.NONE)) {
                 return false;
             }
             if (!projectedEvictionCapacityFitsLocked(
-                    capacity, kvTokens, expectedKvTokens,
-                    0L, freedHardKv, freedExpectedUsage)) {
+                    capacity, kvTokens, expectedKvTokens, released)) {
                 return false;
             }
 
@@ -1371,14 +1461,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long admissionVersion,
             int totalLoad,
             int engineLoad,
-            int engineCapacityUsed,
-            long realKvUsed,
-            long realKvAvailable,
-            long engineFacingKvUsed,
-            long engineFacingKvAvailable,
-            long totalKv,
+            CapacityUsage placementUsage,
+            CapacityUsage dispatchUsage,
             long inflightHardKv,
             long inflightExpectedKv) {
+
+        public int engineCapacityUsed() { return Math.toIntExact(dispatchUsage.occupiedRequests()); }
+        public long realKvUsed() { return placementUsage.expectedKvUsed(); }
+        public long realKvAvailable() { return placementUsage.hardKvAvailable(); }
+        public long engineFacingKvUsed() { return dispatchUsage.expectedKvUsed(); }
+        public long engineFacingKvAvailable() { return dispatchUsage.hardKvAvailable(); }
+        public long totalKv() { return placementUsage.totalKvTokens(); }
 
         public DecodeRoutingView {
             java.util.Objects.requireNonNull(address, "address");
@@ -1389,33 +1482,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         "Decode routing view requires a positive generation");
             }
         }
-    }
-
-    /**
-     * Project one request through the same Engine-facing capacity policy used
-     * by the exact dispatch permit. This immutable-view result is advisory:
-     * the permit acquisition remains the serialization point, but routing can
-     * no longer prefer an endpoint which the captured state already proves
-     * cannot accept this request.
-     */
-    public static boolean canAcquireEngineDispatchPermit(
-            DecodeRoutingView view,
-            long hardKvTokens,
-            long expectedKvTokens,
-            AdmissionCapacity capacity) {
-        if (view == null || capacity == null) {
-            throw new IllegalArgumentException(
-                    "Decode routing view and capacity are required");
-        }
-        return engineDispatchCapacityFits(
-                view.engineCapacityUsed(),
-                view.engineFacingKvAvailable(),
-                view.engineFacingKvUsed(),
-                view.totalKv(),
-                hardKvTokens,
-                expectedKvTokens,
-                capacity.maxEngineRequests(),
-                capacity.maxKvUsagePercent());
     }
 
     public DecodeRoutingView routingView() {
@@ -1496,7 +1562,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         int queued = Math.max(0, Math.min(queuedPhaseCount.get(), inflight));
         int totalLoad = confirmedEngineOwnedCount + inflight;
         int engineLoad = confirmedEngineOwnedCount + Math.max(0, inflight - queued);
-        int engineCapacityUsed = engineLoad + activeEngineDispatchPermitCount;
         long reportedUsed = fields.totalKvCacheTokens() > 0
                 ? Math.max(0L, fields.totalKvCacheTokens()
                         - fields.availableKvCacheTokens())
@@ -1506,11 +1571,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long used = saturatedAddNonNegative(
                 saturatedAddNonNegative(reportedUsed, expectedInflight),
                 priorityPreemptionHeldExpectedKv.get());
-        long available = Math.max(0L, fields.availableKvCacheTokens()
-                - hardInflight
-                - priorityPreemptionHeldKv.get());
-        long engineFacingUsed = engineFacingKvUsed(fields);
-        long engineFacingAvailable = engineFacingKvAvailable(fields);
+        long heldHard = priorityPreemptionHeldKv.get();
+        long placementHard = saturatedAddNonNegative(hardInflight, heldHard);
+        CapacityUsage placementUsage = new CapacityUsage(totalLoad,
+                Math.max(0L, fields.totalKvCacheTokens()), Math.max(0L, fields.availableKvCacheTokens()),
+                placementHard, used);
+        CapacityUsage dispatchUsage = dispatchCapacityUsage(fields);
         return new DecodeRoutingView(
                 address,
                 getStatus().getGenerationId(),
@@ -1519,12 +1585,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 version,
                 totalLoad,
                 engineLoad,
-                engineCapacityUsed,
-                used,
-                available,
-                engineFacingUsed,
-                engineFacingAvailable,
-                fields.totalKvCacheTokens(),
+                placementUsage,
+                dispatchUsage,
                 hardInflight,
                 expectedInflight);
     }
@@ -1539,6 +1601,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                     long reservationToken,
                                     boolean queued,
                                     boolean claimedForPreemption) {
+        public CapacityRelease placementRelease() {
+            return new CapacityRelease(1L, kvTokens, expectedKvTokens);
+        }
     }
 
     // ==================== Priority-preemption transaction ====================
@@ -1605,9 +1670,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
             Map<Long, ClaimOwner> owners = new HashMap<>();
             Map<Long, ReservationHandle> exactVictims = new HashMap<>();
-            long freedSlots = 0L;
-            long freedHardKv = 0L;
-            long freedExpectedUsage = 0L;
+            CapacityRelease released = CapacityRelease.NONE;
             for (ReservationHandle victim : victims) {
                 if (victim == null
                         || victim.endpointGenerationId()
@@ -1638,11 +1701,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     }
                     owners.put(victimId, ClaimOwner.SHADOW_IN_FLIGHT);
                     exactVictims.put(victimId, victim);
-                    freedSlots++;
-                    freedHardKv = saturatedAddNonNegative(
-                            freedHardKv, request.kvTokens());
-                    freedExpectedUsage = saturatedAddNonNegative(
-                            freedExpectedUsage, request.expectedKvTokens());
+
                 } else if (request.confirmed()
                         && request.phase().isEngineConfirmed()) {
                     if (request.priority() <= 0
@@ -1651,23 +1710,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     }
                     owners.put(victimId, ClaimOwner.ENGINE_CONFIRMED);
                     exactVictims.put(victimId, victim);
-                    freedSlots++;
-                    freedHardKv = saturatedAddNonNegative(
-                            freedHardKv, request.kvTokens());
-                    freedExpectedUsage = saturatedAddNonNegative(
-                            freedExpectedUsage, request.kvTokens());
+
                 } else {
                     return PreemptionBeginResult.VICTIM_GONE;
                 }
+                released = released.plus(request.capacityRelease());
             }
             if (projectedEvictionCapacityFitsLocked(
                     capacity, incomingKvTokens, incomingExpectedKvTokens,
-                    0L, 0L, 0L)) {
+                    CapacityRelease.NONE)) {
                 return PreemptionBeginResult.INFEASIBLE;
             }
             if (!projectedEvictionCapacityFitsLocked(
-                    capacity, incomingKvTokens, incomingExpectedKvTokens,
-                    freedSlots, freedHardKv, freedExpectedUsage)) {
+                    capacity, incomingKvTokens, incomingExpectedKvTokens, released)) {
                 return PreemptionBeginResult.INFEASIBLE;
             }
 
@@ -2481,16 +2536,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 - priorityPreemptionHeldKv.get());
     }
 
-    private long engineFacingKvAvailable(
-            WorkerStatus.EngineObservation fields) {
-        long localEngineFacing = Math.max(0L,
-                inflightHardKvReserved() - queuedHardKvReservedTotal.get())
-                + engineDispatchPermitHardKvReservedTotal.get();
-        return Math.max(0, fields.availableKvCacheTokens()
-                - localEngineFacing
-                - priorityPreemptionHeldKv.get());
-    }
-
     // ==================== Metrics ====================
 
     /**
@@ -2712,6 +2757,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public enum EngineDispatchPermitAcquireStatus {
         /** An exact-reservation permit now owns one Decode hard-gate slot. */
         ACQUIRED,
+        /** Engine already owns this reservation; the permit carries identity without charging capacity. */
+        ALREADY_ACCEPTED,
         /** Concurrency or Decode KV has no unreserved hard capacity. */
         CAPACITY_FULL,
         /** The request no longer owns a live shadow reservation. */
@@ -2731,7 +2778,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         ENDPOINT_RETIRED
     }
 
-    /** Explicit result of {@link #acquireEngineDispatchPermit(long, long, long)}. */
+    /** Explicit result of {@link #acquireEngineDispatchPermit(ReservationHandle, AdmissionCapacity)}. */
     public record EngineDispatchPermitAcquisition(
             EngineDispatchPermitAcquireStatus status,
             EngineDispatchPermit permit) {
@@ -2740,18 +2787,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (status == null) {
                 throw new IllegalArgumentException("permit acquisition status is required");
             }
-            if ((status == EngineDispatchPermitAcquireStatus.ACQUIRED) != (permit != null)) {
+            boolean ownsHandoff = status == EngineDispatchPermitAcquireStatus.ACQUIRED
+                    || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
+            if (ownsHandoff != (permit != null)) {
                 throw new IllegalArgumentException(
-                        "only an ACQUIRED result may carry an engine dispatch permit");
+                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
             }
         }
     }
 
     /**
-     * Exact-reservation capability for one Decode concurrency slot.
+     * Exact-reservation capability for one Decode delivery handoff.
      *
      * <p>{@link #transferToEngineLifecycle()} atomically converts the still-current queued
      * reservation into engine-facing ownership without checking capacity again.
+     * An Engine observation which already confirmed this same reservation also
+     * completes the transfer; a replacement reservation never does.
+     * When acquired after Engine acceptance, the permit only carries that
+     * reservation identity and does not occupy an additional capacity slot.
      * {@link #release()} gives up only this exact temporary hard-gate slot;
      * the reservation stays queued. Both operations are idempotent with respect
      * to endpoint state. Object identity and the reservation generation prevent
@@ -2836,56 +2889,61 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Acquire one pre-delivery Decode slot while the reservation remains queued.
+     * Acquire one pre-delivery Decode slot for an exact queued reservation.
      * Decode concurrency and KV are validated and occupied under the same
      * admission lock, so concurrent acquisitions cannot oversell either gate.
+     * A prior Engine acceptance produces an identity-only permit without
+     * occupying additional capacity.
      */
     public EngineDispatchPermitAcquisition acquireEngineDispatchPermit(
-            long requestId,
-            long concurrencyLimit,
-            long maxKvUsagePercent) {
-        if (maxKvUsagePercent < 0L) {
-            throw new IllegalArgumentException(
-                    "maxKvUsagePercent must be non-negative");
-        }
+            ReservationHandle handle,
+            AdmissionCapacity capacity) {
+        java.util.Objects.requireNonNull(handle, "handle");
+        java.util.Objects.requireNonNull(capacity, "capacity");
         GenerationPin generationPin = tryPinGeneration();
         if (generationPin == null) {
-            return rejectedEngineDispatchPermit(
+            return withoutEngineDispatchPermit(
                     EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED);
         }
         try (generationPin) {
             return acquireEngineDispatchPermitPinned(
-                    requestId, concurrencyLimit, maxKvUsagePercent);
+                    handle, capacity);
         }
     }
 
     private EngineDispatchPermitAcquisition acquireEngineDispatchPermitPinned(
-            long requestId,
-            long concurrencyLimit,
-            long maxKvUsagePercent) {
+            ReservationHandle handle,
+            AdmissionCapacity capacity) {
         admissionLock.lock();
         try {
-            DecodeRequestState reservation = shadowReservation(requestId);
-            if (reservation == null || reservation.preemptionClaim != null) {
-                return rejectedEngineDispatchPermit(
+            DecodeRequestState reservation = requestState(handle.requestId());
+            if (handle.endpointGenerationId() != getStatus().getGenerationId()
+                    || !isExactReservation(reservation, handle)
+                    || !reservation.ownsRequest() || reservation.preemptionClaim != null) {
+                return withoutEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.NOT_OWNED);
             }
+            if (reservation.confirmed()) {
+                return new EngineDispatchPermitAcquisition(
+                        EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED,
+                        new EngineDispatchPermit(this, handle.requestId(), reservation));
+            }
             if (!reservation.queued()) {
-                return rejectedEngineDispatchPermit(
+                return withoutEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.NOT_QUEUED);
             }
             if (reservation.dispatchPermit() != null) {
-                return rejectedEngineDispatchPermit(
+                return withoutEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.ALREADY_ACQUIRED);
             }
             if (isEngineDispatchCapacityFullLocked(
-                    reservation, concurrencyLimit, maxKvUsagePercent)) {
-                return rejectedEngineDispatchPermit(
+                    reservation, capacity)) {
+                return withoutEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.CAPACITY_FULL);
             }
 
             EngineDispatchPermit permit = installEngineDispatchPermitLocked(
-                    requestId, reservation);
+                    handle.requestId(), reservation);
             return new EngineDispatchPermitAcquisition(
                     EngineDispatchPermitAcquireStatus.ACQUIRED, permit);
         } finally {
@@ -2893,7 +2951,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    private static EngineDispatchPermitAcquisition rejectedEngineDispatchPermit(
+    private static EngineDispatchPermitAcquisition withoutEngineDispatchPermit(
             EngineDispatchPermitAcquireStatus status) {
         return new EngineDispatchPermitAcquisition(status, null);
     }
@@ -2932,6 +2990,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         boolean capacityIncreased;
         admissionLock.lock();
         try {
+            // Engine status may consume the acquired permit before publication.
+            // Only the same canonical reservation can satisfy this handoff.
+            DecodeRequestState current = requestState(permit.requestId);
+            if (current == permit.reservation && current.confirmed()
+                    && current.preemptionClaim == null) {
+                return EngineDispatchPermitTransferStatus.TRANSFERRED;
+            }
             int usageBefore = engineDispatchHardGateUsageLocked();
             if (!isCurrentEngineDispatchPermitLocked(permit)) {
                 return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
@@ -3034,63 +3099,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 + activeEngineDispatchPermitCount;
     }
 
-    /** Exact capacity gate for a reservation which remains Prefill-queued. */
+    /** Preemptive placement accounts for every queued and Engine-owned reservation. */
     private boolean queuedPlacementIsFullLocked(
-            long hardKvTokens,
-            long expectedKvTokens,
-            AdmissionCapacity capacity) {
-        // This method is used only by the preemptive placement path. Unlike
-        // the non-preemptive soft queue hold, its exact queued reservation
-        // must consume the placement slot immediately; otherwise one status
-        // edge can publish an executor-width burst before the first batcher
-        // acquires its delivery permit.
-        long occupiedSlots = confirmedEngineOwnedCount
-                + reservedRequestCount.get();
-        if (capacity.maxEngineRequests() > 0L
-                && occupiedSlots >= capacity.maxEngineRequests()) {
-            return true;
-        }
-
-        WorkerStatus.EngineObservation status =
-                getStatus().committedWorkerStatus().fields();
-        long totalKv = status.totalKvCacheTokens();
-        if (totalKv <= 0L) {
-            return false;
-        }
-        long hardAvailable = Math.max(
-                0L,
-                status.availableKvCacheTokens()
-                        - inflightKvReservedTotal.get()
-                        - priorityPreemptionHeldKv.get());
-        if (hardKvTokens > hardAvailable) {
-            return true;
-        }
-        if (capacity.maxKvUsagePercent() == 0L) {
-            return false;
-        }
-        long reportedUsed = Math.max(
-                0L, totalKv - status.availableKvCacheTokens());
-        long expectedUsed = saturatedAddNonNegative(
-                saturatedAddNonNegative(
-                        reportedUsed, inflightExpectedKvReservedTotal.get()),
-                priorityPreemptionHeldExpectedKv.get());
-        long projected = saturatedAddNonNegative(
-                expectedUsed, expectedKvTokens);
-        return (double) projected * RoutingConfig.PERCENTAGE_SCALE
-                > (double) capacity.maxKvUsagePercent() * (double) totalKv;
+            long hardKvTokens, long expectedKvTokens, AdmissionCapacity capacity) {
+        return !capacity.evaluate(routingViewLocked().placementUsage(), hardKvTokens, expectedKvTokens).fits();
     }
 
     /** Caller holds admissionLock; this is the authoritative pre-admission gate. */
     private boolean isEngineDispatchCapacityFullLocked(
             DecodeRequestState candidate,
-            long concurrencyLimit,
-            long maxKvUsagePercent) {
+            AdmissionCapacity capacity) {
         WorkerStatus.CommittedWorkerStatus committed =
                 getStatus().committedWorkerStatus();
         return isEngineDispatchCapacityFullSnapshot(
                 candidate,
-                concurrencyLimit,
-                maxKvUsagePercent,
+                capacity,
                 committed.fields());
     }
 
@@ -3101,61 +3124,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * before any claim, removal, or reservation is installed.
      */
     private boolean projectedEvictionCapacityFitsLocked(
-            AdmissionCapacity capacity,
-            long incomingHardKv,
-            long incomingExpectedKv,
-            long freedSlots,
-            long freedHardKv,
-            long freedExpectedUsage) {
-        if (incomingHardKv < 0L || incomingExpectedKv < incomingHardKv
-                || freedSlots < 0L || freedHardKv < 0L
-                || freedExpectedUsage < 0L) {
-            throw new IllegalArgumentException(
-                    "Decode eviction capacity projection requires non-negative demand");
-        }
-        long currentSlots = engineDispatchHardGateUsageLocked();
-        long projectedSlots = Math.max(0L, currentSlots - freedSlots) + 1L;
-        if (capacity.maxEngineRequests() > 0L
-                && projectedSlots > capacity.maxEngineRequests()) {
-            return false;
-        }
-
-        WorkerStatus.EngineObservation fields =
-                getStatus().committedWorkerStatus().fields();
-        long totalKv = fields.totalKvCacheTokens();
-        if (totalKv <= 0L) {
-            return true;
-        }
-        long priorityHeldHardKv = priorityPreemptionHeldKv.get();
-        long priorityHeldExpectedKv =
-                priorityPreemptionHeldExpectedKv.get();
-        requirePriorityPreemptionHoldInvariant(
-                priorityHeldHardKv, priorityHeldExpectedKv);
-        long currentHardCharges = saturatedAddNonNegative(
-                inflightKvReservedTotal.get(), priorityHeldHardKv);
-        long projectedHardSupply = saturatedAddNonNegative(
-                Math.max(0L, fields.availableKvCacheTokens()), freedHardKv);
-        long projectedHardDemand = saturatedAddNonNegative(
-                currentHardCharges, incomingHardKv);
-        if (projectedHardDemand > projectedHardSupply) {
-            return false;
-        }
-        if (capacity.maxKvUsagePercent() == 0L) {
-            return true;
-        }
-
-        long reportedUsed = Math.max(0L,
-                fields.totalKvCacheTokens() - fields.availableKvCacheTokens());
-        long currentExpectedUsage = saturatedAddNonNegative(
-                saturatedAddNonNegative(
-                        reportedUsed, inflightExpectedKvReservedTotal.get()),
-                priorityHeldExpectedKv);
-        long usageAfterVictims = Math.max(
-                0L, currentExpectedUsage - freedExpectedUsage);
-        long projectedExpectedUsage = saturatedAddNonNegative(
-                usageAfterVictims, incomingExpectedKv);
-        return (double) projectedExpectedUsage * RoutingConfig.PERCENTAGE_SCALE
-                <= (double) capacity.maxKvUsagePercent() * (double) totalKv;
+            AdmissionCapacity capacity, long hardKvTokens, long expectedKvTokens, CapacityRelease released) {
+        return capacity.evaluate(routingViewLocked().placementUsage(), hardKvTokens, expectedKvTokens, released).fits();
     }
 
     /**
@@ -3166,50 +3136,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     private boolean isEngineDispatchCapacityFullSnapshot(
             DecodeRequestState candidate,
-            long concurrencyLimit,
-            long maxKvUsagePercent,
+            AdmissionCapacity capacity,
             WorkerStatus.EngineObservation fields) {
-        return !engineDispatchCapacityFits(
-                getEngineLoad() + Math.max(0, activeEngineDispatchPermitCount),
-                engineFacingKvAvailable(fields),
-                engineFacingKvUsed(fields),
-                fields.totalKvCacheTokens(),
-                candidate.kvTokens(),
-                candidate.expectedKvTokens(),
-                concurrencyLimit,
-                maxKvUsagePercent);
+        return !capacity.evaluate(dispatchCapacityUsage(fields), candidate.kvTokens(), candidate.expectedKvTokens()).fits();
     }
 
-    /** Single policy kernel shared by selection projections and exact admission. */
-    private static boolean engineDispatchCapacityFits(
-            long occupiedSlots,
-            long hardKvAvailable,
-            long expectedKvUsed,
-            long totalKv,
-            long hardKvTokens,
-            long expectedKvTokens,
-            long concurrencyLimit,
-            long maxKvUsagePercent) {
-        if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
-            throw new IllegalArgumentException(
-                    "Decode dispatch demand must satisfy expected >= hard >= 0");
-        }
-        if (concurrencyLimit > 0L && occupiedSlots >= concurrencyLimit) {
-            return false;
-        }
-        if (totalKv <= 0L) {
-            return true;
-        }
-        if (hardKvTokens > Math.max(0L, hardKvAvailable)) {
-            return false;
-        }
-        if (maxKvUsagePercent == 0L) {
-            return true;
-        }
-        long projectedExpectedKv = saturatedAddNonNegative(
-                Math.max(0L, expectedKvUsed), expectedKvTokens);
-        return (double) projectedExpectedKv * RoutingConfig.PERCENTAGE_SCALE
-                <= (double) maxKvUsagePercent * (double) totalKv;
+    /** Capture the Engine-facing scope; queued soft reservations consume no dispatch capacity. */
+    private CapacityUsage dispatchCapacityUsage(WorkerStatus.EngineObservation fields) {
+        long heldHard = priorityPreemptionHeldKv.get();
+        long dispatchHard = saturatedAddNonNegative(
+                saturatedAddNonNegative(Math.max(0L, inflightHardKvReserved() - queuedHardKvReservedTotal.get()),
+                        engineDispatchPermitHardKvReservedTotal.get()), heldHard);
+        return new CapacityUsage(
+                getEngineLoad() + Math.max(0, activeEngineDispatchPermitCount),
+                Math.max(0L, fields.totalKvCacheTokens()), Math.max(0L, fields.availableKvCacheTokens()),
+                dispatchHard, engineFacingKvUsed(fields));
     }
 
     /** Saturating addition for non-negative admission counters. */
@@ -3232,8 +3173,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public boolean isEngineDispatchPermitAvailable(
             long requestId,
-            long concurrencyLimit,
-            long maxKvUsagePercent) {
+            AdmissionCapacity capacity) {
         if (isGenerationRetiringOrRetired()) {
             return true;
         }
@@ -3247,8 +3187,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 getStatus().committedWorkerStatus();
         return !isEngineDispatchCapacityFullSnapshot(
                 candidate,
-                concurrencyLimit,
-                maxKvUsagePercent,
+                capacity,
                 committed.fields());
     }
 

@@ -49,7 +49,7 @@ class TwinOverloadAdmissionTest {
         commitBatch(endpoint, config, 2L, 9L);
 
         assertEquals(2, endpoint.getInflightBatchCount());
-        assertEquals(16, endpoint.admissionPendingRequestCount(),
+        assertEquals(16, endpoint.observedRequestCount(),
                 "maxRequests=8 bounds one decision, not the engine's total inflight work");
     }
 
@@ -58,20 +58,24 @@ class TwinOverloadAdmissionTest {
         FlexlbConfig config = config(1);
         PrefillEndpoint endpoint = prefill(config);
         commitBatch(endpoint, config, 11L, 1L);
-        assertEquals(0, endpoint.availableDeliveryCredits());
+        assertEquals(8, endpoint.observedRequestCount());
+        assertTrue(!endpoint.batchAdmissionAvailability(1).isAvailable());
 
         Map<String, TaskInfo> finished = tasks(1L, 7, 11L, TaskPhase.RUNNING);
         applyStatus(endpoint, tasks(8L, 1, 11L, TaskPhase.RUNNING), finished);
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.availableDeliveryCredits(),
-                "seven completed requests must not release the final running member's batch slot");
+        assertEquals(1, endpoint.observedRequestCount(),
+                "completed members immediately leave ownership while the last member retains the batch");
+        assertTrue(!endpoint.batchAdmissionAvailability(1).isAvailable(),
+                "seven finished members do not release the final member's batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(8, endpoint.availableDeliveryCredits());
-        // The full snapshot may repeat across polls without creating extra credit.
+        assertEquals(0, endpoint.observedRequestCount());
+        assertTrue(endpoint.batchAdmissionAvailability(1).isAvailable());
+        // The full snapshot may repeat across polls without releasing ownership twice.
         applyStatus(endpoint, Map.of(), tasks(8L, 1, 11L, TaskPhase.RUNNING));
-        assertEquals(8, endpoint.availableDeliveryCredits());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @ParameterizedTest
@@ -80,21 +84,21 @@ class TwinOverloadAdmissionTest {
         FlexlbConfig config = config(2);
         PrefillEndpoint endpoint = prefill(config);
         commitBatch(endpoint, config, 70L, 101L);
-        assertEquals(8, endpoint.availableDeliveryCredits());
+        assertEquals(8, endpoint.observedRequestCount());
 
         applyStatus(endpoint, tasks(101L, 8, 70L, phase), Map.of());
-        assertEquals(8, endpoint.admissionPendingRequestCount(),
+        assertEquals(8, endpoint.observedRequestCount(),
                 "the local batch and its engine observation describe the same eight requests");
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(8, endpoint.availableDeliveryCredits(),
+        assertEquals(1, endpoint.getInflightBatchCount(),
                 "a local batch must consume one slot without being counted again by worker status");
 
         applyStatus(endpoint, tasks(101L, 8, 70L, phase), Map.of());
-        assertEquals(8, endpoint.availableDeliveryCredits(),
+        assertEquals(1, endpoint.getInflightBatchCount(),
                 "repeated status must neither release nor duplicate the local batch slot");
 
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, phase));
-        assertEquals(16, endpoint.availableDeliveryCredits());
+        assertEquals(0, endpoint.observedRequestCount());
     }
 
     @Test
@@ -105,12 +109,11 @@ class TwinOverloadAdmissionTest {
         ScheduledRequest staged = item(endpoint, config, 2L);
         assertTrue(EndpointTestSupport.offer(endpoint, first));
         assertTrue(EndpointTestSupport.offer(endpoint, staged));
-        int initialCredits = endpoint.availableDeliveryCredits();
         PrefillState.ReservationResult<PrefillState.BatchReservation> acquired =
                 endpoint.reserveBatch(first, 70L, 1);
         assertEquals(PrefillState.CapacityStatus.ACQUIRED, acquired.status());
         try (PrefillState.BatchReservation ignored = acquired.reservation()) {
-            assertEquals(0, endpoint.availableDeliveryCredits());
+            assertEquals(2, endpoint.queuedRequestCount());
             PrefillState.ReservationResult<PrefillState.BatchReservation> blocked =
                     endpoint.reserveBatch(staged, 71L, 1);
             try (PrefillState.BatchReservation unexpected = blocked.reservation()) {
@@ -118,7 +121,7 @@ class TwinOverloadAdmissionTest {
                         "a locally reserved batch must occupy the only slot at final admission");
             }
         }
-        assertEquals(initialCredits, endpoint.availableDeliveryCredits());
+        assertEquals(2, endpoint.queuedRequestCount());
         PrefillState.ReservationResult<PrefillState.BatchReservation> resumed =
                 endpoint.reserveBatch(staged, 71L, 1);
         try (PrefillState.BatchReservation ignored = resumed.reservation()) {
@@ -127,18 +130,16 @@ class TwinOverloadAdmissionTest {
     }
 
     @Test
-    void nonBatchRequestCreditIncludesReportedBacklog() {
+    void nonBatchPreservesUnknownEngineBacklogUntilAnAuthoritativeUpdate() {
         FlexlbConfig config = config(null);
         config.setDispatcher(DispatcherConfig.nonBatch());
-        config.getDispatcher().setMaxInflightRequestsPerPrefillWorker(8);
         PrefillEndpoint endpoint = prefill(config);
         applyStatus(endpoint, tasks(101L, 8, 70L, TaskPhase.RUNNING), Map.of());
-
-        assertEquals(8, endpoint.admissionPendingRequestCount());
-        assertEquals(0, endpoint.availableDeliveryCredits(),
-                "NON_BATCH accounts for worker-reported requests in its request budget");
+        assertEquals(8, endpoint.observedRequestCount());
+        assertTrue(endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().isEmpty());
         applyStatus(endpoint, Map.of(), tasks(101L, 8, 70L, TaskPhase.RUNNING));
-        assertEquals(8, endpoint.availableDeliveryCredits());
+        assertEquals(0, endpoint.observedRequestCount());
+        assertEquals(0L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
     }
 
     @Test
@@ -151,23 +152,23 @@ class TwinOverloadAdmissionTest {
         for (long id = 1; id <= 9; id++) {
             try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(endpoint.tryReserveQueuedPinned(pin, id, 128L, 256L, 50));
+                assertNotNull(endpoint.tryReservePlacementPinned(pin, id, 128L, 256L, 50));
             }
         }
         for (long id = 1; id <= 8; id++) {
             DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                    endpoint.acquireEngineDispatchPermit(id, 8L, 90L);
+                    endpoint.acquireEngineDispatchPermit(endpoint.reservationHandle(id), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().transferToEngineLifecycle());
         }
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                endpoint.acquireEngineDispatchPermit(9L, 8L, 90L).status());
+                endpoint.acquireEngineDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L)).status());
 
         applyStatus(endpoint, tasks(2L, 7, 10L, TaskPhase.RUNNING),
                 tasks(1L, 1, 10L, TaskPhase.RUNNING));
         DecodeEndpoint.EngineDispatchPermitAcquisition resumed =
-                endpoint.acquireEngineDispatchPermit(9L, 8L, 90L);
+                endpoint.acquireEngineDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
         assertTrue(resumed.permit().release());
     }
@@ -184,11 +185,13 @@ class TwinOverloadAdmissionTest {
     }
 
     private static FlexlbConfig config(Integer batchLimit) {
-        FlexlbConfig config = new FlexlbConfig();
-        config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(256);
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         config.fixedWindowDecision().setMaxRequests(8);
+        config.queueScheduler().setQueueTimeoutMs(3_600_000L);
         config.fixedWindowDecision().setMaxCollectionWaitMs(400L);
-        config.getDispatcher().setMaxInflightBatchesPerPrefillWorker(batchLimit);
+        if (batchLimit != null) {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(batchLimit);
+        }
         return config;
     }
 
@@ -200,8 +203,7 @@ class TwinOverloadAdmissionTest {
             assertTrue(EndpointTestSupport.offer(endpoint, item));
             items.add(item);
         }
-        int limit = config.getDispatcher().getMaxInflightBatchesPerPrefillWorker() == null
-                ? 0 : config.getDispatcher().getMaxInflightBatchesPerPrefillWorker();
+        int limit = config.getDispatcher().getMaxInflightPerPrefillWorker();
         PrefillState.ReservationResult<PrefillState.BatchReservation> acquisition =
                 endpoint.reserveBatch(items.getFirst(), batchId, limit);
         assertEquals(PrefillState.CapacityStatus.ACQUIRED, acquisition.status());
@@ -234,6 +236,7 @@ class TwinOverloadAdmissionTest {
             task.setRequestId(id);
             task.setBatchId(batchId);
             task.setPhase(phase);
+            task.setInputLength(128L);
             task.setErrorCode(0);
             result.put(Long.toString(id), task);
         }

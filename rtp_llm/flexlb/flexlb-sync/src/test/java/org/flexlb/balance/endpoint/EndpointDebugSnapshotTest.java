@@ -13,6 +13,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EndpointDebugSnapshotTest {
+    private static org.flexlb.balance.scheduler.ScheduledRequest request(long id) {
+        var item = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
+        org.mockito.Mockito.when(item.requestId()).thenReturn(id);
+        return item;
+    }
+
     @Test
     void decodeSampleKeepsReservationIdentityAndCapacityAccounting() {
         var status = EndpointTestSupport.workerStatus(
@@ -38,8 +44,8 @@ class EndpointDebugSnapshotTest {
     void prefillCopyIsBoundedImmutableAndDoesNotReleaseOwnership() {
         var lock = new ReentrantLock();
         var state = new PrefillState(lock, PrefillActiveIndex.disabled(), System::currentTimeMillis, () -> { });
-        var first = state.tryRegisterDirect(1, 10, 0).reservation();
-        var second = state.tryRegisterDirect(2, 10, 0).reservation();
+        var first = state.reserveUnqueuedRoute(request(1), 10, 0).reservation();
+        var second = state.reserveUnqueuedRoute(request(2), 10, 0).reservation();
         try {
             var page = state.debugSnapshot(new DebugQuery(1, 1, null));
             assertTrue(page.truncated());

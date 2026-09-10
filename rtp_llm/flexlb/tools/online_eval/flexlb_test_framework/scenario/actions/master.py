@@ -93,10 +93,21 @@ def _fault(ctx, params, deadline):
         manager.kill_master9(ctx.env)
     else:
         manager.kill_master9_instance(ctx.env, fault.target)
+    if fault.mode == "kill":
+        _invalidate_master_channel(ctx, fault.target)
     deadline.check()
     return StageOutput(
         {"fault": handle, "pid": process.pid, "started_s": fault.started_s}
     )
+
+
+def _invalidate_master_channel(ctx, target):
+    address = (
+        ctx.ops.master_target()
+        if target == "single"
+        else ctx.backend.manager.master_instance_target(ctx.env, target)
+    )
+    ctx.ops.invalidate_channel(address)
 
 
 def _restore_validate(params, plan):
@@ -126,6 +137,8 @@ def _restore(ctx, params, deadline):
     fault.restored = True
     deadline.check()
     same = current.pid == fault.process.pid
+    if fault.mode == "kill" and not same:
+        _invalidate_master_channel(ctx, fault.target)
     return StageOutput(
         {"pid": current.pid, "restored_s": ctx.clock()},
         [
@@ -161,12 +174,45 @@ def _master_json(ctx, target, path, deadline, post=False):
 
 
 def _ready_validate(params, plan):
-    p = _target(_params(params, plan, {"target", "inflight_zero"}))
+    p = _target(
+        _params(
+            params, plan, {"target", "inflight_zero", "client", "prefill_residual_max"}
+        )
+    )
     p.setdefault("inflight_zero", True)
     if type(p["inflight_zero"]) is not bool:
         raise ValueError("inflight_zero must be boolean")
+    if "client" in p:
+        plan.reference(p["client"], "ha_client")
+        if (
+            not p["inflight_zero"]
+            or type(p.get("prefill_residual_max")) is not int
+            or p["prefill_residual_max"] < 0
+        ):
+            raise ValueError(
+                "bounded clean requires strict owner zero and prefill bound"
+            )
+    elif "prefill_residual_max" in p:
+        raise ValueError("residual bound requires a live client")
     _layout(p, plan)
     return p
+
+
+def decode_residual_bound(client):
+    # MAX_CONCURRENCY is the client's global cap, shared by its targets.
+    value = int(client.flow._overrides["MAX_CONCURRENCY"])
+    if value < 1:
+        raise ValueError("invalid flow concurrency")
+    return value
+
+
+def owner_clean(count, loads, prefill_max=0, decode_max=0):
+    return (
+        count == 0
+        and loads is not None
+        and all(v <= prefill_max for v in loads["prefill"])
+        and all(v <= decode_max for v in loads["decode"])
+    )
 
 
 def _prefill_alive_validate(params, plan):
@@ -232,6 +278,12 @@ def _endpoint_loads(data):
 
 def _ready(ctx, params, deadline):
     expected = {"PREFILL": ctx.env.spec.n_prefill, "DECODE": ctx.env.spec.n_decode}
+    decode_max = (
+        decode_residual_bound(ctx.resource(params["client"], "ha_client"))
+        if "client" in params
+        else 0
+    )
+    prefill_max = params.get("prefill_residual_max", 0)
     samples = []
     artifact = ctx.artifact_dir / f"master-readiness-{len(ctx._resources)}.json"
     # Endpoint failures/missing fields are errors, never observations of zero.
@@ -289,10 +341,9 @@ def _ready(ctx, params, deadline):
                 if all(endpoint_rows):
                     endpoint_loads = _endpoint_loads(inflight)
             samples[-1]["endpoint_loads"] = endpoint_loads
+            samples[-1]["bounds"] = {"prefill": prefill_max, "decode": decode_max}
             clean = not params["inflight_zero"] or (
-                endpoint_loads is not None
-                and count == 0
-                and not any(v for values in endpoint_loads.values() for v in values)
+                owner_clean(count, endpoint_loads, prefill_max, decode_max)
             )
             if converged and clean:
                 break
@@ -453,7 +504,17 @@ HANDLERS += [
 # legacy case or its ambient HA skip gate.
 def _ha_validate(params, plan):
     p = _params(
-        params, plan, {"targets", "duration_s", "timeout_ms", "fallback", "live_events"}
+        params,
+        plan,
+        {
+            "targets",
+            "duration_s",
+            "timeout_ms",
+            "fallback",
+            "live_events",
+            "max_concurrency",
+            "replay_speed",
+        },
     )
     environment = getattr(plan, "environment", {})
     if environment.get("master_layout", "single") != "dual_standalone":
@@ -468,6 +529,16 @@ def _ha_validate(params, plan):
         p.setdefault(key, default)
         if type(p[key]) is not int or not lower <= p[key] <= upper:
             raise ValueError(f"{key} is outside the bounded HA range")
+    if "replay_speed" in p and (
+        type(p["replay_speed"]) not in (int, float)
+        or not math.isfinite(p["replay_speed"])
+        or p["replay_speed"] <= 0
+    ):
+        raise ValueError("invalid HA replay_speed")
+    if "max_concurrency" in p and (
+        type(p["max_concurrency"]) is not int or p["max_concurrency"] < 1
+    ):
+        raise ValueError("invalid HA max_concurrency")
     p.setdefault("live_events", False)
     if type(p["live_events"]) is not bool:
         raise ValueError("live_events must be boolean")
@@ -552,6 +623,14 @@ def _ha_start(ctx, params, deadline):
         timeout_ms=params["timeout_ms"],
         enable_fallback=params["fallback"],
         live_events=params["live_events"],
+        **(
+            {"replay_speed": params["replay_speed"]} if "replay_speed" in params else {}
+        ),
+        **(
+            {"max_concurrency": params["max_concurrency"]}
+            if "max_concurrency" in params
+            else {}
+        ),
     )
     flow._overrides["FETCH_OUTPUT_STREAM"] = "true"
     flow._overrides["ENABLE_FALLBACK"] = str(params["fallback"]).lower()
@@ -973,7 +1052,9 @@ def _batch(ctx, params, deadline):
     try:
         for _ in range(params["count"]):
             deadline.check()
-            row = records.issue(ops.next_request_id(), ctx.clock)
+            # Per-target EngineOps owns channels, not request identity. Keep IDs
+            # unique across successive HA probes in this environment.
+            row = records.issue(ctx.ops.next_request_id(), ctx.clock)
             batch.submit(
                 row,
                 dict(

@@ -44,6 +44,7 @@ class Backend:
         self.counter = 0
         self.pressured = None
         self.perf = {}
+        self.seed_holder = None
         for role, n in (("prefill", 2), ("decode", 4)):
             for i in range(n):
                 name = f"{role}-{i}"
@@ -93,10 +94,14 @@ class FakeTraffic(ClientRecords):
             owner.counter += 1
             rid = owner.counter
             prefill = f"prefill-{(rid-1)%2}"
-            if 5000 in owner.perf.values():
-                fast = [k for k, v in owner.perf.items() if v == 100]
-                if fast:
-                    prefill = fast[0]
+            if self.params["input_len"] > 100000:
+                owner.seed_holder = prefill
+            elif owner.seed_holder:
+                prefill = next(
+                    n
+                    for n in owner.engines
+                    if n.startswith("prefill") and n != owner.seed_holder
+                )
             row = self.issue(rid, self.ctx.clock)
             self.update(
                 row,
@@ -303,7 +308,7 @@ class BalanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         stages = {row["id"]: row for row in result["stages"]}
         self.assertEqual(stages["plain_p6"]["checks"][0]["status"], "FAIL")
-        self.assertEqual(stages["slow_second"]["status"], "BLOCKED")
+        self.assertEqual(stages["idle_replay"]["status"], "BLOCKED")
 
     def test_invalid_unbounded_traffic_and_wrong_ref(self):
         plan = PlanContext("test", {})
@@ -479,7 +484,7 @@ class BalanceTests(unittest.TestCase):
             requests=["cohort"],
             fleet="fleet",
             metric="max_share",
-            property="P1",
+            property="P3",
             relax=0,
         )
         with tempfile.TemporaryDirectory() as tmp, patch.object(

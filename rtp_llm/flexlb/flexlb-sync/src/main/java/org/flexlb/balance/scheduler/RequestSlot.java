@@ -2,19 +2,21 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.balance.scheduler.ExpirationTimer.AcceptanceDeadline;
+import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.ExpirationTimer.DecisionDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.debug.DebugRows;
 
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -29,8 +31,6 @@ import java.util.function.Function;
  * capabilities, never a writable state field or a generic transition API.
  */
 final class RequestSlot {
-
-    private static final int OUTSTANDING_ADMISSION_CLOSED = -1;
 
     // Diagnostic identity is never used for admission or lifecycle decisions.
     private static final java.util.concurrent.atomic.AtomicLong DEBUG_GENERATIONS =
@@ -60,48 +60,36 @@ final class RequestSlot {
     private CancelReason cancellationReason;
     /** One frontend result may win before its unlocked future completion runs. */
     private PublicationKind publicationWinner;
-    /** Last full WorkerStatus observation proving this generation is active. */
-    private long lastWorkerStatusAtMs;
 
     private boolean admissionOpen = true;
     private AdmissionMutation admissionMutation;
     private CancelReason pendingAdmissionCancelReason;
-    /** Expiry is an observed fact independent of which cancellation cause won. */
     private boolean pendingAdmissionInactivityExpired;
-    private AdmissionResources admissionResources;
     private RequestDeadline requestDeadline;
-    private AcceptanceDeadline acceptanceDeadline;
+    private DecisionDeadline decisionDeadline;
     private InactivityDeadline inactivityDeadline;
     private long inactivityTimeoutMs;
-
-    private AtomicInteger outstandingCounter;
-    private final int admissionPriority;
-    /** Index removal is nonblocking and never takes the registry admission lock. */
-    private final Consumer<RequestSlot> removeAdmissionCandidate;
+    private long lastWorkerStatusAtMs;
+    private static final long DECODE_HANDOFF_GRACE_MS = 10_000L;
+    private enum DecisionStage { UNDECIDED, WAITING_ENGINE, PREFILL_RUNNING, WAITING_DECODE, ACCEPTED }
+    private DecisionStage decisionStage = DecisionStage.UNDECIDED;
+    private boolean deliveryPredictionConsumed;
+    private long prefillCompletedAtMs;
+    private OptionalLong decisionExpiresAtMs = OptionalLong.empty();
+    private boolean decisionExpired;
 
     private PreemptionRegistration preemption;
 
     RequestSlot(
             RequestCompletionPublisher completionPublisher,
-            long requestId,
-            AtomicInteger outstandingCounter,
-            int admissionPriority,
-            Consumer<RequestSlot> removeAdmissionCandidate) {
+            long requestId) {
         this.completionPublisher = Objects.requireNonNull(
                 completionPublisher, "completionPublisher");
         this.requestId = requestId;
-        this.admissionPriority = admissionPriority;
-        this.removeAdmissionCandidate = Objects.requireNonNull(removeAdmissionCandidate);
         this.createdAtMs = System.currentTimeMillis();
         this.updatedAtMs = createdAtMs;
-        this.future = new RequestFuture(completionPublisher, this);
         this.lastWorkerStatusAtMs = createdAtMs;
-        this.outstandingCounter = Objects.requireNonNull(
-                outstandingCounter, "outstandingCounter");
-    }
-
-    int admissionPriority() {
-        return admissionPriority;
+        this.future = new RequestFuture(completionPublisher, this);
     }
 
     long requestId() {
@@ -132,7 +120,6 @@ final class RequestSlot {
             deliveryClaimKind = DeliveryClaimKind.BATCH_ENQUEUE;
             batchId = assignedBatchId;
         }
-        removeAdmissionCandidate.accept(this);
         transition(RequestState.Phase.DISPATCHING,
                 "batch enqueue started");
     }
@@ -144,7 +131,6 @@ final class RequestSlot {
         if (deliveryClaimKind == DeliveryClaimKind.NONE) {
             deliveryClaimKind = DeliveryClaimKind.ROUTE_DECISION;
         }
-        removeAdmissionCandidate.accept(this);
         transition(RequestState.Phase.DISPATCHING,
                 "route decision delivery started");
     }
@@ -228,15 +214,15 @@ final class RequestSlot {
                 "delivery_claim_kind", deliveryClaimKind.name(),
                 "batch_id", Long.toString(batchId),
                 "created_at_ms", createdAtMs, "updated_at_ms", updatedAtMs,
-                "effective_admission_priority", admissionPriority,
+                "effective_admission_priority", item == null ? null : item.priority(),
                 "engine_ownership", engineOwnership.name(),
                 "future_done", future.isDone(), "admission_open", admissionOpen,
                 "has_item", item != null, "has_engine_fence", false,
                 "has_preemption", preemption != null,
-                "has_admission_resources", admissionResources != null,
                 "has_admission_mutation", admissionMutation != null,
                 "has_request_deadline", requestDeadline != null,
-                "has_acceptance_deadline", acceptanceDeadline != null,
+                "has_decision_deadline", decisionDeadline != null,
+                "has_inactivity_deadline", inactivityDeadline != null,
                 "has_cancel_reason", cancellationReason != null,
                 "has_pending_admission_cancel", pendingAdmissionCancelReason != null);
     }
@@ -287,14 +273,50 @@ final class RequestSlot {
         return snapshot();
     }
 
-    long lastWorkerStatusAtMs() {
-        requireSlotLock("worker status activity lookup");
-        return lastWorkerStatusAtMs;
+    record EngineObservation(PreemptionReduction transition, DecisionDeadline obsoleteDeadline) {
+        static final EngineObservation STALE = new EngineObservation(PreemptionReduction.STALE, null);
     }
 
-    void observeWorkerStatus(long observedAtMs) {
-        requireSlotLock("worker status activity update");
-        lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, observedAtMs);
+    EngineObservation observePrefillFact(PrefillEndpoint source, RoleType role,
+                                         PrefillState.WorkerStatusFact fact, long nowMs) {
+        requireSlotLock("Prefill fact reduction");
+        if (!ownsPrefillFact(source, fact.item())) { return EngineObservation.STALE; }
+        lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);
+        PreemptionReduction transition = switch (fact.kind()) {
+            case ACTIVE -> {
+                observeDecisionPrefillActive();
+                yield reducePrefillActive(source, fact.item());
+            }
+            case COMPLETED -> {
+                observeDecisionPrefillCompleted(nowMs, role != RoleType.PDFUSION && item.decodeEp() != null);
+                yield role == RoleType.PDFUSION
+                        ? reduceWorkerTerminal(fact.item(), DeferredTerminal.worker(
+                                WorkerTerminalSource.PREFILL_BACKED, true, fact.errorCode()))
+                        : PreemptionReduction.NONE;
+            }
+            case FAILED -> reduceWorkerTerminal(fact.item(), DeferredTerminal.worker(
+                    WorkerTerminalSource.PREFILL_BACKED, false, fact.errorCode()));
+            case PRIORITY_CANCELED -> reducePriorityCanceled(source, fact.item());
+        };
+        reconcileDecisionEvidence();
+        return new EngineObservation(transition, detachObsoleteDecisionDeadline());
+    }
+
+    EngineObservation observeDecodeFact(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact, long nowMs) {
+        requireSlotLock("Decode fact reduction");
+        if (!ownsDecodeFact(source, fact.reservation())) { return EngineObservation.STALE; }
+        lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);
+        if (fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL) {
+            advanceDecision(DecisionStage.ACCEPTED, OptionalLong.empty());
+            markDecodeTerminalOwned();
+            return new EngineObservation(reduceWorkerTerminal(item, DeferredTerminal.worker(
+                    WorkerTerminalSource.DECODE_ENDPOINT_SETTLED, fact.errorCode() == 0L, fact.errorCode())),
+                    detachObsoleteDecisionDeadline());
+        }
+        // Both a repeated ACTIVE observation and first ACCEPTED prove Decode ownership.
+        DecodeAcceptance acceptance = markDecodeAccepted();
+        return new EngineObservation(PreemptionReduction.NONE,
+                acceptance.detachedDecisionDeadline());
     }
 
     StrategyErrorType timeoutErrorType() {
@@ -437,14 +459,9 @@ final class RequestSlot {
 
             RequestDeadline detachedRequestDeadline = requestDeadline;
             requestDeadline = null;
-            boolean armAcceptanceDeadline = expected.decodeEp() != null;
-            AdmissionCleanup detachedAdmission = armAcceptanceDeadline
-                    ? null : detachAdmissionCleanup(true);
             DeliveryConfirmation result = new DeliveryConfirmation(
                     permit,
                     detachedRequestDeadline,
-                    detachedAdmission,
-                    armAcceptanceDeadline,
                     enqueueStartedAtMs);
             transferred = true;
             assertInvariant();
@@ -484,7 +501,6 @@ final class RequestSlot {
         return ownsActiveGeneration()
                 && !future.isDone()
                 && preemption == null
-                && engineOwnership == EngineOwnership.DECODE_PENDING
                 && state != RequestState.Phase.ACKNOWLEDGED
                 && !deliveryClaimKind.isClaimed();
     }
@@ -581,6 +597,9 @@ final class RequestSlot {
         }
         admissionPendingTerminal = null;
         admissionPendingPrefillRetirement = null;
+        if (pendingRetirement != null || pendingTerminal != null && pendingTerminal.authoritativeWorker()) {
+            cancellationToResume = null;
+        }
         assertInvariant();
         return new AdmissionMutationCompletion(
                 true, cancellationToResume, pendingTerminal,
@@ -700,6 +719,67 @@ final class RequestSlot {
         return !state.isTerminal();
     }
 
+    void startDecisionTracking(WorkSnapshot precedingWork, long unstartedWorkMs, long nowMs) {
+        requireSlotLock("delivery prediction consumption");
+        Objects.requireNonNull(precedingWork, "precedingWork");
+        if (unstartedWorkMs < 0L) {
+            throw new IllegalArgumentException("unstarted work must be non-negative");
+        }
+        if (deliveryPredictionConsumed) {
+            throw new IllegalStateException("delivery prediction already consumed");
+        }
+        double lifetime = item.ctx().getConfig().getRequestLifecycle().getDecision().getLifetime();
+        if (!Double.isFinite(lifetime) || lifetime < 1.0) {
+            throw new IllegalArgumentException("invalid decision lifetime");
+        }
+        deliveryPredictionConsumed = true;
+        switch (decisionStage) {
+            case UNDECIDED -> {
+                decisionStage = DecisionStage.WAITING_ENGINE;
+                OptionalLong precedingMs = precedingWork.totalRemainingWorkMsAt(nowMs);
+                // Unknown work cannot prove a request is lost; inactivity detection still applies.
+                if (precedingMs.isPresent()) {
+                    long remainingMs = addWork(precedingMs.getAsLong(), unstartedWorkMs);
+                    double scaled = Math.ceil(remainingMs * lifetime);
+                    long durationMs = scaled >= Long.MAX_VALUE ? Long.MAX_VALUE : (long) scaled;
+                    decisionExpiresAtMs = OptionalLong.of(deadlineAfter(
+                            nowMs, addWork(durationMs, DECODE_HANDOFF_GRACE_MS)));
+                }
+            }
+            case WAITING_DECODE -> decisionExpiresAtMs = OptionalLong.of(
+                    deadlineAfter(prefillCompletedAtMs, DECODE_HANDOFF_GRACE_MS));
+            case PREFILL_RUNNING, ACCEPTED -> { }
+            case WAITING_ENGINE -> throw new IllegalStateException("delivery already observed");
+        }
+    }
+
+    private void observeDecisionPrefillActive() {
+        if (decisionStage == DecisionStage.UNDECIDED || decisionStage == DecisionStage.WAITING_ENGINE) {
+            advanceDecision(DecisionStage.PREFILL_RUNNING, OptionalLong.empty());
+        }
+    }
+
+    private void observeDecisionPrefillCompleted(long observedAtMs, boolean separateDecode) {
+        if (decisionStage == DecisionStage.ACCEPTED || decisionStage == DecisionStage.WAITING_DECODE) {
+            return;
+        }
+        prefillCompletedAtMs = observedAtMs;
+        advanceDecision(separateDecode ? DecisionStage.WAITING_DECODE : DecisionStage.ACCEPTED,
+                separateDecode && deliveryPredictionConsumed
+                        ? OptionalLong.of(deadlineAfter(observedAtMs, DECODE_HANDOFF_GRACE_MS))
+                        : OptionalLong.empty());
+    }
+
+    private void advanceDecision(DecisionStage next, OptionalLong nextDeadline) {
+        decisionStage = next;
+        decisionExpiresAtMs = nextDeadline;
+        decisionExpired = false;
+    }
+
+    private static long addWork(long precedingMs, long unstartedMs) {
+        return precedingMs > Long.MAX_VALUE - unstartedMs ? Long.MAX_VALUE : precedingMs + unstartedMs;
+    }
+
     private static long deadlineAfter(long startedAtMs, long durationMs) {
         if (startedAtMs < 0L || durationMs <= 0L) {
             throw new IllegalArgumentException("deadline requires a valid start and positive duration");
@@ -713,18 +793,40 @@ final class RequestSlot {
                 && nowMs >= deadlineAfter(lastWorkerStatusAtMs, inactivityTimeoutMs);
     }
 
-    /** Retain delivery uncertainty while normal Engine evidence and inactivity TTL remain active. */
+    boolean needsDecisionConfirmation() {
+        requireSlotLock("decision evidence lookup");
+        return ownsActiveGeneration() && item != null
+                && cancellationReason == null && pendingAdmissionCancelReason == null
+                && (decisionExpired && (decisionStage == DecisionStage.WAITING_ENGINE
+                    || decisionStage == DecisionStage.WAITING_DECODE));
+    }
+
+    /** Retain uncertainty as a diagnostic while normal ACK/status and TTL stay active. */
     boolean markAwaitingConfirmation(String message) {
         requireSlotLock("delivery confirmation wait");
         if (!ownsActiveGeneration() || cancellationReason != null
                 || pendingAdmissionCancelReason != null
-                || engineOwnership == EngineOwnership.DECODE_OWNED) {
+                || decisionStage == DecisionStage.PREFILL_RUNNING
+                || decisionStage == DecisionStage.ACCEPTED) {
             return false;
         }
         detail = "SUSPECTED_LOST: " + Objects.requireNonNull(message, "message");
         updatedAtMs = System.currentTimeMillis();
         assertInvariant();
         return true;
+    }
+
+    /** Matching Engine evidence resolves the diagnostic suspicion. */
+    void reconcileDecisionEvidence() {
+        requireSlotLock("decision evidence reconciliation");
+        if (!ownsActiveGeneration() || (decisionStage == DecisionStage.UNDECIDED || decisionStage == DecisionStage.WAITING_ENGINE)
+                || needsDecisionConfirmation() || cancellationReason != null
+                || pendingAdmissionCancelReason != null) {
+            return;
+        }
+        if (detail.startsWith("SUSPECTED_LOST")) {
+            detail = "Engine request observed; waiting for completion";
+        }
     }
 
     boolean installRequestDeadline(RequestDeadline exact) {
@@ -765,51 +867,52 @@ final class RequestSlot {
         return true;
     }
 
-    /**
-     * Return the delay needed by the semantic timer, or empty when acceptance
-     * is already owned by Decode or no admission resource remains attached.
-     */
-    OptionalLong acceptanceDeadlineDelayMs() {
-        requireSlotLock("acceptance deadline planning");
-        if (!ownsActiveGeneration()
-                || admissionResources == null
-                || admissionResources.acceptanceTimeoutMs <= 0L
-                || engineOwnership == EngineOwnership.DECODE_OWNED
-                || acceptanceDeadline != null) {
-            return OptionalLong.empty();
-        }
-        return OptionalLong.of(admissionResources.acceptanceTimeoutMs);
+    OptionalLong decisionDeadlineAtMs() {
+        requireSlotLock("decision deadline planning");
+        return ownsActiveGeneration() && decisionDeadline == null
+                ? decisionExpiresAtMs : OptionalLong.empty();
     }
 
-    boolean installAcceptanceDeadline(AcceptanceDeadline exact) {
-        requireSlotLock("acceptance deadline installation");
-        if (!ownsActiveGeneration()
-                || admissionResources == null
-                || admissionResources.acceptanceTimeoutMs <= 0L
-                || engineOwnership == EngineOwnership.DECODE_OWNED) {
+    boolean installDecisionDeadline(DecisionDeadline exact) {
+        requireSlotLock("decision deadline installation");
+        if (!ownsActiveGeneration() || decisionDeadline != null
+                || !decisionExpiresAtMs.equals(OptionalLong.of(exact.deadlineAtMs()))) {
             return false;
         }
-        if (acceptanceDeadline != null) {
-            throw new IllegalStateException(
-                    "acceptance deadline already installed for " + requestId);
-        }
-        acceptanceDeadline = exact;
-        assertInvariant();
+        decisionDeadline = exact;
         return true;
     }
 
-    AcceptanceExpiry expireAcceptanceDeadline(AcceptanceDeadline exact) {
-        requireSlotLock("acceptance deadline expiry");
-        if (acceptanceDeadline != exact) {
+    /** Detach an old phase's capability before arming the next phase. */
+    DecisionDeadline detachObsoleteDecisionDeadline() {
+        requireSlotLock("decision deadline reconciliation");
+        if (decisionDeadline == null || decisionExpiresAtMs.equals(
+                OptionalLong.of(decisionDeadline.deadlineAtMs()))) {
             return null;
         }
-        acceptanceDeadline = null;
-        if (item != null) {
-            markAwaitingConfirmation("Decode acceptance not observed before acceptance timeout");
+        return detachDecisionDeadline();
+    }
+
+    DecisionExpiry expireDecisionDeadline(DecisionDeadline exact) {
+        requireSlotLock("decision deadline expiry");
+        if (decisionDeadline != exact) {
+            return null;
         }
-        AdmissionCleanup cleanup = detachAdmissionCleanup(false);
+        decisionDeadline = null;
+        // An Engine fact may have changed the phase before the old timer fired.
+        if (!decisionExpiresAtMs.equals(OptionalLong.of(exact.deadlineAtMs()))) {
+            return null;
+        }
+        decisionExpired = true;
+        decisionExpiresAtMs = OptionalLong.empty();
+        boolean needsConfirmation = needsDecisionConfirmation();
+        if (needsConfirmation) {
+            markAwaitingConfirmation(decisionStage == DecisionStage.WAITING_ENGINE
+                    ? "no Engine request evidence before visibility deadline"
+                    : "Decode acceptance missing after Prefill completion");
+        }
         assertInvariant();
-        return new AcceptanceExpiry(cleanup);
+        return new DecisionExpiry(item, needsConfirmation);
     }
 
     /** Atomically detach all timer-owned capabilities during timer close. */
@@ -817,100 +920,18 @@ final class RequestSlot {
         requireSlotLock("deadline detach for timer close");
         ExpirationTimer.DetachedDeadlines detached =
                 new ExpirationTimer.DetachedDeadlines(
-                        requestDeadline, acceptanceDeadline, inactivityDeadline);
+                        requestDeadline, decisionDeadline, inactivityDeadline);
         requestDeadline = null;
-        acceptanceDeadline = null;
+        decisionDeadline = null;
         inactivityDeadline = null;
         assertInvariant();
         return detached;
     }
 
-    /**
-     * Consume the raw release callback at the boundary and immediately hide it
-     * behind an exact, one-shot admission capability.
-     *
-     * @return cleanup to execute immediately when attachment lost a legal
-     *         lifecycle race; null when the slot retained the capability
-     */
-    AdmissionCleanup bindAdmissionResources(
-            Runnable releaseAction,
-            long acceptanceTimeoutMs) {
-        requireSlotLock("admission resource binding");
-        if (acceptanceTimeoutMs < 0L) {
-            throw new IllegalArgumentException(
-                    "acceptanceTimeoutMs must be non-negative");
-        }
-        if (admissionResources != null) {
-            // Ownership of releaseAction has not crossed into the slot.
-            throw new IllegalStateException(
-                    "admission resources already installed for " + requestId);
-        }
-        AdmissionResources exact = new AdmissionResources(
-                releaseAction, acceptanceTimeoutMs);
-        if (!ownsActiveGeneration() || !isOpen()) {
-            return new AdmissionCleanup(exact, null);
-        }
-        admissionResources = exact;
-        if (engineOwnership == EngineOwnership.DECODE_OWNED) {
-            AdmissionCleanup cleanup = detachAdmissionCleanup(true);
-            assertInvariant();
-            return cleanup;
-        }
-        assertInvariant();
-        return null;
-    }
-
-    private AdmissionCleanup detachAdmissionCleanup(
-            boolean detachAcceptanceDeadline) {
-        AdmissionResources resources = admissionResources;
-        admissionResources = null;
-        AcceptanceDeadline deadline = detachAcceptanceDeadline
-                ? acceptanceDeadline : null;
-        if (detachAcceptanceDeadline) {
-            acceptanceDeadline = null;
-        }
-        return resources == null && deadline == null
-                ? null : new AdmissionCleanup(resources, deadline);
-    }
-
-    // ==================== Outstanding request permit ====================
-
-    /** The admission owner transfers this exact ticket without exposing a free slot. */
-    void transferOutstandingPermit() {
-        requireSlotLock("outstanding permit transfer");
-        if (slotPhase != SlotPhase.TERMINALIZING || outstandingCounter == null) {
-            throw new IllegalStateException("permit transfer requires an owned local terminal");
-        }
-        outstandingCounter = null;
-    }
-
-    void releaseOutstandingPermit() {
-        synchronized (this) {
-            removeAdmissionCandidate.accept(this);
-            AtomicInteger counter = outstandingCounter;
-            outstandingCounter = null;
-            if (counter != null) {
-                releaseOutstandingPermit(counter);
-            }
-            assertInvariant();
-        }
-    }
-
-    /** Roll back a registration which has not published its slot yet. */
-    static void releaseOutstandingPermit(AtomicInteger counter) {
-        while (true) {
-            int current = counter.get();
-            if (current == OUTSTANDING_ADMISSION_CLOSED) {
-                return;
-            }
-            if (current <= 0) {
-                throw new IllegalStateException(
-                        "outstanding request permit counter underflow");
-            }
-            if (counter.compareAndSet(current, current - 1)) {
-                return;
-            }
-        }
+    private DecisionDeadline detachDecisionDeadline() {
+        DecisionDeadline deadline = decisionDeadline;
+        decisionDeadline = null;
+        return deadline;
     }
 
     // ==================== Cancellation first cause ====================
@@ -929,7 +950,7 @@ final class RequestSlot {
         return cancellationReason;
     }
 
-    RequestState rememberCancellation(
+    RequestState markCancellationRequested(
             CancelReason reason,
             String detail) {
         requireSlotLock("cancellation claim");
@@ -1344,16 +1365,18 @@ final class RequestSlot {
         return preemption;
     }
 
-    /** Authoritative Decode ownership releases its acceptance watch and admission resources. */
+    /** Authoritative Decode ownership ends the decision-confirmation watch. */
     DecodeAcceptance markDecodeAccepted() {
         requireSlotLock("Decode acceptance");
         if (!ownsActiveGeneration()) {
             return DecodeAcceptance.NONE;
         }
         engineOwnership = EngineOwnership.DECODE_OWNED;
-        DecodeAcceptance accepted = new DecodeAcceptance(detachAdmissionCleanup(true));
+        advanceDecision(DecisionStage.ACCEPTED, OptionalLong.empty());
+        reconcileDecisionEvidence();
+        DecisionDeadline detachedDeadline = detachDecisionDeadline();
         assertInvariant();
-        return accepted;
+        return new DecodeAcceptance(detachedDeadline);
     }
 
     void markDecodeTerminalOwned() {
@@ -1470,7 +1493,6 @@ final class RequestSlot {
         boolean transferred = false;
         try {
             slotPhase = SlotPhase.TERMINALIZING;
-            removeAdmissionCandidate.accept(this);
             admissionOpen = false;
             if (publication != null) {
                 publicationWinner = PublicationKind.TERMINAL;
@@ -1484,14 +1506,14 @@ final class RequestSlot {
 
             RequestDeadline claimedRequestDeadline = requestDeadline;
             requestDeadline = null;
-            AdmissionCleanup admissionCleanup = detachAdmissionCleanup(true);
+            DecisionDeadline detachedDecisionDeadline = detachDecisionDeadline();
             InactivityDeadline claimedInactivityDeadline = inactivityDeadline;
             inactivityDeadline = null;
             TerminalResources terminalResources =
-                    claimedRequestDeadline == null && admissionCleanup == null && claimedInactivityDeadline == null
+                    claimedRequestDeadline == null && detachedDecisionDeadline == null && claimedInactivityDeadline == null
                             ? null
                             : new TerminalResources(
-                                    claimedRequestDeadline, admissionCleanup, claimedInactivityDeadline);
+                                    claimedRequestDeadline, detachedDecisionDeadline, claimedInactivityDeadline);
             TerminalAction action = new TerminalAction(
                     this,
                     item,
@@ -1554,9 +1576,8 @@ final class RequestSlot {
         admissionMutation = null;
         pendingAdmissionCancelReason = null;
         pendingAdmissionInactivityExpired = false;
-        admissionResources = null;
         requestDeadline = null;
-        acceptanceDeadline = null;
+        decisionDeadline = null;
         inactivityDeadline = null;
         slotPhase = SlotPhase.TOMBSTONE;
         assertInvariant();
@@ -1634,11 +1655,6 @@ final class RequestSlot {
                     "terminalizing request still owns admission "
                             + requestId);
         }
-        if (acceptanceDeadline != null && admissionResources == null) {
-            throw new IllegalStateException(
-                    "acceptance deadline has no admission resources for "
-                            + requestId);
-        }
         if (slotPhase != SlotPhase.TOMBSTONE) {
             return;
         }
@@ -1649,10 +1665,8 @@ final class RequestSlot {
                 || admissionMutation != null
                 || pendingAdmissionCancelReason != null
                 || pendingAdmissionInactivityExpired
-                || admissionResources != null
                 || requestDeadline != null
-                || acceptanceDeadline != null
-                || inactivityDeadline != null) {
+                || decisionDeadline != null || inactivityDeadline != null) {
             throw new IllegalStateException(
                     "tombstone retains request-owned state for " + requestId);
         }
@@ -1756,92 +1770,30 @@ final class RequestSlot {
                         false, null, null, null, false);
     }
 
-    record AcceptanceExpiry(AdmissionCleanup cleanup) {
+    record DecisionExpiry(
+            ScheduledRequest item,
+            boolean needsConfirmation) {
     }
 
     record DeliveryConfirmation(
             PublicationPermit publication,
             RequestDeadline requestDeadline,
-            AdmissionCleanup admissionCleanup,
-            boolean armAcceptanceDeadline,
             long batchEnqueueStartedAtMs) {
-    }
-
-    /**
-     * Exact one-shot wrapper for dispatcher admission resources. The raw
-     * callback is never returned after this capability has been created.
-     */
-    private static final class AdmissionResources {
-        private final Runnable releaseAction;
-        private final long acceptanceTimeoutMs;
-        private boolean released;
-
-        private AdmissionResources(
-                Runnable releaseAction,
-                long acceptanceTimeoutMs) {
-            this.releaseAction = releaseAction;
-            this.acceptanceTimeoutMs = acceptanceTimeoutMs;
-        }
-
-        private synchronized void release() {
-            if (released) {
-                return;
-            }
-            released = true;
-            releaseAction.run();
-        }
-    }
-
-    /** Transferable exact cleanup; owns both admission and timer capabilities. */
-    static final class AdmissionCleanup {
-        private final AdmissionResources resources;
-        private final AcceptanceDeadline acceptanceDeadline;
-        private boolean released;
-
-        private AdmissionCleanup(
-                AdmissionResources resources,
-                AcceptanceDeadline acceptanceDeadline) {
-            this.resources = resources;
-            this.acceptanceDeadline = acceptanceDeadline;
-        }
-
-        synchronized void release(ExpirationTimer timer) {
-            if (released) {
-                return;
-            }
-            released = true;
-            Throwable failure = null;
-            if (acceptanceDeadline != null) {
-                try {
-                    timer.cancel(acceptanceDeadline);
-                } catch (Throwable timerFailure) {
-                    failure = timerFailure;
-                }
-            }
-            if (resources != null) {
-                try {
-                    resources.release();
-                } catch (Throwable resourceFailure) {
-                    failure = appendFailure(failure, resourceFailure);
-                }
-            }
-            rethrowCleanup(failure);
-        }
     }
 
     /** Exact terminal cleanup detached atomically at ACTIVE -> TERMINALIZING. */
     static final class TerminalResources {
         private final RequestDeadline requestDeadline;
         private final InactivityDeadline inactivityDeadline;
-        private final AdmissionCleanup admissionCleanup;
+        private final DecisionDeadline detachedDecisionDeadline;
         private boolean released;
 
         private TerminalResources(
                 RequestDeadline requestDeadline,
-                AdmissionCleanup admissionCleanup, InactivityDeadline inactivityDeadline) {
+                DecisionDeadline detachedDecisionDeadline, InactivityDeadline inactivityDeadline) {
             this.requestDeadline = requestDeadline;
             this.inactivityDeadline = inactivityDeadline;
-            this.admissionCleanup = admissionCleanup;
+            this.detachedDecisionDeadline = detachedDecisionDeadline;
         }
 
         synchronized void release(ExpirationTimer timer) {
@@ -1851,11 +1803,8 @@ final class RequestSlot {
             released = true;
             Throwable failure = null;
             if (inactivityDeadline != null) {
-                try {
-                    timer.cancel(inactivityDeadline);
-                } catch (Throwable timerFailure) {
-                    failure = timerFailure;
-                }
+                try { timer.cancel(inactivityDeadline); }
+                catch (Throwable timerFailure) { failure = timerFailure; }
             }
             if (requestDeadline != null) {
                 try {
@@ -1864,9 +1813,9 @@ final class RequestSlot {
                     failure = appendFailure(failure, timerFailure);
                 }
             }
-            if (admissionCleanup != null) {
+            if (detachedDecisionDeadline != null) {
                 try {
-                    admissionCleanup.release(timer);
+                    timer.cancel(detachedDecisionDeadline);
                 } catch (Throwable admissionFailure) {
                     failure = appendFailure(failure, admissionFailure);
                 }
@@ -1886,8 +1835,6 @@ final class RequestSlot {
         private final PublicationKind kind;
         private final AtomicBoolean claimed = new AtomicBoolean();
         private final AtomicBoolean closed = new AtomicBoolean();
-        private final AtomicBoolean terminalOutstandingResolved =
-                new AtomicBoolean();
 
         PublicationPermit(
                 RequestCompletionPublisher publisher,
@@ -1922,21 +1869,19 @@ final class RequestSlot {
         BooleanSupplier claimTerminalResponse(Response response) {
             requireTerminal("external response");
             claim();
-            return terminalPublication(claimResult() ? () -> future.completeOwned(response) : () -> false);
+            return claimResult() ? () -> future.completeOwned(response) : () -> false;
         }
 
         BooleanSupplier claimFailure(Throwable failure) {
             requireTerminal("failure");
             claim();
-            return terminalPublication(claimResult()
-                    ? () -> future.completeExceptionallyOwned(failure) : () -> false);
+            return claimResult() ? () -> future.completeExceptionallyOwned(failure) : () -> false;
         }
 
         BooleanSupplier claimCancellation(boolean mayInterruptIfRunning) {
             requireTerminal("cancellation");
             claim();
-            return terminalPublication(claimResult()
-                    ? () -> future.cancelOwned(mayInterruptIfRunning) : () -> false);
+            return claimResult() ? () -> future.cancelOwned(mayInterruptIfRunning) : () -> false;
         }
 
         private boolean claimResult() {
@@ -1948,33 +1893,13 @@ final class RequestSlot {
         /** Abandon a permit only when no other submitter consumed it. */
         void abandonIfUnclaimed() {
             if (claimed.compareAndSet(false, true)) {
-                resolveTerminalOutstanding();
                 closePublication();
             }
         }
 
         /** Settle a claim whose publication could not enter its executor. */
         void abortClaimedPublication() {
-            resolveTerminalOutstanding();
             closePublication();
-        }
-
-        private BooleanSupplier terminalPublication(BooleanSupplier publication) {
-            return () -> {
-                try {
-                    return publication.getAsBoolean();
-                } finally {
-                    resolveTerminalOutstanding();
-                }
-            };
-        }
-
-        private void resolveTerminalOutstanding() {
-            if (kind == PublicationKind.TERMINAL
-                    && terminalOutstandingResolved.compareAndSet(
-                            false, true)) {
-                slot.releaseOutstandingPermit();
-            }
         }
 
         private void requireTerminal(String operation) {
@@ -2032,8 +1957,10 @@ enum WorkerTerminalSource {
 }
 
 /** Non-persistent decision produced by the RequestSlot acceptance transition. */
-record DecodeAcceptance(RequestSlot.AdmissionCleanup admissionCleanup) {
-    static final DecodeAcceptance NONE = new DecodeAcceptance(null);
+record DecodeAcceptance(
+        ExpirationTimer.DecisionDeadline detachedDecisionDeadline) {
+    static final DecodeAcceptance NONE =
+            new DecodeAcceptance(null);
 }
 
 /** First ordinary terminal observed while priority Cancel owns the slot. */

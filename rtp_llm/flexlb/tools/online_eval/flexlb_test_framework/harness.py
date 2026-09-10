@@ -871,10 +871,8 @@ class EnvSpec:
     raw_config: Optional[str] = None
     spring_profile: str = "default"
     master_debug_log: bool = False
-    # file (static endpoints.json → env vars, NoOpServiceDiscovery)
-    # | domain (explicit DOMAIN_ADDRESS)
-    # | discovery_file (dynamic: mock --discovery-file, master FLEXLB_DISCOVERY_FILE
-    #   → FileServiceDiscovery; /add_engine + /remove_engine keep it in sync)
+    # domain uses MODEL_SERVICE_CONFIG.hosts; file/discovery_file use
+    # the mock-maintained MODEL_SERVICE_CONFIG.discovery_file.
     discovery: str = "file"
     domain_addrs: dict = field(default_factory=dict)  # {prefill: "a,b", decode: "a,b"}
     # Per-role KV pool size in BLOCKS — forwarded to the Java mock as
@@ -1226,12 +1224,7 @@ class EnvManager:
             "--env-file",
             str(env.run_dir / "flexlb_env.txt"),
         ]
-        if spec.discovery == "discovery_file":
-            # Dynamic file discovery: the mock maintains the domain→hosts
-            # mapping (kept in sync by /add_engine + /remove_engine) and the
-            # master re-reads it via FLEXLB_DISCOVERY_FILE → FileServiceDiscovery
-            # (mirrors run_online_eval.sh FLEXLB_DISCOVERY_FILE=auto wiring).
-            argv += ["--discovery-file", str(env.discovery_file)]
+        argv += ["--discovery-file", str(env.discovery_file)]
         proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / "mock_engine.log")
         env.mock = proc
         if not wait_for_port("127.0.0.1", env.mock_http_port, 60):
@@ -1247,7 +1240,7 @@ class EnvManager:
             raise RuntimeError(
                 f"mock engine did not write endpoint file: {env.endpoint_file}"
             )
-        if spec.discovery == "discovery_file" and not wait_for(
+        if not wait_for(
             lambda: env.discovery_file.exists()
             and env.discovery_file.stat().st_size > 0,
             10,
@@ -1261,15 +1254,7 @@ class EnvManager:
     # -- master ------------------------------------------------------------
 
     def _master_env(self, env: FlexEnv, mspec: Optional[MasterSpec] = None) -> dict:
-        """Master JVM env.
-
-        *mspec* is None on the single-master legacy path (byte-identical
-        behaviour).  A MasterSpec layers the per-instance keys on top of
-        the shared base: HIPPO_ROLE (default = the shared label role, the
-        mutual-backup pairing), FLEXLB_ADVERTISED_IP (Tier-2/3),
-        FLEXLB_SYNC_CONSISTENCY_CONFIG (Tier-2/3, built from the live ZK
-        helper connectString) and the per-instance extra_env.
-        """
+        """Build master configuration documents and the existing HA deployment identity."""
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
         if "FLEXLB_CONFIG" in spec.master_env:
@@ -1294,18 +1279,12 @@ class EnvManager:
         menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
         if spec.discovery == "file":
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
-            for key, value in payload.get("env", {}).items():
-                menv[key] = str(value)
+            menv["MODEL_SERVICE_CONFIG"] = payload["env"]["MODEL_SERVICE_CONFIG"]
         elif spec.discovery == "discovery_file":
-            # Dynamic file discovery: MODEL_SERVICE_CONFIG (domain endpoints)
-            # comes from the mock's endpoint-file env section; host resolution
-            # itself goes through FileServiceDiscovery reading the discovery
-            # file the mock keeps in sync (DOMAIN_ADDRESS env vars unused).
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
-            service_config = payload.get("env", {}).get("MODEL_SERVICE_CONFIG")
-            if service_config:
-                menv["MODEL_SERVICE_CONFIG"] = str(service_config)
-            menv["FLEXLB_DISCOVERY_FILE"] = str(env.discovery_file)
+            service_config = json.loads(payload["env"]["MODEL_SERVICE_CONFIG"])
+            service_config["discovery_file"] = str(env.discovery_file)
+            menv["MODEL_SERVICE_CONFIG"] = json.dumps(service_config)
         elif spec.discovery == "domain":
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(
                 {
@@ -1329,21 +1308,22 @@ class EnvManager:
                 },
                 separators=(",", ":"),
             )
-            menv["DOMAIN_ADDRESS:mock.prefill.hosts.address"] = spec.domain_addrs[
-                "prefill"
-            ]
-            menv["DOMAIN_ADDRESS:mock.decode.hosts.address"] = spec.domain_addrs[
-                "decode"
-            ]
+            service_config = json.loads(menv["MODEL_SERVICE_CONFIG"])
+            service_config["hosts"] = {
+                f"mock.{role}.hosts.address": [
+                    host.strip()
+                    for host in spec.domain_addrs[role].split(",")
+                    if host.strip()
+                ]
+                for role in ("prefill", "decode")
+            }
+            menv["MODEL_SERVICE_CONFIG"] = json.dumps(service_config)
         menv.update(spec.master_env)  # spec overrides come last
         if mspec is not None:
             # Per-instance layer (HA dual-master path only — the legacy
             # single-master path keeps mspec None and never reaches here).
-            if mspec.hippo_role:
-                menv["HIPPO_ROLE"] = mspec.hippo_role
-            if mspec.advertised_ip:
-                menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
             if spec.zk_consistency is not None:
+                menv["HIPPO_ROLE"] = mspec.hippo_role or f"flexlb_ft_{spec.label}"
                 if not env.zk_connect_string:
                     # Fail-closed: a master must never boot with
                     # needConsistency=true against a missing/dead ZK —
@@ -2074,26 +2054,6 @@ class ClientOps:
         proc.terminate(timeout_s=timeout_s)
         rc = proc.proc.returncode if proc.proc.returncode is not None else -1
         return LoadClientResult(output_dir, rc)
-
-
-# ---------------------------------------------------------------------------
-# TTL-settle drain window (shared by every case whose leaked inflight slots
-# settle via the master's stale-inflight TTL path)
-# ---------------------------------------------------------------------------
-
-# Worst-case master-side TTL settle: staleInflightTimeoutMs (30s) + the
-# ExpirationTimer @Scheduled(60s) sweep + 5s margin.  A leaked slot's TTL
-# expires at t+30s, but the sweeper only visits on its 60s period, so with
-# worst-phase alignment the ledger entry survives until ~t+90s after its
-# last touch.  Drain windows shorter than this (the legacy TTL+margin=60s
-# or the 90s caps) let the residue bleed into the NEXT case on the shared
-# env — the integration-round cascade (2026-09-01: 16 false
-# FAILs with scheduler=4/8/5 constant residue and an all-zero engine
-# side; every affected case was solo-PASS on a clean env).  Waiting longer
-# is "wait for the settle", NOT a weaker assertion: the target stays
-# all-zero and a true leak (a slot that is never released) still times
-# out and fails the caller.
-TTL_DRAIN_TIMEOUT_S = 95.0
 
 
 # ---------------------------------------------------------------------------
@@ -2853,7 +2813,7 @@ def _wait_master_topology(ops, role: str, expected: int, timeout_s: float) -> bo
     alone is NOT a safe convergence signal: the health 3-strike demotion
     lands well before the eviction removes the endpoint from the routable
     set, so waiting on alive lets traffic hit a dead-but-still-routable
-    port (see elastic_rebalance baseline).
+    port.
     """
 
     def converged() -> bool:

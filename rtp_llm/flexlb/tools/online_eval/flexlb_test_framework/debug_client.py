@@ -131,10 +131,10 @@ def check_scheduler_tombstone(row: dict) -> tuple[bool, str]:
         "has_item",
         "has_engine_fence",
         "has_preemption",
-        "has_admission_resources",
         "has_admission_mutation",
         "has_request_deadline",
-        "has_acceptance_deadline",
+        "has_decision_deadline",
+        "has_inactivity_deadline",
         "has_cancel_reason",
         "has_pending_admission_cancel",
     )

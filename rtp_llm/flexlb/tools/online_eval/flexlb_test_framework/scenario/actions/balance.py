@@ -497,6 +497,7 @@ def _check_validate(params, plan):
             "min_success",
             "min_workers",
             "allow_admission",
+            "diagnostic_reason",
         },
         {"requests", "fleet", "metric", "property"},
     )
@@ -526,6 +527,11 @@ def _check_validate(params, plan):
         "target_share",
         "latency_ratio",
     }
+    if "diagnostic_reason" in p and (
+        not isinstance(p["diagnostic_reason"], str)
+        or not p["diagnostic_reason"].strip()
+    ):
+        raise ValueError("diagnostic_reason must explain a retired contract")
     if p["metric"] not in metrics or p["property"] not in {
         "P1",
         "P2",
@@ -693,6 +699,27 @@ def _check(ctx, params, deadline):
                     )
                 ],
             )
+    if params.get("diagnostic_reason"):
+        evidence = dict(
+            metric=metric,
+            value=value,
+            count=n,
+            distribution=dict(dist),
+            reason=params["diagnostic_reason"],
+        )
+        return StageOutput(
+            {},
+            [
+                CheckResult(
+                    "property",
+                    "SKIP",
+                    params["diagnostic_reason"],
+                    actual=value,
+                    evidence=evidence,
+                )
+            ],
+            [_artifact(ctx, "diagnostic", evidence)],
+        )
     report = GradeReport(
         run_grade=params.get("grade", ctx.instance.get("grade", "normal"))
     )

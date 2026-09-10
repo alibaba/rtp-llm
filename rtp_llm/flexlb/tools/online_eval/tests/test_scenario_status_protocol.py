@@ -446,7 +446,9 @@ class StatusProtocolTest(unittest.TestCase):
             perf=fault_env_perf(),
             master_profile="batch-window",
             discovery="discovery_file",
-            config_overrides=ConfigOverride(ordering="priority", queue_timeout_ms=OMIT),
+            config_overrides=ConfigOverride(
+                ordering="priority", queue_timeout_ms=OMIT, request_timeout_ms=30000
+            ),
         )
         registry = handlers()
         registry.update({h.name: h for h in status.HANDLERS})

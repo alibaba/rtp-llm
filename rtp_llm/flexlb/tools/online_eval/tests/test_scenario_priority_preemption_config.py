@@ -75,7 +75,10 @@ class ConfigRejectionProgram(unittest.TestCase):
         expected = configs
         expected[0]["autoTpmEnabled"] = True
         expected[1]["scheduler"]["ordering"]["defaultPriority"] = 50
-        del expected[2]["scheduler"]["ordering"]["preemption"]["engineCancellation"]
+        expected[2]["scheduler"]["ordering"]["preemption"]["engineCancellation"] = {
+            "ackTimeoutMs": 50,
+            "completionTimeoutMs": 1000,
+        }
         self.assertEqual(expected, backend.raw)
         self.assertEqual([2, 3, 4], [e["env_epoch"] for e in evidence])
         self.assertEqual(

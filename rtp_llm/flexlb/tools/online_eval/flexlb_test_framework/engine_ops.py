@@ -270,6 +270,12 @@ class EngineOps:
                 pass
         self._channels.clear()
 
+    def invalidate_channel(self, target: str) -> None:
+        """Forget only a restarted endpoint; engine channels remain reusable."""
+        channel = self._channels.pop(target, None)
+        if channel is not None:
+            channel.close()
+
     def _channel(self, target: str):
         if target not in self._channels:
             self._channels[target] = grpc.insecure_channel(
@@ -715,15 +721,7 @@ class EngineOps:
         )
 
     def master_scheduler_inflight(self) -> int:
-        """Global scheduler inflight request count (-1 on endpoint failure).
-
-        Unlike the per-endpoint view, this survives engine eviction: when a
-        dead engine is 3-strike-evicted its endpoint row disappears from
-        ``prefill_endpoints`` (per-endpoint lookups return -1) while the
-        scheduler-level inflight bookkeeping lingers until the stale-inflight
-        TTL / eviction cleanup drains it — which is exactly what the TTL
-        cleanup cases need to observe.
-        """
+        """Canonical Master request count; -1 means the endpoint could not be read."""
         data = self.master_inflight()
         if data is None:
             return -1
@@ -836,63 +834,6 @@ class EngineOps:
                 key = name
             result[key] = value
         return result
-
-    def master_ttl_eviction_counts(
-        self, engine_ip: Optional[str] = None
-    ) -> Optional[dict]:
-        """TTL-eviction counters aggregated by ledger role — the assertion
-        channel for TTL cases (no G3 timeline file involved).
-
-        Master counter: Java ``app.flexlb.inflight.ttl.expired.qps``, a
-        Counter exposed as
-        ``flexlb_app_flexlb_inflight_ttl_expired_qps_total`` with tags
-        {role, engineIp, reason}, reported at the 60s maintenance-sweep
-        granularity, two levels:
-
-          * role=SCHEDULER, engineIp="scheduler" — the scheduler's own
-            request-slot ledger sweep (ExpirationTimer);
-          * role=PREFILL/DECODE, engineIp=<real engine IP> — per-endpoint
-            ledger orphan sweeps (EndpointRegistry).
-
-        Returns ``{"scheduler": v, "prefill": Σ, "decode": Σ}``.  A
-        role's value is None when its series is absent — the
-        sparse-counter "never happened" state, which delta callers
-        treat as a 0 baseline (see master_prometheus_metric).  Overall
-        None means the exposition endpoint was unreachable — NOT zero
-        evictions; assertions must fail rather than compute a delta
-        from it.  ``engine_ip`` restricts PREFILL/DECODE aggregation to
-        one engine's series (the scheduler series, tagged
-        engineIp="scheduler", only survives that filter when
-        engine_ip="scheduler" is passed explicitly).
-
-        Case usage (before/after delta):
-
-            before = ops.master_ttl_eviction_counts()
-            ...  # park a request past its inflight TTL
-            after = ops.master_ttl_eviction_counts()
-            delta = after["decode"] - (before["decode"] or 0)
-            assert delta >= 1  # after waiting out the 60s sweep
-
-        The 60s maintenance-sweep granularity means the counter lags
-        the eviction event: after-side assertions must poll (wait_for)
-        instead of sampling once.
-        """
-        body = self.master_prometheus_text()
-        if body is None:
-            return None
-        label_filter = {"engineIp": engine_ip} if engine_ip is not None else None
-        counts: dict = {"scheduler": None, "prefill": None, "decode": None}
-        for _, label_values, value in parse_prometheus_samples(
-            body, "flexlb_app_flexlb_inflight_ttl_expired", label_filter
-        ):
-            role = label_values.get("role", "")
-            if role == "SCHEDULER":
-                counts["scheduler"] = (counts["scheduler"] or 0.0) + value
-            elif role == "PREFILL":
-                counts["prefill"] = (counts["prefill"] or 0.0) + value
-            elif role == "DECODE":
-                counts["decode"] = (counts["decode"] or 0.0) + value
-        return counts
 
     # -- composite request helper ------------------------------------------
 

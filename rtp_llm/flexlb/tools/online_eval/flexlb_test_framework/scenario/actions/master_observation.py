@@ -296,9 +296,21 @@ def checkpoint(ctx, p, deadline):
 
 
 def _probe_validate(params, plan):
-    p = _params(params, plan, {"requests", "max_prefill_share"}, {"requests"})
+    p = _params(
+        params,
+        plan,
+        {"requests", "max_prefill_share", "mode", "max_consecutive"},
+        {"requests"},
+    )
     plan.reference(p["requests"], "requests")
     _number(p, "max_prefill_share", 0.75, 0.5, 1)
+    p.setdefault("mode", "share")
+    if p["mode"] not in {"share", "avoidance", "rotation"}:
+        raise ValueError("invalid probe distribution mode")
+    if p["mode"] == "rotation" and (
+        type(p.get("max_consecutive")) is not int or p["max_consecutive"] < 1
+    ):
+        raise ValueError("rotation requires explicit max_consecutive")
     return p
 
 
@@ -326,13 +338,51 @@ def probe_distribution(ctx, p, deadline):
         and total / len(rows) >= 0.95
         and share <= p["max_prefill_share"]
     )
+    if p.get("mode", "share") != "share":
+        from .execution_evidence import (
+            avoidance,
+            execution_batches,
+            read_events,
+            rotation,
+        )
+
+        events = read_events(ctx.env.run_dir / "engine_events.jsonl")
+        if events is None:
+            raise ValueError("probe distribution requires execution sidecar")
+        ids = {r["wire_request_id"] for r in rows if request_success(r)}
+        batches = execution_batches(events, ids)
+        healthy = len(rows) >= 20 and total / len(rows) >= 0.95
+        if p["mode"] == "avoidance":
+            engine_names = sorted(
+                {e["engine_name"] for e in events if e.get("event") == "prefill_done"}
+            )
+            detail = avoidance(events, ids, engine_names)
+            good = healthy and detail["violations"] == 0
+        else:
+            detail = rotation(batches, p["max_consecutive"])
+            detail["batches"] = batches
+            good = good and healthy and detail["passed"]
+        actual["execution"] = detail
     return StageOutput(
         checks=[
             CheckResult(
                 "balance",
                 "PASS" if good else "FAIL",
                 actual=actual,
-                expected={"min_success": 0.95, "max_share": p["max_prefill_share"]},
+                expected={
+                    "min_success": 0.95,
+                    **(
+                        {"violations": 0}
+                        if p.get("mode") == "avoidance"
+                        else {"max_share": p["max_prefill_share"]}
+                    ),
+                    "mode": p.get("mode", "share"),
+                    **(
+                        {"max_consecutive": p["max_consecutive"]}
+                        if p.get("mode") == "rotation"
+                        else {}
+                    ),
+                },
             )
         ],
         artifacts=[_artifact(ctx, "ha-recovery-probes", rows)],

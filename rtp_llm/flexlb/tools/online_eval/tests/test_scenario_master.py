@@ -34,6 +34,8 @@ class MasterActionsTest(unittest.TestCase):
             time.monotonic,
             time.sleep,
         )
+        self.ctx.ops = Mock()
+        self.ctx.ops.master_target.return_value = "master"
         self.ctx.env_epoch = 1
         self.ctx.env = SimpleNamespace(
             master=self.proc,
@@ -60,6 +62,8 @@ class MasterActionsTest(unittest.TestCase):
         self.assertIs(old.process, self.proc)
         self.proc.proc.wait.assert_called()
         self.assertTrue(old.restored)
+        self.assertEqual(2, self.ctx.ops.invalidate_channel.call_count)
+        self.ctx.ops.invalidate_channel.assert_called_with("master")
         with self.assertRaisesRegex(ValueError, "already"):
             master._restore(self.ctx, {"fault": out.output["fault"]}, self.deadline)
 
@@ -308,6 +312,49 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual(20, len(artifact["records"]))
         self.assertTrue(all(row["consumer_exit_s"] for row in artifact["records"]))
         self.assertTrue(all(row["status"] == "PASS" for row in self.ctx.cleanup(5)))
+
+    def test_successive_dual_probes_share_environment_request_ids(self):
+        from flexlb_test_framework.scenario.actions.elastic import RecordedRequests
+
+        self.ctx.env.spec.master_stable_window_s = 0
+        self.ctx.env.master_specs = {
+            "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=18080)
+        }
+        self.ctx.ops = SimpleNamespace(next_request_id=Mock(side_effect=range(1, 41)))
+
+        def run(records, row, shape, timeout_s):
+            records.update(
+                row,
+                schedule={"status": "OK"},
+                stream={"status": "OK"},
+                prefill_addr="p0",
+                business_finished=True,
+                consumer_exit_s=time.monotonic(),
+                transport_terminal_s=time.monotonic(),
+            )
+
+        params = dict(
+            target="A",
+            count=20,
+            concurrency=10,
+            request_timeout_s=15,
+            sample_after_s=0,
+            sample_topology=False,
+            coldstart=False,
+        )
+        self.ctx.env.mock_http_port = 19000
+        fresh_ops = [Mock(), Mock()]
+        with patch.object(master, "_process"), patch.object(
+            RecordedRequests, "run", run
+        ), patch("flexlb_test_framework.engine_ops.EngineOps", side_effect=fresh_ops):
+            results = [master._batch(self.ctx, params, self.deadline) for _ in range(2)]
+        ids = [json.loads(Path(x.artifacts[0]).read_text())["records"] for x in results]
+        self.assertEqual(
+            list(range(1, 41)), [r["wire_request_id"] for group in ids for r in group]
+        )
+        for ops in fresh_ops:
+            ops.next_request_id.assert_not_called()
+        self.ctx.cleanup(5)
 
     def test_scheduler_missing_response_cannot_satisfy_ttl_zero(self):
         with patch.object(master, "_master_json", return_value={}):

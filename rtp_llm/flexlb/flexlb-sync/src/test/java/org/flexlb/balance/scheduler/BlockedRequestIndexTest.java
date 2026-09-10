@@ -21,8 +21,8 @@ class BlockedRequestIndexTest {
     void higherPriorityCanRescueAnEndpointWithLowerPriorityWaiters() {
         var endpoint = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
         when(endpoint.ipPort()).thenReturn("p:1");
-        var admission = mock(QueueRouteAdmission.class);
-        when(admission.selectedPrefillEndpoint()).thenReturn(endpoint);
+        var admission = mock(RouteAdmission.class);
+        when(admission.prefillEndpoint()).thenReturn(endpoint);
         var key = PlacementKey.exact(RoleType.PREFILL, "a", "p:1");
         GlobalQueueEntry low = entry("a", 10);
         blocked.parkExact(low, key, endpoint);

@@ -390,7 +390,51 @@ def observe(ctx, p, deadline):
     )
 
 
+def _spacing_validate(params, plan):
+    p = _fields(params, {"requests", "interval_s"}, {"requests", "interval_s"})
+    plan.reference(p["requests"], "requests")
+    if (
+        type(p["interval_s"]) not in (int, float)
+        or not math.isfinite(p["interval_s"])
+        or not 0 <= p["interval_s"] <= 30
+    ):
+        raise ValueError("request spacing requires a finite bounded interval")
+    return p
+
+
+def spacing(ctx, params, deadline):
+    rows = ctx.resource(params["requests"], "requests").snapshot_records()
+    if len(rows) != 1:
+        raise ValueError("spacing requires one preceding request")
+    issued = rows[0].get("issued_s")
+    if (
+        type(issued) not in (int, float)
+        or not math.isfinite(issued)
+        or issued > ctx.clock()
+    ):
+        raise ValueError("spacing requires a valid monotonic issue timestamp")
+    remaining = max(0, issued + params["interval_s"] - ctx.clock())
+    deadline.check()
+    if remaining:
+        deadline.sleep(remaining)
+    return StageOutput(
+        artifacts=[
+            _artifact(
+                ctx,
+                "spacing",
+                {
+                    "issued_s": issued,
+                    "interval_s": params["interval_s"],
+                    "slept_s": remaining,
+                    "finished_s": ctx.clock(),
+                },
+            )
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler("kv_capacity_spacing", _spacing_validate, spacing, {}),
     StageHandler(
         "kv_capacity_request", _request_validate, request, {"requests": "requests"}
     ),

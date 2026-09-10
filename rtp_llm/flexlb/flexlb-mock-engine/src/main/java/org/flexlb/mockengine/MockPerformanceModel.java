@@ -385,8 +385,7 @@ final class MockPerformanceModel {
                         throw new IllegalStateException("Master config " + masterConfigFile
                                 + ": router.roles.prefill.executionTimeEstimator is FORMULA"
                                 + " with a blank expression — set the expression explicitly or"
-                                + " omit the estimator to use the built-in DSv4 production fit"
-                                + " (MockPerformanceModel.DSV4_PREFILL_FIT_EXPRESSION)");
+                                + " omit the estimator to use the FlexLB formula default");
                     }
                     return expression;
                 }

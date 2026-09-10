@@ -316,9 +316,14 @@ class DynamicEngineScaleTest {
 
     @Test
     void concurrentRemoveOfSameEngineIsIdempotent() throws Exception {
-        startCluster(model("10", 1.0), 1, 1);
+        startCluster(model("10", 1500.0), 1, 1);
         JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
         int victimPort = added.path("port").asInt();
+
+        StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
+        services.get(victimPort).generateStreamCall(input(6005, 10), collector);
+        awaitCondition(() -> services.get(victimPort).getRunningCount() >= 1, 2_000,
+                "decode request must keep the graceful drain in progress for both removals");
 
         CountDownLatch startGate = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -338,6 +343,8 @@ class DynamicEngineScaleTest {
                 JsonNode removed = outcome.get(30, TimeUnit.SECONDS);
                 assertEquals("ok", removed.path("status").asText());
                 assertEquals(victimPort, removed.path("port").asInt());
+                assertTrue(removed.path("drained").asBoolean());
+                assertTrue(removed.path("running_at_removal").asInt() >= 1);
             }
         } finally {
             pool.shutdownNow();

@@ -242,7 +242,7 @@ def _execution_issues(row):
         for check in checks:
             if (
                 not isinstance(check, dict)
-                or check.get("status") not in {"PASS", "FAIL"}
+                or check.get("status") not in {"PASS", "FAIL", "SKIP"}
                 or check.get("error")
             ):
                 issues.append("check has an execution error or unknown status")

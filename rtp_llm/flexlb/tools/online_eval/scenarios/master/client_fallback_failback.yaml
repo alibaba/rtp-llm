@@ -97,6 +97,9 @@ parameters:
       - A
       - B
       duration_s: 150
+      # ~7.9 requests/s: sustained below native two-P throughput (~9/s),
+      # still enough for >=30 samples in each unchanged five-second window.
+      replay_speed: 0.75
       live_events: true
     kill_a:
       mode: kill
@@ -105,6 +108,21 @@ parameters:
     ready_a_timeout_s: 60
     ready_a:
       target: A
+    recovery_distribution:
+      mode: avoidance
+      max_prefill_share: 0.75
+    rotation_probe_timeout_s: 330
+    rotation_probe:
+      target: A
+      count: 20
+      # Complete each cold probe before the next placement decision.
+      concurrency: 1
+    rotation_distribution:
+      mode: rotation
+      # Parallel RPC arrival order can invert adjacent cross-engine selections.
+      # D2: preserve bounded rotation; three consecutive batches still fail.
+      max_consecutive: 2
+      max_prefill_share: 0.75
     recovery_a_timeout_s: 330
     recovery_a:
       target: A

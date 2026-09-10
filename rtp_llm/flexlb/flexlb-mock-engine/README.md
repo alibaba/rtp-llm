@@ -74,9 +74,9 @@ bash run_online_eval.sh
 | prefill.fixed_ms | null | Fixed prefill latency (bypasses formula) |
 | prefill.min_ms | null | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast |
 | prefill.scale | 1.0 | Prefill-specific multiplier |
-| prefill.max_waiting_batches | 0 | Cap on queued (not-running) prefill batches per engine. Default `0` / absent / negative = unbounded queue — production-aligned: the real engine's P side (`waiting_group_queue_` / `waiting_streams_`) enqueues unconditionally and never rejects on queue depth; backpressure lives in the master (inflight / maxEngineRequests gates), not the engine. A positive cap introduces an engine-side rejection surface (excess enqueues rejected with backpressure) — a front-loaded simulation of the master gate, hence a different rejection-attribution path than production (capped profiles such as the online_eval dsv4 profile's explicit 4 reject at the engine; production would reject at the master — read such tiers' conclusions with that difference in mind). Rule of thumb when capping: n ≈ SLO_ms / batch_ms − 1 (e.g. SLO 1000 ms, batch 150 ms → 4, deepest wait 600 ms + 150 ms execution leaves ~25% headroom); for 1x-scale runs where a batch takes ~330–400 ms, use 1–2 |
+| prefill.max_waiting_batches | 0 | Engine-side queued-batch cap; ≤ 0 means unbounded. A positive cap injects Engine backpressure rejection. FlexLB uses `dispatcher.maxInflightPerPrefillWorker` (default 2): batches in BATCH, requests in NON_BATCH. Waiting work remains in Master queues and expires by queue TTL. These are different failure paths. |
 | prefill.max_batch_tokens | 1048576 | In-engine dual-budget regroup (#8): token ceiling for one EXECUTION batch — admission stops once Σ(computeTokens + hitTokens) over admitted members reaches the budget (members join while admitted < budget, production FIFOScheduler.cc:371-481 semantics; the budget is a STOP, never a mid-batch cut). Default 1_048_576 mirrors the production `max_batch_tokens_size` the mock already reports via WorkerStatus. Explicit `0` disables the token dimension |
-| prefill.max_batch_requests | 32 | In-engine dual-budget regroup (#8): request-count ceiling for one execution batch. Default 32 mirrors the master FIXED_WINDOW `maxRequests` production value. Explicit `0` disables the request dimension. `max_batch_tokens=0` AND `max_batch_requests=0` together disable the regroup entirely — master batches then execute verbatim (the pre-#8 behaviour) |
+| prefill.max_batch_requests | 32 | In-engine dual-budget regroup (#8): request-count ceiling for one execution batch. Mock default 32 is independent of the master FIXED_WINDOW `maxRequests` default 8. Explicit `0` disables the request dimension. `max_batch_tokens=0` AND `max_batch_requests=0` together disable the regroup entirely — master batches then execute verbatim (the pre-#8 behaviour) |
 | decode.scale | 1.0 | Decode-specific multiplier |
 | decode.step_base_ms | 19.5 | Per-step decode latency intercept of the linear production fit: step_ms = step_base_ms + step_per_running_ms × running (production DSv4 fit, task #68). Applies when no `step_ms_by_batch` curve is declared |
 | decode.step_per_running_ms | 0.175 | Per-step decode latency slope per running stream (production DSv4 fit) |
@@ -368,9 +368,10 @@ Every engine advertises a unique 127.x.y.z loopback IP (default on; `--unique-en
 reverts to the legacy shared `--host`) instead of all declaring 127.0.0.1, so the master-side
 `engineIp` Prometheus label stays distinct per engine — with a shared host, per-engine gauge
 series (batcher queue / KV / inflight) overwrote each other. The gRPC bind stays wildcard
-(`forPort`), only the advertised address changes (worker status, `DOMAIN_ADDRESS`,
-endpoints.json, `/metrics` `engine_ip` label); the test line runs on remote Linux only, where
-all of 127.0.0.0/8 routes to loopback.
+(`forPort`), only the advertised address changes (worker status, `discovery.json`,
+endpoints.json, `/metrics` `engine_ip` label); Linux routes all of 127.0.0.0/8 to loopback, but
+macOS only reaches 127.0.0.1 by default — disable the flag for local macOS runs that connect
+across engine addresses.
 
 ### Cancel channel
 

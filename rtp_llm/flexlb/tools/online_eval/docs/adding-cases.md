@@ -147,3 +147,16 @@ python3 rtp_llm/flexlb/tools/online_eval/parallel_runner.py   --source yaml   --
 验证应覆盖新增行为或错误边界，并运行选中的真实 Java 实例。
 检查父 `aggregate.json`、child `scenarios.json`、实例 `result.json`、原始证据及 cleanup。
 报告同时写清源码/JAR、配置、grade、实例 ID 和结果路径；不能仅凭测试数量判断业务通过。
+
+
+### Master Schema 3 配置
+
+在 YAML 的 `environment.config_overrides` 中配置 `max_inflight_per_prefill_worker`、
+`request_timeout_ms`、`decision_lifetime` 等字段。inflight 上限在 BATCH 下计批次，
+在 NON_BATCH 下计请求；构造三个并存请求的容量用例应显式给够上限，不能依赖默认值。
+`request_timeout_ms` 是 Master 的请求非活动预算：引擎侧请求结束不代表 Master 的记账立即消失。
+恢复阶段先验证两侧清场；等待预算也放在 YAML 中。
+
+全局 outstanding/等待位上限、旧 delivered-not-accepted 配置和独立 ack timeout 已删除。
+PRIORITY 省略 preemption 会启用默认抢占，不能用省略字段构造“关闭抢占”用例。
+完整迁移与退役范围见 [Schema 3 对齐记录](validation/config-alignment-20260909.md)。

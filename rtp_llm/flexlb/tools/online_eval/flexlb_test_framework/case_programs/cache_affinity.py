@@ -1930,14 +1930,62 @@ def leader_spill_batch(case):
         "setup", "setup", timeout_s=case.value("leader_spill_batch.setup_timeout_s")
     )
     case.step(
-        "slow_second",
-        "engine_control",
-        params=case.value("leader_spill_batch.slow_second"),
-    )
-    case.step(
         "steer_a_settle",
         "balance_pause",
         params=case.value("leader_spill_batch.steer_a_settle"),
+    )
+    case.step(
+        "p0",
+        "request",
+        params=case.value("leader_spill_batch.p0"),
+    )
+    case.step(
+        "seed_f",
+        "request",
+        params=case.value("leader_spill_batch.seed_f"),
+    )
+    case.step(
+        "p0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.p0_done_timeout_s"),
+        params={"requests": output("p0", "requests")},
+    )
+    case.step(
+        "seed_f_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.seed_f_done_timeout_s"),
+        params={"requests": output("seed_f", "requests")},
+    )
+    case.step(
+        "p0_holder",
+        "kv_landing",
+        params={"requests": output("p0", "requests")},
+    )
+    case.step(
+        "seed_f_holder",
+        "kv_landing",
+        params={"requests": output("seed_f", "requests")},
+    )
+    case.step(
+        "holders_distinct",
+        "kv_distinct",
+        params={
+            "first": output("p0_holder", "engine"),
+            "second": output("seed_f_holder", "engine"),
+        },
+    )
+    case.step(
+        "filler_sync", "balance_pause", params=case.value("leader_spill_batch.filler_sync")
+    )
+    case.step(
+        "filler_a",
+        "request",
+        params=case.value("leader_spill_batch.filler_a"),
+    )
+    case.step(
+        "filler_a_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.filler_a_gap"),
     )
     case.step(
         "steer_a",
@@ -1960,7 +2008,10 @@ def leader_spill_batch(case):
         "kv_same",
         params=case.params(
             "leader_spill_batch.steer_a_placement",
-            {"first": output("steer_a_holder", "engine")},
+            {
+                "first": output("steer_a_holder", "engine"),
+                "second": output("p0_holder", "engine"),
+            },
         ),
     )
     case.step(
@@ -1970,19 +2021,19 @@ def leader_spill_batch(case):
         params=case.value("leader_spill_batch.steer_a_quiet"),
     )
     case.step(
-        "restore_second",
-        "engine_control",
-        params=case.value("leader_spill_batch.restore_second"),
-    )
-    case.step(
-        "slow_first",
-        "engine_control",
-        params=case.value("leader_spill_batch.slow_first"),
-    )
-    case.step(
         "steer_b_settle",
         "balance_pause",
         params=case.value("leader_spill_batch.steer_b_settle"),
+    )
+    case.step(
+        "filler_b",
+        "request",
+        params=case.value("leader_spill_batch.filler_b"),
+    )
+    case.step(
+        "filler_b_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.filler_b_gap"),
     )
     case.step(
         "steer_b",
@@ -2005,13 +2056,11 @@ def leader_spill_batch(case):
         "kv_same",
         params=case.params(
             "leader_spill_batch.steer_b_placement",
-            {"first": output("steer_b_holder", "engine")},
+            {
+                "first": output("steer_b_holder", "engine"),
+                "second": output("seed_f_holder", "engine"),
+            },
         ),
-    )
-    case.step(
-        "restore_first",
-        "engine_control",
-        params=case.value("leader_spill_batch.restore_first"),
     )
     case.step(
         "steer_restore_settle",
@@ -2416,14 +2465,29 @@ def leader_spill_batch(case):
         params=case.value("leader_spill_batch.baseline_digest"),
     )
     case.step(
-        "saturate_leader",
-        "engine_control",
-        params=case.value("leader_spill_batch.saturate_leader"),
-    )
-    case.step(
         "saturation_settle",
         "balance_pause",
         params=case.value("leader_spill_batch.saturation_settle"),
+    )
+    case.step(
+        "saturation_w0_f0",
+        "request",
+        params=case.value("leader_spill_batch.saturation_w0_f0"),
+    )
+    case.step(
+        "saturation_w0_f0_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.saturation_w0_f0_gap"),
+    )
+    case.step(
+        "saturation_w0_f1",
+        "request",
+        params=case.value("leader_spill_batch.saturation_w0_f1"),
+    )
+    case.step(
+        "saturation_w0_f1_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.saturation_w0_f1_gap"),
     )
     case.step(
         "saturation_w0_r0_before",
@@ -2559,6 +2623,38 @@ def leader_spill_batch(case):
         params=case.value("leader_spill_batch.saturation_w0_end"),
     )
     case.step(
+        "saturation_w0_f0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.saturation_w0_f0_done_timeout_s"),
+        params={"requests": output("saturation_w0_f0", "requests")},
+    )
+    case.step(
+        "saturation_w0_f1_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.saturation_w0_f1_done_timeout_s"),
+        params={"requests": output("saturation_w0_f1", "requests")},
+    )
+    case.step(
+        "saturation_w1_f0",
+        "request",
+        params=case.value("leader_spill_batch.saturation_w1_f0"),
+    )
+    case.step(
+        "saturation_w1_f0_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.saturation_w1_f0_gap"),
+    )
+    case.step(
+        "saturation_w1_f1",
+        "request",
+        params=case.value("leader_spill_batch.saturation_w1_f1"),
+    )
+    case.step(
+        "saturation_w1_f1_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.saturation_w1_f1_gap"),
+    )
+    case.step(
         "saturation_w1_r0_before",
         "kv_snapshot",
         timeout_s=case.value("leader_spill_batch.saturation_w1_r0_before_timeout_s"),
@@ -2690,6 +2786,38 @@ def leader_spill_batch(case):
         "kv_snapshot",
         timeout_s=case.value("leader_spill_batch.saturation_w1_end_timeout_s"),
         params=case.value("leader_spill_batch.saturation_w1_end"),
+    )
+    case.step(
+        "saturation_w1_f0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.saturation_w1_f0_done_timeout_s"),
+        params={"requests": output("saturation_w1_f0", "requests")},
+    )
+    case.step(
+        "saturation_w1_f1_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.saturation_w1_f1_done_timeout_s"),
+        params={"requests": output("saturation_w1_f1", "requests")},
+    )
+    case.step(
+        "saturation_w2_f0",
+        "request",
+        params=case.value("leader_spill_batch.saturation_w2_f0"),
+    )
+    case.step(
+        "saturation_w2_f0_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.saturation_w2_f0_gap"),
+    )
+    case.step(
+        "saturation_w2_f1",
+        "request",
+        params=case.value("leader_spill_batch.saturation_w2_f1"),
+    )
+    case.step(
+        "saturation_w2_f1_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.saturation_w2_f1_gap"),
     )
     case.step(
         "saturation_w2_r0_before",
@@ -2825,6 +2953,38 @@ def leader_spill_batch(case):
         params=case.value("leader_spill_batch.saturation_w2_end"),
     )
     case.step(
+        "saturation_w2_f0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.saturation_w2_f0_done_timeout_s"),
+        params={"requests": output("saturation_w2_f0", "requests")},
+    )
+    case.step(
+        "saturation_w2_f1_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.saturation_w2_f1_done_timeout_s"),
+        params={"requests": output("saturation_w2_f1", "requests")},
+    )
+    case.step(
+        "saturation_w3_f0",
+        "request",
+        params=case.value("leader_spill_batch.saturation_w3_f0"),
+    )
+    case.step(
+        "saturation_w3_f0_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.saturation_w3_f0_gap"),
+    )
+    case.step(
+        "saturation_w3_f1",
+        "request",
+        params=case.value("leader_spill_batch.saturation_w3_f1"),
+    )
+    case.step(
+        "saturation_w3_f1_gap",
+        "balance_pause",
+        params=case.value("leader_spill_batch.saturation_w3_f1_gap"),
+    )
+    case.step(
         "saturation_w3_r0_before",
         "kv_snapshot",
         timeout_s=case.value("leader_spill_batch.saturation_w3_r0_before_timeout_s"),
@@ -2958,9 +3118,16 @@ def leader_spill_batch(case):
         params=case.value("leader_spill_batch.saturation_w3_end"),
     )
     case.step(
-        "recover_leader",
-        "engine_control",
-        params=case.value("leader_spill_batch.recover_leader"),
+        "saturation_w3_f0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.saturation_w3_f0_done_timeout_s"),
+        params={"requests": output("saturation_w3_f0", "requests")},
+    )
+    case.step(
+        "saturation_w3_f1_done",
+        "wait",
+        timeout_s=case.value("leader_spill_batch.saturation_w3_f1_done_timeout_s"),
+        params={"requests": output("saturation_w3_f1", "requests")},
     )
     case.step(
         "recovery_settle",
@@ -3960,14 +4127,62 @@ def leader_spill_nonbatch(case):
         "setup", "setup", timeout_s=case.value("leader_spill_nonbatch.setup_timeout_s")
     )
     case.step(
-        "slow_second",
-        "engine_control",
-        params=case.value("leader_spill_nonbatch.slow_second"),
-    )
-    case.step(
         "steer_a_settle",
         "balance_pause",
         params=case.value("leader_spill_nonbatch.steer_a_settle"),
+    )
+    case.step(
+        "p0",
+        "request",
+        params=case.value("leader_spill_nonbatch.p0"),
+    )
+    case.step(
+        "seed_f",
+        "request",
+        params=case.value("leader_spill_nonbatch.seed_f"),
+    )
+    case.step(
+        "p0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.p0_done_timeout_s"),
+        params={"requests": output("p0", "requests")},
+    )
+    case.step(
+        "seed_f_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.seed_f_done_timeout_s"),
+        params={"requests": output("seed_f", "requests")},
+    )
+    case.step(
+        "p0_holder",
+        "kv_landing",
+        params={"requests": output("p0", "requests")},
+    )
+    case.step(
+        "seed_f_holder",
+        "kv_landing",
+        params={"requests": output("seed_f", "requests")},
+    )
+    case.step(
+        "holders_distinct",
+        "kv_distinct",
+        params={
+            "first": output("p0_holder", "engine"),
+            "second": output("seed_f_holder", "engine"),
+        },
+    )
+    case.step(
+        "filler_sync", "balance_pause", params=case.value("leader_spill_nonbatch.filler_sync")
+    )
+    case.step(
+        "filler_a",
+        "request",
+        params=case.value("leader_spill_nonbatch.filler_a"),
+    )
+    case.step(
+        "filler_a_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.filler_a_gap"),
     )
     case.step(
         "steer_a",
@@ -3990,7 +4205,10 @@ def leader_spill_nonbatch(case):
         "kv_same",
         params=case.params(
             "leader_spill_nonbatch.steer_a_placement",
-            {"first": output("steer_a_holder", "engine")},
+            {
+                "first": output("steer_a_holder", "engine"),
+                "second": output("p0_holder", "engine"),
+            },
         ),
     )
     case.step(
@@ -4000,19 +4218,19 @@ def leader_spill_nonbatch(case):
         params=case.value("leader_spill_nonbatch.steer_a_quiet"),
     )
     case.step(
-        "restore_second",
-        "engine_control",
-        params=case.value("leader_spill_nonbatch.restore_second"),
-    )
-    case.step(
-        "slow_first",
-        "engine_control",
-        params=case.value("leader_spill_nonbatch.slow_first"),
-    )
-    case.step(
         "steer_b_settle",
         "balance_pause",
         params=case.value("leader_spill_nonbatch.steer_b_settle"),
+    )
+    case.step(
+        "filler_b",
+        "request",
+        params=case.value("leader_spill_nonbatch.filler_b"),
+    )
+    case.step(
+        "filler_b_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.filler_b_gap"),
     )
     case.step(
         "steer_b",
@@ -4035,13 +4253,11 @@ def leader_spill_nonbatch(case):
         "kv_same",
         params=case.params(
             "leader_spill_nonbatch.steer_b_placement",
-            {"first": output("steer_b_holder", "engine")},
+            {
+                "first": output("steer_b_holder", "engine"),
+                "second": output("seed_f_holder", "engine"),
+            },
         ),
-    )
-    case.step(
-        "restore_first",
-        "engine_control",
-        params=case.value("leader_spill_nonbatch.restore_first"),
     )
     case.step(
         "steer_restore_settle",
@@ -4446,14 +4662,29 @@ def leader_spill_nonbatch(case):
         params=case.value("leader_spill_nonbatch.baseline_digest"),
     )
     case.step(
-        "saturate_leader",
-        "engine_control",
-        params=case.value("leader_spill_nonbatch.saturate_leader"),
-    )
-    case.step(
         "saturation_settle",
         "balance_pause",
         params=case.value("leader_spill_nonbatch.saturation_settle"),
+    )
+    case.step(
+        "saturation_w0_f0",
+        "request",
+        params=case.value("leader_spill_nonbatch.saturation_w0_f0"),
+    )
+    case.step(
+        "saturation_w0_f0_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.saturation_w0_f0_gap"),
+    )
+    case.step(
+        "saturation_w0_f1",
+        "request",
+        params=case.value("leader_spill_nonbatch.saturation_w0_f1"),
+    )
+    case.step(
+        "saturation_w0_f1_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.saturation_w0_f1_gap"),
     )
     case.step(
         "saturation_w0_r0_before",
@@ -4589,6 +4820,38 @@ def leader_spill_nonbatch(case):
         params=case.value("leader_spill_nonbatch.saturation_w0_end"),
     )
     case.step(
+        "saturation_w0_f0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.saturation_w0_f0_done_timeout_s"),
+        params={"requests": output("saturation_w0_f0", "requests")},
+    )
+    case.step(
+        "saturation_w0_f1_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.saturation_w0_f1_done_timeout_s"),
+        params={"requests": output("saturation_w0_f1", "requests")},
+    )
+    case.step(
+        "saturation_w1_f0",
+        "request",
+        params=case.value("leader_spill_nonbatch.saturation_w1_f0"),
+    )
+    case.step(
+        "saturation_w1_f0_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.saturation_w1_f0_gap"),
+    )
+    case.step(
+        "saturation_w1_f1",
+        "request",
+        params=case.value("leader_spill_nonbatch.saturation_w1_f1"),
+    )
+    case.step(
+        "saturation_w1_f1_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.saturation_w1_f1_gap"),
+    )
+    case.step(
         "saturation_w1_r0_before",
         "kv_snapshot",
         timeout_s=case.value("leader_spill_nonbatch.saturation_w1_r0_before_timeout_s"),
@@ -4720,6 +4983,38 @@ def leader_spill_nonbatch(case):
         "kv_snapshot",
         timeout_s=case.value("leader_spill_nonbatch.saturation_w1_end_timeout_s"),
         params=case.value("leader_spill_nonbatch.saturation_w1_end"),
+    )
+    case.step(
+        "saturation_w1_f0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.saturation_w1_f0_done_timeout_s"),
+        params={"requests": output("saturation_w1_f0", "requests")},
+    )
+    case.step(
+        "saturation_w1_f1_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.saturation_w1_f1_done_timeout_s"),
+        params={"requests": output("saturation_w1_f1", "requests")},
+    )
+    case.step(
+        "saturation_w2_f0",
+        "request",
+        params=case.value("leader_spill_nonbatch.saturation_w2_f0"),
+    )
+    case.step(
+        "saturation_w2_f0_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.saturation_w2_f0_gap"),
+    )
+    case.step(
+        "saturation_w2_f1",
+        "request",
+        params=case.value("leader_spill_nonbatch.saturation_w2_f1"),
+    )
+    case.step(
+        "saturation_w2_f1_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.saturation_w2_f1_gap"),
     )
     case.step(
         "saturation_w2_r0_before",
@@ -4855,6 +5150,38 @@ def leader_spill_nonbatch(case):
         params=case.value("leader_spill_nonbatch.saturation_w2_end"),
     )
     case.step(
+        "saturation_w2_f0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.saturation_w2_f0_done_timeout_s"),
+        params={"requests": output("saturation_w2_f0", "requests")},
+    )
+    case.step(
+        "saturation_w2_f1_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.saturation_w2_f1_done_timeout_s"),
+        params={"requests": output("saturation_w2_f1", "requests")},
+    )
+    case.step(
+        "saturation_w3_f0",
+        "request",
+        params=case.value("leader_spill_nonbatch.saturation_w3_f0"),
+    )
+    case.step(
+        "saturation_w3_f0_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.saturation_w3_f0_gap"),
+    )
+    case.step(
+        "saturation_w3_f1",
+        "request",
+        params=case.value("leader_spill_nonbatch.saturation_w3_f1"),
+    )
+    case.step(
+        "saturation_w3_f1_gap",
+        "balance_pause",
+        params=case.value("leader_spill_nonbatch.saturation_w3_f1_gap"),
+    )
+    case.step(
         "saturation_w3_r0_before",
         "kv_snapshot",
         timeout_s=case.value("leader_spill_nonbatch.saturation_w3_r0_before_timeout_s"),
@@ -4988,9 +5315,16 @@ def leader_spill_nonbatch(case):
         params=case.value("leader_spill_nonbatch.saturation_w3_end"),
     )
     case.step(
-        "recover_leader",
-        "engine_control",
-        params=case.value("leader_spill_nonbatch.recover_leader"),
+        "saturation_w3_f0_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.saturation_w3_f0_done_timeout_s"),
+        params={"requests": output("saturation_w3_f0", "requests")},
+    )
+    case.step(
+        "saturation_w3_f1_done",
+        "wait",
+        timeout_s=case.value("leader_spill_nonbatch.saturation_w3_f1_done_timeout_s"),
+        params={"requests": output("saturation_w3_f1", "requests")},
     )
     case.step(
         "recovery_settle",

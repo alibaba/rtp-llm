@@ -394,6 +394,7 @@ class DecodeKvAllocationSemanticsTest {
             assertEquals(Status.Code.RESOURCE_EXHAUSTED, pError.getStatus().getCode());
             assertEquals("LACK_MEM: insufficient KV cache blocks (need=6, avail=5, spb=1024)",
                     pError.getStatus().getDescription());
+            assertCapacityTrailer(pError, 602);
             StatusRuntimeException dError = assertThrows(StatusRuntimeException.class,
                     () -> stub.generateStreamCall(inputWithDecode(901L, SPB,
                             decode.getGrpcPort(), 1)).hasNext());
@@ -402,6 +403,7 @@ class DecodeKvAllocationSemanticsTest {
                     + "rejected by D engine port=" + decode.getGrpcPort()
                     + " after its ALLOCATE retry window (need=1 blocks, avail=1024 tokens, spb=1024)",
                     dError.getStatus().getDescription());
+            assertCapacityTrailer(dError, 8211);
             assertEquals(5L * SPB, prefill.getAvailableKvTokens());
             assertEquals(1L * SPB, decode.getAvailableKvTokens());
             prefill.setStopped(true);
@@ -410,10 +412,22 @@ class DecodeKvAllocationSemanticsTest {
                             decode.getGrpcPort(), 1)).hasNext());
             assertEquals(Status.Code.UNAVAILABLE, stopped.getStatus().getCode());
             assertEquals("engine stopped", stopped.getStatus().getDescription());
+            assertNull(stopped.getTrailers().get(io.grpc.Metadata.Key.of(
+                    "grpc-status-details-bin", io.grpc.Metadata.BINARY_BYTE_MARSHALLER)));
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
+    }
+
+    private static void assertCapacityTrailer(StatusRuntimeException error, int code) throws Exception {
+        assertNotNull(error.getTrailers());
+        byte[] bytes = error.getTrailers().get(io.grpc.Metadata.Key.of(
+                "grpc-status-details-bin", io.grpc.Metadata.BINARY_BYTE_MARSHALLER));
+        assertNotNull(bytes, "typed error must survive the real Netty gRPC transport");
+        var details = EngineRpcService.ErrorDetailsPB.parseFrom(bytes);
+        assertEquals(code, details.getErrorCode());
+        assertEquals(error.getStatus().getDescription(), details.getErrorMessage());
     }
 
     // ────────────────── helpers ──────────────────

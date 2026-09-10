@@ -5,7 +5,7 @@ import json
 
 from ..contracts import StageHandler, StageOutput
 
-MUTATIONS = {"removed_auto_tpm", "fifo_default_priority", "owned_without_cancellation"}
+MUTATIONS = {"removed_auto_tpm", "fifo_default_priority", "removed_engine_cancellation"}
 PARSER_MESSAGES = (
     "config validation failed",
     "unrecognized field",
@@ -26,17 +26,20 @@ def mutate_config(config, mutation):
         if ordering["type"] != "FIFO" or "defaultPriority" in ordering:
             raise ValueError("fifo_default_priority requires a legal FIFO base")
         ordering["defaultPriority"] = 50
-    elif mutation == "owned_without_cancellation":
+    elif mutation == "removed_engine_cancellation":
         preemption = ordering.get("preemption", {})
-        if (
-            ordering["type"] != "PRIORITY"
-            or "DECODE_ENGINE_OWNED" not in preemption.get("allowedVictimStages", [])
-            or "engineCancellation" not in preemption
+        if ordering[
+            "type"
+        ] != "PRIORITY" or "DECODE_ENGINE_OWNED" not in preemption.get(
+            "allowedVictimStages", []
         ):
             raise ValueError(
-                "owned_without_cancellation requires a valid owned-cancellation base"
+                "removed_engine_cancellation requires a valid owned-cancellation base"
             )
-        del preemption["engineCancellation"]
+        preemption["engineCancellation"] = {
+            "ackTimeoutMs": 50,
+            "completionTimeoutMs": 1000,
+        }
     else:
         raise ValueError("unknown startup mutation")
     return raw

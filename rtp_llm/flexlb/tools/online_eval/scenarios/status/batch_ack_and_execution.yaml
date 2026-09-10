@@ -10,7 +10,7 @@ environment:
   config_overrides:
     ordering: priority
     queue_timeout_ms: 10000
-    stale_inflight_ms: 30000
+    request_timeout_ms: 30000
 execution:
   timeout_s: 600
   stage_timeout_s: 120
@@ -237,10 +237,12 @@ parameters:
       enabled: false
       role: prefill
     normal_execution_terminal:
-      success_min: 2
+      per_execution_batch:
+        fallback_success_min: 1
+        fallback_failure_max: 3
       failure_min: 1
-      failure_max: 2
       error_code: 8500
+      failure_phase: execution
     normal_execution_terminal_phase:
       failure_phase: execution
     normal_drained_timeout_s: 135
@@ -311,10 +313,12 @@ parameters:
       prefill_fixed_ms: 100
       restore_prefill_fixed_ms: 100
     serial_execution_terminal:
-      success_min: 2
+      per_execution_batch:
+        fallback_success_min: 1
+        fallback_failure_max: 3
       failure_min: 1
-      failure_max: 2
       error_code: 8500
+      failure_phase: execution
     serial_execution_terminal_phase:
       failure_phase: execution
     serial_drained_timeout_s: 135

@@ -163,7 +163,10 @@ class EnvironmentTest(unittest.TestCase):
         cases = [
             ("removed_auto_tpm", configuration("priority", PROFILE)),
             ("fifo_default_priority", configuration("fifo", PROFILE)),
-            ("owned_without_cancellation", configuration("decode_preemption", PROFILE)),
+            (
+                "removed_engine_cancellation",
+                configuration("decode_preemption", PROFILE),
+            ),
         ]
         for name, overrides in cases:
             base = overrides
@@ -173,12 +176,14 @@ class EnvironmentTest(unittest.TestCase):
             elif name == "fifo_default_priority":
                 expected["scheduler"]["ordering"]["defaultPriority"] = 50
             else:
-                del expected["scheduler"]["ordering"]["preemption"][
+                expected["scheduler"]["ordering"]["preemption"][
                     "engineCancellation"
-                ]
+                ] = {"ackTimeoutMs": 50, "completionTimeoutMs": 1000}
             self.assertEqual(mutate_config(base, name), expected)
         with self.assertRaises(ValueError):
-            mutate_config(json.loads(render_env(PROFILE)), "owned_without_cancellation")
+            mutate_config(
+                json.loads(render_env(PROFILE)), "removed_engine_cancellation"
+            )
 
     def test_probe_does_not_turn_cleanup_or_generic_failure_into_parser_pass(self):
         params = _validate(

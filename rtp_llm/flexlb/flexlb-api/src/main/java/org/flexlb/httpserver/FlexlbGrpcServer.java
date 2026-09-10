@@ -11,6 +11,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
@@ -39,18 +40,6 @@ public class FlexlbGrpcServer {
      */
     static final int FLEXLB_GRPC_PORT_OFFSET = 2;
     private static final int DEFAULT_HTTP_PORT = 7001;
-
-    // Default executor sizes — overridable via environment variables
-    private static final int DEFAULT_EXECUTOR_CORE_SIZE = 1000;
-    private static final int DEFAULT_EXECUTOR_MAX_SIZE = 1000;
-    // NOTE: bounded queue + AbortPolicy so overload fires an immediate rejection
-    // (RejectedExecutionException -> gRPC error to the client) instead of silent
-    // queue growth. Default lowered 10000 -> 1000: at the measured gRPC dispatch
-    // rate a 1000-deep queue drains in tens of milliseconds (well below SLO),
-    // while a 10000-deep backlog was measured to add 1s+ of cold-start queueing
-    // delay. Deployments can override via the single FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
-    // env variable (printed at startup); <= 0 falls back to an unbounded queue.
-    private static final int DEFAULT_EXECUTOR_QUEUE_SIZE = 1000;
 
     /**
      * Metric prefix — matches {@code MicrometerFlexMonitor.METRIC_PREFIX} so that
@@ -100,23 +89,17 @@ public class FlexlbGrpcServer {
         int httpPort = Integer.parseInt(portStr);
         int port = httpPort + FLEXLB_GRPC_PORT_OFFSET;
 
-        // Configurable executor sizes via environment variables
-        int coreSize = environment.getProperty(
-                "FLEXLB_GRPC_EXECUTOR_CORE_SIZE", Integer.class, DEFAULT_EXECUTOR_CORE_SIZE);
-        int maxSize = environment.getProperty(
-                "FLEXLB_GRPC_EXECUTOR_MAX_SIZE", Integer.class, DEFAULT_EXECUTOR_MAX_SIZE);
-        int queueSize = environment.getProperty(
-                "FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE", Integer.class, DEFAULT_EXECUTOR_QUEUE_SIZE);
-
+        FlexlbConfig.GrpcServerConfig executorConfig = configService.loadBalanceConfig().getGrpcServer();
         Logger.info("FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}",
-                coreSize, maxSize, queueSize);
+                executorConfig.getExecutorCoreSize(), executorConfig.getExecutorMaxSize(),
+                executorConfig.getExecutorQueueSize());
 
         this.bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
         this.countingAbortHandler = new CountingAbortHandler();
         this.grpcExecutor = new ThreadPoolExecutor(
-                coreSize, maxSize,
+                executorConfig.getExecutorCoreSize(), executorConfig.getExecutorMaxSize(),
                 60L, TimeUnit.SECONDS,
-                queueSize > 0 ? new LinkedBlockingQueue<Runnable>(queueSize) : new LinkedBlockingQueue<Runnable>(),
+                new LinkedBlockingQueue<>(executorConfig.getExecutorQueueSize()),
                 new DefaultThreadFactory("flexlb-grpc-executor"),
                 countingAbortHandler
         );

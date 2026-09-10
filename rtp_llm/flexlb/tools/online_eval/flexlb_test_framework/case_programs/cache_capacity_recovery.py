@@ -123,6 +123,14 @@ def decode_pool_exhaustion_terminal(case):
         params=case.value("decode_pool_exhaustion_terminal.d_recovery_base"),
     )
     case.step(
+        "fence_released",
+        "master_ready",
+        timeout_s=case.value(
+            "decode_pool_exhaustion_terminal.fence_released_timeout_s"
+        ),
+        params=case.value("decode_pool_exhaustion_terminal.fence_released"),
+    )
+    case.step(
         "headroom",
         "kv_capacity_request",
         timeout_s=case.value("decode_pool_exhaustion_terminal.headroom_timeout_s"),
@@ -930,11 +938,6 @@ def capacity_conflict_overflow(case):
         params=case.value("capacity_conflict_overflow.cache_sync"),
     )
     case.step(
-        "slow_all",
-        "engine_control",
-        params=case.value("capacity_conflict_overflow.slow_all"),
-    )
-    case.step(
         "perf_sync",
         "master_mark",
         params=case.value("capacity_conflict_overflow.perf_sync"),
@@ -987,14 +990,6 @@ def capacity_conflict_overflow(case):
         ),
     )
     case.step(
-        "cool_fast",
-        "engine_control",
-        params=case.params(
-            "capacity_conflict_overflow.cool_fast",
-            {"targets": [output("cool", "engine")]},
-        ),
-    )
-    case.step(
         "cool_sync",
         "master_mark",
         params=case.value("capacity_conflict_overflow.cool_sync"),
@@ -1021,8 +1016,11 @@ def capacity_conflict_overflow(case):
     )
     case.step(
         "wave_spacing_0",
-        "master_mark",
-        params=case.value("capacity_conflict_overflow.wave_spacing_0"),
+        "kv_capacity_spacing",
+        params=case.params(
+            "capacity_conflict_overflow.wave_spacing_0",
+            {"requests": output("wave_0", "requests")},
+        ),
     )
     case.step(
         "wave_1",
@@ -1032,8 +1030,11 @@ def capacity_conflict_overflow(case):
     )
     case.step(
         "wave_spacing_1",
-        "master_mark",
-        params=case.value("capacity_conflict_overflow.wave_spacing_1"),
+        "kv_capacity_spacing",
+        params=case.params(
+            "capacity_conflict_overflow.wave_spacing_1",
+            {"requests": output("wave_1", "requests")},
+        ),
     )
     case.step(
         "wave_2",
@@ -1043,8 +1044,11 @@ def capacity_conflict_overflow(case):
     )
     case.step(
         "wave_spacing_2",
-        "master_mark",
-        params=case.value("capacity_conflict_overflow.wave_spacing_2"),
+        "kv_capacity_spacing",
+        params=case.params(
+            "capacity_conflict_overflow.wave_spacing_2",
+            {"requests": output("wave_2", "requests")},
+        ),
     )
     case.step(
         "wave_3",
@@ -1054,8 +1058,11 @@ def capacity_conflict_overflow(case):
     )
     case.step(
         "wave_spacing_3",
-        "master_mark",
-        params=case.value("capacity_conflict_overflow.wave_spacing_3"),
+        "kv_capacity_spacing",
+        params=case.params(
+            "capacity_conflict_overflow.wave_spacing_3",
+            {"requests": output("wave_3", "requests")},
+        ),
     )
     case.step(
         "wave_4",
@@ -1102,10 +1109,5 @@ def capacity_conflict_overflow(case):
                 ],
             },
         ),
-    )
-    case.step(
-        "restore_perf",
-        "engine_control",
-        params=case.value("capacity_conflict_overflow.restore_perf"),
     )
     case.step("cleanup", "teardown")

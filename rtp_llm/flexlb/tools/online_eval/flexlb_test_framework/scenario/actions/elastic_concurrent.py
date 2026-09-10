@@ -1,6 +1,7 @@
 """Bounded four-thread elastic crossfire with a final quiescent snapshot."""
 
 import json
+import math
 import random
 import threading
 import time
@@ -13,6 +14,50 @@ def validate(params, plan):
     from .elastic import _validate
 
     return _validate(params, plan, set())
+
+
+def crossfire_validate(params, plan):
+    from .elastic import _validate
+
+    # Optional tail_s: extend ONLY the main-loop request emission past the
+    # 10s mutation storm window (mutation workers still stop at `end`).
+    # Absent tail_s (or 0) keeps the behavior identical to the legacy stage.
+    p = _validate(params, plan, {"tail_s", "convergence"})
+    if "tail_s" in p and (
+        type(p["tail_s"]) not in (int, float)
+        or not math.isfinite(p["tail_s"])
+        or p["tail_s"] < 0
+    ):
+        raise ValueError(f"{plan.path}: tail_s must be a nonnegative number")
+    if "convergence" in p:
+        c = p["convergence"]
+        required = {
+            "margin_s",
+            "cap_s",
+            "post_window_s",
+            "min_post_samples",
+            "nonbatch_failfast_s",
+            "batch_failfast_s",
+            "unique_ports",
+        }
+        if not isinstance(c, dict) or set(c) != required:
+            raise ValueError("convergence requires explicit YAML budgets")
+        if c["unique_ports"] is not True:
+            raise ValueError(
+                "convergence requires unique ports for wildcard mock listeners"
+            )
+        for name, value in c.items():
+            if name == "unique_ports":
+                continue
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"convergence.{name} must be positive and finite")
+        if type(c["min_post_samples"]) is not int:
+            raise ValueError("min_post_samples must be an integer")
+    return p
 
 
 def mutation_http(ops, endpoint, deadline, body):
@@ -39,15 +84,38 @@ def crossfire(ctx, params, deadline):
     done = [threading.Event() for _ in range(4)]
     lock = threading.Lock()
     candidates, operations, health = [], [], []
+    addresses = {}
+    added_attempts = 0
     errors = []
     records = RecordedRequests(ctx.ops, ctx.env_epoch, ctx.clock)
     end = ctx.clock() + 10
+    # Diagnostic tail observation: mutation workers still stop at `end`
+    # (mutation_end); only the main-loop request emission extends to
+    # mutation_end + tail_s. Storm-phase = issued before mutation_end.
+    mutation_end = end
+    convergence = params.get("convergence")
+    bound_s = None
+    if convergence:
+        from .elastic_convergence import convergence_bound
+
+        bound_s = convergence_bound(
+            ctx.instance["environment"]["resolved_config"],
+            convergence["margin_s"],
+            convergence["cap_s"],
+        )
+    issue_end = mutation_end + params.get("tail_s", 0)
+    if convergence:
+        issue_end = mutation_end + bound_s + convergence["post_window_s"]
     path = ctx.artifact_dir / f"elastic-crossfire-{time.time_ns()}.json"
 
     def persist():
         with lock:
             data = dict(
-                operations=list(operations), health=list(health), errors=list(errors)
+                operations=list(operations),
+                health=list(health),
+                errors=list(errors),
+                mutation_end_s=mutation_end,
+                bound_s=bound_s,
             )
         data.update(
             requests=records.snapshot_records(), workers_done=[e.is_set() for e in done]
@@ -68,6 +136,7 @@ def crossfire(ctx, params, deadline):
     request_handle = ctx.register_resource("requests", records, cleanup=finish)
 
     def mutate(index):
+        nonlocal added_attempts
         try:
             gate.wait()
             adder = index < 2
@@ -84,6 +153,18 @@ def crossfire(ctx, params, deadline):
                 body = (
                     dict(role="prefill" if worker == 0 else "decode") if adder else None
                 )
+                if adder and convergence:
+                    # Mock listeners bind wildcard addresses. Reusing a port with
+                    # a new advertised IP would let stale-IP traffic reach the new
+                    # engine, invalidating the removed-address fail-fast probe.
+                    with lock:
+                        body["port"] = (
+                            ctx.env.base_grpc_port
+                            + ctx.env.spec.n_prefill
+                            + ctx.env.spec.n_decode
+                            + added_attempts
+                        )
+                        added_attempts += 1
                 if not adder:
                     with lock:
                         if candidates:
@@ -95,6 +176,8 @@ def crossfire(ctx, params, deadline):
                         request=body,
                         started_s=ctx.clock(),
                     )
+                    if convergence and not adder:
+                        entry["address"] = addresses.get(body["port"])
                     try:
                         response = mutation_http(
                             ctx.ops,
@@ -102,6 +185,8 @@ def crossfire(ctx, params, deadline):
                             deadline,
                             body,
                         )
+                        if convergence:
+                            entry["ended_s"] = ctx.clock()
                         entry["response"] = response
                         entry["ok"] = (
                             isinstance(response, dict)
@@ -111,12 +196,34 @@ def crossfire(ctx, params, deadline):
                             port = response.get("port")
                             if type(port) is not int or not 1 <= port <= 65535:
                                 raise ValueError("successful add lacks a valid port")
+                            if convergence:
+                                # Read the exact advertised address after add completion,
+                                # before making this port available to remover workers.
+                                discovery = json.loads(
+                                    ctx.env.discovery_file.read_text()
+                                )
+                                matches = [
+                                    addr
+                                    for entries in discovery.values()
+                                    if isinstance(entries, list)
+                                    for addr in entries
+                                    if isinstance(addr, str)
+                                    and addr.rsplit(":", 1)[-1] == str(port - 1)
+                                ]
+                                if len(matches) != 1:
+                                    raise ValueError(
+                                        "successful add lacks one exact advertised address"
+                                    )
+                                entry["address"] = (
+                                    matches[0].rsplit(":", 1)[0] + ":" + str(port)
+                                )
+                                addresses[port] = entry["address"]
                             with lock:
                                 candidates.append(port)
                     except Exception as exc:
                         entry.update(ok=False, error=f"{type(exc).__name__}: {exc}")
                     finally:
-                        entry["ended_s"] = ctx.clock()
+                        entry.setdefault("ended_s", ctx.clock())
                         with lock:
                             operations.append(entry)
                             if not adder and body["port"] in candidates:
@@ -140,25 +247,60 @@ def crossfire(ctx, params, deadline):
             thread.start()
             started += 1
         gate.set()
-        while ctx.clock() < end:
+
+        def keep_issuing():
+            nonlocal issue_end
+            if convergence:
+                with lock:
+                    last_remove = max(
+                        [mutation_end]
+                        + [
+                            op["ended_s"]
+                            for op in operations
+                            if op.get("ok") and op["operation"] == "remove"
+                        ]
+                    )
+                issue_end = last_remove + bound_s + convergence["post_window_s"]
+                post_count = sum(
+                    r["issued_s"] >= last_remove + bound_s
+                    for r in records.snapshot_records()
+                )
+                return (
+                    not all(event.is_set() for event in done)
+                    or ctx.clock() < issue_end
+                    or post_count < convergence["min_post_samples"]
+                )
+            return ctx.clock() < issue_end
+
+        while keep_issuing():
             deadline.check()
             rid = ctx.ops.next_request_id()
             record = records.issue(rid, ctx.clock)
+            records.update(
+                record,
+                phase=("storm" if record["issued_s"] < mutation_end else "tail"),
+            )
             records.run(
                 record,
                 dict(output_len=2, block_keys=[rid * 100 + 1]),
                 timeout_s=min(40, deadline.remaining()),
                 stream_timeout_s=10,
             )
-            sample = dict(time_s=ctx.clock())
-            try:
-                _master_get(ctx, "rtp_llm/inflight_status", deadline)
-                sample["status"] = 200
-            except Exception as exc:
-                sample.update(status=None, error=f"{type(exc).__name__}: {exc}")
-            with lock:
-                health.append(sample)
-            stop.wait(max(0, min(1, end - ctx.clock())))
+            # Health probing follows the SAME phase source as the request
+            # record: a storm request still samples after its run() returns
+            # (even when the post-run clock has already passed mutation_end),
+            # while tail-phase requests never sample — the master_http check
+            # population stays exactly the storm rounds under every tail_s.
+            if record.get("phase") == "storm":
+                sample = dict(time_s=ctx.clock())
+                try:
+                    _master_get(ctx, "rtp_llm/inflight_status", deadline)
+                    sample["status"] = 200
+                except Exception as exc:
+                    sample.update(status=None, error=f"{type(exc).__name__}: {exc}")
+                with lock:
+                    health.append(sample)
+            stop.wait(max(0, min(1, issue_end - ctx.clock())))
         # Graceful mutation calls may finish after the 10s admission window.
         # Independent completion events prove they have stopped changing the
         # discovery file before the following consistency measurement.
@@ -167,10 +309,35 @@ def crossfire(ctx, params, deadline):
                 raise TimeoutError("crossfire mutation worker did not terminate")
         if errors:
             raise RuntimeError("; ".join(errors))
-        result = completeness(records.snapshot_records())
+        # Health/success-rate population is the storm phase only: tail records
+        # stay out of every existing check numerator/denominator and live on
+        # solely as evidence inside the persisted artifact.
+        result = completeness(
+            [r for r in records.snapshot_records() if r.get("phase") != "tail"]
+        )
+        if convergence:
+            from .elastic_convergence import evaluate_convergence
+
+            result["convergence"] = evaluate_convergence(
+                records.snapshot_records(),
+                operations,
+                mutation_end,
+                bound_s,
+                batch=ctx.instance["environment"]["resolved_config"]["dispatcher"][
+                    "type"
+                ]
+                == "BATCH",
+                min_post_samples=convergence["min_post_samples"],
+                nonbatch_failfast_s=convergence["nonbatch_failfast_s"],
+                batch_failfast_s=convergence["batch_failfast_s"],
+            )
         handle = ctx.register_resource("snapshot", result, historical=True)
         return StageOutput(
-            output=dict(result=handle, requests=request_handle),
+            output=dict(
+                result=handle,
+                requests=request_handle,
+                mutation_end_s=mutation_end,
+            ),
             checks=[
                 CheckResult("workers_finished", "PASS", actual=4),
                 CheckResult(
@@ -255,8 +422,14 @@ def protocol_validate(params, plan):
 def protocol(ctx, params, deadline):
     deadline.check()
     rows = ctx.resource(params["requests"], "requests").snapshot_records()
+    # Tail-phase requests (crossfire tail_s) are evidence-only: they stay out
+    # of the method check population just like every other existing check.
     admitted = [
-        r for r in rows if r["schedule"]["status"] == "OK" and r["prefill_addr"]
+        r
+        for r in rows
+        if r.get("phase") != "tail"
+        and r["schedule"]["status"] == "OK"
+        and r["prefill_addr"]
     ]
     methods = {str(r["wire_request_id"]): r["stream"]["method"] for r in admitted}
     # Fetch is the client branch selected by Schedule metadata, not proof
@@ -277,7 +450,58 @@ def protocol(ctx, params, deadline):
     )
 
 
+def convergence_validate(params, plan):
+    from .elastic import _validate
+
+    p = _validate(params, plan, {"result"}, {"result"})
+    plan.reference(p["result"], "snapshot")
+    return p
+
+
+def convergence_verdict(ctx, params, deadline):
+    deadline.check()
+    evidence = ctx.resource(params["result"], "snapshot")["convergence"]
+    path = ctx.artifact_dir / f"elastic-convergence-{time.time_ns()}.json"
+    path.write_text(json.dumps(evidence, indent=2))
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "coverage",
+                "PASS" if evidence["coverage_ok"] else "FAIL",
+                evidence=evidence,
+            ),
+            CheckResult(
+                "bounded_convergence",
+                "FAIL" if evidence["late_dead_hits"] else "PASS",
+                evidence=evidence,
+            ),
+            CheckResult(
+                "failfast",
+                (
+                    "FAIL"
+                    if evidence["failfast_violations"]
+                    else "PASS" if evidence["failfast_samples"] else "SKIP"
+                ),
+                detail=(
+                    "No qualifying failure sample"
+                    if not evidence["failfast_samples"]
+                    else ""
+                ),
+                evidence=evidence,
+            ),
+        ],
+        artifacts=[str(path)],
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "elastic_convergence_verdict",
+        convergence_validate,
+        convergence_verdict,
+        {},
+        checks=frozenset({"coverage", "bounded_convergence", "failfast"}),
+    ),
     StageHandler(
         "elastic_crossfire_protocol",
         protocol_validate,
@@ -287,9 +511,9 @@ HANDLERS = [
     ),
     StageHandler(
         "elastic_crossfire",
-        validate,
+        crossfire_validate,
         crossfire,
-        {"result": "snapshot", "requests": "requests"},
+        {"result": "snapshot", "requests": "requests", "mutation_end_s": "number"},
         checks=frozenset({"workers_finished", "master_http"}),
         max_dynamic_additions=65,
     ),

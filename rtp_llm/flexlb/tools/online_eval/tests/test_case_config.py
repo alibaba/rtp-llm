@@ -22,7 +22,7 @@ from flexlb_test_framework.scenario.loader import load_document
 
 class CaseConfigTest(unittest.TestCase):
     def test_debug_and_no_fetch_keep_retained_smoke_construction(self):
-        from flexlb_cfg import render_env
+        from flexlb_cfg import ConfigOverride, render_env
 
         plans = compile_scenarios(
             load_scenarios(ROOT / "scenarios/status/status_protocol.yaml"),
@@ -39,7 +39,9 @@ class CaseConfigTest(unittest.TestCase):
             )
             self.assertEqual(
                 plan["environment"]["resolved_config"],
-                json.loads(render_env("batch-window")),
+                json.loads(
+                    render_env("batch-window", ConfigOverride(request_timeout_ms=30000))
+                ),
             )
 
     def config(self):

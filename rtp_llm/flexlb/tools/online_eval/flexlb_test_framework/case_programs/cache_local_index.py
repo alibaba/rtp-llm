@@ -492,11 +492,6 @@ def isolation_batch(case):
     case.step("setup", "setup", timeout_s=case.value("isolation_batch.setup_timeout_s"))
     case.step("fleet", "balance_snapshot", params=case.value("isolation_batch.fleet"))
     case.step(
-        "slow",
-        "engine_control",
-        params=case.value("isolation_batch.slow"),
-    )
-    case.step(
         "perf_sync", "balance_pause", params=case.value("isolation_batch.perf_sync")
     )
     case.step(
@@ -553,19 +548,25 @@ def isolation_batch(case):
         },
     )
     case.step(
-        "restore_perf",
-        "engine_control",
-        params=case.value("isolation_batch.restore_perf"),
+        "b_perf_sync", "balance_pause", params=case.value("isolation_batch.b_perf_sync")
     )
+    # Seed-family traffic makes B's occupancy visible through real admission.
+    case.step("filler_0", "request", params=case.value("isolation_batch.filler"))
     case.step(
-        "slow_b",
-        "engine_control",
+        "filler_0_holder",
+        "kv_landing",
         params=case.params(
-            "isolation_batch.slow_b", {"targets": [output("b_holder", "engine")]}
+            "isolation_batch.filler_holder",
+            {"requests": output("filler_0", "requests")},
         ),
     )
     case.step(
-        "b_perf_sync", "balance_pause", params=case.value("isolation_batch.b_perf_sync")
+        "filler_0_on_b",
+        "kv_same",
+        params={
+            "first": output("b_holder", "engine"),
+            "second": output("filler_0_holder", "engine"),
+        },
     )
     case.step(
         "admit_0",
@@ -592,6 +593,30 @@ def isolation_batch(case):
         params={
             "first": output("a_holder", "engine"),
             "second": output("admit_0_holder", "engine"),
+        },
+    )
+    # Seed-family traffic makes B's occupancy visible through real admission.
+    case.step(
+        "filler_0_terminal",
+        "wait",
+        timeout_s=case.value("isolation_batch.filler_terminal_timeout_s"),
+        params={"requests": output("filler_0", "requests")},
+    )
+    case.step("filler_1", "request", params=case.value("isolation_batch.filler"))
+    case.step(
+        "filler_1_holder",
+        "kv_landing",
+        params=case.params(
+            "isolation_batch.filler_holder",
+            {"requests": output("filler_1", "requests")},
+        ),
+    )
+    case.step(
+        "filler_1_on_b",
+        "kv_same",
+        params={
+            "first": output("b_holder", "engine"),
+            "second": output("filler_1_holder", "engine"),
         },
     )
     case.step(
@@ -621,6 +646,30 @@ def isolation_batch(case):
             "second": output("admit_1_holder", "engine"),
         },
     )
+    # Seed-family traffic makes B's occupancy visible through real admission.
+    case.step(
+        "filler_1_terminal",
+        "wait",
+        timeout_s=case.value("isolation_batch.filler_terminal_timeout_s"),
+        params={"requests": output("filler_1", "requests")},
+    )
+    case.step("filler_2", "request", params=case.value("isolation_batch.filler"))
+    case.step(
+        "filler_2_holder",
+        "kv_landing",
+        params=case.params(
+            "isolation_batch.filler_holder",
+            {"requests": output("filler_2", "requests")},
+        ),
+    )
+    case.step(
+        "filler_2_on_b",
+        "kv_same",
+        params={
+            "first": output("b_holder", "engine"),
+            "second": output("filler_2_holder", "engine"),
+        },
+    )
     case.step(
         "admit_2",
         "request",
@@ -646,6 +695,30 @@ def isolation_batch(case):
         params={
             "first": output("a_holder", "engine"),
             "second": output("admit_2_holder", "engine"),
+        },
+    )
+    # Seed-family traffic makes B's occupancy visible through real admission.
+    case.step(
+        "filler_2_terminal",
+        "wait",
+        timeout_s=case.value("isolation_batch.filler_terminal_timeout_s"),
+        params={"requests": output("filler_2", "requests")},
+    )
+    case.step("filler_3", "request", params=case.value("isolation_batch.filler"))
+    case.step(
+        "filler_3_holder",
+        "kv_landing",
+        params=case.params(
+            "isolation_batch.filler_holder",
+            {"requests": output("filler_3", "requests")},
+        ),
+    )
+    case.step(
+        "filler_3_on_b",
+        "kv_same",
+        params={
+            "first": output("b_holder", "engine"),
+            "second": output("filler_3_holder", "engine"),
         },
     )
     case.step(
@@ -676,11 +749,10 @@ def isolation_batch(case):
         },
     )
     case.step(
-        "restore_b",
-        "engine_control",
-        params=case.params(
-            "isolation_batch.restore_b", {"targets": [output("b_holder", "engine")]}
-        ),
+        "filler_3_terminal",
+        "wait",
+        timeout_s=case.value("isolation_batch.filler_terminal_timeout_s"),
+        params={"requests": output("filler_3", "requests")},
     )
     case.step(
         "admission_quiet",
@@ -965,11 +1037,6 @@ def isolation_nonbatch(case):
         "fleet", "balance_snapshot", params=case.value("isolation_nonbatch.fleet")
     )
     case.step(
-        "slow",
-        "engine_control",
-        params=case.value("isolation_nonbatch.slow"),
-    )
-    case.step(
         "perf_sync", "balance_pause", params=case.value("isolation_nonbatch.perf_sync")
     )
     case.step(
@@ -1026,21 +1093,27 @@ def isolation_nonbatch(case):
         },
     )
     case.step(
-        "restore_perf",
-        "engine_control",
-        params=case.value("isolation_nonbatch.restore_perf"),
-    )
-    case.step(
-        "slow_b",
-        "engine_control",
-        params=case.params(
-            "isolation_nonbatch.slow_b", {"targets": [output("b_holder", "engine")]}
-        ),
-    )
-    case.step(
         "b_perf_sync",
         "balance_pause",
         params=case.value("isolation_nonbatch.b_perf_sync"),
+    )
+    # Seed-family traffic makes B's occupancy visible through real admission.
+    case.step("filler_0", "request", params=case.value("isolation_nonbatch.filler"))
+    case.step(
+        "filler_0_holder",
+        "kv_landing",
+        params=case.params(
+            "isolation_nonbatch.filler_holder",
+            {"requests": output("filler_0", "requests")},
+        ),
+    )
+    case.step(
+        "filler_0_on_b",
+        "kv_same",
+        params={
+            "first": output("b_holder", "engine"),
+            "second": output("filler_0_holder", "engine"),
+        },
     )
     case.step(
         "admit_0",
@@ -1067,6 +1140,30 @@ def isolation_nonbatch(case):
         params={
             "first": output("a_holder", "engine"),
             "second": output("admit_0_holder", "engine"),
+        },
+    )
+    # Seed-family traffic makes B's occupancy visible through real admission.
+    case.step(
+        "filler_0_terminal",
+        "wait",
+        timeout_s=case.value("isolation_nonbatch.filler_terminal_timeout_s"),
+        params={"requests": output("filler_0", "requests")},
+    )
+    case.step("filler_1", "request", params=case.value("isolation_nonbatch.filler"))
+    case.step(
+        "filler_1_holder",
+        "kv_landing",
+        params=case.params(
+            "isolation_nonbatch.filler_holder",
+            {"requests": output("filler_1", "requests")},
+        ),
+    )
+    case.step(
+        "filler_1_on_b",
+        "kv_same",
+        params={
+            "first": output("b_holder", "engine"),
+            "second": output("filler_1_holder", "engine"),
         },
     )
     case.step(
@@ -1096,6 +1193,30 @@ def isolation_nonbatch(case):
             "second": output("admit_1_holder", "engine"),
         },
     )
+    # Seed-family traffic makes B's occupancy visible through real admission.
+    case.step(
+        "filler_1_terminal",
+        "wait",
+        timeout_s=case.value("isolation_nonbatch.filler_terminal_timeout_s"),
+        params={"requests": output("filler_1", "requests")},
+    )
+    case.step("filler_2", "request", params=case.value("isolation_nonbatch.filler"))
+    case.step(
+        "filler_2_holder",
+        "kv_landing",
+        params=case.params(
+            "isolation_nonbatch.filler_holder",
+            {"requests": output("filler_2", "requests")},
+        ),
+    )
+    case.step(
+        "filler_2_on_b",
+        "kv_same",
+        params={
+            "first": output("b_holder", "engine"),
+            "second": output("filler_2_holder", "engine"),
+        },
+    )
     case.step(
         "admit_2",
         "request",
@@ -1121,6 +1242,30 @@ def isolation_nonbatch(case):
         params={
             "first": output("a_holder", "engine"),
             "second": output("admit_2_holder", "engine"),
+        },
+    )
+    # Seed-family traffic makes B's occupancy visible through real admission.
+    case.step(
+        "filler_2_terminal",
+        "wait",
+        timeout_s=case.value("isolation_nonbatch.filler_terminal_timeout_s"),
+        params={"requests": output("filler_2", "requests")},
+    )
+    case.step("filler_3", "request", params=case.value("isolation_nonbatch.filler"))
+    case.step(
+        "filler_3_holder",
+        "kv_landing",
+        params=case.params(
+            "isolation_nonbatch.filler_holder",
+            {"requests": output("filler_3", "requests")},
+        ),
+    )
+    case.step(
+        "filler_3_on_b",
+        "kv_same",
+        params={
+            "first": output("b_holder", "engine"),
+            "second": output("filler_3_holder", "engine"),
         },
     )
     case.step(
@@ -1151,11 +1296,10 @@ def isolation_nonbatch(case):
         },
     )
     case.step(
-        "restore_b",
-        "engine_control",
-        params=case.params(
-            "isolation_nonbatch.restore_b", {"targets": [output("b_holder", "engine")]}
-        ),
+        "filler_3_terminal",
+        "wait",
+        timeout_s=case.value("isolation_nonbatch.filler_terminal_timeout_s"),
+        params={"requests": output("filler_3", "requests")},
     )
     case.step(
         "admission_quiet",

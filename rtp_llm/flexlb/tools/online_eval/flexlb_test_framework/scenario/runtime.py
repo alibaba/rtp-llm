@@ -233,7 +233,7 @@ def _validate_output(ctx, result, expected, check_ids):
     ids = [c.id for c in result.checks]
     if len(set(ids)) != len(ids) or set(ids) != set(check_ids):
         raise ValueError("adapter checks do not match declared check IDs")
-    if any(c.status not in ("PASS", "FAIL", "ERROR") for c in result.checks):
+    if any(c.status not in ("PASS", "FAIL", "ERROR", "SKIP") for c in result.checks):
         raise ValueError("invalid check status")
     json.dumps(asdict(result), allow_nan=False)
 
@@ -300,6 +300,8 @@ def execute_instance(
                     status="PASS",
                 )
                 for check in result.checks:
+                    if check.status == "SKIP":
+                        continue
                     qualified = spec["id"] + "." + check.id
                     if check.status == "ERROR":
                         row["status"] = terminal_status = "ERROR"

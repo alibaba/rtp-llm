@@ -25,16 +25,6 @@ public final class EndpointTestSupport {
     private EndpointTestSupport() {
     }
 
-    /** Test-only access to the endpoint-local route-capacity ledger. */
-    public static PrefillState.ReservationResult<PrefillState.RouteReservation>
-            reserveRoute(
-            PrefillState state,
-            ScheduledRequest item,
-            long predictedMs,
-            int maximumRequests) {
-        return state.reserveRoute(item, predictedMs, maximumRequests);
-    }
-
     static EndpointEventProjector noopEventSink() {
         return org.mockito.Mockito.mock(EndpointEventProjector.class);
     }
@@ -220,15 +210,23 @@ public final class EndpointTestSupport {
         }
     }
 
-    static PrefillState.DirectRegistration registerDirect(
-            PrefillEndpoint endpoint,
-            long requestId,
-            long predictedMs) {
+    static PrefillState.RouteReservation reserveUnqueued(
+            PrefillEndpoint endpoint, ScheduledRequest item, long predictedMs) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
                 throw new IllegalStateException("endpoint is retired");
             }
-            return endpoint.registerDirectRequest(pin, requestId, predictedMs).reservation();
+            return endpoint.reserveUnqueuedRoute(pin, item, predictedMs).reservation();
+        }
+    }
+
+    static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
+        ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
+        org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
+        try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
+             var commit = endpoint.tryBeginRouteCommitAdmission();
+             var handoff = commit.commit(List.of(item), List.of(reservation))) {
+            // The endpoint ledger owns this request until authoritative termination.
         }
     }
 
@@ -267,8 +265,8 @@ public final class EndpointTestSupport {
         try {
             for (ScheduledRequest item : items) {
                 PrefillState.ReservationResult<PrefillState.RouteReservation> result =
-                        endpoint.reservePublishedRouteCredit(
-                                item, predictedMs, Integer.MAX_VALUE);
+                        endpoint.reserveRouteOwnership(
+                                item, predictedMs);
                 if (result.status()
                         != PrefillState.CapacityStatus.ACQUIRED) {
                     throw new IllegalStateException(
@@ -310,13 +308,6 @@ public final class EndpointTestSupport {
         private final List<ScheduledRequest> offerFailures =
                 new CopyOnWriteArrayList<>();
         TestRequestRuntime() {
-            org.mockito.Mockito.when(requests.prepareDecodeAcceptance(org.mockito.Mockito.any()))
-                    .thenAnswer(invocation -> {
-                        RequestRegistry.DeliveryAdmission admission =
-                                org.mockito.Mockito.mock(RequestRegistry.DeliveryAdmission.class);
-                        org.mockito.Mockito.when(admission.transferTo(org.mockito.Mockito.any())).thenReturn(true);
-                        return org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(admission);
-                    });
             org.mockito.Mockito.doAnswer(invocation -> Optional.ofNullable(
                     ((Supplier<?>) invocation.getArgument(1)).get()))
                     .when(requests).prepareIfOwned(
@@ -340,6 +331,11 @@ public final class EndpointTestSupport {
                 return null;
             }).when(requests).complete(
                     org.mockito.Mockito.any(), org.mockito.Mockito.any());
+            org.mockito.Mockito.doAnswer(invocation -> {
+                requests.complete(invocation.getArgument(0), DeliveryResult.delivered());
+                return null;
+            }).when(requests).beginRouteDelivery(
+                    org.mockito.Mockito.any(), org.mockito.Mockito.any(), org.mockito.Mockito.anyLong());
             org.mockito.Mockito.doAnswer(invocation -> {
                 onQueueOfferFailure(
                         invocation.getArgument(0), invocation.getArgument(1));

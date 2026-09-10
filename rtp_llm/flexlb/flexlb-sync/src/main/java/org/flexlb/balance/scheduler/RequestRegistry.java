@@ -1,17 +1,16 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
@@ -24,23 +23,18 @@ import org.flexlb.debug.DebugRows;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
-import org.flexlb.util.PriorityNormalizer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -67,8 +61,6 @@ import java.util.function.Supplier;
 @Component
 public class RequestRegistry {
 
-    static final int OUTSTANDING_ADMISSION_CLOSED = -1;
-    private static final int DECODE_ACCEPTANCE_CLOSED = -1;
     private static final Runnable NO_POST_LOCK_ACTION = () -> { };
 
     private final RequestCompletionPublisher completionPublisher;
@@ -83,27 +75,8 @@ public class RequestRegistry {
      */
     private final Object admissionQuiescenceMonitor = new Object();
     private int inFlightAdmissionMutations;
-    /**
-     * Exact cluster-wide QUEUE ownership bound. Unlike {@code requestSlots.size()},
-     * this counter includes admissions which have not reached registration yet.
-     * A submit either increments this counter or transfers a locally reversible
-     * victim's exact permit without decrementing it.
-     */
-    private final AtomicInteger outstandingRequestCount = new AtomicInteger();
-    /** Serializes duplicate detection, permit transfer and canonical publication only. */
-    private final Object outstandingAdmissionLock = new Object();
-    /** Derived index of queued generations; delivery/terminal claims remove entries. */
-    private final Set<RequestSlot> outstandingCandidates = new ConcurrentSkipListSet<>(
-            Comparator.comparingInt(RequestSlot::admissionPriority)
-                    .thenComparing(Comparator.comparingLong(RequestSlot::createdAtMs).reversed())
-                    .thenComparingLong(RequestSlot::requestId));
-    /** QUEUE requests whose Decode-acceptance guard remains active. */
-    private final AtomicInteger decodeAcceptanceCount = new AtomicInteger();
-    private final Set<Runnable> decodeAcceptanceListeners = ConcurrentHashMap.newKeySet();
-    private static final RouteProjection.AdmissionBlockSemantics ACCEPTANCE_BLOCK =
-            new RouteProjection.AdmissionBlockSemantics("DELIVERY_CAPACITY_DECODE_ACCEPTANCE",
-                    RouteProjection.AfterProbeAdmission.UNAVAILABLE,
-                    "DECODE_ACCEPTANCE_GLOBAL", RoleType.DECODE);
+    /** Serializes duplicate detection and canonical publication. */
+    private final Object registrationLock = new Object();
     private final BatchSchedulerReporter reporter;
     private final RequestSchedulerReporter requestReporter;
     /** The sole canonical owner for admission, delivery and terminal state. */
@@ -131,21 +104,6 @@ public class RequestRegistry {
                             .getBatchDispatchCompletionThreads();
         } catch (Throwable ignored) {
             return 0;
-        }
-    }
-
-    /** Reserve one global request slot without a check-then-act window. */
-    private boolean tryAcquireOutstandingPermit(int limit) {
-        while (true) {
-            int current = outstandingRequestCount.get();
-            if (current == OUTSTANDING_ADMISSION_CLOSED
-                    || current == Integer.MAX_VALUE
-                    || (limit > 0 && current >= limit)) {
-                return false;
-            }
-            if (outstandingRequestCount.compareAndSet(current, current + 1)) {
-                return true;
-            }
         }
     }
 
@@ -179,47 +137,150 @@ public class RequestRegistry {
     }
 
     public void cancelForDeadline(RequestSlot exactSlot) {
-        cancelRequest(exactSlot, 0L, CancelReason.DEADLINE_EXCEEDED, false, 0L);
+        cancelRequest(exactSlot, 0L, CancelReason.DEADLINE_EXCEEDED);
     }
 
-    void cancelForRequestInactivity(RequestSlot exactSlot, long nowMs) {
-        cancelRequest(exactSlot, 0L, CancelReason.DEADLINE_EXCEEDED, true, nowMs);
+    void expireInactiveRequest(RequestSlot exactSlot, long nowMs) {
+        if (exactSlot == null) {
+            return;
+        }
+        TerminalAction expiration;
+        synchronized (exactSlot) {
+            if (!isCurrentSlot(exactSlot) || !exactSlot.ownsActiveGeneration()
+                    || exactSlot.snapshot().state().isTerminal() || !exactSlot.requestInactive(nowMs)) {
+                return;
+            }
+            String detail = "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout";
+            if (exactSlot.deferInactivityExpiryDuringAdmission(detail)) {
+                return;
+            }
+            exactSlot.markCancellationRequested(CancelReason.DEADLINE_EXCEEDED, detail);
+            expiration = beginExpiredRequestLocked(exactSlot, detail);
+        }
+        submitTerminal(expiration);
     }
 
-    public void acceptanceExpired(RequestSlot.AcceptanceExpiry expiry) {
-        releaseAdmissionCleanup(expiry.cleanup());
+    private void reconcileDecodeAcceptance(ScheduledRequest item) {
+        if (item.decodeEp() != null && item.decodeEp().isReservationAccepted(item.decodeReservation())) {
+            onDecodeAccepted(item.decodeEp(), item.decodeReservation());
+        }
     }
 
-    public boolean reduceStale(
-            RequestSlot exactSlot,
-            long nowMs,
-            long staleTtlMs) {
-        return reduceStaleSlot(exactSlot, nowMs, staleTtlMs);
+    void onPrefillFact(PrefillEndpoint source, RoleType role, PrefillState.WorkerStatusFact fact) {
+        applyEngineFact(fact.item().requestId(),
+                slot -> slot.observePrefillFact(source, role, fact, System.currentTimeMillis()));
+    }
+
+    void onDecodeFact(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact) {
+        applyEngineFact(fact.reservation().requestId(),
+                slot -> slot.observeDecodeFact(source, fact, System.currentTimeMillis()));
+    }
+
+    void onDecodeAccepted(DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation) {
+        onDecodeFact(source, DecodeEndpoint.WorkerStatusFact.accepted(reservation));
+    }
+
+    private void applyEngineFact(long requestId,
+                                java.util.function.Function<RequestSlot, RequestSlot.EngineObservation> reduction) {
+        RequestSlot slot = requestSlot(requestId);
+        if (slot == null) { return; }
+        RequestSlot.EngineObservation effects;
+        Runnable work;
+        synchronized (slot) {
+            if (!isCurrentSlot(slot)) { return; }
+            effects = reduction.apply(slot);
+            work = materializePostLockActionLocked(slot, effects.transition(), null);
+        }
+        try {
+            cancelDecisionDeadline(effects.obsoleteDeadline());
+        } finally {
+            try { armDecisionDeadline(slot); }
+            finally { runPostLock(work); }
+        }
+    }
+
+    public void decisionExpired(RequestSlot.DecisionExpiry expiry) {
+        if (expiry.needsConfirmation() && expiry.item() != null) {
+            RequestSlot slot = entryFor(expiry.item());
+            if (slot != null) {
+                synchronized (slot) {
+                    slot.markAwaitingConfirmation(
+                            "decision lifetime expired; awaiting Engine confirmation");
+                }
+            }
+        }
+    }
+
+    void projectPrefillRetirementItem(
+            PrefillEndpoint retiredEndpoint,
+            ScheduledRequest exactItem) {
+        if (exactItem == null || exactItem.prefillEp() != retiredEndpoint) { return; }
+        ScheduledRequest item = exactItem;
+        RequestSlot slot = requestSlot(item.requestId());
+        if (slot == null) {
+            return;
+        }
+        String detail = "Prefill endpoint generation retired: "
+                + retiredEndpoint.ipPort() + "#"
+                + retiredEndpoint.getStatus().getGenerationId();
+        TerminalAction action;
+        synchronized (slot) {
+            if (!isCurrentSlot(slot)) {
+                return;
+            }
+            action = slot.beginPrefillRetirementTerminal(
+                    retiredEndpoint,
+                    item,
+                    owner -> owner.fail(detail),
+                    RequestRegistry.buildErrorResponse(
+                            StrategyErrorType.DISPATCH_FAILED, detail));
+        }
+        submitTerminal(action);
+    }
+
+    void projectDecodeRetirementReservation(
+            DecodeEndpoint retiredEndpoint,
+            DecodeEndpoint.ReservationHandle reservation) {
+        RequestSlot slot = requestSlot(reservation.requestId());
+        if (slot == null) {
+            return;
+        }
+        String detail = "Decode endpoint generation retired: generation="
+                + reservation.endpointGenerationId();
+        Runnable work;
+        synchronized (slot) {
+            if (!isCurrentSlot(slot)) {
+                return;
+            }
+            work = materializePostLockActionLocked(
+                    slot,
+                    slot.reduceDecodeGenerationRetired(
+                            retiredEndpoint, reservation, detail),
+                    null);
+        }
+        runPostLock(work);
     }
 
     // ==================== Request submission ====================
 
     CompletableFuture<Response> register(
-            BalanceContext context,
-            int maxOutstanding) {
+            BalanceContext context) {
         if (context == null || context.getRequest() == null) {
             return CompletableFuture.completedFuture(buildErrorResponse(
                     StrategyErrorType.INVALID_REQUEST, null));
         }
         if (shuttingDown.get()) {
             return CompletableFuture.completedFuture(buildErrorResponse(
-                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    StrategyErrorType.DISPATCH_FAILED,
                     "request scheduler is shutting down"));
         }
 
         RequestSlot slot = null;
-        TerminalAction displaced = null;
-        boolean acquired = false;
         boolean registered = false;
         try {
             // Never execute endpoint cleanup, timer operations or public callbacks here.
             // Slot reducers only remove from the concurrent index, never acquire this lock.
-            synchronized (outstandingAdmissionLock) {
+            synchronized (registrationLock) {
                 if (requestSlots.containsKey(context.getRequestId())) {
                     return CompletableFuture.completedFuture(buildErrorResponse(
                             StrategyErrorType.INVALID_REQUEST,
@@ -230,38 +291,26 @@ public class RequestRegistry {
                             StrategyErrorType.BATCH_SLO_EXPIRED,
                             "request scheduling deadline has expired"));
                 }
-                int priority = PriorityNormalizer.isValid(context.getPriority())
-                        ? context.getPriority() : PriorityNormalizer.DEFAULT_PRIORITY;
-                acquired = tryAcquireOutstandingPermit(maxOutstanding);
-                if (!acquired && !shuttingDown.get()) {
-                    displaced = claimOutstandingVictim(context.getConfig(), priority);
-                    acquired = displaced != null;
-                }
-                if (!acquired) {
-                    boolean closed = shuttingDown.get()
-                            || outstandingRequestCount.get() == OUTSTANDING_ADMISSION_CLOSED;
+                if (shuttingDown.get()) {
                     return CompletableFuture.completedFuture(buildErrorResponse(
-                            closed ? StrategyErrorType.BATCH_DISPATCH_FAILED
-                                    : StrategyErrorType.QUEUE_FULL,
-                            closed ? "request scheduler is shutting down" : null));
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "request scheduler is shutting down"));
                 }
-                slot = new RequestSlot(completionPublisher, context.getRequestId(),
-                        outstandingRequestCount, priority, outstandingCandidates::remove);
+                slot = new RequestSlot(completionPublisher, context.getRequestId());
                 context.setEnqueueTime(System.currentTimeMillis());
                 synchronized (slot) {
                     slot.configureDeadlineError(StrategyErrorType.BATCH_SLO_EXPIRED);
-                    slot.configureInactivityTimeout(context.getConfig().queueScheduler()
-                            .getLifecycle().getStaleInflightTimeoutMs());
+                    slot.configureInactivityTimeout(
+                            context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
                     requestSlots.put(context.getRequestId(), slot);
                     registered = true;
-                    outstandingCandidates.add(slot);
                 }
             }
             RequestFuture future = slot.future();
             if (shuttingDown.get()) {
                 completeError(
                         future,
-                        StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        StrategyErrorType.DISPATCH_FAILED,
                         "request scheduler is shutting down");
                 return future;
             }
@@ -283,51 +332,13 @@ public class RequestRegistry {
             if (registered) {
                 completeError(
                         slot.future(),
-                        StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        StrategyErrorType.DISPATCH_FAILED,
                         detail);
                 return slot.future();
             }
             return CompletableFuture.completedFuture(buildErrorResponse(
-                    StrategyErrorType.BATCH_DISPATCH_FAILED, detail));
-        } finally {
-            if (acquired && !registered) {
-                if (slot == null) {
-                    RequestSlot.releaseOutstandingPermit(outstandingRequestCount);
-                } else {
-                    slot.releaseOutstandingPermit();
-                }
-            }
-            submitTerminal(displaced);
+                    StrategyErrorType.DISPATCH_FAILED, detail));
         }
-    }
-
-    /** Claim only locally reversible work, then transfer its permit before cleanup. */
-    private TerminalAction claimOutstandingVictim(FlexlbConfig config, int priority) {
-        if (config == null || !config.isPriorityOrdering()) {
-            return null;
-        }
-        boolean allowPlaced = config.priorityOrdering().getPreemption() != null
-                && config.priorityOrdering().getPreemption().allows(VictimStage.PREFILL_QUEUED);
-        for (RequestSlot candidate : outstandingCandidates) {
-            if (candidate.admissionPriority() >= priority) {
-                break;
-            }
-            synchronized (candidate) {
-                if (!isCurrentSlot(candidate) || !candidate.canClaimLocalTerminal()
-                        || (!allowPlaced && candidate.activeItem() != null)) {
-                    continue;
-                }
-                String detail = "outstanding admission replaced by higher priority request";
-                TerminalAction action = beginTerminalLocked(candidate, true, true,
-                        slot -> slot.cancel(detail),
-                        buildErrorResponse(StrategyErrorType.PRIORITY_PREEMPTED, detail));
-                if (action != null) {
-                    candidate.transferOutstandingPermit();
-                    return action;
-                }
-            }
-        }
-        return null;
     }
 
     /**
@@ -348,7 +359,9 @@ public class RequestRegistry {
         if (slot == null || !slot.ownsFuture(future)) {
             return;
         }
-        expirationTimer.attachRequestDeadline(slot, context.getRequestExpiresAtMs());
+        if (context.getConfig().isQueue()) {
+            expirationTimer.attachRequestDeadline(slot, context.getRequestExpiresAtMs());
+        }
         expirationTimer.attachInactivityDeadline(slot);
     }
 
@@ -400,91 +413,6 @@ public class RequestRegistry {
             slot.rollbackItemPublication(item);
         }
         return PlacementResult.Status.BLOCKED;
-    }
-
-    /** Prepared immediately before delivery, never while waiting in an endpoint queue. */
-    public CapacityBoundary.Attempt<DeliveryAdmission> prepareDecodeAcceptance(ScheduledRequest item) {
-        var policy = item.ctx().getConfig().queueScheduler().getLifecycle();
-        int limit = policy.getMaxDeliveredNotAcceptedRequestsGlobal();
-        if (!tryAcquireDecodeAcceptancePermit(limit)) {
-            return CapacityBoundary.Attempt.rejected(CapacityBoundary.unavailable(
-                    new DecodeAcceptanceAvailability(limit), ACCEPTANCE_BLOCK));
-        }
-        try {
-            return CapacityBoundary.Attempt.accepted(new DeliveryAdmission(
-                    this::releaseDecodeAcceptancePermit, policy.getDeliveredNotAcceptedTimeoutMs()));
-        } catch (Throwable failure) {
-            releaseDecodeAcceptancePermit();
-            throw failure;
-        }
-    }
-
-    public final class DeliveryAdmission implements AutoCloseable {
-        private Runnable release;
-        private final long acceptanceTimeoutMs;
-
-        private DeliveryAdmission(Runnable release, long acceptanceTimeoutMs) {
-            this.release = release;
-            this.acceptanceTimeoutMs = acceptanceTimeoutMs;
-        }
-
-        public boolean transferTo(ScheduledRequest item) {
-            RequestSlot slot = entryFor(item);
-            if (slot == null) {
-                return false;
-            }
-            RequestSlot.AdmissionCleanup immediate;
-            synchronized (slot) {
-                if (!ownsPreparedDelivery(slot, item)) {
-                    return false;
-                }
-                synchronized (this) {
-                    if (release == null) {
-                        throw new IllegalStateException("delivery admission already transferred");
-                    }
-                    // Transfer only after binding succeeds. On failure the transaction
-                    // still owns cleanup, so no capacity callback runs under the slot lock.
-                    immediate = slot.bindAdmissionResources(release, acceptanceTimeoutMs);
-                    release = null;
-                }
-            }
-            releaseAdmissionCleanup(immediate);
-            return true;
-        }
-
-        @Override
-        public void close() {
-            Runnable exactRelease;
-            synchronized (this) {
-                exactRelease = release;
-                release = null;
-            }
-            if (exactRelease != null) {
-                exactRelease.run();
-            }
-        }
-    }
-
-    private final class DecodeAcceptanceAvailability implements CapacityBoundary.Availability {
-        private final int limit;
-
-        private DecodeAcceptanceAvailability(int limit) {
-            this.limit = limit;
-        }
-
-        public boolean isAvailable() {
-            int used = decodeAcceptanceCount.get();
-            return used != DECODE_ACCEPTANCE_CLOSED && used < Integer.MAX_VALUE
-                    && (limit <= 0 || used < limit);
-        }
-
-        public void addListener(Runnable listener) {
-            decodeAcceptanceListeners.add(listener);
-        }
-
-        public void removeListener(Runnable listener) {
-            decodeAcceptanceListeners.remove(listener);
-        }
     }
 
     public boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
@@ -710,47 +638,6 @@ public class RequestRegistry {
         submitTerminal(localCompletion);
     }
 
-    int decodeAcceptanceCount() {
-        return Math.max(0, decodeAcceptanceCount.get());
-    }
-
-    private boolean tryAcquireDecodeAcceptancePermit(int limit) {
-        while (true) {
-            int current = decodeAcceptanceCount.get();
-            if (current == DECODE_ACCEPTANCE_CLOSED
-                    || current == Integer.MAX_VALUE
-                    || (limit > 0 && current >= limit)) {
-                return false;
-            }
-            if (decodeAcceptanceCount.compareAndSet(current, current + 1)) {
-                return true;
-            }
-        }
-    }
-
-    private void releaseDecodeAcceptancePermit() {
-        while (true) {
-            int current = decodeAcceptanceCount.get();
-            if (current == DECODE_ACCEPTANCE_CLOSED) {
-                return;
-            }
-            if (current <= 0) {
-                throw new IllegalStateException(
-                        "Decode acceptance permit counter underflow");
-            }
-            if (decodeAcceptanceCount.compareAndSet(current, current - 1)) {
-                for (Runnable listener : decodeAcceptanceListeners) {
-                    try {
-                        listener.run();
-                    } catch (Throwable failure) {
-                        Logger.warn("Decode acceptance capacity listener failed", failure);
-                    }
-                }
-                return;
-            }
-        }
-    }
-
     /**
      * Terminate a yielded victim — one the engine never saw (prefill queue
      * eviction / decode reserved-only eviction, contract 5.3) — with the
@@ -762,6 +649,13 @@ public class RequestRegistry {
                 victim,
                 StrategyErrorType.NO_AVAILABLE_WORKER,
                 detail);
+    }
+
+    void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
+        finishYielded(victim, "yielded to higher-priority request " + incoming.requestId());
+        requestReporter.reportVictim(victim.priority(), incoming.priority(),
+                "prefill_queued", "prefill_inflight_requests");
+        requestReporter.reportPriorityPreempt("prefill_queued");
     }
 
     public void finishYieldedReservation(
@@ -981,11 +875,11 @@ public class RequestRegistry {
      * Only the preemption coordinator may send cancellation to an Engine.
      */
     public RequestState cancelRequest(long requestId, long expectedBatchId, CancelReason reason) {
-        return cancelRequest(requestSlots.get(requestId), expectedBatchId, reason, false, 0L);
+        return cancelRequest(requestSlots.get(requestId), expectedBatchId, reason);
     }
 
     private RequestState cancelRequest(RequestSlot entry, long expectedBatchId,
-                                       CancelReason reason, boolean checkInactivity, long nowMs) {
+                                       CancelReason reason) {
         Objects.requireNonNull(reason, "reason");
         if (entry == null) { return null; }
         TerminalAction localCompletion = null;
@@ -1001,29 +895,19 @@ public class RequestRegistry {
             if (!entry.ownsActiveGeneration() || current.state().isTerminal()) {
                 return current;
             }
-            if (checkInactivity) {
-                if (!entry.requestInactive(nowMs)) {
-                    return current;
-                }
-            } else if (entry.hasCancellationFirstCause()
+            if (entry.hasCancellationFirstCause()
                     || (reason == CancelReason.DEADLINE_EXCEEDED
                         && current.deliveryClaimKind() != DeliveryClaimKind.NONE)) {
                 return current;
             }
-            String detail = checkInactivity
-                    ? "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout"
-                    : cancelDetail(reason);
-            if (checkInactivity
-                    ? entry.deferInactivityExpiryDuringAdmission(detail)
-                    : entry.deferCancellationDuringAdmission(reason, detail)) {
+            String detail = cancelDetail(reason);
+            if (entry.deferCancellationDuringAdmission(reason, detail)) {
                 return entry.snapshot();
             }
-            entry.rememberCancellation(reason, detail);
+            entry.markCancellationRequested(reason, detail);
             CancelReason firstCause = entry.requireCancellationFirstCause();
             ScheduledRequest item = entry.activeItem();
-            if (checkInactivity) {
-                localCompletion = beginExpiredRequestLocked(entry, detail);
-            } else if (item == null || entry.canClaimLocalTerminal()) {
+            if (item == null || entry.canClaimLocalTerminal()) {
                 localCompletion = beginTerminalLocked(
                         entry, item != null, item != null,
                         owner -> settleCancellationLifecycle(owner, firstCause, detail),
@@ -1076,6 +960,7 @@ public class RequestRegistry {
                         prefill.getServerIp(), prefill.getGrpcPort());
     }
 
+    /** Source endpoint accounting was already settled by its typed status fact. */
     private TerminalAction settleCancellationFromWorkerStatusLocked(
             RequestSlot entry,
             String proof,
@@ -1221,7 +1106,7 @@ public class RequestRegistry {
                 true,
                 owner -> owner.fail(detail),
                 buildErrorResponse(
-                        StrategyErrorType.BATCH_DISPATCH_FAILED, detail)));
+                        StrategyErrorType.DISPATCH_FAILED, detail)));
     }
 
     /** Endpoint resources are already settled; only RequestSlot/response remain. */
@@ -1273,15 +1158,7 @@ public class RequestRegistry {
         return live;
     }
 
-    /**
-     * Age (ms) of the oldest live request slot, 0 when the ledger is empty.
-     * Single traversal mirroring {@link #liveRequestCount}: per-entry
-     * {@code createdAtMs()} reads the lifecycle snapshot under the same
-     * slot monitor the stale sweep uses, so a slot being reduced never
-     * produces a torn read. Concrete-class method: the upstream lifecycle
-     * port family no longer declares an age accessor, and
-     * RequestMetricsOrchestrator depends on this class directly.
-     */
+    /** Age in milliseconds of the oldest live request, or zero when none remain. */
     public long oldestLiveSlotAgeMs() {
         long oldest = Long.MAX_VALUE;
         long now = System.currentTimeMillis();
@@ -1375,27 +1252,6 @@ public class RequestRegistry {
         }
     }
 
-    private boolean reduceStaleSlot(
-            RequestSlot exactSlot,
-            long nowMs,
-            long staleTtlMs) {
-        TerminalAction expired;
-        synchronized (exactSlot) {
-            if (!isCurrentSlot(exactSlot) || !exactSlot.ownsActiveGeneration()
-                    || nowMs - exactSlot.lastWorkerStatusAtMs() < staleTtlMs) {
-                return false;
-            }
-            String detail = "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout";
-            if (exactSlot.deferInactivityExpiryDuringAdmission(detail)) {
-                return false;
-            }
-            exactSlot.rememberCancellation(CancelReason.DEADLINE_EXCEEDED, detail);
-            expired = beginExpiredRequestLocked(exactSlot, detail);
-        }
-        submitTerminal(expired);
-        return expired != null;
-    }
-
     // ==================== Queue lifecycle callbacks ====================
 
     public void onQueuedItemExpired(ScheduledRequest exactItem) {
@@ -1415,14 +1271,14 @@ public class RequestRegistry {
             ScheduledRequest exactItem,
             Throwable error) {
         ScheduledRequest item = exactItem;
-        String failureDetail = error == null ? "queue full" : error.getMessage();
+        String failureDetail = error == null ? "endpoint publication failed" : error.getMessage();
         RequestSlot entry = entryFor(item);
         if (entry != null) {
             Runnable work;
             synchronized (entry) {
                 work = reduceDeferredTerminalFactLocked(entry,
                         DeferredTerminal.failure(
-                                StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                StrategyErrorType.DISPATCH_FAILED,
                                 "Worker scheduling queue rejected request: "
                                         + failureDetail));
             }
@@ -1518,6 +1374,34 @@ public class RequestRegistry {
             }
             return claim;
         }
+    }
+
+    /** Begin Engine-facing delivery with one exact prediction and acceptance observation. */
+    public void beginDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
+        DeliveryClaim exact = exactClaim(claim);
+        if (exact == null) {
+            throw new IllegalArgumentException("delivery claim was not created by this scheduler");
+        }
+        Objects.requireNonNull(precedingWork, "precedingWork");
+        if (unstartedWorkMs < 0L) {
+            throw new IllegalArgumentException("unstarted work must be non-negative");
+        }
+        reconcileDecodeAcceptance(exact.item);
+        synchronized (exact.slot) {
+            if (!ownsDeliveryClaim(exact)) { return; }
+            exact.slot.startDecisionTracking(precedingWork, unstartedWorkMs, System.currentTimeMillis());
+        }
+        armDecisionDeadline(exact.slot);
+    }
+
+    /** Publish a route after its shared delivery lifecycle has begun. */
+    public void beginRouteDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
+        DeliveryClaim exact = exactClaim(claim);
+        if (exact == null || exact.kind != DeliveryClaimKind.ROUTE_DECISION) {
+            throw new IllegalArgumentException("route delivery requires an exact route claim");
+        }
+        beginDelivery(exact, precedingWork, unstartedWorkMs);
+        complete(exact, DeliveryResult.delivered());
     }
 
     private DeliveryClaim exactClaim(DeliveryClaim claim) {
@@ -1675,6 +1559,8 @@ public class RequestRegistry {
                     item.requestId());
             return null;
         }
+        item.ctx().setAckAtMs(System.currentTimeMillis());
+        item.ctx().setAckAtNanos(System.nanoTime());
         return materializePostLockActionLocked(
                 entry,
                 entry.reduceDeliveryConfirmed(batchId),
@@ -1695,9 +1581,6 @@ public class RequestRegistry {
             long batchId) {
         Response response = buildSuccessResponse(
                 item, deliveryKind);
-        long nowMs = System.currentTimeMillis();
-        item.ctx().setAckAtMs(nowMs);
-        item.ctx().setAckAtNanos(System.nanoTime());
         return () -> publishDelivery(
                 entry, item, response, confirmation, deliveryKind);
     }
@@ -1767,17 +1650,11 @@ public class RequestRegistry {
                 cleanupFailure,
                 action.releasePrefill() && item != null
                         ? () -> releasePrefillAccounting(item) : null);
-        cleanupFailure = runTerminalLeaf(
-                cleanupFailure, action.counterpartCleanup());
+        cleanupFailure = runTerminalLeaf(cleanupFailure, action.counterpartCleanup());
         cleanupFailure = runTerminalLeaf(
                 cleanupFailure,
                 action.preemption() == null
-                        ? null : () -> action.preemption().signalTerminal(
-                                new VictimTerminal(entry.requestId())));
-        cleanupFailure = runTerminalLeaf(
-                cleanupFailure,
-                action.publication() == null
-                        ? entry::releaseOutstandingPermit : null);
+                        ? null : () -> action.preemption().signalTerminal(new VictimTerminal(entry.requestId())));
 
         TombstoneResult tombstone;
         synchronized (entry) {
@@ -1840,22 +1717,11 @@ public class RequestRegistry {
                 confirmation.requestDeadline() == null
                         ? null : () -> expirationTimer.cancel(
                                 confirmation.requestDeadline()));
-        preparationFailure = runTerminalLeaf(
-                preparationFailure,
-                confirmation.admissionCleanup() == null
-                        ? null : () -> expirationTimer.release(
-                                confirmation.admissionCleanup()));
-        preparationFailure = runTerminalLeaf(
-                preparationFailure,
-                confirmation.armAcceptanceDeadline()
-                        ? () -> armAcceptanceDeadline(slot)
-                        : null);
         if (deliveryKind == DeliveryClaimKind.BATCH_ENQUEUE
-                && confirmation.batchEnqueueStartedAtMs() > 0L) {
+                && item.ctx().getAckAtMs() > 0L && confirmation.batchEnqueueStartedAtMs() > 0L) {
             long latencyMs = Math.max(
                     0L,
-                    System.currentTimeMillis()
-                            - confirmation.batchEnqueueStartedAtMs());
+                    item.ctx().getAckAtMs() - confirmation.batchEnqueueStartedAtMs());
             preparationFailure = runTerminalLeaf(
                     preparationFailure,
                     () -> reporter.reportDispatchAckTimeMs(
@@ -1875,19 +1741,19 @@ public class RequestRegistry {
                 confirmation.publication(), response);
     }
 
-    private void armAcceptanceDeadline(RequestSlot entry) {
-        java.util.OptionalLong delay;
+    private void armDecisionDeadline(RequestSlot entry) {
+        java.util.OptionalLong deadline;
         synchronized (entry) {
-            delay = entry.acceptanceDeadlineDelayMs();
+            deadline = entry.decisionDeadlineAtMs();
         }
-        if (delay.isPresent()) {
-            expirationTimer.registerAcceptanceDeadline(
-                    entry, delay.getAsLong());
+        if (deadline.isPresent()) {
+            expirationTimer.registerDecisionDeadline(
+                    entry, deadline.getAsLong());
         }
     }
 
-    void releaseAdmissionCleanup(
-            RequestSlot.AdmissionCleanup cleanup) {
+    void cancelDecisionDeadline(
+            ExpirationTimer.DecisionDeadline cleanup) {
         if (cleanup == null) {
             return;
         }
@@ -1906,11 +1772,6 @@ public class RequestRegistry {
         success.setCode(200);
         success.setEnqueuedByMaster(
                 deliveryKind == DeliveryClaimKind.BATCH_ENQUEUE);
-        // This method is called while the exact RequestSlot is locked.  Do not
-        // traverse and lock every other slot here: concurrent batch completions
-        // would each hold their own slot and wait on one another.  The admission
-        // permit counter is the lock-free, cluster-wide outstanding snapshot.
-        success.setQueueLength(Math.max(0, outstandingRequestCount.get()));
         return success;
     }
 
@@ -1929,7 +1790,7 @@ public class RequestRegistry {
                 work = reduceDeferredTerminalFactLocked(
                         entry,
                         DeferredTerminal.deliveryFailure(
-                                StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                StrategyErrorType.DISPATCH_FAILED,
                                 "Delivery preparation failed: "
                                         + detailOf(cause)));
             }
@@ -2050,17 +1911,8 @@ public class RequestRegistry {
         return action == null ? null : finishTerminal(action);
     }
 
-    /**
-     * Finish a response which was decided by the QUEUE coordinator without
-     * running the public future's continuations on that coordinator thread.
-     *
-     * <p>The lifecycle transition and local resource cleanup are still
-     * linearized synchronously at the decision point.  Only the externally
-     * visible future publication is handed to the completion publisher.  This
-     * keeps the decision thread responsible for ownership, but never for
-     * protobuf encoding, gRPC completion, or arbitrary caller continuations.</p>
-     */
-    boolean publishQueueDecisionResponseAsync(
+    /** Apply terminal cleanup synchronously and publish the response off the decision thread. */
+    boolean publishDecisionResponseAsync(
             long requestId,
             CompletableFuture<Response> future,
             Response response) {
@@ -2216,8 +2068,6 @@ public class RequestRegistry {
             throw new IllegalStateException(
                     "admission must close before terminal shutdown");
         }
-        outstandingRequestCount.getAndSet(OUTSTANDING_ADMISSION_CLOSED);
-        decodeAcceptanceCount.getAndSet(DECODE_ACCEPTANCE_CLOSED);
         completeOutstandingRequestsForShutdown();
     }
 
@@ -2253,7 +2103,7 @@ public class RequestRegistry {
                         entry, item != null, item != null,
                         owner -> owner.fail(detail),
                         buildErrorResponse(
-                                StrategyErrorType.BATCH_DISPATCH_FAILED,
+                                StrategyErrorType.DISPATCH_FAILED,
                                 detail));
                 if (publication != null) {
                     publications.add(publication);

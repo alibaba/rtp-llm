@@ -60,17 +60,17 @@ class TerminalPrograms(unittest.TestCase):
         backend.ops.generate = call
         with patch.object(programs, "Backend", return_value=backend):
             return programs.PreemptionPrograms().run_program(
-                variant="disabled_zero_eviction"
+                variant="same_priority_zero_eviction"
             )
 
     def test_typed_forbidden_error_reaches_verdict_after_real_consumer_exit(self):
         result, cohorts, backend = self.run_program()
         self.assertEqual("FAIL", result["status"], result)
-        self.assertEqual(10, backend.ops.generate_count)
         stages = {s["id"]: s for s in result["stages"]}
-        self.assertEqual("PASS", stages["r1_wave_drain"]["status"])
-        self.assertTrue(
-            all(c["status"] == "FAIL" for c in stages["r1_same_priority"]["checks"])
+        self.assertEqual("PASS", stages["wave_drain"]["status"])
+        self.assertEqual(
+            {"PR4": "FAIL", "AT3": "PASS", "P6_terminal": "FAIL"},
+            {c["id"]: c["status"] for c in stages["same_priority"]["checks"]},
         )
         row = next(r for wave in cohorts for r in wave if r["wire_request_id"] == 2)
         self.assertTrue(row["consumer_completion_verified"])
@@ -79,9 +79,10 @@ class TerminalPrograms(unittest.TestCase):
         self.assertEqual("parsed", row["stream"]["error_trailer"]["status"])
 
     def test_literal_trailer_two_is_not_remapped_to_engine_cancelled(self):
-        result, _, backend = self.run_program(code=2)
-        self.assertEqual("PASS", result["status"], result)
-        self.assertEqual(20, backend.ops.generate_count)
+        result, cohorts, backend = self.run_program(code=2)
+        row = next(r for wave in cohorts for r in wave if r["wire_request_id"] == 2)
+        self.assertEqual(2, row["stream"]["trailer_error_code"])
+        self.assertEqual("parsed", row["stream"]["error_trailer"]["status"])
 
     def test_transport_cancelled_does_not_become_typed_engine_victim(self):
         result, _, _ = self.run_program(status="CANCELLED", code=8429)

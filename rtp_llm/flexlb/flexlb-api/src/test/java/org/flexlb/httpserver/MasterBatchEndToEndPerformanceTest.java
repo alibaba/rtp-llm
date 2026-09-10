@@ -15,11 +15,14 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.ClientCalls;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
-import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
@@ -27,8 +30,13 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.consistency.MasterElectService;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.metric.NoOpFlexMonitor;
@@ -81,9 +89,11 @@ import java.util.SplittableRandom;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Stream;
@@ -121,10 +131,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static final int MAX_RECORDED_DELIVERY_WAIT_MS = 1_000;
     private static final DeliveryMode DELIVERY_MODE = DeliveryMode.parse(
             System.getProperty("flexlb.perf.delivery-mode", "BATCH"));
-    private static final int MASTER_GRPC_EXECUTOR_CORE_THREADS =
-            Integer.getInteger("flexlb.perf.master-grpc-executor-core-threads", 16);
-    private static final int MASTER_GRPC_EXECUTOR_MAX_THREADS =
-            Integer.getInteger("flexlb.perf.master-grpc-executor-max-threads", 32);
     private static final int MASTER_CLIENT_CHANNELS =
             Integer.getInteger("flexlb.perf.master-client-channels", 4);
     private static final MethodDescriptor.Marshaller<byte[]>
@@ -215,7 +221,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private FlexlbGrpcServer masterServer;
     private NioEventLoopGroup masterServerEventLoopGroup;
     private List<ManagedChannel> masterChannels = List.of();
-    private ServerScheduleLatencyRecorder latencyRecorder;
+    private CompletionCoverageRecorder latencyRecorder;
     private ActiveRequestCounter activeRequestCounter;
     private static ch.qos.logback.classic.Logger flexlbLogger;
     private static ch.qos.logback.classic.Logger syncLogger;
@@ -236,6 +242,18 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private final Map<String, LongAdder> dispatchReasonCounts = new ConcurrentHashMap<>();
     private final MillisecondHistogram deliveryWaitHistogram =
             new MillisecondHistogram(MAX_RECORDED_DELIVERY_WAIT_MS);
+    private final Map<Long, CompletableFuture<AcceptedRequest>> acceptedRequests =
+            new ConcurrentHashMap<>();
+    private final LinkedBlockingQueue<CompletedRoute> simulatedCompletions =
+            new LinkedBlockingQueue<>();
+    private final AtomicLong simulatedResponseCount = new AtomicLong();
+    private final AtomicLong simulatedCompletionCount = new AtomicLong();
+    private final AtomicReference<Throwable> simulatedStatusFailure = new AtomicReference<>();
+    private Thread simulatedStatusThread;
+
+    private record AcceptedRequest(Map<RoleType, String> addresses, long batchId, long inputLength) { }
+
+    private record CompletedRoute(long requestId, AcceptedRequest accepted) { }
 
     @BeforeAll
     static void loadLogDerivedRequests() throws IOException {
@@ -276,25 +294,17 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = super.createConfig();
+        cfg.getGrpcServer().setExecutorCoreSize(
+                Integer.getInteger("flexlb.perf.master-grpc-executor-core-threads", 16));
+        cfg.getGrpcServer().setExecutorMaxSize(
+                Integer.getInteger("flexlb.perf.master-grpc-executor-max-threads", 32));
+        cfg.getGrpcServer().setExecutorQueueSize(Math.max(4096, REQUEST_COUNT));
         cfg.fixedWindowDecision().setMaxCollectionWaitMs(10L);
         cfg.fixedWindowDecision().setMaxRequests(16);
         if (DELIVERY_MODE == DeliveryMode.NON_BATCH) {
-            // This scheduling-only fixture does not replay terminal worker status,
-            // so route leases cannot be retired. Leave the per-worker admission
-            // limit disabled; the matrix still exercises the production binding
-            // and selection path without accumulating artificial backpressure.
             cfg.setDispatcher(DispatcherConfig.nonBatch());
+            cfg.getDispatcher().setMaxInflightPerPrefillWorker(64);
         }
-        // The unpaced burst test requires every measured request to enter the
-        // scheduler. Keep the test-only admission limits consistent with its
-        // configurable request count instead of racing a smaller queue cap.
-        cfg.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(
-                Math.max(4_096, REQUEST_COUNT));
-        cfg.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(
-                Math.max(20_000, REQUEST_COUNT));
-        cfg.queueScheduler().getLifecycle()
-                .setMaxDeliveredNotAcceptedRequestsGlobal(
-                        Math.max(20_000, REQUEST_COUNT));
         return cfg;
     }
 
@@ -337,7 +347,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 List.of(RoleType.DECODE, RoleType.PREFILL));
         return new DefaultRouter(
                 prefillSelector,
-                new CostBasedDecodeStrategy(engineWorkerStatus),
+                new DecodeSelector(engineWorkerStatus),
                 new RandomStrategy(engineWorkerStatus),
                 configService,
                 modelMeta);
@@ -346,15 +356,19 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @BeforeEach
     void startMasterGrpcServer() throws Exception {
         publishDecodeCapacity(1_000_000_000L, 2_000_000_000L);
+        observeAcceptedBatches(mockPrefillWorker);
+        simulatedStatusThread = new Thread(
+                this::applySimulatedCompletions, "flexlb-perf-engine-status");
+        simulatedStatusThread.setDaemon(true);
+        simulatedStatusThread.start();
 
         RouteService routeService = new RouteService(
                 configService,
-                (DefaultRouter) router,
                 scheduler,
                 new RecentCacheKeyTraceReporter());
 
         activeRequestCounter = new ActiveRequestCounter();
-        latencyRecorder = new ServerScheduleLatencyRecorder();
+        latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();
         FlexlbServiceImpl service = new FlexlbServiceImpl(
                 routeService,
@@ -372,13 +386,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             grpcPort = socket.getLocalPort();
         }
         MockEnvironment environment = new MockEnvironment()
-                .withProperty("server.port", Integer.toString(grpcPort - 2))
-                .withProperty("FLEXLB_GRPC_EXECUTOR_CORE_SIZE",
-                        Integer.toString(MASTER_GRPC_EXECUTOR_CORE_THREADS))
-                .withProperty("FLEXLB_GRPC_EXECUTOR_MAX_SIZE",
-                        Integer.toString(MASTER_GRPC_EXECUTOR_MAX_THREADS))
-                .withProperty("FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE",
-                        Integer.toString(Math.max(4_096, REQUEST_COUNT)));
+                .withProperty("server.port", Integer.toString(grpcPort - 2));
         masterServerEventLoopGroup = new NioEventLoopGroup(4);
         masterServer = new FlexlbGrpcServer(
                 service,
@@ -452,6 +460,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             .await(5, TimeUnit.SECONDS),
                     "Master gRPC event-loop did not terminate");
         }
+        if (simulatedStatusThread != null) {
+            simulatedStatusThread.interrupt();
+            simulatedStatusThread.join(TimeUnit.SECONDS.toMillis(5));
+            assertTrue(!simulatedStatusThread.isAlive(),
+                    "simulated Engine status worker did not terminate");
+        }
     }
 
     @Test
@@ -469,6 +483,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         TrafficResult result = runTraffic(REQUEST_COUNT, MEASUREMENT_REQUEST_ID_BASE);
         assertSuccessful(result);
         Map<String, Object> masterSnapshot = awaitCompletionCount(REQUEST_COUNT);
+        assertLatencyCoverage(result, MEASUREMENT_REQUEST_ID_BASE, masterSnapshot);
         BatchSummary batches = summarizeEngineBatches(
                 MEASUREMENT_REQUEST_ID_BASE, allPrefillWorkers());
 
@@ -492,8 +507,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 batches.batchCount(), batches.averageBatchSize(), batches.maxBatchSize(),
                 batches.averageInputTokens());
 
-        assertEquals(REQUEST_COUNT, number(masterSnapshot, "arrival_count").longValue());
-        assertEquals(REQUEST_COUNT, number(masterSnapshot, "completion_count").longValue());
         assertEquals(REQUEST_COUNT, batches.requestIds().size(),
                 "mock engine must receive every measured request exactly once");
         assertEquals(expectedRequestIds(MEASUREMENT_REQUEST_ID_BASE, REQUEST_COUNT),
@@ -571,6 +584,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         TrafficResult result = runTraffic(requestCount, firstRequestId, targetQps);
         assertSuccessful(result);
         Map<String, Object> masterSnapshot = awaitCompletionCount(requestCount);
+        long acknowledgedRequests = assertLatencyCoverage(result, firstRequestId, masterSnapshot);
         awaitDeliveryWaitCount(requestCount);
         MillisecondHistogram.Snapshot deliveryWait = deliveryWaitHistogram.snapshot();
         BatchSummary batches = summarizeEngineBatches(firstRequestId, allPrefillWorkers());
@@ -619,7 +633,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         + "engine_batches=%d batch_full=%s window_timeout=%s "
                         + "predicted_execution_cap=%s avg_batch=%s max_batch=%s "
                         + "grpc_queue_p99=%s route_submit_p99=%s "
-                        + "ack_response_p99=%s%n",
+                        + "ack_response_count=%d ack_response_p99=%s "
+                        + "terminal_without_ack_count=%d%n",
                 DELIVERY_MODE, prefillEngineCount, decodeEngineCount, targetQps,
                 requestCount, result.qps(), masterQps,
                 result.p50Ms(), result.p90Ms(), result.p95Ms(), result.p99Ms(),
@@ -644,18 +659,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 predictedCapLabel, averageBatchLabel, maximumBatchLabel,
                 latencyBucketLabel(grpcQueue, "p99"),
                 latencyBucketLabel(routeSubmit, "p99"),
-                latencyBucketLabel(ackResponse, "p99"));
+                number(ackResponse, "count").longValue(),
+                latencyBucketLabel(ackResponse, "p99"),
+                batchDelivery ? requestCount - acknowledgedRequests : 0L);
 
-        assertEquals(requestCount, number(masterSnapshot, "arrival_count").longValue());
-        assertEquals(requestCount, number(masterSnapshot, "completion_count").longValue());
-        assertEquals(requestCount, number(serverLatency, "count").longValue(),
-                "every request must record Master server latency");
-        assertEquals(requestCount, number(grpcQueue, "count").longValue(),
-                "every request must record gRPC queue latency");
-        assertEquals(requestCount, number(routeSubmit, "count").longValue(),
-                "every request must record route-submit latency");
-        assertEquals(requestCount, number(ackResponse, "count").longValue(),
-                "every request must record response-publication latency");
         assertEquals(requestCount, deliveryWait.count(),
                 "every request must record enqueue-to-delivery wait");
         assertEquals(prefillEngineCount, activePrefillRoutes,
@@ -701,8 +708,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         if (DELIVERY_MODE == DeliveryMode.BATCH) {
             assertEquals(requestCount, number(batchWait, "count").longValue(),
                     "every request must record Master batch queue wait");
-            assertEquals(requestCount, number(dispatchAck, "count").longValue(),
-                    "every request must record engine dispatch ACK latency");
             assertEquals(expectedRequestIds(firstRequestId, requestCount), batches.requestIds());
             assertEquals(prefillEngineCount, batches.activeWorkerCount(),
                     "every prefill engine must receive measured traffic");
@@ -807,10 +812,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         while (endpointRegistry.getEndpointCount(RoleType.PREFILL) < required) {
             int additionalIndex = endpointRegistry.getEndpointCount(RoleType.PREFILL) - 1;
             if (DELIVERY_MODE == DeliveryMode.BATCH) {
-                addPrefillWorker(
+                MockPrefillWorker worker = addPrefillWorker(
                         MockWorkerBehavior.builder().build(),
                         ENGINE_MATRIX_FIRST_PREFILL_GRPC_PORT
                                 + additionalIndex * 2);
+                observeAcceptedBatches(worker);
             } else {
                 addLogicalPrefillEndpoint(additionalIndex + 1);
             }
@@ -843,7 +849,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             if (targetQps > 0) {
                 pacingLagNanos += Math.max(0L, issueStartedNanos - nextIssueNanos);
             }
-            issueRequest(futures.get(index), serializedRequests[index], index);
+            issueRequest(futures.get(index), serializedRequests[index], index,
+                    firstRequestId + index);
             issueCallNanos += System.nanoTime() - issueStartedNanos;
             if (targetQps > 0) {
                 // Preserve the configured open-loop rate after a scheduling or GC
@@ -860,6 +867,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
                     .get(30, TimeUnit.SECONDS);
         } catch (Exception failure) {
+            Throwable statusFailure = simulatedStatusFailure.get();
+            if (statusFailure != null) {
+                failure.addSuppressed(statusFailure);
+            }
             long completed = futures.stream().filter(CompletableFuture::isDone).count();
             long successful = futures.stream()
                     .filter(CompletableFuture::isDone)
@@ -899,6 +910,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             responses.add(response.response());
         }
         Arrays.sort(latencies);
+        awaitSimulatedCompletions();
         return new TrafficResult(
                 requestCount * 1_000_000_000.0 / elapsedNanos,
                 percentileNanos(latencies, 0.50) / 1_000_000.0,
@@ -911,15 +923,21 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private void issueRequest(
             CompletableFuture<TimedResponse> future,
             byte[] serializedRequest,
-            int requestIndex) {
+            int requestIndex,
+            long requestId) {
         long requestStartNanos = System.nanoTime();
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 new StreamObserver<>() {
                     @Override
                     public void onNext(
                             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
-                        future.complete(new TimedResponse(
-                                response, System.nanoTime() - requestStartNanos));
+                        long latencyNanos = System.nanoTime() - requestStartNanos;
+                        try {
+                            trackCompletedRoute(requestId, requestIndex, response);
+                            future.complete(new TimedResponse(response, latencyNanos));
+                        } catch (Throwable failure) {
+                            future.completeExceptionally(failure);
+                        }
                     }
 
                     @Override
@@ -944,6 +962,171 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     observer);
         } catch (Throwable failure) {
             future.completeExceptionally(failure);
+        }
+    }
+
+    private void observeAcceptedBatches(MockPrefillWorker worker) {
+        worker.getRpcService().onAcceptedBatch(batch -> {
+            try {
+                for (var slot : batch.getDpSlotsList()) {
+                    for (var external : slot.getRequestsList()) {
+                        var input = external.getInput();
+                        Map<RoleType, String> addresses = new HashMap<>();
+                        for (var target : input.getGenerateConfig().getRoleAddrsList()) {
+                            RoleType role = completionRole(target.getRoleStr());
+                            if (role != null) {
+                                addresses.put(role, target.getIp() + ":" + target.getHttpPort());
+                            }
+                        }
+                        assertEquals(2, addresses.size(),
+                                "accepted Engine input must carry its Prefill and Decode targets");
+                        assertEquals(workerIpPort(worker), addresses.get(RoleType.PREFILL),
+                                "accepted input must name the actual receiving Prefill");
+                        AcceptedRequest accepted = new AcceptedRequest(
+                                Map.copyOf(addresses), batch.getBatchId(), input.getTokenIdsCount());
+                        assertTrue(acceptedRequests.computeIfAbsent(
+                                        input.getRequestId(), ignored -> new CompletableFuture<>())
+                                        .complete(accepted),
+                                "Engine must accept each request exactly once");
+                        simulatedCompletions.add(new CompletedRoute(input.getRequestId(), accepted));
+                    }
+                }
+            } catch (Throwable failure) {
+                simulatedStatusFailure.compareAndSet(null, failure);
+            }
+        });
+    }
+
+    /** Validate BATCH routes; NON_BATCH models frontend delivery after Schedule returns. */
+    private void trackCompletedRoute(
+            long requestId, int requestIndex,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+        if (!response.getSuccess()) {
+            return;
+        }
+        simulatedResponseCount.incrementAndGet();
+        Map<RoleType, String> addresses = new HashMap<>();
+        for (var target : response.getServerStatusList()) {
+            RoleType role = completionRole(target.getRole());
+            if (role != null) {
+                addresses.put(role, target.getServerIp() + ":" + target.getHttpPort());
+            }
+        }
+        assertEquals(2, addresses.size(), "published route must contain Prefill and Decode targets");
+        if (DELIVERY_MODE == DeliveryMode.NON_BATCH) {
+            RealRequestTemplate template = realRequestTemplates.get(
+                    Math.floorMod(requestIndex, realRequestTemplates.size()));
+            simulatedCompletions.add(new CompletedRoute(requestId,
+                    new AcceptedRequest(Map.copyOf(addresses), -1L, template.seqLen())));
+            return;
+        }
+        CompletableFuture<AcceptedRequest> accepted = acceptedRequests.computeIfAbsent(
+                requestId, ignored -> new CompletableFuture<>());
+        accepted.thenAccept(actual -> {
+            assertEquals(addresses, actual.addresses(),
+                    "published route must match the P/D targets carried by accepted Engine input");
+        }).whenComplete((ignored, failure) -> {
+            if (failure != null) {
+                simulatedStatusFailure.compareAndSet(null, failure);
+            }
+            acceptedRequests.remove(requestId, accepted);
+        });
+    }
+
+    private static RoleType completionRole(String role) {
+        if (RoleType.PREFILL.getCode().equals(role)) {
+            return RoleType.PREFILL;
+        }
+        return RoleType.DECODE.getCode().equals(role) ? RoleType.DECODE : null;
+    }
+
+    /** Apply per-worker terminal deltas through the production endpoint/lifecycle transaction. */
+    private void applySimulatedCompletions() {
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                List<CompletedRoute> completed = new ArrayList<>();
+                completed.add(simulatedCompletions.take());
+                simulatedCompletions.drainTo(completed);
+                Map<WorkerEndpoint, Map<String, TaskInfo>> prefillFinished = new HashMap<>();
+                Map<WorkerEndpoint, Map<String, TaskInfo>> decodeFinished = new HashMap<>();
+                for (CompletedRoute route : completed) {
+                    for (var target : route.accepted().addresses().entrySet()) {
+                        RoleType role = target.getKey();
+                        String address = target.getValue();
+                        WorkerEndpoint endpoint = endpointRegistry.get(role, address);
+                        assertTrue(endpoint != null,
+                                "completed route must retain its actual worker endpoint: " + address);
+                        TaskInfo task = new TaskInfo();
+                        task.setRequestId(route.requestId());
+                        task.setInputLength(route.accepted().inputLength());
+                        task.setBatchId(route.accepted().batchId());
+                        task.setDpRank(endpoint.getStatus().getDpRank());
+                        task.setPhase(TaskPhase.RUNNING);
+                        task.setEndTimeMs(System.currentTimeMillis());
+                        task.setExecutionTimeMs(1L);
+                        task.setIterateCount(1L);
+                        (role == RoleType.PREFILL ? prefillFinished : decodeFinished)
+                                .computeIfAbsent(endpoint, ignored -> new HashMap<>())
+                                .put(Long.toString(route.requestId()), task);
+                    }
+                }
+                prefillFinished.forEach(this::publishSimulatedTerminalStatus);
+                decodeFinished.forEach(this::publishSimulatedTerminalStatus);
+                simulatedCompletionCount.addAndGet(completed.size());
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (Throwable failure) {
+            simulatedStatusFailure.compareAndSet(null, failure);
+        }
+    }
+
+    private void publishSimulatedTerminalStatus(
+            WorkerEndpoint endpoint, Map<String, TaskInfo> finished) {
+        WorkerStatus status = endpoint.getStatus();
+        WorkerStatus.AppliedStatusCursor cursor = status.appliedStatusCursor();
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(status.getRole());
+        response.setAlive(true);
+        response.setDpRank(status.getDpRank());
+        response.setAvailableKvCacheTokens(status.getAvailableKvCacheTokens());
+        response.setTotalKvCacheTokens(status.getTotalKvCacheTokens());
+        response.setStatusVersion(cursor.statusVersion() + 1L);
+        response.setLatestFinishedVersion(cursor.latestFinishedTaskVersion() + finished.size());
+        response.setFinishedTaskInfo(finished);
+        applyWorkerStatusResponse(status, response);
+    }
+
+    private void awaitSimulatedCompletions() throws InterruptedException {
+        long expected = simulatedResponseCount.get();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while ((simulatedCompletionCount.get() < expected || !acceptedRequests.isEmpty()
+                || !simulatedCompletions.isEmpty() || scheduler.getInflightSize() != 0)
+                && simulatedStatusFailure.get() == null
+                && System.nanoTime() < deadline) {
+            TimeUnit.MILLISECONDS.sleep(1);
+        }
+        Throwable failure = simulatedStatusFailure.get();
+        if (failure != null) {
+            throw new AssertionError("simulated Engine status projection failed", failure);
+        }
+        assertEquals(expected, simulatedCompletionCount.get(),
+                "every successful route must receive actual-worker completion evidence");
+        assertTrue(acceptedRequests.isEmpty(), "accepted batches must all match a published route");
+        assertTrue(simulatedCompletions.isEmpty(), "terminal projection queue must be drained");
+        assertEquals(0, scheduler.getInflightSize(), "request lifecycle registry must be drained");
+        for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL)) {
+            PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);
+            assertEquals(0, endpoint.getInflightBatchCount(), address + " retained batch credits");
+            assertEquals(0, endpoint.getLocallyOwnedRequestCount(), address + " retained Prefill ownership");
+            assertEquals(0L, endpoint.observedRequestCount(), address + " retained Prefill requests");
+        }
+        for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)) {
+            DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, address);
+            DecodeEndpoint.LayeredAdmissionView view = endpoint.layeredAdmissionView();
+            assertTrue(view.reserved().isEmpty(), address + " retained Decode reservations");
+            assertTrue(view.confirmed().isEmpty(), address + " retained Decode ownership");
+            assertEquals(0, view.activeDispatchPermits(), address + " retained Decode delivery permits");
         }
     }
 
@@ -1044,9 +1227,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             assertTrue(response.getSuccess(),
                     () -> "schedule failed: code=" + response.getCode()
                             + ", error=" + response.getErrorMessage());
-            assertEquals(
-                    FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED,
-                    response.getLifecycle().getState());
+            FlexlbScheduleProtocol.RequestStatePB state = response.getLifecycle().getState();
+            assertTrue(state == FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED
+                            || (DELIVERY_MODE == DeliveryMode.BATCH
+                            && state == FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_COMPLETED),
+                    () -> "successful delivery must be acknowledged or already completed: " + state);
             assertEquals(DELIVERY_MODE.enqueuedByMaster(),
                     response.getEnqueuedByMaster(),
                     "response delivery ownership must match the configured mode");
@@ -1067,13 +1252,61 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return endpoints.size();
     }
 
+    private long assertLatencyCoverage(
+            TrafficResult result, long firstRequestId, Map<String, Object> snapshot) {
+        int requestCount = result.responses().size();
+        Map<Long, ResponseTiming> timings = Map.copyOf(latencyRecorder.responseTimings);
+        assertEquals(expectedRequestIds(firstRequestId, requestCount), timings.keySet(),
+                "latency observations must cover each measured request exactly once");
+        assertEquals(0L, latencyRecorder.duplicateResponses.get(),
+                "a repeated response must not replace a missing latency sample");
+        assertEquals(requestCount, number(snapshot, "arrival_count").longValue());
+        assertEquals(requestCount, number(snapshot, "completion_count").longValue());
+        for (String stage : List.of("server_total_ms", "grpc_queue_ms", "route_submit_ms")) {
+            assertEquals(requestCount, number(nestedMap(snapshot, stage), "count").longValue(),
+                    "every response must record " + stage + ", including terminal-before-ACK responses");
+        }
+
+        long acknowledgedRequests = 0L;
+        for (int index = 0; index < requestCount; index++) {
+            long requestId = firstRequestId + index;
+            ResponseTiming timing = timings.get(requestId);
+            if (DELIVERY_MODE == DeliveryMode.NON_BATCH) {
+                assertEquals(0L, timing.ackAtNanos(),
+                        "route publication must not fabricate an Engine ACK: " + requestId);
+                continue;
+            }
+            assertTrue(timing.batchDispatchedNanos() > 0L,
+                    "every BATCH request must have a real dispatch timestamp: " + requestId);
+            if (timing.ackAtNanos() == 0L) {
+                assertEquals(FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_COMPLETED,
+                        result.responses().get(index).getLifecycle().getState(),
+                        "a successful BATCH response without ACK must have Engine terminal proof: "
+                                + requestId);
+            } else {
+                assertTrue(timing.ackAtNanos() >= timing.batchDispatchedNanos()
+                                && timing.ackAtNanos() <= timing.completedNanos(),
+                        "an ACK sample must lie between dispatch and response completion: " + requestId);
+                acknowledgedRequests++;
+            }
+        }
+        for (String stage : List.of("dispatch_ack_ms", "ack_response_ms")) {
+            assertEquals(acknowledgedRequests,
+                    number(nestedMap(snapshot, stage), "count").longValue(),
+                    stage + " must cover exactly the requests acknowledged before response completion");
+        }
+        return acknowledgedRequests;
+    }
+
     private Map<String, Object> awaitCompletionCount(long expected) throws InterruptedException {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         Map<String, Object> snapshot;
         do {
             snapshot = latencyRecorder.snapshot();
-            if (number(snapshot, "completion_count").longValue() >= expected) {
-                return snapshot;
+            if (number(snapshot, "completion_count").longValue() >= expected
+                    && latencyRecorder.responseTimings.size() >= expected) {
+                // Coverage is published after every histogram write, so take a fresh snapshot.
+                return latencyRecorder.snapshot();
             }
             TimeUnit.MILLISECONDS.sleep(5);
         } while (System.nanoTime() < deadlineNanos);
@@ -1450,6 +1683,32 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private record TimedResponse(FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
                                  long latencyNanos) {
+    }
+
+    private record ResponseTiming(long batchDispatchedNanos, long ackAtNanos, long completedNanos) {
+    }
+
+    /** Retains request identities to audit stage denominators without changing production telemetry. */
+    private static final class CompletionCoverageRecorder extends ServerScheduleLatencyRecorder {
+        private final Map<Long, ResponseTiming> responseTimings = new ConcurrentHashMap<>();
+        private final AtomicLong duplicateResponses = new AtomicLong();
+
+        @Override
+        public void recordCompletion(BalanceContext context, long responseCompletedNanos) {
+            ResponseTiming timing = new ResponseTiming(
+                    context.getBatchDispatchedNanos(), context.getAckAtNanos(), responseCompletedNanos);
+            super.recordCompletion(context, responseCompletedNanos);
+            if (responseTimings.putIfAbsent(context.getRequestId(), timing) != null) {
+                duplicateResponses.incrementAndGet();
+            }
+        }
+
+        @Override
+        public void reset() {
+            super.reset();
+            responseTimings.clear();
+            duplicateResponses.set(0L);
+        }
     }
 
     private record TrafficResult(double qps, double p50Ms, double p90Ms,

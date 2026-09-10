@@ -1102,6 +1102,7 @@ def validate_outcomes(params, plan):
             "failure_max",
             "error_code",
             "failure_phase",
+            "per_execution_batch",
             "slo_or_success",
             "timeout_or_success",
         },
@@ -1122,6 +1123,15 @@ def validate_outcomes(params, plan):
         for key in ("slo_or_success", "timeout_or_success")
     ):
         raise ValueError(f"{plan.path}: invalid slo_or_success")
+    if "per_execution_batch" in p:
+        q = p["per_execution_batch"]
+        if not isinstance(q, dict) or set(q) != {
+            "fallback_success_min",
+            "fallback_failure_max",
+        }:
+            raise ValueError("per_execution_batch requires explicit fallback bounds")
+        for key, value in q.items():
+            _number(value, plan, key, 0, 64, True)
     return p
 
 
@@ -1146,10 +1156,25 @@ def execute_outcomes(ctx, params, deadline):
     _terminal_records(records, allowed)
     failures = [r for r in records if not request_success(r)]
     success = len(records) - len(failures)
+    batch_bounds = None
+    if "per_execution_batch" in params:
+        from .execution_evidence import partial_outcome_bounds, read_events
+
+        batch_bounds = partial_outcome_bounds(
+            read_events(ctx.env.run_dir / "engine_events.jsonl"),
+            {r["wire_request_id"] for r in records},
+            **params["per_execution_batch"],
+        )
+    success_min = (
+        batch_bounds["success_min"] if batch_bounds else params.get("success_min", 0)
+    )
+    failure_max = (
+        batch_bounds["failure_max"] if batch_bounds else params.get("failure_max", 64)
+    )
     passed = (
-        success >= params.get("success_min", 0)
+        success >= success_min
         and len(failures) >= params.get("failure_min", 0)
-        and len(failures) <= params.get("failure_max", 64)
+        and len(failures) <= failure_max
     )
     if "error_code" in params:
         code = params["error_code"]
@@ -1161,6 +1186,13 @@ def execute_outcomes(ctx, params, deadline):
                 or str(code) in str(r["schedule"].get("error"))
                 for r in failures
             )
+        )
+    if batch_bounds is not None:
+        # Injection is per execution batch; typed errors remain per request.
+        passed = passed and all(
+            r.get("business_error_code") == params["error_code"]
+            and bool(r.get("business_error_message"))
+            for r in failures
         )
     if params.get("failure_phase") == "schedule":
         passed = (
@@ -1224,7 +1256,12 @@ def execute_outcomes(ctx, params, deadline):
     artifact = _artifact(
         ctx,
         "outcomes",
-        {"records": records, "success": success, "failure_count": len(failures)},
+        {
+            "records": records,
+            "success": success,
+            "failure_count": len(failures),
+            "batch_bounds": batch_bounds,
+        },
     )
     return StageOutput(
         {"passed": bool(passed)},
@@ -1233,7 +1270,11 @@ def execute_outcomes(ctx, params, deadline):
                 "contract",
                 "PASS" if passed else "FAIL",
                 "per-request status boundary",
-                actual={"success": success, "failure_count": len(failures)},
+                actual={
+                    "success": success,
+                    "failure_count": len(failures),
+                    "batch_bounds": batch_bounds,
+                },
                 expected=params,
                 evidence={"artifact": artifact},
             )

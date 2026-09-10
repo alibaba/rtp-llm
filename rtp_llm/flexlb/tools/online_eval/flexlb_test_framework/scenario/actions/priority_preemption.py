@@ -217,12 +217,29 @@ def _same_priority(ctx, p, deadline):
     return StageOutput(checks=checks, artifacts=[str(path)])
 
 
+def _first_peer_params(p):
+    if type(p.setdefault("first_peer_exempt", True)) is not bool:
+        raise ValueError("first_peer_exempt must be boolean")
+    return p
+
+
+def _priority_indices(priorities, first_peer_exempt):
+    first = [0] if first_peer_exempt else []
+    return first + sorted(
+        range(len(first), len(priorities)), key=lambda i: (-priorities[i], i)
+    )
+
+
 def _queued_params(p, plan):
-    p = _params(p, {"placeholder", "wave", "round"}, {"placeholder", "wave", "round"})
+    p = _params(
+        p,
+        {"placeholder", "wave", "round", "first_peer_exempt"},
+        {"placeholder", "wave", "round"},
+    )
     for key in ("placeholder", "wave"):
         plan.reference(p[key], "requests")
     _number(p["round"], 1, 2, True)
-    return p
+    return _first_peer_params(p)
 
 
 def _queued_first_params(p, plan):
@@ -251,7 +268,7 @@ def _queued(ctx, p, deadline):
         50 if p["round"] == 1 else 70
     ):
         raise ValueError("queued preemption cohort differs from legacy round")
-    indices = [0] + sorted(range(1, 9), key=lambda i: (-priorities[i], i))
+    indices = _priority_indices(priorities, p.get("first_peer_exempt", True))
     expected = [rows[i]["wire_request_id"] for i in indices]
     ph_ok, ph_code = _outcome(placeholder.entries[0], ph[0])
     zero = all(code not in (8400, 8429) for _, code in outcomes)
@@ -287,6 +304,7 @@ def _queued(ctx, p, deadline):
                 outcomes=outcomes,
                 placeholder_outcome=[ph_ok, ph_code],
                 expected=expected,
+                first_peer_exempt=p.get("first_peer_exempt", True),
             ),
             indent=2,
         )
@@ -412,13 +430,15 @@ def _disabled(ctx, p, deadline):
 
 def _comparator_params(p, plan):
     p = _params(
-        p, {"placeholder", "wave", "ordering"}, {"placeholder", "wave", "ordering"}
+        p,
+        {"placeholder", "wave", "ordering", "first_peer_exempt"},
+        {"placeholder", "wave", "ordering"},
     )
     for key in ("placeholder", "wave"):
         plan.reference(p[key], "requests")
     if p["ordering"] not in ("priority", "fifo"):
         raise ValueError("comparator ordering must be priority or fifo")
-    return p
+    return _first_peer_params(p)
 
 
 def _comparator(ctx, p, deadline):
@@ -428,7 +448,11 @@ def _comparator(ctx, p, deadline):
     priorities = [r["priority"] for r in wave.p["requests"]]
     if priorities != [30, 30, 70, 70, 70] or ph_wave.p["requests"][0]["priority"] != 30:
         raise ValueError("comparator cohort differs from the legacy load shape")
-    indices = [0, 2, 3, 4, 1] if p["ordering"] == "priority" else list(range(5))
+    indices = (
+        _priority_indices(priorities, p.get("first_peer_exempt", True))
+        if p["ordering"] == "priority"
+        else list(range(5))
+    )
     expected = [rows[i]["wire_request_id"] for i in indices]
     ph_ok = _outcome(ph_wave.entries[0], ph[0])[0]
     all_ok, shape = all(ok for ok, _ in outcomes), actual == expected
@@ -443,6 +467,7 @@ def _comparator(ctx, p, deadline):
                 raw=raw,
                 dispatch=dispatch,
                 expected=expected,
+                first_peer_exempt=p.get("first_peer_exempt", True),
                 outcomes=outcomes,
                 placeholder_ok=ph_ok,
                 actual=actual,
@@ -749,13 +774,15 @@ def _decode_final(ctx, p, deadline):
 
 def _error_segment_params(p, plan):
     p = _params(
-        p, {"placeholder", "wave", "segment"}, {"placeholder", "wave", "segment"}
+        p,
+        {"placeholder", "wave", "segment", "first_peer_exempt"},
+        {"placeholder", "wave", "segment"},
     )
     for key in ("placeholder", "wave"):
         plan.reference(p[key], "requests")
     if p["segment"] not in ("outstanding", "park", "expiry"):
         raise ValueError("unknown error-family segment")
-    return p
+    return _first_peer_params(p)
 
 
 def _error_segment(ctx, p, deadline):
@@ -791,6 +818,7 @@ def _error_segment(ctx, p, deadline):
     ph_ok = all(ok for ok, _ in ph_out)
     evidence = dict(
         segment=p["segment"],
+        first_peer_exempt=p.get("first_peer_exempt", True),
         placeholder=ph,
         wave=rows,
         placeholder_outcomes=ph_out,
@@ -820,7 +848,10 @@ def _error_segment(ctx, p, deadline):
         )
     elif p["segment"] == "park":
         _, _, _, _, raw, dispatch, actual, _ = _observations(ctx, p, deadline)
-        expected = [rows[i]["wire_request_id"] for i in [0, 8, 1, 2, 3, 4, 5, 6, 7]]
+        expected = [
+            rows[i]["wire_request_id"]
+            for i in _priority_indices(expected_wave, p.get("first_peer_exempt", True))
+        ]
         isolated = all(c not in (8502, 8403, 8431, 8400, 8429, 8511) for c in all_codes)
         passed = (
             codes[-1] == 200
@@ -1178,6 +1209,14 @@ def _observability_duplicate(ctx, p, deadline):
     return StageOutput({"rejected": evidence["code"] == 8406}, artifacts=[str(path)])
 
 
+def _observability_params(p, plan):
+    p = _params(
+        p, {"placeholder", "wave", "first_peer_exempt"}, {"placeholder", "wave"}
+    )
+    _same_params({k: p[k] for k in ("placeholder", "wave")}, plan)
+    return _first_peer_params(p)
+
+
 def _observability(ctx, p, deadline):
     from pathlib import Path
 
@@ -1235,8 +1274,10 @@ def _observability(ctx, p, deadline):
         )
     }
     # Only the completed pair needs dispatch evidence; expired requests need not run.
+    exempt = p.get("first_peer_exempt", True)
+    completed_indices = (0, 8) if exempt else (4, 8)
     dispatch = []
-    for index in (0, 8):
+    for index in completed_indices:
         row = rows[index]
         rid = row["wire_request_id"]
         matches = [
@@ -1268,11 +1309,11 @@ def _observability(ctx, p, deadline):
     rejected = [tag for tag, (_, code) in zip(tags, outcomes) if code in (8402, 8510)]
     client = (
         ph_ok
-        and completed == ["ph", "30a", "90"]
+        and completed == (["ph", "30a", "90"] if exempt else ["ph", "70a", "90"])
         and len(expired) == 7
         and not rejected
         and all(item is not None for item in dispatch)
-        and dispatch[0] < dispatch[1]
+        and (dispatch[0] < dispatch[1] if exempt else dispatch[1] < dispatch[0])
     )
 
     metric = _reservation_metric(ctx, {"labels": {}}, deadline)
@@ -1348,9 +1389,11 @@ def _observability(ctx, p, deadline):
         ):
             selected.append(record)
     selected = selected[-400:]
-    scheduler_log = "[priority-scheduler]" in master
+    scheduler_log = "[request-scheduler]" in master
     pv_field = any("admissionRejectReason" in row for row in selected)
     evidence = dict(
+        first_peer_exempt=exempt,
+        completed_indices=completed_indices,
         placeholder=ph,
         wave=rows,
         outcomes=outcomes,
@@ -1624,12 +1667,13 @@ def _live_start(ctx, p, deadline, before_next=None):
             item["thread"] = threading.Thread(
                 target=wave._submit, args=(item, end), daemon=True
             )
+            issued_at = ctx.clock()
             item["thread"].start()
             # The legacy live ThreadPoolExecutor sleeps only BETWEEN submissions.
             if index + 1 < len(p["requests"]):
                 if before_next is not None:
                     before_next(wave, item)
-                deadline.sleep(p["gap_s"])
+                deadline.sleep(max(0, p["gap_s"] - (ctx.clock() - issued_at)))
     finally:
         wave.persist()
     return StageOutput({"requests": handle}, artifacts=[str(wave.path)])
@@ -2261,7 +2305,17 @@ def _ts_incoming(ctx, p, deadline):
     ):
         raise ValueError("tombstoned incoming lacks original shape and drain")
     return StageOutput(
-        {"completed": request_success(rows[0])}, artifacts=[str(wave.path)]
+        # DecodePreemptionCoordinator aborts before Cancel when the crashed
+        # victim has a cancellation first cause (victim_inflight_gone).
+        {
+            "completed": request_success(rows[0]),
+            "rejected": (
+                rows[0]["schedule"]["status"] == "REJECTED"
+                and rows[0]["schedule"]["error"] == "victim_inflight_gone"
+                and _outcome(wave.entries[0], rows[0]) == (False, 8431)
+            ),
+        },
+        artifacts=[str(wave.path)],
     )
 
 
@@ -2308,7 +2362,14 @@ def _ts_cancel(ctx, p, deadline):
         + "\n"
     )
     return StageOutput(
-        {"reached": reached, "delta_seen": delta >= 1},
+        # auto_tpm_cancel_final_design: retirement is ledger-only; Cancel is
+        # exclusively a preemption transaction on the original Prefill.
+        {
+            "delta_zero": delta == 0,
+            "census_stable": all(
+                sample["counts"] == before["counts"] for sample in samples + [after]
+            ),
+        },
         artifacts=artifacts + [str(path)],
     )
 
@@ -2350,8 +2411,12 @@ def _ts_fence(ctx, p, deadline):
         ]
         passed = (
             not ack.successes
-            and len(errors) == 1
-            and errors[0] == dict(request_id=rid, error_code=8429)
+            and len(errors)
+            == 1  # No Cancel means no ABSENT_FENCE (model_rpc_service.proto).
+            and
+            # JavaMockEngineCluster's Decode cancel marker instead rejects
+            # pre-alignment with 8211 after the Prefill restart.
+            errors[0] == dict(request_id=rid, error_code=8211)
         )
         evidence.update(successes=len(ack.successes), errors=errors, passed=passed)
     except StageTimeout:
@@ -2403,8 +2468,8 @@ def _ts_final_params(p, plan):
     keys = {
         "cut",
         "incoming",
-        "delta_seen",
-        "reached",
+        "delta_zero",
+        "census_stable",
         "fence",
         "engine_clean",
         "residue",
@@ -2419,8 +2484,8 @@ def _ts_final_params(p, plan):
 def _ts_final(ctx, p, deadline):
     v = {k: ctx.resolve(value) for k, value in p.items()}
     checks = [
-        ("PR10", v["cut"] and v["incoming"] and v["delta_seen"]),
-        ("PR6", v["fence"] and v["reached"]),
+        ("PR10", v["cut"] and v["incoming"] and v["delta_zero"]),
+        ("PR6", v["fence"] and v["census_stable"]),
         ("P6", v["engine_clean"] and v["residue"] and v["recovery"]),
     ]
     return StageOutput(
@@ -2461,13 +2526,13 @@ HANDLERS = [
         "preemption_ts_incoming",
         _settled_params,
         _ts_incoming,
-        {"completed": "boolean"},
+        {"completed": "boolean", "rejected": "boolean"},
     ),
     StageHandler(
         "preemption_ts_cancel",
         _ts_cancel_params,
         _ts_cancel,
-        {"reached": "boolean", "delta_seen": "boolean"},
+        {"delta_zero": "boolean", "census_stable": "boolean"},
     ),
     StageHandler(
         "preemption_ts_fence", _settled_params, _ts_fence, {"passed": "boolean"}
@@ -2557,7 +2622,7 @@ HANDLERS = [
     ),
     StageHandler(
         "preemption_observability",
-        _same_params,
+        _observability_params,
         _observability,
         {"client": "boolean", "planes": "boolean"},
     ),
@@ -2720,3 +2785,162 @@ HANDLERS = [
         checks=frozenset({"PR4", "AT3", "P6_terminal"}),
     ),
 ]
+
+
+def _absent_params(p, plan):
+    keys = {
+        "requests",
+        "input_len",
+        "output_len",
+        "rpc_timeout_s",
+        "poll_s",
+        "fetch_attach_timeout_ms",
+    }
+    p = _params(p, keys, keys)
+    plan.reference(p["requests"], "requests")
+    for key in keys - {"requests"}:
+        _number(p[key], 0.001, 60000)
+    return p
+
+
+def _absent_contract(ctx, p, deadline):
+    """Engine fidelity guard, not a master behavior test.
+
+    PrefillBatchRpcServer.cancelByPriorityPreemption and CancelStatusPB define
+    never-seen -> TOMBSTONED -> 8429; completed -> NOT_FOUND with no fence.
+    Production tombstones expire after ten minutes; mock uses a bounded set.
+    This test covers the immediate contract, not TTL equivalence.
+    """
+    import re
+    import time
+
+    from google.protobuf.json_format import MessageToDict
+
+    wave = _cohort(ctx, p["requests"])
+    rows = wave.records()
+    if len(rows) != 1 or not wave.complete or not request_success(rows[0]):
+        raise ValueError("absent fence needs a completed control request")
+    entry = wave.entries[0]["batch"].entries[0]
+    route = entry["response"]
+    done_rid = rows[0]["wire_request_id"]
+    unknown_rid = ctx.ops.next_request_id()
+    stub = ctx.ops.pb2_grpc.RpcServiceStub(
+        ctx.ops._channel(ctx.ops.prefill_addr(route))
+    )
+    path = ctx.artifact_dir / f"preemption-absent-fence-{uuid.uuid4().hex}.json"
+    evidence = {"completed_rid": done_rid, "never_seen_rid": unknown_rid}
+
+    def census(after=None):
+        # Existing aggregate telemetry is the sole unknown-branch counter;
+        # snapshot.rpc_counts exposes only total Cancel RPCs.
+        while True:
+            deadline.check()
+            lines = (ctx.env.run_dir / "mock_engine.log").read_text().splitlines()
+            for line in reversed(lines):
+                if not line.startswith("java_mock_stats "):
+                    continue
+                data = dict(re.findall(r"(\w+)=(\S+)", line))
+                if after is None or int(data["ts_epoch_ms"]) > after:
+                    return {"unknown": int(data["cancel_census_unknown"]), "raw": line}
+            deadline.sleep(p["poll_s"])
+
+    def enqueue(rid):
+        inp = ctx.ops.build_generate_input(
+            rid, input_len=p["input_len"], output_len=p["output_len"]
+        )
+        ctx.ops._copy_role_addrs(inp, route)
+        req = ctx.ops.pb2.EnqueueBatchRequestPB(
+            batch_id=ctx.ops.next_request_id(),
+            dp_slots=[
+                ctx.ops.pb2.EnqueueBatchDpSlotPB(
+                    dp_rank=0,
+                    requests=[ctx.ops.pb2.EnqueueBatchExternalInputPB(input=inp)],
+                )
+            ],
+            fetch_attach_timeout_ms=p["fetch_attach_timeout_ms"],
+        )
+        return stub.EnqueueBatch(
+            req, timeout=min(p["rpc_timeout_s"], deadline.remaining())
+        )
+
+    try:
+        evidence["before"] = census()
+        cancel = stub.Cancel(
+            ctx.ops.pb2.CancelRequestPB(request_id=unknown_rid),
+            timeout=min(p["rpc_timeout_s"], deadline.remaining()),
+        )
+        ack = enqueue(unknown_rid)
+        # Wait for telemetry published after the RPC has installed the fence.
+        sent_ms = time.time() * 1000
+        evidence["unknown_cancel"] = MessageToDict(
+            cancel, preserving_proto_field_name=True
+        )
+        evidence["unknown_enqueue"] = MessageToDict(
+            ack, preserving_proto_field_name=True
+        )
+        evidence["after"] = census(sent_ms)
+        absent = (
+            cancel.status == ctx.ops.pb2.CANCEL_STATUS_TOMBSTONED
+            and not ack.successes
+            and len(ack.errors) == 1
+            and ack.errors[0].request_id == unknown_rid
+            and ack.errors[0].error_info.error_code == 8429
+            and evidence["after"]["unknown"] - evidence["before"]["unknown"] == 1
+        )
+        cancel = stub.Cancel(
+            ctx.ops.pb2.CancelRequestPB(request_id=done_rid),
+            timeout=min(p["rpc_timeout_s"], deadline.remaining()),
+        )
+        ack = enqueue(done_rid)
+        evidence["completed_cancel"] = MessageToDict(
+            cancel, preserving_proto_field_name=True
+        )
+        evidence["completed_enqueue"] = MessageToDict(
+            ack, preserving_proto_field_name=True
+        )
+        # Completed lifecycle installs no cancel marker on either role. A short
+        # replay on the healthy, drained pool must be admitted, not just !=8429.
+        completed = (
+            cancel.status == ctx.ops.pb2.CANCEL_STATUS_NOT_FOUND
+            and len(ack.successes) == 1
+            and ack.successes[0].request_id == done_rid
+            and not ack.errors
+        )
+        if ack.successes:
+            call = stub.FetchResponse(
+                ctx.ops.pb2.FetchRequestPB(request_id=done_rid),
+                timeout=min(p["rpc_timeout_s"], deadline.remaining()),
+            )
+            try:
+                outputs = list(call)
+                evidence["completed_fetch"] = [
+                    MessageToDict(x, preserving_proto_field_name=True) for x in outputs
+                ]
+                completed = (
+                    completed
+                    and any(any(x.flatten_output.finished) for x in outputs)
+                    and not any(x.HasField("error_info") for x in outputs)
+                )
+            finally:
+                call.cancel()
+        evidence.update(absent=absent, completed=completed)
+    finally:
+        path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(
+        checks=[
+            CheckResult("absent_fence", "PASS" if absent else "FAIL"),
+            CheckResult("completed_not_found", "PASS" if completed else "FAIL"),
+        ],
+        artifacts=[str(path)],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "preemption_absent_fence",
+        _absent_params,
+        _absent_contract,
+        {},
+        checks=frozenset({"absent_fence", "completed_not_found"}),
+    )
+)

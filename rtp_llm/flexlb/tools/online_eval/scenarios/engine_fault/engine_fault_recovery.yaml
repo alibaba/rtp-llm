@@ -55,7 +55,7 @@ variants:
     config_overrides:
       ordering: priority
       queue_timeout_ms: 60000
-      stale_inflight_ms: 30000
+      request_timeout_ms: 30000
   program: crash_after
   metadata:
     requires:

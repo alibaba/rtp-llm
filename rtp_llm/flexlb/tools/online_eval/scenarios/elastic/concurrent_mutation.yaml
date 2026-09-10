@@ -37,6 +37,22 @@ variants:
   profiles:
   - window-nonbatch
   program: window_nonbatch
+- id: single_nonbatch_convergence
+  profiles:
+  - single-nonbatch
+  program: convergence
+- id: window_nonbatch_convergence
+  profiles:
+  - window-nonbatch
+  program: convergence
+- id: batch_convergence
+  profiles:
+  - batch-window
+  program: convergence
+- id: single_batch_convergence
+  profiles:
+  - single-batch
+  program: convergence
 metadata:
   description: Four concurrent add/remove workers and serial health probes, followed by quiescent discovery
     validation.
@@ -71,3 +87,15 @@ parameters:
       method: GenerateStreamCall
     health:
       min_success_rate: 0.5
+  convergence:
+    setup_timeout_s: 180
+    crossfire_timeout_s: 180
+    crossfire:
+      convergence:
+        unique_ports: true
+        margin_s: 2
+        cap_s: 30
+        post_window_s: 10
+        min_post_samples: 2
+        nonbatch_failfast_s: 2
+        batch_failfast_s: 5

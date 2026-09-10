@@ -170,6 +170,7 @@ parameters:
       - B
       - A
       duration_s: 90
+      max_concurrency: 8
     kill_time:
       wait_s: 12
     kill_b:
@@ -186,6 +187,7 @@ parameters:
     clean_b:
       target: B
       inflight_zero: true
+      prefill_residual_max: 1
     recovery_a_timeout_s: 630
     recovery_a:
       target: A

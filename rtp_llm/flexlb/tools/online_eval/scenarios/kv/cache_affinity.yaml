@@ -2687,14 +2687,65 @@ parameters:
       min_used: 2
   leader_spill_batch:
     setup_timeout_s: 180
-    slow_second:
-      operation: set_perf
-      targets:
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 3000
     steer_a_settle:
       seconds: 1.5
+    p0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 818000
+      - 818001
+      - 818002
+      - 818003
+      - 818004
+      - 818005
+      - 818006
+      - 818007
+      - 818008
+      - 818009
+      consume: immediate
+      stream_timeout_s: 15
+    p0_done_timeout_s: 15
+    seed_f:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 819000
+      - 819001
+      - 819002
+      - 819003
+      - 819004
+      - 819005
+      - 819006
+      - 819007
+      - 819008
+      - 819009
+      consume: immediate
+      stream_timeout_s: 15
+    seed_f_done_timeout_s: 15
+    filler_sync:
+      seconds: 0.3
+    filler_a:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 819000
+      - 819001
+      - 819002
+      - 819003
+      - 819004
+      - 819005
+      - 819006
+      - 819007
+      - 819008
+      - 819009
+      consume: immediate
+      stream_timeout_s: 15
+    filler_a_gap:
+      seconds: 0.15
     steer_a:
       count: 1
       input_len: 10240
@@ -2713,28 +2764,37 @@ parameters:
       consume: immediate
       stream_timeout_s: 15
     steer_a_done_timeout_s: 15
-    steer_a_placement:
-      second: prefill-0
+    # steer_a_placement.second 由程序动态引用 p0_holder（新家族必落无积压引擎）
+    steer_a_placement: {}
     steer_a_quiet_timeout_s: 8
     steer_a_quiet:
       targets:
       - prefill-0
       - prefill-1
       quiet_s: 3.5
-    restore_second:
-      operation: set_perf
-      targets:
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 100
-    slow_first:
-      operation: set_perf
-      targets:
-      - prefill-0
-      perf:
-        prefill_fixed_ms: 3000
     steer_b_settle:
       seconds: 1.5
+    # filler_b 复用 steer_a 家族：810xxx 在 p0 引擎全命中（steer_a 已落位种入），
+    # touch 不扩容零淘汰；若用 818xxx 会在容量 12 下重插淘汰 810xxx 破坏 steer_family_0
+    filler_b:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    filler_b_gap:
+      seconds: 0.15
     steer_b:
       count: 1
       input_len: 10240
@@ -2753,14 +2813,8 @@ parameters:
       consume: immediate
       stream_timeout_s: 15
     steer_b_done_timeout_s: 15
-    steer_b_placement:
-      second: prefill-1
-    restore_first:
-      operation: set_perf
-      targets:
-      - prefill-0
-      perf:
-        prefill_fixed_ms: 100
+    # steer_b_placement.second 由程序动态引用 seed_f_holder（新家族必落无积压引擎）
+    steer_b_placement: {}
     steer_restore_settle:
       seconds: 1.5
     steer_quiet_timeout_s: 8
@@ -3271,14 +3325,46 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
-    saturate_leader:
-      operation: set_perf
-      targets:
-      - prefill-0
-      perf:
-        prefill_fixed_ms: 3000
     saturation_settle:
       seconds: 1.5
+    saturation_w0_f0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w0_f0_gap:
+      seconds: 0.75
+    saturation_w0_f1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w0_f1_gap:
+      seconds: 0.12
     saturation_w0_r0_before_timeout_s: 10
     saturation_w0_r0_before:
       targets:
@@ -3439,6 +3525,46 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
+    saturation_w0_f0_done_timeout_s: 30
+    saturation_w0_f1_done_timeout_s: 30
+    saturation_w1_f0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w1_f0_gap:
+      seconds: 0.75
+    saturation_w1_f1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w1_f1_gap:
+      seconds: 0.12
     saturation_w1_r0_before_timeout_s: 10
     saturation_w1_r0_before:
       targets:
@@ -3599,6 +3725,46 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
+    saturation_w1_f0_done_timeout_s: 30
+    saturation_w1_f1_done_timeout_s: 30
+    saturation_w2_f0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w2_f0_gap:
+      seconds: 0.75
+    saturation_w2_f1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w2_f1_gap:
+      seconds: 0.12
     saturation_w2_r0_before_timeout_s: 10
     saturation_w2_r0_before:
       targets:
@@ -3759,6 +3925,46 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
+    saturation_w2_f0_done_timeout_s: 30
+    saturation_w2_f1_done_timeout_s: 30
+    saturation_w3_f0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w3_f0_gap:
+      seconds: 0.75
+    saturation_w3_f1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w3_f1_gap:
+      seconds: 0.12
     saturation_w3_r0_before_timeout_s: 10
     saturation_w3_r0_before:
       targets:
@@ -3919,12 +4125,8 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
-    recover_leader:
-      operation: set_perf
-      targets:
-      - prefill-0
-      perf:
-        prefill_fixed_ms: 100
+    saturation_w3_f0_done_timeout_s: 30
+    saturation_w3_f1_done_timeout_s: 30
     recovery_settle:
       seconds: 1.5
     saturation_quiet_timeout_s: 8
@@ -4981,14 +5183,65 @@ parameters:
       max_holders: 2
   leader_spill_nonbatch:
     setup_timeout_s: 180
-    slow_second:
-      operation: set_perf
-      targets:
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 3000
     steer_a_settle:
       seconds: 1.5
+    p0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 818000
+      - 818001
+      - 818002
+      - 818003
+      - 818004
+      - 818005
+      - 818006
+      - 818007
+      - 818008
+      - 818009
+      consume: immediate
+      stream_timeout_s: 15
+    p0_done_timeout_s: 15
+    seed_f:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 819000
+      - 819001
+      - 819002
+      - 819003
+      - 819004
+      - 819005
+      - 819006
+      - 819007
+      - 819008
+      - 819009
+      consume: immediate
+      stream_timeout_s: 15
+    seed_f_done_timeout_s: 15
+    filler_sync:
+      seconds: 0.3
+    filler_a:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 819000
+      - 819001
+      - 819002
+      - 819003
+      - 819004
+      - 819005
+      - 819006
+      - 819007
+      - 819008
+      - 819009
+      consume: immediate
+      stream_timeout_s: 15
+    filler_a_gap:
+      seconds: 0.15
     steer_a:
       count: 1
       input_len: 10240
@@ -5007,28 +5260,37 @@ parameters:
       consume: immediate
       stream_timeout_s: 15
     steer_a_done_timeout_s: 15
-    steer_a_placement:
-      second: prefill-0
+    # steer_a_placement.second 由程序动态引用 p0_holder（新家族必落无积压引擎）
+    steer_a_placement: {}
     steer_a_quiet_timeout_s: 8
     steer_a_quiet:
       targets:
       - prefill-0
       - prefill-1
       quiet_s: 3.5
-    restore_second:
-      operation: set_perf
-      targets:
-      - prefill-1
-      perf:
-        prefill_fixed_ms: 100
-    slow_first:
-      operation: set_perf
-      targets:
-      - prefill-0
-      perf:
-        prefill_fixed_ms: 3000
     steer_b_settle:
       seconds: 1.5
+    # filler_b 复用 steer_a 家族：810xxx 在 p0 引擎全命中（steer_a 已落位种入），
+    # touch 不扩容零淘汰；若用 818xxx 会在容量 12 下重插淘汰 810xxx 破坏 steer_family_0
+    filler_b:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+    filler_b_gap:
+      seconds: 0.15
     steer_b:
       count: 1
       input_len: 10240
@@ -5047,14 +5309,8 @@ parameters:
       consume: immediate
       stream_timeout_s: 15
     steer_b_done_timeout_s: 15
-    steer_b_placement:
-      second: prefill-1
-    restore_first:
-      operation: set_perf
-      targets:
-      - prefill-0
-      perf:
-        prefill_fixed_ms: 100
+    # steer_b_placement.second 由程序动态引用 seed_f_holder（新家族必落无积压引擎）
+    steer_b_placement: {}
     steer_restore_settle:
       seconds: 1.5
     steer_quiet_timeout_s: 8
@@ -5565,14 +5821,46 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
-    saturate_leader:
-      operation: set_perf
-      targets:
-      - prefill-0
-      perf:
-        prefill_fixed_ms: 3000
     saturation_settle:
       seconds: 1.5
+    saturation_w0_f0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w0_f0_gap:
+      seconds: 0.75
+    saturation_w0_f1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w0_f1_gap:
+      seconds: 0.12
     saturation_w0_r0_before_timeout_s: 10
     saturation_w0_r0_before:
       targets:
@@ -5733,6 +6021,46 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
+    saturation_w0_f0_done_timeout_s: 30
+    saturation_w0_f1_done_timeout_s: 30
+    saturation_w1_f0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w1_f0_gap:
+      seconds: 0.75
+    saturation_w1_f1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w1_f1_gap:
+      seconds: 0.12
     saturation_w1_r0_before_timeout_s: 10
     saturation_w1_r0_before:
       targets:
@@ -5893,6 +6221,46 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
+    saturation_w1_f0_done_timeout_s: 30
+    saturation_w1_f1_done_timeout_s: 30
+    saturation_w2_f0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w2_f0_gap:
+      seconds: 0.75
+    saturation_w2_f1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w2_f1_gap:
+      seconds: 0.12
     saturation_w2_r0_before_timeout_s: 10
     saturation_w2_r0_before:
       targets:
@@ -6053,6 +6421,46 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
+    saturation_w2_f0_done_timeout_s: 30
+    saturation_w2_f1_done_timeout_s: 30
+    saturation_w3_f0:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w3_f0_gap:
+      seconds: 0.75
+    saturation_w3_f1:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+    saturation_w3_f1_gap:
+      seconds: 0.12
     saturation_w3_r0_before_timeout_s: 10
     saturation_w3_r0_before:
       targets:
@@ -6213,12 +6621,8 @@ parameters:
       - prefill-0
       - prefill-1
       quiet_s: 0
-    recover_leader:
-      operation: set_perf
-      targets:
-      - prefill-0
-      perf:
-        prefill_fixed_ms: 100
+    saturation_w3_f0_done_timeout_s: 30
+    saturation_w3_f1_done_timeout_s: 30
     recovery_settle:
       seconds: 1.5
     saturation_quiet_timeout_s: 8

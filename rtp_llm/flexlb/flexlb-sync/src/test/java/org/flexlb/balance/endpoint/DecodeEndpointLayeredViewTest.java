@@ -451,7 +451,7 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("2", runningTask(2L, TaskPhase.KV_ALLOCATED, 256),
                 "3", runningTask(3L, TaskPhase.RUNNING, 512)), null, 10_000);
 
-        DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, 4);
+        DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
         assertEquals(List.of(1L), ids(snapshot.reserved()));
         assertEquals(List.of(2L), ids(snapshot.accepted()));
         assertEquals(List.of(3L), ids(snapshot.running()));
@@ -465,7 +465,7 @@ class DecodeEndpointLayeredViewTest {
                 20L, 64, 72, 70);
         beginPreemption(102L, List.of(3L),
                 30L, 64, 72, 70);
-        DecodeEndpointSnapshot after = DecodeEndpointSnapshot.capture(endpoint, 4);
+        DecodeEndpointSnapshot after = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
         assertTrue(after.accepted().isEmpty());
         assertTrue(after.running().isEmpty());
     }

@@ -2,12 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
+import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
+import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -30,7 +27,7 @@ import java.util.Objects;
 public class DefaultRouter {
 
     private final CostBasedPrefillStrategy prefillSelector;
-    private final CostBasedDecodeStrategy decodeSelector;
+    private final DecodeSelector decodeSelector;
     private final RandomStrategy vitSelector;
     private final ConfigService configService;
     private final List<RoleType> requiredRoles;
@@ -39,7 +36,7 @@ public class DefaultRouter {
     @Autowired
     public DefaultRouter(
             CostBasedPrefillStrategy prefillSelector,
-            CostBasedDecodeStrategy decodeSelector,
+            DecodeSelector decodeSelector,
             RandomStrategy vitSelector,
             ConfigService configService,
             ModelMetaConfig modelMetaConfig) {
@@ -61,43 +58,19 @@ public class DefaultRouter {
                 .orElse(RoleType.PREFILL);
     }
 
-    public Response routeDirect(BalanceContext context) {
-        Response validationFailure = validateRequest(context);
-        if (validationFailure != null) {
-            return validationFailure;
-        }
-        try (PinnedRouting routing = selectAll(context, requiredRoles)) {
-            if (routing.rejection() != null) {
-                return routing.rejection();
-            }
-            if (!routing.success()) {
-                return buildFailureResponse(routing.failure().role());
-            }
-            return commitDirect(context, routing.selections());
-        }
+    public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
+        return select(context, resolvePolicyGroup(context));
     }
 
-    public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
-            BalanceContext context) {
-        return routeForQueue(context, resolvePolicyGroup(context));
-    }
-
-    public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
-            BalanceContext context, String policyGroup) {
+    public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context, String policyGroup) {
         Response validationFailure = validateRequest(context);
-        if (validationFailure != null) {
-            return PlacementResult.rejected(validationFailure);
-        }
-        try (PinnedRouting routing = selectAll(context, requiredRoles, policyGroup)) {
-            if (routing.rejection() != null) {
-                return PlacementResult.rejected(routing.rejection());
-            }
-            if (!routing.success()) {
-                return PlacementResult.blocked(routing.failure());
-            }
-            Response response = buildSuccessResponse(routing.serverStatuses());
-            return PlacementResult.success(QueueRouteAdmission.prepare(
-                    context, routing.selections(), response));
+        if (validationFailure != null) { return PlacementResult.rejected(validationFailure); }
+        DecodeBinding decodeAdmission = DecodeBinding.capture(context);
+        try (PinnedRouting routing = selectAll(context, requiredRoles, policyGroup, decodeAdmission)) {
+            if (routing.rejection() != null) { return PlacementResult.rejected(routing.rejection()); }
+            if (!routing.success()) { return PlacementResult.blocked(routing.failure()); }
+            return PlacementResult.success(RouteAdmission.prepare(context, routing.selections(),
+                    buildSuccessResponse(routing.serverStatuses()), decodeAdmission));
         }
     }
 
@@ -114,13 +87,8 @@ public class DefaultRouter {
         return null;
     }
 
-    private PinnedRouting selectAll(
-            BalanceContext context,
-            List<RoleType> roles) {
-        return selectAll(context, roles, resolvePolicyGroup(context));
-    }
-
-    private PinnedRouting selectAll(BalanceContext context, List<RoleType> roles, String policyGroup) {
+    private PinnedRouting selectAll(BalanceContext context, List<RoleType> roles, String policyGroup,
+                                   DecodeBinding decodeAdmission) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
         String group = policyGroup;
         if (StringUtils.isNotBlank(policyGroup)) {
@@ -134,7 +102,7 @@ public class DefaultRouter {
         try {
             for (RoleType role : roles) {
                 PlacementResult<SelectedRole, RoleType> result =
-                        selectRole(context, role, group);
+                        selectRole(context, role, group, decodeAdmission);
                 if (result.status() != PlacementResult.Status.SUCCESS) {
                     Logger.debug(
                             "Failed to select {} worker for request {}",
@@ -186,11 +154,11 @@ public class DefaultRouter {
     }
 
     private PlacementResult<SelectedRole, RoleType> selectRole(
-            BalanceContext context, RoleType role, String group) {
+            BalanceContext context, RoleType role, String group, DecodeBinding decodeAdmission) {
         return switch (role) {
             case PREFILL, PDFUSION ->
                     prefillSelector.select(context, role, group);
-            case DECODE -> decodeSelector.select(context, role, group);
+            case DECODE -> decodeSelector.select(decodeAdmission, group);
             case VIT -> selectedOrBlocked(
                     vitSelector.select(context, role, group), role);
             case FRONTEND -> throw new IllegalArgumentException(
@@ -203,130 +171,6 @@ public class DefaultRouter {
         return selected == null
                 ? PlacementResult.blocked(role)
                 : PlacementResult.success(selected);
-    }
-
-    private Response commitDirect(BalanceContext context, List<SelectedRole> selections) {
-        List<DirectOwnership> owners = new ArrayList<>(selections.size());
-        Response response;
-        try {
-            for (SelectedRole selected : selections) {
-                if (selected.serverStatus().getRequestId() != context.getRequestId()) {
-                    throw new IllegalStateException(
-                            "selected role belongs to another DIRECT request");
-                }
-                WorkerEndpoint.GenerationPin pin = selected.takeGenerationPin();
-                try {
-                    WorkerEndpoint endpoint = pin.endpoint();
-                    RoleType role = selected.serverStatus().getRole();
-                    if (role == RoleType.PREFILL || role == RoleType.PDFUSION) {
-                        if (!(endpoint instanceof PrefillEndpoint prefill)) {
-                            throw new IllegalStateException(
-                                    "Prefill selection has another endpoint type");
-                        }
-                        var acquisition = prefill.registerDirectRequest(
-                                pin, context.getRequestId(), selected.prefillWorkMs());
-                        if (acquisition.status() != PrefillState.CapacityStatus.ACQUIRED) {
-                            Throwable cleanup = closeGenerationPin(pin, null);
-                            pin = null;
-                            cleanup = closeOwnerPins(owners, rollbackDirect(owners, cleanup));
-                            if (cleanup != null) {
-                                throw propagate(cleanup);
-                            }
-                            return Response.error(acquisition.status() == PrefillState.CapacityStatus.CAPACITY_FULL
-                                    ? StrategyErrorType.RESOURCE_EXHAUSTED : StrategyErrorType.INVALID_REQUEST);
-                        }
-                        PrefillState.DirectRegistration registration = acquisition.reservation();
-                        try {
-                            owners.add(new DirectOwnership(pin, registration));
-                        } catch (RuntimeException | Error appendFailure) {
-                            closeDirectRegistration(
-                                    registration, appendFailure);
-                            throw appendFailure;
-                        }
-                        pin = null;
-                    } else if (role == RoleType.DECODE) {
-                        if (!(endpoint instanceof DecodeEndpoint decode)) {
-                            throw new IllegalStateException(
-                                    "Decode selection has another endpoint type");
-                        }
-                        long sequenceLength = Math.max(0L, context.getRequest().getSeqLen());
-                        long expectedKv =
-                                context.getConfig()
-                                        .decodeKvReservationTokens(
-                                                sequenceLength,
-                                                context.getRequest().getMaxNewTokens(),
-                                                selected.decodeTotalKv());
-                        DecodeEndpoint.ReservationHandle reservation =
-                                decode.reservePinned(
-                                        pin,
-                                        context.getRequestId(),
-                                        sequenceLength,
-                                        expectedKv,
-                                        context.getPriority());
-                        try {
-                            owners.add(new DirectOwnership(pin, decode, reservation));
-                        } catch (RuntimeException | Error appendFailure) {
-                            rollbackDecodeReservation(
-                                    decode, reservation, appendFailure);
-                            throw appendFailure;
-                        }
-                        pin = null;
-                    } else {
-                        owners.add(new DirectOwnership(pin));
-                        pin = null;
-                    }
-                } catch (RuntimeException | Error leafFailure) {
-                    if (pin != null) {
-                        closeGenerationPin(pin, leafFailure);
-                    }
-                    throw leafFailure;
-                }
-            }
-            response = buildSuccessResponse(serverStatuses(selections));
-            // Every commit leaf below is a same-thread, allocation-free ownership
-            // move. All fallible registration and response construction has
-            // already completed, so this loop cannot partially commit legally.
-            for (DirectOwnership owner : owners) {
-                owner.commit();
-            }
-        } catch (RuntimeException | Error failure) {
-            rollbackDirect(owners, failure);
-            closeOwnerPins(owners, failure);
-            throw failure;
-        }
-        Throwable closeFailure = closeOwnerPins(owners, null);
-        if (closeFailure != null) {
-            throw propagate(closeFailure);
-        }
-        return response;
-    }
-
-    private static Throwable rollbackDirect(
-            List<DirectOwnership> owners,
-            Throwable primaryFailure) {
-        Throwable failure = primaryFailure;
-        for (int index = owners.size() - 1; index >= 0; index--) {
-            try {
-                owners.get(index).rollback();
-            } catch (Throwable rollbackFailure) {
-                failure = appendFailure(failure, rollbackFailure);
-            }
-        }
-        return failure;
-    }
-
-    private static Throwable closeOwnerPins(
-            List<DirectOwnership> owners,
-            Throwable primaryFailure) {
-        Throwable failure = primaryFailure;
-        for (int index = owners.size() - 1; index >= 0; index--) {
-            try {
-                owners.get(index).closePin();
-            } catch (Throwable closeFailure) {
-                failure = appendFailure(failure, closeFailure);
-            }
-        }
-        return failure;
     }
 
     private static List<ServerStatus> serverStatuses(List<SelectedRole> selections) {
@@ -358,40 +202,6 @@ public class DefaultRouter {
         return primaryFailure;
     }
 
-    private static Throwable closeDirectRegistration(
-            PrefillState.DirectRegistration registration,
-            Throwable primaryFailure) {
-        try {
-            registration.close();
-        } catch (Throwable closeFailure) {
-            return appendFailure(primaryFailure, closeFailure);
-        }
-        return primaryFailure;
-    }
-
-    private static Throwable rollbackDecodeReservation(
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle reservation,
-            Throwable primaryFailure) {
-        try {
-            endpoint.releaseReservationExact(reservation);
-        } catch (Throwable rollbackFailure) {
-            return appendFailure(primaryFailure, rollbackFailure);
-        }
-        return primaryFailure;
-    }
-
-    private static Throwable closeGenerationPin(
-            WorkerEndpoint.GenerationPin pin,
-            Throwable primaryFailure) {
-        try {
-            pin.close();
-        } catch (Throwable closeFailure) {
-            return appendFailure(primaryFailure, closeFailure);
-        }
-        return primaryFailure;
-    }
-
     private static Throwable appendFailure(
             Throwable primaryFailure,
             Throwable cleanupFailure) {
@@ -412,7 +222,7 @@ public class DefaultRouter {
             throw error;
         }
         return new IllegalStateException(
-                "DIRECT route cleanup failed", failure);
+                "route selection cleanup failed", failure);
     }
 
     private static Response buildSuccessResponse(
@@ -420,17 +230,6 @@ public class DefaultRouter {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(statuses);
-        return response;
-    }
-
-    private static Response buildFailureResponse(RoleType failedRole) {
-        StrategyErrorType errorType = failedRole == null
-                ? StrategyErrorType.NO_AVAILABLE_WORKER
-                : failedRole.getErrorType();
-        Response response = new Response();
-        response.setSuccess(false);
-        response.setCode(errorType.getErrorCode());
-        response.setErrorMessage(errorType.getErrorMsg());
         return response;
     }
 
@@ -477,52 +276,4 @@ public class DefaultRouter {
         }
     }
 
-    private record DirectOwnership(
-            WorkerEndpoint.GenerationPin pin,
-            PrefillState.DirectRegistration prefill,
-            DecodeEndpoint decode,
-            DecodeEndpoint.ReservationHandle decodeReservation) {
-
-        private DirectOwnership {
-            java.util.Objects.requireNonNull(pin, "pin");
-        }
-
-        private DirectOwnership(WorkerEndpoint.GenerationPin pin) {
-            this(pin, null, null, null);
-        }
-
-        private DirectOwnership(
-                WorkerEndpoint.GenerationPin pin,
-                PrefillState.DirectRegistration prefill) {
-            this(pin, java.util.Objects.requireNonNull(prefill, "prefill"),
-                    null, null);
-        }
-
-        private DirectOwnership(
-                WorkerEndpoint.GenerationPin pin,
-                DecodeEndpoint decode,
-                DecodeEndpoint.ReservationHandle reservation) {
-            this(pin, null,
-                    java.util.Objects.requireNonNull(decode, "decode"),
-                    java.util.Objects.requireNonNull(reservation, "reservation"));
-        }
-
-        private void commit() {
-            if (prefill != null) {
-                prefill.commit();
-            }
-        }
-
-        private void rollback() {
-            if (prefill != null) {
-                prefill.close();
-            } else if (decode != null) {
-                decode.releaseReservationExact(decodeReservation);
-            }
-        }
-
-        private void closePin() {
-            pin.close();
-        }
-    }
 }

@@ -208,6 +208,24 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(result["status"], "ERROR")
         self.assertEqual(result["finding_confirmed"], [])
 
+    def test_skipped_probe_does_not_claim_finding_resolved(self):
+        handler = StageHandler(
+            "inspect",
+            lambda p, plan: p,
+            lambda ctx, p, d: StageOutput(
+                {}, [CheckResult("sample", "SKIP", "no matching sample")]
+            ),
+            {},
+            checks=frozenset({"sample"}),
+        )
+        doc = source()
+        doc["stages"].append({"id": "inspect", "action": "inspect"})
+        doc["findings"] = ["inspect.sample"]
+        result = self.run_plan(doc, {"inspect": handler})
+        self.assertEqual("PASS", result["status"])
+        self.assertEqual([], result["finding_resolved"])
+        self.assertEqual("SKIP", result["stages"][-1]["checks"][0]["status"])
+
     def test_explicit_teardown_cleans_requests_before_environment_once(self):
         doc = source()
         doc["stages"].append({"id": "end", "action": "teardown"})

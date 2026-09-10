@@ -32,7 +32,7 @@ class Backend:
         terminals=None,
         comparator=False,
         invert_fifo=False,
-        pure_priority=False,
+        pure_priority=True,
     ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
@@ -90,28 +90,32 @@ class Backend:
         if self.missing:
             lifecycle.pop("6")
         if self.queued:
-            order = [
-                1,
-                2,
-                10,
-                4,
-                5,
-                3,
-                6,
-                7,
-                8,
-                9,
-                11,
-                12,
-                20,
-                13,
-                14,
-                15,
-                16,
-                17,
-                18,
-                19,
-            ]
+            order = (
+                [1, 10, 4, 5, 2, 3, 6, 7, 8, 9, 11, 20, 12, 13, 14, 15, 16, 17, 18, 19]
+                if self.pure_priority
+                else [
+                    1,
+                    2,
+                    10,
+                    4,
+                    5,
+                    3,
+                    6,
+                    7,
+                    8,
+                    9,
+                    11,
+                    12,
+                    20,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    18,
+                    19,
+                ]
+            )
             if self.reverse:
                 order[2], order[3] = order[3], order[2]
             lifecycle = {
@@ -150,7 +154,7 @@ class PreemptionPrograms(unittest.TestCase):
             load_scenarios(ROOT / "scenarios/priority/priority_preemption.yaml"),
             handlers=registry,
         )
-        self.assertEqual(17, len(plans))
+        self.assertEqual(14, len(plans))
         return next(p for p in plans if p["variant_id"] == variant), registry
 
     def run_program(self, variant="same_priority_zero_eviction", **kwargs):
@@ -293,6 +297,23 @@ class PreemptionPrograms(unittest.TestCase):
         ]
         self.assertTrue(all(c["status"] == "FAIL" for c in checks))
 
+    def test_legacy_first_peer_exemption_fails_strict_yaml_contract(self):
+        result, _, _ = self.run_program(
+            variant="prefill_queued", queued=True, pure_priority=False
+        )
+        self.assertEqual("FAIL", result["status"])
+        first = next(s for s in result["stages"] if s["id"] == "r1_same_priority")
+        self.assertEqual("FAIL", first["status"])
+
+    def test_expectation_flag_preserves_legacy_and_rejects_non_booleans(self):
+        self.assertTrue(preempt._first_peer_params({})["first_peer_exempt"])
+        priorities = [30, 30, 70, 70, 70]
+        self.assertEqual([0, 2, 3, 4, 1], preempt._priority_indices(priorities, True))
+        self.assertEqual([2, 3, 4, 0, 1], preempt._priority_indices(priorities, False))
+        for value in (0, 1, "false", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                preempt._first_peer_params({"first_peer_exempt": value})
+
     def test_queued_second_placeholder_rejection_blocks_second_wave(self):
         result, _, backend = self.run_program(
             variant="prefill_queued", queued=True, rejected=11
@@ -342,48 +363,6 @@ class PreemptionPrograms(unittest.TestCase):
         self.assertEqual("ERROR", result["status"])
         self.assertEqual(12, len(backend.shapes))
         self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
-
-    def test_disabled_all_success_preserves_twenty_consumers(self):
-        result, cohorts, backend = self.run_program(
-            variant="disabled_zero_eviction", queued=True
-        )
-        self.assertEqual("PASS", result["status"], result)
-        self.assertEqual(20, backend.ops.generate_count)
-        self.assertEqual([1, 1, 9, 9], sorted(map(len, cohorts)))
-
-    def test_disabled_queue_expiries_are_legal_in_both_rounds(self):
-        terminals = {rid: 8511 for rid in list(range(2, 11)) + list(range(12, 21))}
-        result, _, backend = self.run_program(
-            variant="disabled_zero_eviction", terminals=terminals
-        )
-        self.assertEqual("PASS", result["status"], result)
-        self.assertEqual(20, len(backend.shapes))
-        self.assertEqual(2, backend.ops.generate_count)
-
-    def test_disabled_forbidden_queued_code_fails_both_checks(self):
-        result, _, backend = self.run_program(
-            variant="disabled_zero_eviction", terminals={2: 8430}
-        )
-        self.assertEqual("FAIL", result["status"])
-        self.assertEqual(10, len(backend.shapes))
-        checks = next(s for s in result["stages"] if s["id"] == "r1_same_priority")[
-            "checks"
-        ]
-        self.assertEqual(
-            {"AT2": "FAIL", "P6_terminal": "FAIL"},
-            {c["id"]: c["status"] for c in checks},
-        )
-
-    def test_disabled_config_matches_full_expected_t1_render(self):
-
-        plan, _ = self.plan("disabled_zero_eviction")
-        spec = expected_environment(
-            "preemption_disabled", NS(profile="single-nonbatch")
-        )
-        expected = spec.resolved_config
-        self.assertEqual(expected, plan["environment"]["resolved_config"])
-        self.assertNotIn("preemption", expected["scheduler"]["ordering"])
-        self.assertEqual(8000, expected["scheduler"]["queueTimeoutMs"])
 
     def test_comparator_rebuilds_q2_then_f1_and_drains_twelve_consumers(self):
 
@@ -439,7 +418,7 @@ class PreemptionPrograms(unittest.TestCase):
 
     def test_comparator_first_half_failure_still_executes_fifo_and_fails_final(self):
         result, cohorts, backend = self.run_program(
-            variant="comparator_frozen_weak", comparator=True, pure_priority=True
+            variant="comparator_frozen_weak", comparator=True, pure_priority=False
         )
         self.assertEqual("FAIL", result["status"], result)
         self.assertEqual(12, backend.ops.generate_count)

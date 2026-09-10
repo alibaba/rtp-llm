@@ -132,9 +132,7 @@ variants:
         - PREFILL_QUEUED
         - DECODE_RESERVED
         - DECODE_ENGINE_OWNED
-        engine_cancellation:
-          ack_timeout_ms: 50
-          completion_timeout_ms: 1000
+        timeout_ms: 1000
       decode_max_engine_requests: 1
   program: preemption_victim_batch
 - id: preemption_victim_nonbatch
@@ -152,9 +150,7 @@ variants:
         - PREFILL_QUEUED
         - DECODE_RESERVED
         - DECODE_ENGINE_OWNED
-        engine_cancellation:
-          ack_timeout_ms: 50
-          completion_timeout_ms: 1000
+        timeout_ms: 1000
       decode_max_engine_requests: 1
   program: preemption_victim_nonbatch
 metadata:

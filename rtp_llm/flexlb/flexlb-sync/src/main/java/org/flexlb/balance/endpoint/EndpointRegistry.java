@@ -994,29 +994,6 @@ public class EndpointRegistry {
     }
 
     /**
-     * Sum the currently available delivery credits across one endpoint role.
-     * Endpoint-local admission remains authoritative; this aggregate is only
-     * an advisory budget for deciding how many independent requests to release
-     * from the model-wide queue in one pass.
-     */
-    public long availablePrefillDeliveryCredits(RoleType role) {
-        if (role != RoleType.PREFILL && role != RoleType.PDFUSION) {
-            return 0L;
-        }
-        long total = 0L;
-        for (WorkerEndpoint worker : endpoints(role).values()) {
-            if (worker instanceof PrefillEndpoint prefill) {
-                long available = prefill.availableDeliveryCredits();
-                if (Long.MAX_VALUE - total < available) {
-                    return Long.MAX_VALUE;
-                }
-                total += available;
-            }
-        }
-        return total;
-    }
-
-    /**
      * Trigger TTL eviction on all prefill and decode endpoints.
      *
      * @param ttlMs max age before eviction

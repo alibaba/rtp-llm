@@ -14,7 +14,7 @@ environment:
     ordering: priority
     queue_timeout_ms:
       omit: true
-    max_inflight_batches: 2
+    max_inflight_per_prefill_worker: 2
 execution:
   timeout_s: 1200
   stage_timeout_s: 40

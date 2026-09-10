@@ -33,7 +33,7 @@ class StageHandler:
 @dataclass(frozen=True)
 class CheckResult:
     id: str
-    status: str  # PASS | FAIL | ERROR; only ordinary FAIL can match a finding
+    status: str  # PASS | FAIL | ERROR | SKIP; only ordinary FAIL can match a finding
     detail: str = ""
     actual: object = None
     expected: object = None

@@ -205,12 +205,10 @@ class ClusterConfigParamTest {
         assertEquals("prefill-1", engines.get(1).get("name").asText());
         assertEquals(64000, engines.get(0).get("grpc_port").asInt());
 
-        String envContent = Files.readString(envFile);
-        assertTrue(envContent.contains("DOMAIN_ADDRESS:" + config.prefillDomain),
-                "env file should define the prefill domain");
-        // Decode domain record exists but with an empty address list.
-        assertTrue(envContent.contains("DOMAIN_ADDRESS:" + config.decodeDomain + "='"),
-                "decode domain should be present with empty addresses");
+        assertEquals(1, payload.get("env").size());
+        JsonNode service = MAPPER.readTree(payload.get("env").get("MODEL_SERVICE_CONFIG").asText());
+        assertEquals(config.discoveryFile, service.get("discovery_file").asText());
+        assertTrue(Files.readString(envFile).contains("MODEL_SERVICE_CONFIG="));
 
         // Mirror check: decode-only cluster lists only decode engines.
         JavaMockEngineCluster.Config decodeOnly = JavaMockEngineCluster.Config.parse(new String[]{

@@ -39,7 +39,7 @@ class RequestRegistryDebugTest {
     @Test
     void retainedTombstoneIsVisibleWithoutOwningRequestResources() {
         long id = 9007199254740993L;
-        var future = registry.register(RequestLifecycleTestSupport.context(config, id), 8);
+        var future = registry.register(RequestLifecycleTestSupport.context(config, id));
         var before = registry.debugSnapshot(new DebugQuery(5, 5, id));
         assertEquals(Long.toString(id), before.rows().getFirst().get("request_id"));
         registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
@@ -57,7 +57,7 @@ class RequestRegistryDebugTest {
         var slot = registry.requestSlot(id);
         assertTrue(registry.removeExactTombstone(slot, Long.MAX_VALUE));
         assertTrue(registry.debugSnapshot(new DebugQuery(5, 5, id)).rows().isEmpty());
-        registry.register(RequestLifecycleTestSupport.context(config, id), 8);
+        registry.register(RequestLifecycleTestSupport.context(config, id));
         assertNotEquals(row.get("request_generation"), registry.debugSnapshot(new DebugQuery(5, 5, id))
                 .rows().getFirst().get("request_generation"));
     }
@@ -65,7 +65,7 @@ class RequestRegistryDebugTest {
     @Test
     void limitBoundsTraversalAndDoesNotChangeLiveOwnership() {
         for (int i = 1; i <= 10; i++) {
-            registry.register(RequestLifecycleTestSupport.context(config, i), 20);
+            registry.register(RequestLifecycleTestSupport.context(config, i));
         }
         var page = registry.debugSnapshot(new DebugQuery(2, 3, null));
         assertEquals(2, page.rows().size());

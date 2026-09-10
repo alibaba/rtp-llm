@@ -167,7 +167,10 @@ def wraparound(case):
     case.step(
         "recovery_distribution",
         "master_probe_distribution",
-        params={"requests": output("recovery_a", "requests")},
+        params=case.params(
+            "wraparound.recovery_distribution",
+            {"requests": output("recovery_a", "requests")},
+        ),
     )
     # A owns no active requests here; B still drives their shared engines.
     case.step(
@@ -203,6 +206,20 @@ def wraparound(case):
         "master_inflight_clean",
         timeout_s=case.value("wraparound.clean_a_timeout_s"),
         params=case.value("wraparound.clean_a"),
+    )
+    case.step(
+        "rotation_probe",
+        "master_request_batch",
+        timeout_s=case.value("wraparound.rotation_probe_timeout_s"),
+        params=case.value("wraparound.rotation_probe"),
+    )
+    case.step(
+        "rotation_distribution",
+        "master_probe_distribution",
+        params=case.params(
+            "wraparound.rotation_distribution",
+            {"requests": output("rotation_probe", "requests")},
+        ),
     )
     case.step("cleanup", "teardown")
 

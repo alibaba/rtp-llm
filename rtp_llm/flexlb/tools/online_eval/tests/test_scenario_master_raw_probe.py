@@ -72,6 +72,22 @@ class RawMasterProbeTest(unittest.TestCase):
                         config["zone_process_setting"]["process_info"]["envs"]
                     )
                     seen["mock"] = json.loads(variables["FLEXLB_CONFIG"])
+                    env.endpoint_file.write_text(
+                        json.dumps(
+                            {
+                                "env": {
+                                    "MODEL_SERVICE_CONFIG": json.dumps(
+                                        {
+                                            "hosts": {
+                                                "mock.prefill.hosts.address": [],
+                                                "mock.decode.hosts.address": [],
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        )
+                    )
                     env.mock = NS(pid=401)
 
                 def start_master(manager, env):

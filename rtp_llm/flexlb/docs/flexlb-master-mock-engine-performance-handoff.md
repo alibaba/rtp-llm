@@ -1,15 +1,8 @@
 # FlexLB Master + Mock Engine 性能测试 Handoff 手册
 
-> 历史记录说明：本文记录的是 2026-07-17 的性能方法和结果。文中带
-> `slo` 的文件名、脚本变量和结果字段是测试工具的历史命名，不是当前
-> FlexLB 的 SLO 配置接口。当前调度、凑批和路由行为只从进程配置中的
-> `FLEXLB_CONFIG` JSON 读取；不要把历史环境变量名称复制到生产配置。
-> 文中出现的 `dispatcher.maxRequests`、`dispatcher.maxCollectionWaitMs` 和
-> `dispatcher.earlyDispatchPredictedExecutionMs` 是当时 schema v1 的历史字段，
-> schema v2 已删除。当前分别使用 `scheduler.decision.maxRequests`、
-> `scheduler.decision.maxCollectionWaitMs` 和
-> `scheduler.decision.maxPredictedExecutionMs`；预测边界语义也已收敛为“等于
-> 上限时纳入并立即下发，超过上限时保留新请求”。
+> 本文的测量结果来自 2026-07-17，不代表当前实现的性能。复测使用 schema 3，
+> 显式设置单机 uncached-token 容量、完整请求超时和决策 lifetime 系数。
+> 带 `slo` 的历史产物名仅用于查找测量记录。
 
 本文用于交接 FlexLB Master 的 batch 调度性能测试。目标是让接手人能够复现测试、逐级寻找容量拐点，并判断瓶颈在发压端、FlexLB Master 还是 mock engine。
 
@@ -24,14 +17,10 @@
 - Master 进程配置必须在 `FLEXLB_CONFIG` 中选择
   `scheduler.type=QUEUE` 和 `dispatcher.type=BATCH`；`FETCH_OUTPUT_STREAM=0` 只是
   load client 的测试开关：客户端不读输出流，engine 侧仍完整执行 prefill+decode。
-  历史 10 ms base case 需要在独立进程 JSON 中配置当时的
-  `dispatcher.maxCollectionWaitMs=10`，在当前 schema v2 中应写为
-  `scheduler.decision.maxCollectionWaitMs=10`；当前仓库的
-  `master_fixed_window.json` 已不是该 10 ms fixture，不能用已删除的标量
-  环境变量覆盖。历史 `slo500_wait160` case 在独立 JSON 中配置
-  当时的 `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
-  `dispatcher.maxCollectionWaitMs=160`；当前 fixture 已迁移到对应的
-  `scheduler.decision` 字段。
+  10 ms 收集窗口使用 `scheduler.decision.maxCollectionWaitMs=10`。
+  `slo500_wait160` 的复测配置使用 `scheduler.decision.maxPredictedExecutionMs=500`
+  和 `scheduler.decision.maxCollectionWaitMs=160`。预测值达到上限时立即下发；
+  新请求使组预测值超过上限时留到下一组，不可拆分的单请求允许超过上限。
 - 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能；
   关闭客户端读流（`FETCH_OUTPUT_STREAM=0`）不影响 engine 侧的完整执行。
 - 吞吐以 Master 服务端的 `server_arrival_qps` 为准。
@@ -138,7 +127,7 @@ python3 -m unittest discover -s tools/online_eval/tests
 普通 `./mvnw test` 只运行功能测试，并排除 `performance-regression` tag。性能回归分为两个显式 profile，必须分别运行：
 
 - `sync-performance-regression`：`WorkerBatcherPerformanceTest`，覆盖不同真实非空队列深度下 projection input capture 与 immutable materialization 的延迟和分配上限。
-- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路。类内先运行单 worker 的真实 payload burst，再运行 engine-scale 矩阵，避免大规模 fixture 的回收状态污染 burst 基线。
+- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、BEST_ONLY Prefill、Decode 准入选择、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路。类内先运行单 worker 的真实 payload burst，再运行 engine-scale 矩阵，避免大规模 fixture 的回收状态污染 burst 基线。
 
 分别运行两组门禁：
 

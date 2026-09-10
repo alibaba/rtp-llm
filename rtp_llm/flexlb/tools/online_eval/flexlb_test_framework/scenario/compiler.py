@@ -52,21 +52,18 @@ OUTPUTS = {
     "teardown": {"clean": "boolean"},
 }
 INTEGER_OVERRIDES = {
-    "default_priority",
-    "max_requests",
-    "max_collection_wait_ms",
-    "max_predicted_execution_ms",
-    "queue_timeout_ms",
-    "max_outstanding",
-    "stale_inflight_ms",
-    "delivered_not_accepted_timeout_ms",
-    "max_delivered_not_accepted",
-    "max_waiting_requests_per_prefill_worker",
-    "max_inflight_batches",
-    "enqueue_rpc_timeout_ms",
-    "max_inflight_requests_per_worker",
+    "cleanup_interval_ms",
     "status_rpc_ms",
+    "max_requests",
+    "default_priority",
+    "queue_timeout_ms",
     "decode_max_engine_requests",
+    "decode_max_kv_usage_percent",
+    "max_predicted_execution_ms",
+    "request_timeout_ms",
+    "max_collection_wait_ms",
+    "status_stale_after_ms",
+    "max_inflight_per_prefill_worker",
 }
 CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {
     "priority",
@@ -91,9 +88,11 @@ def effective_capabilities(config):
     else:
         raise ValueError("unrecognized effective dispatcher")
     preemption = scheduler["ordering"].get("preemption")
+    if preemption is None and scheduler["ordering"]["type"] == "PRIORITY":
+        preemption = {"allowedVictimStages": list(VICTIM_STAGES)}
     if preemption:
         caps.add("preemption")
-        if preemption.get("engineCancellation"):
+        if "DECODE_ENGINE_OWNED" in preemption.get("allowedVictimStages", []):
             caps.add("engine_cancellation")
     return axes, sorted(caps)
 
@@ -238,7 +237,8 @@ def environment(value, path, profile):
     overrides = mapping(
         value.get("config_overrides", {}),
         path + ".config_overrides",
-        INTEGER_OVERRIDES | {"ordering", "decision", "dispatcher", "preemption"},
+        INTEGER_OVERRIDES
+        | {"ordering", "decision", "dispatcher", "preemption", "decision_lifetime"},
     )
     kwargs = {}
     for key, val in overrides.items():
@@ -255,7 +255,7 @@ def environment(value, path, profile):
             mapping(
                 val,
                 field,
-                {"allowed_victim_stages", "engine_cancellation"},
+                {"allowed_victim_stages", "timeout_ms"},
                 {"allowed_victim_stages"},
             )
             victim_stages = names(
@@ -265,20 +265,12 @@ def environment(value, path, profile):
             )
             if not victim_stages:
                 fail(field, "preemption victim stages cannot be empty")
-            if "engine_cancellation" in val:
-                cancellation = mapping(
-                    val["engine_cancellation"],
-                    field + ".engine_cancellation",
-                    {"ack_timeout_ms", "completion_timeout_ms"},
-                    {"ack_timeout_ms", "completion_timeout_ms"},
+            if "timeout_ms" in val:
+                number(
+                    val["timeout_ms"], field + ".timeout_ms", minimum=1, integer=True
                 )
-                for name, timeout in cancellation.items():
-                    number(
-                        timeout,
-                        field + ".engine_cancellation." + name,
-                        minimum=1,
-                        integer=True,
-                    )
+        elif key == "decision_lifetime":
+            number(val, field, minimum=1)
         elif isinstance(val, dict):
             if val != {"omit": True} or type(val.get("omit")) is not bool:
                 fail(field, "expected exact {omit: true}")

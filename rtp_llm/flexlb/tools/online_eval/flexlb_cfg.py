@@ -12,19 +12,11 @@ One module renders every FLEXLB_CONFIG document this repo produces:
 
 Profiles:
 
-  * four functional case-test profiles (``PROFILES``) — the schema-v2
+  * four functional case-test profiles (``PROFILES``) — the schema-v3
     decision x dispatcher axes (scheduler QUEUE + FIFO ordering), values
     unchanged from the former harness.flexlb_config_for_profile;
-  * ``stress-na130`` — the stress-line baseline (formerly the checked-in
-    ``data/config/master_fixed_window.json``), field-for-field identical:
-    PRIORITY(50) ordering + preemption{PREFILL_QUEUED, DECODE_RESERVED},
-    FIXED_WINDOW(32/400/550), queueTimeoutMs 60000, lifecycle
-    (300000/30000/500000), capacity (1000000/128), BATCH dispatcher with
-    maxInflightBatchesPerPrefillWorker=2 + enqueueRpcTimeoutMs=800, the
-    DSv4 prefill formula, prefill cacheAffinity + candidateChoice, the
-    full decode block (95/384 + kvReservation + decayPerToken +
-    outlierRejection), workerRegistry health(20/5000/10000) + cacheStatus,
-    and the observability cacheHit block (maxKeyOccurrences 80000000).
+  * ``stress-na130`` — the stress workload rendered using schema-v3.
+    Removed capacity, selector and acknowledgement settings are not emitted.
 
 Override semantics (``ConfigOverride``):
 
@@ -36,7 +28,7 @@ Override semantics (``ConfigOverride``):
     the Java default", while the functional profiles carry 60000);
   * an override may only change fields the profile's document already
     has (unknown-for-profile fields raise ValueError — e.g.
-    decode_max_kv_usage_percent is stress-only);
+    unknown legacy capacity knobs);
   * axis fields (ordering / decision / dispatcher) re-type their block
     and drop the other axis' exclusive keys, mirroring the strict
     schema (SINGLE carries no window knobs; FIFO carries no
@@ -99,7 +91,7 @@ VICTIM_STAGES = ("PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED")
 # Profiles
 # ===========================================================================
 #
-# Functional case-test profiles: schema-v2 decision x dispatcher axes
+# Functional case-test profiles: schema-v3 decision x dispatcher axes
 # (scheduler QUEUE + FIFO ordering) — the four legacy combos, values
 # unchanged.  The stress baseline is NOT in PROFILES (the case runner's
 # profile set stays the functional four); it is a render_env profile of
@@ -199,124 +191,61 @@ class _Omit:
 OMIT = _Omit()
 
 # Fields where OMIT is a legal value (absence is a legal document state).
-_OMITTABLE = frozenset(
-    {
-        "queue_timeout_ms",
-        "enqueue_rpc_timeout_ms",
-        "max_waiting_requests_per_prefill_worker",
-        "max_inflight_requests_per_worker",
-        "preemption",
-    }
-)
+_OMITTABLE = frozenset({"queue_timeout_ms", "preemption"})
 
 
 @dataclass(frozen=True)
 class ConfigOverride:
-    """Per-spec knobs layered on top of a profile's base document.
+    """Explicit schema-v3 overrides; removed schema-v3 keys are rejected."""
 
-    Every field defaults to ``None`` = "leave the profile value alone".
-    ``OMIT`` removes the key.  Unknown fields raise ``TypeError`` at
-    construction (frozen dataclass) — the SSOT vocabulary is closed.
-    """
-
-    # -- axis blocks (re-typed; exclusive keys of the other axis drop) ----
-    ordering: Optional[str] = None  # fifo | priority
-    decision: Optional[str] = None  # fixed_window | single
-    dispatcher: Optional[str] = None  # batch | non_batch
-    # -- scheduler.ordering (PRIORITY only — the strict parser rejects
-    #    these keys under FIFO) --------------------------------------------
+    ordering: Optional[str] = None
+    decision: Optional[str] = None
+    dispatcher: Optional[str] = None
     default_priority: Optional[int] = None
-    preemption: Optional[dict] = None  # snake_case; see _build_preemption_cfg
-    # -- scheduler.decision (FIXED_WINDOW only) ----------------------------
+    preemption: Optional[dict] = None
     max_requests: Optional[int] = None
     max_collection_wait_ms: Optional[int] = None
     max_predicted_execution_ms: Optional[int] = None
-    # -- scheduler knobs ----------------------------------------------------
     queue_timeout_ms: Union[int, _Omit, None] = None
-    max_outstanding: Optional[int] = None
-    stale_inflight_ms: Optional[int] = None
-    delivered_not_accepted_timeout_ms: Optional[int] = None
-    max_delivered_not_accepted: Optional[int] = None
-    max_waiting_requests_per_prefill_worker: Optional[int] = None
-    # -- dispatcher knobs ---------------------------------------------------
-    max_inflight_batches: Optional[int] = None  # BATCH
-    enqueue_rpc_timeout_ms: Optional[int] = None  # BATCH
-    max_inflight_requests_per_worker: Optional[int] = None  # NON_BATCH
-    # -- workerRegistry.health ---------------------------------------------
+    max_inflight_per_prefill_worker: Optional[int] = None
+    request_timeout_ms: Optional[int] = None
+    decision_lifetime: Optional[float] = None
     status_rpc_ms: Optional[int] = None
-    # -- router.roles.decode.availability ----------------------------------
+    status_stale_after_ms: Optional[int] = None
+    cleanup_interval_ms: Optional[int] = None
     decode_max_engine_requests: Optional[int] = None
-    decode_max_kv_usage_percent: Optional[int] = None  # stress profile only
-    # -- test-only edit channel --------------------------------------------
-    strip_preemption: bool = False  # drop scheduler.ordering.preemption
+    decode_max_kv_usage_percent: Optional[int] = None
+    strip_preemption: bool = False
 
     def omit_map(self) -> dict:
-        """Field name -> True when set to OMIT (validation aid)."""
         return {f.name: getattr(self, f.name) is OMIT for f in fields(self)}
 
 
 # ===========================================================================
-# Preemption / ordering blocks (strict schema-v2; Python mirror of
+# Preemption / ordering blocks (strict schema-v3; Python mirror of
 # FlexlbConfigValidator.validateQueue)
 # ===========================================================================
 
 
 def _build_preemption_cfg(preemption: dict) -> dict:
-    """snake_case preemption spec -> strict schema-v2 preemption JSON block.
-
-    Input keys: ``allowed_victim_stages`` (list of VICTIM_STAGES values)
-    and optional ``engine_cancellation``
-    ``{"ack_timeout_ms": int, "completion_timeout_ms": int}``.
-    Java-side cross-field contract mirrored:
-
-      * allowedVictimStages must be a non-empty subset of VICTIM_STAGES;
-      * engineCancellation is REQUIRED when DECODE_ENGINE_OWNED is allowed
-        and REJECTED otherwise (both timeouts positive integers);
-      * no JSON nulls are ever emitted (ConfigService.rejectJsonNull).
-    """
+    """Render the schema-v3 reclamation policy without legacy ACK settings."""
+    unknown_keys = set(preemption) - {"allowed_victim_stages", "timeout_ms"}
+    if unknown_keys:
+        raise ValueError(f"unknown preemption keys: {sorted(unknown_keys)}")
     stages = list(preemption.get("allowed_victim_stages") or [])
-    unknown = [s for s in stages if s not in VICTIM_STAGES]
-    if unknown:
+    if not stages or any(stage not in VICTIM_STAGES for stage in stages):
         raise ValueError(
-            f"preemption.allowed_victim_stages: unknown stages {unknown}; "
-            f"valid values: {list(VICTIM_STAGES)}"
+            f"allowed_victim_stages must be a non-empty subset of {VICTIM_STAGES}"
         )
-    if not stages:
-        raise ValueError(
-            "preemption.allowed_victim_stages must be a non-empty subset of "
-            f"{list(VICTIM_STAGES)} when preemption is configured"
-        )
-    cancellation = preemption.get("engine_cancellation")
-    if "DECODE_ENGINE_OWNED" not in stages:
-        if cancellation is not None:
-            raise ValueError(
-                "preemption.engine_cancellation is allowed only when "
-                "DECODE_ENGINE_OWNED is an allowed victim stage"
-            )
-        return {"allowedVictimStages": stages}
-    if cancellation is None:
-        raise ValueError(
-            "preemption.engine_cancellation is required when "
-            "DECODE_ENGINE_OWNED is an allowed victim stage"
-        )
-    ack_ms = cancellation.get("ack_timeout_ms")
-    completion_ms = cancellation.get("completion_timeout_ms")
-    for name, value in (
-        ("ack_timeout_ms", ack_ms),
-        ("completion_timeout_ms", completion_ms),
-    ):
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ValueError(
-                f"preemption.engine_cancellation.{name} must be a positive "
-                "integer (ms)"
-            )
-    return {
-        "allowedVictimStages": stages,
-        "engineCancellation": {
-            "ackTimeoutMs": ack_ms,
-            "completionTimeoutMs": completion_ms,
-        },
-    }
+    result = {"allowedVictimStages": stages}
+    if "timeout_ms" in preemption:
+        value = preemption["timeout_ms"]
+        if "DECODE_ENGINE_OWNED" not in stages:
+            raise ValueError("timeout_ms requires DECODE_ENGINE_OWNED")
+        if type(value) is not int or value <= 0:
+            raise ValueError("preemption.timeout_ms must be a positive integer")
+        result["timeoutMs"] = value
+    return result
 
 
 def _build_ordering_cfg(
@@ -324,13 +253,13 @@ def _build_ordering_cfg(
     default_priority: Optional[int],
     preemption: Optional[dict],
 ) -> dict:
-    """scheduler.ordering block (strict schema-v2).
+    """scheduler.ordering block (strict schema-v3).
 
     FIFO carries only ``{"type": "FIFO"}`` — FifoOrderingConfig has no
     other fields and the strict parser rejects defaultPriority /
     preemption under it.  Under PRIORITY both keys are optional: omitted
     defaultPriority keeps the Java default (50); an omitted preemption
-    block disables preemption (the designed off-switch).
+    block enables the Java default policy (all victim stages).
     """
     if isinstance(ordering, str):
         ordering = ordering.lower()
@@ -359,7 +288,7 @@ def _build_ordering_cfg(
 # build_flexlb_config — the functional-template generator
 # ===========================================================================
 #
-# Unified strict schema-v2 generator for the four functional profiles
+# Unified strict schema-v3 generator for the four functional profiles
 # (formerly harness.build_flexlb_config, extended with the
 # decode_max_engine_requests knob so the JSON-splice call sites could
 # migrate onto generator parameters).  The router always gets the FORMULA
@@ -368,87 +297,86 @@ def _build_ordering_cfg(
 
 def build_flexlb_config(
     *,
-    ordering: str = "fifo",  # fifo | priority
-    decision: str = "fixed_window",  # fixed_window | single
-    dispatcher: str = "batch",  # batch | non_batch
+    ordering: str = "fifo",
+    decision: str = "fixed_window",
+    dispatcher: str = "batch",
     default_priority: Optional[int] = None,
     preemption: Optional[dict] = None,
     max_requests: int = 32,
     max_collection_wait_ms: int = 10,
     max_predicted_execution_ms: int = 550,
     queue_timeout_ms: Optional[int] = None,
-    max_outstanding: int = 5_000,
-    stale_inflight_ms: int = 30_000,
-    delivered_not_accepted_timeout_ms: int = 30_000,
-    max_delivered_not_accepted: int = 200,
-    max_waiting_requests_per_prefill_worker: Optional[int] = None,
-    max_inflight_batches: int = 4,  # BATCH
-    enqueue_rpc_timeout_ms: Optional[int] = None,  # BATCH; None -> Java default 5000
-    max_inflight_requests_per_worker: Optional[int] = None,  # NON_BATCH; None -> unlimited
+    # Explicit functional-test workload values; these are not Java defaults.
+    max_inflight_per_prefill_worker: int = 2,
+    request_timeout_ms: int = 60_000,
+    decision_lifetime: float = 2.0,
     status_rpc_ms: int = 1_000,
+    status_stale_after_ms: Optional[int] = None,
+    cleanup_interval_ms: int = 3_000,
     decode_max_engine_requests: int = 132,
+    decode_max_kv_usage_percent: int = 90,
 ) -> str:
-    """Strict schema-v2 FLEXLB_CONFIG document (compact JSON string)."""
-    if decision == "single":
-        decision_cfg: dict = {"type": "SINGLE"}
-    else:
+    """Generate schema-v3 JSON from scheduling policy and workload budgets."""
+    if decision not in ("single", "fixed_window") or dispatcher not in (
+        "batch",
+        "non_batch",
+    ):
+        raise ValueError("unsupported decision or dispatcher")
+    for name, value in (
+        ("max_inflight_per_prefill_worker", max_inflight_per_prefill_worker),
+        ("queue_timeout_ms", queue_timeout_ms),
+        ("request_timeout_ms", request_timeout_ms),
+    ):
+        if value is None and name == "queue_timeout_ms":
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    import math
+
+    if max_inflight_per_prefill_worker > 2_147_483_647:
+        raise ValueError(
+            "max_inflight_per_prefill_worker exceeds the Java integer limit"
+        )
+    if (
+        isinstance(decision_lifetime, bool)
+        or not math.isfinite(decision_lifetime)
+        or decision_lifetime < 1
+    ):
+        raise ValueError("decision_lifetime must be finite and at least 1")
+    decision_cfg: dict = {"type": "SINGLE"}
+    if decision == "fixed_window":
         decision_cfg = {
             "type": "FIXED_WINDOW",
             "maxRequests": max_requests,
             "maxCollectionWaitMs": max_collection_wait_ms,
             "maxPredictedExecutionMs": max_predicted_execution_ms,
         }
-    if dispatcher == "batch":
-        dispatcher_cfg: dict = {
-            "type": "BATCH",
-            "maxInflightBatchesPerPrefillWorker": max_inflight_batches,
-        }
-        if enqueue_rpc_timeout_ms is not None:
-            dispatcher_cfg["enqueueRpcTimeoutMs"] = enqueue_rpc_timeout_ms
-    else:
-        dispatcher_cfg = {"type": "NON_BATCH"}
-        if max_inflight_requests_per_worker is not None:
-            dispatcher_cfg["maxInflightRequestsPerPrefillWorker"] = (
-                max_inflight_requests_per_worker
-            )
-    capacity_cfg: dict = {"maxOutstandingRequestsGlobal": max_outstanding}
-    if max_waiting_requests_per_prefill_worker is not None:
-        capacity_cfg["maxWaitingRequestsPerPrefillWorker"] = (
-            max_waiting_requests_per_prefill_worker
-        )
+    dispatcher_cfg: dict = {
+        "type": dispatcher.upper(),
+        "maxInflightPerPrefillWorker": max_inflight_per_prefill_worker,
+    }
     scheduler_cfg: dict = {
         "type": "QUEUE",
         "ordering": _build_ordering_cfg(ordering, default_priority, preemption),
         "decision": decision_cfg,
-        "capacity": capacity_cfg,
-        "lifecycle": {
-            "staleInflightTimeoutMs": stale_inflight_ms,
-            "deliveredNotAcceptedTimeoutMs": delivered_not_accepted_timeout_ms,
-            "maxDeliveredNotAcceptedRequestsGlobal": max_delivered_not_accepted,
-        },
     }
     if queue_timeout_ms is not None:
         scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
     return json.dumps(
         {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "scheduler": scheduler_cfg,
             "dispatcher": dispatcher_cfg,
+            "requestLifecycle": {
+                "request": {"timeoutMs": request_timeout_ms},
+                "decision": {"lifetime": decision_lifetime},
+            },
             "router": {
                 "roles": {
                     "prefill": {
                         "executionTimeEstimator": {
                             "type": "FORMULA",
                             "expression": DSV4_PREFILL_EXPRESSION,
-                        },
-                        "candidateChoice": {
-                            "type": "RANDOM_WITHIN_TOLERANCE",
-                            "relativeTolerance": 0.1,
-                            "minimumToleranceMs": 20,
-                            "outlierRejection": {
-                                "maxPendingVsAverageMultiplier": 1.5,
-                                "maxProjectedDrainVsAverageMultiplier": 3.0,
-                            },
                         },
                         "cacheAffinity": {
                             "maxExtraTtftMs": 20,
@@ -457,16 +385,22 @@ def build_flexlb_config(
                     },
                     "decode": {
                         "availability": {
-                            "maxEngineRequests": decode_max_engine_requests
+                            "maxEngineRequests": decode_max_engine_requests,
+                            "maxKvUsagePercent": decode_max_kv_usage_percent,
                         }
                     },
-                },
+                }
             },
             "workerRegistry": {
                 "health": {
                     "statusPollIntervalMs": 20,
                     "statusRpcTimeoutMs": status_rpc_ms,
-                    "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
+                    "statusStaleAfterMs": (
+                        max(10_000, status_rpc_ms * 2)
+                        if status_stale_after_ms is None
+                        else status_stale_after_ms
+                    ),
+                    "cleanupIntervalMs": cleanup_interval_ms,
                 }
             },
         },
@@ -494,20 +428,15 @@ _FUNCTIONAL_PROFILE_KWARGS = {
 # ===========================================================================
 
 _STRESS_BASE: dict = {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "scheduler": {
         "type": "QUEUE",
         "ordering": {
             "type": "PRIORITY",
             "defaultPriority": 50,
             "preemption": {
-                "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"],
+                "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"]
             },
-        },
-        "lifecycle": {
-            "staleInflightTimeoutMs": 300000,
-            "deliveredNotAcceptedTimeoutMs": 30000,
-            "maxDeliveredNotAcceptedRequestsGlobal": 500000,
         },
         "queueTimeoutMs": 60000,
         "decision": {
@@ -516,56 +445,129 @@ _STRESS_BASE: dict = {
             "maxCollectionWaitMs": 400,
             "maxPredictedExecutionMs": 550,
         },
-        "capacity": {
-            "maxOutstandingRequestsGlobal": 1000000,
-            "maxWaitingRequestsPerPrefillWorker": 128,
-        },
     },
-    "dispatcher": {
-        "type": "BATCH",
-        "maxInflightBatchesPerPrefillWorker": 2,
-        "enqueueRpcTimeoutMs": 800,
-    },
+    "dispatcher": {"type": "BATCH", "maxInflightPerPrefillWorker": 2},
     "router": {
         "roles": {
             "prefill": {
                 "executionTimeEstimator": {
                     "type": "FORMULA",
-                    "expression": DSV4_PREFILL_EXPRESSION,
+                    "expression": "max(196, "
+                    "-68.612174288157 + "
+                    "0.993068319341 * "
+                    "(max(0, 287.3980926717 "
+                    "+ 2.30134977837751 * "
+                    "batchSize + "
+                    "0.158123254797307 * "
+                    "sum(hitCacheTokens / "
+                    "1024.) + "
+                    "0.575522710053703 * "
+                    "sum(computeTokens / "
+                    "1024.) + "
+                    "0.0517623430739831 * "
+                    "sum(computeTokens / "
+                    "1024. * computeTokens "
+                    "/ 1024.) + "
+                    "0.0395308136993267 * "
+                    "sum(hitCacheTokens / "
+                    "1024. * computeTokens "
+                    "/ 1024.) + "
+                    "0.0104363634681015 * "
+                    "sum(hitCacheTokens / "
+                    "1024. * hitCacheTokens "
+                    "/ 1024.) + "
+                    "0.575522710053703 * "
+                    "max(sum(computeTokens "
+                    "/ 1024.) - 16, 0) + "
+                    "2.82077211814514 * "
+                    "max(sum(computeTokens "
+                    "/ 1024.) - 32, 0) - "
+                    "0.0254671429192862 * "
+                    "max(sum(computeTokens "
+                    "/ 1024.) - 64, 0) + "
+                    "2.15779213792494 * "
+                    "max(sum(computeTokens "
+                    "/ 1024.) - 96, 0) + "
+                    "0.247806025472364 * "
+                    "max(sum(hitCacheTokens "
+                    "/ 1024.) - 32, 0) - "
+                    "0.444522654549492 * "
+                    "max(sum(hitCacheTokens "
+                    "/ 1024.) - 64, 0) - "
+                    "0.427317020061895 * "
+                    "max(sum(hitCacheTokens "
+                    "/ 1024.) - 128, 0) + "
+                    "0.347029077528455 * "
+                    "max(sum(hitCacheTokens "
+                    "/ 1024.) - 256, 0) - "
+                    "0.298742307762735 * "
+                    "max(sum(hitCacheTokens "
+                    "/ 1024.) - 384, 0) + "
+                    "2.30134977837751 * "
+                    "max(batchSize - 8, 0) "
+                    "- 3.54884859699154 * "
+                    "max(batchSize - 16, 0) "
+                    "- 11.3438560779984 * "
+                    "max(batchSize - 24, 0) "
+                    "+ 0.879751992138183 * "
+                    "sum(max(computeTokens "
+                    "/ 1024. - 2, 0)) + "
+                    "0.636364578079591 * "
+                    "sum(max(computeTokens "
+                    "/ 1024. - 4, 0)) - "
+                    "0.0513345988517118 * "
+                    "sum(max(computeTokens "
+                    "/ 1024. - 8, 0)) - "
+                    "0.332584389129357 * "
+                    "sum(max(hitCacheTokens "
+                    "/ 1024. - 2, 0)) + "
+                    "0.305819761192588 * "
+                    "sum(max(hitCacheTokens "
+                    "/ 1024. - 4, 0)) - "
+                    "0.287610979974721 * "
+                    "sum(max(hitCacheTokens "
+                    "/ 1024. - 8, 0)) + "
+                    "0.191310200712013 * "
+                    "sum(max(hitCacheTokens "
+                    "/ 1024. - 12, 0)) + "
+                    "0.0130251644478961 * "
+                    "max(batchSize - 8, 0) "
+                    "* sum(hitCacheTokens / "
+                    "1024.) + "
+                    "0.00981382840761646 * "
+                    "max(batchSize - 16, 0) "
+                    "* sum(hitCacheTokens / "
+                    "1024.) - "
+                    "0.0299132587297009 * "
+                    "max(batchSize - 24, 0) "
+                    "* sum(hitCacheTokens / "
+                    "1024.) + "
+                    "0.0447455122487382 * "
+                    "max(batchSize - 8, 0) "
+                    "* sum(computeTokens / "
+                    "1024.) + "
+                    "0.0104635312001851 * "
+                    "max(batchSize - 16, 0) "
+                    "* sum(computeTokens / "
+                    "1024.) + "
+                    "0.0542737877321807 * "
+                    "max(batchSize - 24, 0) "
+                    "* sum(computeTokens / "
+                    "1024.))))",
                 },
-                "cacheAffinity": {
-                    "maxExtraTtftMs": 20,
-                    "minPrefixHitPercent": 20,
-                },
-                "candidateChoice": {
-                    "type": "RANDOM_WITHIN_TOLERANCE",
-                    "relativeTolerance": 0.1,
-                    "minimumToleranceMs": 20,
-                    "outlierRejection": {
-                        "maxPendingVsAverageMultiplier": 3,
-                        "maxProjectedDrainVsAverageMultiplier": 3,
-                    },
-                },
+                "cacheAffinity": {"maxExtraTtftMs": 20, "minPrefixHitPercent": 20},
             },
             "decode": {
-                "availability": {
-                    "maxKvUsagePercent": 95,
-                    "maxEngineRequests": 384,
-                },
-                "kvReservation": {"maxOutputTokensForEstimate": 1000},
-                "decayPerToken": 0.001,
-                "outlierRejection": {
-                    "maxEngineLoadVsAverageMultiplier": 3,
-                    "maxKvUsedVsAverageMultiplier": 3,
-                },
+                "availability": {"maxKvUsagePercent": 95, "maxEngineRequests": 384}
             },
-        },
+        }
     },
     "workerRegistry": {
         "health": {
             "statusPollIntervalMs": 20,
             "statusRpcTimeoutMs": 5000,
             "statusStaleAfterMs": 10000,
+            "cleanupIntervalMs": 3000,
         },
         "cacheStatus": {
             "targetDiffSize": 30,
@@ -585,40 +587,18 @@ _STRESS_BASE: dict = {
             "requestTraceLogEnabled": False,
         }
     },
+    "requestLifecycle": {
+        "request": {"timeoutMs": 300000},
+        "decision": {"lifetime": 2.0},
+    },
 }
 
 # override field -> document path for the stress base (edit-in-place).
 _STRESS_DOC_PATHS = {
     "max_requests": ("scheduler", "decision", "maxRequests"),
     "max_collection_wait_ms": ("scheduler", "decision", "maxCollectionWaitMs"),
-    "max_predicted_execution_ms": (
-        "scheduler",
-        "decision",
-        "maxPredictedExecutionMs",
-    ),
+    "max_predicted_execution_ms": ("scheduler", "decision", "maxPredictedExecutionMs"),
     "queue_timeout_ms": ("scheduler", "queueTimeoutMs"),
-    "max_outstanding": ("scheduler", "capacity", "maxOutstandingRequestsGlobal"),
-    "max_waiting_requests_per_prefill_worker": (
-        "scheduler",
-        "capacity",
-        "maxWaitingRequestsPerPrefillWorker",
-    ),
-    "stale_inflight_ms": ("scheduler", "lifecycle", "staleInflightTimeoutMs"),
-    "delivered_not_accepted_timeout_ms": (
-        "scheduler",
-        "lifecycle",
-        "deliveredNotAcceptedTimeoutMs",
-    ),
-    "max_delivered_not_accepted": (
-        "scheduler",
-        "lifecycle",
-        "maxDeliveredNotAcceptedRequestsGlobal",
-    ),
-    "max_inflight_batches": (
-        "dispatcher",
-        "maxInflightBatchesPerPrefillWorker",
-    ),
-    "enqueue_rpc_timeout_ms": ("dispatcher", "enqueueRpcTimeoutMs"),
     "status_rpc_ms": ("workerRegistry", "health", "statusRpcTimeoutMs"),
     "decode_max_engine_requests": (
         "router",
@@ -634,32 +614,24 @@ _STRESS_DOC_PATHS = {
         "availability",
         "maxKvUsagePercent",
     ),
+    "max_inflight_per_prefill_worker": ("dispatcher", "maxInflightPerPrefillWorker"),
+    "request_timeout_ms": ("requestLifecycle", "request", "timeoutMs"),
+    "decision_lifetime": ("requestLifecycle", "decision", "lifetime"),
+    "status_stale_after_ms": ("workerRegistry", "health", "statusStaleAfterMs"),
+    "cleanup_interval_ms": ("workerRegistry", "health", "cleanupIntervalMs"),
 }
 
 
 def _apply_omits(doc: dict, overrides: ConfigOverride) -> None:
-    """Validate OMIT usage and remove the corresponding keys."""
     for name, is_omit in overrides.omit_map().items():
         if not is_omit:
             continue
         if name not in _OMITTABLE:
-            raise ValueError(
-                f"ConfigOverride.{name}: OMIT is not a legal value for this "
-                "field (the key is always present in the base document)"
-            )
+            raise ValueError(f"ConfigOverride.{name}: OMIT is not a legal value")
         if name == "preemption":
             doc["scheduler"]["ordering"].pop("preemption", None)
-        elif name == "queue_timeout_ms":
+        else:
             doc["scheduler"].pop("queueTimeoutMs", None)
-        elif name == "enqueue_rpc_timeout_ms":
-            doc["dispatcher"].pop("enqueueRpcTimeoutMs", None)
-        elif name == "max_waiting_requests_per_prefill_worker":
-            doc["scheduler"]["capacity"].pop(
-                "maxWaitingRequestsPerPrefillWorker", None
-            )
-        elif name == "max_inflight_requests_per_worker":
-            # only meaningful once the dispatcher axis is NON_BATCH
-            doc["dispatcher"].pop("maxInflightRequestsPerPrefillWorker", None)
 
 
 def _edit_doc(doc: dict, path: tuple, value, field_name: str) -> None:
@@ -688,12 +660,8 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
             raise ValueError(
                 f"ordering must be 'fifo' or 'priority', got {overrides.ordering!r}"
             )
-        if (
-            new_type == "fifo"
-            and (
-                overrides.default_priority is not None
-                or overrides.preemption is not None
-            )
+        if new_type == "fifo" and (
+            overrides.default_priority is not None or overrides.preemption is not None
         ):
             raise ValueError(
                 "default_priority/preemption apply only to ordering='priority' "
@@ -710,7 +678,7 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
                 f"default_priority must be in [1, 100], got {overrides.default_priority}"
             )
         ordering_block["defaultPriority"] = overrides.default_priority
-    if overrides.preemption is not None:
+    if overrides.preemption is not None and overrides.preemption is not OMIT:
         ordering_block["preemption"] = _build_preemption_cfg(overrides.preemption)
     if overrides.strip_preemption:
         ordering_block.pop("preemption", None)
@@ -727,9 +695,7 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
                 "type": "FIXED_WINDOW",
                 "maxRequests": decision.get("maxRequests", 32),
                 "maxCollectionWaitMs": decision.get("maxCollectionWaitMs", 10),
-                "maxPredictedExecutionMs": decision.get(
-                    "maxPredictedExecutionMs", 550
-                ),
+                "maxPredictedExecutionMs": decision.get("maxPredictedExecutionMs", 550),
             }
         else:
             raise ValueError(
@@ -739,27 +705,10 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
 
 
 def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
-    dispatcher = doc["dispatcher"]
     if overrides.dispatcher is not None:
-        new_type = overrides.dispatcher.lower()
-        if new_type == "non_batch":
-            doc["dispatcher"] = {"type": "NON_BATCH"}
-        elif new_type == "batch":
-            doc["dispatcher"] = {
-                "type": "BATCH",
-                "maxInflightBatchesPerPrefillWorker": dispatcher.get(
-                    "maxInflightBatchesPerPrefillWorker", 4
-                ),
-            }
-            if "enqueueRpcTimeoutMs" in dispatcher:
-                doc["dispatcher"]["enqueueRpcTimeoutMs"] = dispatcher[
-                    "enqueueRpcTimeoutMs"
-                ]
-        else:
-            raise ValueError(
-                "dispatcher must be 'batch' or 'non_batch', got "
-                f"{overrides.dispatcher!r}"
-            )
+        if overrides.dispatcher not in ("batch", "non_batch"):
+            raise ValueError("dispatcher must be batch or non_batch")
+        doc["dispatcher"]["type"] = overrides.dispatcher.upper()
 
 
 def _render_stress(overrides: Optional[ConfigOverride]) -> str:
@@ -775,18 +724,6 @@ def _render_stress(overrides: Optional[ConfigOverride]) -> str:
         if value is None or value is OMIT:
             continue
         _edit_doc(doc, path, value, name)
-    if overrides.max_inflight_requests_per_worker is not None:
-        if doc["dispatcher"].get("type") == "NON_BATCH":
-            doc["dispatcher"]["maxInflightRequestsPerPrefillWorker"] = (
-                overrides.max_inflight_requests_per_worker
-            )
-        else:
-            raise ValueError(
-                "ConfigOverride.max_inflight_requests_per_worker: the stress "
-                "base document has no dispatcher.maxInflightRequestsPer"
-                "PrefillWorker key under the BATCH dispatcher — switch "
-                "dispatcher='non_batch' or drop the override"
-            )
     return json.dumps(doc, separators=(",", ":"))
 
 
@@ -826,12 +763,6 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
                 # (key simply not emitted)
                 if f.name == "queue_timeout_ms":
                     kwargs["queue_timeout_ms"] = None
-                elif f.name == "enqueue_rpc_timeout_ms":
-                    kwargs["enqueue_rpc_timeout_ms"] = None
-                elif f.name == "max_waiting_requests_per_prefill_worker":
-                    kwargs["max_waiting_requests_per_prefill_worker"] = None
-                elif f.name == "max_inflight_requests_per_worker":
-                    kwargs["max_inflight_requests_per_worker"] = None
                 elif f.name == "preemption":
                     kwargs["preemption"] = None
                 continue
@@ -841,13 +772,6 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
                 if overrides.strip_preemption:
                     kwargs["preemption"] = None
                 continue
-            if f.name == "decode_max_kv_usage_percent":
-                raise ValueError(
-                    "ConfigOverride.decode_max_kv_usage_percent: the "
-                    "functional profiles' decode block has no maxKvUsage"
-                    "Percent key — overrides may only change existing fields "
-                    "(stress-na130 carries it)"
-                )
             if f.name == "decode_max_engine_requests":
                 kwargs["decode_max_engine_requests"] = value
                 continue
@@ -877,9 +801,7 @@ def render_process_config(
     into the master env, preserving the single-source/two-projections
     invariant on the bypass path too.
     """
-    env_str = (
-        raw_config if raw_config is not None else render_env(profile, overrides)
-    )
+    env_str = raw_config if raw_config is not None else render_env(profile, overrides)
     envelope = {
         "zone_name": "master",
         "zone_process_setting": {
@@ -914,24 +836,21 @@ def render_process_config(
 
 _INT_FIELDS = frozenset(
     {
-        "default_priority",
-        "max_requests",
-        "max_collection_wait_ms",
-        "max_predicted_execution_ms",
-        "queue_timeout_ms",
-        "max_outstanding",
-        "stale_inflight_ms",
-        "delivered_not_accepted_timeout_ms",
-        "max_delivered_not_accepted",
-        "max_waiting_requests_per_prefill_worker",
-        "max_inflight_batches",
-        "enqueue_rpc_timeout_ms",
-        "max_inflight_requests_per_worker",
+        "cleanup_interval_ms",
         "status_rpc_ms",
+        "max_requests",
+        "default_priority",
+        "queue_timeout_ms",
         "decode_max_engine_requests",
         "decode_max_kv_usage_percent",
+        "max_predicted_execution_ms",
+        "request_timeout_ms",
+        "max_collection_wait_ms",
+        "status_stale_after_ms",
+        "max_inflight_per_prefill_worker",
     }
 )
+_FLOAT_FIELDS = frozenset({"decision_lifetime"})
 _STR_FIELDS = frozenset({"ordering", "decision", "dispatcher"})
 _BOOL_FIELDS = frozenset({"strip_preemption"})
 
@@ -945,7 +864,7 @@ def parse_overrides(spec: Optional[str]) -> Optional[ConfigOverride]:
     """
     if spec is None or not spec.strip():
         return None
-    known = _INT_FIELDS | _STR_FIELDS | _BOOL_FIELDS
+    known = _INT_FIELDS | _FLOAT_FIELDS | _STR_FIELDS | _BOOL_FIELDS
     kwargs: dict = {}
     for item in spec.split(","):
         item = item.strip()
@@ -969,6 +888,8 @@ def parse_overrides(spec: Optional[str]) -> Optional[ConfigOverride]:
                 raise ValueError(
                     f"FLEXLB_CONFIG_OVERRIDE: {key} expects an integer, got {raw!r}"
                 ) from None
+        elif key in _FLOAT_FIELDS:
+            kwargs[key] = float(raw)
         elif key in _BOOL_FIELDS:
             kwargs[key] = raw.strip().lower() in ("1", "true", "yes", "on")
         else:

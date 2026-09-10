@@ -25,14 +25,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Task35 场景 C：11 种故障注入逐一验证 —— 明确错误传播到调度器终态，
- * post-send 不确定性进入安全 fence，调度器不崩溃且同集群其余引擎不受影响。
+ * post-send 不确定性在请求 TTL 内等待确认，到期回收，且同集群其余引擎不受影响。
  *
  * <p>覆盖 {@link FaultInjectionConfig} 全部字段：failOnEnqueue、enqueueErrorCode、
  * enqueueErrorMessage、enqueueDelayMs、generateDelayMs、generateError、fetchError、
  * noRespond、kvPressureTokens、queueDepthLimit、crashAfterNRequests。
  *
  * <p>控制面（enqueueBatch）故障走真实调度器栈：明确拒绝断言 8510 终态，
- * missing ACK 则断言保守保留记账；数据面（generate_stream/fetch_response）
+ * missing ACK 则断言 TTL 前保留记账、到期回收；数据面（generate_stream/fetch_response）
  * 故障不经过 LB 控制面，用直连 RPC 断言 mock 行为，同时验证调度器路径不受影响。
  *
  * <p>已知缺陷（只报不修，见任务报告）：{@code enqueueErrorCode} 字段从未被
@@ -71,7 +71,7 @@ class FaultInjectionE2ETest {
 
             Response failed = submitTo(h, 0, 9101);
             assertFalse(failed.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), failed.getCode(),
+            assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), failed.getCode(),
                     "engine-side enqueue rejection must propagate as 8510: " + failed.getErrorMessage());
             assertTrue(failed.getErrorMessage().contains("injected-boom"),
                     "custom enqueueErrorMessage must reach the caller: " + failed.getErrorMessage());
@@ -274,7 +274,7 @@ class FaultInjectionE2ETest {
                     .build());
             Response rejected = submitTo(h, 0, 9802);
             assertFalse(rejected.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
+            assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), rejected.getCode());
             assertTrue(rejected.getErrorMessage().contains("queue depth limit exceeded"),
                     rejected.getErrorMessage());
 
@@ -292,7 +292,7 @@ class FaultInjectionE2ETest {
             boolean clientCancellation) throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT + 80, 2, 1, "5", 1.0, true, DecisionPolicyConfig.single())) {
-            h.config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(2_000L);
+            h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             PrefillEndpoint prefillEndpoint = h.prefillEndpoint(0);

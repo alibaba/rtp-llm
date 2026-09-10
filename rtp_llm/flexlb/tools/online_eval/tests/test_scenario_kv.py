@@ -28,6 +28,7 @@ class Clock:
 class Backend:
     def __init__(self, wrong_carve=False, continuation_hits=5, missing_keys=False):
         self.rid = 0
+        self.b_keys = None
         self.keys = {"prefill-0": set(), "prefill-1": set()}
         self.wrong_carve, self.continuation_hits, self.missing_keys = (
             wrong_carve,
@@ -79,12 +80,14 @@ class Backend:
                     and not getattr(self, "collapse", False)
                 )
             elif mode == "isolation":
-                second = self.rid == 2
+                second = self.rid == 2 or params["block_keys"] == self.b_keys
+                if self.rid == 2:
+                    self.b_keys = list(params["block_keys"])
             else:
                 second = self.rid == 2 or 3 <= self.rid < 3 + self.continuation_hits
             name = "prefill-1" if second else "prefill-0"
             self.keys[name].update(params["block_keys"])
-            if mode == "isolation" and self.rid == 16 and getattr(self, "leak", False):
+            if mode == "isolation" and self.rid == 20 and getattr(self, "leak", False):
                 self.keys["prefill-1"].add(811000)
             row = records.issue(self.rid, ctx.clock)
             records.rows.append(row)
@@ -114,6 +117,32 @@ class Backend:
 
 
 class KvScenarioTests(unittest.TestCase):
+    def test_landing_can_reuse_identity_without_reusing_live_cache_observations(self):
+        record = {"schedule": {"status": "OK"}, "prefill_addr": "host:100"}
+        endpoint = {
+            "name": "prefill-0",
+            "role": "prefill",
+            "grpc_addr": "host:100",
+            "stopped": False,
+        }
+        records = NS(snapshot_records=lambda: [record])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(kv, "_http") as http:
+            ctx = NS(
+                resource=lambda ref, kind: (
+                    records
+                    if kind == "requests"
+                    else {"engines": {"prefill-0": endpoint}}
+                ),
+                artifact_dir=Path(tmp),
+            )
+            params = {"requests": {}, "identity_snapshot": {}, "phase": "scheduled"}
+            result = kv.landing(ctx, params, NS(check=lambda: None))
+            self.assertEqual("prefill-0", result.output["engine"])
+            http.assert_not_called()
+            record["prefill_addr"] = "unknown:200"
+            with self.assertRaises(ValueError):
+                kv.landing(ctx, params, NS(check=lambda: None))
+
     def plans(self, grade="normal", prefix="continuity"):
         return [
             plan

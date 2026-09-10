@@ -28,10 +28,14 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
     }
 
     @Override
+    protected long enqueueTimeoutMillis() {
+        return 500L;
+    }
+
+    @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig config = super.createConfig();
-        config.getDispatcher().setEnqueueRpcTimeoutMs(500);
-        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(1_800L);
+        config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);
         return config;
     }
 

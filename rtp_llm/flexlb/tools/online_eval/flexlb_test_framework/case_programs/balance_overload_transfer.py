@@ -109,15 +109,6 @@ def prefill_pressure(case):
         params=case.value("prefill_pressure.fleet"),
     )
     case.step(
-        "slow_both",
-        "engine_control",
-        timeout_s=case.value("prefill_pressure.slow_both_timeout_s"),
-        params=case.params(
-            "prefill_pressure.slow_both",
-            {"targets": [output("fleet", "first"), output("fleet", "second")]},
-        ),
-    )
-    case.step(
         "perf_sync",
         "balance_pause",
         timeout_s=case.value("prefill_pressure.perf_sync_timeout_s"),
@@ -137,15 +128,6 @@ def prefill_pressure(case):
             "requests": output("seed", "requests"),
             "fleet": output("fleet", "snapshot"),
         },
-    )
-    case.step(
-        "restore_cool",
-        "engine_control",
-        timeout_s=case.value("prefill_pressure.restore_cool_timeout_s"),
-        params=case.params(
-            "prefill_pressure.restore_cool",
-            {"targets": [output("seed_pending", "cool")]},
-        ),
     )
     case.step(
         "cool_sync",
@@ -225,15 +207,6 @@ def prefill_pressure(case):
                 "fleet": output("fleet", "snapshot"),
                 "baseline": output("baseline", "requests"),
             },
-        ),
-    )
-    case.step(
-        "restore_perf",
-        "engine_control",
-        timeout_s=case.value("prefill_pressure.restore_perf_timeout_s"),
-        params=case.params(
-            "prefill_pressure.restore_perf",
-            {"targets": [output("fleet", "first"), output("fleet", "second")]},
         ),
     )
     case.step(

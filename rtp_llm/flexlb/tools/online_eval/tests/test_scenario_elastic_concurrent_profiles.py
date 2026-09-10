@@ -29,6 +29,7 @@ class ProfileTests(unittest.TestCase):
             "single-nonbatch": "single_nonbatch",
             "window-nonbatch": "window_nonbatch",
         }
+        plans = [p for p in plans if not p["variant_id"].endswith("_convergence")]
         self.assertEqual({p["profile"]: p["variant_id"] for p in plans}, expected)
         for plan in plans:
             profile = plan["profile"]

@@ -636,7 +636,7 @@ start_mock_per_engine_poller() {
 # batcher and routing queue gauges, inflight max age, dispatch reason
 # counters, the auto_tpm request-count / all_qps counters and the inflight
 # gauge quintet) before appending. The master-side whitelist
-# (FLEXLB_MONITOR_METRIC_WHITELIST above) already trims the exposition at
+# (MASTER_METRIC_WHITELIST above) already trims the exposition at
 # the source down to the same set; this collector-side whitelist re-filters
 # and stays in sync by convention.
 # Same "# ts=" grouped layout as G1.
@@ -811,20 +811,10 @@ ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 FLEXLB_ENV_FILE="${RUN_DIR}/flexlb_env.txt"
 
 JAVA_MOCK_DISCOVERY_ARGS=()
-MASTER_DISCOVERY_ENV=()
-FLEXLB_DISCOVERY_FILE_PATH=""
-if [[ -n "${FLEXLB_DISCOVERY_FILE}" ]]; then
-  if [[ "${FLEXLB_DISCOVERY_FILE}" == "auto" || "${FLEXLB_DISCOVERY_FILE}" == "1" ]]; then
-    if [[ "${START_MOCK}" != "1" ]]; then
-      echo "FLEXLB_DISCOVERY_FILE=auto requires START_MOCK=1 (mock engine writes the file); set an explicit path instead" >&2
-      exit 1
-    fi
-    FLEXLB_DISCOVERY_FILE_PATH="${RUN_DIR}/discovery.json"
-  else
-    FLEXLB_DISCOVERY_FILE_PATH="${FLEXLB_DISCOVERY_FILE}"
-  fi
-  JAVA_MOCK_DISCOVERY_ARGS=(--discovery-file "${FLEXLB_DISCOVERY_FILE_PATH}")
-  MASTER_DISCOVERY_ENV=("FLEXLB_DISCOVERY_FILE=${FLEXLB_DISCOVERY_FILE_PATH}")
+MOCK_DISCOVERY_FILE=""
+if [[ "${START_MOCK}" == "1" ]]; then
+  MOCK_DISCOVERY_FILE="${RUN_DIR}/discovery.json"
+  JAVA_MOCK_DISCOVERY_ARGS=(--discovery-file "${MOCK_DISCOVERY_FILE}")
 fi
 
 # ---------------------------------------------------------------------------
@@ -837,16 +827,23 @@ fi
 run_cfg_generator() {
   python3 - "${ONLINE_EVAL_DIR}" "${PROCESS_CONFIG_FILE}" "${FLEXLB_PROFILE}" \
     "${FLEXLB_CONFIG_OVERRIDE}" "${FLEXLB_JVM_HEAP_SIZE}" <<'PY'
-import sys
+import sys, os, json
 
 sys.path.insert(0, sys.argv[1])
 from flexlb_cfg import parse_overrides, render_env, render_process_config
 
 out_path, profile, override_spec, heap = sys.argv[2:6]
 overrides = parse_overrides(override_spec) if override_spec.strip() else None
+doc = json.loads(render_env(profile, overrides))
+for env_key, field in (("FLEXLB_GRPC_EXECUTOR_CORE_SIZE", "executorCoreSize"),
+                       ("FLEXLB_GRPC_EXECUTOR_MAX_SIZE", "executorMaxSize"),
+                       ("FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE", "executorQueueSize")):
+    if env_key in os.environ:
+        doc.setdefault("grpcServer", {})[field] = int(os.environ[env_key])
+raw = json.dumps(doc, separators=(",", ":"))
 with open(out_path, "w", encoding="utf-8") as fh:
-    fh.write(render_process_config(profile, overrides, jvm_heap=heap))
-sys.stdout.write(render_env(profile, overrides))
+    fh.write(render_process_config(profile, jvm_heap=heap, raw_config=raw))
+sys.stdout.write(raw)
 PY
 }
 
@@ -915,8 +912,8 @@ if [[ "${START_MOCK}" == "1" ]]; then
   MOCK_PID="$!"
   echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
   echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
-  if [[ -n "${FLEXLB_DISCOVERY_FILE_PATH}" ]]; then
-    echo "File service discovery: engine maintains ${FLEXLB_DISCOVERY_FILE_PATH} (add_engine/remove_engine keep it in sync)"
+  if [[ -n "${MOCK_DISCOVERY_FILE}" ]]; then
+    echo "File service discovery: engine maintains ${MOCK_DISCOVERY_FILE} (add_engine/remove_engine keep it in sync)"
   fi
   # The Java process writes discovery files only after every gRPC port is bound.
   wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
@@ -952,16 +949,13 @@ import json
 import sys
 
 payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-for key, value in payload["env"].items():
-    print(f"{key}={value}")
+print("MODEL_SERVICE_CONFIG=" + payload["env"]["MODEL_SERVICE_CONFIG"])
 PY
 )
 
 RUNTIME_OVERRIDE_ENV_ARGS=()
 OVERRIDE_ENV_KEYS=(
-  FLEXLB_GRPC_EXECUTOR_CORE_SIZE
-  FLEXLB_GRPC_EXECUTOR_MAX_SIZE
-  FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
+  HIPPO_ROLE
   FLEXLB_MONITOR_ENABLED
   FLEXLB_MONITOR_METRIC_WHITELIST
 )
@@ -1003,12 +997,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
   fi
   if [[ -n "${FLEXLB_START_CMD:-}" ]]; then
     env "${FLEXLB_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
-      "${MASTER_DISCOVERY_ENV[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-      "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
-      "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
-      "HIPPO_ROLE=${HIPPO_ROLE}" \
-      "FLEXLB_LOG_PATH=${FLEXLB_LOG_PATH}" \
       bash -lc "${FLEXLB_START_CMD}" >"${RUN_DIR}/flexlb.log" 2>&1 &
   else
     if [[ ! -f "${FLEXLB_JAR}" ]]; then
@@ -1021,17 +1010,13 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       MASTER_LOG_ARGS+=(--logging.level.pvLogger=WARN)
     fi
     env "${FLEXLB_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
-      "${MASTER_DISCOVERY_ENV[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-      "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
-      "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
-      "HIPPO_ROLE=${HIPPO_ROLE}" \
-      "FLEXLB_LOG_PATH=${FLEXLB_LOG_PATH}" \
       java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
       --server.port="${FLEXLB_HTTP_PORT}" \
       --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
       --spring.profiles.active="${SPRING_PROFILE:-default}" \
       --flexlb.log.path="${FLEXLB_LOG_PATH}" \
+      --flexlb.monitor.metric-whitelist="${FLEXLB_MONITOR_METRIC_WHITELIST}" \
       ${MASTER_LOG_ARGS[@]+"${MASTER_LOG_ARGS[@]}"} \
       >"${RUN_DIR}/flexlb.log" 2>&1 &
   fi

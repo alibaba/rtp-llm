@@ -21,7 +21,7 @@ YAML 保存全部用例配置：P/D 规模、profile、输入数据、时间预�
 | environment / env（环境） | Master、P/D worker 数量、KV 容量、性能预设等环境描述。运行后的 `ctx.env` 是环境对象。 | `environment: {backend: java_mock, n_prefill: 2, n_decode: 4}`。 |
 | parameters（用例参数） | YAML 提供、Python 读取的数据；缺少被读取的参数会报错。 | completion 支持 `input_len`、`output_len`、`count`。 |
 | config_overrides | `environment` 内受类型检查的 Master 配置项。 | 调度 ordering、decision、dispatcher、配额等。 |
-| schema_version | 配置格式版本，当前为整数 `2`；与 Git 版本无关。 | 旧版带 stages 的 YAML 会在启动前报错。 |
+| schema_version | scenario YAML 格式版本，当前为整数 `2`；Master 的 `FLEXLB_CONFIG.schemaVersion` 为 `3`，两者独立。 | 旧版带 stages 的 YAML 会在启动前报错。 |
 | grade（断言档位） | `normal/strict/loose`；只有明确支持分档的检查才按档位取阈值。 | `--grade normal` 不改变 profile。 |
 | category / tags | YAML metadata中的业务类别、标签，用于分类。 | `category: status`、`tags: [smoke]`，不执行检查。 |
 | capability / requires | 实际环境提供的能力及 YAML 声明的能力要求。启动前校验。 | deferred Fetch 要求 `enqueue_batch`。 |

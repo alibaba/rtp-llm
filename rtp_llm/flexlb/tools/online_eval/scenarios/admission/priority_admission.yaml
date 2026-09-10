@@ -11,7 +11,6 @@ environment:
   config_overrides:
     ordering: priority
     queue_timeout_ms: 60000
-    max_delivered_not_accepted: 1
 execution:
   timeout_s: 420
   stage_timeout_s: 60

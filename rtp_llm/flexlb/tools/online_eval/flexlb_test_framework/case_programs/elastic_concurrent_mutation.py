@@ -92,3 +92,20 @@ def window_nonbatch(case):
     )
     case.step("discovery", "elastic_discovery_consistency")
     case.step("teardown", "teardown")
+
+
+def convergence(case):
+    case.step("setup", "setup", timeout_s=case.value("convergence.setup_timeout_s"))
+    case.step(
+        "crossfire",
+        "elastic_crossfire",
+        timeout_s=case.value("convergence.crossfire_timeout_s"),
+        params=case.value("convergence.crossfire"),
+    )
+    case.step(
+        "convergence",
+        "elastic_convergence_verdict",
+        params={"result": output("crossfire", "result")},
+    )
+    case.step("discovery", "elastic_discovery_consistency")
+    case.step("teardown", "teardown")

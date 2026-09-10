@@ -9,7 +9,7 @@ environment:
   n_decode: 1
   mock_auto_fetch: false
   config_overrides:
-    stale_inflight_ms: 120000
+    request_timeout_ms: 120000
 execution:
   timeout_s: 300
   stage_timeout_s: 90
