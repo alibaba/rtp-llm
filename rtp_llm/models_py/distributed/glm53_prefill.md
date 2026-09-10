@@ -33,6 +33,29 @@ unchanged. For 42 shared layers this adds 931725312 bytes per rank (0.868 GiB)
 relative to TP8. The shared branch uses the checkpoint FP8 representation. Router
 projection and convolution weights retain FP32.
 
+## Selected serving configuration
+
+The current GLM53 performance deployment selects fused FP8 shared experts:
+
+```sh
+export MOE_STRATEGY=mega_moe_fp8_se
+export GLM53_PREFILL_SHARED_EXPERT_LOCAL=1
+export GLM53_KDA_LOCAL_LOW_RANK=0
+```
+
+Also pass `--moe_strategy mega_moe_fp8_se` when setting the strategy through
+the server CLI. Set the shared-weight option before loading Prefill weights;
+its role check leaves Decode TP1 unchanged. The existing standalone FP8 strategy
+remains available for comparisons. This serving selection does not change the
+library-wide defaults in the table above.
+
+Fusion uses group-32 activation quantization and different activation/combine
+rounding boundaries from standalone shared experts. Its full-model logits are
+not bitwise identical to the standalone path. The deployment owner has accepted
+this numerical behavior and selected fusion; the recorded differences remain
+part of the validation evidence. Existing standalone timelines are historical
+baselines and must not be relabeled as fused-service measurements.
+
 ## Numerical behavior
 
 BF16 NCCL reduce-scatter can use a different addition order for different
