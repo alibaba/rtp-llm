@@ -1,13 +1,12 @@
 import argparse
 import os
 import shlex
-import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import kimi_k3_full_model_two_host_pd_smoke_driver as driver
-
+from example.k3 import kimi_k3_full_model_two_host_pd_smoke_driver as driver
 
 class ForwardedOptionalEnvironmentTest(unittest.TestCase):
     def test_precision_modes_and_prefix_budget_reach_both_role_commands(self) -> None:
@@ -50,55 +49,6 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                                 self.assertIn(f"{key}={value}", tokens)
                             self.assertEqual(tokens[-2:], [driver.ROLE_SCRIPT, role])
 
-    def test_parallel_start_defers_readiness_to_role_scripts(self):
-        args = SimpleNamespace(parallel_start=True, prefill_start_delay_s=15)
-        with mock.patch.object(
-            driver, "wait_for_decode_ready"
-        ) as ready, mock.patch.object(driver.time, "sleep") as sleep:
-            driver.wait_before_prefill(args)
-        ready.assert_not_called()
-        sleep.assert_not_called()
-
-    def test_sequential_start_retains_decode_readiness_gate(self):
-        args = SimpleNamespace(parallel_start=False, prefill_start_delay_s=15)
-        with mock.patch.object(
-            driver, "wait_for_decode_ready"
-        ) as ready, mock.patch.object(driver.time, "sleep") as sleep:
-            driver.wait_before_prefill(args)
-        sleep.assert_called_once_with(15)
-        ready.assert_called_once_with(args)
-
-    def readiness_args(self):
-        return SimpleNamespace(
-            decode_endpoint="localhost:28188",
-            decode_ready_timeout_s=60,
-            remote_detached=True,
-            remote_control_root="/tmp/mtp-test",
-            run_id="failed-start",
-            container="lhc_GPU",
-            container_user="luohaocheng.lhc",
-            prefill_container_runtime="pouch",
-            decode_container_runtime="pouch",
-        )
-
-    def test_readiness_stops_on_confirmed_detached_role_exit(self):
-        result = subprocess.CompletedProcess([], 42, "SMOKE_ROLE_EXIT=1\n", "")
-        with mock.patch.object(driver, "run_short_ssh", return_value=result) as run:
-            with self.assertRaisesRegex(RuntimeError, "Decode role exited"):
-                driver.wait_for_decode_ready(self.readiness_args())
-        self.assertIn("controller/decode.status", run.call_args.args[2])
-        self.assertTrue(
-            run.call_args.args[2].startswith("pouch exec -u luohaocheng.lhc lhc_GPU ")
-        )
-
-    def test_readiness_retries_observation_failure_without_restarting_role(self):
-        ready = subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch.object(
-            driver, "run_short_ssh", side_effect=[OSError("relay unavailable"), ready]
-        ) as run, mock.patch.object(driver.time, "sleep"):
-            driver.wait_for_decode_ready(self.readiness_args())
-        self.assertEqual(run.call_count, 2)
-
     def test_forwards_mtp_mode_to_both_roles(self) -> None:
         mode = {
             "SP_TYPE": "mtp",
@@ -136,14 +86,14 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
     def test_forwards_explicit_rdma_hca_allowlist_to_both_roles(self) -> None:
         value = "mlx5_bond_0,mlx5_bond_1"
         with mock.patch.dict(os.environ, {"SMOKE_ACCL_USE_NICS": value}, clear=True):
-            self.assertEqual(
-                driver.forwarded_optional_environment("prefill")["SMOKE_ACCL_USE_NICS"],
-                value,
-            )
-            self.assertEqual(
-                driver.forwarded_optional_environment("decode")["SMOKE_ACCL_USE_NICS"],
-                value,
-            )
+            for role in ("prefill", "decode"):
+                with self.subTest(role=role):
+                    self.assertEqual(
+                        driver.forwarded_optional_environment(role)[
+                            "SMOKE_ACCL_USE_NICS"
+                        ],
+                        value,
+                    )
 
     def test_does_not_invent_driver_override_when_unset(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -163,6 +113,237 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                     ],
                     "1",
                 )
+
+
+class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
+    def test_parse_args_requires_both_eagle3_checkpoints(self):
+        argv = [
+            "driver",
+            "--prefill-ssh-target",
+            "prefill-host",
+            "--decode-ssh-target",
+            "decode-host",
+            "--prefill-repo-root",
+            "/prefill/repo",
+            "--decode-repo-root",
+            "/decode/repo",
+            "--prefill-checkpoint-path",
+            "/prefill/checkpoint",
+            "--decode-checkpoint-path",
+            "/decode/checkpoint",
+            "--prefill-sp-checkpoint-path",
+            "/prefill/eagle3",
+            "--decode-sp-checkpoint-path",
+            "/decode/eagle3",
+            "--prefill-endpoint",
+            "10.0.0.1:27188",
+            "--decode-endpoint",
+            "10.0.0.2:28188",
+            "--run-id",
+            "projection-ktp",
+        ]
+        with mock.patch.object(sys, "argv", argv), mock.patch.dict(os.environ, {}, clear=True):
+            args = driver.parse_args()
+        self.assertEqual(args.prefill_sp_checkpoint_path, "/prefill/eagle3")
+        self.assertEqual(args.decode_sp_checkpoint_path, "/decode/eagle3")
+
+    def test_parse_args_rejects_missing_decode_sp_checkpoint(self):
+        argv = [
+            "driver",
+            "--prefill-ssh-target",
+            "prefill-host",
+            "--decode-ssh-target",
+            "decode-host",
+            "--prefill-repo-root",
+            "/prefill/repo",
+            "--decode-repo-root",
+            "/decode/repo",
+            "--prefill-checkpoint-path",
+            "/prefill/checkpoint",
+            "--decode-checkpoint-path",
+            "/decode/checkpoint",
+            "--prefill-sp-checkpoint-path",
+            "/mtp/checkpoint",
+            "--prefill-endpoint",
+            "10.0.0.1:27188",
+            "--decode-endpoint",
+            "10.0.0.2:28188",
+            "--run-id",
+            "projection-ktp",
+        ]
+        with mock.patch.object(sys, "argv", argv), mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SystemExit):
+                driver.parse_args()
+
+    def test_role_command_exports_role_local_sp_checkpoint(self):
+        args = argparse.Namespace(
+            prefill_repo_root="/prefill/repo",
+            decode_repo_root="/decode/repo",
+            prefill_checkpoint_path="/prefill/checkpoint",
+            decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_endpoint="10.0.0.1:27188",
+            decode_endpoint="10.0.0.2:28188",
+            run_id="projection-ktp",
+            suite="flow",
+            result_endpoint=None,
+            container="lhc_GPU",
+            prefill_container_runtime="docker",
+            decode_container_runtime="docker",
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            _, _, _, command = driver.role_launch_parts(args, "decode")
+        self.assertIn("SP_CHECKPOINT_PATH=/decode/eagle3", command)
+
+    def test_role_command_forwards_core_dump_diagnostic_override(self):
+        args = argparse.Namespace(
+            prefill_repo_root="/prefill/repo",
+            decode_repo_root="/decode/repo",
+            prefill_checkpoint_path="/prefill/checkpoint",
+            decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_endpoint="10.0.0.1:27188",
+            decode_endpoint="10.0.0.2:28188",
+            run_id="projection-ktp",
+            suite="flow",
+            result_endpoint=None,
+            container="lhc_GPU",
+            prefill_container_runtime="docker",
+            decode_container_runtime="docker",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"FT_CORE_DUMP_ON_EXCEPTION": "0"},
+            clear=True,
+        ):
+            _, _, _, command = driver.role_launch_parts(args, "prefill")
+        self.assertIn("FT_CORE_DUMP_ON_EXCEPTION=0", command)
+
+    def test_role_command_forwards_decode_cache_and_prewarm_timeout(self):
+        args = argparse.Namespace(
+            prefill_repo_root="/prefill/repo",
+            decode_repo_root="/decode/repo",
+            prefill_checkpoint_path="/prefill/checkpoint",
+            decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_endpoint="10.0.0.1:27188",
+            decode_endpoint="10.0.0.2:28188",
+            run_id="projection-ktp",
+            suite="all",
+            result_endpoint=None,
+            container="lhc_GPU",
+            prefill_container_runtime="docker",
+            decode_container_runtime="docker",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SMOKE_DECODE_KV_CACHE_MEM_MB": "26000",
+                "SMOKE_DECODE_KDA_POOL_BLOCKS": "40",
+                "SMOKE_DECODE_ROLE_ADDRS": (
+                    "10.0.0.2:28188:28189,10.0.0.2:28197:28198"
+                ),
+                "SMOKE_RDMA_PREWARM_TIMEOUT_S": "300",
+            },
+            clear=True,
+        ):
+            _, _, _, command = driver.role_launch_parts(args, "decode")
+        self.assertIn("SMOKE_DECODE_KV_CACHE_MEM_MB=26000", command)
+        self.assertIn("SMOKE_DECODE_KDA_POOL_BLOCKS=40", command)
+        self.assertIn(
+            "SMOKE_DECODE_ROLE_ADDRS=10.0.0.2:28188:28189,10.0.0.2:28197:28198",
+            command,
+        )
+        self.assertIn("SMOKE_RDMA_PREWARM_TIMEOUT_S=300", command)
+
+    def test_start_remote_roles_launches_prefill_without_decode_health_gate(self):
+        events = []
+
+        class FakeRole:
+            def __init__(self, role):
+                self.role = role
+
+            def start(self):
+                events.append(f"start:{self.role}")
+
+        args = SimpleNamespace(prefill_start_delay_s=3.5)
+        roles = {
+            "decode": FakeRole("decode"),
+            "prefill": FakeRole("prefill"),
+        }
+        with mock.patch.object(
+            driver.time, "sleep", side_effect=lambda seconds: events.append(f"sleep:{seconds}")
+        ):
+            driver.start_remote_roles(args, roles)
+
+        self.assertEqual(
+            events,
+            ["start:decode", "sleep:3.5", "start:prefill"],
+        )
+
+    def test_detached_control_operations_run_inside_role_container(self):
+        args = SimpleNamespace(
+            prefill_repo_root="/prefill/repo",
+            decode_repo_root="/decode/repo",
+            prefill_checkpoint_path="/prefill/checkpoint",
+            decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_endpoint="10.0.0.1:27188",
+            decode_endpoint="10.0.0.2:28188",
+            run_id="projection-ktp",
+            suite="flow",
+            result_endpoint=None,
+            container="lhc_GPU",
+            container_user="19357313:100",
+            prefill_container_runtime="docker",
+            decode_container_runtime="docker",
+        )
+
+        command = driver.build_detached_control_command(
+            args, "decode", "cat /tmp/projection-ktp/decode.status"
+        )
+
+        self.assertEqual(
+            shlex.split(command),
+            [
+                "docker",
+                "exec",
+                "-u",
+                "19357313:100",
+                "lhc_GPU",
+                "bash",
+                "-lc",
+                "cat /tmp/projection-ktp/decode.status",
+            ],
+        )
+
+    def test_role_specific_containers_override_shared_container(self):
+        args = SimpleNamespace(
+            prefill_repo_root="/prefill/repo",
+            decode_repo_root="/decode/repo",
+            prefill_checkpoint_path="/prefill/checkpoint",
+            decode_checkpoint_path="/decode/checkpoint",
+            prefill_sp_checkpoint_path="/prefill/eagle3",
+            decode_sp_checkpoint_path="/decode/eagle3",
+            prefill_endpoint="10.0.0.1:27188",
+            decode_endpoint="10.0.0.2:28188",
+            run_id="projection-ktp",
+            suite="flow",
+            result_endpoint=None,
+            container="lhc_GPU",
+            prefill_container="lhc_GPU_prefill",
+            decode_container="lhc_GPU_decode",
+            prefill_container_runtime="pouch",
+            decode_container_runtime="pouch",
+            container_user="luohaocheng.lhc",
+        )
+
+        self.assertEqual(driver.role_launch_parts(args, "prefill")[2], "lhc_GPU_prefill")
+        self.assertEqual(driver.role_launch_parts(args, "decode")[2], "lhc_GPU_decode")
 
 
 if __name__ == "__main__":

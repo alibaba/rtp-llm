@@ -65,6 +65,121 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
                         atol=0,
                     )
 
+    def test_projection_ktp_shards_fp8_fused_and_forget_weights(self):
+        cfg = SimpleNamespace(
+            linear_num_key_heads=96,
+            linear_num_value_heads=96,
+            linear_key_head_dim=128,
+            linear_value_head_dim=128,
+        )
+        fused_source = LinearAttnAtomicWeight(
+            W.linear_attn_qkvg_fa_beta_w,
+            [],
+            identity,
+            config=cfg,
+            projection_ktp=True,
+        )
+        fused = KimiK3LoadFp8Weight(
+            fused_source, Fp8BlockWiseQuantConfig()
+        )
+        fused_width = 4 * 12288 + 128 + 96
+        fused_weight = torch.arange(fused_width, dtype=torch.float32)[:, None]
+        fused_scale = torch.arange(
+            (fused_width + 127) // 128, dtype=torch.float32
+        )[:, None]
+
+        forget_source = LinearAttnAtomicWeight(
+            W.linear_attn_f_b_w,
+            [],
+            identity,
+            config=cfg,
+            projection_ktp=True,
+        )
+        forget = KimiK3LoadFp8Weight(
+            forget_source, Fp8BlockWiseQuantConfig()
+        )
+        forget_weight = torch.arange(12288, dtype=torch.float32)[:, None]
+        forget_scale = torch.arange(12288 // 128, dtype=torch.float32)[:, None]
+
+        for ktp in (8, 16):
+            rank = ktp - 1
+            load = SimpleNamespace(
+                tp_size=1,
+                tp_rank=0,
+                ktp_size=ktp,
+                ktp_rank=rank,
+            )
+            fused_out = fused._split(
+                {
+                    fused.kernel.name: fused_weight,
+                    fused.scale.name: fused_scale,
+                },
+                load,
+            )
+            local = 12288 // ktp
+            self.assertEqual(
+                fused_out[fused.kernel.name].shape,
+                (4 * local + 224, 1),
+            )
+            self.assertEqual(fused.tp_ranges["parallel"], "KTP")
+            torch.testing.assert_close(
+                fused_out[fused.kernel.name][-224:],
+                fused_weight[-224:],
+                rtol=0,
+                atol=0,
+            )
+            for part in range(4):
+                begin = part * 12288 + rank * local
+                torch.testing.assert_close(
+                    fused_out[fused.kernel.name][
+                        part * local : (part + 1) * local
+                    ],
+                    fused_weight[begin : begin + local],
+                    rtol=0,
+                    atol=0,
+                )
+
+            forget_out = forget._split(
+                {
+                    forget.kernel.name: forget_weight,
+                    forget.scale.name: forget_scale,
+                },
+                load,
+            )
+            self.assertEqual(forget.tp_ranges["parallel"], "KTP")
+            torch.testing.assert_close(
+                forget_out[forget.kernel.name],
+                forget_weight[rank * local : (rank + 1) * local],
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                forget_out[forget.scale.name],
+                forget_scale[
+                    rank * local // 128 : (rank + 1) * local // 128
+                ],
+                rtol=0,
+                atol=0,
+            )
+
+    def test_projection_ktp_does_not_shard_replicated_fp8_output(self):
+        source = LinearAttnAtomicWeight(
+            W.linear_attn_out_w,
+            [],
+            identity,
+            config=SimpleNamespace(),
+        )
+        wrapper = KimiK3LoadFp8Weight(source, Fp8BlockWiseQuantConfig())
+        weight = torch.arange(256, dtype=torch.float32).reshape(2, 128)
+        scale = torch.ones(1, 1)
+        out = wrapper._split(
+            {wrapper.kernel.name: weight, wrapper.scale.name: scale},
+            SimpleNamespace(tp_size=1, tp_rank=0, ktp_size=16, ktp_rank=7),
+        )
+        torch.testing.assert_close(out[wrapper.kernel.name], weight)
+        torch.testing.assert_close(out[wrapper.scale.name], scale)
+        self.assertEqual(wrapper.tp_ranges["parallel"], "TP")
+
     def test_bounded_scratch_quantization_is_bitwise_equal(self):
         torch.manual_seed(19)
         for rows in (96, 2112, 3296, 6368):

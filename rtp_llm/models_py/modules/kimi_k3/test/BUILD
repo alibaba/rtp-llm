@@ -1,3 +1,5 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
 py_test(
     name = "chunkwise_rdma_publisher_test",
     srcs = ["test_chunkwise_rdma_publisher.py"],
@@ -6,4 +8,15 @@ py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
+)
+
+py_test(
+    name = "projection_ktp_test",
+    srcs = ["test_projection_ktp.py"],
+    main = "test_projection_ktp.py",
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
 )
