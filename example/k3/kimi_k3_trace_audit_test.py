@@ -23,6 +23,30 @@ audit = load("k3_audit_test", HERE / "kimi_k3_trace_audit.py")
 recorder = load(
     "k3_audit_recorder_test", HERE.parents[1] / "rtp_llm/utils/k3_tensor_trace.py"
 )
+native_buffers = load(
+    "k3_native_trace_buffers_test", HERE / "native_trace/k3_trace_buffers.py"
+)
+
+
+class NativeTraceBufferTest(unittest.TestCase):
+    def test_unwritten_routes_are_masked_and_snapshot_survives_buffer_reuse(self):
+        buffers = native_buffers.K3TraceBuffers(2, 3, 2, 128, "cpu")
+        buffers.buffer.fill_(255)
+        buffers.reset()
+        for name, value in buffers.tensors.items():
+            value[1, 2, 1].fill_(7 if name == "expert_ids" else 3)
+        snapshot = buffers.snapshot()
+        buffers.buffer.zero_()
+        expected_valid = torch.zeros((2, 3, 2), dtype=torch.bool)
+        expected_valid[1, 2, 1] = True
+        torch.testing.assert_close(snapshot["valid"], expected_valid)
+        self.assertEqual(snapshot["expert_ids"][1, 2, 1], 7)
+        self.assertTrue(torch.all(snapshot["expert_ids"][~expected_valid] == -1))
+        for name, value in snapshot.items():
+            if name in {"valid", "expert_ids"}:
+                continue
+            self.assertTrue(torch.all(value[1, 2, 1] == 3))
+            self.assertEqual(torch.count_nonzero(value[~expected_valid]), 0)
 
 
 class TraceAuditTest(unittest.TestCase):

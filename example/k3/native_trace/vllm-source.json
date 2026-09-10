@@ -1,0 +1,9 @@
+{
+  "commit": "8b1392b978f5a03c828dd1711090d7fb50958b8a",
+  "files": {
+    "deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh": "fd1935beff098addd2e54512a7ddc37936c04deb9c7b423128fce46be92ba8f7",
+    "csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp": "54fafefaf92e208671aa4893f341f99be0686fa9e40e6f1f845ab4534bd02c0f",
+    "csrc/apis/mega.hpp": "74231f9d32a8d295c2189a7aeb73f446c3e32b0fbdd03595b9c9e58df160f34b",
+    "deep_gemm/mega/__init__.py": "7f760e45032dc57730542e378790dbb44dd924d007a6e71388c66d162ab5877b"
+  }
+}
