@@ -228,7 +228,7 @@ def _manual_noaux_reference(
             reverse=True,
         )[:top_k]
         token_weights = [token_scores[expert_id] for expert_id in selected_experts]
-        if renormalize and top_k > 1:
+        if renormalize:
             denominator = max(sum(token_weights), 1e-20)
             token_weights = [weight / denominator for weight in token_weights]
         all_ids.append(selected_experts)
@@ -2153,6 +2153,31 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(torch.equal(softmax_ids, reference_ids))
         self.assertTrue(torch.equal(softmax_weights, reference_weights * 1.5))
 
+    def test_top1_reference_paths_apply_normalization(self):
+        logits = torch.tensor([[0.0, 2.0, -1.0, 1.0]], dtype=torch.float32)
+        weights, _ = _select_deepseek_topk(
+            logits,
+            top_k=1,
+            scoring_func=0,
+            n_group=1,
+            topk_group=1,
+            group_limited=False,
+            renormalize=True,
+            routed_scaling_factor=3.0,
+        )
+        torch.testing.assert_close(weights, torch.ones_like(weights))
+
+        noaux_weights, _ = _select_deepseek_noaux_topk(
+            logits,
+            torch.zeros(4),
+            top_k=1,
+            n_group=2,
+            topk_group=1,
+            renormalize=True,
+            routed_scaling_factor=2.5,
+        )
+        torch.testing.assert_close(noaux_weights, torch.full_like(noaux_weights, 2.5))
+
     def test_noaux_router_uses_bias_only_for_selection(self):
         logits = torch.tensor(
             [
@@ -2483,7 +2508,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertIsNone(block.select_topk)
         select_topk.assert_not_called()
 
-    def test_non_noaux_router_avoids_cuda_select_topk_on_other_devices(self):
+    def test_non_noaux_router_uses_select_topk_on_rocm(self):
         parallelism_config = _single_rank_parallelism_config()
         moe_config = types.SimpleNamespace(fake_balance_expert=False)
         model_config = _router_model_config(scoring_func=0)
@@ -2520,9 +2545,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 topk_method="greedy",
                 correction_bias=False,
             )
-        self.assertFalse(block._use_fast_select_topk)
-        self.assertIsNone(block.select_topk)
-        select_topk.assert_not_called()
+        self.assertTrue(block._use_fast_select_topk)
+        self.assertIsNotNone(block.select_topk)
+        select_topk.assert_called_once_with(config=model_config)
 
     def test_moe_rejects_model_config_routing_mismatch(self):
         mismatch_configs = {

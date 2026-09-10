@@ -35,6 +35,7 @@ def collect_quantization_exclusions(source_config: Any) -> List[str]:
         "ignored_layers",
         "ignore",
         "exclude_modules",
+        "exclude",
         "modules_to_not_convert",
     ):
         value = getattr(source_config, name, None)

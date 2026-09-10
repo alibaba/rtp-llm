@@ -187,6 +187,38 @@ class Fp8QuantRegressionTest(TestCase):
 
         self.assertEqual(returned_output.data_ptr(), output.data_ptr())
 
+    def test_per_token_warp_kernel_keeps_scale_per_token(self):
+        if getattr(torch.version, "hip", None) is not None:
+            self.skipTest("native per-token FP8 kernel path is CUDA-only")
+
+        sm_count = torch.cuda.get_device_properties(0).multi_processor_count
+        num_tokens = sm_count * 2 * 8
+        amplitudes = (
+            torch.arange(num_tokens, device="cuda", dtype=torch.float32)
+            .remainder(251)
+            .to(torch.bfloat16)
+        )
+        input_tensor = amplitudes[:, None].expand(num_tokens, 128).contiguous()
+
+        output, scale = scaled_fp8_per_token_quant(input_tensor)
+        expected_scale = input_tensor.float().abs().amax(dim=1, keepdim=True) / float(
+            torch.finfo(output.dtype).max
+        )
+        normalized = torch.where(
+            expected_scale > 0,
+            input_tensor.float() / expected_scale,
+            torch.zeros_like(input_tensor, dtype=torch.float32),
+        )
+        expected_output = normalized.clamp(
+            float(torch.finfo(output.dtype).min),
+            float(torch.finfo(output.dtype).max),
+        ).to(output.dtype)
+
+        torch.testing.assert_close(scale, expected_scale, rtol=1e-5, atol=1e-7)
+        torch.testing.assert_close(
+            output.float(), expected_output.float(), rtol=0, atol=0
+        )
+
     def test_transform_scale_moves_cpu_input_to_current_cuda_device(self):
         from deep_gemm import get_mn_major_tma_aligned_packed_ue8m0_tensor
 

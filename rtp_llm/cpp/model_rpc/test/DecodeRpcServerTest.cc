@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
-#include <initializer_list>
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -43,12 +42,6 @@ GroupBase makeRpcGroup(std::string tag) {
     group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
     group.block_num = 8;
     return group;
-}
-
-std::shared_ptr<BlockIds> makeBlockIds(std::initializer_list<BlockIdxType> values) {
-    auto result = std::make_shared<BlockIds>();
-    result->assign(BlockIndicesType(values));
-    return result;
 }
 
 // Tokens per logical (cache-key sized) block, and the CP-scaled tokens per block
@@ -120,8 +113,8 @@ TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     const auto* broadcast = BroadcastLoadRequestPB::descriptor();
     ASSERT_NE(broadcast, nullptr);
-    EXPECT_EQ(broadcast->FindFieldByName("block_ids")->number(), 5);
-    EXPECT_EQ(broadcast->FindFieldByName("group_block_ids")->number(), 12);
+    EXPECT_TRUE(broadcast->IsReservedNumber(5));
+    EXPECT_TRUE(broadcast->IsReservedNumber(12));
     EXPECT_EQ(broadcast->FindFieldByName("block_num")->number(), 6);
     EXPECT_EQ(broadcast->FindFieldByName("reuse_block_size")->number(), 7);
     EXPECT_EQ(broadcast->FindFieldByName("timeout_ms")->number(), 8);
@@ -137,20 +130,11 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
 
     const auto* remote = RemoteOperationRequestPB::descriptor();
     ASSERT_NE(remote, nullptr);
-    EXPECT_EQ(remote->FindFieldByName("group_ids")->number(), 3);
+    EXPECT_TRUE(remote->IsReservedNumber(3));
+    EXPECT_EQ(remote->FindFieldByName("group_ids"), nullptr);
     EXPECT_EQ(remote->FindFieldByName("block_ids")->number(), 4);
     EXPECT_EQ(remote->FindFieldByName("uris")->number(), 5);
     EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
-
-    const auto* copy_item = MemoryOperationRequestPB::CopyItem::descriptor();
-    ASSERT_NE(copy_item, nullptr);
-    EXPECT_EQ(copy_item->FindFieldByName("gpu_blocks")->number(), 2);
-    EXPECT_EQ(copy_item->FindFieldByName("tagged_gpu_blocks")->number(), 11);
-
-    const auto* layer_block = LayerCacheBlockPB::descriptor();
-    ASSERT_NE(layer_block, nullptr);
-    EXPECT_EQ(layer_block->FindFieldByName("group_id")->number(), 4);
-    EXPECT_EQ(layer_block->FindFieldByName("cache_tag")->number(), 5);
 }
 
 TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {

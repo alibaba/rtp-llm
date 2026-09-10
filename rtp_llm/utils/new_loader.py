@@ -117,6 +117,15 @@ def new_loader_unsupported_reason(
     if parallelism_config is None:
         return None
 
+    tp_size = int(parallelism_config.tp_size)
+    vocab_size = int(model_config.vocab_size)
+    if tp_size > 1 and vocab_size > 0 and vocab_size % tp_size != 0:
+        return (
+            f"vocabulary size {vocab_size} is not divisible by tensor-parallel "
+            f"size {tp_size}; NewLoader does not yet implement legacy vocabulary "
+            "padding"
+        )
+
     attn_tp = (
         parallelism_config.get_attn_tp_size(),
         parallelism_config.get_attn_tp_rank(),
