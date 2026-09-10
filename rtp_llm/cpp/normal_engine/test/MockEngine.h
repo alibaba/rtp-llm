@@ -3,6 +3,7 @@
 #include <c10/core/ScalarType.h>
 #include <c10/util/Half.h>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <cuda_fp16.h>
 #include "c10/util/intrusive_ptr.h"
@@ -26,9 +27,15 @@ namespace rtp_llm {
 // Mock model that returns random logits for testing NormalEngine without Python
 class MockModel: public ModelBase {
 public:
-    MockModel(size_t vocab_size): vocab_size_(vocab_size) {}
+    using ForwardHook = std::function<void(const GptModelInputs&)>;
+
+    MockModel(size_t vocab_size, ForwardHook forward_hook = {}):
+        vocab_size_(vocab_size), forward_hook_(std::move(forward_hook)) {}
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
+        if (forward_hook_) {
+            forward_hook_(inputs);
+        }
         GptModelOutputs outputs;
         // lm_output_indexes tells us how many logits rows to produce
         int64_t num_tokens = inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.size(0) : 1;
@@ -38,7 +45,8 @@ public:
     }
 
 private:
-    size_t vocab_size_;
+    size_t      vocab_size_;
+    ForwardHook forward_hook_;
 };
 
 struct CustomConfig {
