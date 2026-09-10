@@ -63,6 +63,7 @@ protected:
 
         config_ = P2PConnectorConfig::create(
             runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/2);
+        config_.cache_group_tags = {"group0", "group1"};
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
@@ -150,6 +151,24 @@ protected:
     std::vector<std::unique_ptr<TestRpcServer>> tp_broadcast_servers_;
     std::vector<std::string>                    tp_broadcast_addrs_;
 };
+
+TEST_F(P2PConnectorTest, ResolveCacheTagPrefersTagAndAcceptsLegacyGroupId) {
+    LayerCacheBlockPB legacy;
+    legacy.set_layer_id(1);
+    legacy.set_group_id(1);
+    EXPECT_EQ(connector_->resolveCacheTag(legacy), "group1");
+
+    LayerCacheBlockPB dual;
+    dual.set_layer_id(1);
+    dual.set_group_id(99);
+    dual.set_cache_tag("stable-tag");
+    EXPECT_EQ(connector_->resolveCacheTag(dual), "stable-tag");
+
+    LayerCacheBlockPB invalid;
+    invalid.set_layer_id(1);
+    invalid.set_group_id(2);
+    EXPECT_ANY_THROW(connector_->resolveCacheTag(invalid));
+}
 
 // ==================== handleRead 测试 ====================
 
