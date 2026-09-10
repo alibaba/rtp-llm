@@ -67,6 +67,19 @@ TEST(KVCacheConnectorCoordinatorWatermarkTest, MemoryWatermarkAccountsForIncomin
     EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(100, 200, 5, 95), 0);
 }
 
+TEST(KVCacheConnectorCoordinatorWatermarkTest, SoftWatermarkSpillsBeforeHardWatermarkEmergencyEviction) {
+    const size_t total_blocks    = 1000;
+    const size_t free_blocks     = 80;
+    const size_t incoming_blocks = 50;
+
+    EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(
+                  total_blocks, free_blocks, incoming_blocks, 90),
+              70);
+    EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(
+                  total_blocks, free_blocks, incoming_blocks, 95),
+              20);
+}
+
 class KVCacheConnectorCoordinatorTest: public ::testing::Test {
 protected:
     void SetUp() override {

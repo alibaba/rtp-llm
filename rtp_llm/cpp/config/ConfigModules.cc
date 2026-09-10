@@ -155,6 +155,7 @@ std::string KVCacheConfig::to_string() const {
         << "enable_memory_cache_remote_eviction: " << enable_memory_cache_remote_eviction << "\n"
         << "device_cache_high_watermark_ratio: " << device_cache_high_watermark_ratio << "\n"
         << "memory_cache_high_watermark_ratio: " << memory_cache_high_watermark_ratio << "\n"
+        << "memory_cache_remote_eviction_watermark_ratio: " << memory_cache_remote_eviction_watermark_ratio << "\n"
         << "memory_cache_remote_eviction_timeout_ms: " << memory_cache_remote_eviction_timeout_ms << "\n"
         << "memory_cache_remote_eviction_max_blocks: " << memory_cache_remote_eviction_max_blocks << "\n"
         << "load_cache_retry_times: " << load_cache_retry_times << "\n"

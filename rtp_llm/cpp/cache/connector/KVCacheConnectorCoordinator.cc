@@ -219,11 +219,18 @@ bool KVCacheConnectorCoordinator::init() {
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.memory_cache_high_watermark_ratio >= 1
                                 && kv_cache_config_.memory_cache_high_watermark_ratio <= 100,
                             "MEMORY_CACHE_HIGH_WATERMARK_RATIO must be in [1, 100]");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.memory_cache_remote_eviction_watermark_ratio >= 1
+                                && kv_cache_config_.memory_cache_remote_eviction_watermark_ratio <= 100,
+                            "MEMORY_CACHE_REMOTE_EVICTION_WATERMARK_RATIO must be in [1, 100]");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.memory_cache_remote_eviction_timeout_ms > 0,
                             "MEMORY_CACHE_REMOTE_EVICTION_TIMEOUT_MS must be positive");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.memory_cache_remote_eviction_max_blocks > 0,
                             "MEMORY_CACHE_REMOTE_EVICTION_MAX_BLOCKS must be positive");
     if (kv_cache_config_.enable_memory_cache_remote_eviction) {
+        RTP_LLM_CHECK_WITH_INFO(
+            kv_cache_config_.memory_cache_remote_eviction_watermark_ratio
+                <= kv_cache_config_.memory_cache_high_watermark_ratio,
+            "MEMORY_CACHE_REMOTE_EVICTION_WATERMARK_RATIO must not exceed MEMORY_CACHE_HIGH_WATERMARK_RATIO");
         RTP_LLM_CHECK_WITH_INFO(cache_config_.groupNums() == 1,
                                 "memory cache remote eviction only supports one cache group");
     }
@@ -681,6 +688,16 @@ size_t KVCacheConnectorCoordinator::memoryBlocksAboveHighWatermark(size_t incomi
                                              kv_cache_config_.memory_cache_high_watermark_ratio);
 }
 
+size_t KVCacheConnectorCoordinator::memoryBlocksAboveRemoteEvictionWatermark(size_t incoming_blocks) const {
+    if (!memory_connector_) {
+        return 0;
+    }
+    return projectedBlocksAboveHighWatermark(memory_connector_->totalMemoryBlocks(),
+                                             memory_connector_->freeMemoryBlocks(),
+                                             incoming_blocks,
+                                             kv_cache_config_.memory_cache_remote_eviction_watermark_ratio);
+}
+
 void KVCacheConnectorCoordinator::enforceMemoryHighWatermark(size_t incoming_blocks,
                                                               const std::string& trace_id) {
     const size_t need = memoryBlocksAboveHighWatermark(incoming_blocks);
@@ -694,8 +711,15 @@ void KVCacheConnectorCoordinator::enforceMemoryHighWatermark(size_t incoming_blo
         metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
                                   RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
     }
-    RTP_LLM_LOG_INFO("tiered memory emergency eviction, trace_id=%s, requested=%zu, evicted=%zu, incoming=%zu",
-                     trace_id.c_str(), need, evicted, incoming_blocks);
+    RTP_LLM_LOG_INFO(
+        "tiered memory emergency eviction, trace_id=%s, hard_watermark_ratio=%d, memory_total_blocks=%zu, memory_free_blocks=%zu, requested=%zu, evicted=%zu, incoming=%zu",
+        trace_id.c_str(),
+        kv_cache_config_.memory_cache_high_watermark_ratio,
+        memory_connector_->totalMemoryBlocks(),
+        memory_connector_->freeMemoryBlocks(),
+        need,
+        evicted,
+        incoming_blocks);
 }
 
 void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id) {
@@ -710,12 +734,13 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                                       && kv_cache_config_.enable_remote_cache && remote_connector_ != nullptr
                                       && memory_connector_ != nullptr && cache_config_.groupNums() == 1;
     if (remote_spill_enabled) {
-        const size_t requested_remote_evict_blocks = memoryBlocksAboveHighWatermark(estimated_d2h_blocks);
+        const size_t requested_remote_evict_blocks =
+            memoryBlocksAboveRemoteEvictionWatermark(estimated_d2h_blocks);
         const size_t capped_remote_evict_blocks = std::min(
             requested_remote_evict_blocks,
             static_cast<size_t>(kv_cache_config_.memory_cache_remote_eviction_max_blocks));
         RTP_LLM_LOG_INFO(
-            "memory remote eviction decision, trace_id=%s, device_total_blocks=%zu, device_free_blocks=%zu, device_high_watermark_ratio=%d, estimated_d2h_blocks=%zu, memory_total_blocks=%zu, memory_free_blocks=%zu, memory_high_watermark_ratio=%d, requested_remote_evict_blocks=%zu, capped_remote_evict_blocks=%zu, max_remote_evict_blocks=%d",
+            "memory remote eviction decision, trace_id=%s, device_total_blocks=%zu, device_free_blocks=%zu, device_high_watermark_ratio=%d, estimated_d2h_blocks=%zu, memory_total_blocks=%zu, memory_free_blocks=%zu, memory_remote_eviction_watermark_ratio=%d, memory_high_watermark_ratio=%d, requested_remote_evict_blocks=%zu, capped_remote_evict_blocks=%zu, max_remote_evict_blocks=%d",
             trace_id.c_str(),
             allocator_->totalBlocksNum(),
             allocator_->notInUseBlocksNum(),
@@ -723,6 +748,7 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
             estimated_d2h_blocks,
             memory_connector_->totalMemoryBlocks(),
             memory_connector_->freeMemoryBlocks(),
+            kv_cache_config_.memory_cache_remote_eviction_watermark_ratio,
             kv_cache_config_.memory_cache_high_watermark_ratio,
             requested_remote_evict_blocks,
             capped_remote_evict_blocks,
@@ -895,17 +921,26 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
 
     // Recheck with actual post-copy occupancy. This is the hard waterline guard.
     enforceMemoryHighWatermark(0, trace_id);
+    const auto device_to_memory_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                                 std::chrono::steady_clock::now() - device_to_memory_started)
+                                                 .count();
     if (remote_task_started && metrics_reporter_) {
         RtpLLMMemoryRemoteEvictionMetricsCollector collector;
-        collector.device_to_memory_after_remote_latency_us =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()
-                                                                  - device_to_memory_started)
-                .count();
+        collector.device_to_memory_after_remote_latency_us = device_to_memory_latency_us;
         metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
                                   RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
     }
-    RTP_LLM_LOG_INFO("tiered Device->Memory eviction finished, trace_id=%s, requested=%zu, actual=%zu, success=%d",
-                     trace_id.c_str(), need_d2h_blocks, actual_d2h_blocks, memory_ctx ? memory_ctx->success() : 0);
+    RTP_LLM_LOG_INFO(
+        "tiered Device->Memory eviction finished, trace_id=%s, after_remote=%d, requested=%zu, actual=%zu, latency_us=%ld, hard_watermark_ratio=%d, memory_total_blocks=%zu, memory_free_blocks=%zu, success=%d",
+        trace_id.c_str(),
+        remote_task_started,
+        need_d2h_blocks,
+        actual_d2h_blocks,
+        device_to_memory_latency_us,
+        kv_cache_config_.memory_cache_high_watermark_ratio,
+        memory_connector_->totalMemoryBlocks(),
+        memory_connector_->freeMemoryBlocks(),
+        memory_ctx ? memory_ctx->success() : 0);
 }
 
 std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {

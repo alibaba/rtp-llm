@@ -93,6 +93,7 @@ private:
     void runTieredEviction(const std::string& trace_id);
     size_t deviceBlocksAboveHighWatermark() const;
     size_t memoryBlocksAboveHighWatermark(size_t incoming_blocks) const;
+    size_t memoryBlocksAboveRemoteEvictionWatermark(size_t incoming_blocks) const;
     void enforceMemoryHighWatermark(size_t incoming_blocks, const std::string& trace_id);
 
     bool isPdInvertMode() const;

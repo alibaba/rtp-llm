@@ -469,6 +469,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_memory_cache_remote_eviction", &KVCacheConfig::enable_memory_cache_remote_eviction)
         .def_readwrite("device_cache_high_watermark_ratio", &KVCacheConfig::device_cache_high_watermark_ratio)
         .def_readwrite("memory_cache_high_watermark_ratio", &KVCacheConfig::memory_cache_high_watermark_ratio)
+        .def_readwrite("memory_cache_remote_eviction_watermark_ratio",
+                       &KVCacheConfig::memory_cache_remote_eviction_watermark_ratio)
         .def_readwrite("memory_cache_remote_eviction_timeout_ms", &KVCacheConfig::memory_cache_remote_eviction_timeout_ms)
         .def_readwrite("memory_cache_remote_eviction_max_blocks", &KVCacheConfig::memory_cache_remote_eviction_max_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
@@ -567,7 +569,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_memory_cache_h2d_3d_batch_auto,
                                       self.memory_cache_d2h_copy_mode,
                                       self.memory_cache_d2h_copy_strict,
-                                      self.enable_memory_cache_d2h_3d_batch_auto);
+                                      self.enable_memory_cache_d2h_3d_batch_auto,
+                                      self.memory_cache_remote_eviction_watermark_ratio);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -668,6 +671,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                 c.memory_cache_d2h_copy_mode            = t[extra_start + 14].cast<std::string>();
                                 c.memory_cache_d2h_copy_strict          = t[extra_start + 15].cast<bool>();
                                 c.enable_memory_cache_d2h_3d_batch_auto = t[extra_start + 16].cast<bool>();
+                            }
+                            if (extra_count >= 18) {
+                                c.memory_cache_remote_eviction_watermark_ratio = t[extra_start + 17].cast<int>();
                             }
                         }
                     }

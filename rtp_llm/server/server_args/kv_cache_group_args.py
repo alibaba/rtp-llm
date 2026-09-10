@@ -479,7 +479,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         choices=range(1, 101),
         default=95,
-        help="Memory cache 允许使用的最大 block 百分比，范围 [1, 100]。",
+        help="Memory cache 硬水位；超过后紧急释放 block，范围 [1, 100]。",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_remote_eviction_watermark_ratio",
+        env_name="MEMORY_CACHE_REMOTE_EVICTION_WATERMARK_RATIO",
+        bind_to=(kv_cache_config, "memory_cache_remote_eviction_watermark_ratio"),
+        type=int,
+        choices=range(1, 101),
+        default=90,
+        help="Memory cache 软水位；超过后触发 Memory 到 Remote 淘汰，必须不高于硬水位。",
     )
     kv_cache_group.add_argument(
         "--memory_cache_remote_eviction_timeout_ms",
