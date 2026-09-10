@@ -1774,8 +1774,7 @@ class TestCompactGatherReshape(unittest.TestCase):
             head_num=2, head_num_kv=1, head_dim=8, tokens_per_block=8
         )
         cfg.is_causal = False
-        op = AiterPrefillAttnOp(cfg, v1_kv_layout=True)
-        op.use_compact = False
+        op = AiterPrefillAttnOp(cfg)
         query = torch.zeros(2, 2, 8, dtype=torch.float16)
         cache = SimpleNamespace(
             kv_cache_base=torch.zeros(2, 2, 1, 8, 8, dtype=torch.float16)
