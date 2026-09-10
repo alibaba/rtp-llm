@@ -33,6 +33,11 @@ public enum RoleType {
         this.description = description;
     }
 
+    /** Whether cache polling supplies detailed block keys for the routing index. */
+    public boolean requiresCacheKeys() {
+        return this == PREFILL || this == PDFUSION;
+    }
+
     /**
      * Deserialize from JSON or legacy WorkerStatus strings. Accepts short name
      * ("PREFILL"), proto-prefixed name ("ROLE_TYPE_PREFILL"), and the original
