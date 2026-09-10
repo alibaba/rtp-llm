@@ -1,9 +1,42 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <atomic>
+#include <cstdlib>
+#include <string>
 
 namespace rtp_llm {
 
+// [KVDIAG] opt-in (RTP_LLM_KV_DIAG=1). This callback is the ONLY thing that can turn
+// a local publication into a reply to the waiting peer, and it has a silent no-reply
+// path: it receives only the newly added blocks, skips quietly when a key is not in
+// this context's unloaded set, and replies only once write_cnt_ reaches
+// total_block_count_. A context that never sees its key therefore logs nothing,
+// fails nothing and never answers - the peer just times out.
+static bool kvDiagEnabled() {
+    static const bool value = [] {
+        const char* e = ::getenv("RTP_LLM_KV_DIAG");
+        return e != nullptr && *e != '\0' && std::string(e) != "0";
+    }();
+    return value;
+}
+
 void TcpCacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+    if (kvDiagEnabled()) {
+        static std::atomic<int> cb_budget{16000};
+        if (cb_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_WARNING(
+                "[KVDIAG-SVC-CB] ctx=%p done_run=%d ok=%d triggered_blocks=%zu total_expected=%u written_so_far=%d "
+                "partition_count=%d first=%s",
+                (void*)this,
+                (int)done_run_,
+                (int)ok,
+                blocks.size(),
+                total_block_count_,
+                (int)write_cnt_,
+                (int)partition_count_,
+                blocks.empty() ? "<none>" : blocks[0]->key.c_str());
+        }
+    }
     if (done_run_) {
         // already done run, most likely timeout, no need load
         return;
@@ -41,6 +74,15 @@ void TcpCacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<
     }
 
     if (write_cnt_ == total_block_count_) {
+        if (kvDiagEnabled()) {
+            static std::atomic<int> reply_budget{8000};
+            if (reply_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                RTP_LLM_LOG_WARNING("[KVDIAG-SVC-REPLY] ctx=%p complete: written=%d total=%u -> runSuccess",
+                                    (void*)this,
+                                    (int)write_cnt_,
+                                    total_block_count_);
+            }
+        }
         runSuccess(false);
     }
 }
