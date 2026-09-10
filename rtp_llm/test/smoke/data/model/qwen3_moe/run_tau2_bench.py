@@ -51,7 +51,7 @@ _install_typing_compat()
 # tau2 内部用 loguru 打 user_simulator / orchestrator / domains.* 的 DEBUG+INFO,
 # 满屏刷 "Step 3. Sending message ..." 那类。LOGURU_LEVEL 必须在 `from loguru import
 # logger` 之前设,所以放在最顶。evalscope/tau2 的 import 都是后面懒加载,安全。
-os.environ.setdefault("LOGURU_LEVEL", "INFO")   # 想看细节:LOGURU_LEVEL=DEBUG python ...
+os.environ.setdefault("LOGURU_LEVEL", "INFO")  # 想看细节:LOGURU_LEVEL=DEBUG python ...
 # tqdm 进度条每步刷新也很吵,至少 30s 才更新一次
 os.environ.setdefault("TQDM_MININTERVAL", "30")
 # litellm 在 import 时会去 raw.githubusercontent.com 拉 model cost map
@@ -112,35 +112,60 @@ def resolve_local_dataset() -> str | None:
 # ======================================================================
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 36000
-DEFAULT_MODEL = "your-model-name"   # 必须和服务 /v1/models 返回的 id 一致
-DEFAULT_CONCURRENCY = 8             # --eval-batch-size,按本地服务承载力调
-DEFAULT_REPEATS = 1                 # pass@k 的 k。贪心的话设 1,采样的话 4 或 8
-DEFAULT_TEMPERATURE = 0.0           # smoke 稳定性:贪心采样,消除单次运行方差
-DEFAULT_TOP_P = 1.0                 # temp=0 时 top_p 无意义,设 1 避免边界坑
-DEFAULT_AGENT_MAX_TOKENS = 1024     # 压住 agent 啰嗦,让多轮对话累积增速变慢
+DEFAULT_MODEL = "your-model-name"  # 必须和服务 /v1/models 返回的 id 一致
+DEFAULT_CONCURRENCY = 8  # --eval-batch-size,按本地服务承载力调
+DEFAULT_REPEATS = 1  # pass@k 的 k。贪心的话设 1,采样的话 4 或 8
+DEFAULT_TEMPERATURE = 0.0  # smoke 稳定性:贪心采样,消除单次运行方差
+DEFAULT_TOP_P = 1.0  # temp=0 时 top_p 无意义,设 1 避免边界坑
+DEFAULT_AGENT_MAX_TOKENS = 1024  # 压住 agent 啰嗦,让多轮对话累积增速变慢
 DEFAULT_USER_MAX_TOKENS = 2048
 DEFAULT_SUBSETS = ["airline", "retail", "telecom"]
 DEFAULT_WORK_DIR = "./tau2_bench_results"
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--host",        default=os.environ.get("SERVER_HOST", DEFAULT_HOST))
-    p.add_argument("--port",  type=int, default=int(os.environ.get("SERVER_PORT", DEFAULT_PORT)))
-    p.add_argument("--model",       default=os.environ.get("MODEL_NAME", DEFAULT_MODEL))
-    p.add_argument("--concurrency", type=int, default=int(os.environ.get("EVAL_BATCH_SIZE", DEFAULT_CONCURRENCY)))
-    p.add_argument("--repeats",     type=int, default=DEFAULT_REPEATS)
-    p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
-                   help="采样温度。REPEATS>1 必须 >0 才能让 pass@k 有意义。")
-    p.add_argument("--top-p",       type=float, default=DEFAULT_TOP_P, dest="top_p")
-    p.add_argument("--subsets",     nargs="+", default=DEFAULT_SUBSETS,
-                   help="Domain 子集,可填 airline / retail / telecom")
-    p.add_argument("--limit",       type=int, default=None,
-                   help="每个 subset 取前 N 个 task(调试时用,不设=全量)")
-    p.add_argument("--work-dir",    default=os.environ.get("WORK_DIR", DEFAULT_WORK_DIR))
-    p.add_argument("--skip-preflight", action="store_true", help="跳过启动前的连通性检查")
-    p.add_argument("--task-ids-file", default=None,
-                   help="JSON 文件,格式 {domain: [task_id, ...]};只跑这些 task")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("--host", default=os.environ.get("SERVER_HOST", DEFAULT_HOST))
+    p.add_argument(
+        "--port", type=int, default=int(os.environ.get("SERVER_PORT", DEFAULT_PORT))
+    )
+    p.add_argument("--model", default=os.environ.get("MODEL_NAME", DEFAULT_MODEL))
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=int(os.environ.get("EVAL_BATCH_SIZE", DEFAULT_CONCURRENCY)),
+    )
+    p.add_argument("--repeats", type=int, default=DEFAULT_REPEATS)
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
+        help="采样温度。REPEATS>1 必须 >0 才能让 pass@k 有意义。",
+    )
+    p.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, dest="top_p")
+    p.add_argument(
+        "--subsets",
+        nargs="+",
+        default=DEFAULT_SUBSETS,
+        help="Domain 子集,可填 airline / retail / telecom",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="每个 subset 取前 N 个 task(调试时用,不设=全量)",
+    )
+    p.add_argument("--work-dir", default=os.environ.get("WORK_DIR", DEFAULT_WORK_DIR))
+    p.add_argument(
+        "--skip-preflight", action="store_true", help="跳过启动前的连通性检查"
+    )
+    p.add_argument(
+        "--task-ids-file",
+        default=None,
+        help="JSON 文件,格式 {domain: [task_id, ...]};只跑这些 task",
+    )
     return p.parse_args()
 
 
@@ -152,7 +177,9 @@ def preflight(api_base: str, model: str) -> None:
 
     # 1) /v1/models 通不通
     try:
-        req = urllib.request.Request(f"{api_base}/models", headers={"Authorization": "Bearer EMPTY"})
+        req = urllib.request.Request(
+            f"{api_base}/models", headers={"Authorization": "Bearer EMPTY"}
+        )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
@@ -173,16 +200,20 @@ def preflight(api_base: str, model: str) -> None:
     # 3) 依赖
     try:
         import evalscope  # noqa: F401
+
         print(f"[OK]   evalscope {getattr(evalscope, '__version__', '?')}")
     except ImportError:
         print("[ERR] 未安装 evalscope。pip install evalscope")
         sys.exit(1)
     try:
         import tau2  # noqa: F401
+
         print(f"[OK]   tau2 imported")
     except ImportError:
         print("[ERR] 未安装 tau2。")
-        print("      pip install 'git+https://github.com/sierra-research/tau2-bench@v0.2.0'")
+        print(
+            "      pip install 'git+https://github.com/sierra-research/tau2-bench@v0.2.0'"
+        )
         sys.exit(1)
 
 
@@ -191,7 +222,9 @@ def _install_task_filter(task_ids_map: dict) -> None:
 
     task_ids_map: {domain: [task_id_str, ...]}
     """
-    from evalscope.benchmarks.tau_bench.tau2_bench.tau2_bench_adapter import Tau2BenchAdapter
+    from evalscope.benchmarks.tau_bench.tau2_bench.tau2_bench_adapter import (
+        Tau2BenchAdapter,
+    )
 
     if getattr(Tau2BenchAdapter, "_task_filter_installed", False):
         return
@@ -216,6 +249,7 @@ def _install_task_filter(task_ids_map: dict) -> None:
             dataset_path = dataset_name_or_path
         else:
             from modelscope import dataset_snapshot_download
+
             dataset_path = dataset_snapshot_download(dataset_name_or_path)
         _os.environ["TAU2_DATA_DIR"] = dataset_path
 
@@ -234,7 +268,9 @@ def _install_task_filter(task_ids_map: dict) -> None:
             tasks = [t.model_dump(exclude_unset=True) for t in tasks]
             missing = allowed - {str(t.get("id")) for t in tasks}
             if missing:
-                print(f"[WARN] domain={domain_name} 下未找到 task_id: {sorted(missing)}")
+                print(
+                    f"[WARN] domain={domain_name} 下未找到 task_id: {sorted(missing)}"
+                )
             dataset = DictDataLoader(
                 dict_list=tasks,
                 sample_fields=self.record_to_sample,
@@ -270,24 +306,26 @@ def main() -> None:
     print(f"Limit:        {args.limit if args.limit is not None else 'none (全量)'}")
     print(f"Work dir:     {args.work_dir}")
     if args.repeats > 1 and args.temperature == 0.0:
-        print(f"[WARN] repeats={args.repeats} 但 temperature=0.0,k 次采样完全一样,pass@k 等于 pass@1。")
+        print(
+            f"[WARN] repeats={args.repeats} 但 temperature=0.0,k 次采样完全一样,pass@k 等于 pass@1。"
+        )
     print("")
 
     # 构造 τ²-Bench 的 dataset-args
     #   user simulator 也打同一本地服务 → user_model 填 MODEL_NAME、api_base 指过去
     extra_params = {
         "user_model": args.model,
-        "api_key":    "EMPTY",
-        "api_base":   api_base,
+        "api_key": "EMPTY",
+        "api_base": api_base,
         "generation_config": {
             "temperature": args.temperature,
-            "top_p":       args.top_p,
-            "max_tokens":  DEFAULT_USER_MAX_TOKENS,
+            "top_p": args.top_p,
+            "max_tokens": DEFAULT_USER_MAX_TOKENS,
         },
     }
     dataset_args = {
         "tau2_bench": {
-            "subset_list":  args.subsets,
+            "subset_list": args.subsets,
             "extra_params": extra_params,
         },
     }
@@ -306,9 +344,11 @@ def main() -> None:
     # --- 可选:仅跑指定 task_id(从 passing_tasks.json 读取) ---
     if args.task_ids_file:
         with open(args.task_ids_file) as f:
-            task_ids_map = json.load(f)   # {domain: [task_id, ...]}
+            task_ids_map = json.load(f)  # {domain: [task_id, ...]}
         # 自动把 subsets 限制到有 task 的 domain
-        args.subsets = [d for d in args.subsets if d in task_ids_map and task_ids_map[d]]
+        args.subsets = [
+            d for d in args.subsets if d in task_ids_map and task_ids_map[d]
+        ]
         dataset_args["tau2_bench"]["subset_list"] = args.subsets
         _install_task_filter(task_ids_map)
         total = sum(len(v) for v in task_ids_map.values())
@@ -327,13 +367,13 @@ def main() -> None:
         repeats=args.repeats,
         limit=args.limit,
         work_dir=args.work_dir,
-        ignore_errors=True,       # 单个 task 挂了不拖垮整体
+        ignore_errors=False,  # Any failed task invalidates the smoke evaluation.
         generation_config={
-            "max_tokens":        DEFAULT_AGENT_MAX_TOKENS,
-            "temperature":       args.temperature,
-            "top_p":             args.top_p,
+            "max_tokens": DEFAULT_AGENT_MAX_TOKENS,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
             # 防止 Qwen3 thinking 时进入 repetition loop
-            "presence_penalty":  0.3,
+            "presence_penalty": 0.3,
             "frequency_penalty": 0.3,
         },
     )
@@ -345,7 +385,9 @@ def main() -> None:
 
     # 尝试打印个 summary;run_task 返回结构体随 evalscope 版本变,所以兜底
     try:
-        print(f"\nSummary: {json.dumps(result, indent=2, default=str, ensure_ascii=False)[:2000]}")
+        print(
+            f"\nSummary: {json.dumps(result, indent=2, default=str, ensure_ascii=False)[:2000]}"
+        )
     except Exception:
         print(f"(raw result: {result})")
 
