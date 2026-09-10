@@ -77,10 +77,12 @@ class TensorTrace:
         *,
         identity: dict[str, Any],
         max_pending_bytes: int = 4 * 1024**3,
-        compression: str = "none",
+        compression: str | None = None,
     ) -> None:
         if max_pending_bytes <= 0:
             raise ValueError("max_pending_bytes must be positive")
+        if compression is None:
+            compression = os.environ.get("K3_TRACE_COMPRESSION", "none")
         if compression not in {"none", "deflate"}:
             raise ValueError("compression must be none or deflate")
         self._compression = compression

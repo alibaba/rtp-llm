@@ -7,6 +7,7 @@ import tempfile
 import threading
 import types
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -64,7 +65,11 @@ class ModelTraceTest(unittest.TestCase):
         self.root = Path(temp.name)
         env = patch.dict(
             os.environ,
-            {"K3_TRACE_ROOT": str(self.root), "K3_TRACE_RUN_ID": "model-test"},
+            {
+                "K3_TRACE_ROOT": str(self.root),
+                "K3_TRACE_RUN_ID": "model-test",
+                "K3_TRACE_COMPRESSION": "deflate",
+            },
         )
         env.start()
         self.addCleanup(env.stop)
@@ -83,6 +88,14 @@ class ModelTraceTest(unittest.TestCase):
         model = ToyModel("main")
         model(inputs(torch.tensor([[1.0, 2.0]])))
         tracing.close_models()
+        for path in self.root.glob("model-main-*/frame-*.pt"):
+            with zipfile.ZipFile(path) as archive:
+                self.assertTrue(
+                    all(
+                        m.compress_type == zipfile.ZIP_DEFLATED
+                        for m in archive.infolist()
+                    )
+                )
         frame = self.frames()[0]
         tensors = {item["name"]: item["value"] for item in frame["tensors"]}
         torch.testing.assert_close(
