@@ -777,6 +777,135 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         # The reversible drain was rolled back on every control rank.
         self.assertEqual(wake_calls["n"], len(addresses))
 
+    async def test_drain_rollback_keeps_lease_through_repeated_cancellation(self):
+        for level in (1, 2):
+            for prepare_cancelled in (False, True):
+                for cancel_rollback in (False, True):
+                    with self.subTest(
+                        level=level,
+                        prepare_cancelled=prepare_cancelled,
+                        cancel_rollback=cancel_rollback,
+                    ):
+                        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+                        store = _FakeStore()
+                        wrapper, pb2 = self._build_wrapper(
+                            control_addresses=addresses,
+                            expected_control_address_count=2,
+                            lifecycle_store=store,
+                        )
+                        states = {address: "RUNNING" for address in addresses}
+                        prepare_entered = asyncio.Event()
+                        rollback_entered = asyncio.Event()
+                        release_rollback = asyncio.Event()
+                        hold_prepare = asyncio.Event()
+
+                        for address in addresses:
+
+                            async def status(*args, address=address, **kwargs):
+                                return self._status_pb(
+                                    pb2, state=states[address], supported_levels=[level]
+                                )
+
+                            async def prepare(
+                                request, *args, address=address, **kwargs
+                            ):
+                                self.assertTrue(request.prepare_only)
+                                self.assertFalse(request.commit_only)
+                                states[address] = "DRAINING"
+                                if address == addresses[1]:
+                                    prepare_entered.set()
+                                    if prepare_cancelled:
+                                        await hold_prepare.wait()
+                                    raise self._aio_error(
+                                        grpc.StatusCode.FAILED_PRECONDITION,
+                                        "drain timed out",
+                                    )
+                                return pb2.EmptyPB()
+
+                            async def rollback(
+                                request, *args, address=address, **kwargs
+                            ):
+                                if address == addresses[1]:
+                                    rollback_entered.set()
+                                    await release_rollback.wait()
+                                states[address] = "RUNNING"
+                                return pb2.EmptyPB()
+
+                            stub = wrapper._dp_stubs[address]
+                            stub.GetSleepStatus = AsyncMock(side_effect=status)
+                            stub.SleepServing = AsyncMock(side_effect=prepare)
+                            stub.WakeUpServing = AsyncMock(side_effect=rollback)
+
+                        task = asyncio.create_task(
+                            wrapper.sleep_serving({"level": level, "timeout_ms": 1})
+                        )
+                        if prepare_cancelled:
+                            await asyncio.wait_for(prepare_entered.wait(), timeout=5)
+                            task.cancel()
+                        await asyncio.wait_for(rollback_entered.wait(), timeout=5)
+                        try:
+                            if cancel_rollback:
+                                for _ in range(2):
+                                    task.cancel()
+                                    await asyncio.sleep(0)
+                            self.assertFalse(task.done())
+                            self.assertTrue(wrapper._lifecycle_lock.locked())
+                            self.assertTrue(store.values[wrapper.LIFECYCLE_LEASE_KEY])
+                        finally:
+                            release_rollback.set()
+                        if prepare_cancelled:
+                            with self.assertRaises(asyncio.CancelledError):
+                                await asyncio.wait_for(task, timeout=5)
+                        else:
+                            result = await asyncio.wait_for(task, timeout=5)
+                            self.assertIn("rolled back", result["error"])
+                            self.assertNotIn("recovery_required", result)
+                        self.assertEqual(set(states.values()), {"RUNNING"})
+                        self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+                        self.assertFalse(wrapper._lifecycle_lock.locked())
+                        next_status = await wrapper._initial_lifecycle_status("wake_up")
+                        self.assertEqual(next_status["state"], "RUNNING")
+                        for address in addresses:
+                            wrapper._dp_stubs[
+                                address
+                            ].SleepServing.assert_awaited_once()
+                            wrapper._dp_stubs[
+                                address
+                            ].WakeUpServing.assert_awaited_once()
+
+    async def test_drain_rollback_checks_status_and_preserves_both_failures(self):
+        for failure in ("state", "resource", "status_rpc", "rollback_rpc"):
+            with self.subTest(failure=failure):
+                addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+                wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+                for address in addresses:
+                    stub = wrapper._dp_stubs[address]
+                    stub.GetSleepStatus = AsyncMock(return_value=self._status_pb(pb2))
+                    stub.SleepServing = AsyncMock(return_value=pb2.EmptyPB())
+                    stub.WakeUpServing = AsyncMock(return_value=pb2.EmptyPB())
+                failing = wrapper._dp_stubs[addresses[1]]
+                failing.SleepServing.side_effect = self._aio_error(
+                    grpc.StatusCode.FAILED_PRECONDITION, "drain timed out"
+                )
+                after = self._status_pb(pb2)
+                if failure == "state":
+                    after = self._status_pb(pb2, state="DRAINING")
+                elif failure == "resource":
+                    after = self._status_pb(pb2, device_kv_cache_valid=False)
+                elif failure == "status_rpc":
+                    after = self._aio_error(grpc.StatusCode.UNAVAILABLE, "status lost")
+                else:
+                    failing.WakeUpServing.side_effect = self._aio_error(
+                        grpc.StatusCode.UNAVAILABLE, "rollback lost"
+                    )
+                failing.GetSleepStatus.side_effect = [self._status_pb(pb2), after]
+
+                result = await wrapper.sleep_serving({"level": 2, "timeout_ms": 1})
+                self.assertTrue(result["recovery_required"])
+                self.assertIn("RECOVERY_REQUIRED", result["error"])
+                self.assertIn("drain timed out", result["details"][0]["error"])
+                self.assertGreaterEqual(len(result["details"]), 2)
+
     async def test_get_sleep_status_exposes_in_progress_states_for_control_plane(self):
         cases = [
             ("DRAINING", "ACTIVE", "sleep"),

@@ -318,10 +318,10 @@ class GrpcClientWrapper:
     async def _initial_lifecycle_status(self, operation: str) -> Dict[str, Any]:
         """Probe the pre-condition state shared by every control rank.
 
-        Contract (intended, not a limitation): sleep and wake_up are atomic,
-        uninterruptible instance-wide transitions with no addressable
-        intermediate state. Either every control rank is in the same state, or
-        the instance is faulted. A mixed rank state -- e.g. some ranks SLEEPING
+        Each operation owns the instance-wide lease through its terminal state.
+        Drain may roll back under that lease; after resource release starts,
+        sleep/wake must converge despite request cancellation. A mixed rank
+        state left by a previous operation -- e.g. some ranks SLEEPING
         while others are still DRAINING/WAKING_UP -- is therefore reported as
         ``RECOVERY_REQUIRED`` (FAILED_PRECONDITION) and the caller must restart
         the instance; we deliberately do NOT try to reconcile the ranks forward
@@ -356,8 +356,7 @@ class GrpcClientWrapper:
         return status
 
     async def _drive_to_terminal(self, coro: Any) -> Any:
-        """Run an irreversible lifecycle transition to completion even if the
-        driving request coroutine is cancelled.
+        """Finish a lifecycle commit or drain rollback despite request cancellation.
 
         Once an irreversible phase has started running the GPU-release /
         GPU-restore hooks there is no consistent rollback: freed device memory
@@ -369,6 +368,10 @@ class GrpcClientWrapper:
         half-committed and release the lifecycle lease -- that is the
         control-plane split brain that leaves the instance with half its device
         memory freed and no owner driving it to a consistent state.
+
+        A reversible prepare may be cancelled, but its rollback must likewise
+        finish before releasing the instance lease. Cancelling that compensation
+        would strand drained ranks with admission closed and no coordinator.
 
         So we absorb the cancellation and keep awaiting until the backend
         converges, then report the true terminal state to whoever is left. Both
@@ -398,6 +401,40 @@ class GrpcClientWrapper:
                 "half-committed instance"
             )
         return result
+
+    async def _rollback_sleep_prepare(self) -> List[Dict[str, Any]]:
+        """Abort drain and verify every rank is usable before returning ownership.
+
+        Called only before commit, inside ``_drive_to_terminal``. RPC success
+        alone is not proof of recovery; keep the lease through the status probe.
+        In-flight requests may still be running, so their counts need not be zero.
+        """
+        results = await self._broadcast_control_rpc(
+            "WakeUpServing", pb2.WakeUpRequestPB(), timeout_s=60
+        )
+        statuses = await self._raw_sleep_statuses()
+        if {status.get("address") for status in statuses} != set(
+            self.control_addresses
+        ) or len(statuses) != len(self.control_addresses):
+            results.append({"error": "drain rollback status coverage is incomplete"})
+        for status in statuses:
+            if "error" in status:
+                results.append(status)
+            elif (
+                status.get("state") != "RUNNING"
+                or status.get("gpu_resource_state") != "ACTIVE"
+                or status.get("kv_memory_state") != "ACTIVE"
+                or not status.get("device_kv_cache_valid", False)
+            ):
+                results.append(
+                    {
+                        "address": status.get("address", ""),
+                        "error": "drain rollback did not restore RUNNING with valid "
+                        f"GPU/KV resources: {status}",
+                        "grpc_status": "FAILED_PRECONDITION",
+                    }
+                )
+        return results
 
     async def _converge_commit(
         self,
@@ -597,16 +634,22 @@ class GrpcClientWrapper:
                 logging.warning(
                     "sleep prepare cancelled; rolling back drain to RUNNING"
                 )
-                await self._drive_to_terminal(
-                    self._broadcast_control_rpc(
-                        "WakeUpServing", pb2.WakeUpRequestPB(), timeout_s=60
-                    )
+                abort_results = await self._drive_to_terminal(
+                    self._rollback_sleep_prepare()
                 )
+                if any("error" in result for result in abort_results):
+                    return {
+                        "error": "RECOVERY_REQUIRED: cancelled sleep prepare failed "
+                        "to roll back; restart the instance",
+                        "grpc_status": "FAILED_PRECONDITION",
+                        "recovery_required": True,
+                        "details": error_details(abort_results),
+                    }
                 raise
             failures = [result for result in prepare_results if "error" in result]
             if failures:
-                abort_results = await self._broadcast_control_rpc(
-                    "WakeUpServing", pb2.WakeUpRequestPB(), timeout_s=60
+                abort_results = await self._drive_to_terminal(
+                    self._rollback_sleep_prepare()
                 )
                 abort_failures = [r for r in abort_results if "error" in r]
                 if abort_failures:
@@ -618,10 +661,12 @@ class GrpcClientWrapper:
                     # response, or the control plane will believe only prepare failed
                     # and never learn the rollback did not take.
                     return {
-                        "error": "Failed to prepare sleep and failed to roll back on "
+                        "error": "RECOVERY_REQUIRED: failed to prepare sleep and "
+                        "failed to roll back on "
                         "some control ranks; instance may be in an inconsistent state, "
-                        "issue wake_up or restart the process to recover",
+                        "restart the instance to recover",
                         "grpc_status": "FAILED_PRECONDITION",
+                        "recovery_required": True,
                         "details": error_details(prepare_results)
                         + error_details(abort_results),
                     }
@@ -631,12 +676,11 @@ class GrpcClientWrapper:
                     "details": error_details(prepare_results),
                 }
 
-            # commit runs the GPU-release hooks; for level-2 that includes dumping
-            # the ~weights-sized raw backup to disk, which can take far longer than
-            # a level-1 tms pause. Reuse the drain-derived headroom so a slow dump
-            # does not spuriously trip the commit deadline. Once commit starts the
-            # device memory release is irreversible, so drive it to the terminal
-            # SLEEPING state even if this request is cancelled.
+            # Commit releases GPU resources. Level 2 discards weight pages
+            # without writing a backup; wake reloads the original checkpoint.
+            # The request timeout bounds drain, not cancellation of a commit:
+            # once release starts, drive all ranks to SLEEPING (or report a
+            # recovery-required failure), even if this request is cancelled.
             return await self._drive_to_terminal(
                 self._converge_commit(
                     operation="commit sleep",
