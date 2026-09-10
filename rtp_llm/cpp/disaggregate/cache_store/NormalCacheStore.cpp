@@ -5,9 +5,22 @@
 
 #include "autil/LockFreeThreadPool.h"
 
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace rtp_llm {
+
+// [KVDIAG] opt-in (RTP_LLM_KV_DIAG=1) tracing of the PD KV-load contract; see
+// runStoreTask below for what it records and why.
+static bool kvDiagEnabled() {
+    static const bool value = [] {
+        const char* e = ::getenv("RTP_LLM_KV_DIAG");
+        return e != nullptr && *e != '\0' && std::string(e) != "0";
+    }();
+    return value;
+}
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
@@ -150,6 +163,36 @@ void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&  
 
     auto ret = request_block_buffer_store_->setRequestBlockBuffer(request_block_buffer);
     collector->markEnd(ret);
+
+    // [KVDIAG] the PUBLICATION record - producer half of the PD KV-load contract.
+    // Compare requestId/requestKey and the per-block keys+lens against the decode
+    // side's [KVDIAG-D-REQ]. Logged on SUCCESSFUL INSERTION, not merely task
+    // submission: a submitted task that never lands in the store leaves the peer's
+    // watch waiting until the deadline, which is the same timeout symptom as a key
+    // mismatch but a different cause.
+    if (kvDiagEnabled()) {
+        static std::atomic<int> pub_budget{8000};
+        if (pub_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            auto        blocks = request_block_buffer->getBlocks();
+            std::string keys;
+            size_t      total_bytes = 0;
+            int         shown       = 0;
+            for (const auto& kv : blocks) {
+                const auto len = kv.second ? kv.second->len : 0;
+                total_bytes += len;
+                if (shown++ < 3) {
+                    keys += kv.first + "(" + std::to_string(len) + "),";
+                }
+            }
+            RTP_LLM_LOG_WARNING("[KVDIAG-P-PUB] inserted=%d requestId=%s requestKey=%s blocks=%zu bytes=%zu first=[%s]",
+                                (int)ret,
+                                request_block_buffer->getRequestId().c_str(),
+                                request_block_buffer->getRequestKey().c_str(),
+                                blocks.size(),
+                                total_bytes,
+                                keys.c_str());
+        }
+    }
 
     if (!ret) {
         RTP_LLM_LOG_WARNING("normal cache store run store task failed, request id is %s",

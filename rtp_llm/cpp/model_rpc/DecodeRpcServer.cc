@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <mutex>
 #include <memory>
 #include <unistd.h>
@@ -28,6 +30,22 @@ using grpc::ClientAsyncResponseReader;
 const int LOAD_TIMEOUT_MS         = 5 * 1000;
 const int EXTRA_TIMEOUT_MS        = 100;
 const int RDMA_CONNECT_RETRY_TIME = 3;
+
+// [KVDIAG] opt-in (RTP_LLM_KV_DIAG=1) tracing of the PD KV-load CONTRACT: what the
+// decode side demands (peer list, prefill_cp_size, per layer/group request keys and
+// block counts) versus what the prefill side publishes. Every field below is
+// otherwise DEBUG-only, so a KV-load timeout is undiagnosable without it:
+// CACHE_STORE_LOAD_BUFFER_TIMEOUT after the deadline says only "no matching buffer
+// ever appeared", not whether the peer set, the CP mapping or the keys diverged.
+// Default off; every site is budget-limited because one 8K request produces ~528
+// per-rank load calls.
+static bool kvDiagEnabled() {
+    static const bool value = [] {
+        const char* e = ::getenv("RTP_LLM_KV_DIAG");
+        return e != nullptr && *e != '\0' && std::string(e) != "0";
+    }();
+    return value;
+}
 
 #define GRPC_RET_IF_ERROR(decode_context, stat, code, msg)                                                             \
     if (!(stat)) {                                                                                                     \
@@ -116,6 +134,35 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                 decode_context.request_key.c_str(),
                                 decode_context.prefill_cp_size,
                                 configured_prefill_cp_size);
+    }
+    if (kvDiagEnabled()) {
+        // The single most decisive value in the whole KV-load path: it selects the
+        // peer-assignment branch in constructRemoteLoadRequestForMla. It arrives on
+        // the ALLOCATE message from prefill, and the consistency CHECK above only
+        // runs when the decode leg itself was booted with --prefill_cp_kv_cache_sharded,
+        // so a wrong value is otherwise silent.
+        static std::atomic<int> ctx_budget{200};
+        if (ctx_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            std::string peers;
+            for (const auto& a : decode_context.peer_addrs) {
+                peers += a + ",";
+            }
+            RTP_LLM_LOG_WARNING(
+                "[KVDIAG-D-CTX] key=%s req_id=%ld prefill_cp_size=%d (raw from ALLOCATE=%d) peers=%zu[%s] "
+                "workers=%zu dp_rank=%d tp_rank=%d world_rank=%d kv_sharded=%d cp_prefill_enabled=%d",
+                decode_context.request_key.c_str(),
+                (long)decode_context.request_id,
+                decode_context.prefill_cp_size,
+                allocate_request.prefill_cp_size(),
+                decode_context.peer_addrs.size(),
+                peers.c_str(),
+                resource_.workers.size(),
+                (int)maga_init_params_.parallelism_config.dp_rank,
+                (int)maga_init_params_.parallelism_config.tp_rank,
+                (int)maga_init_params_.parallelism_config.world_rank,
+                (int)maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded,
+                (int)maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled());
+        }
     }
     RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d",
                       decode_context.request_key.c_str(),
@@ -321,6 +368,28 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
         // P >= D, load multi block of prefill
         int group_num = peer_addrs.size() / resource_.workers.size();
         request.add_peer_addrs(peer_addrs[index * group_num]);
+    }
+    if (kvDiagEnabled()) {
+        static std::atomic<int> peer_budget{400};
+        if (peer_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            std::string chosen;
+            for (const auto& a : request.peer_addrs()) {
+                chosen += a + ",";
+            }
+            RTP_LLM_LOG_WARNING(
+                "[KVDIAG-D-PEER] req_id=%ld index=%d cp_size=%d branch=%s workers=%zu peers=%zu chosen=[%s] "
+                "cache_keys=%zu dp_rank=%d",
+                (long)load_context.request_id,
+                index,
+                load_context.prefill_cp_size,
+                load_context.prefill_cp_size > 1 ? "CP-SHARDED(all peers)"
+                : (resource_.workers.size() % peer_addrs.size() == 0 ? "D>=P(part_cnt)" : "P>=D(group_num)"),
+                resource_.workers.size(),
+                peer_addrs.size(),
+                chosen.c_str(),
+                load_context.cache_keys.size(),
+                request.dp_rank());
+        }
     }
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
@@ -948,6 +1017,27 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             addBufBlock("k_scale_" + cache_key, parts[2]);
                             addBufBlock("v_scale_" + cache_key, parts[3]);
                         }
+                    }
+                }
+                if (kvDiagEnabled()) {
+                    // Per (peer, layer, group) DEMAND record. Compare against the
+                    // prefill side's [KVDIAG-P-PUB] keys: blocks=0 here means the
+                    // shouldLoad*FromPeer / cacheKeyIndexForBlock filters dropped
+                    // everything for this peer, which also produces a load timeout
+                    // but for the opposite reason (nothing requested, versus
+                    // something requested that was never published).
+                    static std::atomic<int> req_budget{6000};
+                    if (req_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                        RTP_LLM_LOG_WARNING(
+                            "[KVDIAG-D-REQ] peer[%zu]=%s layer=%zu gid=%zu region=%d key=%s blocks=%zu block_num=%zu",
+                            (size_t)i,
+                            peer_addr.c_str(),
+                            layer_id,
+                            gid,
+                            (int)region_name,
+                            request_key.c_str(),
+                            load_layer_cache->getBlocksCount(),
+                            block_num);
                     }
                 }
                 layer_caches.push_back(load_layer_cache);

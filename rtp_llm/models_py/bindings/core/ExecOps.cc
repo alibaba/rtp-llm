@@ -141,6 +141,19 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
 // CacheStore (cache_store passed explicitly from KVCacheManager)
 // ============================================================
 
+// [KVDIAG] opt-in (RTP_LLM_KV_DIAG=1). The three gates below are the "no
+// publication" class of PD KV-load timeout: if any of them fires, prefill writes
+// nothing, the decode side's watch never triggers, and the only symptom is
+// CACHE_STORE_LOAD_BUFFER_TIMEOUT after the full deadline. All three were logged
+// at DEBUG only, which is invisible in a normal run.
+static bool kvDiagEnabled() {
+    static const bool value = [] {
+        const char* e = ::getenv("RTP_LLM_KV_DIAG");
+        return e != nullptr && *e != '\0' && std::string(e) != "0";
+    }();
+    return value;
+}
+
 void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             const KvCacheInfo&          kv_cache,
                             bool                        mla_kvcache,
@@ -150,14 +163,81 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         return;
     }
     if (!cache_store_inputs.pd_separation || cache_store_inputs.context_batch_size == 0) {
+        if (kvDiagEnabled()) {
+            static std::atomic<int> gate_budget{400};
+            if (gate_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                RTP_LLM_LOG_WARNING(
+                    "[KVDIAG-P-GATE] SKIP write (no publication): pd_sep=%d ctx_bs=%zu dec_bs=%zu model_id=%zu "
+                    "layer=%d region=%d cp=%d/%d cache_keys=%zu decode_entrance=%d opaque=%d req_id_t=%d/%d/%ld "
+                    "req_pd_sep_t=%d/%d/%ld",
+                    (int)cache_store_inputs.pd_separation,
+                    cache_store_inputs.context_batch_size,
+                    cache_store_inputs.decoder_batch_size,
+                    cache_store_inputs.model_id,
+                    cache_store_inputs.layer_id,
+                    (int)cache_store_inputs.region_name,
+                    cache_store_inputs.cp_rank,
+                    cache_store_inputs.cp_size,
+                    cache_store_inputs.cache_keys.size(),
+                    (int)cache_store_inputs.decode_entrance,
+                    (int)cache_store_inputs.use_opaque_kv_cache_store,
+                    (int)cache_store_inputs.request_id.defined(),
+                    (int)(cache_store_inputs.request_id.defined() && cache_store_inputs.request_id.is_cpu()),
+                    (long)(cache_store_inputs.request_id.defined() ? cache_store_inputs.request_id.numel() : -1),
+                    (int)cache_store_inputs.request_pd_separation.defined(),
+                    (int)(cache_store_inputs.request_pd_separation.defined()
+                          && cache_store_inputs.request_pd_separation.is_cpu()),
+                    (long)(cache_store_inputs.request_pd_separation.defined() ?
+                               cache_store_inputs.request_pd_separation.numel() :
+                               -1));
+            }
+        }
         RTP_LLM_LOG_DEBUG("pd_separation = %d, context_batch_size = %d, so ignore writeCacheStore",
                           cache_store_inputs.pd_separation,
                           cache_store_inputs.context_batch_size);
         return;
     }
     if (!cache_store) {
+        if (kvDiagEnabled()) {
+            static std::atomic<int> null_budget{100};
+            if (null_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                RTP_LLM_LOG_WARNING("[KVDIAG-P-GATE] SKIP write: cache_store is NULL (model_id=%zu layer=%d cp=%d/%d)",
+                                    cache_store_inputs.model_id,
+                                    cache_store_inputs.layer_id,
+                                    cache_store_inputs.cp_rank,
+                                    cache_store_inputs.cp_size);
+            }
+        }
         RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
         return;
+    }
+    if (kvDiagEnabled()) {
+        // All gates passed: prefill really is attempting to publish. The CP fields
+        // are the interesting ones - with cp_size>1 the writer re-pairs
+        // (cache_keys[r + i*cp_size], offset[i]) instead of the legacy
+        // (cache_keys[i], offset[i]), so a disagreement with the decode side's
+        // cacheKeyIndexForBlock shows up as a block-KEY mismatch, not a count
+        // mismatch. See OpData.h's CacheStoreInputs comment.
+        static std::atomic<int> write_budget{6000};
+        if (write_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_WARNING(
+                "[KVDIAG-P-WRITE] proceed: model_id=%zu layer=%d region=%d cp=%d/%d ctx_bs=%zu dec_bs=%zu "
+                "cache_keys=%zu first_key=%s tokens_per_block=%zu opaque=%d mla=%d kv_stride=%zu scale_stride=%zu",
+                cache_store_inputs.model_id,
+                cache_store_inputs.layer_id,
+                (int)cache_store_inputs.region_name,
+                cache_store_inputs.cp_rank,
+                cache_store_inputs.cp_size,
+                cache_store_inputs.context_batch_size,
+                cache_store_inputs.decoder_batch_size,
+                cache_store_inputs.cache_keys.size(),
+                cache_store_inputs.cache_keys.empty() ? "<none>" : cache_store_inputs.cache_keys[0].c_str(),
+                cache_store_inputs.tokens_per_block,
+                (int)cache_store_inputs.use_opaque_kv_cache_store,
+                (int)mla_kvcache,
+                cache_store_inputs.kv_block_stride_bytes,
+                cache_store_inputs.kv_scale_stride_bytes);
+        }
     }
 
     // Wait for the CUDA event before reading pinned-host metadata.

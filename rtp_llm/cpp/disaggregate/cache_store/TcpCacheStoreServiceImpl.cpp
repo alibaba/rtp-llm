@@ -5,7 +5,26 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheTransferServiceImplContext.h"
 
+#include <atomic>
+#include <cstdlib>
+#include <string>
+
 namespace rtp_llm {
+
+// [KVDIAG] opt-in (RTP_LLM_KV_DIAG=1): the SERVER half of the PD KV-load contract.
+// The decode side's load RPC lands here; a watch is registered keyed by
+// request->requestid() and armed with request->timeout_ms(). If nothing is ever
+// published under that id, the timer fires and the caller sees only
+// CACHE_STORE_LOAD_BUFFER_TIMEOUT - which cannot distinguish "request never
+// arrived", "arrived but no publication matched" and "matched but the transfer did
+// not complete". These markers make that distinction.
+static bool kvDiagEnabled() {
+    static const bool value = [] {
+        const char* e = ::getenv("RTP_LLM_KV_DIAG");
+        return e != nullptr && *e != '\0' && std::string(e) != "0";
+    }();
+    return value;
+}
 
 TcpCacheStoreServiceImpl::TcpCacheStoreServiceImpl(
     const std::shared_ptr<MemoryUtil>&               memory_util,
@@ -48,7 +67,44 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
         return;
     }
 
-    auto timer_callback = [context]() { context->runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER); };
+    if (kvDiagEnabled()) {
+        static std::atomic<int> in_budget{8000};
+        if (in_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            std::string keys;
+            size_t      total_bytes = 0;
+            for (int i = 0; i < request->blocks_size(); ++i) {
+                const auto& b = request->blocks(i);
+                total_bytes += b.len();
+                if (i < 3) {
+                    keys += b.key() + "(" + std::to_string(b.len()) + "),";
+                }
+            }
+            RTP_LLM_LOG_WARNING(
+                "[KVDIAG-P-SVC] load IN: requestid=%s from=%s timeout_ms=%ld blocks=%d bytes=%zu first=[%s]",
+                request->requestid().c_str(),
+                request->client_ip().c_str(),
+                (long)request->timeout_ms(),
+                request->blocks_size(),
+                total_bytes,
+                keys.c_str());
+        }
+    }
+
+    // Captured by value so the timeout log can still name the request after the
+    // protobuf request object's owner has moved on.
+    const std::string diag_requestid = request->requestid();
+    auto              timer_callback = [context, diag_requestid]() {
+        if (kvDiagEnabled()) {
+            static std::atomic<int> to_budget{8000};
+            if (to_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                RTP_LLM_LOG_WARNING(
+                    "[KVDIAG-P-SVC] WATCH TIMEOUT: no publication ever matched requestid=%s - the decode side will "
+                    "see CACHE_STORE_LOAD_BUFFER_TIMEOUT for this one",
+                    diag_requestid.c_str());
+            }
+        }
+        context->runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
+    };
 
     auto timer = timer_manager_->addTimer(request->timeout_ms(), std::move(timer_callback));
     if (timer == nullptr) {
@@ -73,6 +129,12 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
             request->requestid().c_str(),
             request->client_ip().c_str());
         context->runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_LOAD_BUFFER);
+    } else if (kvDiagEnabled()) {
+        static std::atomic<int> watch_budget{8000};
+        if (watch_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_WARNING("[KVDIAG-P-SVC] watch REGISTERED for requestid=%s (waiting for a matching publication)",
+                                request->requestid().c_str());
+        }
     }
 }
 
