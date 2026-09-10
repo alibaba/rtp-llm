@@ -130,6 +130,8 @@ void KVCacheResource::initGroups(int                                  group_num,
     group_block_ids.clear();
     layer_block_ids.clear();
     layer_region_block_ids.clear();
+    linear_replay_prefix_limits_.clear();
+    linear_replay_active_begins_.clear();
 
     if (!group_types.empty()) {
         RTP_LLM_CHECK_WITH_INFO(group_types.size() >= static_cast<size_t>(group_num),

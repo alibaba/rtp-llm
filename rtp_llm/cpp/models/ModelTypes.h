@@ -92,6 +92,8 @@ enum GptModelInputIndex : size_t {
     gptModelRequestLength,  // length of request id & pd_separation
     pdSeparation,
     isFakeStream,
+    linearReplayBatch,
+    linearReplayGroups,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,

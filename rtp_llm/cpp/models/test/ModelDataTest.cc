@@ -50,6 +50,35 @@ public:
 
 class ModelDataTest: public DeviceTestBase {};
 
+TEST(LinearReplayInputsTest, RequestSlicePreservesPhysicalGroupsAndInt64Epochs) {
+    auto inputs = LinearReplayInputs::allocate(8, 3, torch::kCPU);
+    inputs.slot_ids.copy_(torch::arange(8, torch::kInt32));
+    inputs.active_block_ids.copy_(torch::arange(24, torch::kInt32).reshape({3, 8}));
+    inputs.state_read_block_ids.copy_(inputs.active_block_ids + 100);
+    const int64_t epoch = int64_t{1} << 40;
+    inputs.verify_epochs.fill_(epoch);
+    inputs.slot_generations.fill_(epoch + 1);
+
+    auto rows = inputs.slice(2, 3);
+    EXPECT_EQ(rows.slot_ids.sizes(), torch::IntArrayRef({3}));
+    EXPECT_EQ(rows.active_block_ids.sizes(), torch::IntArrayRef({3, 3}));
+    EXPECT_EQ(rows.active_block_ids.stride(0), 8);
+    EXPECT_FALSE(rows.active_block_ids.is_contiguous());
+    EXPECT_TRUE(torch::equal(rows.slot_ids, torch::tensor({2, 3, 4}, torch::kInt32)));
+    EXPECT_TRUE(
+        torch::equal(rows.active_block_ids, torch::tensor({{2, 3, 4}, {10, 11, 12}, {18, 19, 20}}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(rows.state_read_block_ids, rows.active_block_ids + 100));
+    EXPECT_EQ(rows.verify_epochs.scalar_type(), torch::kInt64);
+    EXPECT_EQ(rows.verify_epochs[0].item<int64_t>(), epoch);
+    EXPECT_EQ(rows.slot_generations[0].item<int64_t>(), epoch + 1);
+
+    // Graph slices must keep the same pool backing, including after the parent is released.
+    auto* backing = rows.active_block_ids.data_ptr<int>();
+    inputs        = LinearReplayInputs{};
+    EXPECT_EQ(rows.active_block_ids.data_ptr<int>(), backing);
+    EXPECT_EQ(rows.active_block_ids[2][2].item<int>(), 20);
+}
+
 TEST_F(ModelDataTest, testConstruct) {
     SamplerDataBuilder builder;
     SamplerInputs      sampler_inputs   = builder.allocate({4, 1024, 1024});

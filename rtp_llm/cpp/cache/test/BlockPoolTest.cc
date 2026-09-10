@@ -516,6 +516,32 @@ TEST_F(BlockPoolTest, MixedAllocFreeOperations) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), 9);
 }
 
+TEST_F(BlockPoolTest, ReplayHoldsPreservePagesWithoutForcingCopyOnWrite) {
+    block_pool_ = std::make_shared<BlockPool>(createTestConfig());
+    ASSERT_TRUE(block_pool_->init());
+    const auto blocks = block_pool_->malloc(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto block = blocks[0];
+    EXPECT_FALSE(block_pool_->needsReplayCopyOnWrite(block));
+    block_pool_->replayReference(blocks);
+    EXPECT_FALSE(block_pool_->needsReplayCopyOnWrite(block));
+    block_pool_->requestReference(blocks);
+    EXPECT_TRUE(block_pool_->needsReplayCopyOnWrite(block));
+    block_pool_->requestFree(blocks);
+    block_pool_->blockCacheReference(blocks);
+    EXPECT_TRUE(block_pool_->needsReplayCopyOnWrite(block));
+    block_pool_->blockCacheFree(blocks);
+    block_pool_->connectorReference(blocks);
+    EXPECT_TRUE(block_pool_->needsReplayCopyOnWrite(block));
+    block_pool_->connectorFree(blocks);
+    EXPECT_FALSE(block_pool_->needsReplayCopyOnWrite(block));
+    const auto free_before = block_pool_->freeBlocksNum();
+    block_pool_->requestFree(blocks);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before);
+    block_pool_->replayFree(blocks);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before + 1);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

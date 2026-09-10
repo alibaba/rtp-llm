@@ -29,6 +29,13 @@ py_library(
 )
 
 py_library(
+    name = "linear_replay",
+    srcs = ["linear_replay.py"],
+    deps = [":fla"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
     visibility = ["//visibility:public"]
@@ -66,6 +73,7 @@ py_library(
         ":sparse_mla",
         ":autotune_cache",
         ":kimi_kda",
+        ":linear_replay",
         ":zigzag_permute",
     ],
     visibility = ["//visibility:public"]

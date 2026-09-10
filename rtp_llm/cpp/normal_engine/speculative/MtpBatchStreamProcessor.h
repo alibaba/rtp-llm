@@ -36,6 +36,12 @@ public:
                                                           TensorHolder&       host_holder,
                                                           bool                skip_linear_cache_groups = false) const;
 
+    absl::Status gatherLinearReplayInputs(const StreamGroups&                             stream_groups,
+                                          const CacheConfig&                              cache_config,
+                                          GptModelInputs&                                 model_input,
+                                          TensorHolder&                                   host_holder,
+                                          std::vector<GenerateStream::LinearReplayRound>& rounds) const;
+
     absl::StatusOr<SamplerInputs>
     gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                            const GptModelInputs&                       model_inputs,

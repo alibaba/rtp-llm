@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
 #include <optional>
@@ -93,6 +94,7 @@ struct GptModelInputs {
     // Optional explicit publication plan. Attention keeps its real token
     // lengths while CacheStore independently publishes a block-aligned range.
     std::optional<CacheStorePublishPlan> cache_store_publish_plan;
+    std::optional<LinearReplayInputs>    linear_replay;
     // Pinned host mirrors retained at gather time. Performance-sensitive
     // Python attention paths consume these instead of synchronously copying
     // CUDA cache metadata back to the host during model forward.
@@ -156,10 +158,7 @@ struct GptModelInputs {
     bool force_disable_sp_run = false;
     bool is_fake_stream       = false;
 
-    // Linear attention target verify should write draft tokens mamba states
-    // to extra kv_cache blocks when normal inference only write last token mamba state.
-    // So, the model has different inference logic for target verify and normal inference.
-    // To select correct inference mode, we need to set this flag manually.
+    // Target verification uses replay logs for LINEAR state and speculative KV for FULL attention.
     bool is_target_verify = false;
 
     // MTP updates the draft cache through a Prefill-shaped forward after target

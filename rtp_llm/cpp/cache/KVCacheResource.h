@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -156,6 +158,36 @@ public:
 
     std::string debugString() const;
 
+    void restrictLinearReplayPrefix(size_t group_id, size_t canonical_slots) {
+        if (linear_replay_prefix_limits_.size() <= group_id) {
+            linear_replay_prefix_limits_.resize(group_id + 1, std::numeric_limits<size_t>::max());
+        }
+        linear_replay_prefix_limits_[group_id] = std::min(linear_replay_prefix_limits_[group_id], canonical_slots);
+    }
+
+    bool canPublishLinearReplayBlock(size_t group_id, size_t position) const {
+        return group_id >= linear_replay_prefix_limits_.size() || position < linear_replay_prefix_limits_[group_id];
+    }
+
+    size_t linearReplayPrefixLimit(size_t group_id) const {
+        return group_id < linear_replay_prefix_limits_.size() ? linear_replay_prefix_limits_[group_id] :
+                                                                std::numeric_limits<size_t>::max();
+    }
+
+    void setLinearReplayActiveBegin(size_t group_id, size_t begin) {
+        if (linear_replay_active_begins_.size() <= group_id) {
+            linear_replay_active_begins_.resize(group_id + 1, std::numeric_limits<size_t>::max());
+        }
+        linear_replay_active_begins_[group_id] = begin;
+    }
+
+    size_t linearReplayActiveBegin(size_t group_id, size_t allocated_end) const {
+        const size_t tail_begin = allocated_end > 2 ? allocated_end - 2 : 0;
+        return group_id < linear_replay_active_begins_.size() ?
+                   std::min(tail_begin, linear_replay_active_begins_[group_id]) :
+                   tail_begin;
+    }
+
 private:
     // layer_id -> block_indices
     LayerBlockIds layer_block_ids;
@@ -166,6 +198,8 @@ private:
     CacheKeysType cache_keys;
     BlockDependenciesType block_dependencies;
     bool cache_keys_are_cp_canonical_{false};
+    std::vector<size_t>   linear_replay_prefix_limits_;
+    std::vector<size_t>   linear_replay_active_begins_;
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};
