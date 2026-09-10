@@ -6,6 +6,7 @@ This private layout is accepted only for the dependency headers audited below.
 """
 
 import hashlib
+import importlib
 import os
 from pathlib import Path
 
@@ -20,6 +21,14 @@ _AUDITED_HEADERS = {
         "90fdb8f27898b1ce1bead6bc4ae3e54ce5edc9d4f6ee47e3169dbbf2d859ff53",
         "fd1935beff098addd2e54512a7ddc37936c04deb9c7b423128fce46be92ba8f7",
     ),  # vLLM DeepGEMM 8b1392b978f5a03c828dd1711090d7fb50958b8a
+    (
+        "f77e3d70460314db39c47a35d5b95289b92e3eb769351859b488ae3a06e95cfe",
+        "66a7dfca57ed43d49670ab2594c642ce3065d409d672e4dcfc812612080131fd",
+    ),  # RTP with the ABI 2 observation-only patch
+    (
+        "90fdb8f27898b1ce1bead6bc4ae3e54ce5edc9d4f6ee47e3169dbbf2d859ff53",
+        "169600e438a24d09665f278beb64c68ee390482c787a9030bf22b3769c99cec1",
+    ),  # vLLM with the ABI 2 observation-only patch
 }
 
 
@@ -83,3 +92,31 @@ def expert_output_tensors(view, expert_ids):
         "expert_ids": expert_ids,
         "valid": valid,
     }
+
+
+def prepare_native_trace_factory(deep_gemm):
+    """Resolve the matching Python/native ABI before any captured invocation."""
+    try:
+        native = importlib.import_module(deep_gemm.__name__ + "._C")
+        buffers = importlib.import_module(deep_gemm.__name__ + ".mega.k3_trace")
+        matching = buffers.ABI_VERSION == 2 and native.k3_trace_abi() == 2
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "Install the ABI 2 K3 native MegaMoE trace dependency"
+        ) from exc
+    if not matching:
+        raise RuntimeError("K3 native MegaMoE trace requires matching ABI 2")
+    return buffers.K3TraceBuffers
+
+
+def native_trace_tensors(trace):
+    """Yield one source rank at a time so eager recording can spill fragments."""
+    for rank in range(trace.tensors["expert_ids"].shape[0]):
+        valid = trace.tensors["expert_ids"][rank] >= 0
+        yield f"source_rank.{rank}.valid", valid
+        for name, tensor in trace.tensors.items():
+            value = tensor[rank]
+            if name != "expert_ids":
+                mask = valid.reshape(valid.shape + (1,) * (value.ndim - valid.ndim))
+                value = torch.where(mask, value, 0)
+            yield f"source_rank.{rank}.{name}", value

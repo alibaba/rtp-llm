@@ -11,7 +11,7 @@
 
 namespace deep_gemm {
 
-// ABI 1. Rows are (source rank, source token, top-k slot). Only the owner
+// ABI 2. Rows are (source rank, source token, top-k slot). Only the owner
 // of a routed expert writes that row. Reset expert_ids to -1 before each call.
 struct K3MegaMoETrace {
     float*    fc1;
@@ -20,9 +20,10 @@ struct K3MegaMoETrace {
     uint8_t*  fp8;
     uint8_t*  scales;
     int32_t*  expert_ids;
+    int32_t*  overflow;
 
     K3_TRACE_HD static constexpr size_t bytes(size_t slots, size_t width) {
-        return slots * (17 * width + width / 32 + sizeof(int32_t));
+        return slots * (17 * width + width / 32 + sizeof(int32_t)) + sizeof(int32_t);
     }
 
     K3_TRACE_HD K3MegaMoETrace(void* raw, size_t slots, size_t width) {
@@ -38,6 +39,7 @@ struct K3MegaMoETrace {
         scales = p;
         p += slots * width / 32;
         expert_ids = reinterpret_cast<int32_t*>(p);
+        overflow   = expert_ids + slots;
     }
 };
 

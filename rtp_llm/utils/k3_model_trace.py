@@ -44,7 +44,7 @@ def _tensor_tree(name, value):
         yield from _tensor_tree(f"{name}.hidden_states", value.hidden_states)
 
 
-def record_model(name, value):
+def record_model(name, value, *, assert_zero=False):
     """Snapshot a named intermediate into the current model/capture frame."""
     if not enabled() or getattr(_local, "suspended", 0):
         return
@@ -53,13 +53,13 @@ def record_model(name, value):
         raise RuntimeError(f"K3 model observation outside model frame: {name}")
     trace = stack[-1]
     for tensor_name, tensor in _tensor_tree(name, value):
-        trace.record(tensor_name, tensor)
+        trace.record(tensor_name, tensor, assert_zero=assert_zero)
 
 
-def record_module(module, name, value):
+def record_module(module, name, value, *, assert_zero=False):
     if not enabled() or getattr(_local, "suspended", 0):
         return
-    record_model(f"{module._k3_trace_path}.{name}", value)
+    record_model(f"{module._k3_trace_path}.{name}", value, assert_zero=assert_zero)
 
 
 def record_module_cache_pages(module, name, cache, block_map, logical_pages):

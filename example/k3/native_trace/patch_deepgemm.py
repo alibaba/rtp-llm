@@ -24,14 +24,18 @@ def routed_store(body, row_expression):
                             DG_STATIC_ASSERT(L1_OUT_BLOCK_N == 64 and ATOM_M == 8, "Unsupported K3 trace layout");
                             if (not task_info.is_shared()) {
                                 const K3MegaMoETrace trace(k3_trace,
-                                    size_t(kNumRanks) * kNumMaxTokensPerRank * kNumTopk,
+                                    size_t(kNumRanks) * k3_trace_capacity * kNumTopk,
                                     kIntermediateHidden);
                                 #pragma unroll
                                 for (uint32_t r = 0; r < 2; ++ r) {
                                     const uint32_t trace_row = ROW_EXPRESSION + r;
                                     if (trace_row < valid_m) {
                                         const auto src = *workspace.get_token_src_metadata_ptr(pool_m_idx + trace_row);
-                                        const size_t slot = (size_t(src.rank_idx) * kNumMaxTokensPerRank + src.token_idx)
+                                        if (src.token_idx >= k3_trace_capacity) {
+                                            atomicExch(trace.overflow, 1);
+                                            continue;
+                                        }
+                                        const size_t slot = (size_t(src.rank_idx) * k3_trace_capacity + src.token_idx)
                                             * kNumTopk + src.topk_idx;
                                         BODY
                                     }
@@ -59,7 +63,7 @@ def patch_kernel(text):
     text = replace_once(
         text,
         "sm100_fp8_fp4_mega_moe_impl(void* y,",
-        "sm100_fp8_fp4_mega_moe_impl(void* y,\n                            void* k3_trace,",
+        "sm100_fp8_fp4_mega_moe_impl(void* y,\n                            void* k3_trace,\n                            uint32_t k3_trace_capacity,",
     )
     row = "epilogue_wg_idx * WG_BLOCK_M + s * STORE_BLOCK_M + i * ATOM_M + (lane_idx % 4) * 2"
     fc1 = routed_store(
@@ -103,7 +107,14 @@ def patch_runtime(text):
         "#include <deep_gemm/layout/mega_moe.cuh>\n#include <deep_gemm/layout/k3_mega_moe_trace.cuh>",
     )
     text = replace_once(
-        text, "        void* y;", "        void* y;\n        void* k3_trace;"
+        text,
+        "        void* y;",
+        "        void* y;\n        void* k3_trace;\n        uint32_t k3_trace_capacity;",
+    )
+    text = replace_once(
+        text,
+        "#include <deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh>",
+        "// K3 native trace ABI 2\n#include <deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh>",
     )
     text = replace_once(
         text,
@@ -124,7 +135,9 @@ def patch_runtime(text):
             ')", args.k3_trace ? "true" : "false", args.num_max_tokens_per_rank,',
         )
     text = replace_once(
-        text, "            args.y,", "            args.y,\n            args.k3_trace,"
+        text,
+        "            args.y,",
+        "            args.y,\n            args.k3_trace,\n            args.k3_trace_capacity,",
     )
     text = replace_once(
         text,
@@ -134,14 +147,22 @@ def patch_runtime(text):
     anchor = "    const auto num_ranks = static_cast<int>(sym_buffer_ptrs.size());"
     validation = """
     void* k3_trace_ptr = nullptr;
+    uint32_t k3_trace_capacity = 0;
     if (k3_trace_opt.has_value()) {
         const auto& trace = k3_trace_opt.value();
         DG_HOST_ASSERT(intermediate_hidden > 0 and intermediate_hidden % 128 == 0);
         DG_HOST_ASSERT(trace.is_cuda() and trace.device() == y.device());
         DG_HOST_ASSERT(trace.scalar_type() == torch::kUInt8 and trace.dim() == 1 and trace.is_contiguous());
         DG_HOST_ASSERT(reinterpret_cast<uintptr_t>(trace.data_ptr()) % alignof(float) == 0);
+        DG_HOST_ASSERT(trace.nbytes() >= sizeof(int32_t));
+        const size_t bytes_per_token = size_t(num_ranks) * num_topk
+            * (17 * intermediate_hidden + intermediate_hidden / 32 + sizeof(int32_t));
+        const size_t capacity = (trace.nbytes() - sizeof(int32_t)) / bytes_per_token;
+        DG_HOST_ASSERT(capacity > 0 and capacity <= size_t(num_max_tokens_per_rank));
+        DG_HOST_ASSERT(capacity >= size_t(num_tokens));
         DG_HOST_ASSERT(trace.nbytes() == K3MegaMoETrace::bytes(
-            size_t(num_ranks) * num_max_tokens_per_rank * num_topk, intermediate_hidden));
+            size_t(num_ranks) * capacity * num_topk, intermediate_hidden));
+        k3_trace_capacity = static_cast<uint32_t>(capacity);
         k3_trace_ptr = trace.data_ptr();
     }
 """
@@ -149,11 +170,16 @@ def patch_runtime(text):
     return replace_once(
         text,
         "        .y = y.data_ptr(),",
-        "        .y = y.data_ptr(),\n        .k3_trace = k3_trace_ptr,",
+        "        .y = y.data_ptr(),\n        .k3_trace = k3_trace_ptr,\n        .k3_trace_capacity = k3_trace_capacity,",
     )
 
 
 def patch_api(text):
+    text = replace_once(
+        text,
+        'm.def("fp8_fp4_mega_moe", &fp8_fp4_mega_moe);',
+        'm.def("k3_trace_abi", []() { return 2; });\n    m.def("fp8_fp4_mega_moe", &fp8_fp4_mega_moe);',
+    )
     text = replace_once(
         text,
         "static void fp8_fp4_mega_moe(\n    const torch::Tensor& y,",

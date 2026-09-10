@@ -1,6 +1,8 @@
-"""Storage for ABI 1 of the optional K3 MegaMoE native observer."""
+"""Storage for ABI 2 of the optional K3 MegaMoE native observer."""
 
 import torch
+
+ABI_VERSION = 2
 
 
 class K3TraceBuffers:
@@ -9,7 +11,7 @@ class K3TraceBuffers:
             raise ValueError("Positive dimensions and width divisible by 128 required")
         shape = (num_ranks, capacity, topk)
         slots = num_ranks * capacity * topk
-        nbytes = slots * (17 * width + width // 32 + 4)
+        nbytes = slots * (17 * width + width // 32 + 4) + 4
         self.buffer = torch.empty(nbytes, dtype=torch.uint8, device=device)
         self.tensors = {}
         offset = 0
@@ -29,11 +31,13 @@ class K3TraceBuffers:
                 self.buffer[offset : offset + size].view(dtype).reshape(shape + tail)
             )
             offset += size
-        assert offset == nbytes
+        self.overflow = self.buffer[offset:].view(torch.int32)
+        assert offset + 4 == nbytes
 
     def reset(self):
         """Enqueue on the same stream that will launch the observed kernel."""
         self.tensors["expert_ids"].fill_(-1)
+        self.overflow.zero_()
 
     def snapshot(self):
         """Clone after the kernel; erase stale bytes in unwritten routes."""

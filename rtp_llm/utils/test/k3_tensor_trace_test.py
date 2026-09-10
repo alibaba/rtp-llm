@@ -72,6 +72,18 @@ class TensorTraceTest(unittest.TestCase):
         self.assertTrue((self.root / "incomplete.json").exists())
         self.assertFalse((self.root / "recorder_closed.json").exists())
 
+    def test_nonzero_native_overflow_flag_prevents_successful_trace_close(self):
+        trace = self.trace()
+        trace.begin({"case": "native-overflow"})
+        flag = torch.ones(1, dtype=torch.int32)
+        trace.record("experts.native.overflow", flag, assert_zero=True)
+        flag.zero_()
+        trace.end()
+        with self.assertRaisesRegex(RuntimeError, "nonzero diagnostic failure flag"):
+            trace.close()
+        self.assertTrue((self.root / "incomplete.json").exists())
+        self.assertFalse((self.root / "recorder_closed.json").exists())
+
     def test_pending_limit_fails_instead_of_truncating_large_tensor(self):
         trace = self.trace(max_pending_bytes=8)
         trace.begin({})

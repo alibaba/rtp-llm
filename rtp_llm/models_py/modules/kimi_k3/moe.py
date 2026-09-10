@@ -19,7 +19,9 @@ from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.utils.k3_megamoe_trace import (
     expert_output_tensors,
+    native_trace_tensors,
     prepare_expert_output_view,
+    prepare_native_trace_factory,
 )
 from rtp_llm.utils.k3_model_trace import record_module
 from rtp_llm.utils.k3_tensor_trace import enabled as trace_enabled
@@ -384,6 +386,9 @@ class KimiK3LatentMoE(nn.Module):
             if trace_enabled()
             else None
         )
+        self._k3_native_trace_factory = (
+            prepare_native_trace_factory(deep_gemm) if trace_enabled() else None
+        )
         output_capacity = max(
             max_tokens_per_rank,
             int(getattr(self._mega_buf, "num_max_tokens_per_rank", 0)),
@@ -422,6 +427,8 @@ class KimiK3LatentMoE(nn.Module):
         routed_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        *,
+        trace_token_capacity: Optional[int] = None,
     ) -> torch.Tensor:
         import deep_gemm
 
@@ -466,6 +473,23 @@ class KimiK3LatentMoE(nn.Module):
         # against a peer that has not finished publishing its next input.
         self._maybe_pre_kernel_barrier(routed_input.device, token_count)
         output = self._mega_y[:token_count]
+        native_trace = None
+        if self._k3_native_trace_factory is not None:
+            native_trace = self._k3_native_trace_factory(
+                self._mega_group.size(),
+                max(
+                    1,
+                    (
+                        trace_token_capacity
+                        if trace_token_capacity is not None
+                        else token_count
+                    ),
+                ),
+                self._mega_buf.num_topk,
+                self._mega_buf.intermediate_hidden,
+                output.device,
+            )
+            native_trace.reset()
         deep_gemm.fp8_fp4_mega_moe(
             output,
             (self._mega_l1_w, self._mega_l1_sf),
@@ -479,7 +503,14 @@ class KimiK3LatentMoE(nn.Module):
                 None if self.linear_beta is None else float(self.linear_beta)
             ),
             fast_math=True,
+            **({"k3_trace": native_trace.buffer} if native_trace is not None else {}),
         )
+        if native_trace is not None:
+            record_module(
+                self, "experts.native.overflow", native_trace.overflow, assert_zero=True
+            )
+            for name, value in native_trace_tensors(native_trace):
+                record_module(self, f"experts.native.{name}", value)
         record_module(self, "dispatch.output", output)
         if self._k3_expert_output_view is not None:
             record_module(
@@ -658,6 +689,7 @@ class KimiK3LatentMoE(nn.Module):
             sliced_input,
             sliced_ids,
             sliced_weights,
+            trace_token_capacity=tokens_per_tp_rank,
         )
         return self._tp_gather(
             local_output,

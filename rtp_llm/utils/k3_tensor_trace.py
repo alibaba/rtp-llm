@@ -317,7 +317,10 @@ class TensorTrace:
             # The clone runs after replay, before the next replay on the same
             # stream. It decouples the writer from reusable capture storage.
             self.record(
-                snapshot.name, snapshot.value, captured_layout=snapshot.metadata
+                snapshot.name,
+                snapshot.value,
+                captured_layout=snapshot.metadata,
+                assert_zero=snapshot.metadata.get("assert_zero", False),
             )
         self.end()
 
@@ -332,6 +335,11 @@ class TensorTrace:
                 try:
                     for event in events:
                         event.synchronize()
+                    for name, host, meta in staged:
+                        if meta.get("assert_zero", False) and torch.count_nonzero(host):
+                            raise RuntimeError(
+                                f"nonzero diagnostic failure flag: {name}"
+                            )
                     path = self.directory / f"frame-{sequence:08d}.pt"
                     temporary = path.with_suffix(".pt.part")
                     torch.save(

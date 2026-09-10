@@ -33,6 +33,7 @@ class NativeTraceBufferTest(unittest.TestCase):
         buffers = native_buffers.K3TraceBuffers(2, 3, 2, 128, "cpu")
         buffers.buffer.fill_(255)
         buffers.reset()
+        self.assertEqual(buffers.overflow.item(), 0)
         for name, value in buffers.tensors.items():
             value[1, 2, 1].fill_(7 if name == "expert_ids" else 3)
         snapshot = buffers.snapshot()
