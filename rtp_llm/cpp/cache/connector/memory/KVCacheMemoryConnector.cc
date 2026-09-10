@@ -1777,6 +1777,12 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
         if (copy_info.backing_type == CacheBackingType::DISK) {
             item->set_disk_slot(copy_info.disk_slot);
         }
+        // Keep the legacy positional layout during the rolling-upgrade
+        // window. New readers use tagged_gpu_blocks when present; old readers
+        // ignore field 11 and consume this field.
+        for (const auto block_id : copy_info.gpu_blocks) {
+            item->add_gpu_blocks(block_id);
+        }
         if (copy_info.gpu_blocks.size() == slots.size()) {
             for (size_t i = 0; i < slots.size(); ++i) {
                 auto* tagged_block = item->add_tagged_gpu_blocks();
@@ -1933,8 +1939,13 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& wire_requ
 std::vector<BlockIdxType>
 KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(const MemoryOperationRequestPB::CopyItem& item,
                                                    const std::vector<LayerTagSlot>&          slots) {
-    RTP_LLM_CHECK_WITH_INFO(item.tagged_gpu_blocks_size() > 0,
-                            "memory copy request must identify every GPU block by layer and tag");
+    if (item.tagged_gpu_blocks_size() == 0) {
+        RTP_LLM_CHECK_WITH_INFO(item.gpu_blocks_size() == static_cast<int>(slots.size()),
+                                "legacy memory copy block count mismatch: peer=%d local=%zu",
+                                item.gpu_blocks_size(),
+                                slots.size());
+        return std::vector<BlockIdxType>(item.gpu_blocks().begin(), item.gpu_blocks().end());
+    }
 
     std::map<std::pair<int, std::string>, BlockIdxType> tagged_blocks;
     for (const auto& tagged_block : item.tagged_gpu_blocks()) {

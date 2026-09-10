@@ -314,6 +314,29 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecInfoMapAndGroups) {
               connector->group_policy_->spec_name_to_info_);
 }
 
+TEST_F(RemoteConnectorInternalTest, LegacyGroupIdsMapToTagsAndTaggedIdentityWins) {
+    auto connector = getFullLinearPolicyConnector();
+    ASSERT_TRUE(connector->group_policy_->init());
+
+    RemoteOperationRequestPB legacy;
+    legacy.set_op(RemoteOpType::REMOTE_OPERATION_UNSPECIFIED);
+    legacy.set_trace_id("legacy");
+    legacy.add_group_ids(1);
+    legacy.add_block_ids(7);
+    legacy.add_uris("memory://legacy");
+    RemoteOperationResponsePB response;
+    EXPECT_FALSE(connector->copyCache(legacy, response));
+
+    RemoteOperationRequestPB dual;
+    dual.set_op(RemoteOpType::REMOTE_OPERATION_UNSPECIFIED);
+    dual.set_trace_id("dual");
+    dual.add_group_ids(999);
+    dual.add_group_tags("1");
+    dual.add_block_ids(7);
+    dual.add_uris("memory://dual");
+    EXPECT_FALSE(connector->copyCache(dual, response));
+}
+
 TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSizes) {
     auto       heterogeneous_config = cache_config_;
     const auto per_layer_bytes      = byte_size_per_block_ / layer_num_;

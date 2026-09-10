@@ -64,6 +64,10 @@ TEST(KVCacheMemoryProtocolTest, TaggedBlocksAreReorderedByLocalLayerAndTag) {
     linear->set_layer_id(0);
     linear->set_tag("linear");
     linear->set_block_id(3);
+    // Tagged data wins when a rolling-upgrade sender also populated the
+    // positional legacy field.
+    item.add_gpu_blocks(99);
+    item.add_gpu_blocks(98);
 
     const auto gpu_blocks = KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(item, slots);
     ASSERT_EQ(gpu_blocks.size(), 2u);
@@ -71,12 +75,25 @@ TEST(KVCacheMemoryProtocolTest, TaggedBlocksAreReorderedByLocalLayerAndTag) {
     EXPECT_EQ(gpu_blocks[1], 7);
 }
 
-TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
+TEST(KVCacheMemoryProtocolTest, LegacyPositionalBlocksRemainReadable) {
     std::vector<KVCacheMemoryConnector::LayerTagSlot> slots = {
         {0, "linear", 0, 16},
         {0, "full", 1, 32},
     };
     MemoryOperationRequestPB::CopyItem item;
+    item.add_gpu_blocks(3);
+    item.add_gpu_blocks(7);
+
+    EXPECT_EQ(KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(item, slots), (std::vector<BlockIdxType>{3, 7}));
+}
+
+TEST(KVCacheMemoryProtocolTest, LegacyPositionalBlocksRequireExactTopologySize) {
+    std::vector<KVCacheMemoryConnector::LayerTagSlot> slots = {
+        {0, "linear", 0, 16},
+        {0, "full", 1, 32},
+    };
+    MemoryOperationRequestPB::CopyItem item;
+    item.add_gpu_blocks(3);
 
     EXPECT_ANY_THROW(KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(item, slots));
 }
