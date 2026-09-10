@@ -89,7 +89,7 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
         sequence_lengths_plus_one: torch.Tensor,
         page_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Independent safe replay of the pre-fusion step-loop semantics."""
+        """Model checkpoint storage, including invalid blocks and aliases."""
 
         batch, steps, projection_size = q.shape
         outputs = torch.empty(
@@ -124,7 +124,7 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
 
                     read_page = (length_plus_one + step - 2) // page_size
                     logical_write_page = (length_plus_one + step - 1) // page_size
-                    if read_page == logical_write_page:
+                    if step > 0 or read_page == logical_write_page:
                         read_block = checkpoint_block
                     else:
                         read_block = (
@@ -168,7 +168,7 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
         sequence_lengths_plus_one: torch.Tensor,
         page_size: int,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-        """Run the pre-fusion Python step loop as the precision baseline."""
+        """Run one-token kernels with the previous step's history as input."""
 
         batch, steps, _ = q.shape
         state = initial_state.clone()
@@ -192,6 +192,13 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
                 state[dest_ids] = state[src_ids]
             step_block_map = block_map.clone()
             step_block_map[batch_idx, logical_col] = dest_ids.to(step_block_map.dtype)
+            if step > 0:
+                read_col = torch.div(
+                    sequence_lengths_plus_one + step - 2,
+                    page_size,
+                    rounding_mode="floor",
+                ).to(torch.long)
+                step_block_map[batch_idx, read_col] = dest_ids.to(step_block_map.dtype)
             output_steps.append(
                 kimi_kda_short_conv_paged_decode(
                     q[:, step, :].contiguous(),
@@ -212,6 +219,48 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
             for projection in range(3)
         )
         return outputs, state
+
+    @staticmethod
+    def _chronological_target_verify_reference(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        weight: torch.Tensor,
+        initial_state: torch.Tensor,
+        block_map: torch.Tensor,
+        sequence_lengths_plus_one: torch.Tensor,
+        page_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convolve continuous token histories using only CPU PyTorch math."""
+
+        batch, steps, projection_size = q.shape
+        packed = torch.cat((q, k, v), dim=-1).cpu()
+        host_weight = weight.cpu()
+        final_state = initial_state.cpu().clone()
+        host_map = block_map.cpu().tolist()
+        host_lengths = sequence_lengths_plus_one.cpu().tolist()
+        output = torch.empty_like(packed)
+        for batch_index, length_plus_one in enumerate(host_lengths):
+            if length_plus_one > 1:
+                read_page = (length_plus_one - 2) // page_size
+                history = final_state[host_map[batch_index][read_page]].clone()
+            else:
+                history = packed.new_zeros(weight.shape[1] - 1, 3 * projection_size)
+            checkpoint_base = (length_plus_one - 1) // page_size
+            for step in range(steps):
+                window = torch.cat((history, packed[batch_index, step][None]), dim=0)
+                convolved = (window.float() * host_weight.T).sum(dim=0)
+                output[batch_index, step] = torch.nn.functional.silu(convolved)
+                history = window[1:]
+                checkpoint = host_map[batch_index][checkpoint_base + step]
+                final_state[checkpoint] = history
+
+        return (
+            output.reshape(batch, steps, 3, projection_size)
+            .permute(2, 0, 1, 3)
+            .to(q.device),
+            final_state.to(initial_state.device),
+        )
 
     def _inputs(self):
         batch = 4
@@ -466,7 +515,9 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
         )
         torch.testing.assert_close(fused_state, expected_state, rtol=0, atol=0)
 
-    def test_target_verify_matches_previous_step_loop_precision_matrix(self) -> None:
+    def test_target_verify_matches_chronological_step_loop_precision_matrix(
+        self,
+    ) -> None:
         page_size = 8
         cases = (
             # batch, steps, projection, width, heterogeneous lengths
@@ -547,6 +598,59 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
                     )
                 torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
 
+    def test_target_verify_preserves_chronological_history_at_32k_page_boundary(
+        self,
+    ) -> None:
+        steps = 4
+        projection_size = 65
+        page_size = 4096
+        pages = 12
+        width = 4
+        # Cross the 32768-token boundary at steps 1, 2, 3, and 4. The last
+        # two requests cover an in-page update and first-token initialization.
+        lengths = torch.tensor(
+            [32769, 32768, 32767, 32766, 32770, 1],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        batch = lengths.numel()
+        block_map = self._block_map(batch, pages).flip(1).contiguous()
+        q = torch.randn(
+            batch, steps, projection_size, dtype=torch.bfloat16, device="cuda"
+        )
+        k = torch.randn_like(q)
+        v = torch.randn_like(q)
+        weight = torch.randn(
+            3 * projection_size, width, dtype=torch.float32, device="cuda"
+        )
+        initial_state = torch.randn(
+            batch * pages + 1,
+            width - 1,
+            3 * projection_size,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        initial_state[0].fill_(42)
+        expected, expected_state = self._chronological_target_verify_reference(
+            q, k, v, weight, initial_state, block_map, lengths, page_size
+        )
+        actual_state = initial_state.clone()
+        actual = torch.stack(
+            kimi_kda_short_conv_paged_target_verify(
+                q, k, v, weight, actual_state, block_map, lengths, page_size
+            )
+        )
+
+        torch.testing.assert_close(
+            actual,
+            expected,
+            rtol=self._TARGET_OUTPUT_RTOL,
+            atol=self._TARGET_OUTPUT_ATOL,
+        )
+        # Check every token checkpoint and all unmodified blocks, including 0.
+        torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
+        torch.testing.assert_close(actual_state[0], initial_state[0], rtol=0, atol=0)
+
     def test_target_verify_masks_invalid_and_missing_checkpoint_blocks(self) -> None:
         batch = 3
         steps = 4
@@ -625,8 +729,8 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
         page_size = 8
         width = 4
         # Exercise both a single block reused by every logical page and a
-        # non-adjacent alias. The reduced barrier schedule must preserve the
-        # old loop's physical write/read order in both cases.
+        # non-adjacent alias. Later steps must use the previous checkpoint
+        # even when that checkpoint aliases an earlier physical block.
         block_map = torch.tensor(
             [[1, 1, 1, 1, 1], [2, 3, 2, 4, 3]],
             dtype=torch.int32,
@@ -762,7 +866,7 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
                 replay_block_map = self._block_map(batch, pages)
                 if replay_index == 1:
                     replay_block_map = replay_block_map.flip(1).contiguous()
-                expected, expected_state = self._iterative_target_verify_short_conv(
+                expected, expected_state = self._chronological_target_verify_reference(
                     replay_q,
                     replay_k,
                     replay_v,
@@ -898,7 +1002,7 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         torch.testing.assert_close(fused_state, iterative_state, rtol=0, atol=0)
 
-    def test_target_verify_full_kda_matches_previous_step_loop_bitwise(self) -> None:
+    def test_target_verify_full_kda_matches_chronological_step_loop(self) -> None:
         batch = 2
         steps = 4
         heads = 12

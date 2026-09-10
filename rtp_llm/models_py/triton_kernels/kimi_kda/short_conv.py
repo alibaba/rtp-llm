@@ -563,11 +563,9 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
 ):
     """Replay a target-verify sequence inside one Triton program.
 
-    This is numerically equivalent to invoking the paged one-token decode
-    kernel T times. It resolves the patched read/write mapping and replays the
-    checkpoint-copy semantics in one program, removing Python dispatch and
-    block-map clones. Each speculative position still publishes its physical
-    checkpoint.
+    Each step consumes the previous token's convolution history and publishes
+    its physical checkpoint. The checkpoint copies run in one program without
+    Python dispatch or block-map clones.
     """
 
     i_b = tl.program_id(0)
@@ -614,10 +612,9 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
             mask=checkpoint_page_valid,
             other=0,
         ).to(tl.int64)
-        # The old loop patched only the logical write column to the reserved
-        # checkpoint block. In-page steps read that copied checkpoint; page
-        # transitions read the original block-table entry instead.
-        read_from_checkpoint = read_page_raw == logical_write_page_raw
+        # Later steps read the copied previous checkpoint even across pages.
+        # Only the first step can read history from the original prior page.
+        read_from_checkpoint = (i_t > 0) | (read_page_raw == logical_write_page_raw)
         read_block_id = tl.where(
             read_from_checkpoint, checkpoint_block_id, original_read_block_id
         )
