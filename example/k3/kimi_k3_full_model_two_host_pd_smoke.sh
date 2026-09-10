@@ -600,7 +600,7 @@ verify_fp8_log() {
     local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
     local evidence_file="${role_dir}/fp8-runtime-evidence.log"
     : >"${evidence_file}"
-    grep -Eh "K3_FP8_WEIGHT" "${logs[@]}" | sed -n '1,20p' >>"${evidence_file}" \
+    grep -Eh "K3_FP8_EXECUTION" "${logs[@]}" | sed -n '1,20p' >>"${evidence_file}" \
         || die "${role} logs have no K3 FP8 weight execution evidence"
     grep -Eh "K3 MLA FP8: dense_e4m3_v1" "${logs[@]}" | sed -n '1,5p' >>"${evidence_file}" \
         || die "${role} logs have no MLA FP8 runtime evidence"
@@ -880,7 +880,6 @@ local_port="${prefill_port}"
 [[ "${role}" == "prefill" ]] || local_port="${decode_port}"
 wait_for_health 127.0.0.1 "${local_port}"
 verify_fastsafetensors_log
-verify_fp8_log
 verify_rdma_log
 verify_role_environment
 
@@ -945,6 +944,9 @@ PY
     [[ -f "${result_file}" ]] || die "timed out waiting for Prefill result"
     verdict="$(tr -d '[:space:]' <"${result_file}")"
     [[ "${verdict}" == "PASS" ]] || die "Prefill reported ${verdict}"
+    # K3_FP8_WEIGHT is emitted by the first model forward, not during model
+    # loading. Decode has processed the Prefill suite once PASS arrives.
+    verify_fp8_log
     verify_rdma_selected_devices
     verify_projection_ktp_decode_log
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
@@ -1026,6 +1028,9 @@ python3 -u "${case_runner}" \
     --expanded-kv-budget-bytes "${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES}" \
     --timeout "${request_timeout}"
 
+# Runtime FP8 markers are produced only after the first model forward. Keep
+# the check as a completion gate, after the suite has exercised Prefill.
+verify_fp8_log
 verify_rdma_selected_devices
 notify_decode PASS "smoke-suite-${smoke_suite}-validated"
 echo "PASS: Prefill validated suite=${smoke_suite}; artifacts=${role_dir}"

@@ -630,6 +630,8 @@ TEST_F(MtpExecutorTest, testMakePrefillRoundInputPacksMultiRequestRounds) {
     EXPECT_EQ(toVec<bool>(first.text_tokens_mask), (std::vector<bool>{true, true, true, true}));
     EXPECT_EQ(toVec<int32_t>(first.input_lengths), (std::vector<int32_t>{2, 2}));
     EXPECT_EQ(toVec<int32_t>(first.prefix_lengths), (std::vector<int32_t>{0, 0}));
+    EXPECT_TRUE(first.input_lengths_host_for_log.is_pinned());
+    EXPECT_TRUE(first.prefix_lengths_host_for_log.is_pinned());
     EXPECT_EQ(first.lm_output_indexes.numel(), 0);
     EXPECT_FALSE(first.last_hidden_states.defined());
     EXPECT_TRUE(first.is_prefill_chunk);

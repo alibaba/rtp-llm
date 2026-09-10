@@ -191,6 +191,40 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
             second.embedding_inputs.text_tokens_mask.tolist(), [True, False, True, True]
         )
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_chunk_metadata_uses_pinned_host_staging_for_async_h2d(self) -> None:
+        inputs = self._inputs(4, [2, 2], [0, 0])
+        inputs.input_ids = inputs.input_ids.cuda()
+        inputs.attention_inputs.kv_cache_block_id_host = torch.arange(
+            8, dtype=torch.int32
+        ).reshape(2, 4)
+        inputs.attention_inputs.kv_cache_kernel_block_id_device = torch.arange(
+            8, dtype=torch.int32, device="cuda"
+        ).reshape(2, 4)
+        plan = KimiK3ChunkRound(
+            (
+                KimiK3ChunkSlice(1, 2, 4, 0, 0, 2, 0, 2, True),
+            )
+        )
+
+        chunk = build_chunk_model_inputs(
+            inputs.input_ids,
+            inputs.attention_inputs,
+            round_plan=plan,
+        )
+        torch.cuda.synchronize()
+
+        self.assertTrue(chunk.attention_inputs.input_lengths_host.is_pinned())
+        self.assertTrue(chunk.attention_inputs.prefix_lengths_host.is_pinned())
+        self.assertEqual(chunk.attention_inputs.input_lengths.tolist(), [2])
+        self.assertEqual(
+            chunk.attention_inputs.kv_cache_block_id_host.tolist(), [[4, 5, 6, 7]]
+        )
+        self.assertEqual(
+            chunk.attention_inputs.kv_cache_kernel_block_id_device.tolist(),
+            [[4, 5, 6, 7]],
+        )
+
     def test_multimodal_chunk_clips_features_and_repacks_locations(self):
         inputs = self._inputs(8, [4, 4], [5, 0])
         a = torch.arange(20).reshape(5, 4)
