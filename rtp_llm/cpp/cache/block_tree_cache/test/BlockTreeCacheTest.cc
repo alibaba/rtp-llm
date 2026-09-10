@@ -228,6 +228,38 @@ protected:
     std::unique_ptr<BlockTreeCache> cache_;
 };
 
+TEST_F(BlockTreeCacheTest, IncompleteResidentInsertKeepsPrefixProtectedAndRetrySucceeds) {
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    cache_->insert({100, 200}, resources, Tier::DEVICE);
+    const std::vector<TreeNode*> path = cache_->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    path[1]->group_set_resources[0].transfer_detached = true;
+    {
+        const size_t resident_prefix_length = cache_->insert({100, 200}, resources, Tier::DEVICE, true);
+        EXPECT_EQ(resident_prefix_length, 1u);
+    }
+    EXPECT_TRUE(path[0]->is_resident);
+    EXPECT_FALSE(path[1]->is_resident);
+    path[1]->group_set_resources[0].transfer_detached = false;
+
+    {
+        const size_t resident_prefix_length = cache_->insert({100, 200}, resources, Tier::DEVICE, true);
+        EXPECT_EQ(resident_prefix_length, 2u);
+    }
+    EXPECT_TRUE(path[1]->is_resident);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 2, Tier::DEVICE), 0);
+    {
+        const size_t resident_prefix_length = cache_->insert({100, 200}, resources, Tier::DEVICE, true);
+        EXPECT_EQ(resident_prefix_length, 2u);
+    }
+    BlockTreeMatchResult match = cache_->match({100, 200});
+    EXPECT_EQ(match.matched_device_blocks, 2u);
+    releaseRequestRefsForTest(*cache_, match.matched_device_resources);
+}
+
 TEST_F(BlockTreeCacheTest, MatchEmptyThenFullAndPartialPath) {
     BlockTreeMatchResult empty_result = cache_->match({100, 200, 300});
     EXPECT_EQ(empty_result.matched_device_blocks, 0u);
@@ -237,7 +269,7 @@ TEST_F(BlockTreeCacheTest, MatchEmptyThenFullAndPartialPath) {
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
     resources[2][0].device_blocks = {44};
-    cache_->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     BlockTreeMatchResult full_result = cache_->match({100, 200, 300});
     EXPECT_EQ(full_result.matched_device_blocks, 3u);
@@ -254,7 +286,7 @@ TEST_F(BlockTreeCacheTest, CollectReuseTimeMetricsAggregatesPerTierAndGroupType)
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
-    cache_->insert({100, 200}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100, 200}, resources, Tier::DEVICE);
 
     const std::vector<TreeNode*> path = cache_->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
@@ -582,10 +614,10 @@ TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
 
     std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
     first_resources[0][0].device_blocks = {42};
-    cache_->insert({100}, first_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100}, first_resources, Tier::DEVICE);
     std::vector<std::vector<GroupSetResource>> second_resources(1, std::vector<GroupSetResource>(1));
     second_resources[0][0].device_blocks = {43};
-    cache_->insert({200}, second_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({200}, second_resources, Tier::DEVICE);
 
     EXPECT_EQ(cache_->evictForGroup(/*group_id=*/0, /*num_blocks=*/2), 2);
 
@@ -605,10 +637,10 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
 
     std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
     first_resources[0][0].device_blocks = {42};
-    cache_->insert({100}, first_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100}, first_resources, Tier::DEVICE);
     std::vector<std::vector<GroupSetResource>> second_resources(1, std::vector<GroupSetResource>(1));
     second_resources[0][0].device_blocks = {43};
-    cache_->insert({200}, second_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({200}, second_resources, Tier::DEVICE);
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
@@ -631,7 +663,7 @@ TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndReturnsAllKeys) {
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
     resources[2][0].device_blocks = {44};
-    cache_->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     const BlockTreeKeySnapshot snapshot = cache_->getKeySnapshot();
     EXPECT_GT(snapshot.version, empty.version);
@@ -660,7 +692,7 @@ TEST_F(BlockTreeCacheTest, MatchFailsFastAtIdleResourceWithMultipleServingTiers)
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {10};
     resources[1][0].device_blocks = {11};
-    cache_->insert({100, 200}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100, 200}, resources, Tier::DEVICE);
 
     TreeNode* first_node                          = cache_->tree()->root()->children.at(100);
     first_node->group_set_resources[0].host_block = 7;
@@ -674,7 +706,7 @@ TEST_F(BlockTreeCacheTest, MatchDoesNotReuseBusyFullResource) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {10};
     resources[1][0].device_blocks = {11};
-    cache_->insert({100, 200}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100, 200}, resources, Tier::DEVICE);
 
     TreeNode* first_node                              = cache_->tree()->root()->children.at(100);
     first_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
@@ -707,7 +739,7 @@ TEST_F(BlockTreeCacheTest, MatchSkipsBusySwaResourceWithoutTruncatingFullPrefix)
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(10 + i)};
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(20 + i)};
         }
-        multi_cache->insert({100, 200, 300, 400}, resources, Tier::DEVICE, /*is_resident=*/false);
+        multi_cache->insert({100, 200, 300, 400}, resources, Tier::DEVICE);
 
         TreeNode* busy_node = multi_cache->tree()->root()->children.at(100)->children.at(200);
         busy_node->group_set_resources[1].transfer_state = state;
@@ -742,7 +774,7 @@ TEST_F(BlockTreeCacheTest, MatchStillTruncatesAtBusyFullResource) {
         resources[i][0].device_blocks = {static_cast<BlockIdxType>(10 + i)};
         resources[i][1].device_blocks = {static_cast<BlockIdxType>(20 + i)};
     }
-    multi_cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
+    multi_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     TreeNode* busy_node                              = multi_cache->tree()->root()->children.at(100)->children.at(200);
     busy_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
@@ -772,7 +804,7 @@ TEST_F(BlockTreeCacheTest, MatchSkipsBusyLinearResourceAndReusesTailState) {
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(10 + i)};
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(20 + i)};
         }
-        multi_cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
+        multi_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
         TreeNode* busy_node = multi_cache->tree()->root()->children.at(100)->children.at(200);
         busy_node->group_set_resources[1].transfer_state = state;
@@ -795,12 +827,12 @@ TEST_F(BlockTreeCacheTest, InsertFailsFastForNonIdleOrMultiTierResource) {
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks  = {10};
     resources[0][0].transfer_state = GroupSetTransferState::DEMOTING;
-    EXPECT_THROW(cache_->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false), std::runtime_error);
+    EXPECT_THROW(cache_->insert({100}, resources, Tier::DEVICE), std::runtime_error);
     EXPECT_EQ(cache_->tree()->size(), 0u);
 
     resources[0][0].transfer_state = GroupSetTransferState::IDLE;
     resources[0][0].host_block     = 7;
-    EXPECT_THROW(cache_->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false), std::runtime_error);
+    EXPECT_THROW(cache_->insert({100}, resources, Tier::DEVICE), std::runtime_error);
     EXPECT_EQ(cache_->tree()->size(), 0u);
 }
 
@@ -812,7 +844,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsertDoesNotCreateNodes) {
     std::vector<std::vector<GroupSetResource>> original_resources(2, std::vector<GroupSetResource>(1));
     original_resources[0][0].device_blocks = {10};
     original_resources[1][0].device_blocks = {11};
-    cache_->insert({100, 200}, original_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100, 200}, original_resources, Tier::DEVICE);
 
     stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 2u);
@@ -821,7 +853,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsertDoesNotCreateNodes) {
     std::vector<std::vector<GroupSetResource>> duplicate_resources(2, std::vector<GroupSetResource>(1));
     duplicate_resources[0][0].device_blocks = {20};
     duplicate_resources[1][0].device_blocks = {21};
-    cache_->insert({100, 200}, duplicate_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100, 200}, duplicate_resources, Tier::DEVICE);
 
     stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 2u);
@@ -851,7 +883,7 @@ TEST_F(BlockTreeCacheTest, ReclaimCascadesToLowerPriorityGroup) {
     resources[0][0].device_blocks = {10};  // Full
     resources[0][1].device_blocks = {20};  // SWA
 
-    multi_cache->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false);
+    multi_cache->insert({100}, resources, Tier::DEVICE);
 
     // Reclaim Full group at DEVICE → should cascade to SWA.
     int reclaimed = BlockTreeCacheTestPeer::reclaimBlocksForTest(*multi_cache, 1, Tier::DEVICE);
@@ -881,7 +913,7 @@ TEST_F(BlockTreeCacheTest, MultiGroupConstruction) {
 
 TEST_F(BlockTreeCacheTest, EmptyKeysAreNoOps) {
     const CacheStats stats_before = cache_->getStats();
-    cache_->insert({}, {}, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({}, {}, Tier::DEVICE);
     const CacheStats stats_after = cache_->getStats();
     EXPECT_EQ(stats_after.tree_node_count, stats_before.tree_node_count);
     EXPECT_EQ(stats_after.device_heap_total_size, stats_before.device_heap_total_size);
@@ -900,7 +932,7 @@ TEST_F(BlockTreeCacheTest, ThreadSafety) {
             std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
             resources[0][0].device_blocks = {static_cast<BlockIdxType>(i * 100 + 1)};
             CacheKeysType keys            = {static_cast<CacheKeyType>(i * 1000 + 1)};
-            cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/false);
+            cache_->insert(keys, resources, Tier::DEVICE);
         });
     }
 
@@ -915,7 +947,7 @@ TEST_F(BlockTreeCacheTest, ThreadSafety) {
 TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_EvictsBeforeLastRelease) {
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
-    cache_->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100}, resources, Tier::DEVICE);
     ASSERT_EQ(cache_->getStats().device_heap_total_size, 1u);
 
     std::mutex               mutex;
@@ -1014,10 +1046,10 @@ TEST_F(BlockTreeCacheTest, ExtraReferencesDoNotChangeCandidateMembership) {
 
     std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
     first_resources[0][0].device_blocks = {42};
-    cache_->insert({100}, first_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({100}, first_resources, Tier::DEVICE);
     std::vector<std::vector<GroupSetResource>> second_resources(1, std::vector<GroupSetResource>(1));
     second_resources[0][0].device_blocks = {43};
-    cache_->insert({200}, second_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache_->insert({200}, second_resources, Tier::DEVICE);
     ASSERT_EQ(cache_->getStats().device_heap_total_size, 2u);
 
     releaseDeviceBlocks(*cache_, pool, {42});
@@ -1135,7 +1167,7 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device_blocks;
-    cache->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100}, resources, Tier::DEVICE);
 
     // Stage A: insertion admits one GroupSet-level candidate even while the request still holds every member block.
     ASSERT_EQ(cache->getStats().tree_node_count, 1u);
@@ -1196,12 +1228,12 @@ TEST_F(BlockTreeCacheTest, ConcurrentMatchInsertSameAndForkedPrefixes) {
                 std::vector<std::vector<GroupSetResource>> same_resources(2, std::vector<GroupSetResource>(1));
                 same_resources[0][0].device_blocks = {10};
                 same_resources[1][0].device_blocks = {11};
-                cache_->insert({100, 200}, same_resources, Tier::DEVICE, /*is_resident=*/false);
+                cache_->insert({100, 200}, same_resources, Tier::DEVICE);
 
                 std::vector<std::vector<GroupSetResource>> fork_resources(2, std::vector<GroupSetResource>(1));
                 fork_resources[0][0].device_blocks = {10};
                 fork_resources[1][0].device_blocks = {fork_block};
-                cache_->insert({100, fork_key}, fork_resources, Tier::DEVICE, /*is_resident=*/false);
+                cache_->insert({100, fork_key}, fork_resources, Tier::DEVICE);
 
                 for (const CacheKeysType& keys : {CacheKeysType{100, 200}, CacheKeysType{100, fork_key}}) {
                     BlockTreeMatchResult match  = cache_->match(keys);
@@ -1389,7 +1421,7 @@ TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {a_pool0, a_pool1};
     resources[1][0].device_blocks = {b_pool0, b_pool1};
-    cache->insert({100, 200}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100, 200}, resources, Tier::DEVICE);
     unreferenceDeviceBlocksForTest(*full, request_blocks);
     EXPECT_TRUE(pool0->isAllocated(a_pool0));
     EXPECT_TRUE(pool0->isAllocated(b_pool0));
@@ -1443,7 +1475,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_KeepsExistingResourceAndCallerOwnsLos
 
     std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
     first_resources[0][0].device_blocks = existing[0];
-    cache->insert({100}, first_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100}, first_resources, Tier::DEVICE);
     EXPECT_EQ(pool->refCount(existing_block), 2u);
     auto initial_find = cache->tree()->findNode({100});
     ASSERT_FALSE(initial_find.empty());
@@ -1453,7 +1485,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_KeepsExistingResourceAndCallerOwnsLos
 
     std::vector<std::vector<GroupSetResource>> duplicate_resources(1, std::vector<GroupSetResource>(1));
     duplicate_resources[0][0].device_blocks = loser[0];
-    cache->insert({100}, duplicate_resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100}, duplicate_resources, Tier::DEVICE);
 
     auto find = cache->tree()->findNode({100});
     ASSERT_FALSE(find.empty());
@@ -1499,7 +1531,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_FillsExistingEmptyGroupAndAddsOneCach
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = request_blocks[0];
-    cache->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100}, resources, Tier::DEVICE);
 
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
     EXPECT_EQ(existing_node->group_set_resources[0].device_blocks, request_blocks[0]);
@@ -1537,7 +1569,7 @@ TEST_F(BlockTreeCacheTest, InsertFailsFastForPartialMultiPoolGroupWithoutAddingC
 
     std::vector<std::vector<GroupSetResource>> partial_resources(1, std::vector<GroupSetResource>(1));
     partial_resources[0][0].device_blocks = {block0, NULL_BLOCK_IDX};
-    EXPECT_THROW(cache->insert({100}, partial_resources, Tier::DEVICE, /*is_resident=*/false), std::runtime_error);
+    EXPECT_THROW(cache->insert({100}, partial_resources, Tier::DEVICE), std::runtime_error);
     EXPECT_EQ(cache->tree()->size(), 0u);
     EXPECT_EQ(pool0->refCount(block0), 1u);
     EXPECT_EQ(pool1->refCount(block1), 1u);
@@ -1569,7 +1601,7 @@ TEST_F(BlockTreeCacheTest, InsertMatchReclaimRelease_RefcountLifecycle) {
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = request_blocks[0];
-    cache->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100}, resources, Tier::DEVICE);
     EXPECT_EQ(pool->refCount(block), 2u);
 
     unreferenceDeviceBlocksForTest(*full, request_blocks);
@@ -1616,7 +1648,7 @@ TEST_F(BlockTreeCacheTest, SequentialReclaimDrainsChainWithoutHostBlocks) {
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
     resources[2][0].device_blocks = {44};
-    ce_cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
+    ce_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     // Reclaim all 3 nodes sequentially (synchronous direct release)
     for (int i = 0; i < 3; ++i) {
@@ -1641,7 +1673,7 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
-    cache->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100}, resources, Tier::DEVICE);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
@@ -1686,7 +1718,7 @@ TEST_F(BlockTreeCacheTest, NodeDeletedWhenAllGroupsEmpty) {
     // Insert
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
-    cache->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100}, resources, Tier::DEVICE);
 
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
 
@@ -1716,7 +1748,7 @@ TEST_F(BlockTreeCacheTest, MatchCollectsBlocksSelectedByGroupPolicy) {
         resources[i][1].device_blocks = {static_cast<BlockIdxType>(20 + i)};
         resources[i][2].device_blocks = {static_cast<BlockIdxType>(30 + i)};
     }
-    cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     BlockTreeMatchResult result = cache->match({100, 200, 300});
     EXPECT_EQ(result.matched_device_blocks, 3u);
@@ -1750,7 +1782,7 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = request_holder[0];
     resources[1][0].device_blocks = request_holder[1];
-    cache->insert({100, 200}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100, 200}, resources, Tier::DEVICE);
     unreferenceDeviceBlocksForTest(*full, request_holder);
     device_pools[0]->incRef(*pool0_prefix);
     device_pools[0]->decRef(*pool0_prefix);
@@ -1785,7 +1817,7 @@ TEST_F(BlockTreeCacheTest, ReorderedMembershipMapsBlocksByGroupId) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = request_holder[0];
     resources[1][0].device_blocks = request_holder[1];
-    cache->insert({100, 200}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100, 200}, resources, Tier::DEVICE);
     unreferenceDeviceBlocksForTest(*full, request_holder);
 
     BlockTreeMatchResult result = cache->match({100, 200});
@@ -1838,7 +1870,7 @@ TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildReclaim) {
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
     resources[2][0].device_blocks = {44};
-    cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     // Initially only C (leaf) is in heap
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
@@ -1985,14 +2017,14 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
     // Insert a node and manually set host data (simulating prior demotion).
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
-    cache->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({100}, resources, Tier::DEVICE);
 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     std::vector<std::vector<GroupSetResource>> resources2(1, std::vector<GroupSetResource>(1));
     resources2[0][0].device_blocks = {55};
-    cache->insert({200}, resources2, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({200}, resources2, Tier::DEVICE);
 
     // Manually set host_block and clear device_blocks to simulate a demoted state.
     auto find = cache->tree()->findNode({200});
@@ -2054,7 +2086,7 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceB
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device_blocks;
-    cache->insert({200}, resources, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert({200}, resources, Tier::DEVICE);
     unreferenceDeviceBlocksForTest(*full, request_holder);
 
     auto find = cache->tree()->findNode({200});

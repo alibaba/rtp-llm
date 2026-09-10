@@ -131,7 +131,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
         }
     }
 
-    cache->insert(keys, slots, Tier::DEVICE, /*is_resident=*/false);
+    cache->insert(keys, slots, Tier::DEVICE);
     for (const auto& [group_id, pool, blocks] : request_holds) {
         (void)group_id;
         pool->decRef(blocks);

@@ -2638,7 +2638,10 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     complete_token_ids->init(generate_input);
 
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
-    allocator->insertIntoCache(insert_info);
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(insert_info, resident_prefix_length);
+    }
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{200, 201, 202});
     EXPECT_EQ(match.matched_device_blocks, 3u);
@@ -2698,7 +2701,10 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     complete_token_ids->init(generate_input);
 
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
-    allocator->insertIntoCache(insert_info);
+    {
+        size_t resident_prefix_length = 0;
+        allocator->insertIntoCache(insert_info, resident_prefix_length);
+    }
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{300, 301, 302});
     EXPECT_EQ(match.matched_device_blocks, 3u);
