@@ -57,7 +57,7 @@ Bazel 入口为 `//rtp_llm/models_py/standalone:glm53_four_layer_smoke`；纯 CP
 
 ## Golden 合约
 
-- `inputs_rankN.pt`：完整 input IDs。Prefill 初始 cache 全零；Decode 的 BF16 KV、FP8 indexer pool、FP32 recurrent/Conv/compressor 历史逐字节保存。Decode 历史是有限值的固定合成状态，**不是 PD Prefill 生成的历史**。
+- `inputs_rankN.pt`：完整 input IDs。Prefill 初始 cache 全零；Decode 的 BF16 KV/Conv state、FP8 indexer pool、FP32 recurrent/compressor 历史逐字节保存。Decode 历史是有限值的固定合成状态，**不是 PD Prefill 生成的历史**。
 - `rankN.pt`：四层全部本卡 token 的完整 BF16 mHC/hidden 输出；每层另保存通过同一 final norm 和全词表 LM head 做 FP32 投影的诊断 logits。Prefill 取每 rank 16 个固定位置（含边界和尾部），Decode 取全部 48 行。诊断读出不参与计时；完整 Prefill 全 token 全词表读出会超过 TB，因此不保存。
 - `rankN.json`：文件 SHA-256，以及原 checkpoint 层号、实际加载的每个权重张量形状/dtype/SHA-256、输入和状态文件 SHA-256、拓扑与位置。
 - `COMPLETE.json`：全部 8 rank 数值和性能通过后才生成。
