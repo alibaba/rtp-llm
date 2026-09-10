@@ -530,7 +530,8 @@ def host_lengths(value: torch.Tensor, name: str) -> list[int]:
 
 def _select_batch_rows(
     value: torch.Tensor,
-    indices: list[int],
+    host_indices: torch.Tensor,
+    device_indices: torch.Tensor,
     *,
     batch_dim: int = 0,
 ) -> torch.Tensor:
@@ -541,19 +542,44 @@ def _select_batch_rows(
             "whole-model K3 block-table batch dimension is invalid: "
             f"shape={tuple(value.shape)} batch_dim={batch_dim}"
         )
+    indices = host_indices.tolist()
     if min(indices) < 0 or max(indices) >= int(value.shape[batch_dim]):
         raise RuntimeError(
             "whole-model K3 active row is outside block table: "
             f"shape={tuple(value.shape)} batch_dim={batch_dim} indices={indices}"
         )
-    index = torch.tensor(indices, dtype=torch.long, device=value.device)
+    index = device_indices if value.device.type == "cuda" else host_indices
     return value.index_select(batch_dim, index).contiguous()
 
 
 def _select_group_batch_rows(
-    values: Sequence[torch.Tensor], indices: list[int]
+    values: Sequence[torch.Tensor],
+    host_indices: torch.Tensor,
+    device_indices: torch.Tensor,
 ) -> list[torch.Tensor]:
-    return [_select_batch_rows(value, indices) for value in values]
+    return [
+        _select_batch_rows(value, host_indices, device_indices) for value in values
+    ]
+
+
+def _host_and_device_tensor(
+    values: Sequence[int], dtype: torch.dtype, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build metadata in pinned host memory and enqueue an ordered H2D copy.
+
+    Consumers run on the current CUDA stream, so non_blocking=True preserves
+    producer/copy/consumer ordering without synchronizing the CPU thread.
+    """
+
+    host = torch.tensor(
+        values,
+        dtype=dtype,
+        device="cpu",
+        pin_memory=device.type == "cuda",
+    )
+    if device.type == "cpu":
+        return host, host
+    return host, host.to(device=device, non_blocking=True)
 
 
 def _slice_token_aligned_tensor(
@@ -662,9 +688,8 @@ def _build_chunk_multimodal_inputs(
 
     if chunk_features:
         chunk.multimodal_features = chunk_features
-        chunk.mm_features_locs_host = torch.tensor(chunk_locs, dtype=torch.int32)
-        chunk.mm_features_locs = chunk.mm_features_locs_host.to(
-            device=device, non_blocking=True
+        chunk.mm_features_locs_host, chunk.mm_features_locs = (
+            _host_and_device_tensor(chunk_locs, torch.int32, device)
         )
     return chunk
 
@@ -688,14 +713,20 @@ def build_chunk_attention_inputs(
     for length, sequence_length in zip(lengths, sequence_lengths):
         cu_seqlens.append(cu_seqlens[-1] + length)
         cu_kv_seqlens.append(cu_kv_seqlens[-1] + sequence_length)
-    chunk.cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-    chunk.cu_kv_seqlens = torch.tensor(
-        cu_kv_seqlens, dtype=torch.int32, device=device
+    chunk.cu_seqlens_host, chunk.cu_seqlens = _host_and_device_tensor(
+        cu_seqlens, torch.int32, device
     )
-    chunk.input_lengths = torch.tensor(lengths, dtype=torch.int32, device=device)
-    chunk.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device=device)
-    chunk.sequence_lengths = torch.tensor(
-        sequence_lengths, dtype=torch.int32, device=device
+    _, chunk.cu_kv_seqlens = _host_and_device_tensor(
+        cu_kv_seqlens, torch.int32, device
+    )
+    chunk.input_lengths_host, chunk.input_lengths = _host_and_device_tensor(
+        lengths, torch.int32, device
+    )
+    chunk.prefix_lengths_host, chunk.prefix_lengths = _host_and_device_tensor(
+        prefixes, torch.int32, device
+    )
+    chunk.sequence_lengths_host, chunk.sequence_lengths = _host_and_device_tensor(
+        sequence_lengths, torch.int32, device
     )
     chunk.sequence_lengths_plus_1_d = chunk.sequence_lengths + 1
     max_length = max(lengths)
@@ -704,19 +735,18 @@ def build_chunk_attention_inputs(
     for length in lengths:
         padding_offset.extend([cumulative_padding] * length)
         cumulative_padding += max_length - length
-    chunk.padding_offset = torch.tensor(
-        padding_offset, dtype=torch.int32, device=device
+    _, chunk.padding_offset = _host_and_device_tensor(
+        padding_offset, torch.int32, device
     )
-    chunk.cu_seqlens_host = torch.tensor(cu_seqlens, dtype=torch.int32)
-    chunk.input_lengths_host = torch.tensor(lengths, dtype=torch.int32)
-    chunk.prefix_lengths_host = torch.tensor(prefixes, dtype=torch.int32)
-    chunk.sequence_lengths_host = torch.tensor(sequence_lengths, dtype=torch.int32)
     chunk.total_tokens = int(total_tokens)
     chunk.context_total_kv_length = int(sum(sequence_lengths))
     chunk.is_prefill = True
     chunk.is_cuda_graph = False
     chunk.cache_store_inputs = None
 
+    host_batch_indices, device_batch_indices = _host_and_device_tensor(
+        batch_indices, torch.long, device
+    )
     for name in (
         "kv_cache_block_id_host",
         "kv_cache_kernel_block_id_host",
@@ -730,17 +760,28 @@ def build_chunk_attention_inputs(
             and value.ndim == 3
             else 0
         )
-        selected = _select_batch_rows(value, batch_indices, batch_dim=batch_dim)
+        selected = _select_batch_rows(
+            value,
+            host_batch_indices,
+            device_batch_indices,
+            batch_dim=batch_dim,
+        )
         if selected is not None:
             setattr(chunk, name, selected)
     chunk.kv_cache_block_id_host_by_group = _select_group_batch_rows(
-        attention_inputs.kv_cache_block_id_host_by_group, batch_indices
+        attention_inputs.kv_cache_block_id_host_by_group,
+        host_batch_indices,
+        device_batch_indices,
     )
     chunk.kv_cache_kernel_block_id_host_by_group = _select_group_batch_rows(
-        attention_inputs.kv_cache_kernel_block_id_host_by_group, batch_indices
+        attention_inputs.kv_cache_kernel_block_id_host_by_group,
+        host_batch_indices,
+        device_batch_indices,
     )
     chunk.kv_cache_kernel_block_id_device_by_group = _select_group_batch_rows(
-        attention_inputs.kv_cache_kernel_block_id_device_by_group, batch_indices
+        attention_inputs.kv_cache_kernel_block_id_device_by_group,
+        host_batch_indices,
+        device_batch_indices,
     )
     return chunk
 

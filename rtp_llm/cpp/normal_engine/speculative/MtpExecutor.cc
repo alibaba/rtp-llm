@@ -68,14 +68,37 @@ torch::Tensor narrowTokenAlignedTensor(
     return tensor.narrow(0, start, length);
 }
 
-// Select rows along a batch dimension. Undefined input stays undefined; an
-// empty index set produces an empty first-dim tensor via index_select.
-torch::Tensor selectBatchRows(const torch::Tensor& tensor, const torch::Tensor& indices, int64_t batch_dim) {
+// Select rows without moving an index tensor across devices. In particular,
+// using CUDA indices for a host block table makes index_select synchronously
+// copy those indices back to the CPU at every chunk boundary.
+torch::Tensor selectBatchRows(const torch::Tensor& tensor,
+                              const torch::Tensor& host_indices,
+                              const torch::Tensor& device_indices,
+                              int64_t              batch_dim) {
     if (!tensor.defined()) {
         return tensor;
     }
-    const auto long_indices = indices.to(torch::TensorOptions(tensor.device()).dtype(torch::kLong));
-    return tensor.index_select(batch_dim, long_indices);
+    const auto& indices = tensor.is_cuda() ? device_indices : host_indices;
+    return tensor.index_select(batch_dim, indices);
+}
+
+template<typename T>
+torch::Tensor makePinnedHostTensor(const std::vector<T>& values, torch::ScalarType dtype) {
+    auto tensor = torch::empty({static_cast<int64_t>(values.size())},
+                               torch::TensorOptions().dtype(dtype).device(torch::kCPU).pinned_memory(true));
+    std::copy(values.begin(), values.end(), tensor.data_ptr<T>());
+    return tensor;
+}
+
+torch::Tensor copyPinnedTensorToDevice(const torch::Tensor& host_tensor,
+                                       const c10::Device&   device,
+                                       TensorHolder&        holder) {
+    if (device.is_cpu()) {
+        return host_tensor;
+    }
+    holder.hold_host(host_tensor);
+    return host_tensor.to(torch::TensorOptions().dtype(host_tensor.scalar_type()).device(device),
+                          /*non_blocking=*/true);
 }
 
 torch::Tensor catDefinedTokenParts(const std::vector<torch::Tensor>& parts) {
@@ -453,36 +476,44 @@ GptModelInputs MtpExecutor::makePrefillRoundInput(const GptModelInputs& full_inp
     chunk.combo_position_ids        = catDefinedTokenParts(position_id_parts);
     chunk.text_tokens_mask          = catDefinedTokenParts(text_mask_parts);
 
-    const auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(full_inputs.combo_tokens.device());
+    const auto device = full_inputs.combo_tokens.device();
+    const auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(device);
     const auto host_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-    chunk.input_lengths   = torch::tensor(round_input_lengths, device_i32);
-    chunk.prefix_lengths  = torch::tensor(round_prefix_lengths, device_i32);
+    auto input_lengths_host = makePinnedHostTensor(round_input_lengths, torch::kInt32);
+    auto prefix_lengths_host = makePinnedHostTensor(round_prefix_lengths, torch::kInt32);
+    auto lm_output_indexes_host = makePinnedHostTensor(lm_output_indexes, torch::kInt32);
+    chunk.input_lengths   = copyPinnedTensorToDevice(input_lengths_host, device, buffer_holder_);
+    chunk.prefix_lengths  = copyPinnedTensorToDevice(prefix_lengths_host, device, buffer_holder_);
     chunk.sequence_lengths  = torch::empty({0}, device_i32);
-    chunk.lm_output_indexes = torch::tensor(lm_output_indexes, device_i32);
-    chunk.input_lengths_host_for_log    = torch::tensor(round_input_lengths, host_i32);
-    chunk.prefix_lengths_host_for_log   = torch::tensor(round_prefix_lengths, host_i32);
+    chunk.lm_output_indexes = copyPinnedTensorToDevice(lm_output_indexes_host, device, buffer_holder_);
+    chunk.input_lengths_host_for_log    = input_lengths_host;
+    chunk.prefix_lengths_host_for_log   = prefix_lengths_host;
     chunk.sequence_lengths_host_for_log = torch::empty({0}, host_i32);
     chunk.cache_store_publish_plan.reset();
 
     // Select the per-request cache/store metadata rows for this round.
-    const auto index_options = torch::TensorOptions().dtype(torch::kInt64).device(full_inputs.combo_tokens.device());
     const std::vector<int64_t> batch_indices_64(batch_indices.begin(), batch_indices.end());
-    auto indices = torch::tensor(batch_indices_64, index_options);
+    auto host_indices = makePinnedHostTensor(batch_indices_64, torch::kInt64);
+    auto device_indices = copyPinnedTensorToDevice(host_indices, device, buffer_holder_);
     const auto& block_table_ref =
         full_inputs.kv_cache_block_id.defined() ? full_inputs.kv_cache_block_id : full_inputs.kv_cache_block_id_host;
     const int64_t block_batch_dim = block_table_ref.defined() && block_table_ref.dim() == 3 ? 1 : 0;
-    chunk.kv_cache_block_id       = selectBatchRows(full_inputs.kv_cache_block_id, indices, block_batch_dim);
-    chunk.kv_cache_block_id_host  = selectBatchRows(full_inputs.kv_cache_block_id_host, indices, block_batch_dim);
+    chunk.kv_cache_block_id =
+        selectBatchRows(full_inputs.kv_cache_block_id, host_indices, device_indices, block_batch_dim);
+    chunk.kv_cache_block_id_host =
+        selectBatchRows(full_inputs.kv_cache_block_id_host, host_indices, device_indices, block_batch_dim);
     const auto& kernel_table_ref  = full_inputs.kv_cache_kernel_block_id.defined() ?
                                         full_inputs.kv_cache_kernel_block_id :
                                         full_inputs.kv_cache_kernel_block_id_host;
     const int64_t kernel_batch_dim = kernel_table_ref.defined() && kernel_table_ref.dim() == 3 ? 1 : 0;
-    chunk.kv_cache_kernel_block_id = selectBatchRows(full_inputs.kv_cache_kernel_block_id, indices, kernel_batch_dim);
+    chunk.kv_cache_kernel_block_id = selectBatchRows(
+        full_inputs.kv_cache_kernel_block_id, host_indices, device_indices, kernel_batch_dim);
     chunk.kv_cache_kernel_block_id_host =
-        selectBatchRows(full_inputs.kv_cache_kernel_block_id_host, indices, kernel_batch_dim);
-    chunk.request_id            = selectBatchRows(full_inputs.request_id, indices, 0);
-    chunk.request_pd_separation = selectBatchRows(full_inputs.request_pd_separation, indices, 0);
-    chunk.cache_keys            = selectBatchRows(full_inputs.cache_keys, indices, 0);
+        selectBatchRows(full_inputs.kv_cache_kernel_block_id_host, host_indices, device_indices, kernel_batch_dim);
+    chunk.request_id = selectBatchRows(full_inputs.request_id, host_indices, device_indices, 0);
+    chunk.request_pd_separation =
+        selectBatchRows(full_inputs.request_pd_separation, host_indices, device_indices, 0);
+    chunk.cache_keys = selectBatchRows(full_inputs.cache_keys, host_indices, device_indices, 0);
 
     sliceRoundMultimodalInputs(chunk, full_inputs, round, total_tokens, /*source_shift=*/0);
 
