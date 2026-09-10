@@ -111,7 +111,7 @@ import os
 import threading
 import time
 from datetime import timedelta
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -131,11 +131,9 @@ from rtp_llm.utils.sleep_timing import log_sleep_timing
 # fail-closed/no-op so enabling the optional optimization cannot make an older or
 # partially initialized rank wedge its peers; strict mode needs a collective
 # preflight vote before it can safely change that contract.
-# TODO(nccl-memory): add a native post-GO watchdog that trips NCCL's abort flag
-# for a communicator stuck inside its unbounded suspend/resume barrier. The
-# current vote timeout only bounds rendezvous; once GO is unanimous, a process
-# death or an internal NCCL remap hang still requires the service supervisor to
-# restart the rank group.
+# Blocking NCCL calls cannot safely be aborted/destroyed concurrently through
+# the public API. A post-GO deadline therefore exits the failed rank and lets
+# ProcessManager/supervisor restart the instance group; see _call_with_watchdog.
 # TODO(nccl-memory): namespace rendezvous keys with a launcher-provided job/epoch
 # nonce before enabling this on elastic workers. A TCPStore that outlives a rank
 # restart can retain an old arrival counter and fabricate a quorum at seq=0.
@@ -183,6 +181,8 @@ _NONBLOCKING_ENV = (
 # work estimate -- generous enough to absorb GIL and scheduling jitter, short
 # enough that a dead peer costs one sleep instead of a hung instance.
 _VOTE_TIMEOUT_S = 30.0
+_COLLECTIVE_TIMEOUT_S = 120.0
+_COLLECTIVE_TIMEOUT_EXIT_CODE = 124
 _VOTE_POLL_S = 0.05
 _VOTE_KEY_PREFIX = "rtp_llm/sleep_nccl_release"
 _DECISION_GO = "go"
@@ -242,6 +242,43 @@ def _record_failure(detail: str) -> str:
     global _last_failure
     _last_failure = detail
     return detail
+
+
+def _call_with_watchdog(operation: str, key: str, call: Callable[[], int]) -> int:
+    """Bound a blocking native call by failing the process, never by retrying it.
+
+    This is separate from the reversible drain deadline. After GO, abandoning
+    a Python future or concurrently destroying a blocking NCCL communicator is
+    not safe. CDLL releases the GIL while NCCL runs, so a daemon timer can exit
+    the rank if the call wedges. ProcessManager handles non-zero child exits by
+    stopping peers and exiting the parent for its supervisor to restart.
+
+    The timeout callback avoids logging/allocator/NCCL locks: the begin record
+    names the call and exit code in advance. This does not replace an external
+    supervisor for a process/kernel that cannot schedule the watchdog itself.
+    """
+    finished = threading.Event()
+
+    def expired() -> None:
+        if not finished.is_set():
+            _record_failure(f"{operation} {key} exceeded {_COLLECTIVE_TIMEOUT_S}s")
+            os._exit(_COLLECTIVE_TIMEOUT_EXIT_CODE)
+
+    timer = threading.Timer(_COLLECTIVE_TIMEOUT_S, expired)
+    timer.daemon = True
+    logging.info(
+        "[NcclMemory] %s begin key=%s deadline_s=%.0f timeout_exit_code=%d",
+        operation,
+        key,
+        _COLLECTIVE_TIMEOUT_S,
+        _COLLECTIVE_TIMEOUT_EXIT_CODE,
+    )
+    timer.start()
+    try:
+        return call()
+    finally:
+        finished.set()
+        timer.cancel()
 
 
 def status_text() -> str:
@@ -697,7 +734,9 @@ def suspend_for_sleep(device: object, reason: str = "sleep") -> None:
             # the two apart. Rules (2)+(5): past a GO there is no benign rc and no
             # retry, so both cases just get recorded and the walk continues.
             try:
-                rc = api.suspend(comm, _SUSPEND_MEM)
+                rc = _call_with_watchdog(
+                    "ncclCommSuspend", key, lambda: api.suspend(comm, _SUSPEND_MEM)
+                )
                 failure = None if rc == 0 else _rc_detail(key, rc)
             except Exception as e:  # noqa: BLE001
                 failure = f"{key}(exc={e})"
@@ -832,8 +871,9 @@ def resume_after_wake(device: object, reason: str = "wake") -> None:
         #
         # Honest limit: this closes the CommCheck/EnsureReady class only. A
         # cuMemCreate OOM inside resume's remap loop is also pre-barrier and is not
-        # predictable from memstats, so a residual hang remains by construction; the
-        # complete fix is a post-GO watchdog tripping comm->abortFlag, out of scope.
+        # predictable from memstats. The post-GO watchdog bounds that residual
+        # hang by failing the rank; it must not retry or race ncclCommAbort against
+        # this blocking communicator.
         unusable: List[str] = []
         for key, comm, _pg in todo:
             total = api.stat(comm, _STAT_TOTAL)
@@ -888,7 +928,9 @@ def resume_after_wake(device: object, reason: str = "wake") -> None:
             # and treat a raised exception exactly like a non-zero rc -- the peers
             # blocked on the next comm's barrier cannot tell them apart.
             try:
-                rc = api.resume(comm)
+                rc = _call_with_watchdog(
+                    "ncclCommResume", key, lambda: api.resume(comm)
+                )
                 failure = None if rc == 0 else _rc_detail(key, rc)
             except Exception as e:  # noqa: BLE001
                 failure = f"{key}(exc={e})"

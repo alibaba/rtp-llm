@@ -27,6 +27,7 @@ import ctypes
 import hashlib
 import logging
 import socket
+import subprocess
 import sys
 import time
 import types
@@ -47,6 +48,45 @@ _ALL_SYMS = ("ncclCommSuspend", "ncclCommResume", "ncclCommMemStats")
 # Arbitrary non-null "comm pointers". Only their identity matters.
 _COMM_A = 0xAAAA0000
 _COMM_B = 0xBBBB0000
+
+
+class TestNativeCollectiveWatchdog(unittest.TestCase):
+    def test_completed_call_disarms_watchdog(self) -> None:
+        with mock.patch.object(nccl_memory.threading, "Timer") as timer_type:
+            self.assertEqual(
+                nccl_memory._call_with_watchdog("suspend", "world", lambda: 0), 0
+            )
+            timer_type.return_value.start.assert_called_once()
+            timer_type.return_value.cancel.assert_called_once()
+            callback = timer_type.call_args.args[1]
+            with mock.patch.object(nccl_memory.os, "_exit") as exit_process:
+                callback()  # a delayed timer callback cannot kill a finished call
+                exit_process.assert_not_called()
+
+    def test_raising_call_disarms_watchdog_and_preserves_error(self) -> None:
+        with mock.patch.object(nccl_memory.threading, "Timer") as timer_type:
+            call = mock.Mock(side_effect=RuntimeError("native call failed"))
+            with self.assertRaisesRegex(RuntimeError, "native call failed"):
+                nccl_memory._call_with_watchdog("resume", "world", call)
+            timer_type.return_value.cancel.assert_called_once()
+
+    def test_stuck_call_exits_only_the_owned_subprocess(self) -> None:
+        # No GPU or real NCCL. A real daemon timer plus a GIL-releasing wait
+        # exercises the fail-fast boundary without risking the test runner.
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import time; from rtp_llm.utils import nccl_memory as m; "
+                "m._COLLECTIVE_TIMEOUT_S = 0.05; "
+                "m._call_with_watchdog('simulated_stuck_resume', 'world', "
+                "lambda: time.sleep(10))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
 
 
 def _free_port() -> int:
