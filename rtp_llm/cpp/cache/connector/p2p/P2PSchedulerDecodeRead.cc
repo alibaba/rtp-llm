@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
@@ -19,13 +19,13 @@ constexpr size_t kAsyncReadThreadCount = 4;
 constexpr size_t kAsyncReadQueueSize   = 1024;
 }  // namespace
 
-P2PConnectorSchedulerDecode::P2PConnectorSchedulerDecode(
+P2PSchedulerDecodeRead::P2PSchedulerDecodeRead(
     P2PConnectorSchedulerConfig                config,
     const kmonitor::MetricsReporterPtr&        metrics_reporter,
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
     config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
 
-P2PConnectorSchedulerDecode::~P2PConnectorSchedulerDecode() {
+P2PSchedulerDecodeRead::~P2PSchedulerDecodeRead() {
     if (async_read_pool_) {
         async_read_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
         async_read_pool_->join();
@@ -36,20 +36,20 @@ P2PConnectorSchedulerDecode::~P2PConnectorSchedulerDecode() {
     }
 }
 
-bool P2PConnectorSchedulerDecode::init(const std::string& process_id) {
+bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
     server_caller_ = std::make_shared<DecodeLoadHelper>(config_.worker_addrs);
 
     auto async_read_pool = std::make_shared<autil::LockFreeThreadPool>(
         kAsyncReadThreadCount, kAsyncReadQueueSize, nullptr, "P2PAsyncReadKickoff");
     if (!async_read_pool->start()) {
-        RTP_LLM_LOG_ERROR("P2PConnectorSchedulerDecode init failed: async read pool start failed");
+        RTP_LLM_LOG_ERROR("P2PSchedulerDecodeRead init failed: async read pool start failed");
         return false;
     }
     async_read_pool_ = std::move(async_read_pool);
 
     checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
     if (!checker_->init(metrics_reporter_, tp_broadcast_client_)) {
-        RTP_LLM_LOG_ERROR("P2PConnectorSchedulerDecode init failed: checker init failed");
+        RTP_LLM_LOG_ERROR("P2PSchedulerDecodeRead init failed: checker init failed");
         async_read_pool_->stop();
         async_read_pool_.reset();
         return false;
@@ -58,7 +58,7 @@ bool P2PConnectorSchedulerDecode::init(const std::string& process_id) {
     return true;
 }
 
-ErrorInfo P2PConnectorSchedulerDecode::checkPeerCpLayout(int prefill_tp_size, int prefill_cp_size) const {
+ErrorInfo P2PSchedulerDecodeRead::checkPeerCpLayout(int prefill_tp_size, int prefill_cp_size) const {
     const auto& cp_cfg = config_.parallelism_config.prefill_cp_config;
 
     // kv_cache_sharded 是部署级同配开关（OpaqueKVCacheSpec::fixedRegionCpSize 的 DECODE
@@ -81,7 +81,7 @@ ErrorInfo P2PConnectorSchedulerDecode::checkPeerCpLayout(int prefill_tp_size, in
     return ErrorInfo::OkStatus();
 }
 
-std::shared_ptr<const PlanResult> P2PConnectorSchedulerDecode::planFor(int prefill_tp_size, int prefill_cp_size) {
+std::shared_ptr<const PlanResult> P2PSchedulerDecodeRead::planFor(int prefill_tp_size, int prefill_cp_size) {
     const auto key = std::make_pair(prefill_tp_size, prefill_cp_size);
     {
         std::lock_guard<std::mutex> lock(plan_cache_mutex_);
@@ -110,7 +110,7 @@ std::shared_ptr<const PlanResult> P2PConnectorSchedulerDecode::planFor(int prefi
 }
 
 P2PBroadcastClient::RankRoutes
-P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        plan,
+P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                                                    KVCacheResource&           resource,
                                                    const std::pair<int, int>& block_range,
                                                    size_t                     worker_num) const {
@@ -155,7 +155,7 @@ P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        pl
                 continue;
             }
             TransferRoutePB pb;
-            RouteCodec::encodeForDecode(*route, &pb);
+            RouteCodec::encodeForReceiver(*route, &pb);
             for (const auto& buffer : layer_buffers) {
                 auto* layer_block = pb.add_layer_blocks();
                 layer_block->set_layer_id(buffer->getLayerId());
@@ -171,19 +171,19 @@ P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        pl
     return rank_routes;
 }
 
-void P2PConnectorSchedulerDecode::stopChecker() {
+void P2PSchedulerDecodeRead::stopChecker() {
     if (checker_) {
         checker_->stop();
     }
 }
 
-void P2PConnectorSchedulerDecode::cancel(const std::shared_ptr<P2PConnectorAsyncReadContext>& context) {
+void P2PSchedulerDecodeRead::cancel(const std::shared_ptr<P2PConnectorAsyncReadContext>& context) {
     if (context) {
         context->cancel(tp_broadcast_client_);
     }
 }
 
-P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncRead(
+P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
     const KVCacheResourcePtr& resource,
     const std::shared_ptr<Meta>& meta,
     const std::pair<int, int>& block_range,
@@ -351,7 +351,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     checker_->addContext(async_context);
     const int64_t add_context_cost_us = currentTimeUs() - add_context_start_us;
     if (add_context_cost_us >= 100000) {
-        RTP_LLM_LOG_WARNING("[PD-DIAG] P2PConnectorSchedulerDecode::asyncRead slow addContext, "
+        RTP_LLM_LOG_WARNING("[PD-DIAG] P2PSchedulerDecodeRead::asyncRead slow addContext, "
                             "unique_key=%s, cost_us=%ld",
                             unique_key.c_str(),
                             add_context_cost_us);
@@ -360,7 +360,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     return {async_context, ErrorInfo::OkStatus()};
 }
 
-std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSchedulerDecode::startAsyncReadCalls(
+std::optional<P2PSchedulerDecodeRead::AsyncReadCallResults> P2PSchedulerDecodeRead::startAsyncReadCalls(
     int64_t                                                 request_id,
     const std::string&                                      prefill_ip,
     uint32_t                                                prefill_port,

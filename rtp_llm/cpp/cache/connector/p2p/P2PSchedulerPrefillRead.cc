@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
@@ -11,13 +11,13 @@
 
 namespace rtp_llm {
 
-P2PConnectorSchedulerPrefill::P2PConnectorSchedulerPrefill(
+P2PSchedulerPrefillRead::P2PSchedulerPrefillRead(
     P2PConnectorSchedulerConfig                config,
     const kmonitor::MetricsReporterPtr&        metrics_reporter,
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
     config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
 
-std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int decode_tp_size) {
+std::shared_ptr<const PlanResult> P2PSchedulerPrefillRead::planFor(int decode_tp_size) {
     {
         std::lock_guard<std::mutex> lock(plan_cache_mutex_);
         auto                        it = plan_cache_.find(decode_tp_size);
@@ -42,13 +42,13 @@ std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int deco
 }
 
 P2PBroadcastClient::RankRoutes
-P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan& plan, size_t worker_num) const {
+P2PSchedulerPrefillRead::buildPrefillRankRoutes(const TransferPlan& plan, size_t worker_num) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
         for (const auto* route : plan.forPrefillRank(static_cast<int>(worker_rank))) {
             TransferRoutePB pb;
             // peer_index 是 decode_transfer_servers 的下标，与 route->dst_rank 同一命名空间。
-            RouteCodec::encodeForPrefill(*route, route->dst_rank, &pb);
+            RouteCodec::encodeForSender(*route, route->dst_rank, &pb);
             rank_routes[worker_rank].push_back(std::move(pb));
         }
     }
@@ -56,7 +56,7 @@ P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan& plan, s
 }
 
 ErrorInfo
-P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&                            resource,
+P2PSchedulerPrefillRead::sendKVCache(const KVCacheResourcePtr&                            resource,
                                           const std::string&                                   unique_key,
                                           int64_t                                              request_id,
                                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
@@ -176,7 +176,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
 }
 
 std::shared_ptr<P2PBroadcastClient::Result>
-P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P2PBroadcastClient::Result>& result,
+P2PSchedulerPrefillRead::waitForBroadcastCompletion(const std::shared_ptr<P2PBroadcastClient::Result>& result,
                                                          const std::string&                                 unique_key,
                                                          int64_t                                            request_id,
                                                          int64_t                                            deadline_ms,

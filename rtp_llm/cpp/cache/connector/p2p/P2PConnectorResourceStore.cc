@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PRequestDeadline.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 
@@ -8,18 +9,9 @@
 #include <chrono>
 #include <limits>
 #include <thread>
+#include <tuple>
 
 namespace {
-
-constexpr int64_t kSideChannelMaxTtlMs     = 3600000;  // 1 hour
-constexpr int64_t kMaxResourceLifetimeMs   = 3600000;  // 1 hour cap to prevent permanently pinned blocks
-
-int64_t normalizeRequestDeadline(int64_t request_deadline_ms, int64_t now_ms, int64_t fallback_ttl_ms) {
-    if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()) {
-        return now_ms + fallback_ttl_ms;
-    }
-    return std::max(request_deadline_ms, now_ms);
-}
 
 std::chrono::system_clock::time_point deadlineToTimeoutPoint(int64_t deadline_ms, int64_t start_time_us) {
     if (deadline_ms > INT64_MAX / 1000) {
@@ -89,7 +81,7 @@ bool P2PConnectorResourceStore::isMarkedCancelled(const std::string& unique_key)
 bool P2PConnectorResourceStore::init() {
     check_timeout_thread_ =
         autil::LoopThread::createLoopThread(std::bind(&P2PConnectorResourceStore::checkTimeout, this),
-                                            timeout_check_interval_ms_,
+                                            int64_t(timeout_check_interval_ms_) * 1000,
                                             "P2PConnectorResourceStoreCheckTimeoutThread");
     if (!check_timeout_thread_) {
         RTP_LLM_LOG_ERROR("P2PConnectorResourceStore init failed: check_timeout_thread is null");
@@ -99,8 +91,19 @@ bool P2PConnectorResourceStore::init() {
     return true;
 }
 
-void P2PConnectorResourceStore::setOnRequestReleased(std::function<void(int64_t, int64_t)> on_request_released) {
+void P2PConnectorResourceStore::setOnRequestReleased(
+    std::function<void(const std::string&, int64_t, int64_t)> on_request_released) {
     on_request_released_ = std::move(on_request_released);
+}
+
+void P2PConnectorResourceStore::setOnRequestRegistered(
+    std::function<bool(const std::string&, int64_t, int64_t)> on_request_registered) {
+    on_request_registered_ = std::move(on_request_registered);
+}
+
+void P2PConnectorResourceStore::setOnRequestAcquired(
+    std::function<bool(const std::string&, int64_t)> on_request_acquired) {
+    on_request_acquired_ = std::move(on_request_acquired);
 }
 
 bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
@@ -119,24 +122,26 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
         return false;
     }
     const int64_t now_ms = currentTimeMs();
+    const int64_t request_deadline_ms =
+        normalizeP2PRequestDeadline(routing->deadline_ms, now_ms, cancelled_keys_ttl_ms_);
     if (routing->deadline_ms > 0 && routing->deadline_ms != std::numeric_limits<int64_t>::max()
         && routing->deadline_ms <= now_ms) {
         RTP_LLM_LOG_WARNING("P2PConnectorResourceStore::addResource rejected expired request, unique_key: %s",
                             unique_key.c_str());
         if (on_request_released_) {
-            on_request_released_(request_id, routing->deadline_ms);
+            on_request_released_(unique_key, request_id, request_deadline_ms);
         }
         return false;
     }
 
-    bool rejected_cancelled = false;
+    bool rejected = false;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         auto                        cancelled_it = cancelled_keys_.find(unique_key);
         if (cancelled_it != cancelled_keys_.end()) {
             // Decode already cancelled this request. Drop the resource immediately instead of
             // letting it sit until checkTimeout(), so blocks are freed without delay.
-            rejected_cancelled = true;
+            rejected = true;
             RTP_LLM_LOG_INFO("P2PConnectorResourceStore::addResource: rejected cancelled key, unique_key: %s",
                              unique_key.c_str());
         } else {
@@ -144,19 +149,23 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
             entry->request_id        = request_id;
             entry->unique_key        = unique_key;
             entry->kv_cache_resource = kv_cache_resource;
-            entry->request_deadline_ms =
-                normalizeRequestDeadline(routing->deadline_ms, now_ms, cancelled_keys_ttl_ms_);
-            entry->deadline_ms = std::min(
-                {entry->request_deadline_ms, now_ms + prefill_resource_hold_ms_, now_ms + kMaxResourceLifetimeMs});
+            entry->request_deadline_ms = request_deadline_ms;
+            entry->deadline_ms = p2pResourceHoldDeadline(request_deadline_ms, now_ms, prefill_resource_hold_ms_);
             entry->add_time_us        = currentTimeUs();
-            resource_map_[unique_key] = entry;
+            if (on_request_registered_
+                && !on_request_registered_(unique_key, entry->deadline_ms, entry->request_deadline_ms)) {
+                cancelled_keys_[unique_key] = request_deadline_ms;
+                rejected = true;
+            } else {
+                resource_map_[unique_key] = entry;
+            }
         }
     }
-    if (rejected_cancelled) {
+    if (rejected) {
         if (on_request_released_) {
-            on_request_released_(
-                request_id, normalizeRequestDeadline(routing->deadline_ms, currentTimeMs(), cancelled_keys_ttl_ms_));
+            on_request_released_(unique_key, request_id, request_deadline_ms);
         }
+        resource_cv_.notify_all();
         return false;
     }
     // 通知所有等待的线程
@@ -209,7 +218,7 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int6
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         const int64_t               now_ms = currentTimeMs();
-        int64_t tombstone_expire_at = normalizeRequestDeadline(request_deadline_ms, now_ms, cancelled_keys_ttl_ms_);
+        int64_t tombstone_expire_at = normalizeP2PRequestDeadline(request_deadline_ms, now_ms, cancelled_keys_ttl_ms_);
         auto                        it = resource_map_.find(unique_key);
         if (it != resource_map_.end()) {
             // Resource is already in the store — remove it now rather than waiting for checkTimeout().
@@ -228,9 +237,11 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int6
         // Record terminal state even when the resource was already present. A
         // duplicate or late StartLoad for this request must not wait again.
         cancelled_keys_[unique_key] = tombstone_expire_at;
+        released_request_deadline_ms = tombstone_expire_at;
     }
-    if (released_request_id >= 0 && on_request_released_) {
-        on_request_released_(released_request_id, released_request_deadline_ms);
+    resource_cv_.notify_all();
+    if (on_request_released_) {
+        on_request_released_(unique_key, released_request_id, released_request_deadline_ms);
     }
 }
 
@@ -272,23 +283,35 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
         return nullptr;
     }
 
-    auto entry = stealResourceEntryLocked(unique_key);
-    if (entry) {
-        std::lock_guard<std::mutex> side_channel_lock(side_channel_map_mutex_);
-        active_side_channel_deadlines_[unique_key] = deadline_ms;
-        auto side_channel_it = side_channel_data_map_.find(unique_key);
-        if (side_channel_it != side_channel_data_map_.end()) {
-            side_channel_it->second.deadline_ms = deadline_ms;
-        }
+    const auto it = resource_map_.find(unique_key);
+    if (it == resource_map_.end()) {
+        return nullptr;
     }
-    return entry;
+    auto entry = it->second;
+    const int64_t transfer_deadline_ms = std::min(deadline_ms, entry->request_deadline_ms);
+    const int64_t now_ms = currentTimeMs();
+    // Hold expiry and transfer activation have one decision point. ResultStore
+    // does not expire resource-owned entries independently while this lock is held.
+    if (now_ms >= entry->deadline_ms || now_ms >= transfer_deadline_ms
+        || (on_request_acquired_ && !on_request_acquired_(unique_key, transfer_deadline_ms))) {
+        resource_map_.erase(it);
+        cancelled_keys_[unique_key] = entry->request_deadline_ms;
+        reportMetrics(true, false, entry->add_time_us);
+        lock.unlock();
+        if (on_request_released_) {
+            on_request_released_(unique_key, entry->request_id, entry->request_deadline_ms);
+        }
+        resource_cv_.notify_all();
+        return nullptr;
+    }
+    entry->deadline_ms = transfer_deadline_ms;
+    return stealResourceEntryLocked(unique_key);
 }
 
 void P2PConnectorResourceStore::checkTimeout() {
     int64_t                  current_time_ms = currentTimeMs();
     bool                     any_expired     = false;
-    std::vector<std::string> expired_keys;
-    std::vector<std::pair<int64_t, int64_t>> released_requests;
+    std::vector<std::tuple<std::string, int64_t, int64_t>> released_requests;
     {
         std::lock_guard<std::mutex> lock(resource_map_mutex_);
         for (auto it = resource_map_.begin(); it != resource_map_.end();) {
@@ -305,8 +328,7 @@ void P2PConnectorResourceStore::checkTimeout() {
                 // of waiting until the business deadline (~1h). See predicate
                 // in waitForResourceOrCancellation.
                 cancelled_keys_[unique_key] = entry->request_deadline_ms;
-                released_requests.emplace_back(entry->request_id, entry->request_deadline_ms);
-                expired_keys.push_back(unique_key);
+                released_requests.emplace_back(unique_key, entry->request_id, entry->request_deadline_ms);
                 it          = resource_map_.erase(it);
                 any_expired = true;
                 reportMetrics(true, false, wait_start_time_us);
@@ -330,43 +352,14 @@ void P2PConnectorResourceStore::checkTimeout() {
         }
     }
     if (on_request_released_) {
-        for (const auto& [request_id, request_deadline_ms] : released_requests) {
-            on_request_released_(request_id, request_deadline_ms);
+        for (const auto& [unique_key, request_id, request_deadline_ms] : released_requests) {
+            on_request_released_(unique_key, request_id, request_deadline_ms);
         }
     }
     if (any_expired) {
         // Wake up any handleRead currently sitting in waitForResourceOrCancellation
         // for one of the keys we just marked cancelled.
         resource_cv_.notify_all();
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(side_channel_map_mutex_);
-        // Clean up side-channel data for resources that just expired, so it
-        // doesn't linger with the original business deadline (~1h).
-        for (const auto& key : expired_keys) {
-            clearSideChannelDataLocked(key);
-        }
-        for (auto it = side_channel_data_map_.begin(); it != side_channel_data_map_.end();) {
-            const auto& [unique_key, entry] = *it;
-            if (entry.deadline_ms > 0 && current_time_ms >= entry.deadline_ms) {
-                RTP_LLM_LOG_WARNING(
-                    "P2PConnectorResourceStore: side-channel timeout, unique_key: %s, deadline_ms: %ld, current_time_ms: %ld",
-                    unique_key.c_str(),
-                    entry.deadline_ms,
-                    current_time_ms);
-                it = side_channel_data_map_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        for (auto it = active_side_channel_deadlines_.begin(); it != active_side_channel_deadlines_.end();) {
-            if (current_time_ms >= it->second) {
-                it = active_side_channel_deadlines_.erase(it);
-            } else {
-                ++it;
-            }
-        }
     }
 }
 
@@ -378,127 +371,6 @@ void P2PConnectorResourceStore::reportMetrics(bool timeout, bool cancelled, int6
         collector->stream_wait_time_us = currentTimeUs() - wait_start_time_us;
         metrics_reporter_->report<P2PConnectorMetrics, StreamStoreWaitMetricsCollector>(nullptr, collector.get());
     }
-}
-
-void P2PConnectorResourceStore::notifySideChannelReady(const std::string&                                unique_key,
-                                                       int64_t                                           deadline_ms,
-                                                       const P2PConnectorResourceEntry::SideChannelData& data) {
-    int64_t add_time_us = currentTimeUs();
-    std::shared_ptr<P2PConnectorResourceEntry> entry;
-    {
-        std::lock_guard<std::mutex> lock(resource_map_mutex_);
-        if (cancelled_keys_.find(unique_key) != cancelled_keys_.end()) {
-            RTP_LLM_LOG_DEBUG("notifySideChannelReady: skipped cancelled key, unique_key: %s", unique_key.c_str());
-            return;
-        }
-        auto it = resource_map_.find(unique_key);
-        if (it != resource_map_.end() && it->second) {
-            entry = it->second;
-            // Always use the resource entry's capped deadline so side-channel
-            // data expires together with the resource (~hold_ms), not the
-            // caller-provided business deadline (~1h).
-            deadline_ms = it->second->deadline_ms;
-            add_time_us = it->second->add_time_us;
-        }
-
-        {
-            std::lock_guard<std::mutex> sc_map_lock(side_channel_map_mutex_);
-            if (!entry) {
-                if (auto active_it = active_side_channel_deadlines_.find(unique_key);
-                    active_it != active_side_channel_deadlines_.end()) {
-                    deadline_ms = active_it->second;
-                } else {
-                    const int64_t now_ms = currentTimeMs();
-                    const int64_t hold_ms =
-                        std::max<int64_t>(0, std::min(prefill_resource_hold_ms_, kSideChannelMaxTtlMs));
-                    const int64_t hold_deadline_ms =
-                        now_ms > std::numeric_limits<int64_t>::max() - hold_ms ?
-                            std::numeric_limits<int64_t>::max() :
-                            now_ms + hold_ms;
-                    if (deadline_ms <= 0 || deadline_ms == INT64_MAX) {
-                        deadline_ms = hold_deadline_ms;
-                    } else {
-                        deadline_ms = std::min(deadline_ms, hold_deadline_ms);
-                    }
-                }
-            }
-            side_channel_data_map_[unique_key] = P2PSideChannelStoreEntry{data, deadline_ms, add_time_us};
-        }
-        if (entry) {
-            std::lock_guard<std::mutex> sc_lock(entry->side_channel_mutex);
-            entry->side_channel_data  = data;
-            entry->side_channel_ready = true;
-            entry->side_channel_cv.notify_all();
-        }
-    }
-    side_channel_cv_.notify_all();
-    RTP_LLM_LOG_DEBUG(
-        "notifySideChannelReady: unique_key: %s, first_token: %ld", unique_key.c_str(), data.first_token_id);
-}
-
-bool P2PConnectorResourceStore::consumeSideChannelData(const std::string&                          unique_key,
-                                                       P2PConnectorResourceEntry::SideChannelData& out_data) {
-    std::lock_guard<std::mutex> lock(side_channel_map_mutex_);
-    auto                        it = side_channel_data_map_.find(unique_key);
-    if (it != side_channel_data_map_.end()) {
-        out_data = it->second.data;
-        side_channel_data_map_.erase(it);
-        return true;
-    }
-    return false;
-}
-
-void P2PConnectorResourceStore::clearSideChannelDataLocked(const std::string& unique_key) {
-    active_side_channel_deadlines_.erase(unique_key);
-    auto it = side_channel_data_map_.find(unique_key);
-    if (it != side_channel_data_map_.end()) {
-        side_channel_data_map_.erase(it);
-        RTP_LLM_LOG_DEBUG("P2PConnectorResourceStore: cleared side-channel, unique_key=%s", unique_key.c_str());
-    }
-}
-
-void P2PConnectorResourceStore::clearSideChannelData(const std::string& unique_key) {
-    std::lock_guard<std::mutex> lock(side_channel_map_mutex_);
-    clearSideChannelDataLocked(unique_key);
-}
-
-bool P2PConnectorResourceStore::waitSideChannelReady(const std::string&    unique_key,
-                                                     int64_t               deadline_ms,
-                                                     std::function<bool()> is_cancelled) {
-    std::shared_ptr<P2PConnectorResourceEntry> entry;
-    {
-        std::lock_guard<std::mutex> lock(resource_map_mutex_);
-        auto                        it = resource_map_.find(unique_key);
-        if (it != resource_map_.end()) {
-            entry = it->second;
-        }
-    }
-    if (!entry) {
-        RTP_LLM_LOG_WARNING("waitSideChannelReady: entry not found, unique_key: %s", unique_key.c_str());
-        return false;
-    }
-
-    std::unique_lock<std::mutex> lock(entry->side_channel_mutex);
-    const int64_t                start_time_us = currentTimeUs();
-    const int64_t                remaining_us  = deadline_ms * 1000 - start_time_us;
-    if (remaining_us <= 0) {
-        RTP_LLM_LOG_WARNING("waitSideChannelReady: past deadline, unique_key: %s", unique_key.c_str());
-        return false;
-    }
-
-    const auto timeout_tp = deadlineToTimeoutPoint(deadline_ms, start_time_us);
-    bool       ready      = waitWithBackoff(
-        lock, entry->side_channel_cv, timeout_tp, [&]() { return entry->side_channel_ready; }, is_cancelled);
-
-    if (!ready) {
-        RTP_LLM_LOG_WARNING("waitSideChannelReady: timeout, unique_key: %s", unique_key.c_str());
-        clearSideChannelData(unique_key);
-    } else if (is_cancelled && is_cancelled()) {
-        RTP_LLM_LOG_DEBUG("waitSideChannelReady: cancelled, unique_key: %s", unique_key.c_str());
-        clearSideChannelData(unique_key);
-        return false;
-    }
-    return ready;
 }
 
 }  // namespace rtp_llm

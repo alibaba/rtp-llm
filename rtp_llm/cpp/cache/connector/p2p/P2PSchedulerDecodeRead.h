@@ -23,7 +23,7 @@ class LockFreeThreadPool;
 
 namespace rtp_llm {
 
-class P2PConnectorSchedulerDecode {
+class P2PSchedulerDecodeRead {
 public:
     struct AsyncReadResult {
         std::shared_ptr<P2PConnectorAsyncReadContext> context;
@@ -34,10 +34,10 @@ public:
         }
     };
 
-    P2PConnectorSchedulerDecode(P2PConnectorSchedulerConfig                config,
+    P2PSchedulerDecodeRead(P2PConnectorSchedulerConfig                config,
                                 const kmonitor::MetricsReporterPtr&        metrics_reporter,
                                 const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
-    ~P2PConnectorSchedulerDecode();
+    ~P2PSchedulerDecodeRead();
 
 public:
     bool init(const std::string& process_id);

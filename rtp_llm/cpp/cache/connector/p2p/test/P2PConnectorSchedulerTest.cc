@@ -7,8 +7,8 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -173,9 +173,9 @@ protected:
             scheduler_config.worker_grpc_addrs, scheduler_config.p2p_cancel_broadcast_timeout_ms);
         ASSERT_TRUE(tp_broadcast_client_->init());
         prefill_scheduler_ =
-            std::make_unique<P2PConnectorSchedulerPrefill>(scheduler_config, nullptr, tp_broadcast_client_);
+            std::make_unique<P2PSchedulerPrefillRead>(scheduler_config, nullptr, tp_broadcast_client_);
         decode_scheduler_ =
-            std::make_unique<P2PConnectorSchedulerDecode>(std::move(scheduler_config), nullptr, tp_broadcast_client_);
+            std::make_unique<P2PSchedulerDecodeRead>(std::move(scheduler_config), nullptr, tp_broadcast_client_);
         ASSERT_TRUE(decode_scheduler_->init("p2p_connector_scheduler_test"));
     }
 
@@ -185,8 +185,8 @@ protected:
     std::unique_ptr<TestRpcServer>              prefill_server_;
     std::string                                 prefill_addr_;
     std::shared_ptr<P2PBroadcastClient>             tp_broadcast_client_;
-    std::unique_ptr<P2PConnectorSchedulerPrefill>   prefill_scheduler_;
-    std::unique_ptr<P2PConnectorSchedulerDecode>    decode_scheduler_;
+    std::unique_ptr<P2PSchedulerPrefillRead>   prefill_scheduler_;
+    std::unique_ptr<P2PSchedulerDecodeRead>    decode_scheduler_;
 };
 
 // ==================== sendKVCache 测试 (Prefill 端功能) ====================

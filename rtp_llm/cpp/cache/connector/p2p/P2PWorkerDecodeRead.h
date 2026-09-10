@@ -20,13 +20,13 @@
 
 namespace rtp_llm {
 
-class P2PConnectorWorkerDecode {
+class P2PWorkerDecodeRead {
 public:
-    P2PConnectorWorkerDecode(P2PConnectorWorkerConfig                    config,
+    P2PWorkerDecodeRead(P2PConnectorWorkerConfig                    config,
                              const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                              const kmonitor::MetricsReporterPtr&         metrics_reporter,
                              const transfer::IKVCacheReceiverPtr&        receiver);
-    ~P2PConnectorWorkerDecode();
+    ~P2PWorkerDecodeRead();
 
 public:
     bool initialized() const {

@@ -14,7 +14,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
+#include "rtp_llm/cpp/cache/connector/p2p/PrefillResultStore.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -133,9 +133,8 @@ public:
 
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
-    void notifySideChannelReady(const std::string&                                unique_key,
-                                int64_t                                           deadline_ms,
-                                const P2PConnectorResourceEntry::SideChannelData& data);
+    void
+    notifySideChannelReady(const std::string& unique_key, int64_t deadline_ms, const PrefillResultStore::Data& data);
     bool writeP2PLayer(size_t                                model_id,
                        int                                   local_layer_id,
                        const std::string&                    tag,

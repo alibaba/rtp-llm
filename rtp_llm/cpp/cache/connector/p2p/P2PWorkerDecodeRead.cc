@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
@@ -15,7 +15,7 @@
 
 namespace rtp_llm {
 
-P2PConnectorWorkerDecode::P2PConnectorWorkerDecode(P2PConnectorWorkerConfig                    config,
+P2PWorkerDecodeRead::P2PWorkerDecodeRead(P2PConnectorWorkerConfig                    config,
                                                    const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                                                    const kmonitor::MetricsReporterPtr&         metrics_reporter,
                                                    const transfer::IKVCacheReceiverPtr&        receiver):
@@ -24,19 +24,19 @@ P2PConnectorWorkerDecode::P2PConnectorWorkerDecode(P2PConnectorWorkerConfig     
     metrics_reporter_(metrics_reporter),
     receiver_(receiver) {
     lease_cleanup_thread_ = autil::LoopThread::createLoopThread(
-        std::bind(&P2PConnectorWorkerDecode::cleanupStaleLeases, this), 1000000, "P2PDecodeLeaseCleanup");
+        std::bind(&P2PWorkerDecodeRead::cleanupStaleLeases, this), 1000000, "P2PDecodeLeaseCleanup");
     if (!lease_cleanup_thread_) {
-        RTP_LLM_LOG_ERROR("P2PConnectorWorkerDecode failed to start lease cleanup thread");
+        RTP_LLM_LOG_ERROR("P2PWorkerDecodeRead failed to start lease cleanup thread");
     }
 }
 
-P2PConnectorWorkerDecode::~P2PConnectorWorkerDecode() {
+P2PWorkerDecodeRead::~P2PWorkerDecodeRead() {
     if (lease_cleanup_thread_) {
         lease_cleanup_thread_->stop();
     }
 }
 
-ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&             worker_plan,
+ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&             worker_plan,
                                                    const std::string&                    unique_key,
                                                    int64_t                               deadline_ms,
                                                    const std::shared_ptr<ReadTaskGroup>& task_group,
@@ -95,7 +95,7 @@ constexpr int kBackoffInitialMs = 1;
 constexpr int kBackoffCapMs     = 8;
 }  // namespace
 
-void P2PConnectorWorkerDecode::cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group,
+void P2PWorkerDecodeRead::cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                     bool                                   cancel_pending_tasks) const {
     if (!task_group) {
         return;
@@ -110,8 +110,8 @@ void P2PConnectorWorkerDecode::cleanupRecvTaskStore(const std::shared_ptr<ReadTa
     }
 }
 
-P2PConnectorWorkerDecode::ReadWaitOutcome
-P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
+P2PWorkerDecodeRead::ReadWaitOutcome
+P2PWorkerDecodeRead::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                               int64_t                               deadline_ms,
                                                               int64_t                               request_id,
                                                               const std::string&                    unique_key) const {
@@ -171,7 +171,7 @@ P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_
     }
 }
 
-void P2PConnectorWorkerDecode::reportReadMetrics(int     total_block_count,
+void P2PWorkerDecodeRead::reportReadMetrics(int     total_block_count,
                                                  bool    success,
                                                  int64_t read_start_time_us) const {
     if (!metrics_reporter_) {
@@ -185,7 +185,7 @@ void P2PConnectorWorkerDecode::reportReadMetrics(int     total_block_count,
     metrics_reporter_->report<P2PConnectorMetrics, DecodeWorkerMetricsCollector>(nullptr, collector.get());
 }
 
-ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
+ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
                                          const std::string&        unique_key,
                                          int64_t                   deadline_ms,
                                          const P2PWorkerRoutePlan& worker_plan) {
@@ -323,8 +323,8 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     return ErrorInfo::OkStatus();
 }
 
-P2PConnectorWorkerDecode::RecvResultInfo
-P2PConnectorWorkerDecode::aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const {
+P2PWorkerDecodeRead::RecvResultInfo
+P2PWorkerDecodeRead::aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const {
     RecvResultInfo result;
     for (const auto& task : task_group->tasks) {
         if (!task->success()) {
@@ -347,7 +347,7 @@ P2PConnectorWorkerDecode::aggregateRecvTaskResults(const std::shared_ptr<ReadTas
     return result;
 }
 
-bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t request_deadline_ms) {
+bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t request_deadline_ms) {
     RTP_LLM_LOG_DEBUG("cancelRead start, unique_key: %s", unique_key.c_str());
     std::shared_ptr<ReadTaskGroup> task_group;
     {
@@ -380,7 +380,7 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t
     return true;
 }
 
-void P2PConnectorWorkerDecode::evictStaleLeases() {
+void P2PWorkerDecodeRead::evictStaleLeases() {
     int64_t now_ms = currentTimeMs();
     for (auto it = lease_map_.begin(); it != lease_map_.end();) {
         if (now_ms - it->second.create_time_ms > kLeaseMapTtlMs) {
@@ -394,7 +394,7 @@ void P2PConnectorWorkerDecode::evictStaleLeases() {
     }
 }
 
-void P2PConnectorWorkerDecode::cleanupStaleLeases() {
+void P2PWorkerDecodeRead::cleanupStaleLeases() {
     const int64_t now_ms = currentTimeMs();
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
@@ -412,7 +412,7 @@ void P2PConnectorWorkerDecode::cleanupStaleLeases() {
     }
 }
 
-bool P2PConnectorWorkerDecode::queryLeaseStatus(
+bool P2PWorkerDecodeRead::queryLeaseStatus(
     const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
     std::lock_guard<std::mutex> lock(lease_map_mutex_);
     evictStaleLeases();

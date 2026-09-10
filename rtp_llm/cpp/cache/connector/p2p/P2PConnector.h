@@ -19,6 +19,7 @@ class Meta;
 class P2PConnectorPrefill;
 class P2PConnectorDecode;
 class P2PConnectorResourceStore;
+class PrefillResultStore;
 
 /**
  * Q: 如何保证kvcache不被写坏
@@ -41,6 +42,7 @@ public:
 
     // Expose the Prefill resource store for integration and testing.
     std::shared_ptr<P2PConnectorResourceStore> streamStore() const;
+    std::shared_ptr<PrefillResultStore> resultStore() const;
 
 public:
     std::shared_ptr<AsyncContext> asyncRead(const KVCacheResourcePtr&    resource,

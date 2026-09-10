@@ -337,8 +337,8 @@ struct CacheStoreConfig {
     int     p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms      = 100 * 1000;
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
-    // Prefill-side hold time for P2PConnectorResourceStore::resource_map_ /
-    // side_channel_data_map_. Replaces the per-request business deadline as the
+    // Prefill-side hold time for KV resources and PrefillResultStore payloads.
+    // Replaces the per-request business deadline as the
     // entry expiration so prefill stops pinning KV blocks for the full request
     // timeout (commonly ~1h) when decode never sends StartLoad.
     int64_t p2p_prefill_resource_hold_ms = 300 * 1000;
@@ -346,8 +346,8 @@ struct CacheStoreConfig {
     // business deadline (from generate_config->timeout_ms, often 1h) is
     // clamped to now + p2p_max_transfer_deadline_ms at the connector entry
     // points (decode asyncRead + prefill handleRead). Without this cap,
-    // P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout and
-    // P2PConnectorSchedulerPrefill::waitForBroadcastCompletion can sit on
+    // P2PWorkerPrefillRead::waitSendCallbacksWithTimeout and
+    // P2PSchedulerPrefillRead::waitForBroadcastCompletion can sit on
     // a single hung RDMA transfer for the full business deadline (5/26
     // incident: 8 reads each blocked ~3600s before broadcast timeout
     // triggered, cascading into engine scheduler stall).

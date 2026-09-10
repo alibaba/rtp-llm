@@ -17,9 +17,10 @@ class KVCacheConnectorLayerContext;
 class Meta;
 class P2PBroadcastClient;
 class P2PConnectorResourceStore;
-class P2PConnectorSchedulerPrefill;
+class PrefillResultStore;
+class P2PSchedulerPrefillRead;
 class LayerBlockConverter;
-class P2PConnectorWorkerPrefill;
+class P2PWorkerPrefillRead;
 struct P2PConnectorResourceEntry;
 
 class P2PConnectorPrefill {
@@ -65,6 +66,9 @@ public:
     std::shared_ptr<P2PConnectorResourceStore> resourceStore() const {
         return stream_store_;
     }
+    std::shared_ptr<PrefillResultStore> resultStore() const {
+        return result_store_;
+    }
 
 private:
     grpc::Status waitForResourceEntry(const std::string&                          unique_key,
@@ -77,17 +81,15 @@ private:
                              P2PConnectorStartLoadResponsePB&                  response,
                              std::function<bool()>                             is_cancelled = nullptr);
 
-    grpc::Status fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-                                            P2PConnectorStartLoadResponsePB&                  response);
-
 private:
     const P2PConnectorConfig                       config_;
     std::shared_ptr<LayerBlockConverter>           layer_block_converter_;
     kmonitor::MetricsReporterPtr                   metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>            tp_broadcast_client_;
-    std::unique_ptr<P2PConnectorSchedulerPrefill> scheduler_;
-    std::shared_ptr<P2PConnectorWorkerPrefill>    worker_;
+    std::unique_ptr<P2PSchedulerPrefillRead>       scheduler_;
+    std::shared_ptr<P2PWorkerPrefillRead>          worker_;
     std::shared_ptr<P2PConnectorResourceStore>    stream_store_;
+    std::shared_ptr<PrefillResultStore>            result_store_;
 };
 
 }  // namespace rtp_llm

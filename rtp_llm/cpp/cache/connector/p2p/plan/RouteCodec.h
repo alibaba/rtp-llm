@@ -12,14 +12,12 @@ namespace rtp_llm {
 /// @brief TransferRoute <-> TransferRoutePB 的编解码。
 ///
 /// 每个 worker 只收到**它自己那一侧**的 partition / slice —— 对端的那一半永不上线。
-/// 因此编码是「有方向的」：encodeForPrefill 写 src_*，encodeForDecode 写 dst_*。
+/// 因此编码是「有方向的」：encodeForSender 写 src_*，encodeForReceiver 写 dst_*。
 class RouteCodec {
 public:
-    /// @brief 编码给 prefill worker：它需要 route_id（命名 key）、目的端点下标、以及自己的
-    ///        src_partition / src_slice。不需要键规则 —— 在所有被允许的 CP 形态下，
-    ///        (src_rank, dst_rank, tag) 唯一确定一条 route，而 prefill worker 的本地投影
-    ///        恰好等于该 route 的键集（详见设计文档 Step 3 的 CP 白名单）。
-    static void encodeForPrefill(const TransferRoute& route, int peer_index, TransferRoutePB* pb) {
+    /// @brief 编码发送方的 route_id、目的端点下标和 src_partition / src_slice。
+    ///        正向 Read 的键集来自 prefill 本地投影。
+    static void encodeForSender(const TransferRoute& route, int peer_index, TransferRoutePB* pb) {
         pb->set_route_id(route.route_id);
         pb->set_cache_tag(route.cache_tag);
         pb->set_peer_index(peer_index);
@@ -30,10 +28,9 @@ public:
         pb->set_slice_index(route.src_slice.index);
     }
 
-    /// @brief 编码给 decode worker：它需要 route_id、自己的 dst_partition / dst_slice，
-    ///        以及本 route 覆盖的具体 (cache_key, block_id)。键规则由 rank0 自己解析完，
-    ///        decode worker 因此是纯执行器、不重新推导键集。
-    static void encodeForDecode(const TransferRoute& route, TransferRoutePB* pb) {
+    /// @brief 编码接收方的 route_id 和 dst_partition / dst_slice。
+    ///        本 route 的具体 (cache_key, block_id) 由编排方解析并补入，worker 不重新推导键集。
+    static void encodeForReceiver(const TransferRoute& route, TransferRoutePB* pb) {
         pb->set_route_id(route.route_id);
         pb->set_cache_tag(route.cache_tag);
         pb->set_partition_count(route.dst_partition.count);

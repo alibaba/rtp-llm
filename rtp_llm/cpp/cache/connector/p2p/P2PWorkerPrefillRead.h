@@ -24,13 +24,13 @@
 
 namespace rtp_llm {
 
-class P2PConnectorWorkerPrefill {
+class P2PWorkerPrefillRead {
 public:
-    P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig                    config,
+    P2PWorkerPrefillRead(P2PConnectorWorkerConfig                    config,
                               const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                               const kmonitor::MetricsReporterPtr&         metrics_reporter,
                               const transfer::IKVCacheSenderPtr&          sender);
-    ~P2PConnectorWorkerPrefill();
+    ~P2PWorkerPrefillRead();
 
 public:
     bool init(int64_t store_wait_timeout_ms);

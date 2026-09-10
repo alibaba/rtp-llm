@@ -12,8 +12,8 @@
 #include <map>
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -395,11 +395,11 @@ protected:
         mock_sender_   = std::make_shared<MockIKVCacheSender>();
         mock_receiver_ = std::make_shared<MockIKVCacheReceiver>();
 
-        prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        prefill_ = std::make_unique<P2PWorkerPrefillRead>(
             worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
         prefill_->init(10 * 1000);
 
-        decode_ = std::make_unique<P2PConnectorWorkerDecode>(
+        decode_ = std::make_unique<P2PWorkerDecodeRead>(
             worker_config_, mock_layer_block_converter_, nullptr, mock_receiver_);
 
         computed_buffers_ = prefill_->getComputedBuffersStore();
@@ -505,10 +505,10 @@ protected:
         worker_config_.transfer_backend_config.rdma_transfer_wait_timeout_ms = timeout_ms;
         prefill_.reset();
         decode_.reset();
-        prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        prefill_ = std::make_unique<P2PWorkerPrefillRead>(
             worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
         prefill_->init(10 * 1000);
-        decode_ = std::make_unique<P2PConnectorWorkerDecode>(
+        decode_ = std::make_unique<P2PWorkerDecodeRead>(
             worker_config_, mock_layer_block_converter_, nullptr, mock_receiver_);
         computed_buffers_ = prefill_->getComputedBuffersStore();
     }
@@ -516,8 +516,8 @@ protected:
 protected:
     P2PConnectorWorkerConfig                       worker_config_;
     std::shared_ptr<LayerBlockConverter>           mock_layer_block_converter_;
-    std::unique_ptr<P2PConnectorWorkerPrefill>     prefill_;
-    std::unique_ptr<P2PConnectorWorkerDecode>      decode_;
+    std::unique_ptr<P2PWorkerPrefillRead>     prefill_;
+    std::unique_ptr<P2PWorkerDecodeRead>      decode_;
     std::shared_ptr<ComputedLayerCacheBufferStore> computed_buffers_;
     std::shared_ptr<MockIKVCacheSender>            mock_sender_;
     std::shared_ptr<MockIKVCacheReceiver>          mock_receiver_;
@@ -1707,7 +1707,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_FallbackTimeout_FailsFastWithGenerate
     // 重建 prefill 使用非常短的 store_wait_timeout（50ms）以加速测试
     prefill_.reset();
     prefill_ =
-        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+        std::make_unique<P2PWorkerPrefillRead>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
     prefill_->init(50);  // store_wait_timeout_ms = 50ms
     computed_buffers_ = prefill_->getComputedBuffersStore();
 
@@ -1762,7 +1762,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_BufferDeadlineFollowsRequestDeadline
     // 重建 prefill 使用极短的 store_wait_timeout（50ms）模拟"forward 完成 50ms 后"
     prefill_.reset();
     prefill_ =
-        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+        std::make_unique<P2PWorkerPrefillRead>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
     prefill_->init(50);  // store_wait_timeout_ms = 50ms
     computed_buffers_ = prefill_->getComputedBuffersStore();
 
@@ -1789,7 +1789,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_BufferDeadlineFollowsRequestDeadline
 TEST_F(P2PConnectorWorkerTest, WriteByLayer_RequestDeadlineBoundsStoreWaitFallback) {
     prefill_.reset();
     prefill_ =
-        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+        std::make_unique<P2PWorkerPrefillRead>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
     prefill_->init(5000);
     computed_buffers_ = prefill_->getComputedBuffersStore();
 

@@ -38,6 +38,10 @@ bool P2PConnector::init() {
     return false;
 }
 
+std::shared_ptr<PrefillResultStore> P2PConnector::resultStore() const {
+    return prefill_ ? prefill_->resultStore() : nullptr;
+}
+
 std::shared_ptr<P2PConnectorResourceStore> P2PConnector::streamStore() const {
     return prefill_ ? prefill_->resourceStore() : nullptr;
 }

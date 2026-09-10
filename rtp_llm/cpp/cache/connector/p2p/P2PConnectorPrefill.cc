@@ -7,8 +7,9 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorBackend.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/PrefillResultStore.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -36,7 +37,7 @@ bool P2PConnectorPrefill::init() {
             RTP_LLM_LOG_ERROR("prefill connector init failed: tp_broadcast_client init failed");
             return false;
         }
-        scheduler_ = std::make_unique<P2PConnectorSchedulerPrefill>(
+        scheduler_ = std::make_unique<P2PSchedulerPrefillRead>(
             config_.scheduler_config, metrics_reporter_, tp_broadcast_client_);
     }
 
@@ -46,24 +47,40 @@ bool P2PConnectorPrefill::init() {
         RTP_LLM_LOG_ERROR("prefill connector init failed: transfer backend init failed");
         return false;
     }
-    worker_ = std::make_shared<P2PConnectorWorkerPrefill>(
+    worker_ = std::make_shared<P2PWorkerPrefillRead>(
         config_.worker_config, layer_block_converter_, metrics_reporter_, sender);
     if (!worker_->init(10 * 1000)) {
         RTP_LLM_LOG_ERROR("prefill connector init failed: worker init failed");
         return false;
     }
 
+    result_store_ =
+        std::make_shared<PrefillResultStore>(config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms,
+                                             config_.scheduler_config.p2p_prefill_resource_hold_ms,
+                                             config_.scheduler_config.p2p_cancelled_keys_ttl_ms);
+    if (!result_store_->init()) {
+        return false;
+    }
     stream_store_ = std::make_shared<P2PConnectorResourceStore>(
         metrics_reporter_,
         config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms,
         config_.scheduler_config.p2p_prefill_resource_hold_ms,
         config_.scheduler_config.p2p_cancelled_keys_ttl_ms);
-    stream_store_->setOnRequestReleased([computed_buffers = worker_->getComputedBuffersStore()](
-                                            int64_t request_id, int64_t request_deadline_ms) {
-        if (computed_buffers) {
-            computed_buffers->removeBuffer(request_id, request_deadline_ms);
-        }
+    stream_store_->setOnRequestRegistered(
+        [results = result_store_](const std::string& key, int64_t deadline_ms, int64_t request_deadline_ms) {
+            return results->registerRequest(key, deadline_ms, request_deadline_ms);
+        });
+    stream_store_->setOnRequestAcquired([results = result_store_](const std::string& key, int64_t deadline_ms) {
+        return results->beginTransfer(key, deadline_ms);
     });
+    stream_store_->setOnRequestReleased(
+        [computed_buffers = worker_->getComputedBuffersStore(),
+         results = result_store_](const std::string& unique_key, int64_t request_id, int64_t request_deadline_ms) {
+            results->seal(unique_key, request_deadline_ms);
+            if (computed_buffers && request_id >= 0) {
+                computed_buffers->removeBuffer(request_id, request_deadline_ms);
+            }
+        });
     if (!stream_store_->init()) {
         RTP_LLM_LOG_ERROR("prefill connector init failed: stream_store init failed");
         return false;
@@ -138,7 +155,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
 
     const std::string& unique_key           = request.unique_key();
     const int64_t      transfer_deadline_ms = request.deadline_ms();
-    const int64_t      request_deadline_ms  = request.request_deadline_ms();
+    int64_t            request_deadline_ms  = request.request_deadline_ms();
     const int64_t      now_ms               = currentTimeMs();
     if (unique_key.empty()) {
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
@@ -148,7 +165,6 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     if (request_deadline_ms <= 0 || transfer_deadline_ms <= 0 || transfer_deadline_ms > request_deadline_ms) {
         if (!unique_key.empty() && request_deadline_ms > 0) {
             stream_store_->markTerminal(unique_key, request_deadline_ms);
-            stream_store_->clearSideChannelData(unique_key);
         }
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("invalid StartLoad deadlines");
@@ -157,7 +173,6 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     if (now_ms >= transfer_deadline_ms) {
         if (!unique_key.empty()) {
             stream_store_->markTerminal(unique_key, request_deadline_ms);
-            stream_store_->clearSideChannelData(unique_key);
         }
         response.set_error_code(transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
         response.set_error_message("transfer deadline expired before handleRead");
@@ -195,11 +210,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         return;
     }
 
-    // The resource-hold deadline only applies while waiting in the store.
-    // Once StartLoad has consumed the entry, response/side-channel waiting is
-    // governed by this transfer's absolute deadline.
-    resource_entry->deadline_ms = transfer_deadline_ms;
-
+    request_deadline_ms = resource_entry->request_deadline_ms;
     int64_t request_id = resource_entry->request_id;
     // Downgrade noisy entry log: total_cost_us in the "handleRead complete" log
     // below already accounts for wait_resource_cost_us; keep this as DEBUG for
@@ -224,7 +235,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                                                    unique_key,
                                                    request_id,
                                                    decode_transfer_servers,
-                                                   transfer_deadline_ms,
+                                                   resource_entry->deadline_ms,
                                                    direct_cancel,
                                                    request.no_transfer(),
                                                    request_deadline_ms);
@@ -234,11 +245,8 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                           unique_key.c_str(),
                           send_cost_us,
                           error_info.ToString().c_str());
-        // Seal the consumed request before clearing its side-channel entry.
-        // Otherwise a late first-token notification can recreate the entry
-        // with the request-level deadline after this handler returns.
+        // Seal the consumed request, rejecting late result notifications.
         stream_store_->markTerminal(unique_key, request_deadline_ms);
-        stream_store_->clearSideChannelData(unique_key);
         response.set_error_code(transErrorCodeToRPC(error_info.code()));
         response.set_error_message(error_info.ToString());
         return;
@@ -249,11 +257,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     RTP_LLM_LOG_DEBUG(
         "[PD-DIAG] handleRead sendKVCache done, unique_key=%s, send_cost_us=%ld", unique_key.c_str(), send_cost_us);
     waitAndFillResponse(resource_entry, response, is_cancelled);
-    // waitAndFillResponse clears the currently visible payload. Mark terminal
-    // and clear once more to close the race with a notification arriving
-    // between its final clear and this handler returning.
     stream_store_->markTerminal(unique_key, request_deadline_ms);
-    stream_store_->clearSideChannelData(unique_key);
     RTP_LLM_LOG_DEBUG("[PD-DIAG] handleRead complete, unique_key=%s, request_id=%ld, "
                      "total_cost_us=%ld, wait_resource_us=%ld, send_us=%ld",
                      unique_key.c_str(),
@@ -266,73 +270,8 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
 void P2PConnectorPrefill::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
                                               P2PConnectorStartLoadResponsePB&                  response,
                                               std::function<bool()>                             is_cancelled) {
-    // Wait for side-channel data to be ready (notified by prefill engine when first token / SP data is produced)
-    // Note: resource_entry has already been stolen from resource_map_, so we wait on it directly
-    const std::string& unique_key  = resource_entry->unique_key;
-    int64_t            deadline_ms = resource_entry->deadline_ms;
-
-    std::unique_lock<std::mutex> lock(resource_entry->side_channel_mutex);
-    const int64_t                remaining_us = deadline_ms * 1000 - currentTimeUs();
-    if (remaining_us <= 0) {
-        RTP_LLM_LOG_WARNING("waitAndFillResponse: past deadline, unique_key: %s", unique_key.c_str());
-        stream_store_->clearSideChannelData(unique_key);
-        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
-        response.set_error_message("waitAndFillResponse: past deadline");
-        return;
-    }
-
-    const auto timeout_tp = std::chrono::system_clock::now() + std::chrono::microseconds(remaining_us);
-    while (!resource_entry->side_channel_ready) {
-        if (is_cancelled && is_cancelled()) {
-            RTP_LLM_LOG_DEBUG("waitAndFillResponse: cancelled, unique_key: %s", unique_key.c_str());
-            stream_store_->clearSideChannelData(unique_key);
-            response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
-            response.set_error_message("waitAndFillResponse: cancelled");
-            return;
-        }
-
-        P2PConnectorResourceEntry::SideChannelData side_channel_data;
-        if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
-            resource_entry->side_channel_data  = std::move(side_channel_data);
-            resource_entry->side_channel_ready = true;
-            break;
-        }
-
-        auto next_wake_tp = std::min(timeout_tp, std::chrono::system_clock::now() + std::chrono::milliseconds(10));
-        resource_entry->side_channel_cv.wait_until(lock, next_wake_tp);
-        if (!resource_entry->side_channel_ready) {
-            if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
-                resource_entry->side_channel_data  = std::move(side_channel_data);
-                resource_entry->side_channel_ready = true;
-                break;
-            }
-            if (std::chrono::system_clock::now() >= timeout_tp) {
-                RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s", unique_key.c_str());
-                stream_store_->clearSideChannelData(unique_key);
-                response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
-                response.set_error_message("waitAndFillResponse: timeout");
-                return;
-            }
-        }
-    }
-
-    // Release lock before calling fillResponseWithStreamInfo to avoid deadlock
-    // (fillResponseWithStreamInfo acquires side_channel_mutex internally)
-    lock.unlock();
-
-    grpc::Status fill_status = fillResponseWithStreamInfo(resource_entry, response);
-    if (!fill_status.ok()) {
-        RTP_LLM_LOG_WARNING("waitAndFillResponse failed, unique_key: %s, error: %s",
-                            resource_entry->unique_key.c_str(),
-                            fill_status.error_message().c_str());
-        stream_store_->clearSideChannelData(unique_key);
-        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
-        response.set_error_message("fillResponseWithStreamInfo failed: " + fill_status.error_message());
-        return;
-    }
-
-    stream_store_->clearSideChannelData(unique_key);
-    response.set_error_code(ErrorCodePB::NONE_ERROR);
+    result_store_->waitAndFill(
+        resource_entry->unique_key, resource_entry->deadline_ms, response, std::move(is_cancelled));
 }
 
 namespace {
@@ -370,7 +309,6 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
         // StartLoad only steals the rank-0 resource entry. Every other Prefill
         // TP rank must seal its local entry on every terminal HANDLE_READ path.
         stream_store_->markTerminal(unique_key, request_deadline_ms);
-        stream_store_->clearSideChannelData(unique_key);
     };
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
@@ -425,7 +363,6 @@ bool P2PConnectorPrefill::processNoTransferPerRank(
         stream_store_->markTerminal(
             unique_key,
             p2p_request.request_deadline_ms() > 0 ? p2p_request.request_deadline_ms() : deadline_ms);
-        stream_store_->clearSideChannelData(unique_key);
     }
     setP2PResponseOk(response);
     return true;
@@ -470,73 +407,6 @@ grpc::Status P2PConnectorPrefill::waitForResourceEntry(
     // request deadline so duplicate or delayed calls cannot wait again.
     stream_store_->markCancelled(unique_key, request_deadline_ms);
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource wait transfer deadline exceeded");
-}
-
-grpc::Status P2PConnectorPrefill::fillResponseWithStreamInfo(
-    const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-    P2PConnectorStartLoadResponsePB&                  response) {
-    // Read side-channel data from entry (filled by notifySideChannelReady)
-    P2PConnectorResourceEntry::SideChannelData data;
-    {
-        std::lock_guard<std::mutex> lock(resource_entry->side_channel_mutex);
-        if (!resource_entry->side_channel_ready) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "side-channel data not ready");
-        }
-        data = resource_entry->side_channel_data;
-    }
-
-    // Fill response proto from side-channel data
-    auto* payload = response.mutable_payload();
-    payload->set_has_first_generate_token(data.has_first_token);
-    if (data.has_first_token) {
-        payload->set_first_generate_token_id(data.first_token_id);
-    }
-    payload->set_total_reuse_len(data.total_reuse_len);
-    payload->set_local_reuse_len(data.local_reuse_len);
-    payload->set_remote_reuse_len(data.remote_reuse_len);
-    payload->set_memory_reuse_len(data.memory_reuse_len);
-    payload->set_disk_reuse_len(data.disk_reuse_len);
-
-    if (!data.propose_tokens.empty()) {
-        auto& propose_tensor = (*payload->mutable_tensors())["propose_tokens"];
-        auto* tokens_pb      = propose_tensor.mutable_tensor();
-        tokens_pb->set_data_type(TensorPB::INT32);
-        tokens_pb->add_shape(data.propose_tokens.size());
-        std::vector<int32_t> int32_tokens(data.propose_tokens.begin(), data.propose_tokens.end());
-        tokens_pb->set_int32_data(int32_tokens.data(), int32_tokens.size() * sizeof(int32_t));
-    }
-    if (data.propose_probs.data_type() != TensorPB::FP32 && data.propose_probs.fp16_data().empty()
-        && data.propose_probs.bf16_data().empty() && data.propose_probs.fp32_data().empty()) {
-        // propose_probs is empty but that's OK — skip
-    } else {
-        auto& probs_tensor = (*payload->mutable_tensors())["propose_probs"];
-        probs_tensor.mutable_tensor()->CopyFrom(data.propose_probs);
-    }
-    if (data.propose_hidden.data_type() != TensorPB::FP32 && data.propose_hidden.fp16_data().empty()
-        && data.propose_hidden.bf16_data().empty() && data.propose_hidden.fp32_data().empty()) {
-        // propose_hidden is empty but that's OK — skip
-    } else {
-        auto& hidden_tensor = (*payload->mutable_tensors())["propose_hidden"];
-        hidden_tensor.mutable_tensor()->CopyFrom(data.propose_hidden);
-    }
-    if (!data.position_ids.empty()) {
-        auto& pos_tensor = (*payload->mutable_tensors())["position_ids"];
-        auto* pos_pb     = pos_tensor.mutable_tensor();
-        pos_pb->set_data_type(TensorPB::INT32);
-        pos_pb->add_shape(data.position_ids.size());
-        pos_pb->set_int32_data(data.position_ids.data(), data.position_ids.size() * sizeof(int32_t));
-    }
-
-    RTP_LLM_LOG_DEBUG("fill response from entry: first_token: %ld, total_reuse: %d, local: %d, remote: %d, "
-                      "memory: %d, disk: %d",
-                      data.first_token_id,
-                      data.total_reuse_len,
-                      data.local_reuse_len,
-                      data.remote_reuse_len,
-                      data.memory_reuse_len,
-                      data.disk_reuse_len);
-
-    return grpc::Status::OK;
 }
 
 }  // namespace rtp_llm

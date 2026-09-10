@@ -12,7 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
@@ -244,7 +244,7 @@ protected:
         mock_converter_    = std::make_shared<LeaseTestMockLayerBlockConverter>();
         inflight_receiver_ = std::make_shared<InflightMockReceiver>();
 
-        decode_ = std::make_unique<P2PConnectorWorkerDecode>(config_, mock_converter_, nullptr, inflight_receiver_);
+        decode_ = std::make_unique<P2PWorkerDecodeRead>(config_, mock_converter_, nullptr, inflight_receiver_);
     }
 
     void TearDown() override {
@@ -299,7 +299,7 @@ protected:
     P2PConnectorWorkerConfig                          config_;
     std::shared_ptr<LeaseTestMockLayerBlockConverter> mock_converter_;
     std::shared_ptr<InflightMockReceiver>             inflight_receiver_;
-    std::unique_ptr<P2PConnectorWorkerDecode>         decode_;
+    std::unique_ptr<P2PWorkerDecodeRead>         decode_;
 };
 
 // =============================================================================
@@ -482,7 +482,7 @@ TEST_F(DecodeLeaseRaceTest, A2_CancelAllPending_LeaseStoppedImmediately) {
 TEST_F(DecodeLeaseRaceTest, A3_CancelMixedPendingAndTransferring_LeaseWaitsForInflight) {
     // We need more tasks to have a mix. Use 4 layers.
     config_.layer_all_num = 4;
-    decode_ = std::make_unique<P2PConnectorWorkerDecode>(config_, mock_converter_, nullptr, inflight_receiver_);
+    decode_ = std::make_unique<P2PWorkerDecodeRead>(config_, mock_converter_, nullptr, inflight_receiver_);
 
     // Start all in PENDING, then manually transition some to TRANSFERRING
     inflight_receiver_->setStartInTransferring(false);
@@ -683,7 +683,7 @@ TEST_F(DecodeLeaseRaceTest, D1_QueryLeaseStatus_IncrementalFinishCounting) {
     const std::string key     = "d1_incremental";
     auto              buffers = makeBuffers(3);
     config_.layer_all_num     = 3;
-    decode_ = std::make_unique<P2PConnectorWorkerDecode>(config_, mock_converter_, nullptr, inflight_receiver_);
+    decode_ = std::make_unique<P2PWorkerDecodeRead>(config_, mock_converter_, nullptr, inflight_receiver_);
 
     int64_t deadline_ms = currentTimeMs() + 60;
 
@@ -924,7 +924,7 @@ TEST_F(DecodeLeaseRaceTest, E2_MultiTP_4Partitions_LastOneInflight) {
 //     Cancel with tasks completing staggered.
 TEST_F(DecodeLeaseRaceTest, E3_MultiLayerMultiPartition_StaggeredCompletion) {
     config_.layer_all_num = 2;
-    decode_ = std::make_unique<P2PConnectorWorkerDecode>(config_, mock_converter_, nullptr, inflight_receiver_);
+    decode_ = std::make_unique<P2PWorkerDecodeRead>(config_, mock_converter_, nullptr, inflight_receiver_);
 
     const std::string key            = "e3_multi_layer_multi_part";
     auto              buffers        = makeBuffers(2);

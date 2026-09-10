@@ -16,12 +16,12 @@
 
 namespace rtp_llm {
 
-class P2PConnectorSchedulerPrefill {
+class P2PSchedulerPrefillRead {
 public:
-    P2PConnectorSchedulerPrefill(P2PConnectorSchedulerConfig                config,
+    P2PSchedulerPrefillRead(P2PConnectorSchedulerConfig                config,
                                  const kmonitor::MetricsReporterPtr&        metrics_reporter,
                                  const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
-    ~P2PConnectorSchedulerPrefill() = default;
+    ~P2PSchedulerPrefillRead() = default;
 
 public:
     ErrorInfo sendKVCache(const KVCacheResourcePtr&                            resource,

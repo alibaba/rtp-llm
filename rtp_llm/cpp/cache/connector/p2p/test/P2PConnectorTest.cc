@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
+#include "rtp_llm/cpp/cache/connector/p2p/PrefillResultStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -306,7 +307,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
-// 测试: waitSideChannelReady 超时（first token not found），返回 INTERNAL 错误
+// 测试: PrefillResultStore 等待超时（first token not found），返回 INTERNAL 错误
 TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     // 1. 添加有效的 resource entry
     std::string unique_key  = "test_wait_side_channel_timeout";
@@ -329,7 +330,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
 
-    // 4. 由于没有调用 notifySideChannelReady，waitSideChannelReady 会超时
+    // 4. 由于没有投递结果，PrefillResultStore 的等待会超时
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
@@ -564,7 +565,7 @@ TEST_F(P2PConnectorTest, ExecuteHandleReadFailureStillReleasesLocalPrefillResour
 // 1. asyncRead 注册 entry 到 stream_store
 // 2. notifySideChannelReady 设置 side-channel data
 // 3. handleRead -> waitAndStealResource -> waitAndFillResponse
-// 4. waitAndFillResponse 检查 side_channel_ready，发现已经是 true，立即返回
+// 4. waitAndFillResponse 从 PrefillResultStore 消费已就绪的数据，立即返回
 TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     // 1. 创建有效的 resource entry
     std::string unique_key  = "test_notify_side_channel_success";
@@ -581,11 +582,8 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
         server->service()->setP2PResponseSuccess(true);
     }
 
-    // 3. 在调用 handleRead 之前，先调用 notifySideChannelReady
-    //    这会在 entry 上设置 side_channel_ready=true
-    //    然后 handleRead steal entry 时，entry 已经是 ready 状态
-    //    waitAndFillResponse 会立即返回
-    P2PConnectorResourceEntry::SideChannelData data;
+    // 3. 在调用 handleRead 之前，将结果写入独立的 PrefillResultStore。
+    PrefillResultStore::Data data;
     data.has_first_token  = true;
     data.first_token_id   = 12345;
     data.total_reuse_len  = 10;
@@ -598,9 +596,8 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     data.propose_probs.set_data_type(TensorPB::FP32);
     data.propose_hidden.set_data_type(TensorPB::FP32);
 
-    // 注意：notifySideChannelReady 需要在 handleRead steal entry 之前调用
-    // 这样 entry 的 side_channel_ready 才会被设置
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    // 结果投递不再依赖 resource entry 是否已被 steal。
+    connector_->resultStore()->notify(unique_key, deadline_ms, data);
 
     // 4. 创建 request 并调用 handleRead
     //    使用 num_workers = 1 简化测试
@@ -632,10 +629,10 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     auto        meta        = createMockMeta(stream.get());
     connector_->asyncRead(resource, meta, 0, 0);
 
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::Data data;
     data.has_first_token = true;
     data.first_token_id  = 34567;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->resultStore()->notify(unique_key, deadline_ms, data);
 
     for (auto& server : tp_broadcast_servers_) {
         server->service()->resetCallCounts();
@@ -690,13 +687,13 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenNotifySideChannelAfterSteal) {
     }
     ASSERT_TRUE(kv_cache_sent);
 
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::Data data;
     data.has_first_token  = true;
     data.first_token_id   = 23456;
     data.total_reuse_len  = 12;
     data.local_reuse_len  = 4;
     data.remote_reuse_len = 8;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->resultStore()->notify(unique_key, deadline_ms, data);
 
     auto status = handle_read_future.wait_for(std::chrono::seconds(2));
     ASSERT_EQ(status, std::future_status::ready);
@@ -706,6 +703,45 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenNotifySideChannelAfterSteal) {
     EXPECT_TRUE(response.payload().has_first_generate_token());
     EXPECT_EQ(response.payload().first_generate_token_id(), 23456);
     EXPECT_EQ(response.payload().total_reuse_len(), 12);
+}
+
+TEST_F(P2PConnectorTest, HandleRead_PreservesResultWhenCleanupOverlapsAcquisition) {
+    auto resources = connector_->streamStore();
+    auto results = connector_->resultStore();
+    {
+        std::lock_guard<std::mutex> lock(resources->resource_map_mutex_);
+        resources->prefill_resource_hold_ms_ = 10000;
+    }
+    const auto acquire = resources->on_request_acquired_;
+    for (const bool no_transfer : {false, true}) {
+        SCOPED_TRACE(no_transfer);
+        const std::string key = no_transfer ? "handoff_no_transfer" : "handoff_transfer";
+        auto stream = createGenerateStream(key, no_transfer ? 5022 : 5021, 30000);
+        auto meta = createMockMeta(stream.get());
+        auto resource = createValidKVCacheResource(2, 2);
+        ASSERT_NE(connector_->asyncRead(resource, meta, 0, 0), nullptr);
+        int64_t hold_deadline;
+        {
+            std::lock_guard<std::mutex> lock(resources->resource_map_mutex_);
+            hold_deadline = resources->resource_map_.at(key)->deadline_ms;
+        }
+        PrefillResultStore::Data data;
+        data.has_first_token = true;
+        data.first_token_id = 123;
+        results->notify(key, stream->deadlineMs(), data);
+        resources->setOnRequestAcquired([acquire, results, hold_deadline](const std::string& key, int64_t deadline) {
+            results->checkTimeout(hold_deadline + 1);
+            return acquire(key, deadline);
+        });
+        auto request = createValidStartLoadRequest(key, stream->deadlineMs(), 2);
+        request.set_no_transfer(no_transfer);
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response);
+        resources->setOnRequestAcquired(acquire);
+        EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR) << response.error_message();
+        EXPECT_TRUE(response.payload().has_first_generate_token());
+        EXPECT_EQ(response.payload().first_generate_token_id(), 123);
+    }
 }
 
 TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
@@ -722,10 +758,10 @@ TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
         server->service()->setP2PResponseSuccess(true);
     }
 
-    P2PConnectorResourceEntry::SideChannelData data;
+    PrefillResultStore::Data data;
     data.has_first_token = true;
     data.first_token_id  = 0;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->resultStore()->notify(unique_key, deadline_ms, data);
 
     auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
 

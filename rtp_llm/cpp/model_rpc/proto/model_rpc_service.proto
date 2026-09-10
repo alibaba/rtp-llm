@@ -589,7 +589,7 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
     // Removed: remote_tp_size (8) - its only consumer was
-    // P2PConnectorWorkerDecode::calculateRecvPartitionCount, which the transfer plan replaced.
+    // P2PWorkerDecodeRead::calculateRecvPartitionCount, which the transfer plan replaced.
     // Removed: allow_empty_projection (10) - an empty `routes` list is now the authoritative
     // "this worker has nothing to do" signal.
     reserved 8, 10;

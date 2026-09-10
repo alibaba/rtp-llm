@@ -12,7 +12,7 @@ namespace rtp_llm {
 /// @brief P2P KV cache 传输编排器。
 ///
 /// 把 TP 不对称、RR CP、非 RR CP、CP 字节切分统一成一份 TransferPlan。由两侧 rank0
-/// scheduler（P2PConnectorSchedulerDecode / P2PConnectorSchedulerPrefill）各调用一次，
+/// scheduler（P2PSchedulerDecodeRead / P2PSchedulerPrefillRead）各调用一次，
 /// worker 只执行下发的 route。
 ///
 /// plan() 是纯函数：不含 cache_keys、不含 block id、不含时间/随机源，因此可按

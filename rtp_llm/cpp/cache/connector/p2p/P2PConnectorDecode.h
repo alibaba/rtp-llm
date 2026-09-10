@@ -13,8 +13,8 @@ namespace rtp_llm {
 class Meta;
 class LayerBlockConverter;
 class P2PBroadcastClient;
-class P2PConnectorSchedulerDecode;
-class P2PConnectorWorkerDecode;
+class P2PSchedulerDecodeRead;
+class P2PWorkerDecodeRead;
 
 class P2PConnectorDecode {
 public:
@@ -49,8 +49,8 @@ private:
     std::shared_ptr<LayerBlockConverter>          layer_block_converter_;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>           tp_broadcast_client_;
-    std::unique_ptr<P2PConnectorSchedulerDecode> scheduler_;
-    std::unique_ptr<P2PConnectorWorkerDecode>    worker_;
+    std::unique_ptr<P2PSchedulerDecodeRead>       scheduler_;
+    std::unique_ptr<P2PWorkerDecodeRead>          worker_;
 };
 
 }  // namespace rtp_llm

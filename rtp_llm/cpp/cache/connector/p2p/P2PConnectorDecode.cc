@@ -5,8 +5,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorBackend.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -36,8 +36,8 @@ bool P2PConnectorDecode::init() {
             RTP_LLM_LOG_ERROR("decode connector init failed: tp_broadcast_client init failed");
             return false;
         }
-        scheduler_ = std::make_unique<P2PConnectorSchedulerDecode>(
-            config_.scheduler_config, metrics_reporter_, tp_broadcast_client_);
+        scheduler_ =
+            std::make_unique<P2PSchedulerDecodeRead>(config_.scheduler_config, metrics_reporter_, tp_broadcast_client_);
         std::string process_id = autil::NetUtil::getBindIp() + "_pid_" + std::to_string(getpid()) + "_timestamp_"
                                  + std::to_string(currentTimeUs());
         if (!scheduler_->init(process_id)) {
@@ -52,7 +52,7 @@ bool P2PConnectorDecode::init() {
         RTP_LLM_LOG_ERROR("decode connector init failed: transfer backend init failed");
         return false;
     }
-    worker_ = std::make_unique<P2PConnectorWorkerDecode>(
+    worker_ = std::make_unique<P2PWorkerDecodeRead>(
         config_.worker_config, layer_block_converter_, metrics_reporter_, receiver);
     if (!worker_->initialized()) {
         RTP_LLM_LOG_ERROR("decode connector init failed: worker init failed");

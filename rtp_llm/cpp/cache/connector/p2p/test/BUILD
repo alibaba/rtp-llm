@@ -42,6 +42,7 @@ cc_test(
         "LayerCacheBufferUtilFilterTest.cc",
         "StoreWaitContextTest.cc",
         "P2PConnectorResourceStoreTest.cc",
+        "PrefillResultStoreTest.cc",
     ],
     deps = [
         ":test_rpc_server",

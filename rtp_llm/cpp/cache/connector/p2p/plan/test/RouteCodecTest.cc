@@ -30,7 +30,7 @@ TransferRoute makeRoute() {
 TEST(RouteCodec, PrefillDirectionCarriesOnlySrcHalf) {
     const auto      route = makeRoute();
     TransferRoutePB pb;
-    RouteCodec::encodeForPrefill(route, /*peer_index=*/1, &pb);
+    RouteCodec::encodeForSender(route, /*peer_index=*/1, &pb);
 
     EXPECT_EQ(pb.route_id(), 5);
     EXPECT_EQ(pb.cache_tag(), "full");
@@ -47,7 +47,7 @@ TEST(RouteCodec, PrefillDirectionCarriesOnlySrcHalf) {
 TEST(RouteCodec, DecodeDirectionCarriesOnlyDstHalf) {
     const auto      route = makeRoute();
     TransferRoutePB pb;
-    RouteCodec::encodeForDecode(route, &pb);
+    RouteCodec::encodeForReceiver(route, &pb);
 
     const auto local = RouteCodec::decode(pb);
     EXPECT_EQ(local.route_id, 5);
@@ -62,7 +62,7 @@ TEST(RouteCodec, SliceModeRoundTrip) {
         auto route      = makeRoute();
         route.dst_slice = SliceSpec{mode, 4, 2};
         TransferRoutePB pb;
-        RouteCodec::encodeForDecode(route, &pb);
+        RouteCodec::encodeForReceiver(route, &pb);
         EXPECT_EQ(RouteCodec::decode(pb).slice.mode, mode);
     }
     EXPECT_EQ(RouteCodec::toSliceMode(99), CpBlockSliceMode::NONE);
