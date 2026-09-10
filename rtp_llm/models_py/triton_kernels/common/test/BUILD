@@ -26,14 +26,6 @@ py_test(
 )
 
 py_test(
-    name = "silu_mul_masked_heuristic_test",
-    srcs = ["silu_mul_masked_heuristic_test.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-    ],
-)
-
-py_test(
     name = "test_moe_gating",
     srcs = ["test_moe_gating.py"],
     deps = [

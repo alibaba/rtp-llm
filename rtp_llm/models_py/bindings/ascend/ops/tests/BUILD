@@ -50,3 +50,24 @@ cc_binary(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
+
+# Python NPU integration test for the Ascend sampler. The .so is pulled into
+# the test's runfiles via data and imported as a module from next to the
+# test script (see the import-fallback logic in test_ascend_sampler.py).
+py_test(
+    name = "test_ascend_sampler",
+    srcs = ["test_ascend_sampler.py"],
+    data = [
+        ":sampler_test_module.so",
+        "//3rdparty/aclnn_custom_ops:aclnn_custom_ops",
+    ],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    # 与同文件 cc_test / cc_binary 的 Ascend 平台门控一致
+    target_compatible_with = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    tags = ["npu", "exclusive", "manual"],
+)
