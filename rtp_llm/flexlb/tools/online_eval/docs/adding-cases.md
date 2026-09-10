@@ -1,5 +1,7 @@
 # 如何添加新 case
 
+新增 case 先选择 functional 或 workload，并在 `suites.yaml` 登记分类；复杂场景的独立检查使用 Python `case.observe`。具体执行策略和产物见 [两类测试](test-suites.md)。
+
 当前入口是 **YAML 提供数据，Python 定义测试行为**。
 术语、profile、资源所有权与结果状态见 [框架设计](framework-design.md)。
 以下命令从仓库根目录运行；真实 Java 测试使用已分配的远端端口与运行目录。

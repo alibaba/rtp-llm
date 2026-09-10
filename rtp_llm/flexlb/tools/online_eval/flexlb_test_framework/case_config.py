@@ -65,6 +65,15 @@ class CaseBuilder:
             step["timeout_s"] = timeout_s
         self.steps.append(step)
 
+    def observe(self, name, action, *, params=None, timeout_s=None):
+        """Independent observation: a FAIL may continue in the workload executor.
+
+        Do not use for prerequisites, injections or checks authorizing a mutation.
+        ERROR/TIMEOUT still abort dependent execution in either test class.
+        """
+        self.step(name, action, params=params, timeout_s=timeout_s)
+        self.steps[-1]["purpose"] = "observation"
+
     def finish(self):
         return copy.deepcopy(self.steps)
 

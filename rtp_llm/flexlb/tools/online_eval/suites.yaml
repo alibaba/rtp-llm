@@ -1,0 +1,583 @@
+# Classification only. Per-case topology, load and thresholds remain in scenario YAML.
+schema_version: 1
+workload_runtime:
+  capture_metrics: true
+  sample_interval_s: 1.0
+  collector_shutdown_s: 10.0
+cases:
+  admission_queue::queue_depth:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  admission_queue::slo_deadline:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  batcher_placement_admission::batcher_queue_capacity_park:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  batcher_placement_admission::batcher_queue_deadline:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  batcher_placement_admission::placement_pool_wait:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_admission_gate::prefill_concurrency:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_admission_gate::decode_hard_gate:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_admission_gate::prefill_waiting_cap:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_admission_gate::kv_pool_capacity:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  prefill_batch_token_budget::split:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  prefill_batch_token_budget::split_fifo:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  prefill_batch_token_budget::boundary:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  prefill_batch_token_budget::regroup_disabled:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_admission::permit_released_without_preemption:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  balance_distribution::uniform_serial:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  balance_distribution::concurrent_mix:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  balance_distribution::decode_spread:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  balance_distribution::length_mixed:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  balance_overload_transfer::decode_pressure:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  balance_overload_transfer::prefill_pressure:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cancel_fence_settlement::engine_notfound_settle_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_fence_settlement::engine_notfound_settle_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_fence_settlement::prefill_dead_await_terminal:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_fence_settlement::decode_retire_closes_fence:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_fence_settlement::transport_failure_one_shot:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_fence_settlement::unexpected_status_await_terminal:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_fence_settlement::engine_restarted_tombstoned_settle:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_fence_settlement::fencing_lost_on_engine_restart:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::basic_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::idempotent_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::after_terminal_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::basic_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::idempotent_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::after_terminal_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::unknown_rid:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::anomaly_path_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::sibling_isolation_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::phase_timing_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::deadline_exempt_inflight_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::anomaly_path_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::sibling_isolation_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::phase_timing_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::deadline_exempt_inflight_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::schedule_drop_delivered:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::stream_break_prefill_autonomous:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::stream_break_decode_autonomous:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::preemption_victim_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cancel_lifecycle::preemption_victim_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  request_completion::immediate:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  request_completion::deferred_fetch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  request_completion::client_no_fetch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  elastic_added_worker_fault::default:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_added_worker_fault::single_batch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_added_worker_fault::single_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_added_worker_fault::window_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_concurrent_mutation::default:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_concurrent_mutation::single_batch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_concurrent_mutation::single_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_concurrent_mutation::window_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_concurrent_mutation::single_nonbatch_convergence:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_concurrent_mutation::window_nonbatch_convergence:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_concurrent_mutation::batch_convergence:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_concurrent_mutation::single_batch_convergence:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::decode_scale_out_protection:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::normal:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::strict:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::rebalance:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::kv_skew_hot:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::kv_skew_cold:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::steady_recovery:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::kv_full_shrink:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::transient_imbalance:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::rebalance_single_batch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::rebalance_single_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::rebalance_window_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::normal_single_batch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::strict_single_batch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::normal_single_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::strict_single_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::normal_window_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_lifecycle::strict_window_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_pending_drain::legacy_terminal:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_pending_drain::zero_errors:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  elastic_pending_drain::single_batch_terminal:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  engine_fault_recovery::generation_bump:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_fault_recovery::status_gap_no_bump:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_fault_recovery::down_phases:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_fault_recovery::flap:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  engine_fault_recovery::kv_resync:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_fault_recovery::kv_usage_reset:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_fault_recovery::crash_after:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_fault_recovery::no_resurrect:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_fault_recovery::status_gap_long_retire:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_rpc_fault::enqueue_delay_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_rpc_fault::generate_delay_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_rpc_fault::generate_delay_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  engine_rpc_fault::enqueue_error:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_affinity::leader_spill_p2:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cache_affinity::leader_spill_p3:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cache_affinity::leader_spill_p4:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cache_affinity::prefix_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_affinity::prefix_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_affinity::hot_tension:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cache_affinity::mixed_tiers:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cache_affinity::leader_spill_batch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cache_affinity::leader_spill_nonbatch:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cache_capacity_recovery::decode_pool_exhaustion_terminal:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_capacity_recovery::decode_capacity_park:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_capacity_recovery::pool_saturation_evict_reject_recover:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_capacity_recovery::capacity_conflict_overflow:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_churn::hot_churn:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  cache_churn::lru_affinity:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_churn::referenced_occupancy:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::shared_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::shared_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::release_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::release_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::redirect_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::redirect_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::down_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::down_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::mixed_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_global_holders::mixed_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_local_index::continuity_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_local_index::continuity_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_local_index::evict_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_local_index::isolation_batch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_local_index::evict_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  cache_local_index::isolation_nonbatch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  client_fallback_failback::all_masters_down:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  client_fallback_failback::wraparound:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  client_fallback_failback::negative_errorcode:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  client_fallback_failback::direct_generate_error:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  master_coldstart::burst_twenty:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  master_dispatch_quota::single_prefill_ttl:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  master_ha_failover::standalone_a_to_b:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  master_lifecycle::kill_single:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  master_lifecycle::freeze_short_long:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  master_lifecycle::kill_dual_b_to_a:
+    kind: workload
+    reason: Multi-window load, topology or recovery lifecycle
+  observed_terminal_cohort::deferred:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::same_priority_zero_eviction:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::prefill_queued:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::timeout_attribution:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::comparator_frozen_weak:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::config_strict_reject:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::decode_engine_owned:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::decode_reservation_priority:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::observability_integrity:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::decode_reserved_live_window:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::cancel_not_found:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::cancel_absent_fence:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_preemption::cancel_tombstoned:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_queue::same_level_fifo:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_queue::low_no_starvation:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_queue::queue_timeout_terminal:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_queue::order_basic:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_queue::normalize_default50:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_queue::normalize_channels:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_queue::normalize_default30:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  priority_queue::normalize_metrics:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  batch_ack_and_execution::ack_partial:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  batch_ack_and_execution::execution_partial:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  batch_ack_and_execution::ack_multi_error:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  batch_ack_and_execution::ack_drop:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  late_completion::after_missing:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::inflight_ttl_cleanup:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::prefill_suppress_all:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::prefill_suppress_finished:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::decode_suppress_finished:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::no_respond:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::version_regress:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::unknown_rid_finished:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::unknown_rid_running:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::unknown_batchid:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::special_ids:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::unbatched_single_request:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::foreign_batchid:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::duplicate_finished:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::cursor_regress:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::finished_then_running:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::zombie_completed_running:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::zombie_fake_running:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::decode_before_prefill:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::decode_running_before_prefill:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::decode_waiting_before_prefill:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::fetch_error:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::debug_snapshot:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+  status_protocol::normal_no_fetch:
+    kind: functional
+    reason: Bounded protocol, state or admission contract
+
+# Retired executions proven identical in environment and all compiled steps.
+covered_instances:
+  priority_queue::normalize_channels::batch-window: priority_queue::normalize_channels::single-nonbatch
+  priority_queue::normalize_channels::single-batch: priority_queue::normalize_channels::single-nonbatch
+  priority_queue::normalize_channels::window-nonbatch: priority_queue::normalize_channels::single-nonbatch
+  priority_queue::normalize_default30::batch-window: priority_queue::normalize_default30::single-nonbatch
+  priority_queue::normalize_default30::single-batch: priority_queue::normalize_default30::single-nonbatch
+  priority_queue::normalize_default30::window-nonbatch: priority_queue::normalize_default30::single-nonbatch
+  priority_queue::normalize_metrics::batch-window: priority_queue::normalize_metrics::single-nonbatch
+  priority_queue::normalize_metrics::single-batch: priority_queue::normalize_metrics::single-nonbatch
+  priority_queue::normalize_metrics::window-nonbatch: priority_queue::normalize_metrics::single-nonbatch

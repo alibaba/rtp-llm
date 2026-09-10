@@ -77,7 +77,7 @@ def uniform_serial(case):
         timeout_s=case.value("uniform_serial.idle_replay_terminal_timeout_s"),
         params={"requests": output("idle_replay", "requests")},
     )
-    case.step(
+    case.observe(
         "idle_replay_p6",
         "balance_check",
         timeout_s=case.value("uniform_serial.idle_replay_p6_timeout_s"),
@@ -89,7 +89,7 @@ def uniform_serial(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "idle_replay_p1",
         "balance_check",
         timeout_s=case.value("uniform_serial.idle_replay_p1_timeout_s"),
@@ -101,7 +101,7 @@ def uniform_serial(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "idle_replay_p2",
         "balance_check",
         timeout_s=case.value("uniform_serial.idle_replay_p2_timeout_s"),
@@ -140,7 +140,7 @@ def concurrent_mix(case):
         timeout_s=case.value("concurrent_mix.terminal_timeout_s"),
         params={"requests": output("burst", "requests")},
     )
-    case.step(
+    case.observe(
         "p6",
         "balance_check",
         timeout_s=case.value("concurrent_mix.p6_timeout_s"),
@@ -152,7 +152,7 @@ def concurrent_mix(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "p1",
         "balance_check",
         timeout_s=case.value("concurrent_mix.p1_timeout_s"),
@@ -164,7 +164,7 @@ def concurrent_mix(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "p2",
         "balance_check",
         timeout_s=case.value("concurrent_mix.p2_timeout_s"),
@@ -272,7 +272,7 @@ def decode_spread(case):
         timeout_s=case.value("decode_spread.n50_after_timeout_s"),
         params=case.value("decode_spread.n50_after"),
     )
-    case.step(
+    case.observe(
         "n50_p6",
         "balance_check",
         timeout_s=case.value("decode_spread.n50_p6_timeout_s"),
@@ -285,7 +285,7 @@ def decode_spread(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "n50_p2",
         "balance_check",
         timeout_s=case.value("decode_spread.n50_p2_timeout_s"),
@@ -298,7 +298,7 @@ def decode_spread(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "n50_p1",
         "balance_check",
         timeout_s=case.value("decode_spread.n50_p1_timeout_s"),
@@ -682,7 +682,7 @@ def length_mixed(case):
         timeout_s=case.value("length_mixed.wave5_short_terminal_timeout_s"),
         params={"requests": output("wave5_short", "requests")},
     )
-    case.step(
+    case.observe(
         "wave5_p6",
         "balance_check",
         timeout_s=case.value("length_mixed.wave5_p6_timeout_s"),
@@ -704,7 +704,7 @@ def length_mixed(case):
         timeout_s=case.value("length_mixed.wave5_master_clean_timeout_s"),
         params=case.value("length_mixed.wave5_master_clean"),
     )
-    case.step(
+    case.observe(
         "token_p3",
         "balance_check",
         timeout_s=case.value("length_mixed.token_p3_timeout_s"),
@@ -732,7 +732,7 @@ def length_mixed(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "short_p2",
         "balance_check",
         timeout_s=case.value("length_mixed.short_p2_timeout_s"),

@@ -6387,4 +6387,4 @@ def leader_spill_multi(case):
         params=handle,
         timeout_s=case.value("leader_spill_multi.validity_timeout_s"),
     )
-    case.step("healthy", "storm_health", params=handle)
+    case.observe("healthy", "storm_health", params=handle)

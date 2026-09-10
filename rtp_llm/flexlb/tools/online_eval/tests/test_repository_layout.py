@@ -73,6 +73,12 @@ class RepositoryLayoutTest(unittest.TestCase):
             load_scenarios(ROOT / "scenarios"), handlers=handlers()
         )
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
+        from flexlb_test_framework.scenario.loader import load_document
+
+        aliases = load_document(ROOT / "suites.yaml")["covered_instances"]
+        self.assertEqual(len(aliases), 9)
+        self.assertTrue(set(aliases).issubset(expected))
+        expected = sorted({aliases.get(identity, identity) for identity in expected})
         self.assertEqual(expected, sorted(p["id"] for p in plans))
         for path in [
             "legacy",

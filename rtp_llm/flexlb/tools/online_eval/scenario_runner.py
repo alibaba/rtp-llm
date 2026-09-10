@@ -14,6 +14,7 @@ from flexlb_test_framework.scenario import (
     compile_scenarios,
     load_scenarios,
 )
+from flexlb_test_framework.suites import classify
 from flexlb_test_framework.scenario.catalog import handlers
 from flexlb_test_framework.scenario.compiler import plan_counts
 from flexlb_test_framework.scenario.lease import validate_lease
@@ -46,6 +47,7 @@ def inventory(plans):
     rows = []
     for plan in plans:
         row = {key: plan[key] for key in LIST_FIELDS}
+        row["test_kind"] = plan.get("test_kind", "functional")
         if "implementation" in plan:
             row["implementation"] = plan["implementation"]
         row["execution"] = {
@@ -90,6 +92,9 @@ def main(argv=None):
     parser.add_argument("--source", required=True, help="scenario file or directory")
     parser.add_argument("--profile")
     parser.add_argument(
+        "--suite", choices=("functional", "workload", "all"), default="all"
+    )
+    parser.add_argument(
         "--grade", choices=("strict", "normal", "loose"), default="normal"
     )
     parser.add_argument("--instances", help="comma separated exact instance IDs")
@@ -100,8 +105,14 @@ def main(argv=None):
     try:
         registry = handlers()
         plans = select(
-            compile_scenarios(
-                load_scenarios(args.source), args.profile, registry, grade=args.grade
+            classify(
+                compile_scenarios(
+                    load_scenarios(args.source),
+                    args.profile,
+                    registry,
+                    grade=args.grade,
+                ),
+                args.suite,
             ),
             args.instances,
         )
@@ -125,6 +136,8 @@ def main(argv=None):
     from flexlb_test_framework.scenario.backend import JavaMockBackend
     from flexlb_test_framework.scenario.runtime import StageTimeout, execute_instance
 
+    from flexlb_test_framework.workload.runtime import execute_workload
+
     cancelled = threading.Event()
 
     def cancel(signum, frame):
@@ -144,7 +157,11 @@ def main(argv=None):
     try:
         for index, (plan, lease) in enumerate(zip(plans, leases)):
             rows.append(
-                execute_instance(
+                (
+                    execute_workload
+                    if plan["test_kind"] == "workload"
+                    else execute_instance
+                )(
                     plan,
                     JavaMockBackend(lease),
                     registry,

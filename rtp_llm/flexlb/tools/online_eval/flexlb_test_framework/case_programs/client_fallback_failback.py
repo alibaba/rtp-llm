@@ -61,14 +61,14 @@ def all_masters_down(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "steady_master",
         "master_client_check",
         params=case.params(
             "all_masters_down.steady_master", {"rows": output("steady", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "fallback_success",
         "master_client_check",
         params=case.params(
@@ -76,14 +76,14 @@ def all_masters_down(case):
             {"rows": output("fallback_rows", "rows")},
         ),
     )
-    case.step(
+    case.observe(
         "fallback_share",
         "master_client_check",
         params=case.params(
             "all_masters_down.fallback_share", {"rows": output("outage", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "no_master_during_outage",
         "master_client_check",
         params=case.params(
@@ -91,14 +91,14 @@ def all_masters_down(case):
             {"rows": output("outage", "rows")},
         ),
     )
-    case.step(
+    case.observe(
         "outage_errors",
         "master_client_check",
         params=case.params(
             "all_masters_down.outage_errors", {"rows": output("outage", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "unique_requests",
         "master_client_check",
         params=case.params(

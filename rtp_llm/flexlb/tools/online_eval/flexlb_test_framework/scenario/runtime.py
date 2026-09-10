@@ -247,6 +247,7 @@ def execute_instance(
     sleeper=time.sleep,
     cancelled=None,
     enforce_deadlines=False,
+    _policy=None,
 ):
     """Execute a compiled plan. Adapters must enforce deadlines in actual work."""
     handlers = dict(handlers or {})
@@ -259,6 +260,9 @@ def execute_instance(
     ctx.instance_deadline_s = end
     rows, finding_failures, finding_passes = [], [], []
     terminal_status, primary_error = "PASS", None
+    blocked = False
+    if _policy is not None:
+        _policy.attach(ctx)
     try:
         for spec in instance["stages"]:
             t0 = clock()
@@ -273,7 +277,7 @@ def execute_instance(
                 "duration_ms": 0,
                 "started_s": t0,
             }
-            if terminal_status != "PASS":
+            if blocked:
                 rows.append(row)
                 continue
             deadline = Deadline(
@@ -282,6 +286,8 @@ def execute_instance(
             try:
                 deadline.check()
                 action = spec["action"]
+                if _policy is not None:
+                    _policy.before_stage(ctx, spec)
                 with interruptible(deadline, enforce_deadlines):
                     if action in handlers:
                         descriptor = handlers[action]
@@ -306,6 +312,7 @@ def execute_instance(
                     if check.status == "ERROR":
                         row["status"] = terminal_status = "ERROR"
                         primary_error = check.detail or "check evidence error"
+                        blocked = True
                     elif qualified in instance["findings"]:
                         (
                             finding_failures
@@ -317,6 +324,12 @@ def execute_instance(
                     elif check.status == "FAIL":
                         if row["status"] != "ERROR":
                             row["status"] = terminal_status = "FAIL"
+                            blocked = blocked or not (
+                                _policy is not None
+                                and _policy.continue_after_failure(spec)
+                            )
+                if _policy is not None:
+                    _policy.after_stage(ctx, spec, row)
                 # Known findings do not prevent additional independent checks.
             except Exception as exc:
                 terminal_status = (
@@ -324,6 +337,7 @@ def execute_instance(
                 )
                 primary_error = f"{type(exc).__name__}: {exc}"
                 row.update(status=terminal_status, error=primary_error)
+                blocked = True
             row["duration_ms"] = int((clock() - t0) * 1000)
             row["finished_s"] = clock()
             rows.append(row)
@@ -368,8 +382,15 @@ def execute_instance(
         resolved_config=instance["environment"]["resolved_config"],
         clock_domain="monotonic",
     )
+    result["test_kind"] = instance.get("test_kind", "functional")
     if "implementation" in instance:
         result["implementation"] = copy.deepcopy(instance["implementation"])
+    if _policy is not None:
+        try:
+            _policy.finalize(ctx, result)
+        except Exception as exc:
+            result["status"] = "ERROR"
+            result["error"] = f"workload evidence/report failed: {exc!r}"
     (ctx.artifact_dir / "result.json").write_text(
         json.dumps(result, indent=2, allow_nan=False) + "\n"
     )

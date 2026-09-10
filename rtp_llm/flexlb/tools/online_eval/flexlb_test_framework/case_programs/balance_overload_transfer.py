@@ -50,7 +50,7 @@ def decode_pressure(case):
         timeout_s=case.value("decode_pressure.after_timeout_s"),
         params=case.value("decode_pressure.after"),
     )
-    case.step(
+    case.observe(
         "p6",
         "balance_check",
         timeout_s=case.value("decode_pressure.p6_timeout_s"),
@@ -63,7 +63,7 @@ def decode_pressure(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "p5",
         "balance_check",
         timeout_s=case.value("decode_pressure.p5_timeout_s"),
@@ -77,7 +77,7 @@ def decode_pressure(case):
             },
         ),
     )
-    case.step(
+    case.observe(
         "p2",
         "balance_check",
         timeout_s=case.value("decode_pressure.p2_timeout_s"),

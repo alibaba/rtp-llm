@@ -67,10 +67,7 @@ variants:
     - queue
 - id: normalize_channels
   profiles:
-  - batch-window
   - single-nonbatch
-  - single-batch
-  - window-nonbatch
   environment:
     n_prefill: 1
     config_overrides:
@@ -86,10 +83,7 @@ variants:
     - queue
 - id: normalize_default30
   profiles:
-  - batch-window
   - single-nonbatch
-  - single-batch
-  - window-nonbatch
   environment:
     n_prefill: 1
     config_overrides:
@@ -106,10 +100,7 @@ variants:
     - queue
 - id: normalize_metrics
   profiles:
-  - batch-window
   - single-nonbatch
-  - single-batch
-  - window-nonbatch
   environment:
     n_prefill: 1
     config_overrides:

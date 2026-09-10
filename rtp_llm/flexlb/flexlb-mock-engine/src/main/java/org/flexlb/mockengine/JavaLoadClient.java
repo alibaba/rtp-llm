@@ -621,256 +621,232 @@ public final class JavaLoadClient {
             return result;
         }
 
-        Exception scheduleExc = null;
-        inflightCount.incrementAndGet();
         try {
-            double sendStartEpochMs = replayStartedEpochMs
-                    + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
-            result.sendStartEpochMs = sendStartEpochMs;
-            result.pacingLagMs = Math.max(0.0, sendStartEpochMs - sendDueEpochMs);
-            actualSentCount.incrementAndGet();
-            if (liveJournal != null) {
-                liveJournal.record("issued", perRequestNode(result));
-            }
+            Exception scheduleExc = null;
+            inflightCount.incrementAndGet();
+            try {
+                double sendStartEpochMs = replayStartedEpochMs
+                        + (System.nanoTime() - replayStartedNanos) / 1_000_000.0;
+                result.sendStartEpochMs = sendStartEpochMs;
+                result.pacingLagMs = Math.max(0.0, sendStartEpochMs - sendDueEpochMs);
+                actualSentCount.incrementAndGet();
+                if (liveJournal != null) {
+                    liveJournal.record("issued", perRequestNode(result));
+                }
 
-            inputPb = buildGenerateInput(record);
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
+                inputPb = buildGenerateInput(record);
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
 
-            long scheduleStartNanos = System.nanoTime();
-            if (router != null) {
-                // HA multi-target mode: one failover-aware Schedule call —
-                // sticky target first, same-request retry on the next target
-                // ONLY on gRPC UNAVAILABLE (see MasterTargetRouter).
-                // schedule_ms spans the whole attempt chain, so
-                // send_start_epoch_ms + schedule_ms stays one wall clock.
-                MasterTargetRouter.ScheduleOutcome outcome =
-                        router.schedule(scheduleReq, config.timeoutMs);
-                scheduleResponse = outcome.response;
-                result.masterTarget = outcome.lastTarget;
-                result.failover = outcome.failover;
-                result.errorKind = outcome.errorKind.label;
-                result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
-                result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
-                if (scheduleResponse == null) {
-                    // No target produced a response: all-targets transport
-                    // failure, DEADLINE_EXCEEDED, or a gRPC-layer master
-                    // error. Route/fallback semantics are decided after the
-                    // try block (terminating-failure boundary lives there).
-                    scheduleExc = outcome.failure;
-                    result.status = "exception";
-                    result.error = outcome.failure == null
-                            ? "no master response" : outcome.failure.toString();
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                long scheduleStartNanos = System.nanoTime();
+                if (router != null) {
+                    // HA multi-target mode: one failover-aware Schedule call —
+                    // sticky target first, same-request retry on the next target
+                    // ONLY on gRPC UNAVAILABLE (see MasterTargetRouter).
+                    // schedule_ms spans the whole attempt chain, so
+                    // send_start_epoch_ms + schedule_ms stays one wall clock.
+                    MasterTargetRouter.ScheduleOutcome outcome =
+                            router.schedule(scheduleReq, config.timeoutMs);
+                    scheduleResponse = outcome.response;
+                    result.masterTarget = outcome.lastTarget;
+                    result.failover = outcome.failover;
+                    result.errorKind = outcome.errorKind.label;
+                    result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
+                    result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
+                    if (scheduleResponse == null) {
+                        // No target produced a response: all-targets transport
+                        // failure, DEADLINE_EXCEEDED, or a gRPC-layer master
+                        // error. Route/fallback semantics are decided after the
+                        // try block (terminating-failure boundary lives there).
+                        scheduleExc = outcome.failure;
+                        result.status = "exception";
+                        result.error = outcome.failure == null
+                                ? "no master response" : outcome.failure.toString();
+                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                    } else {
+                        result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
+                    }
                 } else {
+                    FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
+                            .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+                    scheduleResponse = stub.schedule(scheduleReq);
+
+                    result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
+                    // sched_done epoch-ms (client_events.jsonl): the absolute moment the
+                    // schedule RPC returned — send_start_epoch_ms + scheduleMs keeps the
+                    // same wall clock as the engine-side engine_arrival_ms stamps.
+                    result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
                     result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
                 }
-            } else {
-                FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
-                        .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-                scheduleResponse = stub.schedule(scheduleReq);
 
-                result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
-                // sched_done epoch-ms (client_events.jsonl): the absolute moment the
-                // schedule RPC returned — send_start_epoch_ms + scheduleMs keeps the
-                // same wall clock as the engine-side engine_arrival_ms stamps.
-                result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
-                result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
+                if (scheduleResponse == null) {
+                    // HA mode only (the legacy path throws into the catch below):
+                    // no target answered — status/error/total_ms were already
+                    // stamped by the router branch above; the terminating-failure
+                    // handling right after the try block takes it from here.
+                } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
+                    result.status = "schedule_error";
+                    result.error = scheduleResponse.getErrorMessage().isEmpty()
+                            ? "code=" + scheduleResponse.getCode()
+                            : scheduleResponse.getErrorMessage();
+                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                    // Master answered (8431 admission rejection, 8511 forwarding
+                    // terminal code, ...): business-error boundary — never
+                    // retried, never switched, never sent direct-to-engine.
+                    // 8511 is additionally a no-retry terminal code; the harness
+                    // asserts it via status=schedule_error + the code in error.
+                    result.errorKind = "business";
+                } else {
+                    result.prefill = roleAddr(scheduleResponse, "PREFILL");
+                    result.decode = roleAddr(scheduleResponse, "DECODE");
+
+                    if (!config.fetchOutputStream) {
+                        // Under a NON_BATCH dispatcher the engine only receives the
+                        // request through the client's own GenerateStreamCall
+                        // (submission and stream reading are the same streaming
+                        // call), so skipping the fetch would mean the request
+                        // never reaches any engine. Fail fast instead of silently
+                        // producing a run with zero engine load.
+                        if (!scheduleResponse.getEnqueuedByMaster()) {
+                            System.err.println(
+                                    "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
+                                    + "schedule response reports enqueued_by_master=false "
+                                    + "(request_id=" + record.requestId + "). Under a NON_BATCH "
+                                    + "dispatcher the engine only receives requests through the "
+                                    + "client's GenerateStreamCall stream, so skipping the fetch "
+                                    + "would leave the engine idle. Re-enable stream reading or "
+                                    + "switch the master to a BATCH dispatcher.");
+                            System.exit(86);
+                        }
+                        result.status = "scheduled";
+                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                        // Route through tallyResult so the result lands in
+                        // completedResults (drives flexlb_client_completed_total and
+                        // the schedule-latency pushgateway series) instead of
+                        // bumping counters by hand and skipping the record.
+                        tallyResult(result);
+                        responseCount.incrementAndGet();
+                        return result;
+                    }
+                }
+            } catch (Exception e) {
+                scheduleExc = e;
+                result.status = "exception";
+                result.error = e.toString();
+                result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                // Same taxonomy as the HA router path (the legacy single-target
+                // mode also stamps error_kind; its routing/fallback behavior is
+                // untouched).
+                result.errorKind = MasterTargetRouter.classifyThrowable(e);
+            } finally {
+                inflightCount.decrementAndGet();
             }
 
-            if (scheduleResponse == null) {
-                // HA mode only (the legacy path throws into the catch below):
-                // no target answered — status/error/total_ms were already
-                // stamped by the router branch above; the terminating-failure
-                // handling right after the try block takes it from here.
-            } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
-                result.status = "schedule_error";
-                result.error = scheduleResponse.getErrorMessage().isEmpty()
-                        ? "code=" + scheduleResponse.getCode()
-                        : scheduleResponse.getErrorMessage();
-                result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                // Master answered (8431 admission rejection, 8511 forwarding
-                // terminal code, ...): business-error boundary — never
-                // retried, never switched, never sent direct-to-engine.
-                // 8511 is additionally a no-retry terminal code; the harness
-                // asserts it via status=schedule_error + the code in error.
-                result.errorKind = "business";
-            } else {
-                result.prefill = roleAddr(scheduleResponse, "PREFILL");
-                result.decode = roleAddr(scheduleResponse, "DECODE");
+            // Escape hatch (default OFF — see enableFallback javadoc): on schedule
+            // failure, try fallback direct to engines under the same request permit. Only
+            // reachable when the operator explicitly opted in; standard load tests
+            // keep it off so every failure surfaces as an error row instead of
+            // bypassing the master.
+            //
+            // Trigger semantics are mode-dependent (HA case-test brief p7,
+            // defect-8 fix — scoped to the HA mode only):
+            //  - Legacy single-target mode: ANY schedule failure (exception or
+            //    schedule_error) may trigger the fallback attempt — byte-identical
+            //    to the historical behavior the existing pressure-test line
+            //    relies on.
+            //  - HA multi-target mode: ONLY the double-connection failure (every
+            //    GRPC_TARGETS target answered gRPC UNAVAILABLE, error_kind=
+            //    "transport") may bypass the master. Business error codes (8431 /
+            //    8511 — master answered) and DEADLINE_EXCEEDED never fall back
+            //    (production connection_failed contract).
+            boolean legacyScheduleFailure = scheduleResponse == null
+                    || "schedule_error".equals(result.status)
+                    || "exception".equals(result.status);
+            boolean terminating = router == null
+                    ? legacyScheduleFailure
+                    : (scheduleResponse == null || "schedule_error".equals(result.status));
+            if (terminating) {
+                // Fallback eligibility is mode-dependent (same contract as the
+                // trigger-semantics comment above): the legacy single-target
+                // mode restores the historical ANY-schedule-failure trigger
+                // (exception OR schedule_error); the HA mode only bypasses the
+                // master on the double-connection failure (error_kind=transport
+                // AND no master answer anywhere in the target chain).
+                boolean fallbackEligible = (router == null)
+                        ? legacyScheduleFailure
+                        : ("transport".equals(result.errorKind)
+                            && scheduleResponse == null);
+                if (fallbackEligible && config.enableFallback
+                        && !fallbackPrefillAddrs.isEmpty()) {
+                    String prefix = scheduleExc != null
+                            ? "master=" + scheduleExc
+                            : "master=" + result.error;
+                    attemptFallback(record, result, startedNanos, prefix);
+                } else if (router != null && scheduleResponse == null) {
+                    // HA mode, no master answer, no (or disabled) direct fallback:
+                    // nobody served this request — route_path="failed" separates
+                    // these rows from master-answered rows (route_path="master",
+                    // including schedule_error business failures) and from
+                    // direct-to-engine rows (route_path="fallback").
+                    result.routePath = "failed";
+                }
+                tallyResult(result);
+                responseCount.incrementAndGet();
+                return result;
+            }
 
-                if (!config.fetchOutputStream) {
-                    // Under a NON_BATCH dispatcher the engine only receives the
-                    // request through the client's own GenerateStreamCall
-                    // (submission and stream reading are the same streaming
-                    // call), so skipping the fetch would mean the request
-                    // never reaches any engine. Fail fast instead of silently
-                    // producing a run with zero engine load.
-                    if (!scheduleResponse.getEnqueuedByMaster()) {
-                        System.err.println(
-                                "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
-                                + "schedule response reports enqueued_by_master=false "
-                                + "(request_id=" + record.requestId + "). Under a NON_BATCH "
-                                + "dispatcher the engine only receives requests through the "
-                                + "client's GenerateStreamCall stream, so skipping the fetch "
-                                + "would leave the engine idle. Re-enable stream reading or "
-                                + "switch the master to a BATCH dispatcher.");
-                        System.exit(86);
+            // Phase 2: engine stream reading (same request permit)
+            if (scheduleResponse != null && config.fetchOutputStream) {
+                try {
+
+                    String prefillAddr = roleAddr(scheduleResponse, "PREFILL");
+                    if (prefillAddr.isEmpty()) {
+                        prefillAddr = roleAddr(scheduleResponse, "PDFUSION");
                     }
-                    result.status = "scheduled";
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                    // Route through tallyResult so the result lands in
-                    // completedResults (drives flexlb_client_completed_total and
-                    // the schedule-latency pushgateway series) instead of
-                    // bumping counters by hand and skipping the record.
-                    tallyResult(result);
-                    responseCount.incrementAndGet();
-                    return result;
+                    if (prefillAddr.isEmpty()) {
+                        throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
+                    }
+
+                    EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse);
+                    ManagedChannel engineChannel = getEngineChannel(prefillAddr);
+                    RpcServiceGrpc.RpcServiceBlockingStub engineStub = RpcServiceGrpc.newBlockingStub(engineChannel)
+                            .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+
+                    Iterator<EngineRpcService.GenerateOutputsPB> stream;
+                    if (scheduleResponse.getEnqueuedByMaster()) {
+                        stream = engineStub.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+                                .setRequestId(inputPb.getRequestId())
+                                .build());
+                    } else {
+                        stream = engineStub.generateStreamCall(modifiedInput);
+                    }
+
+                    consumeStream(stream, result, startedNanos);
+                    result.wallClockTs = System.currentTimeMillis() / 1000.0;
+                } catch (Exception e) {
+                    // Escape hatch (default OFF): on fetch/stream failure, try
+                    // fallback — only when the operator explicitly opted in;
+                    // otherwise the failure is recorded as an error row.
+                    // HA mode: a stream-read failure is an ENGINE-side problem,
+                    // not a master connection failure — never falls back (brief
+                    // p7 defect-8: the legacy any-failure parity behavior is
+                    // retired for the HA mode only).
+                    if (router == null
+                            && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
+                        attemptFallback(record, result, startedNanos, "fetch=" + e);
+                    } else {
+                        result.status = "exception";
+                        result.error = e.toString();
+                        result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                    }
                 }
             }
-        } catch (Exception e) {
-            scheduleExc = e;
-            result.status = "exception";
-            result.error = e.toString();
-            result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-            // Same taxonomy as the HA router path (the legacy single-target
-            // mode also stamps error_kind; its routing/fallback behavior is
-            // untouched).
-            result.errorKind = MasterTargetRouter.classifyThrowable(e);
-        } finally {
-            inflightCount.decrementAndGet();
-            semaphore.release();
-        }
 
-        // Escape hatch (default OFF — see enableFallback javadoc): on schedule
-        // failure, try fallback direct to engines, outside the semaphore. Only
-        // reachable when the operator explicitly opted in; standard load tests
-        // keep it off so every failure surfaces as an error row instead of
-        // bypassing the master.
-        //
-        // Trigger semantics are mode-dependent (HA case-test brief p7,
-        // defect-8 fix — scoped to the HA mode only):
-        //  - Legacy single-target mode: ANY schedule failure (exception or
-        //    schedule_error) may trigger the fallback attempt — byte-identical
-        //    to the historical behavior the existing pressure-test line
-        //    relies on.
-        //  - HA multi-target mode: ONLY the double-connection failure (every
-        //    GRPC_TARGETS target answered gRPC UNAVAILABLE, error_kind=
-        //    "transport") may bypass the master. Business error codes (8431 /
-        //    8511 — master answered) and DEADLINE_EXCEEDED never fall back
-        //    (production connection_failed contract).
-        boolean legacyScheduleFailure = scheduleResponse == null
-                || "schedule_error".equals(result.status)
-                || "exception".equals(result.status);
-        boolean terminating = router == null
-                ? legacyScheduleFailure
-                : (scheduleResponse == null || "schedule_error".equals(result.status));
-        if (terminating) {
-            // Fallback eligibility is mode-dependent (same contract as the
-            // trigger-semantics comment above): the legacy single-target
-            // mode restores the historical ANY-schedule-failure trigger
-            // (exception OR schedule_error); the HA mode only bypasses the
-            // master on the double-connection failure (error_kind=transport
-            // AND no master answer anywhere in the target chain).
-            boolean fallbackEligible = (router == null)
-                    ? legacyScheduleFailure
-                    : ("transport".equals(result.errorKind)
-                        && scheduleResponse == null);
-            if (fallbackEligible && config.enableFallback
-                    && !fallbackPrefillAddrs.isEmpty()) {
-                String prefix = scheduleExc != null
-                        ? "master=" + scheduleExc
-                        : "master=" + result.error;
-                attemptFallback(record, result, startedNanos, prefix);
-            } else if (router != null && scheduleResponse == null) {
-                // HA mode, no master answer, no (or disabled) direct fallback:
-                // nobody served this request — route_path="failed" separates
-                // these rows from master-answered rows (route_path="master",
-                // including schedule_error business failures) and from
-                // direct-to-engine rows (route_path="fallback").
-                result.routePath = "failed";
-            }
             tallyResult(result);
             responseCount.incrementAndGet();
             return result;
+        } finally {
+            semaphore.release();
         }
-
-        // Phase 2: engine stream reading (outside semaphore)
-        if (scheduleResponse != null && config.fetchOutputStream) {
-            try {
-                Double firstFrameNanos = null;
-                Double terminalNanos = null;
-
-                String prefillAddr = roleAddr(scheduleResponse, "PREFILL");
-                if (prefillAddr.isEmpty()) {
-                    prefillAddr = roleAddr(scheduleResponse, "PDFUSION");
-                }
-                if (prefillAddr.isEmpty()) {
-                    throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
-                }
-
-                EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse);
-                ManagedChannel engineChannel = getEngineChannel(prefillAddr);
-                RpcServiceGrpc.RpcServiceBlockingStub engineStub = RpcServiceGrpc.newBlockingStub(engineChannel)
-                        .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-
-                Iterator<EngineRpcService.GenerateOutputsPB> stream;
-                if (scheduleResponse.getEnqueuedByMaster()) {
-                    stream = engineStub.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                            .setRequestId(inputPb.getRequestId())
-                            .build());
-                } else {
-                    stream = engineStub.generateStreamCall(modifiedInput);
-                }
-
-                while (stream.hasNext()) {
-                    EngineRpcService.GenerateOutputsPB output = stream.next();
-                    long now = System.nanoTime();
-                    if (firstFrameNanos == null) {
-                        firstFrameNanos = (double) now;
-                    }
-                    EngineRpcService.FlattenOutputPB flatten = output.getFlattenOutput();
-                    for (int j = 0; j < flatten.getFinishedCount(); j++) {
-                        if (flatten.getFinished(j)) {
-                            terminalNanos = (double) now;
-                        }
-                    }
-                }
-
-                if (firstFrameNanos == null) {
-                    // Stream completed with zero outputs — mark as error to avoid
-                    // masking underlying engine issues as successful requests.
-                    result.status = "empty_response";
-                    result.error = "stream completed with zero outputs";
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                } else {
-                    long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
-                    result.ttftMs = (firstFrameNanos - startedNanos) / 1_000_000.0;
-                    result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
-                    result.status = "ok";
-                }
-                result.wallClockTs = System.currentTimeMillis() / 1000.0;
-            } catch (Exception e) {
-                // Escape hatch (default OFF): on fetch/stream failure, try
-                // fallback — only when the operator explicitly opted in;
-                // otherwise the failure is recorded as an error row.
-                // HA mode: a stream-read failure is an ENGINE-side problem,
-                // not a master connection failure — never falls back (brief
-                // p7 defect-8: the legacy any-failure parity behavior is
-                // retired for the HA mode only).
-                if (router == null
-                        && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
-                    attemptFallback(record, result, startedNanos, "fetch=" + e);
-                } else {
-                    result.status = "exception";
-                    result.error = e.toString();
-                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                }
-            }
-        }
-
-        tallyResult(result);
-        responseCount.incrementAndGet();
-        return result;
     }
 
     private void tallyResult(RequestResult result) {
@@ -927,39 +903,48 @@ public final class JavaLoadClient {
                 .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
         Iterator<EngineRpcService.GenerateOutputsPB> stream = stub.generateStreamCall(fbInput);
 
-        Double firstFrameNanos = null;
-        Double terminalNanos = null;
-        while (stream.hasNext()) {
-            EngineRpcService.GenerateOutputsPB output = stream.next();
-            long now = System.nanoTime();
-            if (firstFrameNanos == null) {
-                firstFrameNanos = (double) now;
-            }
-            EngineRpcService.FlattenOutputPB flatten = output.getFlattenOutput();
-            for (int j = 0; j < flatten.getFinishedCount(); j++) {
-                if (flatten.getFinished(j)) {
-                    terminalNanos = (double) now;
-                }
-            }
-        }
-
         result.scheduleMs = 0.0;
         result.prefill = prefillAddr;
         result.decode = decodeAddr;
         result.routePath = "fallback";
         result.wallClockTs = System.currentTimeMillis() / 1000.0;
-        if (firstFrameNanos == null) {
-            // Parity with the main stream path: a stream that completes with
-            // zero outputs is an error, not a 0-ms TTFT success.
+        consumeStream(stream, result, startedNanos);
+    }
+
+    /** A nonempty transport EOF is not business completion, on either route. */
+    static void consumeStream(Iterator<EngineRpcService.GenerateOutputsPB> stream,
+                              RequestResult result, long startedNanos) {
+        Long first = null;
+        Long terminal = null;
+        String businessError = null;
+        while (stream.hasNext()) {
+            EngineRpcService.GenerateOutputsPB output = stream.next();
+            long now = System.nanoTime();
+            if (first == null) first = now;
+            if (output.hasErrorInfo() && output.getErrorInfo().getErrorCodeValue() != 0) {
+                businessError = "engine error code=" + output.getErrorInfo().getErrorCodeValue()
+                        + ": " + output.getErrorInfo().getErrorMessage();
+            }
+            for (boolean finished : output.getFlattenOutput().getFinishedList()) {
+                if (finished) terminal = now;
+            }
+        }
+        result.ttftMs = first == null ? 0 : (first - startedNanos) / 1_000_000.0;
+        result.totalMs = ((terminal == null ? System.nanoTime() : terminal) - startedNanos) / 1_000_000.0;
+        if (businessError != null) {
+            result.status = "engine_error";
+            result.errorKind = "business";
+            result.error = businessError;
+        } else if (first == null) {
             result.status = "empty_response";
             result.error = "stream completed with zero outputs";
-            result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-            return;
+        } else if (terminal == null) {
+            result.status = "incomplete_response";
+            result.error = "stream ended without business finished";
+        } else {
+            result.status = "ok";
+            result.error = "";
         }
-        long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
-        result.ttftMs = (firstFrameNanos - startedNanos) / 1_000_000.0;
-        result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
-        result.status = "ok";
     }
 
     private static EngineRpcService.RoleAddrPB toRoleAddrPb(

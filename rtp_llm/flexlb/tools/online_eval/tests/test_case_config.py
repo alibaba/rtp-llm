@@ -249,6 +249,12 @@ class CaseConfigTest(unittest.TestCase):
         documents = load_scenarios(ROOT / "scenarios")
         plans = compile_scenarios(documents, handlers=handlers())
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
+        from flexlb_test_framework.scenario.loader import load_document
+
+        aliases = load_document(ROOT / "suites.yaml")["covered_instances"]
+        self.assertEqual(len(aliases), 9)
+        self.assertTrue(set(aliases).issubset(expected))
+        expected = sorted({aliases.get(identity, identity) for identity in expected})
         self.assertEqual(sorted(p["id"] for p in plans), expected)
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for source, _ in documents:

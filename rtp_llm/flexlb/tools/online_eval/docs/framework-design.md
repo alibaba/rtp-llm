@@ -5,6 +5,8 @@ YAML 保存全部用例配置：P/D 规模、profile、输入数据、时间预�
 添加配置或新逻辑的具体步骤见 [添加新 case](adding-cases.md)。
 压测与 case 的共享能力及依赖边界见 [公共测试底座](shared-test-runtime.md)。
 
+框架现在分为 **functional 功能合同**与 **workload 复杂场景／持续负载**两类，运行策略、入口和迁移说明见 [两类测试](test-suites.md)。
+
 ## 1. 术语解释
 
 ### 配置与用例

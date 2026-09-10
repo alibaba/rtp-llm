@@ -664,6 +664,12 @@ def main() -> int:
         default=None,
         help="exact compiled instance IDs for compiled Python cases",
     )
+    parser.add_argument(
+        "--suite",
+        choices=("functional", "workload", "all"),
+        default="all",
+        help="select functional contracts, sustained workloads, or both",
+    )
     args = parser.parse_args()
     if args.case_dir is None:
         args.case_dir = str(Path(__file__).resolve().parent / "scenarios")

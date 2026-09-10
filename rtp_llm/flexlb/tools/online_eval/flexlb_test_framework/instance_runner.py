@@ -107,6 +107,8 @@ def _catalog(args):
             args.profile,
             "--grade",
             args.grade,
+            "--suite",
+            getattr(args, "suite", "all"),
             "--list-json",
         ],
         capture_output=True,

@@ -265,21 +265,21 @@ def freeze_short_long(case):
         "master_deadline_probe_check",
         params={"snapshot": output("deadline_probe", "snapshot")},
     )
-    case.step(
+    case.observe(
         "post_success",
         "master_client_check",
         params=case.params(
             "freeze_short_long.post_success", {"rows": output("post_long", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "post_on_a",
         "master_client_check",
         params=case.params(
             "freeze_short_long.post_on_a", {"rows": output("post_long", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "unique_requests",
         "master_client_check",
         params=case.params(
@@ -376,49 +376,49 @@ def kill_dual_b_to_a(case):
             "from": output("switched", "epoch_s"),
         },
     )
-    case.step(
+    case.observe(
         "steady_b",
         "master_client_check",
         params=case.params(
             "kill_dual_b_to_a.steady_b", {"rows": output("steady_plain", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "retry_seen",
         "master_client_check",
         params=case.params(
             "kill_dual_b_to_a.retry_seen", {"rows": output("straddle", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "switch_to_a",
         "master_client_check",
         params=case.params(
             "kill_dual_b_to_a.switch_to_a", {"rows": output("switch", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "switch_errors",
         "master_client_check",
         params=case.params(
             "kill_dual_b_to_a.switch_errors", {"rows": output("switch", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "after_a",
         "master_client_check",
         params=case.params(
             "kill_dual_b_to_a.after_a", {"rows": output("after", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "after_success",
         "master_client_check",
         params=case.params(
             "kill_dual_b_to_a.after_success", {"rows": output("after", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "unique_requests",
         "master_client_check",
         params=case.params(

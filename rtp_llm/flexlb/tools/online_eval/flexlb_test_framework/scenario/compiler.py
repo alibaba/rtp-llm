@@ -315,7 +315,14 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
     active_environment = copy.deepcopy(env or {})
     for i, value in enumerate(values):
         loc = f"{path}[{i}]"
-        mapping(value, loc, {"id", "action", "timeout_s", "params"}, {"id", "action"})
+        mapping(
+            value,
+            loc,
+            {"id", "action", "timeout_s", "params", "purpose"},
+            {"id", "action"},
+        )
+        if value.get("purpose", "operation") not in {"operation", "observation"}:
+            fail(loc + ".purpose", "expected operation or observation")
         sid = identifier(value["id"], loc + ".id")
         if sid in outputs:
             fail(loc, f"duplicate stage id {sid}")
@@ -435,7 +442,13 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
             ):
                 fail(loc, "invalid comparison for output type")
         compiled.append(
-            {"id": sid, "action": action, "timeout_s": timeout, "params": params}
+            {
+                "id": sid,
+                "action": action,
+                "timeout_s": timeout,
+                "params": params,
+                **({"purpose": value["purpose"]} if "purpose" in value else {}),
+            }
         )
         outputs[sid] = (
             handlers[action].outputs if action in handlers else OUTPUTS[action]

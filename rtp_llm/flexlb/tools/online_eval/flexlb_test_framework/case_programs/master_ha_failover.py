@@ -64,49 +64,49 @@ def standalone_a_to_b(case):
             "from": output("switched", "epoch_s"),
         },
     )
-    case.step(
+    case.observe(
         "steady_a",
         "master_client_check",
         params=case.params(
             "standalone_a_to_b.steady_a", {"rows": output("steady", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "failover_seen",
         "master_client_check",
         params=case.params(
             "standalone_a_to_b.failover_seen", {"rows": output("straddle", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "switch_to_b",
         "master_client_check",
         params=case.params(
             "standalone_a_to_b.switch_to_b", {"rows": output("switch", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "switch_errors",
         "master_client_check",
         params=case.params(
             "standalone_a_to_b.switch_errors", {"rows": output("switch", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "after_b",
         "master_client_check",
         params=case.params(
             "standalone_a_to_b.after_b", {"rows": output("after", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "after_success",
         "master_client_check",
         params=case.params(
             "standalone_a_to_b.after_success", {"rows": output("after", "rows")}
         ),
     )
-    case.step(
+    case.observe(
         "unique_requests",
         "master_client_check",
         params=case.params(
