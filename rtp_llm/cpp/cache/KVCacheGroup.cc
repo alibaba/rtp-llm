@@ -60,7 +60,9 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         if (metrics_reporter_) {
             if (freed > 0) {
                 RtpLLMCacheEvictionMetricsCollector collector;
-                collector.evicted_block_count = static_cast<int64_t>(freed);
+                // This allocation-pressure path drops the Device cache entry directly;
+                // unlike tiered eviction it does not copy the block to Memory first.
+                collector.direct_evicted_block_count = static_cast<int64_t>(freed);
                 const bool state_only = !evict_result.evicted_state_only_group.empty()
                                         && evict_result.evicted_state_only_group.size()
                                                == evict_result.evicted_keys.size();

@@ -430,6 +430,35 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
         return nullptr;
     }
     if (metrics_reporter_) {
+        int64_t chain_block_count = 0;
+        int64_t state_block_count = 0;
+        for (const auto cache_key : evict_result.evicted_keys) {
+            const auto& slots = evict_result.evicted_slots.at(cache_key);
+            const auto block_count = static_cast<int64_t>(
+                std::count_if(slots.begin(), slots.end(), [](BlockIdxType block_idx) {
+                    return !isNullBlockIdx(block_idx);
+                }));
+            if (evict_result.evicted_state_only_group.count(cache_key)) {
+                state_block_count += block_count;
+            } else {
+                chain_block_count += block_count;
+            }
+        }
+        auto report_block_count = [&](const char* kind, int64_t block_count) {
+            if (block_count <= 0) {
+                return;
+            }
+            RtpLLMCacheEvictionMetricsCollector collector;
+            collector.evicted_block_count = block_count;
+            kmonitor::MetricsTags tags("scope", "gpu");
+            tags.AddTag("kind", kind);
+            tags.AddTag("backing", "device");
+            metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                       &collector);
+        };
+        report_block_count("chain", chain_block_count);
+        report_block_count("state_swa_kv", state_block_count);
+
         for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
             RtpLLMCacheEvictionMetricsCollector collector;
             collector.lifetime_ms = lifetime_ms;
