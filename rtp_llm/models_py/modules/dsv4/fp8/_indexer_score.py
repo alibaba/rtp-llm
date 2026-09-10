@@ -69,6 +69,62 @@ except ImportError:
 # shadow (RF wheel bundles an OLD deep_gemm without the SM120 kernel).
 _FP8_DEEPGEMM_ON_SM120 = os.environ.get("DSV4_INDEXER_FP8_DEEPGEMM", "0") == "1"
 
+# (d) SM120 paged indexer -> deep_gemm paged flip (default off).
+#
+# The shipping cap-12 path is the per-(b,n) python fallback below. The pinned
+# deep_gemm (+ee6161b) now ships sm120_fp8_paged_mqa_logits, but its host side
+# hard-asserts block_kv == 64 for fp8 on SM120 (fp4 allows 32/64; SM100 allows
+# 32/64/128). This engine's INDEXER_KV entries_per_block is 32
+# (kernel_seq_size_per_block 128 -> 128/4), so enabling the flag at the shipped
+# geometry would DG_HOST_ASSERT-crash the engine on the first decode call.
+# Therefore the flag only takes effect when block_size == 64; otherwise we keep
+# the fallback and say so once, so an A/B can never silently crash.
+_INDEXER_FP8_DEEPGEMM_PAGED = (
+    os.environ.get("DSV4_INDEXER_FP8_DEEPGEMM_PAGED", "0") == "1"
+)
+_PAGED_GEOM_WARNED = [False]
+
+# [IDXDIAG] shape marker + timing-ablation arm for the SM120 paged fallback.
+# Decode runs under CUDA-graph replay, so host timings here only see the capture
+# pass; DSV4_INDEXER_SM120_NULL=1 removes the loop entirely so the ENGINE-level
+# cost can be priced by A/B on TPOT (the captured graph then holds none of the
+# gather/cast/einsum kernels). Both default off:
+#   DSV4_INDEXER_SM120_DIAG=1  -> print up to 500 shape lines per process
+#   DSV4_INDEXER_SM120_NULL=1  -> ablation arm (same allocation, no work)
+_INDEXER_SM120_DIAG = os.environ.get("DSV4_INDEXER_SM120_DIAG", "0") == "1"
+_INDEXER_SM120_NULL = os.environ.get("DSV4_INDEXER_SM120_NULL", "0") == "1"
+_IDX_DIAG_BUDGET = [500 if _INDEXER_SM120_DIAG else 0]
+_IDX_PAGED_DIAG = [200]
+
+
+def sm120_paged_deepgemm_ready(block_size: int) -> bool:
+    """True when the SM120 paged deep_gemm path may be used for this geometry."""
+    if not _INDEXER_FP8_DEEPGEMM_PAGED:
+        return False
+    if block_size != 64:
+        if not _PAGED_GEOM_WARNED[0]:
+            _PAGED_GEOM_WARNED[0] = True
+            import sys
+
+            print(
+                "[IDX-PAGED] DSV4_INDEXER_FP8_DEEPGEMM_PAGED=1 but INDEXER_KV "
+                "entries_per_block=%d != 64 (the only block size the SM120 fp8 "
+                "paged kernel supports); keeping the SM120 fallback." % block_size,
+                file=sys.stderr,
+                flush=True,
+            )
+        return False
+    if _HAS_DEEP_GEMM and _IDX_PAGED_DIAG[0] > 0:
+        _IDX_PAGED_DIAG[0] -= 1
+        import sys
+
+        print(
+            "[IDXPAGED] SM120 paged deep_gemm ENGAGED block_size=%d" % block_size,
+            file=sys.stderr,
+            flush=True,
+        )
+    return _HAS_DEEP_GEMM
+
 
 def has_fp8_paged_mqa_logits() -> bool:
     return _HAS_DEEP_GEMM
@@ -106,7 +162,11 @@ def fp8_paged_indexer_score(
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
     """
-    if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
+    if (
+        q_fp8.is_cuda
+        and torch.cuda.get_device_capability(q_fp8.device)[0] == 12
+        and not sm120_paged_deepgemm_ready(block_size)
+    ):
         return _fp8_paged_indexer_score_sm120(
             q_fp8, w_fold, kv_pool_uint8, block_table, context_lens,
             block_size, max_ctx_len,
@@ -155,6 +215,26 @@ def _fp8_paged_indexer_score_sm120(
 ) -> torch.Tensor:
     B, next_n, H, D = q_fp8.shape
     rows = B * next_n
+    if _IDX_DIAG_BUDGET[0] > 0:
+        _IDX_DIAG_BUDGET[0] -= 1
+        import sys
+
+        print(
+            "[IDXDIAG] B=%d next_n=%d H=%d T_max=%d block=%d cap=%d null=%d"
+            % (
+                B, next_n, H, max_ctx_len, block_size,
+                torch.cuda.is_current_stream_capturing(),
+                _INDEXER_SM120_NULL,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+    if _INDEXER_SM120_NULL:
+        # ablation arm: same allocation, none of the per-(b,n) work
+        return torch.full(
+            (rows, max_ctx_len), float("-inf"), dtype=torch.float32,
+            device=q_fp8.device,
+        )
     out = torch.full(
         (rows, max_ctx_len), float("-inf"), dtype=torch.float32,
         device=q_fp8.device,
