@@ -1,19 +1,16 @@
 #pragma once
 
-#include "autil/Thread.h"
-#include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include <mutex>
-#include <thread>
+#include <cstdint>
 #include <map>
-#include <vector>
 #include <memory>
-#include <condition_variable>
+#include <mutex>
+#include <string>
 
 namespace rtp_llm {
 
 class LayerCacheBuffer {
 public:
-    LayerCacheBuffer(int layer_id, std::string cache_tag, KVCacheResourcePtr resource = nullptr);
+    LayerCacheBuffer(int layer_id, std::string cache_tag);
     ~LayerCacheBuffer() = default;
 
 public:
@@ -33,18 +30,10 @@ public:
     const std::map<int64_t, int>& blockIdMap() const {
         return block_id_map_;
     }
-    void setKVCacheResource(KVCacheResourcePtr resource) {
-        resource_ = std::move(resource);
-    }
-    const KVCacheResourcePtr& kvCacheResource() const {
-        return resource_;
-    }
-
 private:
     int                    layer_id_;
     std::string            cache_tag_;
     std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
-    KVCacheResourcePtr     resource_;
 };
 
 class LayerCacheBufferStore {

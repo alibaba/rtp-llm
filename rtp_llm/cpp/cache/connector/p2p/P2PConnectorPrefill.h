@@ -60,7 +60,11 @@ public:
                                   const P2PConnectorBroadcastTpRequestPB& p2p_request,
                                   FunctionResponsePB&                     response);
 
-    bool cancelProcessReadPerRank(const std::string& unique_key, FunctionResponsePB& response);
+    bool cancelProcessReadPerRank(int64_t             request_id,
+                                  const std::string&  unique_key,
+                                  int64_t             deadline_ms,
+                                  int64_t             request_deadline_ms,
+                                  FunctionResponsePB& response);
 
     std::shared_ptr<P2PConnectorResourceStore> resourceStore() const {
         return stream_store_;

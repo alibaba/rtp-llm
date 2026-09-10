@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
 
-#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -56,8 +55,7 @@ P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan& plan, s
 }
 
 ErrorInfo
-P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&                            resource,
-                                          const std::string&                                   unique_key,
+P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                                   unique_key,
                                           int64_t                                              request_id,
                                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                                           int64_t                                              deadline_ms,
@@ -83,18 +81,6 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          "sendKVCache: cache topology is null");
     }
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    if (!no_transfer) {
-        layer_cache_buffers =
-            LayerCacheBufferUtil::convert(*resource, *config_.topology, 0, -1, config_.cp_rank, config_.cp_size);
-    }
-    if (!no_transfer && layer_cache_buffers.empty()) {
-        std::string error_msg = "sendKVCache: layer_cache_buffers is empty, request_id: " + std::to_string(request_id);
-        RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
-        report_metric_func(false);
-        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, error_msg);
-    }
-
     const auto broadcast_type = no_transfer ? P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER :
                                               P2PConnectorBroadcastType::HANDLE_READ;
 
@@ -123,7 +109,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
     // （worker 用自身投影），故只传等长空壳。
     P2PBroadcastClient::RankLayerCacheBuffers rank_layer_cache_buffers(no_transfer ? 0 : worker_num);
     auto result = no_transfer ? tp_broadcast_client_->broadcast(request_id,
-                                                               layer_cache_buffers,
+                                                               {},
                                                                decode_transfer_servers,
                                                                unique_key,
                                                                deadline_ms,
@@ -146,8 +132,13 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
     }
 
     bool deadline_exceeded = false;
-    auto cancel_result     = waitForBroadcastCompletion(
-        result, unique_key, request_id, deadline_ms, std::move(is_cancelled), &deadline_exceeded);
+    auto cancel_result = waitForBroadcastCompletion(result,
+                                                    unique_key,
+                                                    request_id,
+                                                    deadline_ms,
+                                                    request_deadline_ms,
+                                                    std::move(is_cancelled),
+                                                    &deadline_exceeded);
     report_metric_func(!cancel_result && !deadline_exceeded && result->success());
 
     if (deadline_exceeded) {
@@ -180,8 +171,9 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
                                                          const std::string&                                 unique_key,
                                                          int64_t                                            request_id,
                                                          int64_t                                            deadline_ms,
-                                                         std::function<bool()> is_cancelled,
-                                                         bool*                 deadline_exceeded_out) {
+                                                         int64_t                                            request_deadline_ms,
+                                                         std::function<bool()>                              is_cancelled,
+                                                         bool*                                              deadline_exceeded_out) {
 
     std::shared_ptr<P2PBroadcastClient::Result> cancel_result = nullptr;
     int                                         sleep_ms      = 1;
@@ -192,7 +184,11 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
             RTP_LLM_LOG_WARNING("sendKVCache: request cancelled by client, request_id: %ld, unique_key: %s",
                                 request_id,
                                 unique_key.c_str());
-            cancel_result = tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ);
+            cancel_result = tp_broadcast_client_->cancel(unique_key,
+                                                         P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                                         request_deadline_ms,
+                                                         request_id,
+                                                         deadline_ms);
             if (!cancel_result) {
                 // Cancellation is already terminal for this StartLoad. Do not
                 // keep waiting for the original HANDLE_READ merely because the
@@ -206,7 +202,11 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
                 deadline_ms,
                 request_id,
                 unique_key.c_str());
-            cancel_result = tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ);
+            cancel_result = tp_broadcast_client_->cancel(unique_key,
+                                                         P2PConnectorBroadcastType::CANCEL_HANDLE_READ,
+                                                         request_deadline_ms,
+                                                         request_id,
+                                                         deadline_ms);
             if (deadline_exceeded_out) {
                 *deadline_exceeded_out = true;
             }

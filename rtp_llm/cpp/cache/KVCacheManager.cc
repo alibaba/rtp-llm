@@ -586,8 +586,11 @@ bool KVCacheManager::hasP2PConnector() const {
 void KVCacheManager::notifySideChannelReady(const std::string&                                unique_key,
                                             int64_t                                           deadline_ms,
                                             const P2PConnectorResourceEntry::SideChannelData& data) {
-    if (p2p_connector_) {
-        p2p_connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    if (p2p_connector_ && pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank == 0) {
+        auto stream_store = p2p_connector_->streamStore();
+        if (stream_store) {
+            stream_store->notifySideChannelReady(unique_key, deadline_ms, data);
+        }
     }
 }
 
@@ -635,30 +638,14 @@ bool KVCacheManager::writeP2PLayer(size_t                                model_i
         return false;
     }
 
-    auto held_resource = std::make_shared<KVCacheResource>();
-    held_resource->initGroups(config_.topologyPtr());
-    held_resource->setCacheKeys(cache_keys);
-    held_resource->mutableBlockIdsForLayer(static_cast<int>(global_layer_id), tag).assign(block_ids);
-    // TP rank 0 owns allocation bookkeeping and broadcasts its physical block
-    // indices to the other ranks in tpSyncModelInputs(). Non-root ranks can
-    // address those indices, but their local block pools do not mark them as
-    // allocated, so attempting to take an allocator reference there aborts in
-    // IBlockPool::checkAllocatedNoLock(). The rank-0 connector reference keeps
-    // the request blocks alive for the whole per-rank transfer.
-    if (!cache_keys.empty() && parallelism_config_.tp_rank == 0) {
-        held_resource = allocator_->incrKVCacheRef(*held_resource, cache_keys, true);
-        if (!held_resource) {
-            RTP_LLM_LOG_WARNING("writeP2PLayer failed to hold connector ref, request_id=%ld layer_id=%u tag=%s",
-                                request_id,
-                                global_layer_id,
-                                tag.c_str());
-            return false;
-        }
-    }
+    auto layer_resource = std::make_shared<KVCacheResource>();
+    layer_resource->initGroups(config_.topologyPtr());
+    layer_resource->setCacheKeys(cache_keys);
+    layer_resource->mutableBlockIdsForLayer(static_cast<int>(global_layer_id), tag).assign(block_ids);
 
     return p2p_connector_->writeByLayerTag(static_cast<int>(global_layer_id),
                                            tag,
-                                           held_resource,
+                                           layer_resource,
                                            request_id,
                                            event,
                                            deadline_ms);
@@ -670,6 +657,10 @@ std::shared_ptr<AsyncContext>
 KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!p2p_connector_ || !connector_context) {
+        return nullptr;
+    }
+
+    if (pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank != 0) {
         return nullptr;
     }
 

@@ -144,7 +144,13 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
             return decode_ ? decode_->cancelReadPerRank(unique_key, p2p_request.request_deadline_ms(), response) :
                              reject_role();
         case P2PConnectorBroadcastType::CANCEL_HANDLE_READ:
-            return prefill_ ? prefill_->cancelProcessReadPerRank(unique_key, response) : reject_role();
+            return prefill_ ?
+                       prefill_->cancelProcessReadPerRank(request_id,
+                                                          unique_key,
+                                                          deadline_ms,
+                                                          p2p_request.request_deadline_ms(),
+                                                          response) :
+                       reject_role();
         case P2PConnectorBroadcastType::QUERY_LEASE_STATUS:
             return decode_ ? decode_->queryLeaseStatusPerRank(unique_key, response) : reject_role();
         default:

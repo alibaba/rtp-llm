@@ -1,6 +1,5 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
@@ -24,8 +23,7 @@ public:
     ~P2PConnectorSchedulerPrefill() = default;
 
 public:
-    ErrorInfo sendKVCache(const KVCacheResourcePtr&                            resource,
-                          const std::string&                                   unique_key,
+    ErrorInfo sendKVCache(const std::string&                                   unique_key,
                           int64_t                                              request_id,
                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                           int64_t                                              deadline_ms,
@@ -51,6 +49,7 @@ private:
                                const std::string&                                 unique_key,
                                int64_t                                            request_id,
                                int64_t                                            deadline_ms,
+                               int64_t                                            request_deadline_ms,
                                std::function<bool()>                              is_cancelled,
                                bool*                                              deadline_exceeded_out = nullptr);
 

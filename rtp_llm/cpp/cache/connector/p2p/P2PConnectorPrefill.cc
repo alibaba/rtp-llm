@@ -53,26 +53,32 @@ bool P2PConnectorPrefill::init() {
         return false;
     }
 
-    stream_store_ = std::make_shared<P2PConnectorResourceStore>(
-        metrics_reporter_,
-        config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms,
-        config_.scheduler_config.p2p_prefill_resource_hold_ms,
-        config_.scheduler_config.p2p_cancelled_keys_ttl_ms);
-    stream_store_->setOnRequestReleased([computed_buffers = worker_->getComputedBuffersStore()](
-                                            int64_t request_id, int64_t request_deadline_ms) {
-        if (computed_buffers) {
-            computed_buffers->removeBuffer(request_id, request_deadline_ms);
+    if (config_.tp_rank == 0) {
+        stream_store_ = std::make_shared<P2PConnectorResourceStore>(
+            metrics_reporter_,
+            config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms,
+            config_.scheduler_config.p2p_prefill_resource_hold_ms,
+            config_.scheduler_config.p2p_cancelled_keys_ttl_ms);
+        stream_store_->setOnRequestReleased([computed_buffers = worker_->getComputedBuffersStore()](
+                                                int64_t request_id, int64_t request_deadline_ms) {
+            if (computed_buffers) {
+                computed_buffers->removeBuffer(request_id, request_deadline_ms);
+            }
+        });
+        if (!stream_store_->init()) {
+            RTP_LLM_LOG_ERROR("prefill connector init failed: stream_store init failed");
+            return false;
         }
-    });
-    if (!stream_store_->init()) {
-        RTP_LLM_LOG_ERROR("prefill connector init failed: stream_store init failed");
-        return false;
     }
     return true;
 }
 
 std::shared_ptr<AsyncContext> P2PConnectorPrefill::registerResource(const KVCacheResourcePtr&    resource,
                                                                     const std::shared_ptr<Meta>& meta) {
+    if (config_.tp_rank != 0 || !stream_store_) {
+        RTP_LLM_LOG_WARNING("asyncRead failed, resource registration is only available on prefill tp_rank 0");
+        return nullptr;
+    }
     if (!meta || !resource || !meta->generateStream()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, meta, resource, or generate_stream is null");
         return nullptr;
@@ -90,13 +96,7 @@ std::shared_ptr<AsyncContext> P2PConnectorPrefill::asyncWriteByLayer(
         RTP_LLM_LOG_WARNING("asyncWriteByLayer failed, worker or layer context is null, layer_id=%d", layer_id);
         return nullptr;
     }
-    auto resource = layer_context->heldKVCacheResource();
-    if (!resource) {
-        RTP_LLM_LOG_WARNING("asyncWriteByLayer failed, held resource is null, layer_id=%d, request_id=%ld",
-                            layer_id,
-                            layer_context->requestId());
-        return nullptr;
-    }
+    auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
     if (!worker_->writeByLayer(layer_id,
                                resource,
                                layer_context->requestId(),
@@ -107,7 +107,7 @@ std::shared_ptr<AsyncContext> P2PConnectorPrefill::asyncWriteByLayer(
                             layer_context->requestId());
         return nullptr;
     }
-    return std::make_shared<P2PConnectorAcceptedWriteContext>(resource);
+    return std::make_shared<P2PConnectorAcceptedWriteContext>();
 }
 
 bool P2PConnectorPrefill::writeByLayerTag(int                                   layer_id,
@@ -212,16 +212,20 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     // when the gRPC client disconnects — bypassing the CANCEL_HANDLE_READ
     // broadcast RPC hop. Remote workers (other TP ranks) still receive
     // the broadcast; this only accelerates rank-0's own worker.
-    auto direct_cancel = [is_cancelled, worker = worker_, unique_key]() -> bool {
+    auto direct_cancel = [is_cancelled,
+                          worker = worker_,
+                          request_id,
+                          unique_key,
+                          transfer_deadline_ms,
+                          request_deadline_ms]() -> bool {
         if (is_cancelled && is_cancelled()) {
-            worker->cancelSend(unique_key);
+            worker->cancelRequest(request_id, unique_key, transfer_deadline_ms, request_deadline_ms);
             return true;
         }
         return false;
     };
     auto      send_start_us = currentTimeUs();
-    ErrorInfo error_info = scheduler_->sendKVCache(resource_entry->kv_cache_resource,
-                                                   unique_key,
+    ErrorInfo error_info = scheduler_->sendKVCache(unique_key,
                                                    request_id,
                                                    decode_transfer_servers,
                                                    transfer_deadline_ms,
@@ -361,18 +365,6 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
                                              int64_t                                 deadline_ms,
                                              const P2PConnectorBroadcastTpRequestPB& p2p_request,
                                              FunctionResponsePB&                     response) {
-    const auto release_local_prefill_resource = [this, &unique_key, deadline_ms, &p2p_request]() {
-        if (config_.tp_rank == 0) {
-            return;
-        }
-        const int64_t request_deadline_ms =
-            p2p_request.request_deadline_ms() > 0 ? p2p_request.request_deadline_ms() : deadline_ms;
-        // StartLoad only steals the rank-0 resource entry. Every other Prefill
-        // TP rank must seal its local entry on every terminal HANDLE_READ path.
-        stream_store_->markTerminal(unique_key, request_deadline_ms);
-        stream_store_->clearSideChannelData(unique_key);
-    };
-
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     for (const auto& peer_worker : p2p_request.peer_workers()) {
         decode_transfer_servers.emplace_back(peer_worker.ip(), peer_worker.cache_store_port());
@@ -391,8 +383,9 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
             ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                  "HANDLE_READ route peer_index out of range: " + std::to_string(local.peer_index));
             RTP_LLM_LOG_WARNING("executeHandleRead rejected: %s", error_info.ToString().c_str());
+            worker_->cancelRequest(
+                request_id, unique_key, deadline_ms, p2p_request.request_deadline_ms());
             setP2PResponse(response, error_info);
-            release_local_prefill_resource();
             return false;
         }
         worker_route.dst_ip   = decode_transfer_servers[local.peer_index].first;
@@ -402,7 +395,6 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
 
     ErrorInfo error_info = worker_->sendKVCache(
         request_id, unique_key, deadline_ms, worker_plan, p2p_request.request_deadline_ms());
-    release_local_prefill_resource();
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeHandleRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,
@@ -413,26 +405,23 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
     return error_info.ok();
 }
 
-
 bool P2PConnectorPrefill::processNoTransferPerRank(
     int64_t                                 request_id,
-    const std::string&                      unique_key,
+    const std::string& /* unique_key */,
     int64_t                                 deadline_ms,
     const P2PConnectorBroadcastTpRequestPB& p2p_request,
     FunctionResponsePB&                     response) {
     worker_->completeNoTransfer(request_id, deadline_ms, p2p_request.request_deadline_ms());
-    if (config_.tp_rank != 0) {
-        stream_store_->markTerminal(
-            unique_key,
-            p2p_request.request_deadline_ms() > 0 ? p2p_request.request_deadline_ms() : deadline_ms);
-        stream_store_->clearSideChannelData(unique_key);
-    }
     setP2PResponseOk(response);
     return true;
 }
 
-bool P2PConnectorPrefill::cancelProcessReadPerRank(const std::string& unique_key, FunctionResponsePB& response) {
-    bool ret = worker_->cancelSend(unique_key);
+bool P2PConnectorPrefill::cancelProcessReadPerRank(int64_t             request_id,
+                                                   const std::string& unique_key,
+                                                   int64_t             deadline_ms,
+                                                   int64_t             request_deadline_ms,
+                                                   FunctionResponsePB& response) {
+    bool ret = worker_->cancelRequest(request_id, unique_key, deadline_ms, request_deadline_ms);
     setP2PResponseOk(response);
     return ret;
 }

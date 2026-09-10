@@ -215,7 +215,9 @@ void P2PBroadcastClient::Result::checkDone() {
 
 std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std::string&        unique_key,
                                                                        P2PConnectorBroadcastType type,
-                                                                       int64_t request_deadline_ms) {
+                                                                       int64_t request_deadline_ms,
+                                                                       int64_t request_id,
+                                                                       int64_t deadline_ms) {
     RTP_LLM_LOG_DEBUG("P2PBroadcastClient cancel: unique_key: %s", unique_key.c_str());
 
     // 构建 FunctionRequestPB
@@ -227,6 +229,8 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
         FunctionRequestPB request;
         auto              p2p_request = request.mutable_p2p_request();
         p2p_request->set_unique_key(unique_key);
+        p2p_request->set_request_id(request_id);
+        p2p_request->set_deadline_ms(deadline_ms);
         p2p_request->set_type(type);
         p2p_request->set_request_deadline_ms(request_deadline_ms);
         requests.push_back(std::move(request));

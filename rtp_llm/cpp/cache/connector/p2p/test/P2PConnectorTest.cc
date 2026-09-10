@@ -48,9 +48,6 @@ public:
     const KVCacheResource& kvCacheResource() const override {
         return *resource_;
     }
-    KVCacheResourcePtr heldKVCacheResource() const override {
-        return resource_;
-    }
     int64_t requestId() const override {
         return 100;
     }
@@ -206,6 +203,21 @@ TEST_F(P2PConnectorTest, AsyncWriteByLayer_ReturnsNullWhenWorkerRejectsDispatch)
     auto layer_context = std::make_shared<MockLayerContext>(std::move(resource));
 
     EXPECT_EQ(connector_->asyncWriteByLayer(0, layer_context), nullptr);
+}
+
+TEST_F(P2PConnectorTest, AsyncWriteByLayer_AcceptedContextDoesNotHoldRequestResource) {
+    auto resource = createValidKVCacheResource();
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+    auto layer_context = std::make_shared<MockLayerContext>(resource);
+
+    auto accepted_context = connector_->asyncWriteByLayer(0, layer_context);
+    ASSERT_NE(accepted_context, nullptr);
+
+    layer_context.reset();
+    resource.reset();
+    EXPECT_TRUE(weak_resource.expired());
+    EXPECT_TRUE(accepted_context->done());
+    EXPECT_TRUE(accepted_context->success());
 }
 
 // 测试: stream_store_ 为 nullptr，返回 INTERNAL 错误
@@ -473,7 +485,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLaye
     EXPECT_NE(response.p2p_response().error_message().find("duplicate layer/tag"), std::string::npos);
 }
 
-TEST_F(P2PConnectorTest, ExecuteNoTransferReleasesLocalPrefillResource) {
+TEST_F(P2PConnectorTest, Rank1DoesNotInitializeRequestResourceStore) {
     auto rank1_config = config_;
     rank1_config.tp_rank = 1;
     rank1_config.worker_config.tp_rank = 1;
@@ -481,66 +493,49 @@ TEST_F(P2PConnectorTest, ExecuteNoTransferReleasesLocalPrefillResource) {
         std::make_unique<P2PConnector>(rank1_config, mock_layer_block_converter_, nullptr);
     ASSERT_TRUE(rank1_connector->init());
 
-    const std::string unique_key  = "no-transfer-release";
-    const int64_t     request_id  = 6002;
-    const int64_t     timeout_ms  = 5000;
-    const int64_t     deadline_ms = currentTimeMs() + timeout_ms;
+    EXPECT_EQ(rank1_connector->streamStore(), nullptr);
+
     auto resource = createValidKVCacheResource(2, 2);
-    std::weak_ptr<KVCacheResource> weak_resource = resource;
-    auto stream = createGenerateStream(unique_key, request_id, timeout_ms);
-    auto meta   = createMockMeta(stream.get());
-    ASSERT_NE(rank1_connector->asyncRead(resource, meta, 0, 0), nullptr);
-    resource.reset();
-    EXPECT_FALSE(weak_resource.expired());
-
-    FunctionRequestPB request;
-    auto*             p2p_request = request.mutable_p2p_request();
-    p2p_request->set_type(P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER);
-    p2p_request->set_request_id(request_id);
-    p2p_request->set_unique_key(unique_key);
-    p2p_request->set_deadline_ms(deadline_ms);
-    p2p_request->set_request_deadline_ms(deadline_ms);
-
-    FunctionResponsePB response;
-    EXPECT_TRUE(rank1_connector->executeFunction(request, response));
-    EXPECT_TRUE(weak_resource.expired());
+    auto stream   = createGenerateStream("rank1-no-store", 6002, 5000);
+    auto meta     = createMockMeta(stream.get());
+    EXPECT_EQ(rank1_connector->asyncRead(resource, meta, 0, 0), nullptr);
 }
 
-TEST_F(P2PConnectorTest, ExecuteHandleReadFailureStillReleasesLocalPrefillResource) {
-    auto rank1_config = config_;
-    rank1_config.tp_rank = 1;
-    rank1_config.worker_config.tp_rank = 1;
-    auto rank1_connector =
-        std::make_unique<P2PConnector>(rank1_config, mock_layer_block_converter_, nullptr);
-    ASSERT_TRUE(rank1_connector->init());
+TEST_F(P2PConnectorTest, CancelBeforeHandleReadRejectsLateRequest) {
+    const int64_t     request_id          = 6004;
+    const std::string unique_key          = "cancel-before-handle-read";
+    const int64_t     deadline_ms         = currentTimeMs() + 5000;
+    const int64_t     request_deadline_ms = currentTimeMs() + 10000;
 
-    const std::string unique_key  = "handle-read-failure-release";
-    const int64_t     request_id  = 6003;
-    const int64_t     timeout_ms  = 5000;
-    const int64_t     deadline_ms = currentTimeMs() + timeout_ms;
-    auto resource = createValidKVCacheResource(2, 2);
-    std::weak_ptr<KVCacheResource> weak_resource = resource;
-    auto stream = createGenerateStream(unique_key, request_id, timeout_ms);
-    auto meta   = createMockMeta(stream.get());
-    ASSERT_NE(rank1_connector->asyncRead(resource, meta, 0, 0), nullptr);
-    resource.reset();
-    EXPECT_FALSE(weak_resource.expired());
+    FunctionRequestPB cancel_request;
+    auto*             cancel_p2p_request = cancel_request.mutable_p2p_request();
+    cancel_p2p_request->set_type(P2PConnectorBroadcastType::CANCEL_HANDLE_READ);
+    cancel_p2p_request->set_request_id(request_id);
+    cancel_p2p_request->set_unique_key(unique_key);
+    cancel_p2p_request->set_deadline_ms(deadline_ms);
+    cancel_p2p_request->set_request_deadline_ms(request_deadline_ms);
 
-    FunctionRequestPB request;
-    auto*             p2p_request = request.mutable_p2p_request();
-    p2p_request->set_type(P2PConnectorBroadcastType::HANDLE_READ);
-    p2p_request->set_request_id(request_id);
-    p2p_request->set_unique_key(unique_key);
-    p2p_request->set_deadline_ms(deadline_ms);
-    p2p_request->set_request_deadline_ms(deadline_ms);
-    auto* route = p2p_request->add_routes();
+    FunctionResponsePB cancel_response;
+    EXPECT_TRUE(connector_->executeFunction(cancel_request, cancel_response));
+
+    FunctionRequestPB handle_request;
+    auto*             handle_p2p_request = handle_request.mutable_p2p_request();
+    handle_p2p_request->set_type(P2PConnectorBroadcastType::HANDLE_READ);
+    handle_p2p_request->set_request_id(request_id);
+    handle_p2p_request->set_unique_key(unique_key);
+    handle_p2p_request->set_deadline_ms(deadline_ms);
+    handle_p2p_request->set_request_deadline_ms(request_deadline_ms);
+    auto* peer = handle_p2p_request->add_peer_workers();
+    peer->set_ip("127.0.0.1");
+    peer->set_cache_store_port(12345);
+    auto* route = handle_p2p_request->add_routes();
     route->set_route_id(0);
     route->set_cache_tag("group0");
     route->set_peer_index(0);
 
-    FunctionResponsePB response;
-    EXPECT_FALSE(rank1_connector->executeFunction(request, response));
-    EXPECT_TRUE(weak_resource.expired());
+    FunctionResponsePB handle_response;
+    EXPECT_FALSE(connector_->executeFunction(handle_request, handle_response));
+    EXPECT_EQ(handle_response.p2p_response().error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
 }
 
 // 测试: 成功场景，使用 notifySideChannelReady 机制，返回 OK, 验证 response 中包含了所有字段
@@ -604,6 +599,45 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
         EXPECT_GE(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
     }
+}
+
+TEST_F(P2PConnectorTest, HandleRead_HoldsRank0RequestResourceUntilAllRanksReturn) {
+    const std::string unique_key  = "test_request_resource_all_ranks";
+    const int64_t     request_id  = 5013;
+    const int64_t     timeout_ms  = 5000;
+    const int64_t     deadline_ms = currentTimeMs() + timeout_ms;
+    auto resource = createValidKVCacheResource(2, 2);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+    auto stream = createGenerateStream(unique_key, request_id, timeout_ms);
+    auto meta   = createMockMeta(stream.get());
+    ASSERT_NE(connector_->asyncRead(resource, meta, 0, 0), nullptr);
+
+    P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token = true;
+    data.first_token_id  = 12345;
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+
+    tp_broadcast_servers_[0]->service()->setSleepMillis(0);
+    tp_broadcast_servers_[1]->service()->setSleepMillis(300);
+    auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
+    auto handle_read_future = std::async(std::launch::async, [&]() {
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response);
+        return response;
+    });
+
+    for (int i = 0; i < 100 && tp_broadcast_servers_[1]->service()->getBroadcastTpCallCount() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_GT(tp_broadcast_servers_[1]->service()->getBroadcastTpCallCount(), 0);
+    resource.reset();
+    EXPECT_EQ(handle_read_future.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_FALSE(weak_resource.expired());
+
+    ASSERT_EQ(handle_read_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto response = handle_read_future.get();
+    EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_TRUE(weak_resource.expired());
 }
 
 TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideChannel) {

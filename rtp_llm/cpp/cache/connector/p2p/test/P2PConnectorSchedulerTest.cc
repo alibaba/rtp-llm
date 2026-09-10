@@ -190,38 +190,16 @@ protected:
 
 // ==================== sendKVCache 测试 (Prefill 端功能) ====================
 
-// 测试：resource 转换不到 layer_cache_buffers
-TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_LayerCacheBuffersEmpty) {
-    auto invalid_resource = createInvalidKVCacheResource();
-
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    auto deadline_ms = currentTimeMs() + 1000;
-
-    ErrorInfo error_info = prefill_scheduler_->sendKVCache(
-        invalid_resource, "test_unique_key", 1001, decode_transfer_servers, deadline_ms);
-
-    EXPECT_TRUE(error_info.hasError());
-
-    // 验证 BroadcastTp 没有被调用
-    for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 0);
-    }
-}
-
 // 测试：broadcast 成功
 TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
-    auto valid_resource = createValidKVCacheResource(2, 2);
-
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
     decode_transfer_servers.push_back({"127.0.0.1", 12346});
 
     auto deadline_ms = currentTimeMs() + 1000;
 
-    ErrorInfo error_info = prefill_scheduler_->sendKVCache(
-        valid_resource, "test_broadcast_success", 1001, decode_transfer_servers, deadline_ms);
+    ErrorInfo error_info =
+        prefill_scheduler_->sendKVCache("test_broadcast_success", 1001, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.ok());
 
@@ -253,14 +231,13 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType)
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     ErrorInfo error_info =
-        prefill_scheduler_->sendKVCache(
-            resource, "test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000);
+        prefill_scheduler_->sendKVCache("test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000);
 
     ASSERT_TRUE(error_info.ok());
     const auto rank0_request = tp_broadcast_servers_[0]->service()->getLastBroadcastTpRequest();
     const auto rank1_request = tp_broadcast_servers_[1]->service()->getLastBroadcastTpRequest();
-    // Plan-driven Prefill broadcasts routes only. Workers project their local
-    // LayerCacheBuffer from the request resource instead of receiving it here.
+    // Plan-driven Prefill broadcasts routes only. Each worker has already
+    // produced its local LayerCacheBuffer through the per-layer path.
     EXPECT_EQ(rank0_request.layer_blocks_size(), 0);
     EXPECT_EQ(rank1_request.layer_blocks_size(), 0);
     ASSERT_EQ(rank0_request.routes_size(), 2);
@@ -276,16 +253,13 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastPartialFailed)
         break;
     }
 
-    auto valid_resource = createValidKVCacheResource(2, 2);
-
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     auto deadline_ms = currentTimeMs() + 1000;
 
     ErrorInfo error_info =
-        prefill_scheduler_->sendKVCache(
-            valid_resource, "test_broadcast_all_fail", 1003, decode_transfer_servers, deadline_ms);
+        prefill_scheduler_->sendKVCache("test_broadcast_all_fail", 1003, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
 
@@ -302,16 +276,13 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastTimeout) {
         break;
     }
 
-    auto valid_resource = createValidKVCacheResource(2, 2);
-
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     auto deadline_ms = currentTimeMs() + 50;
 
     ErrorInfo error_info =
-        prefill_scheduler_->sendKVCache(
-            valid_resource, "test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms);
+        prefill_scheduler_->sendKVCache("test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
@@ -332,7 +303,6 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ExitsImmediately_AfterCancelDoneEve
         server->service()->setSleepMillis(3000);  // 3s 慢 worker,模拟 hang
     }
 
-    auto                                          valid_resource = createValidKVCacheResource(2, 2);
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
@@ -348,7 +318,7 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ExitsImmediately_AfterCancelDoneEve
 
     auto      start_ms   = currentTimeMs();
     ErrorInfo error_info = prefill_scheduler_->sendKVCache(
-        valid_resource, "test_exit_after_cancel_done", 4007, decode_transfer_servers, deadline_ms, is_cancelled);
+        "test_exit_after_cancel_done", 4007, decode_transfer_servers, deadline_ms, is_cancelled);
     auto duration_ms = currentTimeMs() - start_ms;
 
     cancel_thread.join();
@@ -374,12 +344,11 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
         server->service()->setSleepMillis(200);
     }
 
-    auto valid_resource = createValidKVCacheResource(2, 2);
-
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     auto deadline_ms = currentTimeMs() + 5000;
+    auto request_deadline_ms = deadline_ms + 5000;
 
     // 使用 atomic 来控制取消状态
     std::atomic<bool> cancelled{false};
@@ -392,7 +361,13 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
     });
 
     ErrorInfo error_info = prefill_scheduler_->sendKVCache(
-        valid_resource, "test_broadcast_cancelled", 1005, decode_transfer_servers, deadline_ms, is_cancelled);
+        "test_broadcast_cancelled",
+        1005,
+        decode_transfer_servers,
+        deadline_ms,
+        is_cancelled,
+        false,
+        request_deadline_ms);
 
     cancel_thread.join();
 
@@ -404,6 +379,10 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+        const auto cancel_request = tp_broadcast_servers_[i]->service()->getLastBroadcastTpRequest();
+        EXPECT_EQ(cancel_request.request_id(), 1005);
+        EXPECT_EQ(cancel_request.deadline_ms(), deadline_ms);
+        EXPECT_EQ(cancel_request.request_deadline_ms(), request_deadline_ms);
     }
 }
 
@@ -849,13 +828,12 @@ TEST_F(P2PConnectorSchedulerTest, SendKVCache_ReturnError_WhenBroadcastExceedsDe
         server->service()->setP2PResponseSuccess(true);
     }
 
-    auto                                          valid_resource = createValidKVCacheResource(2, 2);
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     const int64_t deadline_ms = currentTimeMs() + 80;
     ErrorInfo     error_info  = prefill_scheduler_->sendKVCache(
-        valid_resource, "test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms);
+        "test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);

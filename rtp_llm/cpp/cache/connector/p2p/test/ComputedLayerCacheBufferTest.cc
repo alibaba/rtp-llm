@@ -226,26 +226,6 @@ TEST_F(ComputedLayerCacheBufferTest, CheckTimeoutMixed) {
     EXPECT_EQ(store_->getBuffersCount(), 1);
 }
 
-TEST_F(ComputedLayerCacheBufferTest, LayerCacheBuffer_HoldsKVCacheResourceLifetime) {
-    bool deleter_called = false;
-    auto owned_resource =
-        std::shared_ptr<KVCacheResource>(new KVCacheResource(), [&deleter_called](KVCacheResource* p) {
-            deleter_called = true;
-            delete p;
-        });
-    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(0, "full", owned_resource);
-
-    owned_resource.reset();
-    EXPECT_FALSE(deleter_called);
-
-    auto computed_buffer = std::make_shared<ComputedLayerCacheBuffer>(1007, layer_cache_buffer, getDeadlineMs());
-    layer_cache_buffer.reset();
-    EXPECT_FALSE(deleter_called);
-
-    computed_buffer.reset();
-    EXPECT_TRUE(deleter_called);
-}
-
 TEST_F(ComputedLayerCacheBufferTest, AddBufferRejectedAfterRemove) {
     int64_t request_id  = 4001;
     auto    buffer      = createLayerCacheBuffer(0);

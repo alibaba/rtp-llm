@@ -178,7 +178,7 @@ private:
 /// It does not represent the final transfer result.
 class P2PConnectorAcceptedWriteContext: public AsyncContext {
 public:
-    P2PConnectorAcceptedWriteContext(const KVCacheResourcePtr& resource): resource_(resource) {}
+    P2PConnectorAcceptedWriteContext() = default;
     ~P2PConnectorAcceptedWriteContext() override = default;
 
 public:
@@ -186,8 +186,6 @@ public:
     bool done() const override;
     bool success() const override;
 
-private:
-    const KVCacheResourcePtr resource_;
 };
 
 /// @brief 后台线程定期检查 in-flight 异步 read 上下文，超时时自动取消

@@ -85,7 +85,11 @@ public:
 
     /// @brief 向所有 TP worker 广播 cancel 请求
     std::shared_ptr<Result>
-    cancel(const std::string& unique_key, P2PConnectorBroadcastType type, int64_t request_deadline_ms = 0);
+    cancel(const std::string&        unique_key,
+           P2PConnectorBroadcastType type,
+           int64_t                   request_deadline_ms,
+           int64_t                   request_id,
+           int64_t                   deadline_ms);
 
     struct LeaseStatusResult {
         bool success{false};

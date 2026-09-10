@@ -256,7 +256,7 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
         bool expected = false;
         if (tp_cancel_broadcast_triggered_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
             auto cancel_result = tp_broadcast_client->cancel(
-                unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms_);
+                unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms_, 0, 0);
             if (!cancel_result) {
                 tp_cancel_broadcast_triggered_.store(false, std::memory_order_release);
             } else if (!cancel_result->done()) {

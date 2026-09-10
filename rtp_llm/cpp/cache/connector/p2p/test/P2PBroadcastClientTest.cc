@@ -309,10 +309,13 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
 
 TEST_F(P2PBroadcastClientTest, Cancel_ReturnNotNull_Success) {
     std::string unique_key          = "test_cancel_success";
+    int64_t     request_id          = 3013;
+    int64_t     deadline_ms         = currentTimeMs() + 1000;
     int64_t     request_deadline_ms = currentTimeMs() + 5000;
 
     // 执行 cancel
-    auto result = client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms);
+    auto result = client_->cancel(
+        unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms, request_id, deadline_ms);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->uniqueKey(), unique_key);
 
@@ -325,6 +328,8 @@ TEST_F(P2PBroadcastClientTest, Cancel_ReturnNotNull_Success) {
     for (size_t i = 0; i < servers_.size(); ++i) {
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCallCount(), 0);
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_id(), request_id);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().deadline_ms(), deadline_ms);
         EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_deadline_ms(), request_deadline_ms);
     }
 }

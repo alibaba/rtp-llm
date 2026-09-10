@@ -22,9 +22,8 @@ class P2PConnectorResourceStore;
 
 /**
  * Q: 如何保证kvcache不被写坏
- * A: scheduler 应该在 worker 执行完成之前都持有kv_cache资源, 如果在worker执行过程中, scheduler 因为等待 worker 超时 /
- * RPC失败等原因退出等待，释放worker资源，那么应该abort 目前这部分是在 scheduler 对 worker
- * 的调用中实现，如果调用超时或rpc失败，则scheduler会abort进程
+ * A: Prefill rank 0 的 processRead 在所有 worker 执行完成之前持有请求级 kv_cache 资源。如果等待 worker 超时或
+ * RPC 失败，应先终止仍可能访问源地址的传输，再释放该请求级资源。
  * Q: 超时处理
  * A:
  * 每个stream都会有自己的超时，worker的实现逻辑中会尽量保证在超时后尽快终止后续的可能操作，以尽快完成资源释放，但是不保证一定能在deadline之前完成操作.

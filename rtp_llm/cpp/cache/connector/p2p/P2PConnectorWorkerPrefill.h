@@ -57,7 +57,10 @@ public:
 
     void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms = 0);
 
-    bool cancelSend(const std::string& unique_key);
+    bool cancelRequest(int64_t            request_id,
+                       const std::string& unique_key,
+                       int64_t            deadline_ms,
+                       int64_t            request_deadline_ms = 0);
 
     std::shared_ptr<ComputedLayerCacheBufferStore> getComputedBuffersStore() const {
         return computed_buffers_;
@@ -161,7 +164,7 @@ private:
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;
     autil::LoopThreadPtr                                                cleanup_thread_;
     // Per in-flight sendKVCache, hold both the cancel signal and a weak handle
-    // to its SendTransferResult. The weak handle lets cancelSend() wake up the
+    // to its SendTransferResult. The weak handle lets cancelRequest() wake up the
     // wait_for loop in waitSendCallbacksWithTimeout via cv.notify_all() instead
     // of letting cancel_flag sit unchecked for up to rdma_transfer_wait_timeout_ms
     // (180s by default). Weak ref avoids extending the lifetime of the result.

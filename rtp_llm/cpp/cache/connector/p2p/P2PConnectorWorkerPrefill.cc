@@ -195,9 +195,6 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                           layer
             "writeByLayer failed: layer_cache_buffer is null, request_id=%ld, layer_id=%d", request_id, layer_id);
         return false;
     }
-    for (const auto& layer_cache_buffer : layer_cache_buffers) {
-        layer_cache_buffer->setKVCacheResource(resource);
-    }
     return scheduleLayerCacheBuffers(layer_id, request_id, event, request_deadline_ms, layer_cache_buffers);
 }
 
@@ -218,7 +215,7 @@ bool P2PConnectorWorkerPrefill::writeByLayerTag(int                             
         return false;
     }
 
-    auto       layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag, resource);
+    auto       layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag);
     const auto& cache_keys        = resource->cacheKeys();
     const auto& block_ids         = resource->blocksForLayer(layer_id, tag);
     for (size_t i = 0; i < cache_keys.size(); ++i) {
@@ -586,7 +583,7 @@ bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_p
             [&transfer_result, sent_transfer_count, &cancel_flag]() {
                 // Wake up early when cancel_flag flips so we don't have to wait
                 // out the full rdma_cap_ms slice before re-checking it. This
-                // requires the cancelSend code path to call result_cv.notify_one()
+                // requires cancelRequest() to notify result_cv
                 // after setting cancel_flag — see below.
                 return transfer_result->done_count.load(std::memory_order_relaxed) >= sent_transfer_count
                        || (cancel_flag && cancel_flag->load());
@@ -677,7 +674,7 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
     {
         std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
         // transfer_result is held in this stack frame; weak_ptr is fine because
-        // we only dereference it from cancelSend() while this frame is alive.
+        // we only dereference it from cancelRequest() while this frame is alive.
         handle_cancel_flags_[unique_key] = {cancel_flag, std::weak_ptr<SendTransferResult>(transfer_result)};
     }
 
@@ -782,12 +779,11 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
         handle_cancel_flags_.erase(unique_key);
     }
 
-    // Always remove the computed buffer entry. This is safe because the caller (handleRead)
-    // holds a whole-request KVCacheResourcePtr in resource_entry, which keeps all blocks
-    // allocated via connector_ref_counter until handleRead returns. The per-layer refs here
-    // are redundant for block lifetime safety.
+    // Always remove the computed buffer entry. On Prefill rank 0, processRead holds the
+    // request-level KVCacheResourcePtr until all rank RPCs return. Per-layer buffers on
+    // every rank only describe block locations and do not own allocator references.
     // This also marks the request_id as removed, preventing late-arriving layers from
-    // StoreWaitContextChecker from creating orphan entries that pin blocks (LACK MEM).
+    // StoreWaitContextChecker from creating orphan description entries.
     computed_buffers_->removeBuffer(request_id);
 
     auto send_result = determineSendResult(transfer_result,
@@ -833,6 +829,47 @@ void P2PConnectorWorkerPrefill::completeNoTransfer(int64_t request_id,
     RTP_LLM_LOG_DEBUG("sendKVCache [P2P]: no-transfer request completed, request_id=%ld", request_id);
 }
 
+bool P2PConnectorWorkerPrefill::cancelRequest(int64_t            request_id,
+                                              const std::string& unique_key,
+                                              int64_t            deadline_ms,
+                                              int64_t            request_deadline_ms) {
+    if (request_deadline_ms <= 0) {
+        request_deadline_ms = deadline_ms;
+    }
+    // removeBuffer also records a request-id tombstone. Layers or StartLoad
+    // arriving after cancellation are rejected instead of creating an empty
+    // computed buffer and waiting until the request deadline.
+    computed_buffers_->removeBuffer(request_id, request_deadline_ms);
+    RTP_LLM_LOG_DEBUG("cancelRequest start, request_id=%ld, unique_key=%s", request_id, unique_key.c_str());
+
+    std::shared_ptr<std::atomic<bool>> cancel_flag;
+    std::shared_ptr<SendTransferResult> transfer_result;
+    {
+        std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
+        auto                        it = handle_cancel_flags_.find(unique_key);
+        if (it == handle_cancel_flags_.end()) {
+            RTP_LLM_LOG_INFO("cancelRequest: unique_key not found: %s (best-effort)", unique_key.c_str());
+            return true;
+        }
+        cancel_flag     = it->second.cancel_flag;
+        transfer_result = it->second.transfer_result.lock();
+    }
+    cancel_flag->store(true, std::memory_order_relaxed);
+    const int released_pending_task_count = releasePendingAsyncSendTasks(unique_key, &transfer_result);
+    // Wake up waitSendCallbacksWithTimeout immediately so it sees the flag,
+    // instead of waiting for rdma_transfer_wait_timeout_ms before re-checking.
+    if (transfer_result) {
+        std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+        transfer_result->result_cv.notify_all();
+    }
+    RTP_LLM_LOG_INFO("cancelRequest success, request_id=%ld, unique_key=%s, released_pending_tasks=%d, notified_cv=%d",
+                     request_id,
+                     unique_key.c_str(),
+                     released_pending_task_count,
+                     transfer_result ? 1 : 0);
+    return true;
+}
+
 P2PConnectorWorkerPrefill::SendResultInfo
 P2PConnectorWorkerPrefill::determineSendResult(const std::shared_ptr<SendTransferResult>& transfer_result,
                                                const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
@@ -868,36 +905,6 @@ P2PConnectorWorkerPrefill::determineSendResult(const std::shared_ptr<SendTransfe
         return {false, transfer_result->error_code, transfer_result->error_msg};
     }
     return {};
-}
-
-bool P2PConnectorWorkerPrefill::cancelSend(const std::string& unique_key) {
-    RTP_LLM_LOG_DEBUG("cancelSend start, unique_key: %s", unique_key.c_str());
-    std::shared_ptr<std::atomic<bool>> cancel_flag;
-    std::shared_ptr<SendTransferResult> transfer_result;
-    {
-        std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
-        auto                        it = handle_cancel_flags_.find(unique_key);
-        if (it == handle_cancel_flags_.end()) {
-            RTP_LLM_LOG_INFO("cancelSend: unique_key not found: %s (best-effort)", unique_key.c_str());
-            return true;
-        }
-        cancel_flag     = it->second.cancel_flag;
-        transfer_result = it->second.transfer_result.lock();
-    }
-    cancel_flag->store(true, std::memory_order_relaxed);
-    const int released_pending_task_count = releasePendingAsyncSendTasks(unique_key, &transfer_result);
-    // Wake up waitSendCallbacksWithTimeout immediately so it sees the flag,
-    // instead of letting it sit in cv.wait_for for up to rdma_transfer_wait_timeout_ms
-    // (180s default) before re-checking.
-    if (transfer_result) {
-        std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
-        transfer_result->result_cv.notify_all();
-    }
-    RTP_LLM_LOG_INFO("cancelSend success, unique_key: %s, released_pending_tasks: %d, notified_cv: %d",
-                     unique_key.c_str(),
-                     released_pending_task_count,
-                     transfer_result ? 1 : 0);
-    return true;
 }
 
 }  // namespace rtp_llm
