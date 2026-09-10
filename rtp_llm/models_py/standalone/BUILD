@@ -4,6 +4,27 @@ load("//bazel:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps"
 requirement(["fast-safetensors", "fastsafetensors"])
 
 py_library(
+    name = "glm53_four_layer_smoke_lib",
+    srcs = glob(["glm53_smoke/*.py"], exclude = ["glm53_smoke/test_smoke.py"]),
+    deps = [":auto_model"],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "glm53_four_layer_smoke",
+    srcs = ["glm53_four_layer_smoke.py"],
+    deps = [":glm53_four_layer_smoke_lib"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "glm53_four_layer_smoke_contract_test",
+    srcs = ["glm53_smoke/test_smoke.py"],
+    main = "glm53_smoke/test_smoke.py",
+    deps = [":glm53_four_layer_smoke_lib"],
+)
+
+py_library(
     name = "auto_model",
     srcs = ["auto_model.py"],
     deps = [
