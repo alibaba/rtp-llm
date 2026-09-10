@@ -371,7 +371,7 @@ def _register_process_groups_to_cpp():
 
         Args:
             tensors: Tensors to broadcast, each is broadcast in-place from root.
-            root: Source rank that holds the data.
+            root: Source rank within the selected process group.
             mode: ParallelMode int (0=TP, 1=DP, 2=DP_AND_TP) selecting process group.
         """
         pg = mode_to_group.get(mode)
@@ -380,7 +380,7 @@ def _register_process_groups_to_cpp():
         device_id = torch.cuda.current_device()
         for t in tensors:
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, root, group=pg)
+            torch.distributed.broadcast(gpu_t, group=pg, group_src=root)
             if was_cpu:
                 t.copy_(gpu_t)
 
