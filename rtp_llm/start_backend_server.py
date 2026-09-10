@@ -20,6 +20,7 @@ from rtp_llm.device.device_type import device_count, is_ascend
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import SpeculativeType
 from rtp_llm.config.server_config_setup import (
+    configure_kv_cache_event_host_ip_port,
     load_gpu_nic_affinity,
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
@@ -89,6 +90,7 @@ def local_rank_start(
         local_rank = py_env_configs.parallelism_config.local_rank
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
+        configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
         # Fail-fast at config time: Ascend speculative decoding is not
         # supported yet (CUDA-only rejection sampling); MtpExecutor also
@@ -414,10 +416,12 @@ def start_backend_server(
 
     # Single-rank fast path only when NO accelerator backend is available;
     # otherwise the Ascend multi-rank path below must stay reachable.
-    if not torch.cuda.is_available() and not is_ascend():
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
-
     pc = py_env_configs.parallelism_config
+    if not torch.cuda.is_available() and not is_ascend():
+        return local_rank_start(
+            global_controller, py_env_configs, pc.world_rank, pipe_writer
+        )
+
     _dev_count = device_count()
     if (
         pc.world_size % _dev_count != 0
@@ -444,7 +448,9 @@ def start_backend_server(
                 cleanup=manager.stop if manager else None,
             )
         else:
-            return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+            return local_rank_start(
+                global_controller, py_env_configs, pc.world_rank, pipe_writer
+            )
     finally:
         if manager:
             manager.stop()

@@ -9,11 +9,13 @@ from unittest.mock import patch
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
+    configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
 )
 from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.start_backend_server import start_backend_server
 
 # clear=True must preserve gpu_lock isolation across Torch lazy initialization.
 _PINNED_DEVICES = {
@@ -54,6 +56,140 @@ class ServerConfigPortLayoutTest(TestCase):
         config.worker_info_port_num = 8
 
         config.validate_port_layout(dash_sc_enabled=False)
+
+
+class KVCacheEventHostIdentityTest(TestCase):
+    def _dp_publisher_configs(self) -> PyEnvConfigs:
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.kv_cache_config.kv_cache_event_publisher_type = "kvcm"
+        py_env_configs.parallelism_config.dp_size = 2
+        py_env_configs.parallelism_config.dp_rank = 1
+        py_env_configs.parallelism_config.tp_rank = 0
+        py_env_configs.server_config.ip = "10.0.0.8"
+        py_env_configs.server_config.start_port = 20000
+        py_env_configs.server_config.worker_info_port_num = 9
+        py_env_configs.server_config.set_local_rank(3)
+        return py_env_configs
+
+    def test_empty_host_identity_uses_rank_port_layout(self):
+        py_env_configs = self._dp_publisher_configs()
+
+        with self.assertLogs(level="WARNING") as logs:
+            configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port,
+            "10.0.0.8:20027",
+        )
+        self.assertIn("auto-derived", "\n".join(logs.output))
+        self.assertIn("overwrite", "\n".join(logs.output))
+
+    def test_explicit_host_identity_is_preserved(self):
+        py_env_configs = self._dp_publisher_configs()
+        py_env_configs.kv_cache_config.kv_cache_event_host_ip_port = (
+            "cache-replica-1:19000"
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port,
+            "cache-replica-1:19000",
+        )
+        self.assertIn("explicit", "\n".join(logs.output))
+
+    def test_non_publisher_tp_rank_is_unchanged(self):
+        py_env_configs = self._dp_publisher_configs()
+        py_env_configs.parallelism_config.tp_rank = 1
+
+        configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, ""
+        )
+
+
+class SingleGpuBackendRankTest(TestCase):
+    def _start_rank(self, tp_size: int, dp_size: int, world_rank: int):
+        py_env_configs = PyEnvConfigs()
+        parallelism_config = py_env_configs.parallelism_config
+        parallelism_config.tp_size = tp_size
+        parallelism_config.dp_size = dp_size
+        parallelism_config.ep_size = tp_size * dp_size if dp_size > 1 else 1
+        parallelism_config.world_size = tp_size * dp_size
+        parallelism_config.world_rank = world_rank
+        parallelism_config.local_world_size = 1
+
+        py_env_configs.kv_cache_config.kv_cache_event_publisher_type = "kvcm"
+        py_env_configs.server_config.ip = "10.0.0.8"
+        py_env_configs.server_config.start_port = 20000
+
+        def initialize_rank(
+            global_controller, configs, selected_world_rank, pipe_writer
+        ):
+            set_parallelism_config(
+                configs.parallelism_config,
+                selected_world_rank,
+                configs.ffn_disaggregate_config,
+                configs.prefill_cp_config,
+            )
+            local_rank = configs.parallelism_config.local_rank
+            configs.server_config.set_local_rank(local_rank)
+            configs.distribute_config.set_local_rank(local_rank)
+            configure_kv_cache_event_host_ip_port(configs)
+            return selected_world_rank
+
+        with (
+            patch("rtp_llm.start_backend_server.signal.signal"),
+            patch("rtp_llm.start_backend_server.os.makedirs"),
+            patch("rtp_llm.start_backend_server.setproctitle"),
+            patch("rtp_llm.start_backend_server.load_gpu_nic_affinity"),
+            patch(
+                "rtp_llm.start_backend_server.torch.cuda.is_available",
+                return_value=True,
+            ),
+            patch(
+                "rtp_llm.start_backend_server.torch.cuda.device_count",
+                return_value=1,
+            ),
+            patch(
+                "rtp_llm.utils.jit_cache_manager.start_from_config",
+                return_value=None,
+            ),
+            patch(
+                "rtp_llm.start_backend_server.local_rank_start",
+                side_effect=initialize_rank,
+            ),
+        ):
+            result = start_backend_server(object(), py_env_configs)
+
+        return result, py_env_configs
+
+    def test_single_gpu_nonzero_dp_rank_starts_publisher(self):
+        result, py_env_configs = self._start_rank(
+            tp_size=1, dp_size=2, world_rank=1
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(py_env_configs.parallelism_config.tp_rank, 0)
+        self.assertEqual(py_env_configs.parallelism_config.dp_rank, 1)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port,
+            "10.0.0.8:20000",
+        )
+
+    def test_single_gpu_nonzero_tp_rank_does_not_start_publisher(self):
+        result, py_env_configs = self._start_rank(
+            tp_size=2, dp_size=1, world_rank=1
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(py_env_configs.parallelism_config.tp_rank, 1)
+        self.assertEqual(py_env_configs.parallelism_config.dp_rank, 0)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, ""
+        )
 
 
 class GenerateConfigTest(TestCase):

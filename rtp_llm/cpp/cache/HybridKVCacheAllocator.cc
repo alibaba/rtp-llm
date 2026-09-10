@@ -73,6 +73,18 @@ std::vector<int> HybridKVCacheAllocator::independentEvictionGroupIds() const {
     return group_ids;
 }
 
+std::vector<int> HybridKVCacheAllocator::reuseParticipatingGroupIds() const {
+    // Unlike skipReuseCacheGroup() (which admits tail-sparse LINEAR groups into
+    // the reuse surface), the publication completeness set only accepts groups
+    // that materialize every block position; see cacheGroupPublishesPrefixChain.
+    std::vector<CacheGroupPolicy> policies;
+    policies.reserve(kv_cache_groups_.size());
+    for (const auto& group : kv_cache_groups_) {
+        policies.push_back(group->policy());
+    }
+    return reuseParticipatingGroupIdsFromPolicies(policies);
+}
+
 bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
     return mapper && mapper->isSharded() && gid >= 0 && static_cast<size_t>(gid) < kv_cache_groups_.size()
            && mapper->compactLastRankGroup(config_, static_cast<size_t>(gid));
@@ -259,19 +271,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         original_sizes[static_cast<size_t>(gid)] = kv_resource->blocksNum(0, gid);
     }
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-        auto&     block_ids_0   = kv_resource->mutableBlockIds(0, gid);
-        const int group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, common_seq_len);
-        const auto& group = kv_cache_groups_[static_cast<size_t>(gid)];
+        auto&       block_ids_0   = kv_resource->mutableBlockIds(0, gid);
+        const int   group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, common_seq_len);
+        const auto& group         = kv_cache_groups_[static_cast<size_t>(gid)];
         // Snapshot the slot count before the call so a failure can report this
         // group's exact physical request in the error_code=602 record.
         const int blocks_before = static_cast<int>(block_ids_0.blocksNum());
         if (!group->malloc(block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
-            logMallocFailure(malloc_info,
-                             "init_group_malloc",
-                             0,
-                             gid,
-                             false,
-                             group->needBlocksNum(group_seq_len, blocks_before, 0));
+            logMallocFailure(
+                malloc_info, "init_group_malloc", 0, gid, false, group->needBlocksNum(group_seq_len, blocks_before, 0));
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }
