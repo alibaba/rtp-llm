@@ -9,6 +9,7 @@ Defaults for ``SamplingParams`` align with ``rtp_llm.config.generate_config.Gene
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -999,6 +1000,7 @@ def parse_dash_sc_grpc_request(
     request,
 ) -> tuple[list[int] | None, SamplingParams | None, OtherParams | None]:
     """Parse one ``ModelInferRequest``: ``input_ids``, sampling tensors, ``other`` params."""
+    log_grammar_request(request)
     ids = parse_input_ids_from_request(request)
     if ids is None:
         return None, None, None
@@ -1008,6 +1010,181 @@ def parse_dash_sc_grpc_request(
         parse_sampling_params(request, ds_attrs),
         parse_other_params(request, ds_attrs),
     )
+
+
+_GRAMMAR_TRACE_FIELDS = frozenset(
+    {
+        "tool_call_structural_tag",
+        "structural_tag",
+        "unified_structural_tag",
+        "response_format",
+        "guided_json",
+        "json_schema",
+        "json_format",
+        "regex",
+        "ebnf",
+        "tool_choice",
+        "tools",
+        "parallel_tool_calls",
+        "tool_grammar_level",
+        "enable_thinking",
+        "in_think_mode",
+        "max_new_think_tokens",
+        "max_thinking_tokens",
+        "thinking_budget",
+        "num_return_sequences",
+        "num_beams",
+        "n",
+        "x-ds-llm-tool-choice",
+    }
+)
+_GRAMMAR_TRACE_CONTAINERS = frozenset(
+    {
+        "ds_header_attributes",
+        "parameters",
+        "body",
+        "payload",
+        "request",
+        "extra_params",
+        "sampling_params",
+        "headers",
+    }
+)
+
+
+def grammar_trace_value(value: Any) -> Any:
+    """Bound constraint text while retaining an exact fingerprint of string values."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=True)
+    raw = text.encode("utf-8", errors="backslashreplace")
+    return {
+        "type": type(value).__name__,
+        "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "value": text[:8192],
+        "truncated": len(text) > 8192,
+    }
+
+
+def log_grammar_request(request) -> None:
+    """Inspect wire fields independently of parsing, including unsupported aliases.
+
+    Only constraint/control values are logged; payload messages, prompt/media
+    tensors, and arbitrary header values are excluded. Run before validation so rejected
+    requests also have receipt evidence.
+    """
+    if not logging.getLogger().isEnabledFor(logging.INFO):
+        return
+    try:
+        controls = {}
+        containers = {}
+
+        def visit(value, path, depth=0):
+            if depth > 8:
+                containers[path] = "depth_limit"
+                return
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (ValueError, TypeError):
+                    containers[path] = "invalid_json"
+                    return
+            if not isinstance(value, dict):
+                containers[path] = type(value).__name__
+                return
+            containers[path] = sorted(value)
+            for key, item in value.items():
+                name = str(key).lower()
+                child = f"{path}.{key}"
+                if name in _GRAMMAR_TRACE_FIELDS:
+                    controls[child] = grammar_trace_value(item)
+                elif name in _GRAMMAR_TRACE_CONTAINERS:
+                    visit(item, child, depth + 1)
+
+        parameter_types = {}
+        for name, parameter in request.parameters.items():
+            kind = parameter.WhichOneof("parameter_choice")
+            parameter_types[name] = kind
+            value = getattr(parameter, kind) if kind else None
+            if name.lower() in _GRAMMAR_TRACE_FIELDS:
+                controls[f"parameters.{name}"] = grammar_trace_value(value)
+            elif name.lower() in _GRAMMAR_TRACE_CONTAINERS:
+                visit(value, f"parameters.{name}")
+        for inp in request.inputs:
+            if inp.name.lower() in _GRAMMAR_TRACE_FIELDS:
+                _, raw = _find_input_raw(request, inp.name)
+                # Record scalar controls without interpreting arbitrary tensor data.
+                if raw is not None and len(raw) <= 64:
+                    controls[f"inputs.{inp.name}"] = {
+                        "datatype": inp.datatype,
+                        "raw_hex": raw.hex(),
+                        "int_values": unpack_int_tensor_flat(inp.datatype, raw),
+                    }
+        logging.info(
+            "[GrammarTrace] stage=received dash_request_id=%s model=%s data=%s",
+            request.id,
+            request.model_name,
+            json.dumps(
+                {
+                    "parameter_types": parameter_types,
+                    "inputs": [
+                        {"name": i.name, "datatype": i.datatype, "shape": list(i.shape)}
+                        for i in request.inputs
+                    ],
+                    "container_keys": containers,
+                    "controls": controls,
+                },
+                ensure_ascii=True,
+            ),
+        )
+    except Exception:
+        # Diagnostic failures must not change request acceptance or inference.
+        logging.warning(
+            "[GrammarTrace] stage=received dash_request_id=%s inspection_failed",
+            request.id,
+            exc_info=True,
+        )
+
+
+def log_grammar_config(config, *, request_id: int, trace_id: str) -> None:
+    """Log the final Python config after request/model overrides, for each phase."""
+    if not logging.getLogger().isEnabledFor(logging.INFO):
+        return
+    try:
+        fields = (
+            "structural_tag",
+            "response_format",
+            "json_schema",
+            "regex",
+            "ebnf",
+            "json_format",
+            "in_think_mode",
+            "max_thinking_tokens",
+            "begin_think_token_ids",
+            "end_think_token_ids",
+            "num_beams",
+            "num_return_sequences",
+        )
+        logging.info(
+            "[GrammarTrace] stage=generate_config request_id=%s trace_id=%s data=%s",
+            request_id,
+            trace_id,
+            json.dumps(
+                {
+                    name: grammar_trace_value(getattr(config, name, None))
+                    for name in fields
+                },
+                ensure_ascii=True,
+            ),
+        )
+    except Exception:
+        logging.warning(
+            "[GrammarTrace] stage=generate_config request_id=%s trace_id=%s inspection_failed",
+            request_id,
+            trace_id,
+            exc_info=True,
+        )
 
 
 # ----------------------------------------------------------------------------

@@ -24,11 +24,27 @@ namespace rtp_llm {
 
 namespace {
 
-using JsonMap = autil::legacy::json::JsonMap;
+using JsonMap   = autil::legacy::json::JsonMap;
 using JsonArray = autil::legacy::json::JsonArray;
 
 std::mutex            g_grammar_backend_mutex;
 XGrammarBackendCppPtr g_grammar_backend;
+
+std::string grammarTraceTag(const GenerateInput& input) {
+    return "request_id=" + std::to_string(input.request_id) + " trace_id=" + input.request_info.trace_id
+           + " source_request_id=" + input.request_info.request_id + " source_role=" + input.request_info.source_role;
+}
+
+void appendLoggedProcessor(std::vector<BaseLogitsProcessorPtr>& result,
+                           BaseLogitsProcessorPtr               processor,
+                           const char*                          name,
+                           const GenerateInput&                 input) {
+    result.push_back(std::move(processor));
+    RTP_LLM_LOG_INFO("[GrammarTrace] stage=processor_added %s index=%zu processor=%s",
+                     grammarTraceTag(input).c_str(),
+                     result.size() - 1,
+                     name);
+}
 
 std::string anyToString(const autil::legacy::Any& any) {
     if (auto str = autil::legacy::AnyCast<std::string>(&any)) {
@@ -143,7 +159,7 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                               const GrammarKeyCpp&                  key,
                                               LogitsProcessorFactory::ErrorReporter error_reporter,
                                               const std::string&                    model_type) {
-    auto config = generate_input->generate_config;
+    auto                  config = generate_input->generate_config;
     XGrammarBackendCppPtr backend;
     {
         std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
@@ -165,7 +181,8 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
         return nullptr;
     }
 
-    auto compiled = backend->getCached(key);
+    auto       compiled  = backend->getCached(key);
+    const bool cache_hit = compiled != nullptr;
     if (!compiled) {
         auto result = backend->compileNow(key);
         if (!result.compiled) {
@@ -178,11 +195,16 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
         compiled = result.compiled;
         backend->setCache(key, compiled);
     }
+    RTP_LLM_LOG_INFO("[GrammarTrace] stage=compiled %s grammar_type=%s grammar_bytes=%zu cache_hit=%d",
+                     grammarTraceTag(*generate_input).c_str(),
+                     key.key_type.c_str(),
+                     key.key_string.size(),
+                     cache_hit);
 
     const bool terminate_without_stop_token = key.key_type == "json";
     if (config->in_think_mode) {
-        auto matcher = backend->createMatcher(
-            compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
+        auto matcher =
+            backend->createMatcher(compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
         return std::make_shared<ReasoningGrammarLogitsProcessor>(std::move(matcher),
                                                                  eos_token_id,
                                                                  config->max_thinking_tokens,
@@ -194,8 +216,8 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                                                  model_type);
     }
 
-    auto matcher = backend->createMatcher(
-        compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
+    auto matcher =
+        backend->createMatcher(compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
     return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id, std::move(error_reporter));
 }
 
@@ -207,20 +229,24 @@ void appendThinkProcessor(std::vector<BaseLogitsProcessorPtr>& result,
     auto think_processor =
         ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size, eos_token_id, model_type);
     if (think_processor != nullptr) {
-        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
+        appendLoggedProcessor(result, think_processor, "ThinkModeLogitsProcessor", *generate_input);
     }
 }
 
-void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&       result,
-                            std::shared_ptr<GenerateInput>             generate_input,
-                            int64_t                                    eos_token_id,
-                            const GrammarKeyCpp&                       grammar_key,
-                            LogitsProcessorFactory::ErrorReporter      error_reporter,
-                            const std::string&                         model_type) {
+void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&  result,
+                            std::shared_ptr<GenerateInput>        generate_input,
+                            int64_t                               eos_token_id,
+                            const GrammarKeyCpp&                  grammar_key,
+                            LogitsProcessorFactory::ErrorReporter error_reporter,
+                            const std::string&                    model_type) {
     auto grammar_processor =
         createGrammarProcessor(generate_input, eos_token_id, grammar_key, error_reporter, model_type);
     if (grammar_processor != nullptr) {
-        result.push_back(std::move(grammar_processor));
+        appendLoggedProcessor(result,
+                              std::move(grammar_processor),
+                              generate_input->generate_config->in_think_mode ? "ReasoningGrammarLogitsProcessor" :
+                                                                               "GrammarLogitsProcessor",
+                              *generate_input);
     }
 }
 
@@ -230,12 +256,12 @@ void appendTreeAndMultiSeqProcessors(std::vector<BaseLogitsProcessorPtr>& result
                                      int64_t                              eos_token_id) {
     auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
     if (tree_processor != nullptr) {
-        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_processor));
+        appendLoggedProcessor(result, tree_processor, "TreeLogitsProcessor", *generate_input);
     }
 
     auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(generate_input, eos_token_id);
     if (multi_seq_processor != nullptr) {
-        result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_processor));
+        appendLoggedProcessor(result, multi_seq_processor, "MultiSeqLogitsProcessor", *generate_input);
     }
 }
 
@@ -296,7 +322,38 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                                                const std::string&             model_type,
                                                ErrorReporter                  error_reporter) {
     std::vector<BaseLogitsProcessorPtr> result;
-    auto                                config = generate_input->generate_config;
+    auto                                config    = generate_input->generate_config;
+    const auto                          trace_tag = grammarTraceTag(*generate_input);
+    // Capture identifiers only: processors can retain the reporter for runtime errors.
+    error_reporter = [reporter = std::move(error_reporter),
+                      trace_tag](ErrorCode code, const std::string& message, bool stream_lock_held) {
+        RTP_LLM_LOG_WARNING("[GrammarTrace] stage=error %s code=%d message=%s",
+                            trace_tag.c_str(),
+                            static_cast<int>(code),
+                            message.c_str());
+        if (reporter) {
+            reporter(code, message, stream_lock_held);
+        }
+    };
+    RTP_LLM_LOG_INFO("[GrammarTrace] stage=factory_input %s model_type=%s json_schema=%d regex=%d ebnf=%d "
+                     "structural_tag=%d structural_tag_bytes=%zu response_format=%d response_format_bytes=%zu "
+                     "in_think_mode=%d max_thinking_tokens=%d begin_think_tokens=%zu end_think_tokens=%zu "
+                     "has_num_beams=%d num_return_sequences=%d",
+                     trace_tag.c_str(),
+                     model_type.c_str(),
+                     config->json_schema.has_value(),
+                     config->regex.has_value(),
+                     config->ebnf.has_value(),
+                     config->structural_tag.has_value(),
+                     config->structural_tag ? config->structural_tag->size() : 0,
+                     config->response_format.has_value(),
+                     config->response_format ? config->response_format->size() : 0,
+                     config->in_think_mode,
+                     config->max_thinking_tokens,
+                     config->begin_think_token_ids.size(),
+                     config->end_think_token_ids.size(),
+                     config->hasNumBeams(),
+                     config->num_return_sequences);
 
     GrammarKeyCpp grammar_key;
     try {
@@ -307,8 +364,16 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                 ErrorCode::INVALID_PARAMS, std::string("invalid grammar response_format: ") + e.what(), false);
         }
         appendTreeAndMultiSeqProcessors(result, generate_input, init_batch_size, eos_token_id);
+        RTP_LLM_LOG_INFO("[GrammarTrace] stage=factory_result %s reason=invalid_grammar processor_count=%zu",
+                         trace_tag.c_str(),
+                         result.size());
         return result;
     }
+    RTP_LLM_LOG_INFO("[GrammarTrace] stage=grammar_key %s grammar_type=%s grammar_bytes=%zu empty=%d",
+                     trace_tag.c_str(),
+                     grammar_key.key_type.c_str(),
+                     grammar_key.key_string.size(),
+                     grammar_key.empty());
 
     if (grammar_key.empty()) {
         appendThinkProcessor(result, generate_input, max_batch_size, eos_token_id, model_type);
@@ -326,12 +391,7 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                                false);
             }
         } else {
-            appendGrammarProcessor(result,
-                                   generate_input,
-                                   eos_token_id,
-                                   grammar_key,
-                                   error_reporter,
-                                   model_type);
+            appendGrammarProcessor(result, generate_input, eos_token_id, grammar_key, error_reporter, model_type);
         }
     } else if (config->hasNumBeams() || config->num_return_sequences > 1) {
         if (error_reporter) {
@@ -340,15 +400,14 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                            false);
         }
     } else {
-        appendGrammarProcessor(result,
-                               generate_input,
-                               eos_token_id,
-                               grammar_key,
-                               error_reporter,
-                               model_type);
+        appendGrammarProcessor(result, generate_input, eos_token_id, grammar_key, error_reporter, model_type);
     }
 
     appendTreeAndMultiSeqProcessors(result, generate_input, init_batch_size, eos_token_id);
+    RTP_LLM_LOG_INFO("[GrammarTrace] stage=factory_result %s grammar_empty=%d processor_count=%zu",
+                     trace_tag.c_str(),
+                     grammar_key.empty(),
+                     result.size());
     return result;
 }
 

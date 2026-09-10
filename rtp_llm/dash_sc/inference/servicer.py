@@ -48,6 +48,7 @@ from rtp_llm.dash_sc.codec import (
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
+    log_grammar_config,
     parse_dash_sc_grpc_request,
     parse_messages_from_request,
     parse_multimodal_parts_from_request,
@@ -632,6 +633,7 @@ def _make_generate_input(
     trace_id = str(
         getattr(generate_config, "trace_id", "") or extract_trace_id(headers) or ""
     )
+    log_grammar_config(generate_config, request_id=request_id, trace_id=trace_id)
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
