@@ -57,6 +57,33 @@ class PerTokenFp8QuantTest(TestCase):
             ):
                 self._run_per_token_fp8_quant_test(*params)
 
+    def test_zero_rows_and_independent_warp_scales(self):
+        # This size forces the eight-warps-per-CTA path. Adjacent tokens have
+        # deliberately different ranges so a CTA-shared scale race is visible.
+        sm_count = torch.cuda.get_device_properties(0).multi_processor_count
+        num_tokens = sm_count * 16
+        hidden_size = 128
+        token_scales = torch.pow(
+            torch.tensor(2.0, device="cuda"),
+            (torch.arange(num_tokens, device="cuda") % 15 - 7).float(),
+        )
+        x = torch.linspace(-1.0, 1.0, hidden_size, device="cuda").repeat(num_tokens, 1)
+        x = (x * token_scales.unsqueeze(1)).to(torch.bfloat16)
+        x[0].zero_()
+        x[9].zero_()
+
+        q_out, scales = self.call_per_token_quant_fp8(x)
+        max_abs = x.float().abs().amax(dim=1, keepdim=True)
+        expected_scales = torch.where(
+            max_abs == 0, torch.ones_like(max_abs), max_abs / 448.0
+        )
+        expected_q = self.torch_scaled_fp8_quant(x, expected_scales)
+
+        torch.testing.assert_close(scales, expected_scales, rtol=1e-6, atol=0)
+        self.assertTrue(torch.equal(q_out.float(), expected_q.float()))
+        self.assertEqual(scales[0].item(), 1.0)
+        self.assertEqual(scales[9].item(), 1.0)
+
 
 if __name__ == "__main__":
     main()

@@ -9,7 +9,7 @@ import librtp_compute_ops
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
+__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'fused_rope_quantize_and_write_fp8_kv_cache', 'gather_and_dequantize_fp8_kv_cache', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'quantize_and_write_fp8_kv_cache', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
 
 
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
@@ -22,6 +22,10 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
     def fill_decode_cuda_graph_params(self, sequence_lengths_plus_1_d: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int) -> None:
         """
         Update FlashInfer decode metadata on device during CUDA graph replay
+        """
+    def fill_decode_params_device(self, sequence_lengths_h: torch.Tensor, sequence_lengths_plus_1_d: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int) -> None:
+        """
+        Fill eager decode metadata from host lengths and a device block table.
         """
     def fill_params_mha_device(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
         """
@@ -303,6 +307,10 @@ def get_cutlass_batched_moe_mm_data(expert_offsets: torch.Tensor, problem_sizes1
     ...
 def get_cutlass_moe_mm_without_permute_info(topk_ids: torch.Tensor, expert_offsets: torch.Tensor, problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor, num_experts: int, n: int, k: int, problem_1_swap_ab: bool, problem_2_swap_ab: bool, blockscale_offsets: torch.Tensor | None = None) -> None:
     ...
+def gather_and_dequantize_fp8_kv_cache(kv_cache: torch.Tensor, kv_scales: torch.Tensor, source_kernel_page_ids: torch.Tensor, output: torch.Tensor, physical_page_size: int, kernel_page_size: int, subdivision: int) -> None:
+    """
+    Gather kernel pages from persistent FP8 KV cache and dequantize with per-row scales.
+    """
 def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor, slot_mapping: torch.Tensor, quant_block_size: int, scale_fmt: str) -> None:
     """
     Indexer K quantization and cache kernel
@@ -351,6 +359,12 @@ def per_token_group_quant_int8(input: torch.Tensor, output_q: torch.Tensor, outp
     """
 def per_token_quant_fp8(input: torch.Tensor, output_q: torch.Tensor, output_s: torch.Tensor) -> None:
     ...
+def fused_rope_quantize_and_write_fp8_kv_cache(qkv: torch.Tensor, kv_cache: torch.Tensor, kv_scales: torch.Tensor, batch_indices: torch.Tensor, positions: torch.Tensor, page_indptr: torch.Tensor, page_indices: torch.Tensor, num_q_heads: int, num_kv_heads: int, kernel_page_size: int, rope_config: libth_transformer_config.RopeConfig, cos_sin_cache: torch.Tensor | None = None) -> torch.Tensor:
+    """Apply RoPE to packed QKV and dynamically quantize/write paged FP8 K/V."""
+def quantize_and_write_fp8_kv_cache(k: torch.Tensor, v: torch.Tensor, kv_cache: torch.Tensor, kv_scales: torch.Tensor, target_physical_page_ids: torch.Tensor, token_offsets: torch.Tensor, physical_page_size: int, kernel_page_size: int, subdivision: int) -> None:
+    """
+    Dynamically quantize post-RoPE K/V and write persistent paged FP8 cache rows.
+    """
 def cublas_gemm_bf16_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """BF16 x BF16 GEMM with FP32 accumulation and FP32 output."""
 def prepare_sparse_mla_params(attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> SparseMlaParams:

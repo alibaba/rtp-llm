@@ -83,6 +83,7 @@ class ArpcConfig:
         ...
 class AttentionConfigs:
     dtype: torch.dtype
+    fp8_kv_cache_mode: int
     fuse_qkv_add_bias: bool
     head_num: int
     indexer_head_dim: int

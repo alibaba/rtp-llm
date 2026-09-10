@@ -1,4 +1,18 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _parse_fp8_kv_cache_mode(value: str) -> int:
+    try:
+        mode = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            f"must be one of 0, 1, or 2, got {value!r}"
+        ) from error
+    if mode not in (0, 1, 2):
+        raise argparse.ArgumentTypeError(f"must be one of 0, 1, or 2, got {value!r}")
+    return mode
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -58,16 +72,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "--fp8_kv_cache",
         env_name="FP8_KV_CACHE",
         bind_to=(kv_cache_config, "fp8_kv_cache"),
-        type=int,
-        help="是否开启FP8的KV_CACHE",
+        type=_parse_fp8_kv_cache_mode,
+        help="FP8 KV cache 模式：0=关闭，1=legacy unit-scale，2=dynamic per-token-per-local-KV-head",
     )
     # compatible with old version
     kv_cache_group.add_argument(
         "--blockwise_use_fp8_kv_cache",
         env_name="BLOCKWISE_USE_FP8_KV_CACHE",
         bind_to=(kv_cache_config, "fp8_kv_cache"),
-        type=int,
-        help="是否开启FP8的KV_CACHE",
+        type=_parse_fp8_kv_cache_mode,
+        help="[deprecated] FP8 KV cache 模式：0=关闭，1=legacy unit-scale，2=dynamic per-token-per-local-KV-head",
     )
     kv_cache_group.add_argument(
         "--kv_cache_mem_mb",

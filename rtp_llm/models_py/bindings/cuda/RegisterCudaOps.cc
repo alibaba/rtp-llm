@@ -9,6 +9,7 @@
 #endif
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/fp8_kv_cache.h"
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
 
 namespace rtp_llm {
@@ -29,6 +30,46 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def(
         "per_token_quant_fp8", &per_token_quant_fp8, py::arg("input"), py::arg("output_q"), py::arg("output_s"));
+
+    rtp_ops_m.def("fused_rope_quantize_and_write_fp8_kv_cache",
+                  &fused_rope_quantize_and_write_fp8_kv_cache,
+                  "Apply RoPE to packed QKV and dynamically quantize/write paged FP8 K/V",
+                  py::arg("qkv"),
+                  py::arg("kv_cache"),
+                  py::arg("kv_scales"),
+                  py::arg("batch_indices"),
+                  py::arg("positions"),
+                  py::arg("page_indptr"),
+                  py::arg("page_indices"),
+                  py::arg("num_q_heads"),
+                  py::arg("num_kv_heads"),
+                  py::arg("kernel_page_size"),
+                  py::arg("rope_config"),
+                  py::arg("cos_sin_cache") = std::nullopt);
+
+    rtp_ops_m.def("quantize_and_write_fp8_kv_cache",
+                  &quantize_and_write_fp8_kv_cache,
+                  "Dynamically quantize post-RoPE K/V and write persistent paged FP8 cache rows",
+                  py::arg("k"),
+                  py::arg("v"),
+                  py::arg("kv_cache"),
+                  py::arg("kv_scales"),
+                  py::arg("target_physical_page_ids"),
+                  py::arg("token_offsets"),
+                  py::arg("physical_page_size"),
+                  py::arg("kernel_page_size"),
+                  py::arg("subdivision"));
+
+    rtp_ops_m.def("gather_and_dequantize_fp8_kv_cache",
+                  &gather_and_dequantize_fp8_kv_cache,
+                  "Gather kernel pages from persistent FP8 KV cache and dequantize with per-row scales",
+                  py::arg("kv_cache"),
+                  py::arg("kv_scales"),
+                  py::arg("source_kernel_page_ids"),
+                  py::arg("output"),
+                  py::arg("physical_page_size"),
+                  py::arg("kernel_page_size"),
+                  py::arg("subdivision"));
 
     // Only available when compiling device code for >= sm100.
 #if defined(ENABLE_FP4)

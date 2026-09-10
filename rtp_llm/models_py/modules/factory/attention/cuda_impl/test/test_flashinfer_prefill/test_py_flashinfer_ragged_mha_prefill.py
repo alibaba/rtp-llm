@@ -1,11 +1,14 @@
 import logging
+import math
 import unittest
 from typing import List
+from unittest import mock
 
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPrefillAttnOp,
+    PyFlashinferPrefillImpl,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.attention_ref import (
     compute_flashinfer_prefill_reference,
@@ -323,6 +326,155 @@ class TestPyFlashinferPrefillAttnOpFP8(TestPyFlashinferPrefillAttnOp):
     rtol = 4e-2
     atol = 4e-2
     max_mismatch_rate = 5e-5
+
+    def test_mode1_interleaved_mrope_rotates_qk_and_writes_unit_scale_fp8(self):
+        sequence_lengths = [5, 3]
+        page_size = 4
+        config = self._create_config(
+            head_num=4,
+            head_num_kv=2,
+            size_per_head=256,
+            seq_size_per_block=page_size,
+        )
+        self._enable_qwen35_mrope_mode1(config)
+        config.attn_configs.is_causal = True
+        inputs = self._create_prefill_attention_inputs(
+            len(sequence_lengths), sequence_lengths, page_size
+        )
+        position_ids = self._add_qwen35_mrope_inputs(inputs, sequence_lengths)
+        self.assertTrue(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
+
+        total_tokens = sum(sequence_lengths)
+        qkv = torch.randn(
+            total_tokens,
+            (config.head_num + 2 * config.head_num_kv) * config.size_per_head,
+            dtype=config.attn_configs.dtype,
+            device=self.device,
+        )
+        q, k, v = torch.split(
+            qkv,
+            [
+                config.head_num * config.size_per_head,
+                config.head_num_kv * config.size_per_head,
+                config.head_num_kv * config.size_per_head,
+            ],
+            dim=-1,
+        )
+        q = q.reshape(total_tokens, config.head_num, config.size_per_head)
+        k = k.reshape(total_tokens, config.head_num_kv, config.size_per_head)
+        v = v.reshape(total_tokens, config.head_num_kv, config.size_per_head)
+        expected_q, expected_k = self._apply_qwen35_mrope_reference(q, k, position_ids)
+
+        total_blocks = sum(math.ceil(length / page_size) for length in sequence_lengths)
+        kv_cache, _, _ = self._create_kv_cache(
+            total_blocks,
+            page_size,
+            config.head_num_kv,
+            config.size_per_head,
+            dtype=torch.float8_e4m3fn,
+        )
+        impl = PyFlashinferPrefillImpl(
+            config.attn_configs, inputs, config.parallelism_config
+        )
+        self.assertIsNone(impl.rope_impl)
+        self.assertIsNotNone(impl.fused_mrope_impl)
+
+        with mock.patch.object(
+            impl.fused_mrope_impl,
+            "forward",
+            wraps=impl.fused_mrope_impl.forward,
+        ) as fused_forward, mock.patch.object(
+            impl.kv_cache_write_op,
+            "forward",
+            wraps=impl.kv_cache_write_op.forward,
+        ) as cache_write, mock.patch.object(
+            impl.fmha_impl,
+            "forward",
+            wraps=impl.fmha_impl.forward,
+        ) as fmha_forward:
+            output = impl.forward(qkv.clone(), kv_cache)
+
+        fused_forward.assert_called_once()
+        self.assertIsNone(fused_forward.call_args.args[1])
+        cache_write.assert_called_once()
+        fmha_forward.assert_called_once()
+        query, written_k, written_v = fmha_forward.call_args.args[:3]
+        self.assertEqual(written_k.dtype, torch.float8_e4m3fn)
+        self.assertEqual(written_v.dtype, torch.float8_e4m3fn)
+        torch.testing.assert_close(query, expected_q, rtol=1e-2, atol=1e-2)
+        reference = compute_flashinfer_prefill_reference(
+            expected_q.to(impl.fmha_impl.q_dtype).to(expected_q.dtype),
+            written_k.to(expected_k.dtype),
+            written_v.to(v.dtype),
+            inputs.cu_seqlens_device,
+            causal=True,
+        )
+        self._assert_output_close(output, reference, name="MRoPE ragged output")
+        torch.testing.assert_close(
+            written_k.float(),
+            expected_k.to(torch.float8_e4m3fn).float(),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            written_v.float(), v.to(torch.float8_e4m3fn).float(), rtol=0, atol=0
+        )
+
+        token_offset = 0
+        for batch_idx, sequence_length in enumerate(sequence_lengths):
+            for position in range(sequence_length):
+                page_id = int(
+                    inputs.kv_cache_kernel_block_id[
+                        batch_idx, position // page_size
+                    ].item()
+                )
+                page_offset = position % page_size
+                torch.testing.assert_close(
+                    kv_cache.kv_cache_base[page_id, 0, :, page_offset].float(),
+                    expected_k[token_offset + position].to(torch.float8_e4m3fn).float(),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    kv_cache.kv_cache_base[page_id, 1, :, page_offset].float(),
+                    v[token_offset + position].to(torch.float8_e4m3fn).float(),
+                    rtol=0,
+                    atol=0,
+                )
+            token_offset += sequence_length
+        self.assertTrue(torch.all(kv_cache.kv_scale_base == 1).item())
+
+    def test_mode1_mrope_support_rejects_invalid_variants(self):
+        config = self._create_config(
+            head_num=4,
+            head_num_kv=2,
+            size_per_head=64,
+            seq_size_per_block=4,
+        )
+        self._enable_qwen35_mrope_mode1(config)
+        inputs = self._create_prefill_attention_inputs(1, [2], 4)
+        self._add_qwen35_mrope_inputs(inputs, [2])
+
+        cases = (
+            ("non_interleaved", "mrope_interleaved", False),
+            ("invalid_index_factor", "index_factor", 1),
+            ("invalid_sections", "mrope_dim3", 9),
+        )
+        for name, field, value in cases:
+            with self.subTest(name=name):
+                setattr(config.attn_configs.rope_config, field, value)
+                self.assertFalse(
+                    PyFlashinferPrefillImpl.support(config.attn_configs, inputs)
+                )
+                self._enable_qwen35_mrope_mode1(config)
+
+        inputs.combo_position_ids = torch.empty(
+            0, dtype=torch.int32, device=self.device
+        )
+        self.assertFalse(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
+        self._add_qwen35_mrope_inputs(inputs, [2])
+        config.attn_configs.fp8_kv_cache_mode = 2
+        self.assertFalse(PyFlashinferPrefillImpl.support(config.attn_configs, inputs))
 
     def test_out_of_fp8_range_kv(self):
         config = self._create_config(

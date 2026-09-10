@@ -4,6 +4,7 @@ import math
 import unittest
 from types import SimpleNamespace
 from typing import Tuple
+from unittest import mock
 
 import torch
 from flashinfer import get_batch_indices_positions, get_seq_lens
@@ -654,6 +655,89 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             "\n✓ All implementations (Reference, Python, C++) produce consistent results"
         )
         print("=" * 80)
+
+
+class TestDynamicKVCacheWriteOp(unittest.TestCase):
+    def test_maps_kernel_pages_to_physical_pages_and_offsets(self):
+        writer = KVCacheWriteOp(
+            num_kv_heads=2,
+            head_size=4,
+            physical_page_size=32,
+            kernel_page_size=8,
+            dynamic_mode=True,
+        )
+        writer.set_params(
+            SimpleNamespace(
+                batch_indice_d=torch.tensor([0, 0, 1, 1], dtype=torch.int32),
+                positions_d=torch.tensor([0, 17, 8, 31], dtype=torch.int32),
+                decode_page_indptr_d=torch.tensor([0, 3, 7], dtype=torch.int32),
+                page_indice_d=torch.tensor(
+                    [10, 11, 12, 4, 7, 8, 15], dtype=torch.int32
+                ),
+            )
+        )
+        key = torch.randn(4, 2, 4, dtype=torch.bfloat16)
+        value = torch.randn_like(key)
+        cache = SimpleNamespace(
+            kv_cache_base=torch.empty(16, 2, 2, 8, 4, dtype=torch.float8_e4m3fn),
+            kv_scale_base=torch.empty(16, 2 * 2 * 8, dtype=torch.float32),
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op."
+            "rtp_llm_ops.quantize_and_write_fp8_kv_cache",
+            create=True,
+        ) as write_mock:
+            writer.forward(key, value, cache)
+
+        write_mock.assert_called_once()
+        args = write_mock.call_args.args
+        self.assertEqual(args[0].dtype, torch.bfloat16)
+        self.assertEqual(args[1].dtype, torch.bfloat16)
+        torch.testing.assert_close(
+            args[4], torch.tensor([2, 3, 1, 3], dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            args[5], torch.tensor([16, 1, 24, 31], dtype=torch.int32)
+        )
+        self.assertEqual(args[6:], (32, 8, 4))
+
+    def test_dynamic_warmup_skips_write_and_real_cache_requires_scales(self):
+        writer = KVCacheWriteOp(
+            num_kv_heads=1,
+            head_size=4,
+            physical_page_size=16,
+            kernel_page_size=8,
+            dynamic_mode=True,
+        )
+        writer.set_params(
+            SimpleNamespace(
+                batch_indice_d=torch.tensor([0], dtype=torch.int32),
+                positions_d=torch.tensor([0], dtype=torch.int32),
+                decode_page_indptr_d=torch.tensor([0, 1], dtype=torch.int32),
+                page_indice_d=torch.tensor([0], dtype=torch.int32),
+            )
+        )
+        key = torch.randn(1, 1, 4, dtype=torch.float16)
+        value = torch.randn_like(key)
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op."
+            "rtp_llm_ops.quantize_and_write_fp8_kv_cache",
+            create=True,
+        ) as write_mock:
+            writer.forward(key, value, None)
+            write_mock.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "kv_scale_base"):
+                writer.forward(
+                    key,
+                    value,
+                    SimpleNamespace(
+                        kv_cache_base=torch.empty(
+                            2, 2, 1, 8, 4, dtype=torch.float8_e4m3fn
+                        ),
+                        kv_scale_base=None,
+                    ),
+                )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,177 @@
+diff --git a/include/flashinfer/attention/prefill.cuh b/include/flashinfer/attention/prefill.cuh
+index 5db013bb..25e00923 100644
+--- a/include/flashinfer/attention/prefill.cuh
++++ b/include/flashinfer/attention/prefill.cuh
+@@ -687,6 +687,37 @@ __device__ __forceinline__ void compute_qk(
+   *k_smem_offset_r -= KTraits::NUM_MMA_D_QK * sizeof(typename KTraits::DTypeKV);
+ }
+ 
++template <typename KTraits, typename Params>
++__device__ __forceinline__ void apply_per_token_k_scale(
++    const Params& params, typename KTraits::AttentionVariant variant, const uint32_t batch_idx,
++    const uint32_t kv_idx_base,
++    typename KTraits::DTypeQKAccum (*s_frag)[KTraits::NUM_MMA_KV][8],
++    const uint32_t lane_idx = threadIdx.x, const uint32_t kv_head_idx = blockIdx.z) {
++  if constexpr (KTraits::AttentionVariant::use_per_token_kv_scale) {
++#pragma unroll
++    for (uint32_t mma_kv = 0; mma_kv < KTraits::NUM_MMA_KV; ++mma_kv) {
++      float k_scale[4];
++#pragma unroll
++      for (uint32_t scale_idx = 0; scale_idx < 4; ++scale_idx) {
++        const uint32_t kv_idx = kv_idx_base + mma_kv * 16 + 2 * (lane_idx % 4) +
++                                8 * (scale_idx / 2) + scale_idx % 2;
++        k_scale[scale_idx] =
++            variant.KVScale(params, batch_idx, kv_idx, kv_head_idx, /*kv_selector=*/0);
++      }
++#pragma unroll
++      for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
++#pragma unroll
++        for (uint32_t reg_id = 0; reg_id < 8; ++reg_id) {
++          float scaled = float(s_frag[mma_q][mma_kv][reg_id]) *
++                         k_scale[2 * (reg_id / 4) + reg_id % 2];
++          vec_cast<typename KTraits::DTypeQKAccum, float>::cast<1>(
++              &s_frag[mma_q][mma_kv][reg_id], &scaled);
++        }
++      }
++    }
++  }
++}
++
+ template <typename KTraits, typename Params, typename DTypeQKAccum>
+ __device__ __forceinline__ void logits_transform(
+     const Params& params, typename KTraits::AttentionVariant variant, const uint32_t batch_idx,
+@@ -952,8 +983,10 @@ __device__ __forceinline__ void update_mdo_states(
+   }
+ }
+ 
+-template <typename KTraits>
++template <typename KTraits, typename Params>
+ __device__ __forceinline__ void compute_sfm_v(
++    const Params& params, typename KTraits::AttentionVariant variant, const uint32_t batch_idx,
++    const uint32_t kv_idx_base, const uint32_t kv_head_idx,
+     smem_t<KTraits::SWIZZLE_MODE_KV>* v_smem, uint32_t* v_smem_offset_r,
+     typename KTraits::DTypeQKAccum (*s_frag)[KTraits::NUM_MMA_KV][8],
+     float (*o_frag)[KTraits::NUM_MMA_D_VO][8], float (*d)[2]) {
+@@ -985,6 +1018,38 @@ __device__ __forceinline__ void compute_sfm_v(
+     }
+   }
+ 
++  // Scale the exact probability fragments consumed by PV MMA only after the
++  // unscaled softmax denominator has been accumulated into d.
++  if constexpr (KTraits::AttentionVariant::use_per_token_kv_scale) {
++#pragma unroll
++    for (uint32_t mma_kv = 0; mma_kv < KTraits::NUM_MMA_KV; ++mma_kv) {
++      float v_scale[4];
++#pragma unroll
++      for (uint32_t scale_idx = 0; scale_idx < 4; ++scale_idx) {
++        const uint32_t kv_idx = kv_idx_base + mma_kv * 16 + 2 * (threadIdx.x % 4) +
++                                8 * (scale_idx / 2) + scale_idx % 2;
++        v_scale[scale_idx] =
++            variant.KVScale(params, batch_idx, kv_idx, kv_head_idx, /*kv_selector=*/1);
++      }
++#pragma unroll
++      for (uint32_t mma_q = 0; mma_q < KTraits::NUM_MMA_Q; ++mma_q) {
++#pragma unroll
++        for (uint32_t reg_id = 0; reg_id < 8; ++reg_id) {
++          const float scale = v_scale[2 * (reg_id / 4) + reg_id % 2];
++          if constexpr (std::is_same_v<typename KTraits::DTypeQKAccum, float>) {
++            float scaled = float(s_frag_f16[mma_q][mma_kv][reg_id]) * scale;
++            vec_cast<typename KTraits::DTypeQ, float>::cast<1>(
++                &s_frag_f16[mma_q][mma_kv][reg_id], &scaled);
++          } else {
++            float scaled = float(s_frag[mma_q][mma_kv][reg_id]) * scale;
++            vec_cast<typename KTraits::DTypeQKAccum, float>::cast<1>(
++                &s_frag[mma_q][mma_kv][reg_id], &scaled);
++          }
++        }
++      }
++    }
++  }
++
+ #pragma unroll
+   for (uint32_t mma_kv = 0; mma_kv < KTraits::NUM_MMA_KV; ++mma_kv) {
+ #pragma unroll
+@@ -1498,6 +1563,8 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
+       compute_qk<KTraits>(&qo_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r, s_frag);
+       uint32_t kv_idx_base =
+           chunk_start + (iter * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) * NUM_MMA_KV * 16;
++      apply_per_token_k_scale<KTraits>(params, variant, /*batch_idx=*/0, kv_idx_base, s_frag,
++                                       lane_idx, kv_head_idx);
+       logits_transform<KTraits>(params, variant, /*batch_idx=*/0, qo_packed_idx_base, kv_idx_base,
+                                 qo_len, kv_len, group_size, s_frag, tid, kv_head_idx);
+ 
+@@ -1518,7 +1585,8 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
+       block.sync();
+ 
+       // compute sfm*v
+-      compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r, s_frag, o_frag, d);
++      compute_sfm_v<KTraits>(params, variant, /*batch_idx=*/0, kv_idx_base, kv_head_idx, &v_smem,
++                             &v_smem_offset_r, s_frag, o_frag, d);
+ 
+       block.sync();
+       produce_kv<true, SharedMemFillMode::kFillZero, KTraits>(
+@@ -1937,6 +2005,8 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
+       compute_qk<KTraits>(&qo_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r, s_frag);
+       uint32_t kv_idx_base =
+           chunk_start + (iter * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) * NUM_MMA_KV * 16;
++      apply_per_token_k_scale<KTraits>(params, variant, /*batch_idx=*/request_idx, kv_idx_base, s_frag,
++                                       lane_idx, kv_head_idx);
+       logits_transform<KTraits>(params, variant, /*batch_idx=*/request_idx, qo_packed_idx_base,
+                                 kv_idx_base, qo_len, kv_len, group_size, s_frag, tid, kv_head_idx);
+ 
+@@ -1958,7 +2028,8 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
+       block.sync();
+ 
+       // compute sfm*v
+-      compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r, s_frag, o_frag, d);
++      compute_sfm_v<KTraits>(params, variant, /*batch_idx=*/request_idx, kv_idx_base, kv_head_idx,
++                             &v_smem, &v_smem_offset_r, s_frag, o_frag, d);
+ 
+       block.sync();
+       produce_kv<true, SharedMemFillMode::kFillZero, KTraits>(
+@@ -2300,6 +2371,8 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
+       compute_qk<KTraits>(&qo_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r, s_frag);
+       uint32_t kv_idx_base =
+           chunk_start + (iter * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) * NUM_MMA_KV * 16;
++      apply_per_token_k_scale<KTraits>(params, variant, /*batch_idx=*/request_idx, kv_idx_base, s_frag,
++                                       lane_idx, kv_head_idx);
+       logits_transform<KTraits>(params, variant, /*batch_idx=*/request_idx, qo_packed_idx_base,
+                                 kv_idx_base, qo_len, kv_len, group_size, s_frag, tid, kv_head_idx);
+ 
+@@ -2345,7 +2418,8 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
+       block.sync();
+ 
+       // compute sfm*v
+-      compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r, s_frag, o_frag, d);
++      compute_sfm_v<KTraits>(params, variant, /*batch_idx=*/request_idx, kv_idx_base, kv_head_idx,
++                             &v_smem, &v_smem_offset_r, s_frag, o_frag, d);
+ 
+       block.sync();
+       page_produce_kv<true, KTraits>(&smem_storage, &v_smem_offset_w, paged_kv.v_data,
+diff --git a/include/flashinfer/attention/variant_helper.cuh b/include/flashinfer/attention/variant_helper.cuh
+index bf97db38..03a8482c 100644
+--- a/include/flashinfer/attention/variant_helper.cuh
++++ b/include/flashinfer/attention/variant_helper.cuh
+@@ -74,6 +74,7 @@ DEFINE_HAS_MEMBER(v_scale)
+ 
+ struct AttentionVariantBase {
+   constexpr static bool use_softmax = true;
++  static constexpr bool use_per_token_kv_scale = false;
+   REGISTER_LOGITS_TRANSFORM(params, logits, batch_idx, qo_idx, kv_idx, qo_head_idx, kv_head_idx,
+                             { return logits; })
+ 
+@@ -88,6 +89,14 @@ struct AttentionVariantBase {
+     return output * d_rcp * v_scale_val;
+   })
+ 
++  // Per-token KV scale hook. Custom variants can enable it and override this method.
++  // kv_selector is 0 for K and 1 for V.
++  template <typename Params>
++  __device__ __forceinline__ float KVScale(const Params& params, uint32_t batch_idx, uint32_t kv_idx,
++                                           uint32_t kv_head_idx, uint32_t kv_selector) {
++    return 1.f;
++  }
++
+   // Helper to get v_scale from params, returns 1.0f if not present
+   template <typename Params>
+   __device__ __forceinline__ static float get_v_scale(const Params& params) {
