@@ -1,5 +1,6 @@
 -r requirements_base.txt
 auto_gptq
+torch_memory_saver==0.0.9.post1
 autoawq
 apache-tvm-ffi==0.1.9
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.4.dev0%2Btorch2.8.0.cu129.aone68234507-cp310-cp310-linux_x86_64.whl
