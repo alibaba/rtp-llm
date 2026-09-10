@@ -1235,7 +1235,11 @@ inline std::optional<SeededPrefix> seedDevicePrefix(const std::shared_ptr<KVCach
     // The next token makes the last allocated block a cacheable full prefix block,
     // matching the production stream insertion lifecycle.
     seed.token_ids->setSeqLength(seq_len + 1);
-    manager->insertIntoCache(InsertInfo{seed.resource, seed.token_ids, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(InsertInfo{seed.resource, seed.token_ids, /*is_resident=*/false},
+                                 resident_prefix_length);
+    }
     manager->free(FreeInfo{seed.resource, seed.token_ids});
     return seed;
 }
@@ -1276,7 +1280,11 @@ inline std::optional<SeededPrefix> seedCpCanonicalDevicePrefix(const std::shared
         manager->free(FreeInfo{seed.resource, seed.token_ids});
         return std::nullopt;
     }
-    manager->insertIntoCache(InsertInfo{seed.resource, seed.token_ids, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(InsertInfo{seed.resource, seed.token_ids, /*is_resident=*/false},
+                                 resident_prefix_length);
+    }
     manager->free(FreeInfo{seed.resource, seed.token_ids});
     return seed;
 }

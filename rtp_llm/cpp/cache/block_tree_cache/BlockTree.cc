@@ -275,6 +275,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
             current->is_resident = true;
             result.newly_resident_nodes.push_back(current);
         }
+        if (is_resident) {
+            result.resident_prefix_length = i + 1;
+        }
         if (collect_path) {
             result.path.push_back(current);
         }

@@ -20,7 +20,7 @@ public:
                            int64_t                            reserve_block_ratio = 0);
 
     void free(const FreeInfo& free_info) override;
-    void insertIntoCache(const InsertInfo& insert_info) override;
+    void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) override;
 
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                     const CacheKeysType&   cache_keys,

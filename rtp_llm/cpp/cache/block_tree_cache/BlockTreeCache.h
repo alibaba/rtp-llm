@@ -122,8 +122,12 @@ public:
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
-                                Tier                                              target_tier,
-                                bool                                              is_resident);
+                                Tier                                              target_tier);
+    // Returns the resident key-prefix count, including nodes that were already resident.
+    size_t insert(const CacheKeysType&                              cache_keys,
+                  const std::vector<std::vector<GroupSetResource>>& resources,
+                  Tier                                              target_tier,
+                  bool                                              is_resident);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(size_t group_id, size_t num_blocks);

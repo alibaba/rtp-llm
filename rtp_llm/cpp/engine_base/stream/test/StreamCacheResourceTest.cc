@@ -939,13 +939,12 @@ TEST_F(StreamCacheResourceTest, StorageMatchDoesNotBlockIndependentAllocation) {
 
     ASSERT_TRUE(second_stream->streamCacheResource().initKVBlock().ok());
     EXPECT_TRUE(second_stream->streamCacheResource().asyncLoadCache());
-    // Request-level remote disable is not propagated below lookup admission. The process-level backend still matches.
-    EXPECT_EQ(backend->matchCalls(), 1u);
 
     backend->releaseMatches();
-    backend->waitForMatches(2);
     ASSERT_TRUE(first_resource.waitForAllocatorLoad().ok());
     ASSERT_TRUE(second_stream->streamCacheResource().waitForAllocatorLoad().ok());
+    // Both requests use the deployment backend; check the count after asynchronous loads finish.
+    EXPECT_EQ(backend->matchCalls(), 2u);
 }
 
 TEST_F(StreamCacheResourceTest, DeferredResultPublishesOnlyDeviceReadyReuseLength) {

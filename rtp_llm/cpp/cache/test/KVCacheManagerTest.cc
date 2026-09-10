@@ -1102,7 +1102,10 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
     }
 
     InsertInfo insert_info{first_resource, first_tokens, /*is_resident=*/false};
-    manager->insertIntoCache(insert_info);
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(insert_info, resident_prefix_length);
+    }
 
     FreeInfo first_free{first_resource, first_tokens};
     manager->free(first_free);
@@ -1159,7 +1162,11 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     // Simulate one generated token before inserting into the device cache, so
     // the fourth full block is cached and can be reused by the next prefill.
     first_tokens->setSeqLength(4 * spb + 1);
-    manager->insertIntoCache(InsertInfo{first_resource, first_tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(InsertInfo{first_resource, first_tokens, /*is_resident=*/false},
+                                 resident_prefix_length);
+    }
     manager->free(FreeInfo{first_resource, first_tokens});
 
     auto second_resource = makeDSV4BatchResource(manager_config);
@@ -1356,7 +1363,10 @@ protected:
         ASSERT_NO_FATAL_FAILURE(devicePayload(req, /*write=*/false, 3));
         req.keys = req.resource->cacheKeys(0);
         req.keys.resize(2);  // Only the two complete blocks are reusable.
-        manager_->insertIntoCache(InsertInfo{req.resource, req.tokens, false});
+        {
+            size_t resident_prefix_length = 0;
+            manager_->insertIntoCache(InsertInfo{req.resource, req.tokens, false}, resident_prefix_length);
+        }
         manager_->free(FreeInfo{req.resource, req.tokens});
     }
 
@@ -1770,7 +1780,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     malloc_info.reuse_cache         = true;
     malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
-    kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
 
     const BlockTreeKeySnapshot tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     ASSERT_GT(tree_snapshot.version, empty.version);
@@ -1792,7 +1805,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     EXPECT_TRUE(version_only.cached_keys.empty());
 
     const BlockTreeKeySnapshot before_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot();
-    kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
     const BlockTreeKeySnapshot after_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     EXPECT_EQ(after_duplicate.version, before_duplicate.version);
     EXPECT_EQ(after_duplicate.keys, before_duplicate.keys);
@@ -1829,7 +1845,10 @@ TEST_F(KVCacheManagerTest, StorePublishesFullBlocksOnlyAndLookupLeavesOneToken) 
     const CacheKeysType seed_keys = seed_resource->cacheKeys(0);
     ASSERT_EQ(seed_keys.size(), 3u);
 
-    manager->insertIntoCache(InsertInfo{seed_resource, seed_tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(InsertInfo{seed_resource, seed_tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
     manager->free(FreeInfo{seed_resource, seed_tokens});
 
     EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot().keys,
@@ -1878,7 +1897,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     malloc_info.reuse_cache         = false;
     malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
-    kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
 
     const auto initial_tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     ASSERT_EQ(initial_tree_snapshot.keys.size(), 2u);
@@ -1895,7 +1917,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
 
     tokens->setSeqLength(6);
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
-    kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
     const auto updated_tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     ASSERT_EQ(updated_tree_snapshot.keys.size(), 3u);
     ASSERT_GT(updated_tree_snapshot.version, initial_tree_snapshot.version);
@@ -2064,7 +2089,10 @@ TEST_F(KVCacheManagerTest, DSV4AllocationPressureEvictsCachedResources) {
     ASSERT_TRUE(manager->malloc(malloc_a).success);
 
     InsertInfo insert_a{res_a, tokens_a, /*is_resident=*/false};
-    manager->insertIntoCache(insert_a);
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(insert_a, resident_prefix_length);
+    }
     FreeInfo free_a{res_a, tokens_a};
     manager->free(free_a);
 
@@ -2082,7 +2110,10 @@ TEST_F(KVCacheManagerTest, DSV4AllocationPressureEvictsCachedResources) {
     ASSERT_TRUE(manager->malloc(malloc_b).success);
 
     InsertInfo insert_b{res_b, tokens_b, /*is_resident=*/false};
-    manager->insertIntoCache(insert_b);
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(insert_b, resident_prefix_length);
+    }
     FreeInfo free_b{res_b, tokens_b};
     manager->free(free_b);
 
@@ -2169,7 +2200,10 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
         expectDsv4SwaAllocatedBlocks(manager_config, seed_res->blocks(0, gid), gid, "seed group");
     }
 
-    manager->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
     manager->free(FreeInfo{seed_res, seed_tokens});
 
     // Same prefix, one more block. This hits one cached independent-pool block and
@@ -2247,7 +2281,10 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     malloc_a.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_a).success);
     InsertInfo insert_a{res_a, tokens_a, /*is_resident=*/false};
-    manager->insertIntoCache(insert_a);
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(insert_a, resident_prefix_length);
+    }
     manager->free(FreeInfo{res_a, tokens_a});
 
     const CacheKeysType keys_a = res_a->cacheKeys(0);
@@ -2260,7 +2297,10 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     malloc_b.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_b).success);
     InsertInfo insert_b{res_b, tokens_b, /*is_resident=*/false};
-    manager->insertIntoCache(insert_b);
+    {
+        size_t resident_prefix_length = 0;
+        manager->insertIntoCache(insert_b, resident_prefix_length);
+    }
     manager->free(FreeInfo{res_b, tokens_b});
 
     const size_t free_after_cache = manager->freeBlocksNum();
