@@ -9,7 +9,6 @@
 #include <utility>
 
 #include "absl/numeric/int128.h"
-#include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
@@ -713,36 +712,31 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     return config;
 }
 
-uint32_t CacheConfigCreator::measureLocalBlockCapacity(const CacheConfig&                 topology,
-                                                       const ModelConfig&                 model_config,
-                                                       const RuntimeConfig&               runtime_config,
-                                                       const KVCacheConfig&               kv_cache_config,
-                                                       const ParallelismConfig&           parallelism_config,
-                                                       const std::optional<WarmUpResult>& warm_up_result,
-                                                       const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    const uint32_t block_num = computeLocalBlockNum(blockBudgetForConfig(topology),
-                                                    model_config,
-                                                    runtime_config,
-                                                    kv_cache_config,
-                                                    parallelism_config,
-                                                    warm_up_result,
-                                                    sp_config,
-                                                    topology.linear_step);
+CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
+                                             const ParallelismConfig&                         parallelism_config,
+                                             const RuntimeConfig&                             runtime_config,
+                                             const KVCacheConfig&                             kv_cache_config,
+                                             const std::optional<WarmUpResult>&               warm_up_result,
+                                             const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    CacheConfig config    = createBasicConfig(model_config, parallelism_config, kv_cache_config, 0);
+    uint32_t    block_num = computeLocalBlockNum(blockBudgetForConfig(config),
+                                              model_config,
+                                              runtime_config,
+                                              kv_cache_config,
+                                              parallelism_config,
+                                              warm_up_result,
+                                              sp_config,
+                                              config.linear_step);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
-                            static_cast<long>(topology.totalGroupBlockSizeBytes() / 1024 / 1024));
-    return block_num;
-}
+                            static_cast<long>(config.totalGroupBlockSizeBytes() / 1024 / 1024));
+    if (kv_cache_config.test_block_num <= 0) {
+        block_num = clampAutomaticBlockNum(block_num, config);
+    }
 
-CacheConfig CacheConfigCreator::composeCacheConfig(CacheConfig                topology,
-                                                   uint32_t                   block_num,
-                                                   const RuntimeConfig&       runtime_config,
-                                                   const ModelConfig&         model_config,
-                                                   const PPBlockNumOverrides* pp_overrides) {
-    RTP_LLM_CHECK_WITH_INFO(block_num > 0, "composeCacheConfig requires a positive block_num, got %u", block_num);
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * topology.seq_size_per_block;
-    topology.finalizeBlockNums(block_num, runtime_config, pp_overrides);
+    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
+    config.finalizeBlockNums(block_num, runtime_config);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %zu tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %zu tokens, less than max_seq_len %ld, "
@@ -751,50 +745,18 @@ CacheConfig CacheConfigCreator::composeCacheConfig(CacheConfig                to
                             kv_cache_seq_len,
                             model_config.max_seq_len);
     }
-    return topology;
-}
-
-CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
-                                             const ParallelismConfig&                         parallelism_config,
-                                             const RuntimeConfig&                             runtime_config,
-                                             const KVCacheConfig&                             kv_cache_config,
-                                             const std::optional<WarmUpResult>&               warm_up_result,
-                                             const std::optional<SpeculativeExecutionConfig>& sp_config,
-                                             const std::shared_ptr<CacheCapacityNegotiator>&  negotiator) {
-    CacheConfig topology  = createBasicConfig(model_config, parallelism_config, kv_cache_config, 0);
-    uint32_t    block_num = measureLocalBlockCapacity(
-        topology, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    if (kv_cache_config.test_block_num <= 0) {
-        block_num = clampAutomaticBlockNum(block_num, topology);
-    }
-
-    // The hook reconciles local capacity with the peers and aborts startup
-    // on failure, so a returned agreement needs no error path here.
-    NegotiatedCapacity         agreed;
-    const PPBlockNumOverrides* overrides = nullptr;
-    if (negotiator != nullptr) {
-        agreed    = negotiator->negotiate(topology, block_num, runtime_config);
-        block_num = agreed.paged_block_num;
-        overrides = &agreed.block_num_overrides;
-    }
-
-    auto config = composeCacheConfig(std::move(topology), block_num, runtime_config, model_config, overrides);
-    if (negotiator != nullptr) {
-        negotiator->validateComposed(config, agreed);
-    }
     return config;
 }
 
-CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&                              score_model_config,
-                                               const ModelConfig&                              propose_model_config,
-                                               const ParallelismConfig&                        parallelism_config,
-                                               const RuntimeConfig&                            runtime_config,
-                                               const KVCacheConfig&                            kv_cache_config,
-                                               const SpeculativeExecutionConfig&               sp_config,
-                                               const std::optional<WarmUpResult>&              warm_up_result,
-                                               bool                                            is_mtp,
-                                               bool                                            is_eagle,
-                                               const std::shared_ptr<CacheCapacityNegotiator>& negotiator) {
+CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&                 score_model_config,
+                                               const ModelConfig&                 propose_model_config,
+                                               const ParallelismConfig&           parallelism_config,
+                                               const RuntimeConfig&               runtime_config,
+                                               const KVCacheConfig&               kv_cache_config,
+                                               const SpeculativeExecutionConfig&  sp_config,
+                                               const std::optional<WarmUpResult>& warm_up_result,
+                                               bool                               is_mtp,
+                                               bool                               is_eagle) {
     // The joint topology below is built from whole-model configs (no
     // stageScopedModelConfig), so it is not stage-scoped yet.
     RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1,
@@ -945,19 +907,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     if (kv_cache_config.test_block_num <= 0) {
         block_num = clampAutomaticBlockNum(block_num, config);
     }
-    // Same hook contract as createConfig, placed after the joint topology
-    // exists so the hook sees real per-group geometry.
-    NegotiatedCapacity         agreed;
-    const PPBlockNumOverrides* overrides = nullptr;
-    if (negotiator != nullptr) {
-        agreed    = negotiator->negotiate(config, block_num, runtime_config);
-        block_num = agreed.paged_block_num;
-        overrides = &agreed.block_num_overrides;
-    }
-    config.finalizeBlockNums(block_num, runtime_config, overrides);
-    if (negotiator != nullptr) {
-        negotiator->validateComposed(config, agreed);
-    }
+    config.finalizeBlockNums(block_num, runtime_config);
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%u, "

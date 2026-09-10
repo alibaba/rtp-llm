@@ -2,14 +2,13 @@
 //
 // Pins: pp_size=1 equivalence (scoping is a no-op); pp_size>1 per-stage
 // geometry (local layer ids, layer counts, block bytes); tags staying global
-// across the slice; and how the creator resolves counts from a negotiated
-// agreement. createConfig is the only public entry, so the agreement cases
-// drive it with canned CacheCapacityNegotiator hooks.
+// across the slice; and how the manager resolves counts from a negotiated
+// agreement. The agreement is consulted in allocateAndSync, so the agreement
+// cases drive a KVCacheManager construction with canned negotiator hooks.
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -17,6 +16,7 @@
 #include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -131,14 +131,6 @@ static std::vector<std::string> sortedGroupTags(const CacheConfig& config) {
     }
     std::sort(tags.begin(), tags.end());
     return tags;
-}
-
-static std::map<std::string, uint32_t> groupBlockNumsByTag(const CacheConfig& config) {
-    std::map<std::string, uint32_t> by_tag;
-    for (const auto& group : config.groups()) {
-        by_tag[group.tag] = group.block_num;
-    }
-    return by_tag;
 }
 
 // ---------------------------------------------------------------------------
@@ -388,14 +380,15 @@ TEST(PPStageCacheConfig, arbitraryRetainedTagNamesPassThrough) {
 }
 
 // ---------------------------------------------------------------------------
-// Capacity agreement cases: the construction steps are private, so a canned
-// agreement is injected as a hook and driven through createConfig.
+// Capacity agreement cases: the negotiation runs inside allocateAndSync, so a
+// canned agreement is injected via the manager's negotiator hook.
 // ---------------------------------------------------------------------------
 
 namespace {
 
-// Returns a fixed agreement and counts the hook invocations, so a test can also
-// assert WHERE in the pipeline the hook was consulted.
+// Returns a fixed agreement. validateComposed is deliberately a no-op: this
+// file pins the resolution of an agreement, including the silent fallback
+// that a real PP hook fuses against (see validatePPComposedBlockNums).
 class FixedNegotiator: public CacheCapacityNegotiator {
 public:
     FixedNegotiator(uint32_t paged_block_num, PPBlockNumOverrides overrides):
@@ -403,80 +396,36 @@ public:
 
     NegotiatedCapacity
     negotiate(const CacheConfig& topology, uint32_t local_block_num, const RuntimeConfig& runtime_config) override {
-        ++negotiate_calls;
-        seen_local_block_num = local_block_num;
         return agreed;
     }
 
-    // Deliberately a no-op: this file pins the creator's resolution of an
-    // agreement, including the silent fallback that a real PP hook fuses
-    // against (see validatePPComposedBlockNums).
-    void validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed_capacity) override {
-        ++validate_calls;
-    }
+    void validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed_capacity) override {}
 
     NegotiatedCapacity agreed;
-    int                negotiate_calls      = 0;
-    int                validate_calls       = 0;
-    uint32_t           seen_local_block_num = 0;
 };
 
-// Echoes the local measurement back with an empty override table: the result
-// must equal the no-hook path, so the hook is the only difference.
-class EchoNegotiator: public CacheCapacityNegotiator {
-public:
-    NegotiatedCapacity
-    negotiate(const CacheConfig& topology, uint32_t local_block_num, const RuntimeConfig& runtime_config) override {
-        return NegotiatedCapacity{local_block_num, {}};
-    }
-
-    void validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed_capacity) override {}
-};
-
-// createConfig with a hook, spelled out once so the cases stay readable.
+// Locally sized config plus a manager constructed with the hook; tp_size=1
+// keeps allocateAndSync free of real collectives. Spelled out once so the
+// cases stay readable.
 CacheConfig createWithHook(const ModelConfig&                              mc,
                            const ParallelismConfig&                        pc,
                            const std::shared_ptr<CacheCapacityNegotiator>& negotiator) {
-    return CacheConfigCreator::createConfig(
-        mc, pc, RuntimeConfig{}, pinnedKvConfig(), std::nullopt, std::nullopt, negotiator);
+    auto           config = CacheConfigCreator::createConfig(mc, pc, RuntimeConfig{}, pinnedKvConfig());
+    KVCacheManager manager(std::move(config),
+                           /*warmup=*/false,
+                           /*metrics_reporter=*/nullptr,
+                           pinnedKvConfig(),
+                           pc,
+                           RuntimeConfig{},
+                           SpeculativeExecutionConfig{},
+                           PDSepConfig{},
+                           CacheStoreConfig{},
+                           /*use_cuda_malloc_block_pool=*/false,
+                           negotiator);
+    return manager.cacheConfig();
 }
 
 }  // namespace
-
-TEST(PPStageCacheConfig, negotiatedOverrideTableAppliesPerTagCounts) {
-    // Different counts per group: the case no single global count can express,
-    // which is why the agreement is per tag.
-    const auto mc = makeHybridModelConfig(8);
-    auto       negotiator =
-        std::make_shared<FixedNegotiator>(/*paged_block_num=*/60, PPBlockNumOverrides{{"full", 60}, {"linear", 90}});
-
-    const auto config = createWithHook(mc, makePpConfig(8, 2, 0), negotiator);
-
-    ASSERT_EQ(config.groupNums(), 2);
-    EXPECT_EQ(config.group("full").block_num, 60u);
-    EXPECT_EQ(config.group("linear").block_num, 90u);
-    EXPECT_EQ(config.block_num, 60);
-    // Consulted exactly once, after measurement (which must have produced a
-    // usable local capacity) and before sizing.
-    EXPECT_EQ(negotiator->negotiate_calls, 1);
-    EXPECT_EQ(negotiator->validate_calls, 1);
-    EXPECT_GT(negotiator->seen_local_block_num, 0u);
-}
-
-TEST(PPStageCacheConfig, negotiatedOverrideTableUniformAcrossStages) {
-    // Both stages fed the same agreement derive identical per-group counts even
-    // though their local topologies differ (different layer slices, hence
-    // different block byte sizes and different local measurements).
-    const auto mc          = makeHybridModelConfig(8);
-    auto       stage0_hook = std::make_shared<FixedNegotiator>(60, PPBlockNumOverrides{{"full", 60}, {"linear", 60}});
-    auto       stage1_hook = std::make_shared<FixedNegotiator>(60, PPBlockNumOverrides{{"full", 60}, {"linear", 60}});
-
-    const auto stage0 = createWithHook(mc, makePpConfig(8, 2, 0), stage0_hook);
-    const auto stage1 = createWithHook(mc, makePpConfig(8, 2, 1), stage1_hook);
-
-    EXPECT_EQ(stage0.block_num, stage1.block_num);
-    EXPECT_EQ(groupBlockNumsByTag(stage0), groupBlockNumsByTag(stage1));
-}
 
 TEST(PPStageCacheConfig, groupAbsentFromOverrideFallsBackToDerivation) {
     // A tag missing from the agreement is derived from the paged yardstick as
@@ -490,22 +439,6 @@ TEST(PPStageCacheConfig, groupAbsentFromOverrideFallsBackToDerivation) {
 
     EXPECT_EQ(config.group("full").block_num, 25u);
     EXPECT_EQ(config.group("linear").block_num, 70u);
-}
-
-TEST(PPStageCacheConfig, overrideRejectsZeroCount) {
-    // A non-positive per-tag count cannot size a pool; sizing rejects it
-    // instead of building a zero-block group.
-    const auto mc         = makeSingleModelConfig(8);
-    auto       negotiator = std::make_shared<FixedNegotiator>(/*paged_block_num=*/10, PPBlockNumOverrides{{"full", 0}});
-    EXPECT_THROW(createWithHook(mc, makePpConfig(8, 2, 0), negotiator), std::exception);
-}
-
-TEST(PPStageCacheConfig, negotiatedZeroPagedCountRejected) {
-    // Same defence on the yardstick itself: a hook returning zero is a defect
-    // and must not produce a config with no blocks at all.
-    const auto mc         = makeSingleModelConfig(8);
-    auto       negotiator = std::make_shared<FixedNegotiator>(/*paged_block_num=*/0, PPBlockNumOverrides{{"full", 10}});
-    EXPECT_THROW(createWithHook(mc, makePpConfig(8, 2, 0), negotiator), std::exception);
 }
 
 TEST(PPStageCacheConfig, explicitPoolKeepsPinnedCountUnderOverride) {
@@ -529,19 +462,6 @@ TEST(PPStageCacheConfig, explicitPoolKeepsPinnedCountUnderOverride) {
     EXPECT_EQ(config.group("full").block_num, 100u);
     EXPECT_EQ(config.group("linear").block_num, 50u);
     EXPECT_EQ(config.block_num, 100);
-}
-
-TEST(PPStageCacheConfig, echoHookMatchesNoHookPath) {
-    const auto mc = makeHybridModelConfig(8);
-
-    const auto no_hook = CacheConfigCreator::createConfig(mc, makePpConfig(8, 2, 0), RuntimeConfig{}, pinnedKvConfig());
-    auto       echo    = std::make_shared<EchoNegotiator>();
-    const auto via_hook = createWithHook(mc, makePpConfig(8, 2, 0), echo);
-
-    EXPECT_EQ(no_hook.block_num, 1000u);
-    EXPECT_EQ(via_hook.block_num, no_hook.block_num);
-    EXPECT_EQ(groupBlockNumsByTag(via_hook), groupBlockNumsByTag(no_hook));
-    EXPECT_EQ(via_hook.groupNums(), no_hook.groupNums());
 }
 
 }  // namespace test

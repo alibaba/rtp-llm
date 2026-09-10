@@ -10,6 +10,7 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
@@ -152,16 +153,17 @@ bool cacheStatusSnapshotEnabled() {
 
 }  // namespace
 
-KVCacheManager::KVCacheManager(CacheConfig&&                      config,
-                               bool                               warmup,
-                               const kmonitor::MetricsReporterPtr metrics_reporter,
-                               const KVCacheConfig&               kv_cache_config,
-                               const ParallelismConfig&           parallelism_config,
-                               const RuntimeConfig&               runtime_config,
-                               const SpeculativeExecutionConfig&  sp_config,
-                               const PDSepConfig&                 pd_sep_config,
-                               const CacheStoreConfig&            cache_store_config,
-                               bool                               use_cuda_malloc_block_pool):
+KVCacheManager::KVCacheManager(CacheConfig&&                                   config,
+                               bool                                            warmup,
+                               const kmonitor::MetricsReporterPtr              metrics_reporter,
+                               const KVCacheConfig&                            kv_cache_config,
+                               const ParallelismConfig&                        parallelism_config,
+                               const RuntimeConfig&                            runtime_config,
+                               const SpeculativeExecutionConfig&               sp_config,
+                               const PDSepConfig&                              pd_sep_config,
+                               const CacheStoreConfig&                         cache_store_config,
+                               bool                                            use_cuda_malloc_block_pool,
+                               const std::shared_ptr<CacheCapacityNegotiator>& capacity_negotiator):
     config_(std::move(config)),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -170,7 +172,8 @@ KVCacheManager::KVCacheManager(CacheConfig&&                      config,
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
-    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
+    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool),
+    capacity_negotiator_(capacity_negotiator) {
     initialize(warmup);
 }
 
@@ -651,7 +654,18 @@ void KVCacheManager::allocateAndSync() {
             synced_block_num = static_cast<uint32_t>(*std::min_element(block_num_ptr, block_num_ptr + sync_size));
         }
     }
-    config_.finalizeBlockNums(synced_block_num, runtime_config_);
+    if (use_lane_scope) {
+        // The cross-stage agreement runs on the stage-aligned capacity, so every
+        // lane reduces the same per-stage value and converges to one table.
+        RTP_LLM_CHECK_WITH_INFO(capacity_negotiator_ != nullptr,
+                                "pp_size=%ld requires a cache capacity negotiator",
+                                parallelism_config_.pp_size);
+        const auto agreed = capacity_negotiator_->negotiate(config_, synced_block_num, runtime_config_);
+        config_.finalizeBlockNums(agreed.paged_block_num, runtime_config_, &agreed.block_num_overrides);
+        capacity_negotiator_->validateComposed(config_, agreed);
+    } else {
+        config_.finalizeBlockNums(synced_block_num, runtime_config_);
+    }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
 

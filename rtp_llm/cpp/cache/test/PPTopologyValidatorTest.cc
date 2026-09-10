@@ -13,6 +13,7 @@
 
 #include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 
 using namespace std;
@@ -624,9 +625,10 @@ TEST(PPTopologyValidatorTest, ComposedBlockNumsMustEqualCanonical) {
     EXPECT_THROW(validatePPComposedBlockNums(unknown_tag, result.agreed), std::exception);
 }
 
-// Case 32: end-to-end shape of the new flow — measure, negotiate, compose.
-// The composed config's per-group counts are exactly the canonical minima, and
-// a single-owner tag survives at the richer stage's own capacity.
+// Case 32: end-to-end shape of the flow — local sizing, then negotiation in
+// the manager. The composed config's per-group counts are exactly the
+// canonical minima, and a single-owner tag survives at the richer stage's own
+// capacity.
 TEST(PPTopologyValidatorTest, MeasureNegotiateComposeEndToEnd) {
     // stage0 topology: two groups ("default" tag), unsized skeleton.
     ModelConfig model                   = makeSingleGroupModel("zeta", /*layer_num=*/2);
@@ -649,8 +651,8 @@ TEST(PPTopologyValidatorTest, MeasureNegotiateComposeEndToEnd) {
     EXPECT_EQ(validation.agreed.block_num_overrides.at("zeta"), 100u);  // single owner -> kept
     EXPECT_EQ(validation.agreed.paged_block_num, 80u);
 
-    // Feed the agreement back through the public entry point, with the hook
-    // running the real fuse: covers validator -> creator -> fuse in one pass.
+    // Feed the agreement through the manager's negotiation point, with the
+    // hook running the real fuse: validator -> manager sizing -> fuse.
     class AgreementHook: public CacheCapacityNegotiator {
     public:
         explicit AgreementHook(const NegotiatedCapacity& agreed): agreed_(agreed) {}
@@ -676,9 +678,27 @@ TEST(PPTopologyValidatorTest, MeasureNegotiateComposeEndToEnd) {
     KVCacheConfig kv_config;
     kv_config.test_block_num = 1000;
 
-    auto              hook     = std::make_shared<AgreementHook>(validation.agreed);
-    const CacheConfig composed = CacheConfigCreator::createConfig(
-        model, ParallelismConfig{}, RuntimeConfig{}, kv_config, std::nullopt, std::nullopt, hook);
+    auto        hook     = std::make_shared<AgreementHook>(validation.agreed);
+    CacheConfig composed = CacheConfigCreator::createConfig(model, ParallelismConfig{}, RuntimeConfig{}, kv_config);
+
+    // pp_size>1 selects the negotiation path; tp_size=1 keeps it free of real
+    // collectives. The config stays whole-model: only the agreement flow is
+    // under test here, not layer scoping.
+    ParallelismConfig pp_parallelism;
+    pp_parallelism.pp_size = 2;
+    pp_parallelism.pp_rank = 0;
+    KVCacheManager manager(std::move(composed),
+                           /*warmup=*/false,
+                           /*metrics_reporter=*/nullptr,
+                           kv_config,
+                           pp_parallelism,
+                           RuntimeConfig{},
+                           SpeculativeExecutionConfig{},
+                           PDSepConfig{},
+                           CacheStoreConfig{},
+                           /*use_cuda_malloc_block_pool=*/false,
+                           hook);
+    composed = manager.cacheConfig();
     EXPECT_EQ(composed.block_num, 80u);
     EXPECT_EQ(composed.group("alpha").block_num, 80u);
     EXPECT_EQ(composed.group("zeta").block_num, 100u);

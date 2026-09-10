@@ -14,15 +14,16 @@ struct NegotiatedCapacity {
     PPBlockNumOverrides block_num_overrides;
 };
 
-/* Capacity negotiation hook for CacheConfigCreator, consulted between local
-   measurement and sizing so the agreement enters the config as an input.
+/* Cross-stage capacity negotiation hook, consulted by
+   KVCacheManager::allocateAndSync after the intra-stage TP alignment, so the
+   agreement is reduced from stage-aligned values and enters sizing as an input.
    Implementations abort startup on failure, so a returned value is always usable. */
 class CacheCapacityNegotiator {
 public:
     virtual ~CacheCapacityNegotiator() = default;
 
-    // topology is this stage's unsized skeleton; local_block_num is what this
-    // machine alone can afford.
+    // topology is this stage's locally sized config; local_block_num is the
+    // stage-aligned capacity the agreement builds on.
     virtual NegotiatedCapacity
     negotiate(const CacheConfig& topology, uint32_t local_block_num, const RuntimeConfig& runtime_config) = 0;
 

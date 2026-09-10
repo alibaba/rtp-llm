@@ -14,8 +14,6 @@
 
 namespace rtp_llm {
 
-class CacheCapacityNegotiator;
-
 using CacheTopologyPair = std::pair<std::vector<CacheGroup>, std::vector<CacheLayer>>;
 
 struct KVCacheBlockBudget {
@@ -42,27 +40,25 @@ public:
                                          const KVCacheConfig&     kv_cache_config,
                                          int                      gen_num_per_cycle);
 
-    /* skeleton -> measure -> (negotiate) -> size; a non-null negotiator's result
-       enters sizing as an input, null sizes from the local measurement alone. */
+    /* skeleton -> measure -> size; purely local. Cross-stage capacity
+       agreement happens later, in KVCacheManager::allocateAndSync. */
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
                                     const RuntimeConfig&                             runtime_config,
                                     const KVCacheConfig&                             kv_cache_config,
                                     const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
-                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt,
-                                    const std::shared_ptr<CacheCapacityNegotiator>&  negotiator     = nullptr);
+                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt);
 
     // Joint score/propose (speculative decoding) variant of the same pipeline.
-    static CacheConfig createSpConfig(const ModelConfig&                              score_model_config,
-                                      const ModelConfig&                              propose_model_config,
-                                      const ParallelismConfig&                        parallelism_config,
-                                      const RuntimeConfig&                            runtime_config,
-                                      const KVCacheConfig&                            kv_cache_config,
-                                      const SpeculativeExecutionConfig&               sp_config,
-                                      const std::optional<WarmUpResult>&              warm_up_result,
-                                      bool                                            is_mtp,
-                                      bool                                            is_eagle,
-                                      const std::shared_ptr<CacheCapacityNegotiator>& negotiator = nullptr);
+    static CacheConfig createSpConfig(const ModelConfig&                 score_model_config,
+                                      const ModelConfig&                 propose_model_config,
+                                      const ParallelismConfig&           parallelism_config,
+                                      const RuntimeConfig&               runtime_config,
+                                      const KVCacheConfig&               kv_cache_config,
+                                      const SpeculativeExecutionConfig&  sp_config,
+                                      const std::optional<WarmUpResult>& warm_up_result,
+                                      bool                               is_mtp,
+                                      bool                               is_eagle);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.
@@ -74,25 +70,6 @@ public:
        hybrid_attention_types) to this rank's partition; identity at pp_size=1. */
     static ModelConfig stageScopedModelConfig(const ModelConfig&       model_config,
                                               const ParallelismConfig& parallelism_config);
-
-private:
-    /* Budget solve over per-block bytes: pure computation, no VRAM touched. */
-    static uint32_t measureLocalBlockCapacity(const CacheConfig&                               topology,
-                                              const ModelConfig&                               model_config,
-                                              const RuntimeConfig&                             runtime_config,
-                                              const KVCacheConfig&                             kv_cache_config,
-                                              const ParallelismConfig&                         parallelism_config,
-                                              const std::optional<WarmUpResult>&               warm_up_result,
-                                              const std::optional<SpeculativeExecutionConfig>& sp_config);
-
-    /* The only place a CacheConfig becomes sized (before any pool exists).
-       pp_overrides pins groups to negotiated per-tag counts; null derives
-       every group from block_num. */
-    static CacheConfig composeCacheConfig(CacheConfig                topology,
-                                          uint32_t                   block_num,
-                                          const RuntimeConfig&       runtime_config,
-                                          const ModelConfig&         model_config,
-                                          const PPBlockNumOverrides* pp_overrides = nullptr);
 
     // Removed functions moved to MemoryEvaluationHelper:
     // getDefaultRuntimeMemorySize

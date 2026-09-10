@@ -532,24 +532,19 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_   = cache_cfg.groupNums();
     } else {
-        // PP stages must agree on cache capacity before any pool exists; the
-        // hook keeps the exchange and its rules out of the engine.
-        std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
-        if (parallelism_config.pp_size > 1) {
-            pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
-        }
-        auto cache_config = CacheConfigCreator::createConfig(model_config_,
-                                                             parallelism_config,
-                                                             runtime_config,
-                                                             kv_cache_config,
-                                                             warm_up_result,
-                                                             sp_config,
-                                                             pp_negotiator);
+        auto cache_config = CacheConfigCreator::createConfig(
+            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
         RTP_LLM_LOG_INFO("create cache manager with config %s", cache_config.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          cache_config.block_num,
                          cache_config.totalGroupBlockSizeBytes() / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", cache_config.linear_step);
+        // PP stages agree on cache capacity inside allocateAndSync, before any
+        // pool exists; the hook keeps the exchange and its rules out of the engine.
+        std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
+        if (parallelism_config.pp_size > 1) {
+            pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
+        }
         resource_context_.cache_manager = make_shared<KVCacheManager>(std::move(cache_config),
                                                                       false,
                                                                       metrics_reporter_,
@@ -559,7 +554,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       SpeculativeExecutionConfig{},
                                                                       pd_sep_config,
                                                                       cache_store_config,
-                                                                      use_cuda_malloc_block_pool);
+                                                                      use_cuda_malloc_block_pool,
+                                                                      pp_negotiator);
         resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
