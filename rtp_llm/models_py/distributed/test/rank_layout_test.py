@@ -185,11 +185,44 @@ class RankLayoutGroupsTest(unittest.TestCase):
                 self.assertEqual(layout.group_of(Group.WORLD, r), all_ranks)
                 self.assertEqual(layout.rank_in_group(Group.WORLD, r), r)
 
+    def test_stage_groups_are_per_stage_exhaustive(self):
+        # STAGE: one group per pp stage holding all its dp*tp ranks; the
+        # in-group position is the lane-local index dp * tp_size + tp.
+        for pp_size, dp_size, tp_size in _SWEEP:
+            layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
+            stride = dp_size * tp_size
+            expected = [
+                list(range(p * stride, (p + 1) * stride)) for p in range(pp_size)
+            ]
+            self.assertEqual(layout.size_of(Group.STAGE), stride)
+            self.assertEqual(
+                layout.groups(Group.STAGE), expected, msg=f"layout={layout}"
+            )
+            for r in range(layout.world_size()):
+                coord = layout.coord_of(r)
+                self.assertEqual(
+                    layout.group_of(Group.STAGE, r),
+                    expected[coord.pp],
+                    msg=f"layout={layout}, rank={r}",
+                )
+                self.assertEqual(
+                    layout.rank_in_group(Group.STAGE, r),
+                    coord.dp * tp_size + coord.tp,
+                    msg=f"layout={layout}, rank={r}",
+                )
+
+    def test_stage_groups_equal_ep_groups_exhaustive(self):
+        for pp_size, dp_size, tp_size in _SWEEP:
+            layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
+            self.assertEqual(
+                layout.groups(Group.STAGE), layout.ep_groups(), msg=f"layout={layout}"
+            )
+
     def test_groups_partition_world_exhaustive(self):
         # Every axis' groups must partition [0, world_size) exactly once.
         for pp_size, dp_size, tp_size in _SWEEP:
             layout = RankLayout(pp_size=pp_size, dp_size=dp_size, tp_size=tp_size)
-            for axis in (Group.TP, Group.DP, Group.PP):
+            for axis in (Group.TP, Group.DP, Group.PP, Group.STAGE):
                 groups = layout.groups(axis)
                 flat = sorted(r for g in groups for r in g)
                 self.assertEqual(
