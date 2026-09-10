@@ -84,8 +84,6 @@ private:
                            const P2PConnectorBroadcastTpRequestPB& p2p_request,
                            FunctionResponsePB&                     response);
 
-    std::string resolveCacheTag(const LayerCacheBlockPB& layer_block) const;
-
     bool executeRead(int64_t                                 request_id,
                      const std::string&                      unique_key,
                      int64_t                                 deadline_ms,

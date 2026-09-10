@@ -34,7 +34,6 @@ from rtp_llm.utils.model_weight import W
 
 
 class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
-
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
@@ -121,11 +120,12 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     self._w1_scale.size(0) == self._E
                     and self._w2_scale.size(0) == self._E
                 )
-                assert (
-                    self._w1_scale.size(1) == self._N
-                    if is_deep_gemm_e8m0_used()
+                expected_w1_scale_dim = (
+                    self._N
+                    if self._scale_dtype == torch.int32
                     else self._N // self.DEEPGEMM_BLOCK_SHAPE[0]
                 )
+                assert self._w1_scale.size(1) == expected_w1_scale_dim
                 assert (
                     self._w1_scale.size(2)
                     == (
@@ -135,11 +135,12 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     )
                     // self._num_packed_scales
                 )
-                assert (
-                    self._w2_scale.size(1) == self._K
-                    if is_deep_gemm_e8m0_used()
+                expected_w2_scale_dim = (
+                    self._K
+                    if self._scale_dtype == torch.int32
                     else self._K // self.DEEPGEMM_BLOCK_SHAPE[1]
                 )
+                assert self._w2_scale.size(1) == expected_w2_scale_dim
                 assert (
                     self._w2_scale.size(2)
                     == (

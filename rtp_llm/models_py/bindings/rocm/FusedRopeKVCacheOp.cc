@@ -232,7 +232,7 @@ static void validateMropePositionIds(const RopeConfig&    rope_config,
                 ": RopeStyle::Mrope requires index_factor == 3, got ",
                 rope_config.index_factor);
     const int mrope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-    TORCH_CHECK(rope_config.mrope_dim1 > 0 && rope_config.mrope_dim2 > 0 && rope_config.mrope_dim3 > 0
+    TORCH_CHECK(rope_config.mrope_dim1 >= 0 && rope_config.mrope_dim2 >= 0 && rope_config.mrope_dim3 >= 0
                     && mrope_dim * 2 == rope_config.dim,
                 where,
                 ": invalid Mrope sections [",

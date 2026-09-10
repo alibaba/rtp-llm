@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 class LayerCacheBuffer {
 public:
-    LayerCacheBuffer(int layer_id, std::string cache_tag, int legacy_group_id = -1);
+    LayerCacheBuffer(int layer_id, std::string cache_tag);
     ~LayerCacheBuffer() = default;
 
 public:
@@ -27,9 +27,6 @@ public:
     const std::string& cacheTag() const {
         return cache_tag_;
     }
-    int legacyGroupId() const {
-        return legacy_group_id_;
-    }
     const std::map<int64_t, int>& blockIdMap() const {
         return block_id_map_;
     }
@@ -37,7 +34,6 @@ public:
 private:
     int                    layer_id_;
     std::string            cache_tag_;
-    int                    legacy_group_id_;
     std::map<int64_t, int> block_id_map_;  // [cache_key, block_id]
 };
 

@@ -256,6 +256,7 @@ class Qwen2MoeLoadTest(unittest.TestCase):
         config = _config()
         config.quant_config = types.SimpleNamespace(
             get_runtime_method_key=lambda: "fp8",
+            get_moe_runtime_method_key=lambda: "fp8",
             get_method=lambda: "fp8",
         )
         model = Qwen2MoeForCausalLM(

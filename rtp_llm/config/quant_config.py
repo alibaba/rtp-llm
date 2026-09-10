@@ -107,12 +107,14 @@ class QuantizationConfig(ABC):
             "ignored_layers",
             kwargs.get("ignored_layers", []),
             kwargs.get("ignore_patterns", []),
+            kwargs.get("ignore", []),
             kwargs.get("modules_to_not_convert", []),
         )
         self.exclude_modules: Set[str] = set(
-            _normalize_module_patterns(
-                kwargs.get("exclude_modules", kwargs.get("exclude", [])),
+            _merge_module_patterns(
                 "exclude_modules",
+                kwargs.get("exclude_modules", []),
+                kwargs.get("exclude", []),
             )
         )
 
@@ -275,10 +277,16 @@ class QuantizationConfig(ABC):
             return None
         ignored_layers = _merge_module_patterns(
             "ignored_layers",
+            quant_config.get("ignored_layers", []),
+            quant_config.get("ignore_patterns", []),
             quant_config.get("ignore", []),
             quant_config.get("modules_to_not_convert", []),
         )
-        exclude_modules = quant_config.get("exclude", [])
+        exclude_modules = _merge_module_patterns(
+            "exclude_modules",
+            quant_config.get("exclude_modules", []),
+            quant_config.get("exclude", []),
+        )
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
         if quant_method == "fp8":

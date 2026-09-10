@@ -106,6 +106,7 @@ def _make_experts(
             if runtime_method == "none"
             else types.SimpleNamespace(
                 get_runtime_method_key=lambda: runtime_method,
+                get_moe_runtime_method_key=lambda: runtime_method,
                 get_method=lambda: runtime_method,
             )
         )
@@ -970,7 +971,10 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
                 _make_experts(num_experts=1, quant_config=quant)
 
     def test_runtime_and_model_quantization_must_match(self):
-        source_quant = types.SimpleNamespace(get_runtime_method_key=lambda: "fp8_block")
+        source_quant = types.SimpleNamespace(
+            get_runtime_method_key=lambda: "fp8_block",
+            get_moe_runtime_method_key=lambda: "fp8_block",
+        )
         with self.assertRaisesRegex(ValueError, "quantization mismatch"):
             _make_experts(
                 num_experts=1,
@@ -1583,6 +1587,7 @@ class Qwen3MoeModelTest(unittest.TestCase):
     def test_router_gate_stays_unquantized_for_fp8_model(self):
         source_quant = types.SimpleNamespace(
             get_runtime_method_key=lambda: "FP8_PER_BLOCK",
+            get_moe_runtime_method_key=lambda: "FP8_PER_BLOCK",
             get_method=lambda: "FP8_PER_BLOCK",
             weight_block_size=[128, 128],
             modules_to_not_convert=[],
