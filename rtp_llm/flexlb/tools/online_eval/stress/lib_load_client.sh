@@ -99,46 +99,12 @@ require_java21() {
 # (single-QoS pin that overrides both the trace field and the PRIORITY
 # default) is blanked by the same rule: callers pass "FORCE_PRIORITY=<n>"
 # explicitly.
-JAVA_LOAD_CLIENT_ENV_VARS=(
-  TRACE_FILE
-  TARGET_ADDR
-  GRPC_TARGET
-  GRPC_TARGETS
-  DURATION_S
-  MAX_CONCURRENCY
-  REPLAY_SPEED
-  LOAD_CLIENT_WORKERS
-  OUTPUT_DIR
-  NUM_SHARDS
-  SHARD_INDEX
-  LIMIT
-  TIMEOUT_MS
-  SLA_TTFT_MS
-  FETCH_OUTPUT_STREAM
-  LOOP
-  REPLAY_UNIQUE_PREFIX
-  N_CHANNELS
-  EVENT_LOOP_THREADS
-  START_AT_EPOCH_MS
-  RESPONSE_TIMEOUT
-  SKIP_SERVER_LATENCY
-  MODEL
-  API_KEY
-  GRADIENT
-  GRADIENT_START_SPEED
-  GRADIENT_MAX_SPEED
-  MAX_INPUT_LEN
-  MAX_OUTPUT_LEN
-  PUSHGATEWAY_URL
-  ENABLE_FALLBACK
-  ENDPOINTS_FILE
-  DRY_RUN
-  PRIORITY
-  FORCE_PRIORITY
-  SEND_MODE
-  SEND_MODE_QPS
-  RAMP_UP_SECONDS
-)
+# FLEXLB_DIR is required by this library and works through either entry symlink.
+JAVA_LOAD_CLIENT_ENV_VARS=()
+while IFS= read -r load_client_env_name; do
+  [[ -z "${load_client_env_name}" ]] || JAVA_LOAD_CLIENT_ENV_VARS+=("${load_client_env_name}")
+done < "${FLEXLB_DIR}/tools/online_eval/online_eval/load_client_env.txt" || return 1
+unset load_client_env_name
 
 # run_java_load_client VAR=value [VAR=value ...]
 #

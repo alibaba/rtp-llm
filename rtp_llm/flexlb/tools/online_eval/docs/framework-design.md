@@ -3,6 +3,7 @@
 框架采用 **YAML 配置 → Python case → 公共执行器 → Java Master / Mock engine**。
 YAML 保存全部用例配置：P/D 规模、profile、输入数据、时间预算、元数据、断言阈值和参数约束。Python 保留步骤顺序、分支、循环、结果绑定和判定算法，不提供用例配置默认值。
 添加配置或新逻辑的具体步骤见 [添加新 case](adding-cases.md)。
+压测与 case 的共享能力及依赖边界见 [公共测试底座](shared-test-runtime.md)。
 
 ## 1. 术语解释
 

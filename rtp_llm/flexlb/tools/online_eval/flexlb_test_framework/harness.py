@@ -126,52 +126,9 @@ DEFAULT_MASTER_MANAGEMENT_PORT = int(
 MASTER_PORT_STRIDE = 10
 MASTER_PORT_MAX_SHIFTS = 50
 
-# Every env var read by JavaLoadClient.Config.fromEnv().  Exported explicitly
-# (unset ones become empty string — JavaLoadClient treats empty as unset) so
-# no ambient environment can leak in.  Mirrors lib_load_client.sh.
-LOAD_CLIENT_ENV_VARS = [
-    "LIVE_CLIENT_EVENTS",
-    "TRACE_FILE",
-    "TARGET_ADDR",
-    "GRPC_TARGET",
-    # HA case-test multi-target contract (Tina): GRPC_TARGETS is a comma-
-    # separated address list; >= 2 addresses enable sticky-target selection
-    # + same-request transport-failure retry to the next target.  Exported
-    # explicitly (empty = unset) so no ambient value leaks in; the
-    # single-master legacy path never sets it and the pre-HA JavaLoadClient
-    # ignores it entirely (it only reads GRPC_TARGET).
-    "GRPC_TARGETS",
-    "DURATION_S",
-    "MAX_CONCURRENCY",
-    "REPLAY_SPEED",
-    "LOAD_CLIENT_WORKERS",
-    "OUTPUT_DIR",
-    "NUM_SHARDS",
-    "SHARD_INDEX",
-    "LIMIT",
-    "TIMEOUT_MS",
-    "SLA_TTFT_MS",
-    "FETCH_OUTPUT_STREAM",
-    "LOOP",
-    "N_CHANNELS",
-    "EVENT_LOOP_THREADS",
-    "START_AT_EPOCH_MS",
-    "RESPONSE_TIMEOUT",
-    "SKIP_SERVER_LATENCY",
-    "MODEL",
-    "API_KEY",
-    "GRADIENT",
-    "GRADIENT_START_SPEED",
-    "GRADIENT_MAX_SPEED",
-    "MAX_INPUT_LEN",
-    "MAX_OUTPUT_LEN",
-    "PUSHGATEWAY_URL",
-    "ENABLE_FALLBACK",
-    "ENDPOINTS_FILE",
-    "DRY_RUN",
-    "SEND_MODE",
-    "SEND_MODE_QPS",
-]
+# Shared with the shell stress launcher; case values still come from YAML.
+from online_eval.load_client import LOAD_CLIENT_ENV_VARS
+from online_eval.metrics import parse_prometheus_samples
 
 # ---------------------------------------------------------------------------
 # Perf configs (translated from legacy scripts)
@@ -2107,47 +2064,12 @@ def _http_get_text(url: str, timeout: float = 5.0) -> Optional[str]:
 
 
 def _parse_per_engine_lines(body: str) -> list:
-    """Parse a mock /metrics?per_engine=true exposition body into
-    [(metric_name, labels_dict, value)] filtered to BALANCE_MOCK_SERIES.
-
-    Structurally identical to engine_ops.parse_prometheus_samples (same
-    tolerant label-block split, same skip rules), duplicated here because
-    this module cannot import engine_ops — the dependency arrow is one-way
-    (engine_ops imports harness; a reverse import would be a cycle).
-    """
-    samples: list = []
-    for raw in body.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        name_end = len(line)
-        for idx, ch in enumerate(line):
-            if ch == "{" or ch == " ":
-                name_end = idx
-                break
-        name = line[:name_end]
-        if name not in BALANCE_MOCK_SERIES:
-            continue
-        rest = line[name_end:]
-        labels: dict = {}
-        if rest.startswith("{"):
-            close = rest.find("}")
-            if close < 0:
-                continue
-            for pair in rest[1:close].split(","):
-                key, sep, value = pair.partition("=")
-                if sep:
-                    labels[key.strip()] = value.strip().strip('"')
-            rest = rest[close + 1 :]
-        parts = rest.split()
-        if not parts:
-            continue
-        try:
-            v = float(parts[0])
-        except ValueError:
-            continue
-        samples.append((name, labels, v))
-    return samples
+    """Select balance series using the shared exposition parser."""
+    return [
+        sample
+        for sample in parse_prometheus_samples(body, "")
+        if sample[0] in BALANCE_MOCK_SERIES
+    ]
 
 
 class BalanceSampler:

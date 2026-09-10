@@ -13,7 +13,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from .actions.elastic import ClientRecords, request_success
+from online_eval.requests import ClientRecords, request_success
 from .runtime import StageTimeout
 
 
