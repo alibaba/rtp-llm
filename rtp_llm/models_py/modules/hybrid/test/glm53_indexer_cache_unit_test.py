@@ -1,7 +1,7 @@
 import math
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -79,6 +79,23 @@ class Glm53PdCacheStoreTest(unittest.TestCase):
 
 
 class Glm53IndexerGroupingTest(unittest.TestCase):
+    def test_canonicalization_preserves_selection_and_padding(self) -> None:
+        from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
+            canonicalize_topk_output,
+        )
+
+        first = torch.tensor([[7, 2, -1, 5], [-1, -1, -1, -1]], dtype=torch.int32)
+        second = torch.tensor([[5, 7, 2, -1], [-1, -1, -1, -1]], dtype=torch.int32)
+        with patch.dict("os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "0"}):
+            unchanged = first.clone()
+            canonicalize_topk_output(first)
+            self.assertTrue(torch.equal(first, unchanged))
+        with patch.dict("os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}):
+            canonicalize_topk_output(first)
+            canonicalize_topk_output(second)
+        self.assertTrue(torch.equal(first, second))
+        self.assertEqual(first.tolist(), [[2, 5, 7, -1], [-1, -1, -1, -1]])
+
     def test_prefill_fast_path_uses_expanded_raw_token_width(self) -> None:
         compressed = SimpleNamespace(indexer_topk=512, sparse_attention_topk=2051)
         legacy = SimpleNamespace(indexer_topk=2048, sparse_attention_topk=0)

@@ -546,6 +546,14 @@ class Indexer(nn.Module):
                     position_ids=positions if q_len > 1 else None,
                     compressor_meta=compressor_meta,
                 ).reshape(-1, self.index_topk)
+                # Radix selection fixes the set, but its atomic output order
+                # can vary. Honor the existing canonicalization flag during
+                # GLM decode too, before group expansion and attention reduce.
+                from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
+                    canonicalize_topk_output,
+                )
+
+                canonicalize_topk_output(topk)
             return None if use_fast_path else topk
         finally:
             self.compressed_indexer.clear_pool_context()

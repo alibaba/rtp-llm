@@ -108,7 +108,7 @@ def _fp8_prefill_topk_use_torch() -> bool:
     )
 
 
-def _fp8_prefill_topk_canonicalize() -> bool:
+def _topk_canonicalize_enabled() -> bool:
     return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
         "1",
         "true",
@@ -117,9 +117,9 @@ def _fp8_prefill_topk_canonicalize() -> bool:
     )
 
 
-def _canonicalize_prefill_topk_output(out: torch.Tensor) -> None:
+def canonicalize_topk_output(out: torch.Tensor) -> None:
     """Sort valid token indices in-place while preserving ``-1`` padding."""
-    if not _fp8_prefill_topk_canonicalize():
+    if not _topk_canonicalize_enabled():
         return
     sentinel = torch.iinfo(out.dtype).max
     sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
@@ -153,7 +153,7 @@ def _run_prefill_topk_torch(
     lengths = (row_ends - row_starts).unsqueeze(1)
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
     out[:, :k_eff].copy_(indices)
-    _canonicalize_prefill_topk_output(out)
+    canonicalize_topk_output(out)
 
 
 def _run_prefill_topk(
@@ -185,7 +185,7 @@ def _run_prefill_topk(
             # limits without truncating valid compressed keys.
             logits.shape[1],
         )
-        _canonicalize_prefill_topk_output(out)
+        canonicalize_topk_output(out)
         return
 
     # ``logits`` is over compressed K tokens. Convert back to input-token
@@ -200,7 +200,7 @@ def _run_prefill_topk(
         rtp_llm_ops.fast_topk_v2_variable(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
-        _canonicalize_prefill_topk_output(out)
+        canonicalize_topk_output(out)
         return
 
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -214,7 +214,7 @@ def _run_prefill_topk(
         int(topk),
         _fp8_prefill_topk_force_radix_sort(),
     )
-    _canonicalize_prefill_topk_output(out)
+    canonicalize_topk_output(out)
 
 
 def _fp8_prefill_score_chunk_rows() -> int:
