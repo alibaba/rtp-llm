@@ -31,7 +31,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
 
-    for (int i = 0; i < nextBatchSize(); i++) {
+    // update() has already advanced the token count. Emit this step's beams,
+    // not the next scheduled width (which may grow or shrink).
+    for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count      = iter_count_;
         generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();

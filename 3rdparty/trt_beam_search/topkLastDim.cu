@@ -552,10 +552,18 @@ __device__ void choose_bucket(Counter<T, IdxT>* counter, IdxT const* histogram, 
 
 // For one-block version, last_filter() could be called when pass < num_passes - 1.
 // So `pass` could not be constexpr
-template <typename T, typename IdxT, int BitsPerPass, bool prioritize_smaller_indice = false>
-__device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, IdxT* out_idx, IdxT current_len, IdxT k,
-    Counter<T, IdxT>* counter, bool const select_min, int const pass)
-{
+template<typename T, typename IdxT, int BitsPerPass, bool prioritize_smaller_indice = false>
+__device__ void last_filter(T const*          in_buf,
+                            IdxT const*       in_idx_buf,
+                            T*                out,
+                            IdxT*             out_idx,
+                            IdxT              current_len,
+                            IdxT              k,
+                            Counter<T, IdxT>* counter,
+                            bool const        select_min,
+                            int const         pass,
+                            bool              has_mask,
+                            T                 mask_val) {
     auto const kth_value_bits = counter->kth_value_bits;
     int const start_bit = calc_start_bit<T, BitsPerPass>(pass);
 
@@ -568,7 +576,8 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
     for (IdxT i = threadIdx.x; i < current_len; i += blockDim.x)
     {
         const T value = in_buf[i];
-        auto const bits = (twiddle_in(value, select_min) >> start_bit) << start_bit;
+        auto const full_bits = twiddle_in(value, select_min);
+        auto const bits      = (full_bits >> start_bit) << start_bit;
         if (bits < kth_value_bits)
         {
             IdxT pos = atomicAdd(p_out_cnt, static_cast<IdxT>(1));
@@ -580,6 +589,7 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
         }
         else if (bits == kth_value_bits)
         {
+            const bool skip_reorder = has_mask && full_bits == twiddle_in(mask_val, select_min);
             IdxT new_idx = in_idx_buf ? in_idx_buf[i] : i;
             IdxT back_pos = atomicAdd(p_out_back_cnt, static_cast<IdxT>(1));
             if (back_pos < num_of_kth_needed)
@@ -589,12 +599,13 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
                 if constexpr (!prioritize_smaller_indice)
                 {
                     out_idx[pos] = new_idx;
+                } else if (skip_reorder) {
+                    out_idx[pos] = new_idx;
                 }
             }
             if constexpr (prioritize_smaller_indice)
             {
-                if (new_idx < ref_last.load(cuda::memory_order_relaxed))
-                {
+                if (!skip_reorder && new_idx < ref_last.load(cuda::memory_order_relaxed)) {
                     for (int j = 0; j < num_of_kth_needed; j++)
                     {
                         IdxT pre_idx = atomicMin(&p_equal[j], new_idx);
@@ -609,10 +620,19 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
     }
 }
 
-template <typename T, typename IdxT, int BitsPerPass, bool prioritize_smaller_indice = false>
-__global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_buf, IdxT const* in_idx_buf, T* out,
-    IdxT* out_idx, IdxT len, IdxT k, Counter<T, IdxT>* counters, bool const select_min)
-{
+template<typename T, typename IdxT, int BitsPerPass, bool prioritize_smaller_indice = false>
+__global__ void last_filter_kernel(T const*          in,
+                                   IdxT const*       in_idx,
+                                   T const*          in_buf,
+                                   IdxT const*       in_idx_buf,
+                                   T*                out,
+                                   IdxT*             out_idx,
+                                   IdxT              len,
+                                   IdxT              k,
+                                   Counter<T, IdxT>* counters,
+                                   bool const        select_min,
+                                   bool              has_mask,
+                                   T                 mask_val) {
     const size_t batch_id = blockIdx.y; // size_t to avoid multiplication overflow
 
     Counter<T, IdxT>* counter = counters + batch_id;
@@ -645,10 +665,21 @@ __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_
     IdxT* p_out_back_cnt = &counter->out_back_cnt;
     IdxT* p_equal = out_idx + k - num_of_kth_needed;
     cuda::atomic_ref<IdxT> ref_last(p_equal[num_of_kth_needed - 1]);
-    auto f = [k, select_min, kth_value_bits, num_of_kth_needed, p_out_cnt, p_out_back_cnt, in_idx_buf, out, out_idx,
-                 p_equal, ref_last](T value, IdxT i)
-    {
-        const auto bits = (twiddle_in(value, select_min) >> start_bit) << start_bit;
+    auto                   f = [k,
+              select_min,
+              kth_value_bits,
+              num_of_kth_needed,
+              p_out_cnt,
+              p_out_back_cnt,
+              in_idx_buf,
+              out,
+              out_idx,
+              p_equal,
+              ref_last,
+              has_mask,
+              mask_val](T value, IdxT i) {
+        const auto full_bits = twiddle_in(value, select_min);
+        const auto bits      = (full_bits >> start_bit) << start_bit;
         if (bits < kth_value_bits)
         {
             IdxT pos = atomicAdd(p_out_cnt, static_cast<IdxT>(1));
@@ -657,6 +688,7 @@ __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_
         }
         else if (bits == kth_value_bits)
         {
+            const bool skip_reorder = has_mask && full_bits == twiddle_in(mask_val, select_min);
             IdxT new_idx = in_idx_buf ? in_idx_buf[i] : i;
             IdxT back_pos = atomicAdd(p_out_back_cnt, static_cast<IdxT>(1));
             if (back_pos < num_of_kth_needed)
@@ -666,12 +698,13 @@ __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_
                 if constexpr (!prioritize_smaller_indice)
                 {
                     out_idx[pos] = new_idx;
+                } else if (skip_reorder) {
+                    out_idx[pos] = new_idx;
                 }
             }
             if constexpr (prioritize_smaller_indice)
             {
-                if (new_idx < ref_last.load(cuda::memory_order_relaxed))
-                {
+                if (!skip_reorder && new_idx < ref_last.load(cuda::memory_order_relaxed)) {
                     for (int j = 0; j < num_of_kth_needed; j++)
                     {
                         IdxT pre_idx = atomicMin(&p_equal[j], new_idx);
@@ -726,12 +759,28 @@ __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_
  * the next pass, inputs are read from `in` rather than from `in_buf`. The benefit is that
  * we can save the cost of writing candidates and their indices.
  */
-template <typename T, typename IdxT, int BitsPerPass, int BlockSize, bool fused_last_filter,
-    bool prioritize_smaller_indice = false>
-__global__ void radix_kernel(T const* in, IdxT const* in_idx, T const* in_buf, IdxT const* in_idx_buf, T* out_buf,
-    IdxT* out_idx_buf, T* out, IdxT* out_idx, Counter<T, IdxT>* counters, IdxT* histograms, const IdxT len,
-    const IdxT k, bool const select_min, int const pass)
-{
+template<typename T,
+         typename IdxT,
+         int  BitsPerPass,
+         int  BlockSize,
+         bool fused_last_filter,
+         bool prioritize_smaller_indice = false>
+__global__ void radix_kernel(T const*          in,
+                             IdxT const*       in_idx,
+                             T const*          in_buf,
+                             IdxT const*       in_idx_buf,
+                             T*                out_buf,
+                             IdxT*             out_idx_buf,
+                             T*                out,
+                             IdxT*             out_idx,
+                             Counter<T, IdxT>* counters,
+                             IdxT*             histograms,
+                             const IdxT        len,
+                             const IdxT        k,
+                             bool const        select_min,
+                             int const         pass,
+                             bool              has_mask,
+                             T                 mask_val) {
     const size_t batch_id = blockIdx.y;
     auto counter = counters + batch_id;
     IdxT current_k;
@@ -863,8 +912,16 @@ __global__ void radix_kernel(T const* in, IdxT const* in_idx, T const* in_buf, I
             if constexpr (fused_last_filter)
             {
                 last_filter<T, IdxT, BitsPerPass, prioritize_smaller_indice>(out_buf ? out_buf : in_buf,
-                    out_idx_buf ? out_idx_buf : in_idx_buf, out, out_idx, out_buf ? current_len : len, k, counter,
-                    select_min, pass);
+                                                                             out_idx_buf ? out_idx_buf : in_idx_buf,
+                                                                             out,
+                                                                             out_idx,
+                                                                             out_buf ? current_len : len,
+                                                                             k,
+                                                                             counter,
+                                                                             select_min,
+                                                                             pass,
+                                                                             has_mask,
+                                                                             mask_val);
             }
         }
     }
@@ -1066,10 +1123,17 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf, IdxT const* 
     }
 }
 
-template <typename T, typename IdxT, int BitsPerPass, int BlockSize, bool prioritize_smaller_indice = false>
-__global__ void radix_topk_one_block_kernel(T const* in, IdxT const* in_idx, const IdxT len, const IdxT k, T* out,
-    IdxT* out_idx, bool const select_min, char* bufs)
-{
+template<typename T, typename IdxT, int BitsPerPass, int BlockSize, bool prioritize_smaller_indice = false>
+__global__ void radix_topk_one_block_kernel(T const*    in,
+                                            IdxT const* in_idx,
+                                            const IdxT  len,
+                                            const IdxT  k,
+                                            T*          out,
+                                            IdxT*       out_idx,
+                                            bool const  select_min,
+                                            char*       bufs,
+                                            bool        has_mask,
+                                            T           mask_val) {
     constexpr int num_buckets = calc_num_buckets<BitsPerPass>();
     __shared__ Counter<T, IdxT> counter;
     __shared__ IdxT histogram[num_buckets];
@@ -1149,14 +1213,31 @@ __global__ void radix_topk_one_block_kernel(T const* in, IdxT const* in_idx, con
                 __syncthreads();
             }
             last_filter<T, IdxT, BitsPerPass, prioritize_smaller_indice>(out_buf ? out_buf : in,
-                out_buf ? out_idx_buf : in_idx, out, out_idx, out_buf ? current_len : len, k, &counter, select_min,
-                pass);
+                                                                         out_buf ? out_idx_buf : in_idx,
+                                                                         out,
+                                                                         out_idx,
+                                                                         out_buf ? current_len : len,
+                                                                         k,
+                                                                         &counter,
+                                                                         select_min,
+                                                                         pass,
+                                                                         has_mask,
+                                                                         mask_val);
             break;
         }
         else if (counter.len == counter.k)
         {
-            last_filter<T, IdxT, BitsPerPass, false>(out_buf ? out_buf : in, out_buf ? out_idx_buf : in_idx, out,
-                out_idx, out_buf ? current_len : len, k, &counter, select_min, pass);
+            last_filter<T, IdxT, BitsPerPass, false>(out_buf ? out_buf : in,
+                                                     out_buf ? out_idx_buf : in_idx,
+                                                     out,
+                                                     out_idx,
+                                                     out_buf ? current_len : len,
+                                                     k,
+                                                     &counter,
+                                                     select_min,
+                                                     pass,
+                                                     has_mask,
+                                                     mask_val);
             break;
         }
     }
@@ -1197,11 +1278,22 @@ inline std::vector<void*> calc_aligned_pointers(void const* p, std::vector<size_
     return aligned_pointers;
 }
 
-template <typename T, typename IdxT, int BitsPerPass, int BlockSize>
-void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, IdxT const* in_idx, int batch_size,
-    IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, bool fused_last_filter, unsigned grid_dim,
-    cudaStream_t stream, bool sorted = false)
-{
+template<typename T, typename IdxT, int BitsPerPass, int BlockSize>
+void standalone_stable_radix_topk_(void*            buf,
+                                   size_t&          buf_size,
+                                   T const*         in,
+                                   IdxT const*      in_idx,
+                                   int              batch_size,
+                                   IdxT             len,
+                                   IdxT             k,
+                                   T*               out,
+                                   IdxT*            out_idx,
+                                   bool             select_min,
+                                   bool             fused_last_filter,
+                                   unsigned         grid_dim,
+                                   std::optional<T> mask_val,
+                                   cudaStream_t     stream,
+                                   bool             sorted = false) {
     static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
     constexpr int num_buckets = air_topk_stable::calc_num_buckets<BitsPerPass>();
 
@@ -1302,15 +1394,40 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
             kernel = air_topk_stable::radix_kernel<T, IdxT, BitsPerPass, BlockSize, true, true>;
         }
 
-        kernel<<<blocks, BlockSize, 0, stream>>>(in, in_idx, in_buf, in_idx_buf, out_buf, out_idx_buf, topk_out,
-            topk_out_idx, counters, histograms, len, k, select_min, pass);
+        kernel<<<blocks, BlockSize, 0, stream>>>(in,
+                                                 in_idx,
+                                                 in_buf,
+                                                 in_idx_buf,
+                                                 out_buf,
+                                                 out_idx_buf,
+                                                 topk_out,
+                                                 topk_out_idx,
+                                                 counters,
+                                                 histograms,
+                                                 len,
+                                                 k,
+                                                 select_min,
+                                                 pass,
+                                                 mask_val.has_value(),
+                                                 mask_val.value_or(T(0)));
         check_cuda_error();
     }
 
     if (!fused_last_filter)
     {
-        air_topk_stable::last_filter_kernel<T, IdxT, BitsPerPass, true><<<blocks, BlockSize, 0, stream>>>(
-            in, in_idx, out_buf, out_idx_buf, topk_out, topk_out_idx, len, k, counters, select_min);
+        air_topk_stable::last_filter_kernel<T, IdxT, BitsPerPass, true>
+            <<<blocks, BlockSize, 0, stream>>>(in,
+                                               in_idx,
+                                               out_buf,
+                                               out_idx_buf,
+                                               topk_out,
+                                               topk_out_idx,
+                                               len,
+                                               k,
+                                               counters,
+                                               select_min,
+                                               mask_val.has_value(),
+                                               mask_val.value_or(T(0)));
         check_cuda_error();
     }
 
@@ -1337,10 +1454,20 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
     }
 }
 
-template <typename T, typename IdxT, int BitsPerPass, int BlockSize>
-void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T const* in, IdxT const* in_idx,
-    int batch_size, IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, cudaStream_t stream, bool sorted = false)
-{
+template<typename T, typename IdxT, int BitsPerPass, int BlockSize>
+void standalone_stable_radix_topk_one_block_(void*            buf,
+                                             size_t&          buf_size,
+                                             T const*         in,
+                                             IdxT const*      in_idx,
+                                             int              batch_size,
+                                             IdxT             len,
+                                             IdxT             k,
+                                             T*               out,
+                                             IdxT*            out_idx,
+                                             bool             select_min,
+                                             std::optional<T> mask_val,
+                                             cudaStream_t     stream,
+                                             bool             sorted = false) {
     static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
 
     char* bufs = nullptr;
@@ -1409,7 +1536,16 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
     check_cuda_error();
 
     air_topk_stable::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true>
-        <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k, topk_out, topk_out_idx, select_min, bufs);
+        <<<batch_size, BlockSize, 0, stream>>>(in,
+                                               in_idx,
+                                               len,
+                                               k,
+                                               topk_out,
+                                               topk_out_idx,
+                                               select_min,
+                                               bufs,
+                                               mask_val.has_value(),
+                                               mask_val.value_or(T(0)));
     check_cuda_error();
 
     T* idx_sort_out = sorted ? sort_in : out;
@@ -1434,17 +1570,36 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
     }
 }
 
-template <typename T, typename idxT, bool sorted = false>
-void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, int batch_size, idxT len, idxT k, T* out,
-    idxT* out_idx, bool greater, cudaStream_t stream = 0)
-{
+template<typename T, typename idxT, bool sorted = false>
+void standalone_stable_radix_11bits(void*            buf,
+                                    size_t&          buf_size,
+                                    T const*         in,
+                                    int              batch_size,
+                                    idxT             len,
+                                    idxT             k,
+                                    T*               out,
+                                    idxT*            out_idx,
+                                    bool             greater,
+                                    std::optional<T> mask_val,
+                                    cudaStream_t     stream = 0) {
     constexpr int items_per_thread = 32;
     constexpr int block_dim = 512;
     constexpr bool fused_last_filter = false;
     if (len <= block_dim * items_per_thread)
     {
-        standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(
-            buf, buf_size, in, static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, stream, sorted);
+        standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(buf,
+                                                                        buf_size,
+                                                                        in,
+                                                                        static_cast<idxT*>(nullptr),
+                                                                        batch_size,
+                                                                        len,
+                                                                        k,
+                                                                        out,
+                                                                        out_idx,
+                                                                        !greater,
+                                                                        mask_val,
+                                                                        stream,
+                                                                        sorted);
     }
     else
     {
@@ -1453,13 +1608,37 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
 
         if (grid_dim == 1)
         {
-            standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(buf, buf_size, in,
-                static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, stream, sorted);
+            standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(buf,
+                                                                            buf_size,
+                                                                            in,
+                                                                            static_cast<idxT*>(nullptr),
+                                                                            batch_size,
+                                                                            len,
+                                                                            k,
+                                                                            out,
+                                                                            out_idx,
+                                                                            !greater,
+                                                                            mask_val,
+                                                                            stream,
+                                                                            sorted);
         }
         else
         {
-            standalone_stable_radix_topk_<T, idxT, 11, block_dim>(buf, buf_size, in, static_cast<idxT*>(nullptr),
-                batch_size, len, k, out, out_idx, !greater, fused_last_filter, grid_dim, stream, sorted);
+            standalone_stable_radix_topk_<T, idxT, 11, block_dim>(buf,
+                                                                  buf_size,
+                                                                  in,
+                                                                  static_cast<idxT*>(nullptr),
+                                                                  batch_size,
+                                                                  len,
+                                                                  k,
+                                                                  out,
+                                                                  out_idx,
+                                                                  !greater,
+                                                                  fused_last_filter,
+                                                                  grid_dim,
+                                                                  mask_val,
+                                                                  stream,
+                                                                  sorted);
         }
     }
 }
@@ -1478,7 +1657,7 @@ size_t invokeComputeTopkLastDimWorkspaceSize(
     T* out_val = nullptr;
     SizeType32* out_idx = nullptr;
     standalone_stable_radix_11bits<T, SizeType32, true>(
-        workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, is_largest, 0);
+        workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, is_largest, std::nullopt, 0);
     return buf_size;
 }
 
@@ -1498,23 +1677,36 @@ INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
 
 ///////////////
 
-template <typename T>
-void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
-    void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, void* workspace,
-    cudaStream_t stream)
-{
+template<typename T>
+void invokeTopkLastDim(SizeType32       batchSize,
+                       SizeType32       inputLength,
+                       SizeType32       k,
+                       bool             is_largest,
+                       std::optional<T> mask_val,
+                       void const* __restrict__ input,
+                       void* __restrict__ out_val,
+                       void* __restrict__ out_idx,
+                       void*        workspace,
+                       cudaStream_t stream) {
     size_t buf_size = 0; // will be overwritten by the kernel
     T const* in = reinterpret_cast<T const*>(input);
     T* out_val_ = reinterpret_cast<T*>(out_val);
     SizeType32* out_idx_ = reinterpret_cast<SizeType32*>(out_idx);
     standalone_stable_radix_11bits<T, SizeType32, true>(
-        workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, stream);
+        workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, mask_val, stream);
 }
 
 #define INSTANTIATE_TOPK_LastDim_DATA_TYPE(T)                                                                          \
-    template void invokeTopkLastDim<T>(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,    \
-        void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, void* workspace,       \
-        cudaStream_t stream)
+    template void invokeTopkLastDim<T>(SizeType32       batchSize,                                                     \
+                                       SizeType32       inputLength,                                                   \
+                                       SizeType32       k,                                                             \
+                                       bool             is_largest,                                                    \
+                                       std::optional<T> mask_val,                                                      \
+                                       void const* __restrict__ input,                                                 \
+                                       void* __restrict__ out_val,                                                     \
+                                       void* __restrict__ out_idx,                                                     \
+                                       void*        workspace,                                                         \
+                                       cudaStream_t stream)
 
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(int);
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(float);

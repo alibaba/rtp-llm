@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
+#include <cmath>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
@@ -99,10 +100,31 @@ void TreeLogitsProcessor::ensureCsrStateBuffers(size_t count) {
 
 void TreeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
     std::vector<StreamTreeInfo> new_tree_infos;
+    new_tree_infos.reserve(src_batch_indices.size());
     for (auto src_batch_idx : src_batch_indices) {
+        RTP_LLM_CHECK_WITH_INFO(src_batch_idx >= 0 && static_cast<size_t>(src_batch_idx) < tree_infos_.size(),
+                                "tree parent beam index [%d] is outside input beam count [%zu]",
+                                src_batch_idx,
+                                tree_infos_.size());
         new_tree_infos.push_back(tree_infos_[src_batch_idx].copy());
     }
     tree_infos_ = std::move(new_tree_infos);
+}
+
+void TreeLogitsProcessor::validateBeamScores(const rtp_llm::BufferPtr& scores, size_t output_count) const {
+    if (tree_infos_.empty() || !tree_infos_.front().csr_snapshot || !tree_infos_.front().is_beam_search) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        scores && (scores->where() == MemoryType::MEMORY_CPU || scores->where() == MemoryType::MEMORY_CPU_PINNED)
+            && scores->type() == DataType::TYPE_FP32 && scores->size() == output_count,
+        "CSR beam search requires one host cumulative log probability per output beam");
+    for (size_t index = 0; index < output_count; ++index) {
+        RTP_LLM_CHECK_WITH_INFO(std::isfinite(scores->data<float>()[index]),
+                                "CSR beam search selected a non-finite score at beam [%zu]: "
+                                "insufficient valid candidates or invalid model scores",
+                                index);
+    }
 }
 
 void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) {
@@ -217,15 +239,21 @@ std::string TreeLogitsProcessor::validateCsrRequest(const ConstraintTreeCsrSnaps
         return runtime_tree_required ? "runtime constraint tree is required but no CSR snapshot is active" :
                                        std::string();
     }
-    if (!generate_config.variable_num_beams.empty()) {
-        return "runtime constraint tree does not support variable_num_beams in this release";
-    }
     if (generate_config.num_beams <= 0) {
         return "runtime constraint tree requires num_beams to be positive";
     }
-    if (snapshot->rootCandidateCount() < static_cast<size_t>(generate_config.num_beams)) {
+    for (auto width : generate_config.variable_num_beams) {
+        if (width <= 0) {
+            return "runtime constraint tree requires every variable_num_beams entry to be positive";
+        }
+    }
+    // Later steps select globally from all surviving parents, not just the
+    // root. Their actual capacity is checked on the sampler's selected scores.
+    const auto first_width = generate_config.variable_num_beams.empty() ? generate_config.num_beams :
+                                                                          generate_config.variable_num_beams.front();
+    if (snapshot->rootCandidateCount() < static_cast<size_t>(first_width)) {
         return "runtime constraint tree root candidate count [" + std::to_string(snapshot->rootCandidateCount())
-               + "] is smaller than num_beams [" + std::to_string(generate_config.num_beams) + "]";
+               + "] is smaller than first-step num_beams [" + std::to_string(first_width) + "]";
     }
     return {};
 }

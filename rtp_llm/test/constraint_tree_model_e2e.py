@@ -1,11 +1,10 @@
 """Real model HTTP E2E; a separate Java harness owns tree building/publication."""
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
-
-import os
 
 WORKER = os.environ.get("CSR_E2E_WORKER", "http://127.0.0.1:18765")
 MASTER = os.environ.get("CSR_E2E_MASTER", "http://127.0.0.1:18770")
@@ -33,7 +32,7 @@ def http(base, path, body=None, raw=False):
     return response.status, data, dict(response.headers)
 
 
-def generate(beams=1):
+def generate(beams=1, schedule=None):
     return http(
         WORKER,
         "/",
@@ -42,6 +41,7 @@ def generate(beams=1):
             "generate_config": {
                 "max_new_tokens": 12,
                 "num_beams": beams,
+                "variable_num_beams": schedule or [],
                 "top_k": 1,
                 "return_output_ids": True,
                 "is_streaming": False,
@@ -76,17 +76,18 @@ def publish(version, sids):
     raise AssertionError(state)
 
 
-def check_generation(sids, beams=1, repeats=3):
+def check_generation(sids, beams=1, repeats=3, schedule=None):
     allowed = [list(map(int, sid.split("_"))) for sid in sids]
     for _ in range(repeats):
-        code, body, _ = generate(beams)
+        code, body, _ = generate(beams, schedule)
         print(
             json.dumps({"inference_http": code, "result": body}, ensure_ascii=False),
             flush=True,
         )
         assert code == 200 and body.get("finished") is True, body
         outputs = body["output_ids"]
-        assert len(outputs) == beams, outputs
+        assert len(outputs) == (schedule[-1] if schedule else beams), outputs
+        assert len({tuple(tokens) for tokens in outputs}) == len(outputs), outputs
         for tokens in outputs:
             # Engine responses can include EOS padding for shorter beams.
             assert EOS in tokens, ("missing allowed EOS", tokens)
@@ -95,6 +96,72 @@ def check_generation(sids, beams=1, repeats=3):
                 assert all(x == EOS for x in tokens[i:]), tokens
                 tokens = tokens[:i]
             assert tokens in allowed, (tokens, allowed)
+
+
+def variable_beam_checks():
+    """Real model + Java publication; no special-case production beam widths."""
+    import itertools
+    import math
+
+    sids = [
+        "_".join(map(str, tokens))
+        for tokens in itertools.product(
+            range(169967, 169971), *[range(216540, 216544)] * 4
+        )
+    ]
+    publish(int(time.time() * 1000), sids)
+    for schedule in ([2, 4, 1, 1, 3], [1, 1, 3, 2, 4], [3]):
+        check_generation(sids, max(schedule), repeats=3, schedule=schedule)
+
+    # Only four two-token paths: requesting five must fail without returning
+    # masked tokens or duplicate padding. A subsequent valid request must work.
+    sids = [
+        f"{first}_{second}" for first in (169967, 169968) for second in (216540, 216541)
+    ]
+    publish(int(time.time() * 1000), sids)
+    code, body, _ = generate(5, [2, 5])
+    assert code >= 400, (code, body)
+    check_generation(sids, 3, repeats=3, schedule=[2, 3])
+
+    # Actual business widths, with fewer root candidates than the final width.
+    sids = [
+        f"{first}_{second}"
+        for first in range(169967, 170479)
+        for second in range(215830, 215838)
+    ]
+    publish(int(time.time() * 1000), sids)
+    allowed = {tuple(map(int, sid.split("_"))) for sid in sids}
+    for _ in range(3):
+        code, body, _ = generate(3500, [512, 3500])
+        assert code == 200 and body.get("finished"), (code, str(body)[:1000])
+        outputs = body["output_ids"]
+        assert len(outputs) == len({tuple(tokens) for tokens in outputs}) == 3500
+        for tokens in outputs:
+            assert EOS in tokens and all(
+                t == EOS for t in tokens[tokens.index(EOS) :]
+            ), tokens
+            assert tuple(tokens[: tokens.index(EOS)]) in allowed, tokens
+        for aux in body["aux_info"]:
+            scores = aux["cum_log_probs"]
+            assert all(
+                math.isfinite(x)
+                for x in (scores if isinstance(scores, list) else [scores])
+            )
+        print(
+            json.dumps(
+                {
+                    "variable_beams": [512, 3500],
+                    "allowed_unique_outputs": len(outputs),
+                    "eos_verified": True,
+                    "aux": body["aux_info"][0],
+                }
+            ),
+            flush=True,
+        )
+    print(
+        "PASS: real-model variable beam growth/shrink/one-step holds, candidate shortage, business 512->3500 + EOS",
+        flush=True,
+    )
 
 
 def main():
@@ -150,8 +217,9 @@ def extended_checks():
     assert code == 200 and isinstance(artifact, bytes)
     bad = bytearray(artifact)
     struct.pack_into("<Q", bad, 16, v + 1)
+    header_size = struct.unpack_from("<I", bad, 12)[0]
     states = struct.unpack_from("<I", bad, 32)[0]
-    struct.pack_into("<i", bad, 48 + 4 * (states + 1), -5)
+    struct.pack_into("<i", bad, header_size + 4 * (states + 1), -5)
     code, body, _ = http(WORKER, "/update_constraint_tree", bytes(bad), raw=True)
     assert code == 200 and body["status"] == "accepted", (code, body)
     for _ in range(100):
@@ -253,3 +321,4 @@ def extended_checks():
 if __name__ == "__main__":
     main()
     extended_checks()
+    variable_beam_checks()

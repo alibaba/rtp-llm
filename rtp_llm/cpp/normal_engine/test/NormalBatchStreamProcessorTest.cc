@@ -1,4 +1,6 @@
 #include <memory>
+#include <cmath>
+#include <set>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -6,6 +8,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/core/Types.h"
 #include "rtp_llm/cpp/core/BufferHelper.h"
 #include "rtp_llm/cpp/devices/testing/TestBase.h"
@@ -15,6 +18,165 @@ using namespace std;
 namespace rtp_llm {
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
+
+class CsrVariableBeamTest: public DeviceTestBase {
+protected:
+    // A complete layered trie; tokens occupy disjoint ranges at each depth.
+    // Keep snapshots local to these tests so other stream tests stay unconstrained.
+    ConstraintTreeCsrSnapshotPtr makeTree(const std::vector<int>& fanouts, int vocab) {
+        auto tree             = std::make_shared<ConstraintTreeCsrSnapshot>();
+        tree->version_        = 1;
+        tree->start_token_id_ = vocab - 2;
+        tree->end_token_id_   = vocab - 1;
+        tree->row_ptr_        = {0};
+        int level_size = 1, next_state = 1, token_begin = 10;
+        for (int fanout : fanouts) {
+            for (int node = 0; node < level_size; ++node) {
+                for (int child = 0; child < fanout; ++child) {
+                    tree->col_idx_.push_back(token_begin + child);
+                    tree->next_state_.push_back(next_state++);
+                }
+                tree->row_ptr_.push_back(tree->col_idx_.size());
+            }
+            level_size *= fanout;
+            token_begin += fanout;
+        }
+        tree->sid_count_           = level_size;
+        tree->terminal_mask_state_ = tree->row_ptr_.size() - 1;
+        for (int node = 0; node < level_size; ++node) {
+            tree->col_idx_.push_back(tree->endTokenId());
+            tree->next_state_.push_back(-1);
+            tree->row_ptr_.push_back(tree->col_idx_.size());
+        }
+        tree->device_row_ptr_ = device_->clone({*vector2Buffer(tree->row_ptr_), AllocationType::DEVICE});
+        tree->device_col_idx_ = device_->clone({*vector2Buffer(tree->col_idx_), AllocationType::DEVICE});
+        return tree;
+    }
+
+    GenerateStreamPtr
+    makeStream(const ConstraintTreeCsrSnapshotPtr& tree, const std::vector<int>& schedule, int steps, int vocab) {
+        auto input                                 = std::make_shared<GenerateInput>();
+        input->input_ids                           = vector2Buffer(std::vector<int>{1, 2});
+        input->generate_config                     = std::make_shared<GenerateConfig>();
+        input->generate_config->variable_num_beams = schedule;
+        input->generate_config->num_beams          = *std::max_element(schedule.begin(), schedule.end());
+        input->generate_config->max_new_tokens     = steps;
+        input->generate_config->is_streaming       = true;
+        input->generate_config->do_sample          = false;
+        input->generate_config->top_k              = 1;
+        GptInitParameter params;
+        params.max_seq_len_                  = 32;
+        params.vocab_size_                   = vocab;
+        params.special_tokens_.eos_token_id_ = vocab - 1;
+        params.seq_size_per_block_           = 8;
+        ResourceContext resources;
+        resources.cache_manager =
+            std::make_shared<CacheManager>(CacheConfig(KVCacheParam{1, 20000, 1, 8, 8, DataType::TYPE_FP32}), device_);
+        auto stream = std::make_shared<NormalGenerateStream>(input, params, resources, nullptr);
+        RTP_LLM_CHECK(stream->initKVBlock(params.max_seq_len_).ok());
+        stream->tree_logits_processor_ptr_ = std::make_shared<TreeLogitsProcessor>(
+            device_, std::vector<StreamTreeInfo>{StreamTreeInfo(true, 2, 0, true, tree)});
+        stream->initializeLogitsProcessorList();
+        stream->setRunning();
+        return stream;
+    }
+
+    void step(const std::list<GenerateStreamPtr>& streams, int vocab) {
+        GptInitParameter params;
+        params.vocab_size_ = vocab;
+        NormalBatchStreamProcessor processor(params, CacheConfig(), false);
+        StreamGroups               groups(streams);
+        MergedOutput               output;
+        output.model_output.logits = device_->allocateBuffer(
+            {DataType::TYPE_FP32, {groups.totalSamplerBatchSizeIn(), (size_t)vocab}, AllocationType::DEVICE});
+        // Non-uniform deterministic scores exercise ranking/parent reordering.
+        auto logits = Buffer2torchTensor(*output.model_output.logits, false);
+        logits.copy_(torch::arange(vocab, logits.options()).remainder(97).mul_(0.01));
+        auto inputs = processor.gatherSamplerInput(groups, GptModelInputs{}, output.model_output);
+        ASSERT_TRUE(inputs.ok());
+        Sampler sampler({device_, vocab - 1, groups.totalSamplerBatchSizeOut()});
+        output.sampler_output = sampler.forward(inputs.value());
+        device_->syncDeviceStream(DeviceStream::DEFAULT);
+        ASSERT_TRUE(processor.dispatch(groups, output).ok());
+    }
+
+    void expectValidOutput(const GenerateStreamPtr& stream, const ConstraintTreeCsrSnapshotPtr& tree, int width) {
+        ASSERT_FALSE(stream->stopped()) << stream->statusInfo().ToString();
+        // Existing beam search emits only the final result, even when the
+        // request asks for streaming. Still verify every intermediate state.
+        if (stream->finished()) {
+            ASSERT_TRUE(stream->hasOutput());
+            auto output = stream->nextOutput();
+            ASSERT_TRUE(output.ok());
+            ASSERT_EQ(width, output.value().generate_outputs.size());
+        } else {
+            EXPECT_FALSE(stream->hasOutput());
+        }
+        ASSERT_EQ(width, stream->getTreeLogitsProcessor()->size());
+        std::set<std::vector<int>> unique;
+        for (int beam = 0; beam < width; ++beam) {
+            auto tokens = stream->completeTokenIdsVec(beam);
+            int  state  = 0;
+            for (size_t position = 2; position < tokens.size(); ++position) {
+                state = tree->transition(state, tokens[position]);
+                ASSERT_NE(ConstraintTreeCsrSnapshot::INVALID_TRANSITION, state);
+            }
+            EXPECT_TRUE(unique.insert(tokens).second);
+            EXPECT_TRUE(std::isfinite(stream->cumLogProbs()->data<float>()[beam]));
+        }
+    }
+};
+
+TEST_F(CsrVariableBeamTest, GrowShrinkHoldOneAndGrowAgain) {
+    const int vocab = 128;
+    auto      tree  = makeTree({4, 4, 4, 4, 4}, vocab);
+    for (const auto& schedule : std::vector<std::vector<int>>{{2, 4, 1, 1, 3, 3}, {1, 1, 3, 2, 4, 4}, {3}}) {
+        auto stream = makeStream(tree, schedule, 6, vocab);
+        for (int index = 0; index < 6; ++index) {
+            ASSERT_NO_THROW(step({stream}, vocab));
+            expectValidOutput(stream, tree, schedule[std::min(index, (int)schedule.size() - 1)]);
+            ASSERT_FALSE(stream->stopped());
+        }
+        EXPECT_TRUE(stream->finished());
+    }
+}
+
+TEST_F(CsrVariableBeamTest, BusinessWidth512To3500AndEos) {
+    const int vocab  = 8192;
+    auto      tree   = makeTree({512, 8}, vocab);
+    auto      stream = makeStream(tree, {512, 3500}, 3, vocab);
+    for (int width : {512, 3500, 3500}) {
+        ASSERT_NO_THROW(step({stream}, vocab));
+        expectValidOutput(stream, tree, width);
+        ASSERT_FALSE(stream->stopped());
+    }
+    EXPECT_TRUE(stream->finished());
+}
+
+TEST_F(CsrVariableBeamTest, FinalOutputUsesCurrentRatherThanNextScheduledWidth) {
+    auto tree   = makeTree({4, 4, 4}, 128);
+    auto stream = makeStream(tree, {2, 3, 4}, 2, 128);
+    ASSERT_NO_THROW(step({stream}, 128));
+    expectValidOutput(stream, tree, 2);
+    ASSERT_NO_THROW(step({stream}, 128));
+    expectValidOutput(stream, tree, 3);
+    EXPECT_TRUE(stream->finished());
+}
+
+TEST_F(CsrVariableBeamTest, InsufficientCandidatesRejectOnlyAffectedRequest) {
+    const int vocab = 128;
+    auto      tree  = makeTree({2, 2}, vocab);
+    auto      bad   = makeStream(tree, {2, 5}, 2, vocab);
+    auto      good  = makeStream(tree, {2, 3}, 2, vocab);
+    ASSERT_NO_THROW(step({bad, good}, vocab));
+    expectValidOutput(bad, tree, 2);
+    expectValidOutput(good, tree, 2);
+    ASSERT_NO_THROW(step({bad, good}, vocab));
+    EXPECT_TRUE(bad->stopped());
+    EXPECT_FALSE(bad->hasOutput());
+    expectValidOutput(good, tree, 3);
+    EXPECT_TRUE(good->finished());
+}
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext  resource_context;

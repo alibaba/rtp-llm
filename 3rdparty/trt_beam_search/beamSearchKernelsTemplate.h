@@ -670,7 +670,11 @@ void beamSearchKernelLauncher(
         void* pTopK = reinterpret_cast<void*>(reinterpret_cast<char*>(workspace) + offset);
 
         // Stage 1
-        invokeTopkLastDim<T>(nBS * nBMIn, nV, nBMOut * 2, true, logProbs, pStage1LogProbs, pStage1Ids, pTopK, stream);
+        // Backport of 0190dfffb8: masked candidates need no stable tie ordering.
+        // Finite candidates retain the existing ordering; CSR rejects non-finite selections.
+        const T mask_val = T(-std::numeric_limits<float>::infinity());
+        invokeTopkLastDim<T>(
+            nBS * nBMIn, nV, nBMOut * 2, true, mask_val, logProbs, pStage1LogProbs, pStage1Ids, pTopK, stream);
         check_cuda_error();
 
         int nThread = std::min(roundUp(nBMIn * nBMOut * 2, 32), MAX_BLOCK_SIZE);
@@ -679,8 +683,16 @@ void beamSearchKernelLauncher(
         check_cuda_error();
 
         // Stage 2
-        invokeTopkLastDim<T>(
-            nBS, nBMIn * nBMOut * 2, nBMOut * 2, true, pStage1LogProbs, pStage2LogProbs, pStage2Ids, pTopK, stream);
+        invokeTopkLastDim<T>(nBS,
+                             nBMIn * nBMOut * 2,
+                             nBMOut * 2,
+                             true,
+                             mask_val,
+                             pStage1LogProbs,
+                             pStage2LogProbs,
+                             pStage2Ids,
+                             pTopK,
+                             stream);
         check_cuda_error();
 
         nThread = std::min(roundUp(nBMOut * 2, 32), MAX_BLOCK_SIZE);

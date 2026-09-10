@@ -54,6 +54,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     begin_time_us_ = input->begin_time_us;
     device_        = rtp_llm::DeviceFactory::getDefaultDevice();
+    // Validate the beam schedule before allocating buffers sized by its maximum.
+    tree_logits_processor_ptr_ = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = device_->allocateBuffer(
             {rtp_llm::DataType::TYPE_FP32, {(size_t)inputLength() - 1}, rtp_llm::AllocationType::HOST}, {});
@@ -89,7 +91,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     think_logits_processor_ptr_ = ThinkModeLogitsProcessor::fromGenerateInput(device_, generate_input_, maxBatchSize());
-    tree_logits_processor_ptr_  = TreeLogitsProcessor::fromGenerateInput(device_, generate_input_, init_batch_size);
     multi_seq_logits_processor_ptr_ =
         MultiSeqLogitsProcessor::fromGenerateInput(device_, generate_input_, special_tokens_.eos_token_id_);
 
@@ -899,6 +900,9 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const rtp_llm::BufferPtr
 }
 
 void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
+    if (tree_logits_processor_ptr_) {
+        tree_logits_processor_ptr_->validateBeamScores(update_info.cum_log_probs, currentBatchSize());
+    }
     updateLogitProcessorMultiSeqStatus(update_info.src_batch_indices);
 
     const auto& new_tokens = update_info.new_tokens;

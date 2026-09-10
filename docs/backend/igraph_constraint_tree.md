@@ -355,9 +355,12 @@ be rebuilt or replaced.
 4. Trigger `/rtp_llm/constraint_tree/source/refresh`. Check source item counts,
    then Master `READY` and every Worker's active version/digests. The default
    60-second reconciliation can lag behind actual Worker activation.
-5. Send isolated test requests using fixed beams. The root must contain at least
-   that many distinct first-token candidates. Existing requests with non-empty
-   `variable_num_beams` are rejected; coordinate any TPP config change explicitly.
+5. Send isolated requests with the actual beam schedule. The root must contain at
+   least the first step's width of distinct first-token candidates. Later steps
+   need enough valid candidates across surviving parents; otherwise the request
+   fails closed. Fixed beams and positive `variable_num_beams` schedules are
+   supported by the variable-beam Worker release; older fixed-only Workers still
+   reject non-empty schedules. Upgrade and verify Workers before enabling traffic.
 
 Master and Worker are separate release artifacts. Do not deploy only the Java
 `ai-whale.tgz` and assume it updates the native inference implementation.

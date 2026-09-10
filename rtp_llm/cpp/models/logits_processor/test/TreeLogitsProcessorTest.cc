@@ -468,7 +468,7 @@ TEST_F(TreeLogitsProcessorTest, testFinishedCsrBeamHasOnlyEosAndNoNanProbability
     EXPECT_ANY_THROW(processor.updateStatus(invalid_tokens, 1));
 }
 
-TEST_F(TreeLogitsProcessorTest, testCsrRequestAdmissionIsFailClosedAndSupportsOnlyFixedBeam) {
+TEST_F(TreeLogitsProcessorTest, testCsrRequestAdmissionValidatesFirstWidthAndPositiveSchedule) {
     GenerateConfig config;
     EXPECT_TRUE(TreeLogitsProcessor::validateCsrRequest(nullptr, config, false).empty());
     EXPECT_NE(std::string::npos,
@@ -485,17 +485,68 @@ TEST_F(TreeLogitsProcessorTest, testCsrRequestAdmissionIsFailClosedAndSupportsOn
     const auto snapshot = manager->snapshot();
     ASSERT_EQ(2, snapshot->rootCandidateCount());
 
-    config.variable_num_beams = {1, 2};
+    config.num_beams = 3500;
+    for (const auto& schedule : std::vector<std::vector<int>>{{1, 2}, {2, 3500}, {2, 1, 1, 4}, {1}}) {
+        config.variable_num_beams = schedule;
+        EXPECT_TRUE(TreeLogitsProcessor::validateCsrRequest(snapshot, config, true).empty());
+    }
+    for (const auto& schedule : std::vector<std::vector<int>>{{0, 2}, {2, 0}, {2, -1}, {-1}}) {
+        config.variable_num_beams = schedule;
+        EXPECT_NE(std::string::npos, TreeLogitsProcessor::validateCsrRequest(snapshot, config, true).find("positive"));
+    }
+    config.variable_num_beams = {3, 1};
     EXPECT_NE(std::string::npos,
-              TreeLogitsProcessor::validateCsrRequest(snapshot, config, true).find("variable_num_beams"));
+              TreeLogitsProcessor::validateCsrRequest(snapshot, config, true).find("first-step num_beams"));
 
     config.variable_num_beams.clear();
     config.num_beams = 3;
     EXPECT_NE(std::string::npos,
-              TreeLogitsProcessor::validateCsrRequest(snapshot, config, true).find("smaller than num_beams"));
+              TreeLogitsProcessor::validateCsrRequest(snapshot, config, true).find("first-step num_beams"));
 
     config.num_beams = 2;
     EXPECT_TRUE(TreeLogitsProcessor::validateCsrRequest(snapshot, config, true).empty());
+}
+
+TEST_F(TreeLogitsProcessorTest, testCsrVariableBeamReorderIsBoundsCheckedAndPinsSnapshot) {
+    auto       manager  = ConstraintTreeCsrManager::instance();
+    const auto artifact = [&](uint64_t version) {
+        return makeCsrArtifact(version, 62, 63, 2, {0, 2, 3, 4}, {10, 11, 63, 63}, {1, 2, -1, -1});
+    };
+    ASSERT_TRUE(manager->updateFromBinary(artifact(manager->currentVersion() + 1), device_).ok());
+    auto                snapshot = manager->snapshot();
+    TreeLogitsProcessor processor(device_, {StreamTreeInfo(true, 0, 0, true, snapshot)});
+    processor.updateMultiSeqStatus({0, 0});
+    EXPECT_NO_THROW(processor.updateStatus(createBuffer<int32_t>({2, 1}, {10, 11}, AllocationType::HOST), 1));
+    const auto two_states = processor.getStatus();
+    ASSERT_TRUE(manager->updateFromBinary(artifact(manager->currentVersion() + 1), device_).ok());
+    processor.updateMultiSeqStatus({1, 0, 1, 0});
+    EXPECT_EQ((std::vector<std::string>{two_states[1], two_states[0], two_states[1], two_states[0]}),
+              processor.getStatus());
+    const auto before_invalid = processor.getStatus();
+    EXPECT_ANY_THROW(processor.updateMultiSeqStatus({0, -1}));
+    EXPECT_EQ(before_invalid, processor.getStatus());
+    EXPECT_ANY_THROW(processor.updateMultiSeqStatus({0, 4}));
+    EXPECT_EQ(before_invalid, processor.getStatus());
+    processor.updateMultiSeqStatus({1});
+    EXPECT_EQ((std::vector<std::string>{two_states[0]}), processor.getStatus());
+    EXPECT_NO_THROW(processor.updateStatus(createBuffer<int32_t>({1, 2}, {10, 63}, AllocationType::HOST), 1));
+}
+
+TEST_F(TreeLogitsProcessorTest, testCsrSelectedBeamScoresFailClosed) {
+    auto manager = ConstraintTreeCsrManager::instance();
+    ASSERT_TRUE(
+        manager
+            ->updateFromBinary(makeCsrArtifact(manager->currentVersion() + 1, 62, 63, 1, {0, 1, 2}, {10, 63}, {1, -1}),
+                               device_)
+            .ok());
+    TreeLogitsProcessor processor(device_, {StreamTreeInfo(true, 0, 0, true, manager->snapshot())});
+    EXPECT_NO_THROW(processor.validateBeamScores(createBuffer<float>({2}, {-0.5f, -1.0f}, AllocationType::HOST), 2));
+    for (float invalid : {-INFINITY, INFINITY, NAN}) {
+        EXPECT_ANY_THROW(
+            processor.validateBeamScores(createBuffer<float>({2}, {-0.5f, invalid}, AllocationType::HOST), 2));
+    }
+    EXPECT_ANY_THROW(processor.validateBeamScores(nullptr, 2));
+    EXPECT_ANY_THROW(processor.validateBeamScores(createBuffer<float>({1}, {0}, AllocationType::HOST), 2));
 }
 
 TEST_F(TreeLogitsProcessorTest, testCsrGpuMaskLatencyRootMiddleAndEos) {

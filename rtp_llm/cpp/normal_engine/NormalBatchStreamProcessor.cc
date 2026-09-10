@@ -41,6 +41,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.combo_tokens = CACHED_HOST_BUF(TYPE_INT32, {current_tokens_size});
     if (max_block_size) {
         model_input.kv_cache_block_id       = CACHED_HOST_BUF(TYPE_INT32, {total_batch_size, max_block_size});
+        // Shorter rows must not inherit padding block IDs from the host cache.
+        device_->bufMemset(*model_input.kv_cache_block_id, 0);
         model_input.kv_cache_update_mapping = CACHED_HOST_BUF(TYPE_INT32, {total_block_copy_num, 2});
         model_input.cache_keys              = CACHED_HOST_BUF(TYPE_INT64, {total_context_batch_size, max_block_size});
     }
@@ -562,7 +564,9 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         RTP_LLM_LOG_DEBUG(
             "stream [%ld], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
 
-        stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
+        // A variable-beam request still owns beam histories during a 1 -> 1
+        // step; both CompleteTokenIds and its logits processors need them.
+        stream->update({stream->hasNumBeams() ? batch_new_all_token_ids : new_tokens,
                         1,
                         batch_hidden_states,
                         batch_logits,

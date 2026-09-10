@@ -93,7 +93,7 @@ Each `rq_token_ids` entry is one variable-length SID token sequence and excludes
 - Worker `POST /update_constraint_tree`: receive a CSR binary snapshot.
 - Worker `GET /constraint_tree_status`: report the version that is actually active.
 
-Set `CONSTRAINT_TREE_REQUIRED=true` on workers dedicated to realtime constrained decoding. Such a worker rejects generation requests until a runtime CSR snapshot is active, so startup or update failures cannot silently fall back to unconstrained generation. Runtime CSR currently supports fixed `num_beams`; `variable_num_beams` is rejected, and the root candidate count must be at least `num_beams`.
+Set `CONSTRAINT_TREE_REQUIRED=true` on workers dedicated to realtime constrained decoding. Such a worker rejects generation requests until a runtime CSR snapshot is active, so startup or update failures cannot silently fall back to unconstrained generation. Runtime CSR supports fixed `num_beams` and positive `variable_num_beams` schedules. The root candidate count must be at least the first step's beam width. Later steps reuse the existing sampler's parent indices to grow, shrink or reorder pinned CSR states; insufficient candidates or non-finite selected scores fail the request closed rather than relaxing its constraint.
 
 Optional Master tuning variables are `CONSTRAINT_TREE_BUILD_THREADS`, `CONSTRAINT_TREE_RECONCILE_INTERVAL_SECONDS`, `CONSTRAINT_TREE_PUBLISH_CONCURRENCY`, and `CONSTRAINT_TREE_PUBLISH_TIMEOUT_SECONDS`.
 

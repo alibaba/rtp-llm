@@ -105,10 +105,20 @@ verification and construction using retained input. A built artifact is repushed
 without rebuilding. Corrected SID data must use a new version.
 
 Normal inference requests do not carry the tree or a download address. They use
-the currently active snapshot. Use fixed `num_beams`, with at least that many
-distinct root candidates. Variable beam expansion is unsupported. Finished beams
+the currently active snapshot. Both fixed `num_beams` and positive
+`variable_num_beams` schedules are supported by the existing sampler. The root
+must contain at least the first scheduled width of distinct candidates, not the
+maximum width. Later expansion selects across the surviving parents; insufficient
+valid candidates or non-finite selected scores fail that request closed. No
+automatic beam shrinking or duplicate padding is introduced. Finished beams
 remain EOS-only while longer siblings complete; other invalid transitions fail
 the request closed.
+
+Sparse CSR masks use negative infinity for disallowed tokens. Beam search reuses
+the upstream mask-aware TopK optimization (0190dfffb8): masked ties do not require
+stable index ordering, while finite candidates retain their original ordering.
+Selected non-finite scores are still rejected; the optimization does not make
+masked candidates valid. The binary-search CSR mask kernel is unchanged.
 
 ## Recovery and scope
 
@@ -118,7 +128,7 @@ the request closed.
   resubmission before inference can resume.
 - Backup is retained for inspection/recovery, not automatic rollback. To restore
   an older SID set, republish that set using a new, higher version.
-- Single-Master operation, fixed beams, and the existing binary-search GPU mask
+- Single-Master operation and the existing binary-search GPU mask
   kernel are intentional MVP limits. No cross-Master election or DFS is included.
 
 ## Real-model E2E
@@ -141,6 +151,10 @@ required-tree rejection, mixed-length/prefix-overlapping SIDs, fixed beams 1/2/3
 hot publication, backup, stale artifacts, synchronous/asynchronous load failures,
 and an in-flight long request spanning a snapshot switch. It prints the final
 version/SID set for a separate cold-Worker-restart recovery check.
+Variable-beam checks cover growth, shrinking, repeated single-beam steps, candidate
+shortage followed by a successful request, and 512-to-3500 expansion with EOS.
+The CUDA sampler regression separately compares sparse results against the Torch
+reference and checks stable finite ties with small and production-size vocabularies.
 
 For a Java-to-C++ protocol-only test without model weights, use
 `ConstraintTreeCrossLanguageE2ETest` with `CONSTRAINT_TREE_CPP_WORKER_BINARY` set

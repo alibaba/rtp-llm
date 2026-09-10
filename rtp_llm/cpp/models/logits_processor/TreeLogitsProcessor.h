@@ -77,6 +77,9 @@ public:
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) override;
+    // The sampler already returns host scores. Reject an incomplete/invalid
+    // constrained beam set before any selected tokens are exposed to callers.
+    void validateBeamScores(const rtp_llm::BufferPtr& scores, size_t output_count) const;
 
 public:
     std::vector<std::string> getStatus();
