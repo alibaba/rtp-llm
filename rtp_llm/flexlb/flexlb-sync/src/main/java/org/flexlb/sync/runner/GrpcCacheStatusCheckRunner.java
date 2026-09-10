@@ -102,7 +102,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             // EngineSyncRunner is invoked on the status-poll cadence. Prefill
             // cache polling uses an integer number of those ticks so a changing
             // interval does not require a second scheduler or timer.
-            if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
+            if (roleType.requiresCacheKeys()
                         && syncCount.longValue() % roundInterval != 0) {
                 logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
                 return; // finally will reset the flag
@@ -190,7 +190,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 }
                 if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
                     workerStatus.publishCacheStatus(newCacheStatus);
-                    if (isCacheProducingRole()) {
+                    if (roleType.requiresCacheKeys()) {
                         // CacheAwareService is keyed by address, not generation.
                         // Keep the generation lock through this in-memory index
                         // update so retirement cannot publish a replacement or
@@ -275,11 +275,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
             return null;
         }
-    }
-
-    private boolean isCacheProducingRole() {
-        return RoleType.PREFILL.equals(roleType)
-                || RoleType.PDFUSION.equals(roleType);
     }
 
     private void log(String msg) {
