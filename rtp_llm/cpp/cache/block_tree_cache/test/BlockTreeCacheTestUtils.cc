@@ -921,7 +921,7 @@ void FullSWAEnvironment::insertRequestPath() {
         resources[path_index][0].device_blocks = request_blocks[0][path_index];
         resources[path_index][1].device_blocks = request_blocks[1][path_index];
     }
-    cache->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
+    cache->insert(keys, resources, Tier::DEVICE, /*is_resident=*/false);
 }
 
 void FullSWAEnvironment::releaseRequestRefs() {

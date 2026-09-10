@@ -38,7 +38,7 @@ protected:
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(swa_b + i)};
             resources[i][2].device_blocks = {static_cast<BlockIdxType>(lin_b + i)};
         }
-        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
+        cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/false);
     }
 
     void insertResidentPath(const CacheKeysType& keys) {
@@ -48,7 +48,7 @@ protected:
         for (const TreeNode* node : path) {
             resources.push_back(node->group_set_resources);
         }
-        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
+        cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/true);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -275,7 +275,7 @@ TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
     resources[0][1].device_blocks = {30};
     resources[1][0].device_blocks = {21};
     resources[1][1].device_blocks = {31};
-    swa_lin_cache->insert({100, 200}, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
+    swa_lin_cache->insert({100, 200}, resources, Tier::DEVICE, /*is_resident=*/false);
 
     EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 2u);
     EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 4u);
