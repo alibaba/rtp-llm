@@ -1512,3 +1512,77 @@ HANDLERS.append(
         requires=frozenset({"enqueue_batch"}),
     )
 )
+
+
+def _execution_capacity_validate(params, plan):
+    p = _fields(
+        params,
+        {"rows", "max_running_batches", "min_requests"},
+        {"rows", "max_running_batches", "min_requests"},
+    )
+    plan.reference(p["rows"], "admission_rows")
+    for key in ("max_running_batches", "min_requests"):
+        if type(p[key]) is not int or p[key] < 1:
+            raise ValueError("execution capacity requires positive integer bounds")
+    return p
+
+
+def execution_capacity(events, ids):
+    from .execution_evidence import execution_batches
+
+    batches = execution_batches(events, ids)
+    peaks = {}
+    for engine in {b["engine"] for b in batches}:
+        edges = sorted(
+            (t, delta)
+            for b in batches
+            if b["engine"] == engine
+            for t, delta in ((b["start_ms"], 1), (b["end_ms"], -1))
+            if b["end_ms"] > b["start_ms"]
+        )
+        active = peak = 0
+        for _, delta in edges:
+            active += delta
+            peak = max(peak, active)
+        peaks[engine] = peak
+    return {"batches": batches, "peaks": peaks}
+
+
+def _execution_capacity(ctx, params, deadline):
+    from .execution_evidence import read_events
+
+    deadline.check()
+    rows = ctx.resource(params["rows"], "admission_rows")
+    ids = {r["wire_request_id"] for r in rows}
+    events = read_events(ctx.env.run_dir / "engine_events.jsonl")
+    if events is None:
+        raise ValueError("execution capacity requires engine execution evidence")
+    evidence = execution_capacity(events, ids)
+    passed = (
+        len(ids) >= params["min_requests"]
+        and bool(evidence["peaks"])
+        and all(
+            0 < n <= params["max_running_batches"] for n in evidence["peaks"].values()
+        )
+    )
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "capacity",
+                "PASS" if passed else "FAIL",
+                actual=evidence,
+                expected=params["max_running_batches"],
+            )
+        ]
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "admission_execution_capacity",
+        _execution_capacity_validate,
+        _execution_capacity,
+        {},
+        checks=frozenset({"capacity"}),
+    )
+)

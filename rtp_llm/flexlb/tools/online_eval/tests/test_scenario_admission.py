@@ -288,6 +288,7 @@ class AdmissionProgramsTest(unittest.TestCase):
         )
         state = SimpleNamespace(sent=0, waited=0, active=False, lock=threading.Lock())
         test = self
+        (Path(self.tmp.name) / "engine_events.jsonl").write_text("")
 
         class Batch:
             def __init__(self, ctx, params):
@@ -324,6 +325,23 @@ class AdmissionProgramsTest(unittest.TestCase):
                     )
                 row = test.row(code, text, latency)
                 row["wire_request_id"] = i
+                if variant == "prefill_concurrency":
+                    event_path = Path(test.tmp.name) / "engine_events.jsonl"
+                    with event_path.open("a") as out:
+                        out.write(
+                            json.dumps(
+                                dict(
+                                    event="prefill_done",
+                                    rid=i,
+                                    batch_id=i,
+                                    engine_name="prefill-0",
+                                    engine_arrival_ms=i * 10,
+                                    prefill_start_ms=i * 10,
+                                    prefill_done_ms=i * 10 + 10,
+                                )
+                            )
+                            + "\n"
+                        )
                 self.records = [row]
                 self.entries = [
                     dict(
@@ -428,7 +446,7 @@ class AdmissionProgramsTest(unittest.TestCase):
         )
         backend = SimpleNamespace(
             setup=lambda *args: (
-                SimpleNamespace(),
+                SimpleNamespace(run_dir=Path(test.tmp.name)),
                 probe_ops,
             ),
             teardown=lambda *args: None,

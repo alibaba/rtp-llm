@@ -33,6 +33,61 @@ def event(rid, batch, engine, arrival=0, start=1, end=10):
 
 
 class ExecutionEvidenceTests(unittest.TestCase):
+    def test_recovery_under_other_owner_load_is_not_a_distribution_oracle(self):
+        from flexlb_test_framework.scenario.actions import master_observation as obs
+
+        rows = [
+            dict(
+                wire_request_id=i,
+                business_finished=True,
+                business_error_code=None,
+                schedule={"status": "OK"},
+                stream={"status": "OK"},
+                cancel={"requested_s": None},
+                prefill_addr="P0",
+            )
+            for i in range(20)
+        ]
+        ctx = NS(resource=lambda *a: NS(snapshot_records=lambda: rows))
+        with patch.object(
+            obs, "_pools", return_value={"prefill": ["P0", "P1"]}
+        ), patch.object(obs, "_artifact", return_value="probe.json"):
+            result = obs.probe_distribution(
+                ctx,
+                {"requests": "r", "mode": "recovery", "max_prefill_share": 0.75},
+                NS(),
+            )
+            self.assertEqual("PASS", result.checks[0].status)
+            for row in rows[:2]:
+                row["business_finished"] = False
+            result = obs.probe_distribution(
+                ctx,
+                {"requests": "r", "mode": "recovery", "max_prefill_share": 0.75},
+                NS(),
+            )
+            self.assertEqual("FAIL", result.checks[0].status)
+            rows[2]["prefill_addr"] = "unknown"
+            with self.assertRaisesRegex(ValueError, "unknown Prefill"):
+                obs.probe_distribution(
+                    ctx,
+                    {"requests": "r", "mode": "recovery", "max_prefill_share": 0.75},
+                    NS(),
+                )
+
+    def test_capacity_uses_distinct_batches_and_half_open_intervals(self):
+        from flexlb_test_framework.scenario.actions.admission import execution_capacity
+
+        rows = [
+            event(1, 1, "P0", 0, 1, 10),
+            event(2, 1, "P0", 0, 1, 10),
+            event(3, 2, "P0", 0, 10, 20),
+        ]
+        self.assertEqual({"P0": 1}, execution_capacity(rows, {1, 2, 3})["peaks"])
+        rows[-1]["prefill_start_ms"] = 9
+        self.assertEqual({"P0": 2}, execution_capacity(rows, {1, 2, 3})["peaks"])
+        with self.assertRaisesRegex(ValueError, "missing"):
+            execution_capacity(rows, {1, 2, 3, 4})
+
     def test_single_merged_and_cross_engine_batches(self):
         rows = [event(1, 1, "P0"), event(2, 1, "P0"), event(3, 1, "P1")]
         self.assertEqual(1, len(execution_batches(rows, {1, 2})))

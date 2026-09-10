@@ -478,3 +478,69 @@ HANDLERS = [
         checks=frozenset({"victim_visible_terminal"}),
     ),
 ]
+
+
+def terminal_validate(params, plan):
+    from .elastic import _validate
+
+    p = _validate(
+        params, plan, {"result", "terminal_bound_s"}, {"result", "terminal_bound_s"}
+    )
+    plan.reference(p["result"], "snapshot")
+    if (
+        type(p["terminal_bound_s"]) not in (int, float)
+        or not 0 < p["terminal_bound_s"] <= 120
+    ):
+        raise ValueError("pending terminal bound must be in (0,120]")
+    return p
+
+
+def terminal_contract(result, bound_s):
+    from .elastic import request_success
+
+    bad = []
+    removed_s = result["removed_s"]
+    for record in result["records"]:
+        end = record.get("transport_terminal_s")
+        outcome = classify(record, removed_s)
+        # An error that predates the removal is not explained by the stale window.
+        valid = (
+            record.get("consumer_exit_s") is not None
+            and end is not None
+            and record["cancel"]["requested_s"] is None
+            and outcome["kind"] in {"completed", "error"}
+            and end - removed_s <= bound_s
+            and record["consumer_exit_s"] - removed_s <= bound_s
+            and (request_success(record) or end >= removed_s)
+        )
+        if not valid:
+            bad.append(record["wire_request_id"])
+    return bool(result["records"]) and not bad, bad
+
+
+def terminal(ctx, params, deadline):
+    deadline.check()
+    result = ctx.resource(params["result"], "snapshot")
+    good, bad = terminal_contract(result, params["terminal_bound_s"])
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "all_terminal",
+                "PASS" if good else "FAIL",
+                actual=bad,
+                expected="all issued requests have an uncancelled bounded terminal; pre-remove errors fail",
+                evidence=result,
+            )
+        ]
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "elastic_pending_terminal",
+        terminal_validate,
+        terminal,
+        {},
+        checks=frozenset({"all_terminal"}),
+    )
+)

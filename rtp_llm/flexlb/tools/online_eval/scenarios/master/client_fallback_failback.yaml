@@ -111,8 +111,8 @@ parameters:
     ready_a:
       target: A
     recovery_distribution:
-      mode: avoidance
-      max_prefill_share: 0.75
+      # A/B share busy engines here; verify recovery, then test isolated rotation.
+      mode: recovery
     rotation_probe_timeout_s: 330
     rotation_probe:
       target: A

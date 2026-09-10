@@ -33,8 +33,7 @@ variants:
   - single-batch
   program: single_batch_terminal
 metadata:
-  description: Private pending-wave scale-in; legacy visible terminals and an explicit stronger all-issued
-    zero-error variant.
+  description: Private pending-wave scale-in; visible terminals during scale-in and zero-error recovery after topology convergence.
   category: elastic
   requires:
   - enqueue_batch
@@ -118,8 +117,11 @@ parameters:
       discovered: 1
       alive: 1
       present: false
-    all_issued_zero_errors:
+    # Historical variant id is retained; zero errors applies to fresh recovery traffic.
+    recovery_zero_errors:
       min_success_rate: 1.0
+    all_issued_terminal:
+      terminal_bound_s: 40
   single_batch_terminal:
     setup_timeout_s: 180
     slow_both_prefills:

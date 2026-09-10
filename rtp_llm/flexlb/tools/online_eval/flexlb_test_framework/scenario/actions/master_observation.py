@@ -305,7 +305,7 @@ def _probe_validate(params, plan):
     plan.reference(p["requests"], "requests")
     _number(p, "max_prefill_share", 0.75, 0.5, 1)
     p.setdefault("mode", "share")
-    if p["mode"] not in {"share", "avoidance", "rotation"}:
+    if p["mode"] not in {"share", "avoidance", "rotation", "recovery"}:
         raise ValueError("invalid probe distribution mode")
     if p["mode"] == "rotation" and (
         type(p.get("max_consecutive")) is not int or p["max_consecutive"] < 1
@@ -338,7 +338,13 @@ def probe_distribution(ctx, p, deadline):
         and total / len(rows) >= 0.95
         and share <= p["max_prefill_share"]
     )
-    if p.get("mode", "share") != "share":
+    if p.get("mode") == "recovery":
+        # Concurrent traffic from the other master makes engine-arrival busy
+        # intervals unsuitable as a scheduling-decision oracle. This phase
+        # proves the restarted master can serve requests; the later isolated
+        # rotation phase separately checks distribution.
+        good = len(rows) >= 20 and total / len(rows) >= 0.95
+    if p.get("mode", "share") in {"avoidance", "rotation"}:
         from .execution_evidence import (
             avoidance,
             execution_batches,
@@ -372,9 +378,13 @@ def probe_distribution(ctx, p, deadline):
                 expected={
                     "min_success": 0.95,
                     **(
-                        {"violations": 0}
-                        if p.get("mode") == "avoidance"
-                        else {"max_share": p["max_prefill_share"]}
+                        {"valid_prefill_endpoints": True}
+                        if p.get("mode") == "recovery"
+                        else (
+                            {"violations": 0}
+                            if p.get("mode") == "avoidance"
+                            else {"max_share": p["max_prefill_share"]}
+                        )
                     ),
                     "mode": p.get("mode", "share"),
                     **(

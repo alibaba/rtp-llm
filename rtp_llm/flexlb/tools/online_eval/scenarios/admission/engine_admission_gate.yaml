@@ -62,24 +62,9 @@ parameters:
       metric: admitted_count
       expected: 4
       op: eq
-    park_timeout_s: 20
-    park:
-      targets:
-      - prefill-0
-      fields:
-      - prefill_waiting_batches
-      - waiting
-      duration_s: 10
-      reduce: any
-      until_value: 1
-      until_op: ge
-    park_seen:
-      fields:
-      - prefill_waiting_batches
-      - waiting
-      stat: max_seen
-      op: ge
-      expected: 1
+    execution_capacity:
+      max_running_batches: 1
+      min_requests: 4
     drained_timeout_s: 120
     all_completed:
       metric: success_count

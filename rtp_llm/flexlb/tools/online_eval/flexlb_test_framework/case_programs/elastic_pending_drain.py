@@ -1,4 +1,4 @@
-"""Private pending-wave scale-in; legacy visible terminals and an explicit stronger all-issued zero-error variant."""
+"""Private pending-wave scale-in; legacy visible terminals and a zero-error recovery variant after topology convergence."""
 
 from ..case_config import output
 
@@ -103,15 +103,15 @@ def zero_errors(case):
         params=case.value("zero_errors.restore_survivor"),
     )
     case.step(
-        "recovery",
-        "elastic_pending_recovery",
-        timeout_s=case.value("zero_errors.recovery_timeout_s"),
-    )
-    case.step(
         "topology",
         "elastic_topology",
         timeout_s=case.value("zero_errors.topology_timeout_s"),
         params=case.params("zero_errors.topology", {"port": output("remove", "port")}),
+    )
+    case.step(
+        "recovery",
+        "elastic_pending_recovery",
+        timeout_s=case.value("zero_errors.recovery_timeout_s"),
     )
     case.step(
         "visible_terminal",
@@ -119,11 +119,18 @@ def zero_errors(case):
         params={"result": output("collect", "result")},
     )
     case.step(
-        "all_issued_zero_errors",
+        "recovery_zero_errors",
         "elastic_flow_assert",
         params=case.params(
-            "zero_errors.all_issued_zero_errors",
-            {"result": output("collect", "summary")},
+            "zero_errors.recovery_zero_errors",
+            {"result": output("recovery", "result")},
+        ),
+    )
+    case.step(
+        "all_issued_terminal",
+        "elastic_pending_terminal",
+        params=case.params(
+            "zero_errors.all_issued_terminal", {"result": output("collect", "result")}
         ),
     )
     case.step("teardown", "teardown")

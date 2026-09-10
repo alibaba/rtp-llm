@@ -248,3 +248,5 @@ child 写每个实例的 `result.json` 与证据，并汇总到 `scenarios.json`
 框架测试数量不是 Java 业务实例通过数量。修复必须追加新版本结果，不能覆盖冻结版本的原始失败。
 
 关于 P/D 预留、Fetch、计算槽与 KV 引用的区别，以及省网络压测开关，见 [Mock P/D 与 Fetch 生命周期](mock-pd-fetch-lifecycle.md)。
+
+摘机与瞬时失联的阶段边界、配置推导和各家族改造方案见 [摘机 case 契约](engine-removal-contract.md)。

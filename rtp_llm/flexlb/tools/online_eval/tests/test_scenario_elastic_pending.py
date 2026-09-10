@@ -392,11 +392,40 @@ class PendingTests(unittest.TestCase):
             self.assertAlmostEqual(sleeps[0], 0.01)
             self.assertEqual([c.status for c in result.checks], ["FAIL"] * 3)
 
-    def test_zero_errors_is_stronger_than_expected_terminal(self):
+    def test_terminal_contract_rejects_hangs_late_consumers_and_early_errors(self):
+        record = dict(
+            wire_request_id=1,
+            business_finished=True,
+            business_error_code=None,
+            schedule={"status": "OK", "error": None},
+            stream={"status": "OK"},
+            cancel={"requested_s": None},
+            transport_terminal_s=11,
+            consumer_exit_s=11,
+        )
+        result = dict(records=[record], removed_s=10)
+        self.assertTrue(pending.terminal_contract(result, 40)[0])
+        record["consumer_exit_s"] = 51
+        self.assertFalse(pending.terminal_contract(result, 40)[0])
+        record["consumer_exit_s"] = 11
+        record["transport_terminal_s"] = None
+        self.assertFalse(pending.terminal_contract(result, 40)[0])
+        record.update(
+            transport_terminal_s=9,
+            consumer_exit_s=9,
+            business_finished=False,
+            business_error_code=8431,
+        )
+        self.assertFalse(pending.terminal_contract(result, 40)[0])
+
+    def test_zero_errors_applies_to_recovery_after_topology(self):
         result, _ = self.run_program("zero_errors")
         rows = {r["id"]: r for r in result["stages"]}
         self.assertEqual(rows["visible_terminal"]["status"], "PASS")
-        self.assertEqual(rows["all_issued_zero_errors"]["status"], "FAIL")
+        self.assertEqual(rows["recovery_zero_errors"]["status"], "PASS")
+        self.assertEqual(rows["all_issued_terminal"]["status"], "PASS")
+        ids = list(rows)
+        self.assertLess(ids.index("topology"), ids.index("recovery"))
 
     def test_schedule_reject_is_retained_but_not_a_victim_terminal(self):
         legacy, state = self.run_program(wave_error=False, reject_first=True)
@@ -412,7 +441,7 @@ class PendingTests(unittest.TestCase):
         self.assertIsNone(rejected_outcome["route"])
         strict, _ = self.run_program("zero_errors", wave_error=False, reject_first=True)
         self.assertEqual(
-            next(r for r in strict["stages"] if r["id"] == "all_issued_zero_errors")[
+            next(r for r in strict["stages"] if r["id"] == "all_issued_terminal")[
                 "status"
             ],
             "FAIL",
@@ -424,6 +453,11 @@ class PendingTests(unittest.TestCase):
         self.assertEqual(rows["wave"]["status"], "FAIL")
         self.assertEqual(rows["remove"]["status"], "BLOCKED")
         self.assertNotIn("remove_s", state)
+
+    def test_zero_error_recovery_does_not_accept_one_failure(self):
+        result, _ = self.run_program("zero_errors", recovery_errors=1)
+        rows = {r["id"]: r for r in result["stages"]}
+        self.assertEqual(rows["recovery_zero_errors"]["status"], "FAIL")
 
     def test_recovery_preserves_19_of_20_boundary(self):
         for errors, expected in [(1, "PASS"), (2, "FAIL")]:

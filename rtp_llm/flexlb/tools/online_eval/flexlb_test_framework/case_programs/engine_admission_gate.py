@@ -26,19 +26,6 @@ def prefill_concurrency(case):
         ),
     )
     case.step(
-        "park",
-        "admission_observe",
-        timeout_s=case.value("prefill_concurrency.park_timeout_s"),
-        params=case.value("prefill_concurrency.park"),
-    )
-    case.step(
-        "park_seen",
-        "admission_gauge_check",
-        params=case.params(
-            "prefill_concurrency.park_seen", {"snapshot": output("park", "snapshot")}
-        ),
-    )
-    case.step(
         "drained",
         "admission_wait",
         timeout_s=case.value("prefill_concurrency.drained_timeout_s"),
@@ -49,6 +36,14 @@ def prefill_concurrency(case):
         "admission_check",
         params=case.params(
             "prefill_concurrency.all_completed", {"rows": output("drained", "rows")}
+        ),
+    )
+    case.step(
+        "execution_capacity",
+        "admission_execution_capacity",
+        params=case.params(
+            "prefill_concurrency.execution_capacity",
+            {"rows": output("drained", "rows")},
         ),
     )
     case.step(
