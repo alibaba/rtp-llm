@@ -231,6 +231,7 @@ std::string ModelConfig::to_string() const {
         << "use_norm_input_residual: " << use_norm_input_residual << "\n"
         << "use_norm_attn_out_residual: " << use_norm_attn_out_residual << "\n"
         << "max_seq_len: " << max_seq_len << "\n"
+        << "physical_mtp_module_num: " << physical_mtp_module_num << "\n"
         << "vocab_size: " << vocab_size << "\n"
         << "output_vocab_size: " << output_vocab_ids.size() << "\n"
         << "output_vocab_padded_size: " << output_vocab_padded_size << "\n"

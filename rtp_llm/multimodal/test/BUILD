@@ -98,6 +98,16 @@ py_test(
     ],
 )
 
+py_test(
+    name = "minimax_m3_vl_vit_test",
+    srcs = [
+        "minimax_m3_vl_vit_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
 # This target covers the production shared-library and Python/C++ config boundary.
 # The real Barex multi-GPU export -> read -> release smoke lives in internal_source.
 py_test(
@@ -114,4 +124,14 @@ py_test(
         "//rtp_llm:config_ops",
     ],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "minimax_m3_vl_rope_test",
+    srcs = [
+        "minimax_m3_vl_rope_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
 )

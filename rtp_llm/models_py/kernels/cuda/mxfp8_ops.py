@@ -1,0 +1,278 @@
+"""MXFP8 (1x32 microscaling FP8) primitives for MiniMax-M3.
+
+Weights are e4m3 with a UE8M0 (uint8) ``weight_scale_inv`` on a fixed
+``[1, 32]`` micro-block. Activations are dynamically quantized to e4m3 with a
+per-(row, 32-col) UE8M0 scale. The GEMMs go through DeepGEMM's
+``fp8_fp4_gemm_nt`` / ``m_grouped_fp8_fp4_gemm_nt_contiguous`` with
+``recipe=(1, 32)`` (these handle FP8xFP8 with this recipe). SM100 only.
+"""
+
+import os
+from typing import Optional, Tuple
+
+import torch
+
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    fp8_fp4_gemm_nt,
+    m_grouped_fp8_fp4_gemm_nt_contiguous,
+    m_grouped_fp8_fp4_gemm_nt_masked,
+)
+
+MX_BLOCK = 32
+_FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+_FLASHINFER_CUTE_DSL_MAX_NUMEL = 2**31 - 1
+
+
+def ue8m0_uint8_to_fp32(scale_u8: torch.Tensor) -> torch.Tensor:
+    """On-disk UE8M0 (uint8 exponent, bias 127) -> fp32 power-of-two scale."""
+    return torch.exp2(scale_u8.to(torch.float32) - 127.0)
+
+
+def mxfp8_quant_act_eager(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Dynamic per-(row, 32-col) MXFP8 quant of a 2D activation.
+
+    Returns (e4m3 ``[M, K]``, fp32 power-of-two scale ``[M, K // 32]``).
+    The scale is a pure power of two so it is exactly representable as UE8M0.
+
+    This is a compatibility reference for callers that need row-major fp32
+    scales. DeepGEMM hot paths should use ``mxfp8_quant_act_packed``.
+    """
+    assert x.dim() == 2, f"expected 2D activation, got {x.shape}"
+    M, K = x.shape
+    assert K % MX_BLOCK == 0, f"K={K} must be a multiple of {MX_BLOCK}"
+    xf = x.to(torch.float32).view(M, K // MX_BLOCK, MX_BLOCK)
+    amax = xf.abs().amax(dim=-1).clamp(min=1e-20)
+    exp = torch.ceil(torch.log2(amax / _FP8_E4M3_MAX))
+    scale = torch.exp2(exp)
+    q = (xf / scale.unsqueeze(-1)).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX)
+    return q.view(M, K).to(torch.float8_e4m3fn).contiguous(), scale.contiguous()
+
+
+def _mxfp8_quant_flashinfer_backend(x: torch.Tensor) -> str:
+    # cute-dsl is faster for normal decode/prefill shapes, but it is not safe
+    # once flattened input offsets exceed the 32-bit element-indexing range.
+    if x.numel() > _FLASHINFER_CUTE_DSL_MAX_NUMEL:
+        return "cuda"
+    return "cute-dsl"
+
+
+def mxfp8_quant_act_packed(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Dynamic MXFP8 quant for DeepGEMM packed-scale consumers.
+
+    Returns (e4m3 ``[M, K]``, int32 packed scale) using
+    ``flashinfer.mxfp8_quantize`` plus the local scale-layout packer.
+    This is intentionally separate from :func:`mxfp8_quant_act`: the generic
+    API returns row-major fp32 scale, while DeepGEMM consumes packed int32 scale.
+    """
+    assert x.dim() == 2, f"expected 2D activation, got {x.shape}"
+    K = x.shape[1]
+    assert K % MX_BLOCK == 0, f"K={K} must be a multiple of {MX_BLOCK}"
+    assert x.is_cuda, "FlashInfer MXFP8 quant requires CUDA input"
+    assert x.is_contiguous(), "input must be contiguous"
+
+    import flashinfer
+
+    q, scale_u8 = flashinfer.mxfp8_quantize(
+        x,
+        is_sf_swizzled_layout=False,
+        alignment=MX_BLOCK,
+        backend=_mxfp8_quant_flashinfer_backend(x),
+    )
+    from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
+        pack_flashinfer_mxfp8_scale_triton,
+    )
+
+    return q, pack_flashinfer_mxfp8_scale_triton(scale_u8, x.shape[0], K)
+
+
+def mxfp8_quant_act(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Dynamic per-(row, 32-col) MXFP8 quant of a 2D activation.
+
+    Returns (e4m3 ``[M, K]``, fp32 power-of-two scale ``[M, K // 32]``).
+    Keep this public contract because fused norm/activation callers pass the
+    scale onward as row-major fp32. Packed-scale consumers must call
+    :func:`mxfp8_quant_act_packed` instead.
+    """
+    if os.environ.get("MXFP8_QUANT_EAGER") == "1" or not x.is_cuda:
+        return mxfp8_quant_act_eager(x)
+    from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
+        mxfp8_quant_act_triton,
+    )
+
+    return mxfp8_quant_act_triton(x)
+
+
+def pack_mxfp8_scale(
+    scale_fp32: torch.Tensor,
+    mn: int,
+    k: int,
+    num_groups: Optional[int] = None,
+) -> torch.Tensor:
+    """Pack an fp32 (power-of-two) scale into DeepGEMM's int32 TMA layout.
+
+    ``scale_fp32`` is ``[mn, k // 32]`` (or ``[num_groups, mn, k // 32]`` when
+    ``num_groups`` is given). Uses the (1, 32) recipe; output dtype is int32.
+    """
+    import deep_gemm
+
+    kwargs = dict(mn=mn, k=k, recipe=(1, MX_BLOCK))
+    if num_groups is not None:
+        kwargs["num_groups"] = num_groups
+    sf = scale_fp32.contiguous()
+    # DeepGEMM's JIT kernel launches on the *current* CUDA device. During
+    # weight loading each TP rank's tensors live on its own device (e.g.
+    # cuda:5) while the current device may still be cuda:0, which makes the
+    # launch fail with CUDA_ERROR_INVALID_VALUE. Pin the current device to the
+    # tensor's device for the launch.
+    if sf.is_cuda:
+        with torch.cuda.device(sf.device):
+            return deep_gemm.transform_sf_into_required_layout(sf, **kwargs)
+    return deep_gemm.transform_sf_into_required_layout(sf, **kwargs)
+
+
+def mxfp8_linear(
+    x: torch.Tensor,
+    weight_e4m3: torch.Tensor,
+    weight_scale_packed: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """y = x @ weight_e4m3.T   (weight is [N, K] e4m3, scale prepacked int32)."""
+    M, N = x.shape[0], weight_e4m3.shape[0]
+    a_q, a_s_packed = mxfp8_quant_act_packed(x)
+    out = torch.empty(M, N, device=x.device, dtype=out_dtype)
+    with torch.cuda.device(x.device):
+        fp8_fp4_gemm_nt(
+            (a_q, a_s_packed),
+            (weight_e4m3, weight_scale_packed),
+            out,
+            recipe_a=(1, MX_BLOCK),
+            recipe_b=(1, MX_BLOCK),
+            disable_ue8m0_cast=True,
+        )
+    if bias is not None:
+        out = out + bias.to(out.dtype)
+    return out
+
+
+def mxfp8_grouped_gemm(
+    x: torch.Tensor,
+    weight_e4m3: torch.Tensor,
+    weight_scale_packed: torch.Tensor,
+    m_indices: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Grouped (contiguous) MoE GEMM. ``weight_e4m3`` is ``[E, N, K]``.
+
+    Rows of ``x`` must already be permuted so each expert's tokens are
+    contiguous and each expert block is padded to
+    ``deep_gemm.get_m_alignment_for_contiguous_layout()`` (128). ``m_indices``
+    maps each row to its expert id.
+    """
+    T, N = x.shape[0], weight_e4m3.shape[1]
+    a_q, a_s_packed = mxfp8_quant_act_packed(x)
+    out = torch.empty(T, N, device=x.device, dtype=out_dtype)
+    with torch.cuda.device(x.device):
+        m_grouped_fp8_fp4_gemm_nt_contiguous(
+            (a_q, a_s_packed),
+            (weight_e4m3, weight_scale_packed),
+            out,
+            m_indices,
+            recipe_a=(1, MX_BLOCK),
+            recipe_b=(1, MX_BLOCK),
+            disable_ue8m0_cast=True,
+        )
+    return out
+
+
+def mxfp8_grouped_gemm_masked(
+    x: torch.Tensor,
+    weight_e4m3: torch.Tensor,
+    weight_scale_packed: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+    out_dtype: torch.dtype = torch.bfloat16,
+    quant_max_m: Optional[int] = None,
+    active_experts: Optional[torch.Tensor] = None,
+    active_count: Optional[torch.Tensor] = None,
+    quant_max_active_experts: Optional[int] = None,
+    active_row_experts: Optional[torch.Tensor] = None,
+    active_row_tokens: Optional[torch.Tensor] = None,
+    active_row_count: Optional[torch.Tensor] = None,
+    quant_max_active_rows: Optional[int] = None,
+) -> torch.Tensor:
+    assert x.dim() == 3, f"expected [E, M, K], got {tuple(x.shape)}"
+    E, M, K = x.shape
+    assert E == weight_e4m3.shape[0]
+    N = weight_e4m3.shape[1]
+
+    # DeepEP low-latency dispatch gives BF16 [E, M, K]. Keep the communication
+    # path BF16, then quantize only for the MXFP8 weight GEMM. Only rows below
+    # masked_m[expert] are guaranteed valid/readable in the low-latency buffer,
+    # so the quantizer must not flatten and read padded rows.
+    from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
+        mxfp8_quant_act_masked_packed_triton,
+    )
+
+    # Quantization must cover every row that masked_m may expose. expected_m is
+    # a DeepGEMM tuning hint, not a correctness upper bound; use the caller's
+    # graph-safe token-count bound when available.
+    a_q, a_s_packed = mxfp8_quant_act_masked_packed_triton(
+        x,
+        masked_m,
+        max_m=quant_max_m,
+        active_experts=active_experts,
+        active_count=active_count,
+        max_active_experts=quant_max_active_experts,
+        active_row_experts=active_row_experts,
+        active_row_tokens=active_row_tokens,
+        active_row_count=active_row_count,
+        max_active_rows=quant_max_active_rows,
+    )
+
+    out = torch.empty(E, M, N, device=x.device, dtype=out_dtype)
+    with torch.cuda.device(x.device):
+        m_grouped_fp8_fp4_gemm_nt_masked(
+            (a_q, a_s_packed),
+            (weight_e4m3, weight_scale_packed),
+            out,
+            masked_m,
+            expected_m,
+            recipe_a=(1, MX_BLOCK),
+            recipe_b=(1, MX_BLOCK),
+            disable_ue8m0_cast=True,
+        )
+    return out
+
+
+def mxfp8_grouped_gemm_masked_prequantized(
+    a_q: torch.Tensor,
+    a_s_packed: torch.Tensor,
+    weight_e4m3: torch.Tensor,
+    weight_scale_packed: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Masked DeepGEMM with activations already quantized to MXFP8.
+
+    This is used by fused activation+quant decode paths to avoid materializing
+    a BF16 intermediate only to immediately read it again for MXFP8 quant.
+    """
+    assert a_q.dim() == 3, f"expected [E, M, K], got {tuple(a_q.shape)}"
+    E, M, _ = a_q.shape
+    assert E == weight_e4m3.shape[0]
+    N = weight_e4m3.shape[1]
+    out = torch.empty(E, M, N, device=a_q.device, dtype=out_dtype)
+    with torch.cuda.device(a_q.device):
+        m_grouped_fp8_fp4_gemm_nt_masked(
+            (a_q, a_s_packed),
+            (weight_e4m3, weight_scale_packed),
+            out,
+            masked_m,
+            expected_m,
+            recipe_a=(1, MX_BLOCK),
+            recipe_b=(1, MX_BLOCK),
+            disable_ue8m0_cast=True,
+        )
+    return out

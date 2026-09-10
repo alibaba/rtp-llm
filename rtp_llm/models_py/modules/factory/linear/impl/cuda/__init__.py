@@ -24,5 +24,12 @@ if is_cuda():
 
         LinearFactory.register(CudaFp4GEMMLinear)
 
+        try:
+            from .mxfp8_linear import CudaMxfp8Linear
+
+            LinearFactory.register(CudaMxfp8Linear)
+        except ImportError as e:
+            logger.warning(f"MXFP8 Linear not available: {e}")
+
     LinearFactory.register(CudaFp8PerTensorLinear)
     LinearFactory.register(CudaFp8GEMMLinear)

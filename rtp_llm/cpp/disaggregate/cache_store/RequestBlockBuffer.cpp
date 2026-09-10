@@ -1,5 +1,7 @@
 #include <mutex>
 #include <unordered_map>
+#include <algorithm>
+#include <utility>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -97,37 +99,64 @@ bool RequestBlockBuffer::isValid() const {
 }
 
 bool RequestBlockBuffer::setWatchFunc(RequestBlockBuffer::WatchFunc&& watch_func) {
+    return setWatchFunc(std::move(watch_func), nullptr);
+}
+
+bool RequestBlockBuffer::setWatchFunc(RequestBlockBuffer::WatchFunc&&                        watch_func,
+                                      std::shared_ptr<const std::unordered_set<std::string>> filter_keys) {
+    auto      active_filter_keys = filter_keys;
+    WatchFunc active_watch_func  = std::move(watch_func);
     // set callback
     {
         std::unique_lock<std::shared_mutex> lock(watch_func_mutex_);
-        watch_funcs_.push_back(watch_func);
+        watch_funcs_.push_back({active_watch_func, std::move(filter_keys)});
     }
 
     // current blocks trigger once
-    // set callback then trigger will not miss new blocks
+    // set callback then trigger will not miss new blocks. Replay only to the
+    // newly registered watcher; broadcasting through triggerWatchFunc() makes
+    // every existing layer watcher rescan the same block list.
     std::vector<std::shared_ptr<BlockBuffer>> blocks;
     {
         std::shared_lock<std::shared_mutex> lock(blocks_mutex_);
         for (auto iter : blocks_) {
-            blocks.push_back(iter.second);
+            if (active_filter_keys == nullptr || active_filter_keys->empty()
+                || active_filter_keys->find(iter.first) != active_filter_keys->end()) {
+                blocks.push_back(iter.second);
+            }
         }
     }
-    if (!blocks.empty()) {
-        triggerWatchFunc(true, blocks);
+    if (!blocks.empty() && active_watch_func) {
+        active_watch_func(true, blocks);
     }
     return true;
 }
 
 void RequestBlockBuffer::triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
-    std::vector<WatchFunc> tmp_watch_funcs;
+    std::vector<Watcher> tmp_watch_funcs;
     {
         std::shared_lock<std::shared_mutex> lock(watch_func_mutex_);
         tmp_watch_funcs = watch_funcs_;
     }
 
-    for (auto watch_func : tmp_watch_funcs) {
-        if (watch_func) {
-            watch_func(ok, blocks);
+    for (auto& watcher : tmp_watch_funcs) {
+        if (!watcher.func) {
+            continue;
+        }
+        if (!ok || watcher.filter_keys == nullptr || watcher.filter_keys->empty()) {
+            watcher.func(ok, blocks);
+            continue;
+        }
+
+        std::vector<std::shared_ptr<BlockBuffer>> matched_blocks;
+        matched_blocks.reserve(std::min(blocks.size(), watcher.filter_keys->size()));
+        for (auto& block : blocks) {
+            if (block != nullptr && watcher.filter_keys->find(block->key) != watcher.filter_keys->end()) {
+                matched_blocks.push_back(block);
+            }
+        }
+        if (!matched_blocks.empty()) {
+            watcher.func(true, matched_blocks);
         }
     }
 }

@@ -67,6 +67,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.last_hidden_states.defined() ?
             static_cast<int64_t>(torchDTypeToDataType(inputs.last_hidden_states.dtype())) :
             0;
+    shape_hints[GptModelInputIndex::mtpHiddenStatesLayout] =
+        static_cast<int64_t>(inputs.last_hidden_states_layout);
     shape_hints[GptModelInputIndex::skipRun] = inputs.skip_run;
     shape_hints[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
@@ -155,8 +157,30 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     int64_t*      mm_extra_input_shape_ptr = nullptr;
     inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states          = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
-    inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
-    inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    const auto hidden_layout_value         = shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesLayout];
+    RTP_LLM_CHECK_WITH_INFO(hidden_layout_value >= static_cast<int64_t>(MtpHiddenStatesLayout::NONE)
+                                && hidden_layout_value <= static_cast<int64_t>(MtpHiddenStatesLayout::CP_LOCAL),
+                            "invalid synchronized MTP hidden layout=%ld",
+                            hidden_layout_value);
+    inputs.last_hidden_states_layout        = static_cast<MtpHiddenStatesLayout>(hidden_layout_value);
+    const bool synced_has_mtp_hidden_states = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] > 0;
+    RTP_LLM_CHECK_WITH_INFO(synced_has_mtp_hidden_states
+                                || inputs.last_hidden_states_layout == MtpHiddenStatesLayout::NONE,
+                            "MTP hidden layout must be NONE when hidden states are empty, got layout=%s",
+                            mtpHiddenStatesLayoutName(inputs.last_hidden_states_layout));
+    RTP_LLM_CHECK_WITH_INFO(!synced_has_mtp_hidden_states
+                                || inputs.last_hidden_states_layout != MtpHiddenStatesLayout::NONE,
+                            "MTP hidden layout must be explicit when hidden states are present");
+    RTP_LLM_CHECK_WITH_INFO(!synced_has_mtp_hidden_states
+                                || inputs.last_hidden_states_layout != MtpHiddenStatesLayout::CP_LOCAL,
+                            "CP-local MTP hidden states must be attached after tpSyncModelInputs");
+    if (!synced_has_mtp_hidden_states) {
+        // A non-root GptModelInputs object may be reused across iterations.
+        // Keep tensor presence and synchronized layout metadata atomic.
+        inputs.clearLastHiddenStates();
+    }
+    inputs.skip_run       = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.is_fake_stream = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;
     }
@@ -239,6 +263,24 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     bool is_non_root = parallelism_config.tp_rank != 0;
     if (is_non_root) {
+        // Optional multimodal fields may disappear on the next batch. Clear
+        // old storage before conditional allocation, otherwise a text-only
+        // batch can inherit stale MM metadata and enter the MM CP path.
+        if (!combo_position_ids_size) {
+            inputs.combo_position_ids = torch::Tensor();
+        }
+        if (!text_tokens_mask_size) {
+            inputs.text_tokens_mask = torch::Tensor();
+        }
+        if (!mm_features_locs_size) {
+            inputs.mm_features_locs = torch::Tensor();
+        }
+        if (!mm_features_num) {
+            inputs.multimodal_features.reset();
+        }
+        if (!mm_extra_input_num) {
+            inputs.mm_extra_input.reset();
+        }
         const auto context_batch_size = checkedHint(GptModelInputIndex::prefixLengths, "prefixLengths");
 
         // Respect the root-side device bitmap so all ranks classify tensors the

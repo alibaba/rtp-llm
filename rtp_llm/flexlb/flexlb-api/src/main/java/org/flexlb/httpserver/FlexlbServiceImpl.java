@@ -865,6 +865,19 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        request.setMediaKeys(pb.getMediaKeysList());
+        request.setVitRouteOnly(pb.getVitRouteOnly());
+        if (pb.hasSelectedVit()) {
+            FlexlbScheduleProtocol.FlexlbServerStatusPB selected = pb.getSelectedVit();
+            ServerStatus selectedVit = new ServerStatus();
+            selectedVit.setRole(RoleType.fromString(selected.getRole()));
+            selectedVit.setServerIp(selected.getServerIp());
+            selectedVit.setHttpPort(selected.getHttpPort());
+            selectedVit.setGrpcPort(selected.getGrpcPort());
+            selectedVit.setGroup(selected.getGroup());
+            selectedVit.setWorkerInstance(selected.getWorkerInstance());
+            request.setSelectedVit(selectedVit);
+        }
 
         var config = configService.loadBalanceConfig();
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
@@ -932,6 +945,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         .setServerIp(ss.getServerIp() != null ? ss.getServerIp() : "")
                         .setHttpPort(ss.getHttpPort())
                         .setGrpcPort(ss.getGrpcPort())
+                        .setGroup(ss.getGroup() != null ? ss.getGroup() : "")
+                        .setWorkerInstance(ss.getWorkerInstance() != null ? ss.getWorkerInstance() : "")
                         .build());
             }
         }

@@ -42,6 +42,9 @@ class FusedRopeAttnParams:
 class FusedRopeKVCachePrefillOpBase:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
+        self.rope_cache = get_rope_cache_once(
+            attn_configs.rope_config, attn_configs.max_seq_len
+        )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         if (
@@ -114,7 +117,9 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_offset=params.kv_cache_offset,
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
+                self.rope_cache.data
+                if check_rope_cache(rope_config, self.rope_cache)
+                else None
             ),
             padding_offset=params.padding_offset,
             position_ids=params.position_ids,
@@ -173,9 +178,32 @@ class FusedRopeKVCachePrefillOpQOut(FusedRopeKVCachePrefillOpBase):
         )
 
 
+class FusedRopeKVCachePrefillOpQNoTransposeOut(FusedRopeKVCachePrefillOpBase):
+    """RoPE + paged-KV write that returns q in ragged ``[token_num, head_num,
+    size_per_head]`` layout (no per-batch transpose/padding).
+
+    This matches the Python FlashInfer *paged* prefill wrapper, which consumes a
+    ragged query tensor plus a paged KV cache (the FlashInfer-HND ``kv_cache``
+    written here by ``store_cache``).
+    """
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        params: FusedRopeAttnParams,
+    ) -> torch.Tensor:
+        return self._forward(
+            qkv, kv_cache, params, True, False, False, False, False, False
+        )
+
+
 class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
+        self.rope_cache = get_rope_cache_once(
+            attn_configs.rope_config, attn_configs.max_seq_len
+        )
         self._dummy_scale: Optional[torch.Tensor] = None
 
     def _get_kv_scale(self, kv_cache: LayerKVCache) -> Optional[torch.Tensor]:
@@ -206,7 +234,6 @@ class FusedRopeKVCacheDecodeOp:
         params: FusedRopeAttnParams,
     ) -> torch.Tensor:
         rope_config = self.attn_configs.rope_config
-        rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
         assert params.kv_cache_offset is not None
         assert params.sequence_lengths.is_cuda or params.sequence_lengths.is_pinned(), (
             "sequence_lengths must be CUDA or pinned host memory"
@@ -226,7 +253,9 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_scale=self._get_kv_scale(kv_cache),
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
+                self.rope_cache.data
+                if check_rope_cache(rope_config, self.rope_cache)
+                else None
             ),
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,

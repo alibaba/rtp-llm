@@ -54,6 +54,17 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         size_t                        freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
 
         if (metrics_reporter_) {
+            if (freed > 0) {
+                // This allocation-pressure path drops the Device cache entry directly;
+                // unlike tiered eviction it does not copy the block to Memory first.
+                RtpLLMCacheEvictionMetricsCollector collector;
+                collector.direct_evicted_block_count = static_cast<int64_t>(freed);
+                kmonitor::MetricsTags tags("scope", "gpu");
+                tags.AddTag("backing", "device");
+                tags.AddTag("group_id", std::to_string(group_id_));
+                metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                           &collector);
+            }
             for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
                 RtpLLMCacheEvictionMetricsCollector collector;
                 collector.lifetime_ms = lifetime_ms;

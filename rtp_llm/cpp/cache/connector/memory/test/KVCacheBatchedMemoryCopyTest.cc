@@ -1,6 +1,7 @@
 // Copyright (c) RTP-LLM
 
 #include <cstring>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <set>
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 
@@ -554,7 +556,9 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
     EXPECT_TRUE(pro_connector->supportsTypedPrefixCacheLayout(pro_connector->layerTagSlots()));
 }
 
-void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
+void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags,
+                                     bool                         use_3d_h2d = false,
+                                     bool                         use_3d_d2h = false) {
     const auto set_device_rc = cudaSetDevice(0);
     ASSERT_EQ(set_device_rc, cudaSuccess) << cudaGetErrorString(set_device_rc);
 
@@ -635,7 +639,24 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
         }
     }
 
-    ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(items, KVCacheMemoryConnector::CopyDirection::D2H, slots));
+    if (use_3d_d2h) {
+        size_t tile_count    = 0;
+        size_t run_count     = 0;
+        size_t payload_bytes = 0;
+        ASSERT_TRUE(connector->tryCopyCacheWith3DBatchedMemoryCopy(items,
+                                                                   KVCacheMemoryConnector::CopyDirection::D2H,
+                                                                   slots,
+                                                                   &tile_count,
+                                                                   &run_count,
+                                                                   &payload_bytes));
+        EXPECT_GT(tile_count, 0u);
+        EXPECT_GT(run_count, 0u);
+        EXPECT_LT(run_count, tile_count);
+        EXPECT_GT(payload_bytes, 0u);
+    } else {
+        ASSERT_TRUE(
+            connector->tryCopyCacheWithStagedMemoryCopy(items, KVCacheMemoryConnector::CopyDirection::D2H, slots));
+    }
 
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
         const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
@@ -676,7 +697,24 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
         }
     }
 
-    ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(items, KVCacheMemoryConnector::CopyDirection::H2D, slots));
+    if (use_3d_h2d) {
+        size_t tile_count    = 0;
+        size_t run_count     = 0;
+        size_t payload_bytes = 0;
+        ASSERT_TRUE(connector->tryCopyCacheWith3DBatchedMemoryCopy(items,
+                                                                   KVCacheMemoryConnector::CopyDirection::H2D,
+                                                                   slots,
+                                                                   &tile_count,
+                                                                   &run_count,
+                                                                   &payload_bytes));
+        EXPECT_GT(tile_count, 0u);
+        EXPECT_GT(run_count, 0u);
+        EXPECT_LT(run_count, tile_count);
+        EXPECT_GT(payload_bytes, 0u);
+    } else {
+        ASSERT_TRUE(
+            connector->tryCopyCacheWithStagedMemoryCopy(items, KVCacheMemoryConnector::CopyDirection::H2D, slots));
+    }
 
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
         for (size_t i = 0; i < slots.size(); ++i) {
@@ -690,6 +728,14 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
 
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     runDsv4TypedStagedCopyRoundTrip({});
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesCuda3DBatchForH2D) {
+    runDsv4TypedStagedCopyRoundTrip({}, true);
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesCuda3DBatchForD2H) {
+    runDsv4TypedStagedCopyRoundTrip({}, false, true);
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedStagedCopySupportsHostBackedStateRegions) {
@@ -1477,6 +1523,185 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     EXPECT_FALSE(no_need_write);
     EXPECT_EQ(connector->compressed_pool_->freeBlocksNum(), 1u);
     EXPECT_EQ(connector->state_swa_pool_->freeBlocksNum(), 1u);
+}
+
+
+TEST(MemoryCopy3DRunBuilderTest, CoalescesRegularLayersPerBlockAndComponent) {
+    std::vector<BatchedMemoryCopy3DTile> tiles;
+    for (int layer = 0; layer < 4; ++layer) {
+        tiles.push_back({reinterpret_cast<void*>(0x1000 + layer * 0x100),
+                         reinterpret_cast<void*>(0x5000 + layer * 0x200),
+                         64,
+                         layer,
+                         0,
+                         0});
+    }
+    std::vector<BatchedMemoryCopy3DRun> runs;
+    std::string reason;
+    ASSERT_TRUE(buildBatchedMemoryCopy3DRuns(tiles, runs, &reason)) << reason;
+    ASSERT_EQ(runs.size(), 1u);
+    EXPECT_EQ(runs[0].depth, 4u);
+    EXPECT_EQ(runs[0].width_bytes, 64u);
+    EXPECT_EQ(runs[0].src_layer_pitch_bytes, 0x100u);
+    EXPECT_EQ(runs[0].dst_layer_pitch_bytes, 0x200u);
+}
+
+TEST(MemoryCopy3DRunBuilderTest, SplitsComponentsBlocksAndPitchBoundaries) {
+    std::vector<BatchedMemoryCopy3DTile> tiles;
+    for (int block = 0; block < 2; ++block) {
+        for (int component = 0; component < 2; ++component) {
+            for (int layer = 0; layer < 3; ++layer) {
+                const uintptr_t src_base = 0x10000 + block * 0x10000 + component * 0x4000;
+                const uintptr_t dst_base = 0x50000 + block * 0x10000 + component * 0x4000;
+                const uintptr_t src = src_base + (layer < 2 ? layer * 0x100 : 0x280);
+                const uintptr_t dst = dst_base + (layer < 2 ? layer * 0x100 : 0x280);
+                tiles.push_back({reinterpret_cast<void*>(src),
+                                 reinterpret_cast<void*>(dst),
+                                 64,
+                                 layer,
+                                 component,
+                                 block});
+            }
+        }
+    }
+    std::vector<BatchedMemoryCopy3DRun> runs;
+    ASSERT_TRUE(buildBatchedMemoryCopy3DRuns(tiles, runs));
+    EXPECT_EQ(runs.size(), 8u);
+    for (size_t i = 0; i < runs.size(); i += 2) {
+        EXPECT_EQ(runs[i].depth, 2u);
+        EXPECT_EQ(runs[i + 1].depth, 1u);
+    }
+}
+
+TEST(MemoryCopy3DRunBuilderTest, RejectsOverlappingRanges) {
+    std::vector<BatchedMemoryCopy3DTile> tiles{
+        {reinterpret_cast<void*>(0x1000), reinterpret_cast<void*>(0x5000), 128, 0, 0, 0},
+        {reinterpret_cast<void*>(0x1040), reinterpret_cast<void*>(0x6000), 128, 1, 0, 0}};
+    std::vector<BatchedMemoryCopy3DRun> runs;
+    std::string reason;
+    EXPECT_FALSE(buildBatchedMemoryCopy3DRuns(tiles, runs, &reason));
+    EXPECT_EQ(reason, "overlapping_tiles");
+}
+
+TEST(KVCacheBatchedMemoryCopyPerfTest, MiniMaxM3Block64CopyModes) {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    constexpr int kMainLayers = 60;
+    constexpr int kMtpLayers = 1;
+    constexpr int kLayers = kMainLayers + kMtpLayers;
+    constexpr size_t kKvBytes = 2 * 4 * 128 * 64;       // FP8 K+V, 4 KV heads, head_dim 128.
+    constexpr size_t kScaleBytes = 2 * 4 * 64 * 4;      // FP32 K/V scales.
+    constexpr size_t kIndexBytes = 4 * 128 * 64 * 2;    // BF16 sparse index K.
+    constexpr size_t kLayerStride = kKvBytes + kScaleBytes + kIndexBytes;
+    constexpr size_t kComponentBytes[] = {kKvBytes, kScaleBytes, kIndexBytes};
+    constexpr int kWarmup = 10;
+    constexpr int kIters = 100;
+
+    std::printf("MINIMAX_M3_COPY_PERF block_tokens=64 layers=%d main=%d mtp=%d layer_stride=%zu iters=%d\n",
+                kLayers, kMainLayers, kMtpLayers, kLayerStride, kIters);
+    for (int block_count : {1, 2, 4, 8, 16}) {
+        const size_t total_bytes = static_cast<size_t>(block_count) * kLayers * kLayerStride;
+        void* host = nullptr;
+        void* device = nullptr;
+        ASSERT_EQ(cudaHostAlloc(&host, total_bytes, cudaHostAllocDefault), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&device, total_bytes), cudaSuccess);
+        std::memset(host, 0x5a, total_bytes);
+        ASSERT_EQ(cudaMemset(device, 0xa5, total_bytes), cudaSuccess);
+
+        std::vector<BatchedMemoryCopyTile> batch_h2d;
+        std::vector<BatchedMemoryCopyTile> batch_d2h;
+        std::vector<BatchedMemoryCopy3DTile> tiles_h2d;
+        std::vector<BatchedMemoryCopy3DTile> tiles_d2h;
+        std::vector<StagedMemoryCopyTile> staged_tiles;
+        for (int block = 0; block < block_count; ++block) {
+            for (int layer = 0; layer < kLayers; ++layer) {
+                size_t component_off = 0;
+                for (int component = 0; component < 3; ++component) {
+                    const size_t off = (static_cast<size_t>(block) * kLayers + layer) * kLayerStride + component_off;
+                    auto* h = static_cast<char*>(host) + off;
+                    auto* d = static_cast<char*>(device) + off;
+                    const size_t bytes = kComponentBytes[component];
+                    batch_h2d.push_back({d, h, bytes});
+                    batch_d2h.push_back({h, d, bytes});
+                    tiles_h2d.push_back({h, d, bytes, layer, component, block});
+                    tiles_d2h.push_back({d, h, bytes, layer, component, block});
+                    staged_tiles.push_back({d, off, bytes});
+                    component_off += bytes;
+                }
+            }
+        }
+        BatchedMemoryCopyParams batch_h2d_params{batch_h2d, 0};
+        BatchedMemoryCopyParams batch_d2h_params{batch_d2h, 0};
+        BatchedMemoryCopy3DParams p3_h2d;
+        BatchedMemoryCopy3DParams p3_d2h;
+        p3_h2d.device_index = 0;
+        p3_d2h.device_index = 0;
+        p3_d2h.source_is_cuda = true;
+        ASSERT_TRUE(buildBatchedMemoryCopy3DRuns(tiles_h2d, p3_h2d.runs));
+        ASSERT_TRUE(buildBatchedMemoryCopy3DRuns(tiles_d2h, p3_d2h.runs));
+        StagedMemoryCopyParams staged;
+        staged.host_base = host;
+        staged.host_bytes = total_bytes;
+        staged.tiles = staged_tiles;
+        staged.device_index = 0;
+        StagedMemoryCopyScratch staged_scratch;
+        cudaStream_t stream = nullptr;
+        ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+
+        auto run = [&](const char* mode, bool d2h, auto&& fn) {
+            for (int i = 0; i < kWarmup; ++i) ASSERT_TRUE(fn());
+            const auto begin = std::chrono::steady_clock::now();
+            for (int i = 0; i < kIters; ++i) ASSERT_TRUE(fn());
+            const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count()
+                              / kIters;
+            const double gbps = static_cast<double>(total_bytes) / us / 1.0e3;
+            std::printf("MINIMAX_M3_COPY_PERF direction=%s blocks=%d mode=%s us=%.3f GBps=%.3f tiles=%zu ops3d=%zu bytes=%zu\n",
+                        d2h ? "D2H" : "H2D", block_count, mode, us, gbps,
+                        batch_h2d.size(), p3_h2d.runs.size(), total_bytes);
+        };
+        for (bool d2h : {false, true}) {
+            run("1d_async", d2h, [&]() {
+                const auto& batch = d2h ? batch_d2h : batch_h2d;
+                for (const auto& t : batch) {
+                    if (cudaMemcpyAsync(t.dst, t.src, t.bytes, cudaMemcpyDefault, stream) != cudaSuccess) return false;
+                }
+                return cudaStreamSynchronize(stream) == cudaSuccess;
+            });
+            run("batch_1d", d2h, [&]() {
+                return execBatchedMemoryCopy(d2h ? batch_d2h_params : batch_h2d_params);
+            });
+            run("2d_async", d2h, [&]() {
+                for (int block = 0; block < block_count; ++block) {
+                    size_t component_off = 0;
+                    for (int component = 0; component < 3; ++component) {
+                        const size_t off = static_cast<size_t>(block) * kLayers * kLayerStride + component_off;
+                        auto* h = static_cast<char*>(host) + off;
+                        auto* d = static_cast<char*>(device) + off;
+                        void* dst = d2h ? h : d;
+                        const void* src = d2h ? d : h;
+                        if (cudaMemcpy2DAsync(dst,
+                                              kLayerStride,
+                                              src,
+                                              kLayerStride,
+                                              kComponentBytes[component],
+                                              kLayers,
+                                              d2h ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice,
+                                              stream) != cudaSuccess) return false;
+                        component_off += kComponentBytes[component];
+                    }
+                }
+                return cudaStreamSynchronize(stream) == cudaSuccess;
+            });
+            run("batch_3d", d2h, [&]() {
+                return exec3DBatchedMemoryCopy(d2h ? p3_d2h : p3_h2d);
+            });
+            staged.direction = d2h ? StagedMemoryCopyDirection::D2H : StagedMemoryCopyDirection::H2D;
+            run("staged_sm", d2h, [&]() { return execStagedMemoryCopy(staged, &staged_scratch); });
+        }
+        releaseStagedMemoryCopyScratch(staged_scratch);
+        ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+        ASSERT_EQ(cudaFree(device), cudaSuccess);
+        ASSERT_EQ(cudaFreeHost(host), cudaSuccess);
+    }
 }
 
 }  // namespace rtp_llm::test

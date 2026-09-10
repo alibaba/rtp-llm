@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, Mock, patch
 import requests
 
 import rtp_llm.utils.fuser as fuser
-from rtp_llm.utils.fuser import Fuser, retry_with_timeout
+from rtp_llm.utils.fuser import Fuser, _redact_uri, retry_with_timeout
 
 
 class TestFuser(unittest.TestCase):
@@ -106,6 +106,21 @@ class TestFuser(unittest.TestCase):
             fuser.umount_all()
         fuse_umount.assert_called_once_with(force=True)
         nfs_umount.assert_called_once_with()
+
+    def test_redact_oss_uri_credentials(self):
+        uri = (
+            "oss://bucket/prefix?OSS_ACCESS_ID=test-id"
+            "&OSS_ACCESS_KEY=test-secret"
+            "&OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com"
+        )
+
+        redacted = _redact_uri(uri)
+
+        self.assertNotIn("test-id", redacted)
+        self.assertNotIn("test-secret", redacted)
+        self.assertIn("OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com", redacted)
+        self.assertIn("OSS_ACCESS_ID=", redacted)
+        self.assertIn("OSS_ACCESS_KEY=", redacted)
 
 
 class RetryDecoratorTest(unittest.TestCase):

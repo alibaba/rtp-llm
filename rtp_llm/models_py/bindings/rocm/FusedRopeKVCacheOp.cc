@@ -213,7 +213,8 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
 }
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs) {
+    attn_configs_(attn_configs),
+    rope_cache_(getRopeCacheOnce(attn_configs.rope_config, attn_configs.max_seq_len, false)) {
     validateMropeConfig(attn_configs_);
 }
 
@@ -471,7 +472,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 }
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs) {
+    attn_configs_(attn_configs),
+    rope_cache_(getRopeCacheOnce(attn_configs.rope_config, attn_configs.max_seq_len, false)) {
     validateMropeConfig(attn_configs_);
 }
 
@@ -589,9 +591,8 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
         position_ids_ptr = params->sequence_lengths.data_ptr<int>();
     }
 
-    auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len, false);
     float2* rope_cache_ptr =
-        rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) : nullptr;
+        rope_cache_.used && rope_cache_.data.defined() ? static_cast<float2*>(rope_cache_.data.data_ptr()) : nullptr;
 
     if (use_asm()) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),

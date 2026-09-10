@@ -47,7 +47,16 @@ class BackendManager(object):
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
 
-        if engine_config.parallelism_config.world_size > 1:
+        need_dist = engine_config.parallelism_config.world_size > 1
+        if not need_dist and engine_config.moe_config.moe_strategy in (
+            "mega_moe",
+            "mega_moe_se",
+            "mega_moe_fp8",
+            "mega_moe_fp8_se",
+            "mega_moe_fused",
+        ):
+            need_dist = True
+        if need_dist:
             init_distributed_environment(
                 engine_config.parallelism_config,
                 nccl_comm_config=self._distributed_server.get_nccl_comm_config(),

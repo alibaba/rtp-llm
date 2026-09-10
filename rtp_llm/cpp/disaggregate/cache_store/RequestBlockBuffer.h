@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include <functional>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -17,13 +18,28 @@ public:
         const std::string& key_, const std::shared_ptr<void>& addr_, uint32_t len_, bool gpu_mem_, bool adopted_):
         key(key_), addr(addr_), len(len_), gpu_mem(gpu_mem_), adopted(adopted_) {}
     BlockBuffer(const BlockBuffer& rhs):
-        key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted) {}
+        key(rhs.key),
+        addr(rhs.addr),
+        len(rhs.len),
+        gpu_mem(rhs.gpu_mem),
+        adopted(rhs.adopted),
+        partition_count(rhs.partition_count),
+        partition_id(rhs.partition_id),
+        partition_kv_halves(rhs.partition_kv_halves) {}
 
     std::string           key;
     std::shared_ptr<void> addr;
     uint32_t              len{0};
     bool                  gpu_mem{true};
     bool                  adopted{true};
+
+    // How much of the *remote* block this one asks for; see
+    // BlockBufferInfo.partition_count in cache_store_service.proto. Only
+    // meaningful on the loading (decode) side; 0 inherits the request-level
+    // partition, which is what every symmetric-TP caller wants.
+    int32_t partition_count{0};
+    int32_t partition_id{0};
+    bool    partition_kv_halves{false};
 };
 
 //  request 关联的 block buffer
@@ -53,6 +69,7 @@ public:
     // change with true callback, dtor with false callback
     typedef std::function<void(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&)> WatchFunc;
     bool setWatchFunc(WatchFunc&& watch_func);
+    bool setWatchFunc(WatchFunc&& watch_func, std::shared_ptr<const std::unordered_set<std::string>> filter_keys);
     void notifyRequestDone();
 
     std::string debugInfo() const;
@@ -61,6 +78,11 @@ private:
     void triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&);
 
 private:
+    struct Watcher {
+        WatchFunc                                              func;
+        std::shared_ptr<const std::unordered_set<std::string>> filter_keys;
+    };
+
     std::string requestid_;
     std::string request_key_;
 
@@ -71,7 +93,7 @@ private:
     size_t                                                        blocks_size_ = 0;
 
     mutable std::shared_mutex watch_func_mutex_;
-    std::vector<WatchFunc>    watch_funcs_;
+    std::vector<Watcher>      watch_funcs_;
 };
 
 }  // namespace rtp_llm

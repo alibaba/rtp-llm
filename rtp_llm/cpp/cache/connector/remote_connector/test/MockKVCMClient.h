@@ -117,6 +117,13 @@ public:
                 CreateTransferClient,
                 (const std::string& config, const kv_cache_manager::InitParams& init_params),
                 (override, const));
+
+    MOCK_METHOD(std::unique_ptr<kv_cache_manager::TransferClient>,
+                CreateTransferClient,
+                (const std::string&                                config,
+                 const kv_cache_manager::InitParams&                init_params,
+                 const kv_cache_manager::SharedMemoryRegistration& shared_memory_registration),
+                (override, const));
 };
 
 }  // namespace remote_connector

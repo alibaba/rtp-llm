@@ -19,6 +19,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -76,6 +77,14 @@ static std::once_flag    g_init_flag;
 static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
+
+thread_local int g_cuda_graph_warmup_forward_depth  = 0;
+thread_local int g_cuda_graph_capture_forward_depth = 0;
+
+bool envFlagEnabledOnce(const char* name) {
+    const char* env = std::getenv(name);
+    return env != nullptr && std::strcmp(env, "0") != 0 && std::strcmp(env, "") != 0;
+}
 }  // anonymous namespace
 
 // ============================================================
@@ -92,6 +101,40 @@ bool isRuntimeInitialized() {
 
 bool getEnableCommOverlap() {
     return g_enable_comm_overlap;
+}
+
+// ============================================================
+// CUDA graph forward phase flags
+// ============================================================
+
+void pushCudaGraphWarmupForwardFlag() {
+    ++g_cuda_graph_warmup_forward_depth;
+}
+
+void popCudaGraphWarmupForwardFlag() {
+    if (g_cuda_graph_warmup_forward_depth > 0) {
+        --g_cuda_graph_warmup_forward_depth;
+    }
+}
+
+bool cudaGraphWarmupForwardEnabled() {
+    static const bool env_enabled = envFlagEnabledOnce("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD");
+    return env_enabled || g_cuda_graph_warmup_forward_depth > 0;
+}
+
+void pushCudaGraphCaptureForwardFlag() {
+    ++g_cuda_graph_capture_forward_depth;
+}
+
+void popCudaGraphCaptureForwardFlag() {
+    if (g_cuda_graph_capture_forward_depth > 0) {
+        --g_cuda_graph_capture_forward_depth;
+    }
+}
+
+bool cudaGraphCaptureForwardEnabled() {
+    static const bool env_enabled = envFlagEnabledOnce("RTP_LLM_CUDA_GRAPH_CAPTURE_FORWARD");
+    return env_enabled || g_cuda_graph_capture_forward_depth > 0;
 }
 
 int64_t getDeviceId() {
@@ -850,6 +893,8 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 
 void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
+    m.def("cuda_graph_warmup_forward_enabled", &cudaGraphWarmupForwardEnabled);
+    m.def("cuda_graph_capture_forward_enabled", &cudaGraphCaptureForwardEnabled);
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,
           py::arg("key"),

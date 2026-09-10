@@ -6,7 +6,7 @@
 namespace rtp_llm {
 namespace {
 
-constexpr std::array<ErrorCode, 7> kMultimodalErrorCodes = {{
+constexpr std::array<ErrorCode, 9> kMultimodalErrorCodes = {{
     ErrorCode::MM_LONG_PROMPT_ERROR,
     ErrorCode::MM_WRONG_FORMAT_ERROR,
     ErrorCode::MM_PROCESS_ERROR,
@@ -14,6 +14,10 @@ constexpr std::array<ErrorCode, 7> kMultimodalErrorCodes = {{
     ErrorCode::MM_NOT_SUPPORTED_ERROR,
     ErrorCode::MM_DOWNLOAD_FAILED,
     ErrorCode::MM_REMOTE_RPC_FAILED,
+    // Content-safety verdicts raised by the greennet gate inside mm_process_engine.
+    // They must survive the Python->C++ hop instead of collapsing to MM_PROCESS_ERROR.
+    ErrorCode::UNSAFE_INPUT_CONTENT,
+    ErrorCode::UNSAFE_OUTPUT_CONTENT,
 }};
 
 }  // namespace

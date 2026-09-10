@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
@@ -17,6 +20,52 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+namespace {
+
+constexpr size_t kMemoryCacheWaitDoneThreads          = 8;
+constexpr size_t kMemoryCacheWaitDoneQueueSizeDefault = 1000;
+
+std::string normalizedH2DCopyMode(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) { return std::tolower(c); });
+    return mode;
+}
+
+bool validH2DCopyMode(const std::string& mode) {
+    return mode == "auto" || mode == "generic" || mode == "memcpy_batch" || mode == "memcpy3d_batch"
+           || mode == "staged_sm" || mode == "split_kv_sm";
+}
+
+size_t memoryCacheWaitDoneQueueSize() {
+    const char* value = std::getenv("RTP_LLM_MEMORY_CACHE_WAIT_DONE_QUEUE_SIZE");
+    if (value == nullptr || value[0] == '\0') {
+        return kMemoryCacheWaitDoneQueueSizeDefault;
+    }
+
+    char* end    = nullptr;
+    long  parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed <= 0 || parsed > INT_MAX) {
+        RTP_LLM_LOG_WARNING("invalid RTP_LLM_MEMORY_CACHE_WAIT_DONE_QUEUE_SIZE=%s, fallback to %zu",
+                            value,
+                            kMemoryCacheWaitDoneQueueSizeDefault);
+        return kMemoryCacheWaitDoneQueueSizeDefault;
+    }
+    return static_cast<size_t>(parsed);
+}
+
+}  // namespace
+
+void* KVCacheMemoryConnector::hostPoolBaseAddress() const {
+    return block_pool_ ? block_pool_->getBaseAddress() : nullptr;
+}
+
+size_t KVCacheMemoryConnector::hostPoolSizeBytes() const {
+    return block_pool_ ? block_pool_->getTotalSizeBytes() : 0;
+}
+
+int KVCacheMemoryConnector::hostPoolSharedMemoryFd() const {
+    return block_pool_ ? block_pool_->getSharedMemoryFd() : -1;
+}
+
 // When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
 // This layer SM-copy path is only used for non typed layer-region layouts.
 static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const CacheConfig& cfg, MultiCopyParams& out) {
@@ -163,6 +212,14 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
 
 bool KVCacheMemoryConnector::init() {
     const auto memory_cache_sync_timeout_ms = kv_cache_config_.memory_cache_sync_timeout_ms;
+    const auto h2d_copy_mode = normalizedH2DCopyMode(kv_cache_config_.memory_cache_h2d_copy_mode);
+    const auto d2h_copy_mode = normalizedH2DCopyMode(kv_cache_config_.memory_cache_d2h_copy_mode);
+    RTP_LLM_CHECK_WITH_INFO(validH2DCopyMode(h2d_copy_mode),
+                            "init failed, unknown MEMORY_CACHE_H2D_COPY_MODE=%s",
+                            kv_cache_config_.memory_cache_h2d_copy_mode.c_str());
+    RTP_LLM_CHECK_WITH_INFO(validH2DCopyMode(d2h_copy_mode),
+                            "init failed, unknown MEMORY_CACHE_D2H_COPY_MODE=%s",
+                            kv_cache_config_.memory_cache_d2h_copy_mode.c_str());
     RTP_LLM_CHECK_WITH_INFO(memory_cache_sync_timeout_ms > 0,
                             "init failed, sync timeout is invalid, sync timeout: %ld ms",
                             memory_cache_sync_timeout_ms);
@@ -193,7 +250,12 @@ bool KVCacheMemoryConnector::init() {
     broadcast_manager_ = std::make_shared<BroadcastManager>(tp_addrs_);
     RTP_LLM_CHECK_WITH_INFO(broadcast_manager_->init(), "init failed, broadcast manager init failed");
 
-    wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(8, 1000, nullptr, "WaitDoneThreadPool");
+    const auto wait_done_queue_size = memoryCacheWaitDoneQueueSize();
+    RTP_LLM_LOG_INFO("init memory cache wait done thread pool, threads=%zu queue_size=%zu",
+                     kMemoryCacheWaitDoneThreads,
+                     wait_done_queue_size);
+    wait_done_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
+        kMemoryCacheWaitDoneThreads, wait_done_queue_size, nullptr, "WaitDoneThreadPool");
     RTP_LLM_CHECK_WITH_INFO(wait_done_thread_pool_->start(), "init failed, wait done thread pool start failed");
 
     if (metrics_reporter_) {
@@ -1111,6 +1173,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&             ca
         copy_info.backing_type = match_result.backing_type;
         copy_info.mem_block    = match_result.matched_index;
         copy_info.disk_slot    = match_result.disk_slot;
+        copy_info.block_size   = match_result.block_size;
         copy_info.gpu_blocks.reserve(slots.size());
         for (const auto& slot : slots) {
             const auto layer = static_cast<size_t>(slot.layer_id);
@@ -1493,6 +1556,8 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&             c
         copy_info.mem_block   = NULL_BLOCK_IDX;
         copy_info.gpu_blocks  = std::move(gpu_blocks);
         copy_info.is_complete = is_complete;
+        copy_info.block_size =
+            isDualPool() ? (is_complete ? complete_block_size_ : incomplete_block_size_) : memoryCacheBlockSizeBytes();
         copy_infos.emplace_back(std::move(copy_info));
     }
 
@@ -1652,6 +1717,7 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
     auto plan        = new CopyPlan();
     plan->copy_infos = copy_infos;
     plan->direction  = direction;
+    plan->plan_id    = next_copy_plan_id_.fetch_add(1, std::memory_order_relaxed);
     auto deleter     = [this](CopyPlan* plan) {
         for (const auto& copy_info : plan->copy_infos) {
             if (!copy_info.request_released) {
@@ -1712,6 +1778,14 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
                                                   copy_item_num,
                                                   disk_item_num]() mutable {
             const auto task_start_us = currentTimeUs();
+            const auto plan_id       = task_copy_plan->plan_id;
+            RTP_LLM_LOG_INFO("memory cache copy plan begin, plan_id=%lu direction=%s items=%zu estimated_bytes=%zu "
+                             "timeout_ms=%ld",
+                             plan_id,
+                             direction == CopyDirection::H2D ? "H2D" : "D2H",
+                             copy_item_num,
+                             estimateCopyPlanBytes(task_copy_plan),
+                             copyPlanTimeoutMs(task_copy_plan));
             const auto send_start_us = currentTimeUs();
             try {
                 auto send_result = sendCopyPlan(task_copy_plan);
@@ -1728,6 +1802,10 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
             const auto wait_start_us = currentTimeUs();
             context->waitDone();
             const auto wait_done_us = currentTimeUs();
+            RTP_LLM_LOG_INFO("memory cache copy plan done, plan_id=%lu elapsed_us=%ld success=%d",
+                             plan_id,
+                             wait_done_us - task_start_us,
+                             context->success());
             reportCopyTaskMetrics(context->success(),
                                   wait_done_us - task_start_us,
                                   task_start_us - enqueue_time_us,
@@ -1738,7 +1816,8 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
                                   direction);
         });
     if (code != autil::ThreadPoolBase::ERROR_NONE) {
-        RTP_LLM_LOG_WARNING("start copy plan async failed, push send+wait task failed, code=%d", code);
+        RTP_LLM_LOG_WARNING(
+            "start copy plan async failed, queue is full, plan_id=%lu code=%d", copy_plan->plan_id, code);
         return false;
     }
     return true;
@@ -1748,6 +1827,7 @@ std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
 KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const {
     MemoryOperationRequestPB mem_req;
     const auto               slots = layerTagSlots();
+    mem_req.set_copy_plan_id(copy_plan->plan_id);
     mem_req.set_copy_direction(copy_plan->direction == CopyDirection::H2D ? MemoryOperationRequestPB::H2D :
                                                                             MemoryOperationRequestPB::D2H);
     for (const auto& copy_info : copy_plan->copy_infos) {
@@ -1821,7 +1901,8 @@ KVCacheMemoryConnector::sendMemoryRequest(const MemoryOperationRequestPB& mem_re
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
     };
-    return broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout_ms, rpc_call);
+    return broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, timeout_ms, rpc_call, BroadcastDeadlinePolicy::EXIT_WITHOUT_CORE, mem_req.copy_plan_id());
 }
 
 void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const {
@@ -1906,28 +1987,209 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& wire_requ
         return success;
     }
 
-    if (!has_layer_block_items) {
-        if (tryCopyCacheWithStagedMemoryCopy(items, copy_direction, slots)) {
-            response.set_success(true);
-            reportCopyMetrics(true, timer.done_us(), copy_direction);
-            return true;
+    const bool has_typed_slots = hasTypedLayerTagSlots(slots);
+    // The tiled fast paths address a block as a flat per-slot layout, which
+    // layer-block items do not satisfy; only the generic copy handles those.
+    const bool tiled_paths_available = !has_layer_block_items;
+
+    if (copy_direction == CopyDirection::D2H) {
+        const std::string requested = normalizedH2DCopyMode(kv_cache_config_.memory_cache_d2h_copy_mode);
+        const bool        strict    = kv_cache_config_.memory_cache_d2h_copy_strict;
+        std::string       effective;
+        std::string       fallback_reason;
+        size_t            tile_count    = 0;
+        size_t            op_count      = 0;
+        size_t            payload_bytes = 0;
+        auto              try_mode      = [&](const std::string& mode) {
+            bool ok = false;
+            if (mode == "staged_sm") {
+                ok = tiled_paths_available && tryCopyCacheWithStagedMemoryCopy(items, copy_direction, slots);
+            } else if (mode == "memcpy3d_batch") {
+                autil::ScopedTime2 mode_timer;
+                ok = tiled_paths_available
+                     && tryCopyCacheWith3DBatchedMemoryCopy(
+                         items, copy_direction, slots, &tile_count, &op_count, &payload_bytes);
+                const auto mode_elapsed_us = mode_timer.done_us();
+                report3DCopyMetrics(
+                    ok, mode_elapsed_us, copy_direction, items.size(), tile_count, op_count, payload_bytes);
+                RTP_LLM_LOG_INFO("memory cache 3D batch copy attempt plan_id=%lu direction=D2H success=%d "
+                                 "blocks=%zu tiles=%zu ops=%zu bytes=%zu elapsed_us=%ld",
+                                 wire_request.copy_plan_id(),
+                                 ok,
+                                 items.size(),
+                                 tile_count,
+                                 op_count,
+                                 payload_bytes,
+                                 mode_elapsed_us);
+            } else if (mode == "memcpy_batch") {
+                ok = tiled_paths_available && has_typed_slots
+                     && tryCopyCacheWithBatchedMemoryCopy(items, copy_direction, slots);
+            } else if (mode == "split_kv_sm") {
+                // The generic copy picks the split-KV SM route itself under
+                // exactly these conditions.
+                ok = !has_typed_slots && kv_cache_config_.enable_memory_cache_sm_copy
+                     && copyMemoryItemsGeneric(items, copy_direction, slots);
+            } else if (mode == "generic") {
+                ok = copyMemoryItemsGeneric(items, copy_direction, slots);
+            }
+            if (ok) {
+                effective = mode;
+            } else if (fallback_reason.empty()) {
+                fallback_reason = mode + "_unavailable_or_failed";
+            }
+            return ok;
+        };
+
+        bool success = false;
+        if (requested == "auto") {
+            if (kv_cache_config_.enable_memory_cache_d2h_3d_batch_auto && cache_config_.groupNums() == 1) {
+                success = try_mode("memcpy3d_batch");
+            }
+            if (!success) {
+                success = try_mode("staged_sm");
+            }
+            if (!success && has_typed_slots) {
+                success = try_mode("memcpy_batch");
+            }
+            if (!success && kv_cache_config_.enable_memory_cache_sm_copy && !has_typed_slots) {
+                success = try_mode("split_kv_sm");
+            }
+            if (!success) {
+                success = try_mode("generic");
+            }
+        } else {
+            success = try_mode(requested);
+            if (!success && !strict) {
+                if (requested == "staged_sm") {
+                    success = try_mode("memcpy3d_batch");
+                }
+                if (!success && (requested == "staged_sm" || requested == "memcpy3d_batch")) {
+                    success = try_mode("memcpy_batch");
+                }
+                if (!success && requested != "generic") {
+                    success = try_mode("generic");
+                }
+            }
         }
-        if (hasTypedLayerTagSlots(slots) && tryCopyCacheWithBatchedMemoryCopy(items, copy_direction, slots)) {
-            response.set_success(true);
-            reportCopyMetrics(true, timer.done_us(), copy_direction);
-            return true;
+        const auto elapsed_us = timer.done_us();
+        RTP_LLM_LOG_INFO("memory cache D2H copy plan_id=%lu requested=%s effective=%s strict=%d success=%d "
+                         "fallback_reason=%s blocks=%zu tiles=%zu ops=%zu bytes=%zu elapsed_us=%ld "
+                         "auto_3d_enabled=%d groups=%zu typed_slots=%d",
+                         wire_request.copy_plan_id(),
+                         requested.c_str(),
+                         effective.empty() ? "none" : effective.c_str(),
+                         strict,
+                         success,
+                         fallback_reason.empty() ? "none" : fallback_reason.c_str(),
+                         items.size(),
+                         tile_count,
+                         op_count,
+                         payload_bytes,
+                         elapsed_us,
+                         kv_cache_config_.enable_memory_cache_d2h_3d_batch_auto,
+                         cache_config_.groupNums(),
+                         has_typed_slots);
+        response.set_success(success);
+        reportCopyMetrics(success, elapsed_us, copy_direction);
+        return success;
+    }
+
+    const std::string requested = normalizedH2DCopyMode(kv_cache_config_.memory_cache_h2d_copy_mode);
+    const bool        strict    = kv_cache_config_.memory_cache_h2d_copy_strict;
+    std::string       effective;
+    std::string       fallback_reason;
+    size_t            tile_count    = 0;
+    size_t            op_count      = 0;
+    size_t            payload_bytes = 0;
+    auto              try_mode      = [&](const std::string& mode) {
+        bool ok = false;
+        if (mode == "staged_sm") {
+            ok = tiled_paths_available && tryCopyCacheWithStagedMemoryCopy(items, copy_direction, slots);
+        } else if (mode == "memcpy3d_batch") {
+            autil::ScopedTime2 mode_timer;
+            ok = tiled_paths_available
+                 && tryCopyCacheWith3DBatchedMemoryCopy(
+                     items, copy_direction, slots, &tile_count, &op_count, &payload_bytes);
+            const auto mode_elapsed_us = mode_timer.done_us();
+            report3DCopyMetrics(
+                ok, mode_elapsed_us, copy_direction, items.size(), tile_count, op_count, payload_bytes);
+            RTP_LLM_LOG_INFO("memory cache 3D batch copy attempt plan_id=%lu direction=H2D success=%d "
+                             "blocks=%zu tiles=%zu ops=%zu bytes=%zu elapsed_us=%ld",
+                             wire_request.copy_plan_id(),
+                             ok,
+                             items.size(),
+                             tile_count,
+                             op_count,
+                             payload_bytes,
+                             mode_elapsed_us);
+        } else if (mode == "memcpy_batch") {
+            ok = tiled_paths_available && has_typed_slots
+                 && tryCopyCacheWithBatchedMemoryCopy(items, copy_direction, slots);
+        } else if (mode == "split_kv_sm") {
+            ok = !has_typed_slots && kv_cache_config_.enable_memory_cache_sm_copy
+                 && copyMemoryItemsGeneric(items, copy_direction, slots);
+        } else if (mode == "generic") {
+            ok = copyMemoryItemsGeneric(items, copy_direction, slots);
+        }
+        if (ok) {
+            effective = mode;
+        } else if (fallback_reason.empty()) {
+            fallback_reason = mode + "_unavailable_or_failed";
+        }
+        return ok;
+    };
+
+    bool success = false;
+    if (requested == "auto") {
+        success = try_mode("staged_sm");
+        if (!success && kv_cache_config_.enable_memory_cache_h2d_3d_batch_auto && cache_config_.groupNums() == 1) {
+            success = try_mode("memcpy3d_batch");
+        }
+        if (!success && has_typed_slots) {
+            success = try_mode("memcpy_batch");
+        }
+        if (!success && kv_cache_config_.enable_memory_cache_sm_copy && !has_typed_slots) {
+            success = try_mode("split_kv_sm");
+        }
+        if (!success) {
+            success = try_mode("generic");
+        }
+    } else {
+        success = try_mode(requested);
+        if (!success && !strict) {
+            if (requested == "staged_sm") {
+                success = try_mode("memcpy3d_batch");
+            }
+            if (!success && (requested == "staged_sm" || requested == "memcpy3d_batch")) {
+                success = try_mode("memcpy_batch");
+            }
+            if (!success && requested != "generic") {
+                success = try_mode("generic");
+            }
         }
     }
 
-    if (!copyMemoryItemsGeneric(items, copy_direction, slots)) {
-        response.set_success(false);
-        reportCopyMetrics(false, timer.done_us(), copy_direction);
-        return false;
-    }
-
-    response.set_success(true);
-    reportCopyMetrics(true, timer.done_us(), copy_direction);
-    return true;
+    const auto elapsed_us = timer.done_us();
+    RTP_LLM_LOG_INFO("memory cache H2D copy plan_id=%lu requested=%s effective=%s strict=%d success=%d "
+                     "fallback_reason=%s blocks=%zu tiles=%zu ops=%zu bytes=%zu elapsed_us=%ld "
+                     "auto_3d_enabled=%d groups=%zu typed_slots=%d",
+                     wire_request.copy_plan_id(),
+                     requested.c_str(),
+                     effective.empty() ? "none" : effective.c_str(),
+                     strict,
+                     success,
+                     fallback_reason.empty() ? "none" : fallback_reason.c_str(),
+                     items.size(),
+                     tile_count,
+                     op_count,
+                     payload_bytes,
+                     elapsed_us,
+                     kv_cache_config_.enable_memory_cache_h2d_3d_batch_auto,
+                     cache_config_.groupNums(),
+                     has_typed_slots);
+    response.set_success(success);
+    reportCopyMetrics(success, elapsed_us, copy_direction);
+    return success;
 }
 
 std::vector<BlockIdxType>
@@ -2226,6 +2488,115 @@ StagedMemoryCopyScratch& KVCacheMemoryConnector::stagedCopyScratchForDevice(int 
         scratch = std::make_unique<StagedMemoryCopyScratch>();
     }
     return *scratch;
+}
+
+bool KVCacheMemoryConnector::tryCopyCacheWith3DBatchedMemoryCopy(const NormalizedCopyItems&       items,
+                                                                 CopyDirection                    direction,
+                                                                 const std::vector<LayerTagSlot>& slots,
+                                                                 size_t*                          tile_count,
+                                                                 size_t*                          run_count,
+                                                                 size_t*                          payload_bytes) {
+    RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.plan_3d_batch");
+    if (allocator_ == nullptr || (!isDualPool() && block_pool_ == nullptr) || (isDualPool() && !complete_pool_)) {
+        return false;
+    }
+
+    BatchedMemoryCopy3DParams params;
+    params.source_is_cuda = direction == CopyDirection::D2H;
+    std::vector<BatchedMemoryCopy3DTile> tiles;
+    size_t                               bytes = 0;
+
+    for (size_t item_idx = 0; item_idx < items.size(); ++item_idx) {
+        const auto& item             = items[item_idx];
+        const auto  mem_block        = item.mem_block;
+        const auto& gpu_blocks       = item.gpu_blocks;
+        const bool  item_is_complete = item.is_complete;
+
+        if (isNullBlockIdx(mem_block) || gpu_blocks.size() != slots.size()) {
+            return false;
+        }
+
+        auto& pool_ref = isDualPool() ? (item_is_complete ? complete_pool_ : incomplete_pool_) : block_pool_;
+        if (!pool_ref) {
+            return false;
+        }
+        const auto mem_buffers = pool_ref->convertIndexToBuffer(/*layer_id=*/0, mem_block);
+        if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0
+            || mem_buffers[0].is_cuda) {
+            return false;
+        }
+        const auto& mem_buffer = mem_buffers[0];
+
+        size_t byte_off = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            const auto& slot         = slots[slot_idx];
+            const auto  gpu_block    = gpu_blocks.at(slot_idx);
+            const auto  layer_stride = slot.stride_bytes;
+
+            // Incomplete blocks only materialize their full-only slots, and the
+            // packing skips the rest outright, so byte_off must not advance here.
+            if (!item_is_complete && !isFullOnlySlot(slot)) {
+                continue;
+            }
+
+            if (isNullBlockIdx(gpu_block)) {
+                byte_off += layer_stride;
+                continue;
+            }
+
+            const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
+            size_t     within_layer_off = 0;
+            for (size_t component = 0; component < gpu_buffers.size(); ++component) {
+                const auto& gpu = gpu_buffers[component];
+                if (gpu.addr == nullptr || gpu.size_bytes == 0 || !gpu.is_cuda
+                    || within_layer_off + gpu.size_bytes > layer_stride
+                    || byte_off + within_layer_off + gpu.size_bytes > mem_buffer.size_bytes) {
+                    return false;
+                }
+                if (params.device_index < 0) {
+                    params.device_index = gpu.device_index;
+                } else if (params.device_index != gpu.device_index) {
+                    return false;
+                }
+                auto*       mem_addr = static_cast<char*>(mem_buffer.addr) + byte_off + within_layer_off;
+                const void* src      = direction == CopyDirection::H2D ? mem_addr : gpu.addr;
+                void*       dst      = direction == CopyDirection::H2D ? gpu.addr : mem_addr;
+                tiles.push_back(BatchedMemoryCopy3DTile{src,
+                                                        dst,
+                                                        gpu.size_bytes,
+                                                        slot.layer_id,
+                                                        static_cast<int>(component),
+                                                        static_cast<int>(item_idx)});
+                bytes += gpu.size_bytes;
+                within_layer_off += gpu.size_bytes;
+            }
+            byte_off += layer_stride;
+        }
+    }
+
+    std::string reason;
+    if (!buildBatchedMemoryCopy3DRuns(tiles, params.runs, &reason)) {
+        RTP_LLM_LOG_WARNING("build cuda memcpy 3d batch runs failed, reason=%s", reason.c_str());
+        return false;
+    }
+    if (tile_count) {
+        *tile_count = tiles.size();
+    }
+    if (run_count) {
+        *run_count = params.runs.size();
+    }
+    if (payload_bytes) {
+        *payload_bytes = bytes;
+    }
+    RTP_LLM_LOG_DEBUG("cuda memcpy 3d batch, direction=%s, blocks=%zu tiles=%zu runs=%zu bytes=%zu device=%d",
+                      direction == CopyDirection::H2D ? "H2D" : "D2H",
+                      items.size(),
+                      tiles.size(),
+                      params.runs.size(),
+                      bytes,
+                      params.device_index);
+    RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_3d_batch");
+    return exec3DBatchedMemoryCopy(params);
 }
 
 bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
@@ -3559,6 +3930,95 @@ int64_t KVCacheMemoryConnector::copyPlanTimeoutMs(const std::shared_ptr<CopyPlan
     return std::max(kv_cache_config_.memory_cache_sync_timeout_ms, kv_cache_config_.memory_cache_disk_sync_timeout_ms);
 }
 
+size_t KVCacheMemoryConnector::estimateCopyPlanBytes(const std::shared_ptr<CopyPlan>& copy_plan) const {
+    if (!copy_plan) {
+        return 0;
+    }
+    size_t bytes = 0;
+    for (const auto& copy_info : copy_plan->copy_infos) {
+        bytes += copy_info.block_size;
+    }
+    return bytes;
+}
+
+
+size_t KVCacheMemoryConnector::totalMemoryBlocks() const {
+    return block_pool_ ? block_pool_->totalBlocksNum() : 0;
+}
+
+size_t KVCacheMemoryConnector::freeMemoryBlocks() const {
+    return block_pool_ ? block_pool_->freeBlocksNum() : 0;
+}
+
+std::vector<KVCacheMemoryConnector::MemoryRemoteEvictionItem>
+KVCacheMemoryConnector::prepareRemoteEviction(size_t block_num) {
+    if (!block_cache_ || !block_pool_ || block_num == 0 || isDualPool() || usePrefixTreeMemoryCache()) {
+        return {};
+    }
+    return block_cache_->detachMemoryForRemoteEviction(block_num);
+}
+
+bool KVCacheMemoryConnector::buildHostBlockBuffers(const std::vector<MemoryRemoteEvictionItem>& items,
+                                                   const std::vector<size_t>& selected_indices,
+                                                   HostBlockBuffers& buffers) const {
+    if (!block_pool_) {
+        return false;
+    }
+    const auto slots = layerTagSlots();
+    buffers.clear();
+    buffers.reserve(selected_indices.size());
+    for (size_t selected : selected_indices) {
+        if (selected >= items.size() || items[selected].backing_type != CacheBackingType::MEMORY) {
+            return false;
+        }
+        auto mem = block_pool_->convertIndexToBuffer(0, items[selected].block_index);
+        if (mem.size() != 1 || !mem[0].addr || mem[0].size_bytes < items[selected].block_size) {
+            return false;
+        }
+        size_t block_size = 0;
+        for (const auto& slot : slots) {
+            if (slot.stride_bytes > mem[0].size_bytes - block_size) {
+                return false;
+            }
+            block_size += slot.stride_bytes;
+        }
+        if (block_size == 0 || (items[selected].block_size != 0 && block_size != items[selected].block_size)) {
+            return false;
+        }
+        BlockInfo info;
+        info.is_cuda    = false;
+        info.addr       = mem[0].addr;
+        info.size_bytes = block_size;
+        buffers.push_back(HostBlockBuffer{info});
+    }
+    return true;
+}
+
+void KVCacheMemoryConnector::finishRemoteEviction(const std::vector<MemoryRemoteEvictionItem>& items,
+                                                  bool remote_success) {
+    (void)remote_success;
+    if (!block_cache_) {
+        return;
+    }
+    for (const auto& item : items) {
+        auto finished = block_cache_->finishRemoteEviction(item.cache_key, item.generation);
+        if (finished.has_value()) {
+            releaseCacheBacking(*finished);
+        }
+    }
+}
+
+size_t KVCacheMemoryConnector::evictMemoryImmediately(size_t block_num) {
+    if (!block_cache_ || block_num == 0) {
+        return 0;
+    }
+    auto victims = block_cache_->popMemoryForImmediateEviction(block_num);
+    for (const auto& item : victims) {
+        releaseCacheBacking(item);
+    }
+    return victims.size();
+}
+
 std::vector<CacheKeyType> KVCacheMemoryConnector::cacheKeys() const {
     if (usePrefixTreeMemoryCache()) {
         RTP_LLM_CHECK_WITH_INFO(prefix_block_cache_ != nullptr, "prefix block cache should not be null");
@@ -3668,6 +4128,29 @@ void KVCacheMemoryConnector::reportCopyTaskMetrics(bool          success,
 
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyTaskMetricsCollector>(nullptr,
                                                                                                    &collector);
+}
+
+void KVCacheMemoryConnector::report3DCopyMetrics(bool          success,
+                                                 int64_t       latency_us,
+                                                 CopyDirection direction,
+                                                 int64_t       block_count,
+                                                 int64_t       tile_count,
+                                                 int64_t       op_count,
+                                                 int64_t       bytes) {
+    if (!metrics_reporter_) {
+        return;
+    }
+
+    RtpLLMMemoryCache3DCopyMetricsCollector collector;
+    collector.failed      = !success;
+    collector.from_gpu    = direction == CopyDirection::D2H;
+    collector.block_count = block_count;
+    collector.tile_count  = tile_count;
+    collector.op_count    = op_count;
+    collector.bytes       = bytes;
+    collector.latency_us  = latency_us;
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCache3DCopyMetricsCollector>(nullptr,
+                                                                                                  &collector);
 }
 
 void KVCacheMemoryConnector::reportDiskMatchMetrics(bool    success,

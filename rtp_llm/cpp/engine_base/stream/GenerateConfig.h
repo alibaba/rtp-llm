@@ -107,9 +107,10 @@ public:
     bool can_use_pd_separation = true;
     bool pd_separation         = false;
 
-    bool               in_think_mode       = false;
-    ThinkingMode       thinking_mode       = ThinkingMode::UNSPECIFIED;
-    int                max_thinking_tokens = 0;
+    bool               in_think_mode                 = false;
+    ThinkingMode       thinking_mode                 = ThinkingMode::UNSPECIFIED;
+    bool               enable_think_logits_processor = true;
+    int                max_thinking_tokens           = 0;
     std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
     bool               gen_timeline = false;
@@ -204,6 +205,7 @@ public:
                      << ", grammar_terminate_without_stop_token: " << grammar_terminate_without_stop_token
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", thinking_mode: " << static_cast<int>(thinking_mode)
+                     << ", enable_think_logits_processor: " << enable_think_logits_processor
                      << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
@@ -322,6 +324,7 @@ public:
         int thinking_mode_int = static_cast<int>(thinking_mode);
         json.Jsonize("thinking_mode", thinking_mode_int, thinking_mode_int);
         thinking_mode = normalizeThinkingMode(thinking_mode_int);
+        JSONIZE(enable_think_logits_processor);
         JSONIZE(max_thinking_tokens);
         JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);

@@ -505,6 +505,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                              params.output_token_ids_d.data_ptr<int32_t>(),
                                              params.output_accepted_token_num_d.data_ptr<int32_t>(),
                                              params.do_sample_d.data_ptr<bool>(),
+                                             params.deterministic_draft,
                                              config.batch_size,
                                              config.num_speculative_tokens,
                                              config.target_vocab_size,
@@ -612,6 +613,29 @@ void invokeMappingDraft2Target(IdType*     tokens,
                                int         d2t_map_size,
                                hipStream_t stream);
 }  // namespace rtp_llm
+
+// Forward-declare rejection-sampling kernel from rtp_llm/models_py/bindings/rocm/speculative_sampling/sampling.cu
+// (same amd_bfloat16.h transitive-include hazard — kept out of the include graph).
+// NOTE: This declaration is intentionally at global scope (not inside namespace rtp_llm)
+// because the ROCm kernel implementation is also defined at global scope. The call site
+// uses ::invokeRejectionSampling to match. This compiles and links correctly.
+template<typename DType, typename IdType>
+hipError_t invokeRejectionSampling(DType*      draft_probs,
+                                   IdType*     draft_token_ids,
+                                   DType*      uniform_samples,
+                                   DType*      target_probs,
+                                   IdType*     target_token_ids,
+                                   int         target_token_stride,
+                                   IdType*     output_token_ids,
+                                   IdType*     output_accepted_token_num,
+                                   bool*       do_sample,
+                                   bool        deterministic_draft,
+                                   int         batch_size,
+                                   int         num_speculative_tokens,
+                                   int         target_vocab_size,
+                                   hipStream_t stream,
+                                   bool        draft_probs_point_mass = false);
+
 
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/models_py/bindings/rocm/kernels/sampling/sampling.h"
@@ -860,6 +884,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                                params.output_token_ids_d.data_ptr<int32_t>(),
                                                params.output_accepted_token_num_d.data_ptr<int32_t>(),
                                                params.do_sample_d.data_ptr<bool>(),
+                                               params.deterministic_draft,
                                                config.batch_size,
                                                config.num_speculative_tokens,
                                                config.target_vocab_size,

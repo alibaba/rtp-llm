@@ -15,14 +15,26 @@ import torch
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import (
+    FfnAtomicWeight,
+    FfnConfig,
+    FfnWeight,
     MoeAtomicWeight,
     MoeConfig,
     MoeWeight,
     iter_stacked_moe_weights,
 )
-from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
+from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
+    OfflineMegaMoeFp4MoeWeight,
+    OfflineMegaMoeFp4SharedExpertWeight,
+    wrap_for_offline_fp4,
+    wrap_shared_expert_for_offline_fp4,
+)
+from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+    PerBlockFp8Weight,
+    V4PerBlockFp8Weight,
+)
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity, stack_
 
 
 class FakeTensorSource(TensorSource):
@@ -75,6 +87,149 @@ class TestV4SharedExpertW13Weight(unittest.TestCase):
         )
         self.assertIs(wrapped.kernel.process_fun, concat_0)
         self.assertIs(wrapped.scale.process_fun, concat_0)
+
+
+class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
+    def _make_shared_ffn(self):
+        config = FfnConfig(align_size=0, is_gated_activation=True)
+        return FfnWeight(
+            sub_weights=[
+                FfnAtomicWeight(
+                    W.ffn_w1,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.shared_experts.gate_proj.weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    config=config,
+                ),
+                FfnAtomicWeight(
+                    W.ffn_w2,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.shared_experts.down_proj.weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    config=config,
+                ),
+                FfnAtomicWeight(
+                    W.ffn_w3,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.shared_experts.up_proj.weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    config=config,
+                ),
+            ],
+            config=config,
+        )
+
+    def test_unwraps_fp8_shared_w13_to_offline_fp4_scale_names(self):
+        ffn = self._make_shared_ffn()
+        fp8_wrapped = ffn.w13.create(ffn.w13, Fp8BlockWiseQuantConfig(is_quanted=True))
+
+        self.assertIsInstance(fp8_wrapped, PerBlockFp8Weight)
+        offline = wrap_shared_expert_for_offline_fp4(fp8_wrapped)
+
+        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+        self.assertEqual(
+            [w.name for w in offline.scale.weights],
+            [
+                "model.layers.{i}.mlp.shared_experts.gate_proj.weight_scale",
+                "model.layers.{i}.mlp.shared_experts.up_proj.weight_scale",
+            ],
+        )
+
+    def test_unwraps_fp8_shared_w2_to_offline_fp4_scale_name(self):
+        ffn = self._make_shared_ffn()
+        fp8_wrapped = ffn.w2.create(ffn.w2, Fp8BlockWiseQuantConfig(is_quanted=True))
+
+        self.assertIsInstance(fp8_wrapped, PerBlockFp8Weight)
+        offline = wrap_shared_expert_for_offline_fp4(fp8_wrapped)
+
+        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+        self.assertEqual(
+            [w.name for w in offline.scale.weights],
+            ["model.layers.{i}.mlp.shared_experts.down_proj.weight_scale"],
+        )
+
+    def test_strategy_wrapper_skips_shared_expert_unless_requested(self):
+        ffn = self._make_shared_ffn()
+        fp8_wrapped = ffn.w13.create(ffn.w13, Fp8BlockWiseQuantConfig(is_quanted=True))
+
+        self.assertIs(wrap_for_offline_fp4(fp8_wrapped), fp8_wrapped)
+
+        offline = wrap_for_offline_fp4(fp8_wrapped, include_shared_expert=True)
+        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+
+    def test_strategy_wrapper_always_wraps_routed_moe(self):
+        moe = MoeAtomicWeight(
+            W.moe_w1,
+            [
+                CkptWeightInfo(
+                    "model.layers.{i}.mlp.experts.0.gate_proj.weight",
+                    identity,
+                )
+            ],
+            identity,
+            config=MoeConfig(expert_num=1),
+        )
+
+        offline = wrap_for_offline_fp4(moe)
+
+        self.assertIsInstance(offline, OfflineMegaMoeFp4MoeWeight)
+        self.assertEqual(
+            [w.name for w in offline.scale.weights],
+            ["model.layers.{i}.mlp.experts.0.gate_proj.weight_scale"],
+        )
+
+    def test_native_mxfp4_scale_key_and_ue8m0_decode(self):
+        moe = MoeAtomicWeight(
+            W.moe_w2,
+            [
+                CkptWeightInfo(
+                    "language_model.model.layers.{i}.block_sparse_moe."
+                    "experts.w2_weight",
+                    identity,
+                )
+            ],
+            stack_,
+            config=MoeConfig(expert_num=2),
+            stacked_ckpt_keys=True,
+        )
+
+        offline = wrap_for_offline_fp4(moe)
+
+        self.assertIsInstance(offline, OfflineMegaMoeFp4MoeWeight)
+        self.assertEqual(
+            [w.name for w in offline.scale.weights],
+            [
+                "language_model.model.layers.{i}.block_sparse_moe."
+                "experts.w2_weight_scale"
+            ],
+        )
+        self.assertTrue(offline.scale.stacked_ckpt_keys)
+        decoded = offline.scale.process_fun(
+            [
+                torch.tensor([[127, 128]], dtype=torch.float32),
+                torch.tensor([[126, 129]], dtype=torch.float32),
+            ]
+        )
+        torch.testing.assert_close(
+            decoded,
+            torch.tensor([[[1.0, 2.0]], [[0.5, 4.0]]], dtype=torch.float32),
+        )
+
+        # Fastsafetensor splitting only recognizes identity ckpt merge funcs.
+        # Decode therefore belongs in process_fun, not the ckpt merge callback.
+        self.assertIs(offline.scale.weights[0].merge_fun, identity)
 
 
 class TestStackSplitTensorSource(unittest.TestCase):

@@ -88,6 +88,21 @@ class MtpHiddenBufferTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "requested=6, capacity=5"):
             DeepSeekV4Model.get_mtp_target_hidden_states(model, 6)
 
+    def test_capability_requires_initialized_hidden_buffer(self) -> None:
+        model = DeepSeekV4Model.__new__(DeepSeekV4Model)
+
+        model.v4 = None
+        self.assertFalse(model.supports_mtp_target_hidden_states())
+
+        model.v4 = types.SimpleNamespace(_mtp_hidden_buffer=None)
+        self.assertFalse(model.supports_mtp_target_hidden_states())
+
+        model.v4._mtp_hidden_buffer = torch.empty(1, 3)
+        self.assertTrue(model.supports_mtp_target_hidden_states())
+
+        model.v4._mtp_hidden_buffer = None
+        self.assertFalse(model.supports_mtp_target_hidden_states())
+
     def test_last_hidden_accessor_slices_requested_rows(self) -> None:
         v4 = types.SimpleNamespace()
         v4._mtp_last_hidden_buffer = torch.empty(4, 3, dtype=torch.bfloat16)

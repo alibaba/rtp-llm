@@ -187,6 +187,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["CONCURRENCY_LIMIT"] = "64"
         os.environ["PREFILL_PREPARE_RESOURCE_POOL_SIZE"] = "256"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
+        os.environ["MAX_BATCH_KV_LEN"] = "6000000"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
@@ -204,6 +205,10 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["SP_DETERMINISTIC_DRAFT_EXACT_MATCH"] = "1"
+        os.environ["MAX_THINKING_TOKENS"] = "123"
+        os.environ["VIT_CONCURRENCY"] = "12"
+        os.environ["VIT_MAX_QUEUE_SIZE"] = "34"
 
         sys.argv = ["prog"]
 
@@ -242,6 +247,10 @@ class ServerArgsSetTest(TestCase):
             32,
         )
         self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
+            6000000,
+        )
+        self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
             2048,
         )
@@ -253,6 +262,7 @@ class ServerArgsSetTest(TestCase):
             pickle.dumps(py_env_configs.runtime_config.fifo_scheduler_config)
         )
         self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
+        self.assertEqual(restored_fifo_config.max_batch_kv_len, 6000000)
         # Old pickles carry only the two original slots; every field added later
         # must fall back to its default instead of raising.
         fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
@@ -262,6 +272,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(legacy_fifo_config.max_batch_tokens_size, 8192)
         self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 0)
         self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
+        self.assertEqual(legacy_fifo_config.max_batch_kv_len, 0)
 
         # Verify frontend and DashSc pre-stop windows are configured independently.
         self.assertEqual(
@@ -303,6 +314,12 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.jit_config.remote_jit_dir,
             "dfs://bucket/jit/cache",
         )
+        self.assertEqual(py_env_configs.generate_env_config.max_thinking_tokens, 123)
+        self.assertEqual(py_env_configs.vit_config.vit_concurrency, 12)
+        self.assertEqual(py_env_configs.vit_config.vit_max_queue_size, 34)
+        self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
+        restored_sp_config = pickle.loads(pickle.dumps(py_env_configs.sp_config))
+        self.assertTrue(restored_sp_config.deterministic_draft_exact_match)
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
@@ -329,6 +346,8 @@ class ServerArgsSetTest(TestCase):
             "384",
             "--max_context_batch_size",
             "64",
+            "--max_batch_kv_len",
+            "7000000",
             "--max_batch_tokens_without_cache",
             "4096",
             "--cp_force_single_prefill",
@@ -351,6 +370,12 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--sp_deterministic_draft_exact_match",
+            "true",
+            "--vit_concurrency",
+            "24",
+            "--vit_max_queue_size",
+            "48",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -387,6 +412,10 @@ class ServerArgsSetTest(TestCase):
             64,
         )
         self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
+            7000000,
+        )
+        self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
             4096,
         )
@@ -413,6 +442,9 @@ class ServerArgsSetTest(TestCase):
         # Verify cache_store_config
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
+        self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
+        self.assertEqual(py_env_configs.vit_config.vit_concurrency, 24)
+        self.assertEqual(py_env_configs.vit_config.vit_max_queue_size, 48)
 
         # Verify fmha_config
         self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trtllm_gen)
@@ -507,6 +539,7 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(
             py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill
         )  # Overridden
+        self.assertFalse(py_env_configs.sp_config.deterministic_draft_exact_match)
 
     def test_mixed_env_and_cmd_args(self):
         """Test mixed environment variables and command line arguments."""

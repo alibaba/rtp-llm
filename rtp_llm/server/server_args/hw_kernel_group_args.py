@@ -146,6 +146,57 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help="设置为 `True` 时，禁用ROCm平台自定义的 AllGather (AG) 实现，可能回退到标准库（如 RCCL）的 AllGather。",
     )
 
+    hw_kernel_group.add_argument(
+        "--deterministic_gemm",
+        env_name="DETERMINISTIC_GEMM",
+        bind_to=(hw_kernel_config, "deterministic_gemm"),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，cuBLASLt GEMM 优先选择无 split-K 的确定性算法（splitK=1），"
+        "保证多次运行结果逐 bit 一致，适用于测试/验证场景。默认 False，使用性能最优算法。",
+    )
+
+    hw_kernel_group.add_argument(
+        "--deterministic_attn",
+        env_name="DETERMINISTIC_ATTN",
+        bind_to=(hw_kernel_config, "deterministic_attn"),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，注意力计算跳过 TRT_V2/PAGED_TRT_V2 FMHA 内核，"
+        "优先选择 OPEN_SOURCE/PAGED_OPEN_SOURCE Flash Attention 实现，"
+        "保证多次运行结果确定性一致。默认 False，使用性能最优算法。",
+    )
+
+    hw_kernel_group.add_argument(
+        "--enable_fuse_kernels",
+        env_name="ENABLE_FUSE_KERNELS",
+        bind_to=(hw_kernel_config, "enable_fuse_kernels"),
+        type=str2bool,
+        default=True,
+        help=(
+            "model_py 路径下所有 Triton fuse kernel 的总开关 "
+            "(Qwen3.5/Qwen3-Next decoder 融合、GLM5/DSV3.2 MLA 融合、"
+            "strided_slice_copy_、_apply_output_bmm 等)。"
+            "设置为 `False` 时全量回退到 unfused baseline，用于调试或精度对齐验证。"
+        ),
+    )
+
+    hw_kernel_group.add_argument(
+        "--sp_prefill_cuda_graph_mode",
+        env_name="SP_PREFILL_CUDA_GRAPH_MODE",
+        bind_to=(hw_kernel_config, "sp_prefill_cuda_graph_mode"),
+        type=str,
+        default="auto",
+        choices=["auto", "on", "off"],
+        help=(
+            "投机采样 draft prefill 的 CUDA Graph 开关。"
+            "`auto`(默认) 沿用 MegaMoE 策略（MegaMoE + EP 时自动关闭），"
+            "`on` 强制开启，`off` 强制走 eager。"
+            "DISABLE_SP_PREFILL_CUDA_GRAPH / RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH "
+            "环境变量优先级高于此项。"
+        ),
+    )
+
 
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True

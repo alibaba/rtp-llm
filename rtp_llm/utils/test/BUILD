@@ -193,6 +193,34 @@ py_test(
 )
 
 py_test(
+    name = "process_lifecycle_test",
+    srcs = [
+        "process_lifecycle_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "start_backend_server_lifecycle_test",
+    srcs = [
+        "start_backend_server_lifecycle_test.py",
+    ],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:ops",
+        "//rtp_llm:sdk",
+        "//rtp_llm:utils",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "grpc_client_wrapper_test",
     srcs = ["grpc_client_wrapper_test.py"],
     deps = [

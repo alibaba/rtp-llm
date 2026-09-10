@@ -1,0 +1,2159 @@
+# Copyright 2025. All rights reserved.
+"""Fused bitonic top-k + emission kernel for M3 sparse prefill.
+
+Reuses kernel-1 (``_flash_attn_fwd_with_block_score_kernel``) for QK score,
+then in one kernel-2 (``_topk_to_block_table_kernel``) does bitonic top-k and
+emits either trtllm block_tables+seq_lens (``EMIT_BLOCK_TABLE``) or the
+``topk_idx`` layout topk_sparse.py expects (``EMIT_TOPK_IDX``). Assumes
+``idx_group_size == 1`` (M3 production: num_idx_heads == num_kv_heads).
+"""
+
+import logging
+import os
+import subprocess
+
+import torch
+import triton
+import triton.language as tl
+
+from ..common.utils import get_cu_seqblocks, robust_allocator
+from .flash_with_topk_idx import _bitonic_merge, _flash_attn_fwd_with_block_score_kernel
+from .score_chunk import (
+    M3_PREFILL_WORKSPACE_CACHE,
+    PrefillScoreHostMetadata,
+    build_prefill_score_chunks,
+    get_float32_workspace_views,
+    get_or_create_m3_prefill_workspace,
+    m3_index_score_chunk_enabled,
+    m3_index_score_chunk_rows,
+    resolve_prefill_score_host_metadata,
+)
+
+# Opt-1+: bypass the fmha_sm100 adapter in step3, preallocating the CSR/schedule/
+# page_table buffers once per forward (reused across all sparse layers) so the
+# per-layer ``.tolist()`` DtoH sync + 6 torch.empty allocs + schedule-capacity
+# recompute (~250us/layer of GPU idle) collapse to once-per-forward. The native CSR
+# kernel + schedule are reused verbatim -> output is bit-identical + deterministic.
+_M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
+
+# Opt-in chunked step3: sparse_atten_func internally allocates O_partial
+# [topk, total_q, Hq, dim] (+ LSE_partial), i.e. workspace scales with total_q --
+# tens of GB at 1M-token prefill. When enabled, step3 splits the query dim into
+# fixed-size chunks (CSR/schedule rebuilt per chunk, causal alignment preserved
+# via per-chunk seqused_k) so the workspace is bounded by the chunk size.
+# Enabled by default; chunk size defaults to 16K queries.  This is an
+# independent sparse-attention workspace policy, not a direct-paged layout
+# prerequisite.  Set M3_SPARSE_ATTN_CHUNK_ENABLE=0 only for controlled A/B or
+# compatibility rollback.
+# Read lazily (not at import) so env set after module import still takes effect.
+_DEFAULT_SPARSE_ATTN_CHUNK_SIZE = 16384
+
+
+def _sparse_attn_chunk_enabled() -> bool:
+    return os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "1") == "1"
+
+
+def _sparse_attn_chunk_size() -> int:
+    raw = os.environ.get(
+        "M3_SPARSE_ATTN_CHUNK_SIZE", str(_DEFAULT_SPARSE_ATTN_CHUNK_SIZE)
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logging.warning(
+            "[M3 sparse attn] invalid M3_SPARSE_ATTN_CHUNK_SIZE=%r; using default=%d",
+            raw,
+            _DEFAULT_SPARSE_ATTN_CHUNK_SIZE,
+        )
+        value = _DEFAULT_SPARSE_ATTN_CHUNK_SIZE
+    return max(value, 1)
+
+
+# Keep BF16 partial O as the production default. FP8 only changes the K1 -> K2
+# intermediate; Q/K/V storage and the final output dtype remain unchanged.
+_M3_SPARSE_ATTN_PARTIAL_DTYPE = (
+    torch.float8_e4m3fn
+    if os.environ.get("M3_SPARSE_ATTN_FP8_PARTIAL", "0") == "1"
+    else torch.bfloat16
+)
+
+# One-time reusable workspace for chunked prefill score and step3. The two
+# phases execute serially, so one flat allocation can back both layouts.
+# Mirrors the megamoe symm-mem buffer pattern (mega_buf._MEGA_BUF_CACHE): a single
+# flat CUDA uint8 tensor is allocated on first use, cached at module level per
+# device, grown only when a later plan needs more bytes, and reused across every
+# chunk / sparse layer / prefill step. Without it, sparse_atten_func +
+# SparseK2qCsrBuilderSm100 re-allocate the temporaries below on every chunk of
+# every layer. Layout (sizes computed by fmha_sm100, offsets 256B-aligned):
+#   [0, fwd_bytes)  sparse_atten_func intra-call temporaries
+#       O_partial   [topk, chunk_q, Hq, dim] partial_dtype -- dominant term;
+#                   topk=16, chunk_q=16384, Hq=64, dim=128 uses 4 GiB in
+#                   BF16 or 2 GiB in FP8
+#       LSE_partial [topk, chunk_q, Hq] fp32     -- ~64 MiB at the same shape
+#       fwd_bytes = interface.sparse_fwd_workspace_bytes(...) (256B-aligned)
+#   [fwd_bytes, fwd_bytes + csr_words*4)  CSR builder pipeline scratch, int32
+#       row_counts [Hkv, total_rows] + row_map [1, max_kv_blocks]
+#       + row_coords [total_rows, 2] + tile_counts [G_total, Hkv, total_rows],
+#       csr_words = build_k2q_csr.k2q_csr_workspace_words(...) (a few MiB)
+# Compatibility alias retained for the existing sparse-prefill chunk tests.
+_M3_CHUNK_WS_CACHE = M3_PREFILL_WORKSPACE_CACHE
+
+_CHUNKED_SPARSE_ATTN_LOGGED = False
+
+
+def _get_or_create_chunk_ws(nbytes: int, device: torch.device) -> torch.Tensor:
+    return get_or_create_m3_prefill_workspace(nbytes, device)
+
+
+def _patch_fmha_sm100_cxx_standard():
+    """GCC < 11 crashes (ICE) on CUDA 13's libcudacxx C++20 templates.
+    The fmha_sm100 JIT kernels compile fine with C++17; patch the flag."""
+    try:
+        ver = subprocess.check_output(["g++", "-dumpversion"], text=True).strip()
+        if int(ver.split(".")[0]) >= 11:
+            return
+    except Exception:
+        return
+    try:
+        import fmha_sm100.jit as _jit
+
+        _orig = _jit._get_nvcc_flags
+
+        def _patched(cache_dir, fmha=True):
+            return _orig(cache_dir, fmha).replace("-std=c++20", "-std=c++17")
+
+        _jit._get_nvcc_flags = _patched
+    except Exception:
+        pass
+
+
+def _patch_cutlass_cute_thrmma():
+    """Compat shim for nvidia-cutlass-dsl 4.6.0.dev0.
+
+    fmha_sm100's kernel modules annotate params as ``cute.core.ThrMma``, but this
+    cutlass-dsl daily relocated ``ThrMma`` from ``cutlass.cute.core`` to
+    ``cutlass.cute.atom`` (still re-exported as ``cutlass.cute.ThrMma``). The
+    annotations are evaluated at import, so the stale ``core.ThrMma`` reference
+    raises ``AttributeError`` and aborts the engine on the first sparse forward.
+    FA4 (flash_attn_4==4.6.0.dev0) and flashinfer/trtllm (>=4.5.0) both require
+    this exact dsl, so re-aliasing the one relocated symbol is the least-invasive
+    fix (no version change, no lock-file churn)."""
+    try:
+        import cutlass.cute.atom as _atom
+        import cutlass.cute.core as _core
+
+        if not hasattr(_core, "ThrMma") and hasattr(_atom, "ThrMma"):
+            _core.ThrMma = _atom.ThrMma
+    except Exception:
+        pass
+
+
+_patch_cutlass_cute_thrmma()
+_patch_fmha_sm100_cxx_standard()
+
+
+@triton.jit
+def _kv_flat_to_paged_kernel(
+    k_in,
+    v_in,
+    k_out,
+    v_out,
+    block,
+    nkv,
+    dim,
+    BLOCK_B: tl.constexpr,
+    DIM: tl.constexpr,
+    NKV: tl.constexpr,
+):
+    """Fused K+V copy: flat scratch page [block, nkv, dim] -> paged [nkv, block, dim]
+    (out[p,h,b,d] = in[p,b,h,d]). One launch for both caches; coalesced read (the
+    input page is contiguous [block,nkv,dim]) + coalesced write (nkv contiguous
+    [BLOCK_B,dim] chunks). ~4x faster than two aten permute+contiguous copies."""
+    # The process-wide CP scratch grows with the independent historical maxima
+    # of batch size and sequence length.  Long-context traffic can therefore
+    # make the flattened [page, block, head, dim] offset exceed INT32 even when
+    # the current request itself is small.  Promote the page term before the
+    # multiplication; otherwise Triton wraps at 2**31 elements and both the
+    # loads and stores below address memory outside their tensors.
+    pid_p = tl.program_id(0)
+    pid_p_i64 = pid_p.to(tl.int64)
+    b0 = tl.program_id(1) * BLOCK_B
+    offs_b = b0 + tl.arange(0, BLOCK_B)
+    offs_h = tl.arange(0, NKV)
+    offs_d = tl.arange(0, DIM)
+    mask_b = offs_b < block
+    in_off = (
+        pid_p_i64 * (block * nkv * dim)
+        + offs_b[:, None, None] * (nkv * dim)
+        + offs_h[None, :, None] * dim
+        + offs_d[None, None, :]
+    )
+    k_tile = tl.load(k_in + in_off, mask=mask_b[:, None, None], other=0)
+    v_tile = tl.load(v_in + in_off, mask=mask_b[:, None, None], other=0)
+    out_off = (
+        pid_p_i64 * (nkv * block * dim)
+        + offs_h[None, :, None] * (block * dim)
+        + offs_b[:, None, None] * dim
+        + offs_d[None, None, :]
+    )
+    tl.store(k_out + out_off, k_tile, mask=mask_b[:, None, None])
+    tl.store(v_out + out_off, v_tile, mask=mask_b[:, None, None])
+
+
+def _kv_flat_to_paged(
+    k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
+):
+    """flat [slots, nkv, dim] -> paged [num_paged, nkv, block, dim] for K and V in one
+    fused launch. Returns (k_paged, v_paged) contiguous. Replaces two aten
+    permute(0,2,1,3).contiguous() copies (~4x faster, bit-identical)."""
+    shape = (num_paged, num_kv_heads, block_size_k, head_dim)
+    k_paged = torch.empty(shape, dtype=k_cache.dtype, device=k_cache.device)
+    v_paged = torch.empty(shape, dtype=v_cache.dtype, device=v_cache.device)
+    # BLOCK_B=8 / num_warps=8 / num_stages=2 tuned best; the copy is HBM-bandwidth-bound
+    # (~6 TB/s achievable here) so it already runs at the pure-contiguous-copy ceiling.
+    BLOCK_B = 8
+    grid = (num_paged, triton.cdiv(block_size_k, BLOCK_B))
+    _kv_flat_to_paged_kernel[grid](
+        k_cache,
+        v_cache,
+        k_paged,
+        v_paged,
+        block_size_k,
+        num_kv_heads,
+        head_dim,
+        BLOCK_B=BLOCK_B,
+        DIM=head_dim,
+        NKV=num_kv_heads,
+        num_warps=8,
+        num_stages=2,
+    )
+    return k_paged, v_paged
+
+
+@triton.jit
+def _maxscore_transpose_kernel(
+    src,  # [H, K_in, Q] fp32 (fmha maxscore layout)
+    out,  # [H, Q, K_out] fp32
+    K_out,
+    Q,
+    s_h,
+    s_k,
+    s_q,
+    o_h,
+    o_q,
+    o_k,
+    BK: tl.constexpr,
+    BQ: tl.constexpr,
+):
+    """out[h, q, k] = src[h, k, q] for k < K_out.
+
+    Tiled 2-D transpose: each program reads a [BK, BQ] tile with a contiguous
+    read along q (src's fastest dim) and writes it with a contiguous write along
+    k (out's fastest dim), so both sides coalesce. Replaces
+    ``maxscore.transpose(1, 2)[:, :, :K_out].contiguous()``, whose aten copy runs
+    at ~1.7 TB/s on this shape vs ~6.2 TB/s here (~3.6x, bit-identical).
+    """
+    # At 1M context, one FP32 score head contains roughly
+    # Q * ceil(K / page_size) ~= 8e9 elements.  Triton otherwise evaluates
+    # ``pid_h * stride_h`` in int32 and wraps the base pointer for heads 1+.
+    # Promote the head id before both source and destination slab arithmetic.
+    pid_h = tl.program_id(0).to(tl.int64)
+    off_k = tl.program_id(1) * BK + tl.arange(0, BK)
+    off_q = tl.program_id(2) * BQ + tl.arange(0, BQ)
+    mask_k = off_k < K_out
+    mask_q = off_q < Q
+    val = tl.load(
+        src + pid_h * s_h + off_k[:, None] * s_k + off_q[None, :] * s_q,
+        mask=mask_k[:, None] & mask_q[None, :],
+        other=0.0,
+    )
+    tl.store(
+        out + pid_h * o_h + off_q[None, :] * o_q + off_k[:, None] * o_k,
+        val,
+        mask=mask_k[:, None] & mask_q[None, :],
+    )
+
+
+def _maxscore_to_score(maxscore, max_seqblock_k, out=None):
+    """[H, K_in, Q] fmha maxscore -> [H, Q, max_seqblock_k] fp32 contiguous.
+
+    ``out`` may be a buffer reused across sparse layers (the shape depends only
+    on the per-forward plan geometry). fmha always emits fp32, so no cast is
+    needed; guard in case that ever changes.
+    """
+    num_heads, _k_in, total_q = maxscore.shape
+    if maxscore.dtype != torch.float32:
+        return maxscore.transpose(1, 2)[:, :, :max_seqblock_k].contiguous().float()
+    want = (num_heads, total_q, max_seqblock_k)
+    if (
+        out is None
+        or tuple(out.shape) != want
+        or out.dtype != torch.float32
+        or out.device != maxscore.device
+    ):
+        out = torch.empty(want, dtype=torch.float32, device=maxscore.device)
+    # BK=16 / BQ=128 / num_warps=4 measured best at [4, 640, 20480] (~6.3 TB/s,
+    # i.e. the pure-copy ceiling); the kernel is HBM-bound so the tile choice is
+    # flat across nearby configs.
+    BK, BQ = 16, 128
+    grid = (num_heads, triton.cdiv(max_seqblock_k, BK), triton.cdiv(total_q, BQ))
+    _maxscore_transpose_kernel[grid](
+        maxscore,
+        out,
+        max_seqblock_k,
+        total_q,
+        maxscore.stride(0),
+        maxscore.stride(1),
+        maxscore.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        BK=BK,
+        BQ=BQ,
+        num_warps=4,
+    )
+    return out
+
+
+def build_index_score_plan(
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    num_idx_heads,
+    idx_kv_heads,
+    block_size_k,
+    *,
+    host_metadata: PrefillScoreHostMetadata | None = None,
+):
+    """Build the fmha_sm100 OnlyScore plan for the index QK score.
+
+    The plan depends ONLY on the per-forward segment geometry (qo/kv segment
+    lengths, per-segment offsets, head/page config) -- identical across every
+    sparse layer in one model forward. Build it once per forward and pass it to
+    ``flash_prefill_topk_to_block_tables(..., index_score_plan=plan)`` so only the
+    first sparse layer pays the build cost (no module-global cache needed)."""
+    from fmha_sm100.api import _fmha_sm100_plan
+
+    host_metadata = resolve_prefill_score_host_metadata(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        host_metadata=host_metadata,
+    )
+    qo_seg = torch.tensor(host_metadata.query_lens, dtype=torch.int32, device="cpu")
+    kv_seg = torch.tensor(host_metadata.seq_lens, dtype=torch.int32, device="cpu")
+    qo_off = torch.tensor(host_metadata.prefix_lens, dtype=torch.int32, device="cpu")
+    return _fmha_sm100_plan(
+        qo_seg,
+        kv_seg,
+        num_idx_heads,
+        num_kv_heads=idx_kv_heads,
+        qo_offset=qo_off,
+        page_size=block_size_k,
+        output_maxscore=True,
+        causal=True,
+        num_kv_splits=1,
+    )
+
+
+def _attach_direct_csr(plan, kv_seg_cpu, block_size_k, device):
+    """Opt-1+: preallocate CSR/schedule/page_table buffers ONCE per forward (stored on
+    the cached plan, reused across all sparse layers) so step3 can bypass the adapter.
+    batch-general. Native CSR builder + schedule are reused as-is -> bit-identical."""
+    from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
+    from src.sm100.prepare_scheduler import SparseAttentionSchedule
+
+    head_kv = int(plan["num_kv_heads"])
+    total_q = int(plan["cu_seqlens_q"][-1].item())
+    topk = int(plan["kv_block_num"])
+    total_rows = int(plan["total_rows"])
+    blk = int(plan["blk_kv"])
+    pages_per_batch = [
+        (int(s) + block_size_k - 1) // block_size_k for s in kv_seg_cpu.tolist()
+    ]
+    batch, max_pages = len(pages_per_batch), max(pages_per_batch)
+    cap = int(plan["scheduler_metadata_capacity"])
+
+    builder = SparseK2qCsrBuilderSm100()
+    builder._ensure_loaded()
+    q_ind = torch.empty((head_kv, total_q * topk), dtype=torch.int32, device=device)
+    # 16-byte aligned page_table [batch, max_pages] (the cute kernel asserts %16 == 0)
+    buf = torch.empty(batch * max_pages + 4, dtype=torch.int32, device=device)
+    shift = ((-buf.data_ptr()) % 16) // 4
+    page_table = buf[shift : shift + batch * max_pages].view(batch, max_pages)
+    plan["_csr_direct"] = dict(
+        builder=builder,
+        row_ptr=torch.empty(
+            (head_kv, total_rows + 1), dtype=torch.int32, device=device
+        ),
+        q_ind=q_ind,
+        sched=SparseAttentionSchedule(
+            enabled=True,
+            scheduler_metadata=torch.empty((cap, 6), dtype=torch.int32, device=device),
+            work_count=torch.empty((1,), dtype=torch.int32, device=device),
+            qsplit_indices=torch.empty_like(q_ind),
+            split_counts=torch.empty(
+                (total_q, head_kv), dtype=torch.int32, device=device
+            ),
+            target_q_per_cta=int(plan["target_q_per_cta"]),
+        ),
+        page_table=page_table,
+        pages_per_batch=pages_per_batch,
+        max_kv_blocks=(max(int(plan["max_seqlen_k"]), blk) + blk - 1) // blk,
+        target_q_per_cta=int(plan["target_q_per_cta"]),
+    )
+
+
+def build_sparse_attn_plan(
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    num_q_heads,
+    num_kv_heads,
+    block_size_k,
+    topk,
+    use_fp8_kvcache: bool = False,
+):
+    """Build the fmha_sm100 sparse-attention (step3) plan.
+
+    Like build_index_score_plan it depends only on the per-forward segment geometry
+    (so build once per forward, reuse across sparse layers). ``topk`` becomes
+    ``kv_block_num`` (must be in {4,8,16,32}). Consumed by sparse_fmha for the main
+    GQA sparse attention over the top-k selected blocks."""
+    from fmha_sm100.api import sparse_fmha_plan
+
+    qo_seg = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().to(torch.int32)
+    kv_seg = seq_lens.cpu().to(torch.int32)
+    qo_off = prefix_lens.cpu().to(
+        torch.int32
+    )  # qo_offset=prefix -> bottom-right causal
+    plan = sparse_fmha_plan(
+        qo_seg,
+        kv_seg,
+        num_qo_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        qo_offset=qo_off,
+        page_size=block_size_k,
+        output_maxscore=False,
+        kv_block_num=topk,
+        causal=True,
+        use_fp8_kvcache=use_fp8_kvcache,
+        partial_dtype=_M3_SPARSE_ATTN_PARTIAL_DTYPE,
+    )
+    # Keep the AOT-plan storage contract explicit at the Python boundary. The
+    # native kernels are dtype-specific; callers must not pair an FP8 plan with
+    # BF16 storage (or vice versa).
+    plan["_use_fp8_kvcache"] = bool(use_fp8_kvcache)
+    if _M3_MSA_FUSED_CSR:
+        _attach_direct_csr(plan, kv_seg, block_size_k, cu_seqlens.device)
+    return plan
+
+
+def build_kv_page_indices(req_to_token, seq_lens, block_size_k):
+    """Flat per-segment physical page table for fmha (page = slot // block_size_k).
+
+    Depends only on req_to_token + seq_lens (per-forward constant, identical across
+    sparse layers AND shared by the index-score and step3 fmha calls), so the caller
+    builds it once per forward (stored on _cp_shared_meta) and threads it in. Built
+    on the fly when not supplied."""
+    nblocks = (seq_lens.to(torch.int64) + block_size_k - 1) // block_size_k  # [batch]
+    page_starts = req_to_token[
+        :, ::block_size_k
+    ]  # [batch, max_pages] block-start slots
+    cols = torch.arange(page_starts.shape[1], device=req_to_token.device)
+    valid = cols[None, :] < nblocks[:, None]
+    return (page_starts // block_size_k)[valid].to(torch.int32)
+
+
+_HEUR_topk_to_block_table_kernel = {
+    "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"]),
+    "BLOCK_SIZE_K": lambda args: 2 * triton.next_power_of_2(args["topk"]),
+}
+
+_TOPK_BT_PINNED_NUM_WARPS = 1
+
+
+@triton.heuristics(_HEUR_topk_to_block_table_kernel)
+@triton.jit
+def _topk_to_block_table_kernel(
+    s_ptr,  # Score: h x n x max_seqblock
+    bt_ptr,  # block_tables: (n*NKV) x topk
+    seqlen_ptr,  # seq_lens: (n*NKV)
+    ti_ptr,  # topk_idx: NKV x n x topk (raw block indices, -1 padding)
+    sample_interval: tl.constexpr,
+    block_size: tl.constexpr,
+    cu_seqlens,
+    cu_seqblocks_q,
+    prefix_lens,
+    topk,
+    init_blocks: tl.constexpr,
+    local_blocks: tl.constexpr,
+    num_pages,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_bt_r,
+    stride_bt_t,
+    stride_ti_h,
+    stride_ti_n,
+    stride_ti_t,
+    NKV: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    MASK_INIT: tl.constexpr,
+    MASK_LOCAL: tl.constexpr,
+    EMIT_BLOCK_TABLE: tl.constexpr,
+    EMIT_TOPK_IDX: tl.constexpr,
+):
+    tl.static_assert(BLOCK_SIZE_K > BLOCK_SIZE_T)
+    pid_q = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    pid_h = tl.program_id(2)
+    seq_start = tl.load(cu_seqlens + pid_b)
+    block_start = tl.load(cu_seqblocks_q + pid_b)
+    block_num = tl.load(cu_seqblocks_q + pid_b + 1) - block_start
+    prefix_len = tl.load(prefix_lens + pid_b)
+    if pid_q >= block_num:
+        return
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    # int64 base offset: score is [num_idx_heads, total_q, max_seqblock_k], so the
+    # per-head slab (total_q * max_seqblock_k) times pid_h overflows int32 for long
+    # context. Promote the n/head terms to int64 before scaling by the strides.
+    s_ptrs = (
+        s_ptr
+        + (seq_start + pid_q * sample_interval).to(tl.int64) * stride_s_n
+        + pid_h.to(tl.int64) * stride_s_h
+        + off_k * stride_s_k
+    )
+    topk_score = tl.full((BLOCK_SIZE_K,), -1e30, dtype=tl.float32)
+    topk_idx = tl.full((BLOCK_SIZE_K,), 0, dtype=tl.int32)
+    left_half_mask = tl.arange(0, BLOCK_SIZE_K) < BLOCK_SIZE_K // 2
+    valid_blocks = (prefix_len + pid_q * sample_interval + block_size) // block_size
+    for i in tl.range(0, valid_blocks, BLOCK_SIZE_K):
+        causal_mask = i + off_k < valid_blocks
+        local_mask = i + off_k >= max(0, valid_blocks - local_blocks)
+        init_mask = i + off_k < init_blocks
+        score = tl.load(s_ptrs, mask=causal_mask, other=-1e30).to(tl.float32)
+        score = tl.where(score != score, -1e30, score)
+        s_ptrs = s_ptrs + stride_s_k * BLOCK_SIZE_K
+        if MASK_INIT:
+            score = tl.where(causal_mask & init_mask, score - 1e29, score)
+        else:
+            score = tl.where(causal_mask & init_mask, 1e30, score)
+        if MASK_LOCAL:
+            score = tl.where(causal_mask & local_mask, score - 1e28, score)
+        else:
+            score = tl.where(causal_mask & local_mask, 1e29, score)
+        topk_score, last_topk_score = score, topk_score
+        topk_idx, last_topk_idx = (tl.where(causal_mask, i + off_k + 1, 0), topk_idx)
+        n_dims: tl.constexpr = tl.standard._log2(BLOCK_SIZE_K)
+        for j in tl.static_range(1, n_dims):
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), j, 2, n_dims
+            )
+        if i != 0:
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), n_dims, False, n_dims
+            )
+            topk_score_new = last_topk_score * left_half_mask + topk_score * (
+                1 - left_half_mask
+            )
+            topk_idx_new = last_topk_idx * left_half_mask + topk_idx * (
+                1 - left_half_mask
+            )
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score_new, topk_idx_new.to(tl.int32), n_dims, True, n_dims
+            )
+        else:
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), n_dims, True, n_dims
+            )
+    # reduce to the top BLOCK_SIZE_T block indices (>=0; -1 padding)
+    sel_mask = tl.arange(0, BLOCK_SIZE_K // BLOCK_SIZE_T) == 0
+    t = tl.sum(
+        sel_mask[:, None]
+        * tl.reshape(topk_idx - 1, [BLOCK_SIZE_K // BLOCK_SIZE_T, BLOCK_SIZE_T]),
+        axis=0,
+    )  # [BLOCK_SIZE_T] block indices
+
+    # ---- fused emission: optional block-table + optional topk_idx ----
+    n_sel = min(topk, valid_blocks)
+    valid = (off_t < n_sel) & (t >= 0)
+    if EMIT_BLOCK_TABLE:
+        local_blk = (prefix_len + pid_q * sample_interval) // block_size
+        nvalid = tl.sum(valid.to(tl.int32))
+        is_local = valid & (t == local_blk)
+        has_local = tl.sum(is_local.to(tl.int32)) > 0
+        non_local = valid & (t != local_blk)
+        rank = tl.cumsum(non_local.to(tl.int32)) - 1
+        out_pos = tl.where(is_local, nvalid - 1, rank)
+        page = pid_h * num_pages + t
+        row = (block_start + pid_q) * NKV + pid_h
+        tl.store(bt_ptr + row * stride_bt_r + out_pos * stride_bt_t, page, mask=valid)
+        partial = (prefix_len + pid_q * sample_interval) % block_size + 1
+        sl_val = tl.where(
+            has_local, (nvalid - 1) * block_size + partial, nvalid * block_size
+        )
+        tl.store(seqlen_ptr + row, sl_val)
+    if EMIT_TOPK_IDX:
+        # topk_idx [NKV, total_q, topk] in the layout topk_sparse expects.
+        # Padding is -1 (matches existing flash_prefill_with_topk_index contract).
+        ti_val = tl.where(valid, t, -1)
+        ti_offset = (
+            (block_start + pid_q) * stride_ti_n
+            + pid_h * stride_ti_h
+            + off_t * stride_ti_t
+        )
+        tl.store(
+            ti_ptr + ti_offset,
+            ti_val.to(ti_ptr.dtype.element_ty),
+            mask=off_t < topk,
+        )
+
+
+_MULTIROW_BLOCK_Q = 16
+_MULTIROW_NUM_WARPS = 4
+_MULTIROW_MIN_KV_BLOCKS = 128
+
+
+@triton.heuristics(_HEUR_topk_to_block_table_kernel)
+@triton.jit
+def _topk_to_block_table_multirow_kernel(
+    s_ptr,  # Score: h x n x max_seqblock
+    bt_ptr,  # block_tables: (n*NKV) x topk
+    seqlen_ptr,  # seq_lens: (n*NKV)
+    ti_ptr,  # topk_idx: NKV x n x topk (raw block indices, -1 padding)
+    sample_interval: tl.constexpr,
+    block_size: tl.constexpr,
+    cu_seqlens,
+    cu_seqblocks_q,
+    prefix_lens,
+    topk,
+    init_blocks: tl.constexpr,
+    local_blocks: tl.constexpr,
+    num_pages,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_bt_r,
+    stride_bt_t,
+    stride_ti_h,
+    stride_ti_n,
+    stride_ti_t,
+    NKV: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    MASK_INIT: tl.constexpr,
+    MASK_LOCAL: tl.constexpr,
+    EMIT_BLOCK_TABLE: tl.constexpr,
+    EMIT_TOPK_IDX: tl.constexpr,
+):
+    tl.static_assert(BLOCK_SIZE_K > BLOCK_SIZE_T)
+    pid_qg = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    pid_h = tl.program_id(2)
+    seq_start = tl.load(cu_seqlens + pid_b)
+    block_start = tl.load(cu_seqblocks_q + pid_b)
+    block_num = tl.load(cu_seqblocks_q + pid_b + 1) - block_start
+    prefix_len = tl.load(prefix_lens + pid_b)
+    q_lo = pid_qg * BLOCK_Q
+    if q_lo >= block_num:
+        return
+    off_q = q_lo + tl.arange(0, BLOCK_Q)
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    row_ok = off_q < block_num
+    valid_blocks = tl.where(
+        row_ok, (prefix_len + off_q * sample_interval + block_size) // block_size, 0
+    )
+    s_row = (
+        s_ptr
+        + (seq_start + off_q * sample_interval).to(tl.int64) * stride_s_n
+        + pid_h.to(tl.int64) * stride_s_h
+    )
+    topk_score = tl.full((BLOCK_Q, BLOCK_SIZE_K), -1e30, dtype=tl.float32)
+    topk_idx = tl.zeros((BLOCK_Q, BLOCK_SIZE_K), dtype=tl.int32)
+    left_half_mask = (off_k < BLOCK_SIZE_K // 2)[None, :].to(tl.int32)
+    for i in tl.range(0, tl.max(valid_blocks), BLOCK_SIZE_K):
+        k = i + off_k
+        causal_mask = k[None, :] < valid_blocks[:, None]
+        local_mask = k[None, :] >= tl.maximum(0, valid_blocks[:, None] - local_blocks)
+        init_mask = (k < init_blocks)[None, :]
+        score = tl.load(
+            s_row[:, None] + k[None, :] * stride_s_k, mask=causal_mask, other=-1e30
+        ).to(tl.float32)
+        score = tl.where(score != score, -1e30, score)
+        if MASK_INIT:
+            score = tl.where(causal_mask & init_mask, score - 1e29, score)
+        else:
+            score = tl.where(causal_mask & init_mask, 1e30, score)
+        if MASK_LOCAL:
+            score = tl.where(causal_mask & local_mask, score - 1e28, score)
+        else:
+            score = tl.where(causal_mask & local_mask, 1e29, score)
+        topk_score, last_topk_score = score, topk_score
+        topk_idx, last_topk_idx = tl.where(causal_mask, k[None, :] + 1, 0), topk_idx
+        n_dims: tl.constexpr = tl.standard._log2(BLOCK_SIZE_K)
+        for j in tl.static_range(1, n_dims):
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), j, 2, n_dims
+            )
+        if i != 0:
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), n_dims, False, n_dims
+            )
+            topk_score_new = last_topk_score * left_half_mask + topk_score * (
+                1 - left_half_mask
+            )
+            topk_idx_new = last_topk_idx * left_half_mask + topk_idx * (
+                1 - left_half_mask
+            )
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score_new, topk_idx_new.to(tl.int32), n_dims, True, n_dims
+            )
+        else:
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), n_dims, True, n_dims
+            )
+    sel_mask = (tl.arange(0, BLOCK_SIZE_K // BLOCK_SIZE_T) == 0)[None, :, None]
+    t = tl.sum(
+        sel_mask
+        * tl.reshape(
+            topk_idx - 1, [BLOCK_Q, BLOCK_SIZE_K // BLOCK_SIZE_T, BLOCK_SIZE_T]
+        ),
+        axis=1,
+    )
+
+    n_sel = tl.minimum(topk, valid_blocks)
+    valid = (off_t[None, :] < n_sel[:, None]) & (t >= 0) & row_ok[:, None]
+    if EMIT_BLOCK_TABLE:
+        local_blk = ((prefix_len + off_q * sample_interval) // block_size)[:, None]
+        nvalid = tl.sum(valid.to(tl.int32), axis=1)[:, None]
+        is_local = valid & (t == local_blk)
+        has_local = tl.sum(is_local.to(tl.int32), axis=1)[:, None] > 0
+        non_local = valid & (t != local_blk)
+        rank = tl.cumsum(non_local.to(tl.int32), axis=1) - 1
+        out_pos = tl.where(is_local, nvalid - 1, rank)
+        page = pid_h * num_pages + t
+        row = ((block_start + off_q) * NKV + pid_h)[:, None]
+        tl.store(bt_ptr + row * stride_bt_r + out_pos * stride_bt_t, page, mask=valid)
+        partial = ((prefix_len + off_q * sample_interval) % block_size + 1)[:, None]
+        sl_val = tl.where(
+            has_local, (nvalid - 1) * block_size + partial, nvalid * block_size
+        )
+        tl.store(seqlen_ptr + row, sl_val, mask=row_ok[:, None])
+    if EMIT_TOPK_IDX:
+        ti_val = tl.where(valid, t, -1)
+        ti_offset = (
+            (block_start + off_q)[:, None] * stride_ti_n
+            + pid_h * stride_ti_h
+            + off_t[None, :] * stride_ti_t
+        )
+        tl.store(
+            ti_ptr + ti_offset,
+            ti_val.to(ti_ptr.dtype.element_ty),
+            mask=(off_t[None, :] < topk) & row_ok[:, None],
+        )
+
+
+def _launch_topk_to_block_table(
+    max_seqblock_q: int,
+    batch_size: int,
+    num_heads: int,
+    max_seqblock_k: int,
+    *args,
+    **kwargs,
+):
+    if max_seqblock_k >= _MULTIROW_MIN_KV_BLOCKS:
+        grid = (
+            triton.cdiv(max_seqblock_q, _MULTIROW_BLOCK_Q),
+            batch_size,
+            num_heads,
+        )
+        _topk_to_block_table_multirow_kernel[grid](
+            *args,
+            **kwargs,
+            BLOCK_Q=_MULTIROW_BLOCK_Q,
+            num_warps=_MULTIROW_NUM_WARPS,
+            num_stages=2,
+        )
+    else:
+        _topk_to_block_table_kernel[(max_seqblock_q, batch_size, num_heads)](
+            *args,
+            **kwargs,
+            num_warps=_TOPK_BT_PINNED_NUM_WARPS,
+            num_stages=2,
+        )
+
+
+_INDEX_SCORE_CHUNK_LOGGED = False
+
+
+def _allocate_topk_outputs(
+    total_q: int,
+    num_kv_heads: int,
+    topk: int,
+    device: torch.device,
+    emit_block_table: bool,
+):
+    if emit_block_table:
+        block_tables = torch.zeros(
+            total_q * num_kv_heads, topk, dtype=torch.int32, device=device
+        )
+        output_seq_lens = torch.zeros(
+            total_q * num_kv_heads, dtype=torch.int32, device=device
+        )
+    else:
+        block_tables = torch.empty(1, 1, dtype=torch.int32, device=device)
+        output_seq_lens = torch.empty(1, dtype=torch.int32, device=device)
+    topk_idx = torch.full(
+        (num_kv_heads, total_q, topk), -1, dtype=torch.int32, device=device
+    )
+    return block_tables, output_seq_lens, topk_idx
+
+
+def prepare_fmha_index_score_chunks(
+    index_score_plan,
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    kv_indices,
+    chunk_rows,
+    block_size_k,
+    num_heads,
+    idx_kv_heads,
+    total_q,
+    max_seqlen_k,
+    *,
+    host_metadata: PrefillScoreHostMetadata | None = None,
+):
+    cache_key = (
+        chunk_rows,
+        int(total_q),
+        int(seq_lens.shape[0]),
+        int(max_seqlen_k),
+        block_size_k,
+        num_heads,
+        idx_kv_heads,
+    )
+    if isinstance(index_score_plan, dict):
+        cached = index_score_plan.get("_index_score_chunk_meta")
+        if cached is not None and cached["key"] == cache_key:
+            return cached["chunks"]
+
+    chunks = build_prefill_score_chunks(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        None,
+        chunk_rows,
+        block_size_k,
+        kv_indices=kv_indices,
+        host_metadata=host_metadata,
+    )
+    chunks_with_plans = [
+        (
+            chunk,
+            build_index_score_plan(
+                chunk.cu_seqlens,
+                chunk.seq_lens,
+                chunk.prefix_lens,
+                num_heads,
+                idx_kv_heads,
+                block_size_k,
+                host_metadata=chunk.host_metadata,
+            ),
+        )
+        for chunk in chunks
+    ]
+    if isinstance(index_score_plan, dict):
+        index_score_plan["_index_score_chunk_meta"] = {
+            "key": cache_key,
+            "chunks": chunks_with_plans,
+        }
+    return chunks_with_plans
+
+
+def _flash_prefill_topk_to_block_tables_chunked(
+    idx_q,
+    k_pages,
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    max_seqlen_k,
+    block_size_k,
+    topk,
+    num_pages,
+    init_blocks,
+    local_blocks,
+    sm_scale,
+    index_score_plan,
+    kv_indices,
+    emit_block_table,
+    num_heads,
+    idx_kv_heads,
+):
+    from fmha_sm100.api import _fmha_sm100
+
+    total_q = idx_q.shape[0]
+    chunk_rows = m3_index_score_chunk_rows()
+    chunks_with_plans = prepare_fmha_index_score_chunks(
+        index_score_plan,
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        kv_indices,
+        chunk_rows,
+        block_size_k,
+        num_heads,
+        idx_kv_heads,
+        total_q,
+        max_seqlen_k,
+    )
+    block_tables, output_seq_lens, topk_idx = _allocate_topk_outputs(
+        total_q, num_heads, topk, idx_q.device, emit_block_table
+    )
+
+    maxscore_capacity = 0
+    score_capacity = 0
+    for chunk, plan in chunks_with_plans:
+        max_k_tiles = int(plan["max_k_tiles"])
+        if max_k_tiles <= 0:
+            raise RuntimeError(
+                "M3 chunked fmha index score produced invalid max_k_tiles="
+                f"{max_k_tiles} for chunk_rows={chunk.q_end - chunk.q_start}"
+            )
+        chunk_q = chunk.q_end - chunk.q_start
+        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        maxscore_capacity = max(maxscore_capacity, num_heads * max_k_tiles * chunk_q)
+        score_capacity = max(score_capacity, num_heads * chunk_q * max_seqblock_k)
+
+    maxscore_storage, score_storage = get_float32_workspace_views(
+        idx_q.device, ((maxscore_capacity,), (score_capacity,))
+    )
+
+    global _INDEX_SCORE_CHUNK_LOGGED
+    if not _INDEX_SCORE_CHUNK_LOGGED:
+        _INDEX_SCORE_CHUNK_LOGGED = True
+        logging.info(
+            "[M3 index score] chunked fmha enabled: total_q=%d chunk_rows=%d "
+            "chunks=%d workspace_bytes=%d",
+            total_q,
+            chunk_rows,
+            len(chunks_with_plans),
+            (maxscore_capacity + score_capacity) * 4,
+        )
+
+    for chunk, plan in chunks_with_plans:
+        q_start, q_end = chunk.q_start, chunk.q_end
+        chunk_q = q_end - q_start
+        max_k_tiles = int(plan["max_k_tiles"])
+        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        maxscore_numel = num_heads * max_k_tiles * chunk_q
+        score_numel = num_heads * chunk_q * max_seqblock_k
+        maxscore = maxscore_storage[:maxscore_numel].view(
+            num_heads, max_k_tiles, chunk_q
+        )
+        score = score_storage[:score_numel].view(num_heads, chunk_q, max_seqblock_k)
+
+        _o, maxscore = _fmha_sm100(
+            idx_q[q_start:q_end],
+            k_pages,
+            k_pages,
+            plan,
+            kv_indices=chunk.kv_indices,
+            output_o=False,
+            output_maxscore=True,
+            sm_scale=sm_scale,
+            max_score=maxscore,
+        )
+        _maxscore_to_score(maxscore, max_seqblock_k, out=score)
+
+        # Score chunking is only enabled for block_size_q == 1, so token and
+        # query-block cumulative offsets are identical. Avoid get_cu_seqblocks:
+        # its first call reads two reduction scalars back to the host.
+        cu_seqblocks_q = chunk.cu_seqlens
+        max_seqblock_q = chunk.max_seqlen_q
+        if emit_block_table:
+            bt_chunk = block_tables[q_start * num_heads : q_end * num_heads]
+            sl_chunk = output_seq_lens[q_start * num_heads : q_end * num_heads]
+        else:
+            bt_chunk = block_tables
+            sl_chunk = output_seq_lens
+        topk_chunk = topk_idx[:, q_start:q_end, :]
+        _launch_topk_to_block_table(
+            max_seqblock_q,
+            chunk.cu_seqlens.shape[0] - 1,
+            num_heads,
+            max_seqblock_k,
+            score,
+            bt_chunk,
+            sl_chunk,
+            topk_chunk,
+            1,
+            block_size_k,
+            chunk.cu_seqlens,
+            cu_seqblocks_q,
+            chunk.prefix_lens,
+            topk,
+            init_blocks,
+            local_blocks,
+            num_pages,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            bt_chunk.stride(0),
+            bt_chunk.stride(1),
+            topk_chunk.stride(0),
+            topk_chunk.stride(1),
+            topk_chunk.stride(2),
+            NKV=num_heads,
+            MASK_INIT=False,
+            MASK_LOCAL=False,
+            EMIT_BLOCK_TABLE=emit_block_table,
+            EMIT_TOPK_IDX=True,
+        )
+
+    return block_tables, output_seq_lens, topk_idx
+
+
+@torch.no_grad()
+def flash_prefill_topk_to_block_tables(
+    idx_q: torch.Tensor,  # [total_q, num_idx_heads(=num_kv_heads), d]
+    idx_k_cache: torch.Tensor,  # paged [max_slots, 1, d]
+    req_to_token: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    block_size_k: int,
+    topk: int,
+    num_pages: int,
+    init_blocks: int = 0,
+    local_blocks: int = 1,
+    sm_scale=None,
+    index_score_plan=None,
+    kv_indices=None,
+    emit_block_table: bool = True,
+):
+    """Returns (block_tables [total_q*NKV, topk] int32, seq_lens [total_q*NKV] int32).
+
+    ``index_score_plan``: a prebuilt fmha_sm100 OnlyScore plan (from
+    ``build_index_score_plan``). It depends only on the per-forward segment shape,
+    so the caller builds it once per forward (stored on MSAAttention._cp_shared_meta)
+    and passes it here, avoiding a rebuild per sparse layer. When None it is built
+    on the fly (decode fast-path / non-CP callers)."""
+    triton.set_allocator(robust_allocator)
+    total_q, num_heads, qk_head_dim = idx_q.shape
+    max_slots, idx_kv_heads, _ = idx_k_cache.shape  # idx K is usually single-head
+    gqa_group_size = num_heads // idx_kv_heads  # QK kernel: index-heads share idx K
+    # block-table layout: in production idx_group_size==1 so each index head maps to
+    # one main-attention KV head -> NKV == num_heads.
+    num_kv_heads = num_heads
+    batch_size = cu_seqlens.shape[0] - 1
+    block_size_q = 1
+    if sm_scale is None:
+        sm_scale = qk_head_dim**-0.5
+
+    # Index QK score via fmha_sm100 OnlyScore (SM100/Blackwell) instead of the
+    # Triton block-score kernel. fmha emits the same per-128-block max score that
+    # the bitonic topk->block_table kernel below consumes, but is MMA-efficient on
+    # the skinny index QK -> ~2.5x faster at 64k ctx. JIT-compiled+cached on first
+    # use (needs a gcc>=11 host compiler at COMPILE time; the cached .so is reused
+    # afterwards with no compiler dependency).
+    from fmha_sm100.api import _fmha_sm100
+
+    # paged MQA view of the idx-K cache: [num_total_pages, idx_kv_heads, page, d]
+    num_total_pages = max_slots // block_size_k
+    k_pages = idx_k_cache[: num_total_pages * block_size_k].view(
+        num_total_pages, idx_kv_heads, block_size_k, qk_head_dim
+    )
+    # flat per-segment physical page table (page = slot // block_size_k). Built once
+    # per forward by the caller and threaded in (shared with step3); else built here.
+    if kv_indices is None:
+        kv_indices = build_kv_page_indices(req_to_token, seq_lens, block_size_k)
+    if m3_index_score_chunk_enabled(total_q):
+        return _flash_prefill_topk_to_block_tables_chunked(
+            idx_q=idx_q,
+            k_pages=k_pages,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
+            max_seqlen_k=max_seqlen_k,
+            block_size_k=block_size_k,
+            topk=topk,
+            num_pages=num_pages,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            sm_scale=sm_scale,
+            index_score_plan=index_score_plan,
+            kv_indices=kv_indices,
+            emit_block_table=emit_block_table,
+            num_heads=num_heads,
+            idx_kv_heads=idx_kv_heads,
+        )
+    cu_seqblocks_q, max_seqblock_q, all_seqblock_q, _, _, _ = get_cu_seqblocks(
+        cu_seqlens, max_seqlen_q, block_size_q, block_size_k
+    )
+    max_seqblock_k = triton.cdiv(max_seqlen_k, block_size_k)
+    # The fmha plan depends only on the per-forward segment shape (identical across
+    # every sparse layer). The caller builds it once per forward and passes it in;
+    # build on the fly only when not supplied (decode fast-path / non-CP callers).
+    plan = index_score_plan
+    if plan is None:
+        plan = build_index_score_plan(
+            cu_seqlens, seq_lens, prefix_lens, num_heads, idx_kv_heads, block_size_k
+        )
+    # Reuse the maxscore buffer across sparse layers instead of letting fmha
+    # allocate it per call. fmha's internal alloc is torch.full(..., -inf), whose
+    # fill costs ~31us/layer, and the -inf is dead: the kernel writes every tile in
+    # [0, ceil(kv_len/page)) and _topk_to_block_table_kernel masks its loads to the
+    # causal-valid range (other=-1e30), so it never observes the padding tiles.
+    # Shape depends only on the plan geometry -> stable across layers in a forward.
+    max_k_tiles = int(plan["max_k_tiles"])
+    maxscore = plan.get("_maxscore_buf") if max_k_tiles > 0 else None
+    if maxscore is None and max_k_tiles > 0:
+        maxscore = torch.empty(
+            (num_heads, max_k_tiles, total_q), dtype=torch.float32, device=idx_q.device
+        )
+        plan["_maxscore_buf"] = maxscore
+    _o, maxscore = _fmha_sm100(
+        idx_q,
+        k_pages,
+        k_pages,
+        plan,
+        kv_indices=kv_indices,
+        output_o=False,
+        output_maxscore=True,
+        sm_scale=sm_scale,
+        max_score=maxscore,
+    )
+    # [num_heads, max_block, total_q] -> [num_heads, total_q, max_seqblock_k] fp32.
+    # Fused Triton transpose (aten's strided copy only reaches ~1.7 TB/s here) into
+    # a buffer reused across sparse layers, like _maxscore_buf above.
+    score = _maxscore_to_score(maxscore, max_seqblock_k, out=plan.get("_score_buf"))
+    plan["_score_buf"] = score
+
+    # bt/sl (compacted trtllm-gen block table) are consumed ONLY by the trtllm-gen
+    # step3 path; the fmha step3 path uses topk_idx + page_table and never reads them.
+    # When the caller won't use them (emit_block_table=False) skip the alloc and the
+    # kernel's block-table emission, passing 1-elem dummies just to satisfy the strides.
+    if emit_block_table:
+        bt = torch.zeros(
+            total_q * num_kv_heads, topk, dtype=torch.int32, device=idx_q.device
+        )
+        sl = torch.zeros(total_q * num_kv_heads, dtype=torch.int32, device=idx_q.device)
+    else:
+        bt = torch.empty(1, 1, dtype=torch.int32, device=idx_q.device)
+        sl = torch.empty(1, dtype=torch.int32, device=idx_q.device)
+    # topk_idx (-1 padded, raw block ids for fmha step3) is allocated directly in the
+    # [nkv, total_q, topk] q2k layout the native CSR builder / sparse_atten_func consume,
+    # so the fmha step3 feeds it straight in with NO permute-copy. The kernel writes via
+    # the (h, n, t) strides (passed in natural order for this layout).
+    topk_idx = torch.full(
+        (num_kv_heads, total_q, topk), -1, dtype=torch.int32, device=idx_q.device
+    )
+    _launch_topk_to_block_table(
+        max_seqblock_q,
+        batch_size,
+        num_heads,
+        max_seqblock_k,
+        score,
+        bt,
+        sl,
+        topk_idx,
+        block_size_q,
+        block_size_k,
+        cu_seqlens,
+        cu_seqblocks_q,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+        num_pages,
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        bt.stride(0),
+        bt.stride(1),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),  # h, n, t
+        NKV=num_kv_heads,
+        MASK_INIT=False,
+        MASK_LOCAL=False,
+        EMIT_BLOCK_TABLE=emit_block_table,
+        EMIT_TOPK_IDX=True,
+    )
+    return bt, sl, topk_idx
+
+
+def _pack_segments_into_chunks(qo_lens, chunk_size):
+    """Split the flat query dim into consecutive ``chunk_size`` chunks.
+
+    Functionally equivalent to concatenating all segments along the sequence
+    dim and slicing every ``chunk_size`` queries: every chunk except the last
+    is exactly ``chunk_size`` long (minimal call count). Each chunk is a list
+    of ``(seg_idx, q0, q1)`` segment-local slices; a segment straddling a
+    chunk boundary is split into partial entries. One multi-segment varlen
+    call is issued per chunk, which matters under CP zigzag where every
+    request contributes 2 short segments.
+    """
+    groups, cur, cur_q = [], [], 0
+    for b, q_len in enumerate(qo_lens):
+        q0 = 0
+        while q0 < q_len:
+            take = min(chunk_size - cur_q, q_len - q0)
+            cur.append((b, q0, q0 + take))
+            cur_q += take
+            q0 += take
+            if cur_q == chunk_size:
+                groups.append(cur)
+                cur, cur_q = [], 0
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def _build_group_page_table(group, seg_pages, kv_indices, dev):
+    """[nb, max_n_pad] page table for one group; pad the row width to a
+    multiple of 4 int32 and 16-byte align the base so EVERY row satisfies the
+    cute kernel's %16 == 0 alignment assert. zeros: padding is never
+    dereferenced but must not hold garbage page ids."""
+    nb = len(group)
+    max_n = max(seg_pages[b][1] for (b, _, _) in group)
+    max_n_pad = ((max_n + 3) // 4) * 4
+    buf = torch.zeros(nb * max_n_pad + 4, dtype=torch.int32, device=dev)
+    shift = ((-buf.data_ptr()) % 16) // 4
+    pt = buf[shift : shift + nb * max_n_pad].view(nb, max_n_pad)
+    for i, (b, _, _) in enumerate(group):
+        o, n = seg_pages[b]
+        pt[i, :n] = kv_indices[o : o + n]
+    return pt
+
+
+def _build_chunk(
+    group, qo_lens, seqused, seg_q_starts, seg_pages, kv_indices, block_size_k, dev
+):
+    """Geometry for ONE packed varlen call: per-entry cu_seqlens / seqused_k /
+    page-table rows keep the segments independent, exactly like the
+    non-chunked ``_csr_direct`` path."""
+    q_lens = [q1 - q0 for (_, q0, q1) in group]
+    # effective causal KV length per entry at its chunk end
+    kv_useds = [(seqused[b] - qo_lens[b]) + q1 for (b, _, q1) in group]
+    kv_max = max(kv_useds)
+    cu_q_l, cu_k_l = [0], [0]
+    for ql, ku in zip(q_lens, kv_useds):
+        cu_q_l.append(cu_q_l[-1] + ql)
+        cu_k_l.append(cu_k_l[-1] + ku)
+    b0, q0_first, _ = group[0]
+    g0 = seg_q_starts[b0] + q0_first
+    csz = sum(q_lens)
+    # cu_q / cu_k / seqused are standalone allocs: the kernel asserts 16-byte
+    # data alignment, so views into a shared buffer (base + 4B) would be rejected
+    return dict(
+        g0=g0,
+        g1=g0 + csz,
+        csz=csz,
+        nb=len(group),
+        max_q=max(q_lens),
+        kv_max=kv_max,
+        total_k=cu_k_l[-1],
+        total_rows=sum((ku + block_size_k - 1) // block_size_k for ku in kv_useds),
+        max_kv_blocks=(max(kv_max, block_size_k) + block_size_k - 1) // block_size_k,
+        cu_q=torch.tensor(cu_q_l, dtype=torch.int32, device=dev),
+        cu_k=torch.tensor(cu_k_l, dtype=torch.int32, device=dev),
+        seqused=torch.tensor(kv_useds, dtype=torch.int32, device=dev),
+        pt=_build_group_page_table(group, seg_pages, kv_indices, dev),
+    )
+
+
+def _build_chunk_meta(
+    p,
+    kv_indices,
+    topk,
+    block_size_k,
+    chunk_size,
+    num_q_heads,
+    head_dim,
+    partial_dtype,
+    dev,
+):
+    """Per-forward host metadata for ``_sparse_attn_chunked``: per-chunk
+    aligned page tables + geometry/cu_seqlens tensors, built by the first
+    sparse layer and reused by the rest (the plan is per-forward, so is
+    kv_indices)."""
+    from interface import sparse_fwd_workspace_bytes
+    from src.sm100.build_k2q_csr import k2q_csr_workspace_words
+    from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
+
+    num_kv_heads = int(p["num_kv_heads"])
+    qo_lens = [int(v) for v in p["qo_segment_lens"].tolist()]  # CPU tensor
+    seqused = [int(v) for v in p["seqused_k"].cpu().tolist()]  # one DtoH sync
+    # kv_indices is laid out by the FULL per-segment KV run (kv_segment_lens,
+    # what build_kv_page_indices consumed), NOT by the causal seqused_k. Under
+    # zigzag/load-balanced CP a segment's seqused_k (= qo_offset + q_len) is
+    # smaller than its full KV run, so sizing the page table / advancing the
+    # page cursor by seqused_k desyncs the walk and maps later segments to the
+    # wrong physical pages. Size the page run by kv_segment_lens; keep the
+    # causal prefix (= qo_offset) from seqused_k.
+    kv_runs = [int(v) for v in p["kv_segment_lens"].cpu().tolist()]
+    seg_pages, off = [], 0  # (page_offset, n_pages) per segment
+    for kv_run in kv_runs:
+        n = (kv_run + block_size_k - 1) // block_size_k
+        seg_pages.append((off, n))
+        off += n
+
+    seg_q_starts = [0]
+    for q_len in qo_lens:
+        seg_q_starts.append(seg_q_starts[-1] + q_len)
+
+    chunks = [
+        _build_chunk(
+            group,
+            qo_lens,
+            seqused,
+            seg_q_starts,
+            seg_pages,
+            kv_indices,
+            block_size_k,
+            dev,
+        )
+        for group in _pack_segments_into_chunks(qo_lens, chunk_size)
+    ]
+
+    builder = SparseK2qCsrBuilderSm100()
+    builder._ensure_loaded()
+    # Reusable-workspace sizing (see _M3_CHUNK_WS_CACHE): fwd segment covers
+    # the largest chunk; csr segment covers the largest per-chunk scratch.
+    # emit_schedule=True is a superset of the non-schedule size (adds only
+    # row_coords), so the same buffer serves both usable_SM_count modes.
+    ws_fwd_bytes = sparse_fwd_workspace_bytes(
+        topK=topk,
+        total_q=max(c["csz"] for c in chunks),
+        head_q=num_q_heads,
+        head_dim=head_dim,
+        partial_dtype=partial_dtype,
+    )
+    ws_csr_words = max(
+        k2q_csr_workspace_words(
+            num_kv_heads,
+            c["total_rows"],
+            c["nb"],
+            c["max_kv_blocks"],
+            c["csz"],
+            True,
+        )
+        for c in chunks
+    )
+    return dict(
+        chunks=chunks,
+        builder=builder,
+        ws_fwd_bytes=ws_fwd_bytes,
+        ws_csr_words=ws_csr_words,
+    )
+
+
+@torch.no_grad()
+def _sparse_attn_chunked(
+    q,  # [total_q, num_q_heads, head_dim] bf16
+    k_paged_f,  # [num_paged, nkv, blk, dim]
+    v_paged_f,  # [num_paged, nkv, blk, dim]
+    topk_idx,  # [nkv, total_q, topk] int32, -1 padded
+    kv_indices,  # flat per-segment physical page ids (int32)
+    sparse_attn_plan,
+    topk: int,
+    block_size_k: int,
+    sm_scale: float,
+    chunk_size: int,
+):
+    """Step3 with the query dim split into ``chunk_size`` chunks (memory-saving).
+
+    ``sparse_atten_func`` allocates O_partial [topk, total_q, Hq, dim] (+
+    LSE_partial) per call, so its workspace scales with total_q -- prohibitive at
+    1M-token prefill. Each query row only depends on its own top-k KV blocks, so
+    chunking over queries is lossless: for a chunk [q0, q1) of a segment with
+    prefix P we rebuild the CSR + schedule from the topk_idx slice and call
+    sparse_atten_func with seqused_k = P + q1. The kernel's bottom-right causal
+    alignment (causal_q_offset = seqused_k - seqlen_q = P + q0) then gives local
+    query i the kv limit P + q0 + i -- identical to the full call.
+
+    Chunk partitioning: see ``_pack_segments_into_chunks`` (exact-fill slicing
+    of the batch-concatenated query dim: every chunk except the last is
+    exactly chunk_size, segments straddling a boundary become partial entries
+    of one multi-segment varlen call). Workspace is bounded by chunk_size;
+    per-chunk CSR/schedule rebuild + small H2D copies are the accepted
+    trade-off of this opt-in mode.
+    """
+    from interface import sparse_atten_func
+
+    p = sparse_attn_plan
+    dev = q.device
+    total_q, num_q_heads, head_dim = q.shape
+    qhead_per_kv = num_q_heads // int(p["num_kv_heads"])
+    usable_sm = int(p.get("usable_SM_count", -1))
+    partial_dtype = p.get("partial_dtype", torch.bfloat16)
+
+    meta = p.get("_chunk_meta")
+    if meta is None:
+        meta = _build_chunk_meta(
+            p,
+            kv_indices,
+            topk,
+            block_size_k,
+            chunk_size,
+            num_q_heads,
+            head_dim,
+            partial_dtype,
+            dev,
+        )
+        p["_chunk_meta"] = meta
+        global _CHUNKED_SPARSE_ATTN_LOGGED
+        if not _CHUNKED_SPARSE_ATTN_LOGGED:
+            _CHUNKED_SPARSE_ATTN_LOGGED = True
+            logging.info(
+                "[M3 sparse attn] chunked step3 enabled: total_q=%d chunk_size=%d "
+                "segments=%d packed_calls=%d",
+                total_q,
+                chunk_size,
+                len(p["qo_segment_lens"]),
+                len(meta["chunks"]),
+            )
+
+    fwd_bytes, csr_words = meta["ws_fwd_bytes"], meta["ws_csr_words"]
+    ws = _get_or_create_chunk_ws(fwd_bytes + csr_words * 4, dev)
+    ws_fwd = ws[:fwd_bytes]
+    ws_csr = ws[fwd_bytes : fwd_bytes + csr_words * 4].view(torch.int32)
+
+    out = torch.empty(total_q, num_q_heads, head_dim, dtype=torch.bfloat16, device=dev)
+    for c in meta["chunks"]:
+        g0, g1 = c["g0"], c["g1"]
+        # dim-1 slice of the contiguous [nkv, total_q, topk] is non-contiguous
+        # across heads -> small copy (nkv * csz * topk int32)
+        topk_chunk = topk_idx[:, g0:g1, :].contiguous()
+        # Mirror sparse_fmha: the native builder schedule ignores
+        # usable_SM_count, so when SM-limited let sparse_atten_func build one.
+        ret = meta["builder"](
+            topk_chunk,
+            c["cu_q"],
+            c["cu_k"],
+            total_k=c["total_k"],
+            blk_kv=block_size_k,
+            max_seqlen_k=c["kv_max"],
+            max_seqlen_q=c["max_q"],
+            total_rows=c["total_rows"],
+            qhead_per_kv=qhead_per_kv,
+            return_schedule=usable_sm <= 0,
+            workspace=ws_csr,
+        )
+        row_ptr, q_ind = ret[0], ret[1]
+        sched = ret[2] if len(ret) == 3 else None
+        # out= makes the K2 combine kernel write the chunk result directly
+        # into the persistent output (dim-0 slice is contiguous), removing a
+        # [csz, Hq, dim] DtoD copy (~83us / 256MB per 16K-q chunk).
+        sparse_atten_func(
+            q[g0:g1],
+            k_paged_f,
+            v_paged_f,
+            row_ptr,
+            q_ind,
+            topk,
+            cu_seqlens_q=c["cu_q"],
+            cu_seqlens_k=c["cu_k"],
+            max_seqlen_q=c["max_q"],
+            max_seqlen_k=c["kv_max"],
+            blk_kv=block_size_k,
+            causal=p["causal"],
+            softmax_scale=sm_scale,
+            partial_dtype=partial_dtype,
+            return_softmax_lse=False,
+            page_table=c["pt"],
+            seqused_k=c["seqused"],
+            schedule=sched,
+            usable_SM_count=usable_sm,
+            workspace=ws_fwd,
+            out=out[g0:g1],
+        )
+    return out
+
+
+@torch.no_grad()
+def flash_prefill_with_fmha(
+    q: torch.Tensor,  # [total_q, num_q_heads, head_dim] bf16
+    k_cache: torch.Tensor | None,  # [max_slots, num_kv_heads, head_dim] FLAT
+    v_cache: torch.Tensor | None,  # [max_slots, num_kv_heads, head_dim] FLAT
+    idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
+    idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
+    req_to_token: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    block_size_k: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    sm_scale: float,
+    index_score_plan=None,
+    sparse_attn_plan=None,
+    kv_indices=None,
+    k_paged_cache: torch.Tensor | None = None,
+    v_paged_cache: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fast sparse prefill: mega topk (index score + bitonic) -> fmha_sm100 sparse attn.
+
+    Step 1+2 emit ``topk_idx`` (raw top-k block ids); step 3 runs the main GQA sparse
+    attention through fmha_sm100 (~1.6x faster than trtllm-gen at 64k, cos>=0.9999).
+    No trtllm block table (bt/sl) is built -- the fmha path uses topk_idx + page_table.
+
+    ``sparse_attn_plan`` (from ``build_sparse_attn_plan``) is required. When it carries
+    the Opt-1+ ``_csr_direct`` buffers, step3 bypasses the fmha adapter (prealloc CSR/
+    schedule + GPU page_table + direct ``sparse_atten_func``, bit-identical + determi-
+    nistic); otherwise it uses the adapter ``sparse_fmha``.
+
+    Decode uses ``flash_decode_with_trtllm_gen`` instead (trtllm-gen sparse-decode).
+    Constraint: idx_group_size == 1 (num_idx_heads == num_kv_heads).
+    """
+    from fmha_sm100.api import sparse_fmha
+
+    if sparse_attn_plan is None:
+        raise ValueError("flash_prefill_with_fmha requires a sparse_attn_plan")
+
+    total_q, num_q_heads, head_dim = q.shape
+    if (k_paged_cache is None) != (v_paged_cache is None):
+        raise ValueError("paged K and V caches must be provided together")
+    plan_uses_fp8_kv = bool(
+        sparse_attn_plan.get("_use_fp8_kvcache", False)
+        if isinstance(sparse_attn_plan, dict)
+        else False
+    )
+    if k_paged_cache is not None:
+        if k_paged_cache.dim() != 4 or v_paged_cache.dim() != 4:
+            raise ValueError(
+                "paged K/V must be [pages,heads,page_size,head_dim], got "
+                f"K={tuple(k_paged_cache.shape)} V={tuple(v_paged_cache.shape)}"
+            )
+        if k_paged_cache.shape != v_paged_cache.shape:
+            raise ValueError(
+                f"paged K/V shape mismatch: K={tuple(k_paged_cache.shape)} "
+                f"V={tuple(v_paged_cache.shape)}"
+            )
+        if k_paged_cache.dtype != v_paged_cache.dtype or k_paged_cache.dtype not in (
+            torch.bfloat16,
+            torch.float8_e4m3fn,
+        ):
+            raise ValueError(
+                "direct paged K/V must use matching BF16 or E4M3 tensors, got "
+                f"K={k_paged_cache.dtype} V={v_paged_cache.dtype}"
+            )
+        if k_paged_cache.device != q.device or v_paged_cache.device != q.device:
+            raise ValueError(
+                "direct paged K/V and Q must be on the same device, got "
+                f"Q={q.device} K={k_paged_cache.device} V={v_paged_cache.device}"
+            )
+        if not k_paged_cache.is_contiguous() or not v_paged_cache.is_contiguous():
+            raise ValueError("direct paged K/V must be contiguous HND tensors")
+        storage_uses_fp8_kv = k_paged_cache.dtype == torch.float8_e4m3fn
+        if storage_uses_fp8_kv != plan_uses_fp8_kv:
+            raise ValueError(
+                "direct paged K/V dtype does not match sparse-attention plan: "
+                f"dtype={k_paged_cache.dtype} plan_fp8={plan_uses_fp8_kv}"
+            )
+        if not storage_uses_fp8_kv and k_paged_cache.dtype != q.dtype:
+            raise ValueError(
+                "direct BF16 paged K/V must match Q dtype, got "
+                f"Q={q.dtype} K={k_paged_cache.dtype}"
+            )
+        if int(k_paged_cache.shape[2]) != int(block_size_k):
+            raise ValueError(
+                f"paged K/V page size {k_paged_cache.shape[2]} != {block_size_k}"
+            )
+        if int(k_paged_cache.shape[3]) != int(head_dim):
+            raise ValueError(
+                f"paged K/V head dim {k_paged_cache.shape[3]} != {head_dim}"
+            )
+        num_kv_heads = int(k_paged_cache.shape[1])
+        k_paged_f, v_paged_f = k_paged_cache, v_paged_cache
+    else:
+        if k_cache is None or v_cache is None:
+            raise ValueError("flat K/V caches are required when paged K/V are absent")
+        if plan_uses_fp8_kv:
+            raise ValueError(
+                "an FP8 sparse-attention plan requires direct FP8 paged K/V"
+            )
+        max_slots, num_kv_heads, _ = k_cache.shape
+    num_pages = (max_seqlen_k + block_size_k - 1) // block_size_k
+
+    # Physical page table: build once here (or take the per-forward cached one) and
+    # share between the index-score kernel and step3 -- avoids the double build.
+    if kv_indices is None:
+        kv_indices = build_kv_page_indices(req_to_token, seq_lens, block_size_k)
+
+    # Step 1+2: fused QK score + bitonic topk -> topk_idx. emit_block_table=False: the
+    # fmha step3 path uses topk_idx + page_table and never reads the trtllm block table.
+    _bt, _sl, topk_idx = flash_prefill_topk_to_block_tables(
+        idx_q=idx_q,
+        idx_k_cache=idx_k_cache,
+        req_to_token=req_to_token,
+        cu_seqlens=cu_seqlens,
+        seq_lens=seq_lens,
+        prefix_lens=prefix_lens,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        block_size_k=block_size_k,
+        topk=topk,
+        num_pages=num_pages,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        index_score_plan=index_score_plan,
+        kv_indices=kv_indices,
+        emit_block_table=False,
+    )
+
+    # Step 3 consumes HND paged K/V. The reference path converts the flat BF16
+    # gather scratch here. A direct-paged caller may instead supply an already
+    # paged, request-local BF16 or FP8 working set and avoid both the flat main
+    # scratch and this conversion.
+    if k_paged_cache is None:
+        num_paged = max_slots // block_size_k
+        k_paged_f, v_paged_f = _kv_flat_to_paged(
+            k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
+        )
+    # Opt-in chunked step3 (M3_SPARSE_ATTN_CHUNK_ENABLE): route BOTH step3 paths
+    # (direct CSR and adapter -- they converge on the same sparse_atten_func)
+    # through the chunked implementation to bound the O_partial workspace.
+    if _sparse_attn_chunk_enabled():
+        chunk_size = _sparse_attn_chunk_size()
+        if total_q > chunk_size:
+            out_f = _sparse_attn_chunked(
+                q,
+                k_paged_f,
+                v_paged_f,
+                topk_idx,
+                kv_indices,
+                sparse_attn_plan,
+                topk,
+                block_size_k,
+                sm_scale,
+                chunk_size,
+            )
+            return out_f.view(total_q, num_q_heads, head_dim)
+    # Opt-1+ direct path: when the per-forward CSR buffers are attached, bypass the
+    # adapter -- feed topk_idx (already [nkv,Q,topk] = q2k) straight to the native CSR
+    # _run into prealloc row_ptr/q_indices, GPU page_table (no .tolist() sync), direct
+    # sparse_atten_func reusing the native schedule. Same native kernel/schedule ->
+    # bit-identical + deterministic. batch-general.
+    csr = (
+        sparse_attn_plan.get("_csr_direct")
+        if isinstance(sparse_attn_plan, dict)
+        else None
+    )
+    if csr is not None:
+        from interface import sparse_atten_func
+
+        p = sparse_attn_plan
+        # topk_idx is already [nkv, total_q, topk] contiguous = the q2k layout the native
+        # builder wants -> feed it straight in (no permute-copy, no q2k staging buffer).
+        pt, off = csr["page_table"], 0
+        for b, n in enumerate(csr["pages_per_batch"]):
+            pt[b, :n] = kv_indices[off : off + n]
+            off += n
+        s = csr["sched"]
+        csr["builder"]._run_with_schedule(
+            topk_idx,
+            p["cu_seqlens_q"],
+            p["cu_seqlens_k"],
+            csr["row_ptr"],
+            csr["q_ind"],
+            s.scheduler_metadata,
+            s.work_count,
+            s.qsplit_indices,
+            s.split_counts,
+            topk,
+            block_size_k,
+            p["total_rows"],
+            csr["max_kv_blocks"],
+            csr["target_q_per_cta"],
+            s.work_capacity,
+            p["max_seqlen_q"],
+        )
+        out_f = sparse_atten_func(
+            q,
+            k_paged_f,
+            v_paged_f,
+            csr["row_ptr"],
+            csr["q_ind"],
+            topk,
+            cu_seqlens_q=p["cu_seqlens_q"],
+            cu_seqlens_k=p["cu_seqlens_k"],
+            max_seqlen_q=p["max_seqlen_q"],
+            max_seqlen_k=p["max_seqlen_k"],
+            blk_kv=block_size_k,
+            causal=p["causal"],
+            softmax_scale=sm_scale,
+            partial_dtype=p.get("partial_dtype", torch.bfloat16),
+            return_softmax_lse=False,
+            page_table=pt,
+            seqused_k=p["seqused_k"],
+            schedule=s,
+            usable_SM_count=int(p.get("usable_SM_count", -1)),
+        )
+        if isinstance(out_f, tuple):
+            out_f = out_f[0]
+        return out_f.view(total_q, num_q_heads, head_dim)
+    # Adapter fallback: sparse_fmha's kv_block_indexes wants [total_q, nkv, topk]; topk_idx
+    # is now [nkv, total_q, topk], so transpose the view back (adapter then re-permutes +
+    # makes it contiguous internally). kv_indices shared with the index-score kernel.
+    out_f, _ = sparse_fmha(
+        q,
+        k_paged_f,
+        v_paged_f,
+        sparse_attn_plan,
+        kv_indices=kv_indices,
+        kv_block_indexes=topk_idx.permute(1, 0, 2),
+        output_o=True,
+        output_maxscore=False,
+        sm_scale=sm_scale,
+    )
+    return out_f.view(total_q, num_q_heads, head_dim)
+
+
+@torch.no_grad()
+def flash_decode_with_trtllm_gen(
+    q: torch.Tensor,  # [total_q, num_q_heads, head_dim] bf16
+    k_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
+    v_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
+    idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
+    idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
+    req_to_token: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    block_size_k: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    sm_scale: float,
+    workspace: torch.Tensor,
+    index_score_plan=None,
+    kv_indices=None,
+) -> torch.Tensor:
+    """Fast sparse decode: mega topk (index score + bitonic) -> trtllm-gen sparse-decode.
+
+    Step 1+2 emit bt/sl (compacted trtllm block table) + topk_idx; step 3 runs
+    flashinfer's trtllm-gen sparse-decode kernel over the paged KV.
+
+    trtllm-gen's kernel launches with grid_dim_x = total_q * num_kv_heads, capped at
+    2**16 - 1 = 65535; when total_q exceeds ``65535 // num_kv_heads`` we slice the
+    q_packed / block_tables / seq_lens rows and issue multiple calls over the shared
+    paged KV (per-query independence -> no LSE merge). Verified bit-equivalent up to
+    q=65536 in m3_test/test_trtllm_gen_q_limit.py. Constraint: idx_group_size == 1.
+    """
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+
+    total_q, num_q_heads, head_dim = q.shape
+    max_slots, num_kv_heads, _ = k_cache.shape
+    gqa = num_q_heads // num_kv_heads
+    num_pages = (max_seqlen_k + block_size_k - 1) // block_size_k
+
+    if kv_indices is None:
+        kv_indices = build_kv_page_indices(req_to_token, seq_lens, block_size_k)
+
+    # Step 1+2: fused QK score + bitonic topk; emit bt/sl (compacted trtllm block table).
+    bt, sl, _topk_idx = flash_prefill_topk_to_block_tables(
+        idx_q=idx_q,
+        idx_k_cache=idx_k_cache,
+        req_to_token=req_to_token,
+        cu_seqlens=cu_seqlens,
+        seq_lens=seq_lens,
+        prefix_lens=prefix_lens,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        block_size_k=block_size_k,
+        topk=topk,
+        num_pages=num_pages,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        index_score_plan=index_score_plan,
+        kv_indices=kv_indices,
+        emit_block_table=True,
+    )
+
+    # Permute flat MSA side cache to trtllm's paged layout:
+    #   flat  [num_pages * block_size_k, num_kv_heads, head_dim]
+    # -> paged [num_kv_heads * num_pages, 1, block_size_k, head_dim]
+    # The trailing unsqueeze(1) is trtllm's blocks-per-token dim (= 1 here).
+    paged_slots = num_pages * block_size_k
+
+    def _to_paged(cache: torch.Tensor) -> torch.Tensor:
+        return (
+            cache[:paged_slots]
+            .view(num_pages, block_size_k, num_kv_heads, head_dim)
+            .permute(2, 0, 1, 3)
+            .contiguous()
+            .view(num_kv_heads * num_pages, block_size_k, head_dim)
+            .unsqueeze(1)
+        )
+
+    k_paged = _to_paged(k_cache)
+    v_paged = _to_paged(v_cache)
+
+    # Pack Q for trtllm-gen's GQA layout:
+    #   [total_q, num_q_heads, head_dim] -> [total_q * num_kv_heads, gqa, head_dim]
+    q_packed = (
+        q.view(total_q, num_kv_heads, gqa, head_dim)
+        .reshape(total_q * num_kv_heads, gqa, head_dim)
+        .contiguous()
+    )
+
+    # Chunk q_packed along axis 0 (= (token, kv_head) interleaved rows) so each
+    # call's grid_dim_x stays <= 65535. block_tables and seq_lens share the same
+    # row layout so they slice identically. KV cache + workspace are shared across
+    # chunks; sparse-decode queries are mutually independent, no LSE merge needed.
+    CUDA_GRID_MAX = 65535
+    rows_per_chunk = (CUDA_GRID_MAX // num_kv_heads) * num_kv_heads
+    nrows = q_packed.shape[0]
+
+    if nrows <= rows_per_chunk:
+        out = trtllm_batch_decode_with_kv_cache(
+            query=q_packed,
+            kv_cache=(k_paged, v_paged),
+            workspace_buffer=workspace,
+            block_tables=bt,
+            seq_lens=sl,
+            max_seq_len=max_seqlen_k,
+            bmm1_scale=sm_scale,
+            bmm2_scale=1.0,
+            backend="trtllm-gen",
+            out_dtype=torch.bfloat16,
+        )
+    else:
+        out_chunks = []
+        for start in range(0, nrows, rows_per_chunk):
+            end = min(start + rows_per_chunk, nrows)
+            out_chunks.append(
+                trtllm_batch_decode_with_kv_cache(
+                    query=q_packed[start:end],
+                    kv_cache=(k_paged, v_paged),
+                    workspace_buffer=workspace,
+                    block_tables=bt[start:end],
+                    seq_lens=sl[start:end],
+                    max_seq_len=max_seqlen_k,
+                    bmm1_scale=sm_scale,
+                    bmm2_scale=1.0,
+                    backend="trtllm-gen",
+                    out_dtype=torch.bfloat16,
+                )
+            )
+        out = torch.cat(out_chunks, dim=0)
+
+    return out.view(total_q, num_kv_heads, gqa, head_dim).reshape(
+        total_q, num_q_heads, head_dim
+    )
+
+
+def _flash_prefill_with_fused_topk_index_chunked(
+    idx_q,
+    idx_k_cache,
+    req_to_token,
+    slot_ids,
+    cu_seqlens,
+    seq_lens,
+    prefix_lens,
+    block_size_k,
+    topk,
+    init_blocks,
+    local_blocks,
+    sm_scale,
+    score_type,
+):
+    total_q, num_heads, qk_head_dim = idx_q.shape
+    max_slots, idx_kv_heads, _ = idx_k_cache.shape
+    gqa_group_size = num_heads // idx_kv_heads
+    chunk_rows = m3_index_score_chunk_rows()
+    chunks = build_prefill_score_chunks(
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        slot_ids,
+        chunk_rows,
+        block_size_k,
+    )
+    score_capacity = max(
+        num_heads
+        * (chunk.q_end - chunk.q_start)
+        * triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        for chunk in chunks
+    )
+    (score_storage,) = get_float32_workspace_views(idx_q.device, ((score_capacity,),))
+    topk_idx = torch.full(
+        (num_heads, total_q, topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=idx_q.device,
+    )
+    block_table_dummy = torch.empty(1, 1, dtype=torch.int32, device=idx_q.device)
+    seq_lens_dummy = torch.empty(1, dtype=torch.int32, device=idx_q.device)
+
+    global _INDEX_SCORE_CHUNK_LOGGED
+    if not _INDEX_SCORE_CHUNK_LOGGED:
+        _INDEX_SCORE_CHUNK_LOGGED = True
+        logging.info(
+            "[M3 index score] chunked Triton fused path enabled: total_q=%d "
+            "chunk_rows=%d chunks=%d workspace_bytes=%d",
+            total_q,
+            chunk_rows,
+            len(chunks),
+            score_capacity * 4,
+        )
+
+    for chunk in chunks:
+        q_start, q_end = chunk.q_start, chunk.q_end
+        chunk_q = q_end - q_start
+        max_seqblock_k = triton.cdiv(chunk.max_seqlen_k, block_size_k)
+        score_numel = num_heads * chunk_q * max_seqblock_k
+        score = score_storage[:score_numel].view(num_heads, chunk_q, max_seqblock_k)
+
+        def grid(meta):
+            return (
+                triton.cdiv(chunk.max_seqlen_q, meta["BLOCK_SIZE_Q"]),
+                (chunk.cu_seqlens.shape[0] - 1) * num_heads,
+            )
+
+        q_chunk = idx_q[q_start:q_end]
+        _flash_attn_fwd_with_block_score_kernel[grid](
+            q_chunk,
+            idx_k_cache,
+            None,
+            None,
+            None,
+            score,
+            req_to_token,
+            chunk.cu_seqlens,
+            chunk.seq_lens,
+            chunk.prefix_lens,
+            chunk.slot_ids,
+            max_slots,
+            num_heads,
+            gqa_group_size,
+            qk_head_dim,
+            qk_head_dim,
+            block_size_k,
+            sm_scale,
+            False,
+            1,
+            q_chunk.stride(0),
+            q_chunk.stride(1),
+            q_chunk.stride(2),
+            idx_k_cache.stride(0),
+            idx_k_cache.stride(1),
+            idx_k_cache.stride(2),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            req_to_token.stride(0),
+            SCORE_TYPE=score_type,
+            DISABLE_INDEX_VALUE=True,
+        )
+
+        cu_seqblocks_q = chunk.cu_seqlens
+        max_seqblock_q = chunk.max_seqlen_q
+        topk_chunk = topk_idx[:, q_start:q_end, :]
+        _launch_topk_to_block_table(
+            max_seqblock_q,
+            chunk.cu_seqlens.shape[0] - 1,
+            num_heads,
+            max_seqblock_k,
+            score,
+            block_table_dummy,
+            seq_lens_dummy,
+            topk_chunk,
+            1,
+            block_size_k,
+            chunk.cu_seqlens,
+            cu_seqblocks_q,
+            chunk.prefix_lens,
+            topk,
+            init_blocks,
+            local_blocks,
+            0,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            block_table_dummy.stride(0),
+            block_table_dummy.stride(1),
+            topk_chunk.stride(0),
+            topk_chunk.stride(1),
+            topk_chunk.stride(2),
+            NKV=num_heads,
+            MASK_INIT=False,
+            MASK_LOCAL=False,
+            EMIT_BLOCK_TABLE=False,
+            EMIT_TOPK_IDX=True,
+        )
+    return None, topk_idx
+
+
+@torch.no_grad()
+def flash_prefill_with_fused_topk_index(
+    idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
+    idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
+    req_to_token: torch.Tensor,
+    slot_ids: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    block_size_k: int,
+    topk: int,
+    init_blocks: int = 0,
+    local_blocks: int = 1,
+    sm_scale=None,
+    score_type: str = "max",
+):
+    """Drop-in for ``flash_prefill_with_topk_index`` (M3 sparse, disable_index_value,
+    idx_group_size==1). Returns ``(None, topk_idx[num_idx_heads, total_q, topk] int32)``
+    with -1 padding — same contract, fed straight into topk_sparse step 3.
+    """
+    triton.set_allocator(robust_allocator)
+    total_q, num_heads, qk_head_dim = idx_q.shape
+    max_slots, idx_kv_heads, _ = idx_k_cache.shape
+    gqa_group_size = num_heads // idx_kv_heads
+    batch_size = cu_seqlens.shape[0] - 1
+    block_size_q = 1
+    if sm_scale is None:
+        sm_scale = qk_head_dim**-0.5
+
+    if m3_index_score_chunk_enabled(total_q):
+        return _flash_prefill_with_fused_topk_index_chunked(
+            idx_q,
+            idx_k_cache,
+            req_to_token,
+            slot_ids,
+            cu_seqlens,
+            seq_lens,
+            prefix_lens,
+            block_size_k,
+            topk,
+            init_blocks,
+            local_blocks,
+            sm_scale,
+            score_type,
+        )
+
+    cu_seqblocks_q, max_seqblock_q, _all_seqblock_q, _, _, _ = get_cu_seqblocks(
+        cu_seqlens, max_seqlen_q, block_size_q, block_size_k
+    )
+    max_seqblock_k = triton.cdiv(max_seqlen_k, block_size_k)
+    v_head_dim = qk_head_dim  # V never loaded (disable_index_value)
+
+    score = torch.full(
+        (num_heads, total_q, max_seqblock_k),
+        float("-inf"),
+        dtype=torch.float32,
+        device=idx_q.device,
+    )
+
+    def grid(META):
+        return (triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]), batch_size * num_heads)
+
+    _flash_attn_fwd_with_block_score_kernel[grid](
+        idx_q,
+        idx_k_cache,
+        None,
+        None,
+        None,
+        score,
+        req_to_token,
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        slot_ids,
+        max_slots,
+        num_heads,
+        gqa_group_size,
+        qk_head_dim,
+        v_head_dim,
+        block_size_k,
+        sm_scale,
+        False,
+        1,
+        idx_q.stride(0),
+        idx_q.stride(1),
+        idx_q.stride(2),
+        idx_k_cache.stride(0),
+        idx_k_cache.stride(1),
+        idx_k_cache.stride(2),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        req_to_token.stride(0),
+        SCORE_TYPE=score_type,
+        DISABLE_INDEX_VALUE=True,
+    )
+
+    topk_idx = torch.full(
+        (num_heads, total_q, topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=idx_q.device,
+    )
+    # bt/sl unused; tiny dummies as non-null pointer placeholders
+    bt_dummy = torch.empty(1, 1, dtype=torch.int32, device=idx_q.device)
+    sl_dummy = torch.empty(1, dtype=torch.int32, device=idx_q.device)
+    _launch_topk_to_block_table(
+        max_seqblock_q,
+        batch_size,
+        num_heads,
+        max_seqblock_k,
+        score,
+        bt_dummy,
+        sl_dummy,
+        topk_idx,
+        block_size_q,
+        block_size_k,
+        cu_seqlens,
+        cu_seqblocks_q,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+        0,
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        bt_dummy.stride(0),
+        bt_dummy.stride(1),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        NKV=num_heads,
+        MASK_INIT=False,
+        MASK_LOCAL=False,
+        EMIT_BLOCK_TABLE=False,
+        EMIT_TOPK_IDX=True,
+    )
+    return None, topk_idx

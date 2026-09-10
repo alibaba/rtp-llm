@@ -8,6 +8,7 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <memory>
@@ -15,8 +16,32 @@
 #include <torch/python.h>
 #include <ATen/Generator.h>
 #include <type_traits>
+#include <utility>
 
 namespace rtp_llm {
+
+class CacheStoreAsyncWriter;
+
+// Semantic row layout of GptModelInputs::last_hidden_states. Row count alone
+// cannot distinguish GLOBAL from CP_LOCAL when short padded requests make both
+// layouts the same size.
+enum class MtpHiddenStatesLayout : uint8_t {
+    NONE     = 0,
+    GLOBAL   = 1,
+    CP_LOCAL = 2,
+};
+
+inline const char* mtpHiddenStatesLayoutName(MtpHiddenStatesLayout layout) {
+    switch (layout) {
+        case MtpHiddenStatesLayout::NONE:
+            return "NONE";
+        case MtpHiddenStatesLayout::GLOBAL:
+            return "GLOBAL";
+        case MtpHiddenStatesLayout::CP_LOCAL:
+            return "CP_LOCAL";
+    }
+    return "INVALID";
+}
 
 enum class ParallelMode {
     TP        = 0,
@@ -49,7 +74,8 @@ struct GptModelInputs {
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
 
     // for mtp model
-    torch::Tensor last_hidden_states;
+    torch::Tensor         last_hidden_states;
+    MtpHiddenStatesLayout last_hidden_states_layout = MtpHiddenStatesLayout::NONE;
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
@@ -98,12 +124,52 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
+    // True only for the recurrent, decode-side MTP draft-prefill pass. The
+    // initial prompt prefill also uses mtp_iteration_step == 0, so the phase
+    // cannot be inferred safely from the iteration marker.
+    bool is_mtp_draft_prefill = false;
+
+    // MTP draft iteration marker for GLM-5.2 DSA top-k sharing:
+    // -1: not an MTP draft iteration or unknown
+    //  0: first draft step, compute and publish top-k indices
+    // >0: later draft steps, reuse top-k indices from step 0
+    int mtp_iteration_step = -1;
+
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
 public:
+    void setLastHiddenStates(torch::Tensor hidden_states, MtpHiddenStatesLayout layout) {
+        last_hidden_states = std::move(hidden_states);
+        if (last_hidden_states.defined() && last_hidden_states.numel() > 0) {
+            RTP_LLM_CHECK_WITH_INFO(layout == MtpHiddenStatesLayout::GLOBAL
+                                        || layout == MtpHiddenStatesLayout::CP_LOCAL,
+                                    "non-empty MTP hidden states require GLOBAL or CP_LOCAL layout, got %s",
+                                    mtpHiddenStatesLayoutName(layout));
+            last_hidden_states_layout = layout;
+        } else {
+            last_hidden_states_layout = MtpHiddenStatesLayout::NONE;
+        }
+    }
+
+    void clearLastHiddenStates() {
+        last_hidden_states        = torch::Tensor();
+        last_hidden_states_layout = MtpHiddenStatesLayout::NONE;
+    }
+
     std::string debugString(bool force = false) const;
 };
+
+// A multimodal batch carries at least one of the side inputs that must stay
+// aligned with the CP-local token layout. Keep this predicate next to the
+// input contract so the target and MTP paths use the same definition.
+inline bool hasMultimodalModelInputs(const GptModelInputs& inputs) {
+    const bool has_features = inputs.multimodal_features.has_value() && !inputs.multimodal_features->empty();
+    const bool has_extra    = inputs.mm_extra_input.has_value() && !inputs.mm_extra_input->empty();
+    const bool has_locs     = inputs.mm_features_locs.defined() && inputs.mm_features_locs.numel() > 0;
+    const bool has_mask     = inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.numel() > 0;
+    return has_features || has_extra || has_locs || has_mask;
+}
 
 struct GptModelOutputs {
     torch::Tensor logits;
@@ -351,6 +417,10 @@ struct RejectionSamplingParams {
     torch::Tensor output_token_ids_d;
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
+    // Exact-match greedy verification (MiniMax deterministic draft): accept the
+    // draft token only when it equals the target argmax, else truncate. Selected
+    // by the caller from the draft proposal mode.
+    bool deterministic_draft = false;
     // True when draft_probs_d is a degenerate point mass on draft_token_ids_d
     // (in-model proposers such as DSpARK emit tokens, not per-vocab probs).
     // The kernel then treats q(draft) == 1 instead of reading draft_probs_d.

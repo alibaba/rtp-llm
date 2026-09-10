@@ -48,6 +48,11 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                item = input_item;
     item.in_flight_ref                       = 0;
+    item.generation                          = ++generation_seq_;
+
+    if (remote_evicting_items_.count(item.cache_key) != 0) {
+        return {false, std::nullopt};
+    }
 
     auto existing = items_.find(item.cache_key);
     if (existing != items_.end()) {
@@ -193,6 +198,68 @@ std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::popOldestEv
         items_.erase(it);
     }
     return disk_item;
+}
+
+
+std::vector<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::detachMemoryForRemoteEviction(size_t n) {
+    std::vector<CacheItem> victims;
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    while (victims.size() < n) {
+        auto candidate = oldestFromSetLocked(memory_complete_lru_);
+        if (!candidate.has_value()) {
+            break;
+        }
+        auto it = items_.find(candidate->cache_key);
+        if (it == items_.end()) {
+            continue;
+        }
+        if (remote_evicting_items_.count(it->first) != 0) {
+            memory_complete_lru_.erase(EvictKey{it->second.last_access_seq, it->first});
+            continue;
+        }
+        CacheItem item = it->second;
+        eraseEvictKeyLocked(it->second);
+        items_.erase(it);
+        remote_evicting_items_.emplace(item.cache_key, item);
+        victims.push_back(item);
+    }
+    return victims;
+}
+
+std::vector<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::popMemoryForImmediateEviction(size_t n) {
+    std::vector<CacheItem> victims;
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    while (victims.size() < n) {
+        auto candidate = oldestFromSetLocked(memory_complete_lru_);
+        if (!candidate.has_value()) {
+            break;
+        }
+        auto it = items_.find(candidate->cache_key);
+        if (it == items_.end()) {
+            continue;
+        }
+        victims.push_back(it->second);
+        eraseEvictKeyLocked(it->second);
+        items_.erase(it);
+    }
+    return victims;
+}
+
+std::optional<MemoryDiskBlockCache::CacheItem>
+MemoryDiskBlockCache::finishRemoteEviction(CacheKeyType cache_key, uint64_t generation) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = remote_evicting_items_.find(cache_key);
+    if (it == remote_evicting_items_.end() || it->second.generation != generation) {
+        return std::nullopt;
+    }
+    CacheItem item = it->second;
+    remote_evicting_items_.erase(it);
+    return item;
+}
+
+size_t MemoryDiskBlockCache::remoteEvictingSize() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return remote_evicting_items_.size();
 }
 
 bool MemoryDiskBlockCache::markInFlight(CacheKeyType     cache_key,

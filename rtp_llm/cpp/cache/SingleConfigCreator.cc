@@ -115,9 +115,10 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.block_num          = 0;
     config.seq_size_per_block = tokens_per_block;
 
-    config.use_mla   = model_config.attn_config.use_mla;
-    config.dtype     = dtype;
-    config.is_sparse = model_config.attn_config.is_sparse;
+    config.use_mla                   = model_config.attn_config.use_mla;
+    config.dtype                     = dtype;
+    config.is_sparse                 = model_config.attn_config.is_sparse;
+    config.use_opaque_kv_cache_store = model_config.use_opaque_kv_cache_store;
 
     auto spec = getDefaultSpecFromRuntimeSpecs(model_config, runtime_specs);
 
@@ -153,6 +154,31 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         auto indexer_dim             = model_config.attn_config.indexer_head_dim;
         config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
         config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+        // Sized by the indexer, not by the KV heads: every attention-TP rank keeps
+        // the whole thing, so a head partition of the data block must not be
+        // applied to this region.
+        config.scale_region_is_head_partitioned = false;
+    } else if (!config.use_mla && model_config.attn_config.indexer_head_dim > 0) {
+        // MiniMax-M3 MSA: the sparse-attention layers maintain a BF16 indexer K
+        // cache (idx_K, one head, indexer_head_dim per token). Rather than a
+        // separate side pool, piggyback it on the MHA scale region of the main
+        // paged pool so it is addressed by the same block table and travels with
+        // the main K/V during PD separation. is_mla stays false (the main K/V
+        // keeps its HND layout); the scale region is exposed to Python as FP32
+        // and reinterpreted as BF16 there. BF16 => 2 bytes/elem, so the per-block
+        // stride is indexer_head_dim * 2 * seq_size_per_block bytes.
+        auto indexer_dim             = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
+        config.kv_scale_stride_bytes = indexer_dim * 2 * spec->seq_size_per_block;
+        config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+        // PD transfer: the idx_K BF16 cache in the scale slot is a single logical
+        // block (not k/v separable), and the main K/V HND block is not k/v-split
+        // friendly for byte-half partitioning. Use opaque whole-block PD transfer
+        // (single kv_/kv_scale_ blocks) like GLM5/DSV4, so prefill-store and
+        // decode-load keys/sizes match and the cache-store load completes.
+        config.use_opaque_kv_cache_store = true;
+        // idx_K is a single head sized by indexer_head_dim, so unlike a real
+        // quantization scale it is identical on every attention-TP rank.
+        config.scale_region_is_head_partitioned = false;
     }
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;

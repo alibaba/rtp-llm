@@ -3773,6 +3773,48 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AllocateOneBackingUsesMatchingDiskPoo
     conn->incomplete_pool_->requestFree(held_incomplete);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, RemoteEvictionBuildsOnlySelectedCompleteHostBlocks) {
+    const size_t free_before = connector_->freeMemoryBlocks();
+    auto blocks = connector_->block_pool_->malloc(3);
+    ASSERT_EQ(blocks.size(), 3u);
+
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        auto infos = connector_->block_pool_->convertIndexToBuffer(0, blocks[i]);
+        ASSERT_EQ(infos.size(), 1u);
+        MemoryDiskBlockCache::CacheItem item;
+        item.cache_key    = 7001 + i;
+        item.backing_type = CacheBackingType::MEMORY;
+        item.block_index  = static_cast<BlockIdxType>(blocks[i]);
+        item.block_size   = infos[0].size_bytes;
+        item.is_complete  = true;
+        ASSERT_TRUE(connector_->block_cache_->putCommitted(item).first);
+        connector_->block_pool_->blockCacheReference({item.block_index});
+    }
+    connector_->block_pool_->requestFree(blocks);
+
+    auto victims = connector_->prepareRemoteEviction(3);
+    ASSERT_EQ(victims.size(), 3u);
+    EXPECT_EQ(connector_->freeMemoryBlocks(), free_before - 3);
+
+    KVCacheMemoryConnector::HostBlockBuffers buffers;
+    ASSERT_TRUE(connector_->buildHostBlockBuffers(victims, {0, 2}, buffers));
+    ASSERT_EQ(buffers.size(), 2u);
+    for (size_t output = 0; output < buffers.size(); ++output) {
+        const auto victim_index = output == 0 ? 0 : 2;
+        ASSERT_EQ(buffers[output].size(), 1u);
+        EXPECT_FALSE(buffers[output][0].is_cuda);
+        EXPECT_NE(buffers[output][0].addr, nullptr);
+        EXPECT_EQ(buffers[output][0].size_bytes, victims[victim_index].block_size);
+        const auto pool_buffer =
+            connector_->block_pool_->convertIndexToBuffer(0, victims[victim_index].block_index);
+        ASSERT_EQ(pool_buffer.size(), 1u);
+        EXPECT_EQ(buffers[output][0].addr, pool_buffer[0].addr);
+    }
+
+    connector_->finishRemoteEviction(victims, true);
+    EXPECT_EQ(connector_->freeMemoryBlocks(), free_before);
+}
+
 TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncompleteWhenIncompletePoolDisabled) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/1);
     allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);

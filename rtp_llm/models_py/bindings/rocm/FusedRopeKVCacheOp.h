@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
@@ -22,6 +23,7 @@ public:
 
 protected:
     AttentionConfigs attn_configs_;
+    RopeCache        rope_cache_;
     virtual bool     use_asm() const = 0;
 };
 
@@ -57,6 +59,7 @@ public:
 
 protected:
     AttentionConfigs attn_configs_;
+    RopeCache        rope_cache_;
     virtual bool     use_asm() const = 0;
 };
 

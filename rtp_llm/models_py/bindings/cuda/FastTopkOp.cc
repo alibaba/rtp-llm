@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/fast_topk.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/minimax_decode_topk.h"
 
 namespace torch_ext {
 
@@ -33,6 +34,11 @@ void fast_topk_transform_ragged_fused(at::Tensor&                         score,
                                       at::Tensor&                         topk_indices_offset,
                                       const std::optional<torch::Tensor>& row_starts) {
     rtp_llm::fast_topk_transform_ragged_fused(score, lengths, topk_indices_ragged, topk_indices_offset, row_starts);
+}
+
+void minimax_decode_topk(
+    at::Tensor& score, at::Tensor& seq_lens, at::Tensor& topk_idx, int64_t block_size, int64_t topk) {
+    rtp_llm::minimax_decode_topk(score, seq_lens, topk_idx, block_size, topk);
 }
 
 void persistent_topk(at::Tensor& logits,

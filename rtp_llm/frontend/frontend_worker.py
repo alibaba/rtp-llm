@@ -107,6 +107,7 @@ class FrontendWorker:
             mm_related_params=None,  # Frontend doesn't need mm_related_params
             grpc_config=py_env_configs.grpc_config,
             vit_separation=vit_separation,
+            mm_model_config=getattr(model_config, "mm_model_config", None),
             server_config=py_env_configs.server_config,
             master_config=py_env_configs.master_config,
             parallelism_config=engine_config.parallelism_config,

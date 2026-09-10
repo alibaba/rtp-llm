@@ -8,9 +8,18 @@ import torch
 
 _WARMUP_ENV = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
 
+try:
+    from rtp_llm.ops.compute_ops import (
+        cuda_graph_warmup_forward_enabled as _cuda_graph_warmup_forward_enabled,
+    )
+except ImportError:
+    # Older ops builds expose the phase only through the environment.
+    def _cuda_graph_warmup_forward_enabled() -> bool:
+        return os.environ.get(_WARMUP_ENV, "0") == "1"
+
 
 def cuda_graph_warmup_forward_enabled() -> bool:
-    return os.environ.get(_WARMUP_ENV, "0") == "1"
+    return _cuda_graph_warmup_forward_enabled()
 
 
 def sync_cuda_graph_warmup_ranks(

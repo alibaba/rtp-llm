@@ -83,6 +83,16 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        # SwiGLU-OAI (GPT-OSS / MiniMax-M3) alpha coefficient. The matching
+        # ``swiglu_limit`` already lives on the C++ side. Adding alpha as a
+        # Python field avoids a C++ rebuild for first-pass adoption; future
+        # work may promote it to the C++ ModelConfig.
+        "swiglu_alpha",
+        # MiniMax-M3 sparse-attention (MSA) config. Python-only dict carrying
+        # the index-branch dims + topk/block params parsed from the checkpoint
+        # ``sparse_attention_config``. Consumed by MSAAttention when wiring the
+        # Triton MSA kernels for sparse layers. See models/minimax_m3.py.
+        "msa_sparse_config",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -132,6 +142,7 @@ class ModelConfig(CppModelConfig):
         "input_vocab_size",
         "type_vocab_size",
         "gen_num_per_cycle",
+        "physical_mtp_module_num",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
@@ -232,7 +243,7 @@ class ModelConfig(CppModelConfig):
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
 
-        if self.mm_model_config.is_multimodal:
+        if self.mm_model_config.is_multimodal and not getattr(self, "is_mtp", False):
             model_size += get_multimodal_mixin_cls(self.model_type).eval_mm_model_size(
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
@@ -323,7 +334,7 @@ class ModelConfig(CppModelConfig):
             + self.hidden_size
         )
 
-        if self.mm_model_config.is_multimodal:
+        if self.mm_model_config.is_multimodal and not getattr(self, "is_mtp", False):
             param_count += get_multimodal_mixin_cls(
                 self.model_type
             ).eval_mm_model_param_count(
@@ -597,7 +608,10 @@ class ModelConfig(CppModelConfig):
             self.apply_rope_scaling_override(model_override_args)
 
     def init_precision_config(
-        self, kv_cache_config: Optional[Any], act_type: Optional[str]
+        self,
+        kv_cache_config: Optional[Any],
+        act_type: Optional[str],
+        kv_cache_dtype_override: Optional[KvCacheDataType] = None,
     ):
         """Initialize precision configuration from checkpoint and quantization settings.
 
@@ -605,13 +619,16 @@ class ModelConfig(CppModelConfig):
         1. Loads quant_config from checkpoint or quantization string
         2. Sets quant_algo if quant_config exists
         3. Initializes data_type from act_type (or config_dtype if act_type is empty)
-        4. Sets attn_config.kv_cache_dtype based on kv_cache_config (if provided)
+        4. Sets attn_config.kv_cache_dtype from an explicit draft override or
+           kv_cache_config
         5. Applies quantization-specific overrides (e.g., fp8 quant_config sets kv_cache_dtype to FP8)
         6. Validates configuration with quant_config using kv_cache_dtype_to_torch_dtype
         7. Sets final data_type
 
         Args:
             kv_cache_config: Optional KVCacheConfig to set attn_config.kv_cache_dtype
+            act_type: Optional activation type override
+            kv_cache_dtype_override: Optional propose-model-only KV dtype override
         """
         # Load quant_config
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
@@ -681,8 +698,15 @@ class ModelConfig(CppModelConfig):
                     "ACT_TYPE can be configured manually."
                 )
 
-        # Set attn_config.kv_cache_dtype based on kv_cache_config
-        if kv_cache_config is not None:
+        # A speculative draft may override only its KV dtype. Allocation
+        # policy, page size and memory budget remain shared with the target.
+        if kv_cache_dtype_override is not None:
+            self.attn_config.kv_cache_dtype = kv_cache_dtype_override
+            logging.info(
+                "Setting attn_config.kv_cache_dtype to %s from the propose-model override",
+                kv_cache_dtype_override,
+            )
+        elif kv_cache_config is not None:
             if kv_cache_config.fp8_kv_cache:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
                 logging.info(
@@ -698,6 +722,16 @@ class ModelConfig(CppModelConfig):
             self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
             logging.info(
                 "Setting attn_config.kv_cache_dtype to FP8 based on quant_config.get_method().lower() == 'fp8'"
+            )
+
+        if (
+            kv_cache_dtype_override is not None
+            and self.attn_config.kv_cache_dtype != kv_cache_dtype_override
+        ):
+            raise ValueError(
+                "propose KV cache dtype conflicts with checkpoint quantization: "
+                f"requested {kv_cache_dtype_override}, got "
+                f"{self.attn_config.kv_cache_dtype}"
             )
 
         # Validate configuration with quant_config
@@ -870,6 +904,8 @@ def build_model_config(
         Any
     ] = None,  # QuantizationConfig (optional, for quantization)
     vit_config: Optional[VitConfig] = None,
+    apply_hack_layer_num: bool = True,
+    kv_cache_dtype_override: Optional[KvCacheDataType] = None,
 ) -> None:
     """Build and initialize ModelConfig from model_args.
 
@@ -883,6 +919,8 @@ def build_model_config(
         profiling_debug_logging_config: ProfilingDebugLoggingConfig for hack_layer_num
         embedding_config: Optional EmbeddingConfig (for check_task_type)
         quantization_config: Optional QuantizationConfig (for quantization settings)
+        apply_hack_layer_num: Whether to apply the target-model debug layer override
+        kv_cache_dtype_override: Optional propose-model-only KV dtype override
     """
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
@@ -915,7 +953,9 @@ def build_model_config(
     # This will initialize data_type from act_type (or config_dtype), set attn_config.kv_cache_dtype
     # from kv_cache_config, and validate with quant_config
     model_config.init_precision_config(
-        kv_cache_config=kv_cache_config, act_type=model_args.act_type
+        kv_cache_config=kv_cache_config,
+        act_type=model_args.act_type,
+        kv_cache_dtype_override=kv_cache_dtype_override,
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
     model_config.dsv4_fixed_pool_use_memory = bool(
@@ -943,7 +983,7 @@ def build_model_config(
 
     # Apply hack_layer_num if needed
     hack_layer_num = profiling_debug_logging_config.hack_layer_num
-    if hack_layer_num:
+    if apply_hack_layer_num and hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
         apply_layer_num_override(model_config, hack_layer_num)
 

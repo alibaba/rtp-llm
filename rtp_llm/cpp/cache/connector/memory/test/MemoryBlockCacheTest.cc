@@ -534,6 +534,67 @@ TEST(MemoryBlockCacheTest, cacheKeys_UpdatesOrderAfterMatch) {
     EXPECT_EQ(keys2[2], 2);
 }
 
+
+TEST(MemoryBlockCacheTest, detachForRemoteEvictionSkipsResidentAndIncompleteItems) {
+    MemoryBlockCache cache;
+    ASSERT_TRUE(cache.put({1, 11, 100, false, true}).first);
+    ASSERT_TRUE(cache.put({2, 12, 100, true, true}).first);
+    ASSERT_TRUE(cache.put({3, 13, 100, false, false}).first);
+
+    auto victims = cache.detachForRemoteEviction(3);
+    ASSERT_EQ(victims.size(), 1u);
+    EXPECT_EQ(victims[0].cache_key, 1);
+    EXPECT_EQ(victims[0].block_index, 11);
+    EXPECT_GT(victims[0].generation, 0u);
+    EXPECT_FALSE(cache.contains(1));
+    EXPECT_EQ(cache.remoteEvictingSize(), 1u);
+    EXPECT_TRUE(cache.contains(2));
+    EXPECT_TRUE(cache.contains(3));
+}
+
+TEST(MemoryBlockCacheTest, finishRemoteEvictionRejectsStaleAndDuplicateCallbacks) {
+    MemoryBlockCache cache;
+    ASSERT_TRUE(cache.put({10, 20, 100, false, true}).first);
+    auto victims = cache.detachForRemoteEviction(1);
+    ASSERT_EQ(victims.size(), 1u);
+
+    EXPECT_FALSE(cache.finishRemoteEviction(10, victims[0].generation + 1).has_value());
+    EXPECT_EQ(cache.remoteEvictingSize(), 1u);
+    auto finished = cache.finishRemoteEviction(10, victims[0].generation);
+    ASSERT_TRUE(finished.has_value());
+    EXPECT_EQ(finished->block_index, 20);
+    EXPECT_EQ(cache.remoteEvictingSize(), 0u);
+    EXPECT_FALSE(cache.finishRemoteEviction(10, victims[0].generation).has_value());
+}
+
+TEST(MemoryBlockCacheTest, reinsertionCannotOverwriteDetachedIncarnation) {
+    MemoryBlockCache cache;
+    ASSERT_TRUE(cache.put({42, 100, 100, false, true}).first);
+    auto old_victims = cache.detachForRemoteEviction(1);
+    ASSERT_EQ(old_victims.size(), 1u);
+
+    ASSERT_TRUE(cache.put({42, 101, 100, false, true}).first);
+    EXPECT_TRUE(cache.detachForRemoteEviction(1).empty());
+    auto old_finished = cache.finishRemoteEviction(42, old_victims[0].generation);
+    ASSERT_TRUE(old_finished.has_value());
+    EXPECT_EQ(old_finished->block_index, 100);
+
+    auto new_victims = cache.detachForRemoteEviction(1);
+    ASSERT_EQ(new_victims.size(), 1u);
+    EXPECT_EQ(new_victims[0].block_index, 101);
+    EXPECT_NE(new_victims[0].generation, old_victims[0].generation);
+}
+
+TEST(MemoryBlockCacheTest, popForImmediateEvictionDoesNotEnterRemoteState) {
+    MemoryBlockCache cache;
+    ASSERT_TRUE(cache.put({7, 70, 100, false, true}).first);
+    auto victims = cache.popForImmediateEviction(1);
+    ASSERT_EQ(victims.size(), 1u);
+    EXPECT_EQ(victims[0].block_index, 70);
+    EXPECT_FALSE(cache.contains(7));
+    EXPECT_EQ(cache.remoteEvictingSize(), 0u);
+}
+
 }  // namespace rtp_llm::test
 
 int main(int argc, char** argv) {

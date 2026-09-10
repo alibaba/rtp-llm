@@ -74,6 +74,17 @@ inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_con
     }
     if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
         model_num = 1;
+    } else if (model_config.physical_mtp_module_num > 0) {
+        // A recurrent native MTP checkpoint declares its physical module count
+        // explicitly (one physical module may be reused across several proposal
+        // steps), which overrides the weight/gen_num_per_cycle derivation above.
+        // source_layer_indices below still maps every module to weight 0 when
+        // weight_count == 1, so the single physical weight is reused in place.
+        model_num = static_cast<size_t>(model_config.physical_mtp_module_num);
+        RTP_LLM_CHECK_WITH_INFO(model_num <= gen_num_per_cycle,
+                                "physical MTP module count must not exceed proposal steps: modules=%zu steps=%zu",
+                                model_num,
+                                gen_num_per_cycle);
     }
     RTP_LLM_CHECK_WITH_INFO(model_num > 0,
                             "MTP module config plan produced no modules: weights=%zu gen_num_per_cycle=%zu",

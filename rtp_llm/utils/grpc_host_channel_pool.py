@@ -37,7 +37,9 @@ class GrpcHostChannelPool:
         :param transient_failure_grace_period: TRANSIENT_FAILURE 持续多久后允许后台淘汰（秒）
         :param idle_channel_ttl: IDLE channel 未被使用多久后允许后台淘汰（秒）
         """
-        self._options = options or []
+        self._options = list(options or [])
+        if not any(key == "grpc.enable_http_proxy" for key, _ in self._options):
+            self._options.append(("grpc.enable_http_proxy", 0))
         self._channels: Dict[str, GrpcHostChannel] = {}
         self._closed_channels: List[GrpcHostChannel] = []
         self._pending_close_channels: Dict[int, GrpcHostChannel] = {}

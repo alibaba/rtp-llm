@@ -47,6 +47,14 @@ py_test(
 )
 
 py_test(
+    name = "batch_perf_impl_test",
+    srcs = ["batch_perf_impl_test.py"],
+    deps = [
+        ":perf_test_lib",
+    ],
+)
+
+py_test(
     name = "test_perf_config_and_runners",
     srcs = ["test_perf_config_and_runners.py"],
     data = [
@@ -86,7 +94,7 @@ py_test(
 )
 
 
-# Distribution mode: sampling from dataset using model's parameters.
+# Distribution mode: sampling from dataset using model's parameters.
 py_test(
         name = "distribution_perf_test",
         main = "batch_decode_test.py",

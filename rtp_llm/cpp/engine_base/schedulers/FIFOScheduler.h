@@ -3,6 +3,8 @@
 #include <atomic>
 #include <cstddef>
 #include <list>
+#include <thread>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -31,7 +33,9 @@ public:
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
+    absl::Status stop() override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    std::shared_ptr<const std::unordered_set<int64_t>> workerStatusRunningTaskIdsSnapshot() const override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that
@@ -90,6 +94,8 @@ private:
     void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool   waitPredicate() override;
     void   onRunningStream(const GenerateStreamPtr& stream) override;
+    void   cachePrepareLoop();
+    void   publishWorkerStatusSnapshotLocked();
     // FIFO-specific replacement for FIFOSchedulerBase::evaluateWaitingStreams(): admission and
     // state transition happen in a single pass so that per-round token budgets only account for
     // streams that really advanced, and errored streams behind a saturated budget are still
@@ -121,10 +127,18 @@ private:
     // Context-parallel prefill can opt into single-request admission until
     // the model-side path supports per-request layouts.
     const bool cp_force_single_prefill_ = false;
+    // Optional strict cap on the complete visible KV tokens across a prefill batch.
+    const size_t max_batch_kv_len_ = 0;
     // Soft per-round quota on the tokens that are actually recomputed (prefix-cache hits
     // excluded). 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
     const size_t prefill_cp_size_                = 1;
+    const bool   worker_status_snapshot_enabled_ = false;
+
+    bool              async_cache_prepare_enabled_ = false;
+    std::thread       cache_prepare_thread_;
+    GenerateStreamPtr cache_prepare_blocked_stream_;
+    std::shared_ptr<const std::unordered_set<int64_t>> worker_status_running_task_ids_snapshot_;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;

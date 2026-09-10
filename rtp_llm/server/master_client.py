@@ -1,10 +1,11 @@
 """FlexLB schedule client: request role addrs from master/slave via gRPC."""
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import grpc
 import grpc.aio
@@ -35,6 +36,7 @@ from rtp_llm.utils.base_model_datatypes import GenerateInput
 route_logger = logging.getLogger("route_logger")
 
 SUCCESS_CODE = 200
+VIT_ROUTE_STALE_CODE = 8408
 # gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
 # This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
 FLEXLB_GRPC_PORT_OFFSET = 2
@@ -67,6 +69,7 @@ class FlexlbResponse:
     error_message: Optional[str] = None
     admission_reject_reason: AdmissionRejectReason = AdmissionRejectReason.UNSPECIFIED
     enqueued_by_master: bool = False
+    server_status: Optional[List[Dict[str, Any]]] = None
 
     @property
     def is_ok(self) -> bool:
@@ -77,6 +80,7 @@ class FlexlbResponse:
         cls,
         role_addrs: List[RoleAddr],
         enqueued_by_master: bool = False,
+        server_status: Optional[List[Dict[str, Any]]] = None,
     ) -> "FlexlbResponse":
         """Business success: parsed role addrs."""
         return cls(
@@ -86,6 +90,7 @@ class FlexlbResponse:
             error_message=None,
             admission_reject_reason=AdmissionRejectReason.UNSPECIFIED,
             enqueued_by_master=enqueued_by_master,
+            server_status=server_status,
         )
 
     @classmethod
@@ -265,6 +270,11 @@ class MasterClient:
         input: GenerateInput,
         request_id: int,
         input_pb: Optional["GenerateInputPB"] = None,
+        *,
+        media_keys: Optional[List[str]] = None,
+        selected_vit: Optional[Dict[str, Any]] = None,
+        seq_len: Optional[int] = None,
+        vit_only: bool = False,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -285,7 +295,10 @@ class MasterClient:
         ) or getattr(input.generate_config, "timeout_ms", None)
         if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
-        timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+        route_timeout_ms = ttft_timeout_ms
+        if vit_only:
+            route_timeout_ms = min(ttft_timeout_ms, 500) if ttft_timeout_ms > 0 else 500
+        timeout_s = route_timeout_ms / 1000.0 if route_timeout_ms > 0 else None
 
         gc = input.generate_config
         api_key = self._extract_api_key(input)
@@ -293,7 +306,7 @@ class MasterClient:
         request_pb = FlexlbScheduleRequestPB(
             request_id=request_id,
             block_cache_keys=block_cache_keys,
-            seq_len=input.prompt_length,
+            seq_len=input.prompt_length if seq_len is None else seq_len,
             generate_timeout=ttft_timeout_ms,
             request_time_ms=int(time.time() * 1000),
             max_new_tokens=gc.max_new_tokens,
@@ -303,7 +316,17 @@ class MasterClient:
             api_key=api_key,
             cache_key_block_size=cache_key_block_size,
             priority=priority,
+            media_keys=media_keys or [],
+            vit_route_only=vit_only,
         )
+        if selected_vit is not None:
+            status = request_pb.selected_vit
+            status.role = str(selected_vit.get("role", ""))
+            status.server_ip = str(selected_vit.get("server_ip", ""))
+            status.http_port = int(selected_vit.get("http_port", 0))
+            status.grpc_port = int(selected_vit.get("grpc_port", 0))
+            status.group = str(selected_vit.get("group", ""))
+            status.worker_instance = str(selected_vit.get("worker_instance", ""))
         if input_pb is not None:
             request_pb.generate_input = input_pb.SerializeToString()
 
@@ -333,6 +356,12 @@ class MasterClient:
             except ValueError:
                 exception_type = ExceptionType.MASTER_NO_AVAILABLE_WORKER
             message = response.error_message or "master schedule error"
+            if selected_vit is not None and response.code == VIT_ROUTE_STALE_CODE:
+                return FlexlbResponse.error_response(response.code, message)
+            if vit_only:
+                return FlexlbResponse.error_response(
+                    response.code, message, admission_reject_reason
+                )
             route_logger.error(
                 "Master schedule error, request_id=%s, error_code=%s, "
                 "error_message=%s, admission_reject_reason=%s",
@@ -361,10 +390,53 @@ class MasterClient:
             )
             for s in response.server_status
         ]
+        server_status = [
+            {
+                "role": s.role,
+                "server_ip": s.server_ip,
+                "http_port": s.http_port,
+                "grpc_port": s.grpc_port,
+                "group": s.group,
+                "worker_instance": s.worker_instance,
+            }
+            for s in response.server_status
+        ]
         return FlexlbResponse.ok(
             role_addrs,
             enqueued_by_master=response.enqueued_by_master,
+            server_status=server_status,
         )
+
+    async def get_vit_cache_metadata(self, address: RoleAddr, keys: List[str]):
+        import aiohttp
+
+        started = time.monotonic()
+        try:
+            timeout = aiohttp.ClientTimeout(total=0.5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"http://{address.ip}:{address.http_port}/mm_cache/metadata",
+                    json={"keys": list(dict.fromkeys(keys))},
+                ) as response:
+                    if response.status != SUCCESS_CODE:
+                        return None
+                    chunks, size = [], 0
+                    async for chunk in response.content.iter_chunked(65536):
+                        size += len(chunk)
+                        if size > 16 * 1024 * 1024:
+                            return None
+                        chunks.append(chunk)
+                    return json.loads(b"".join(chunks))
+        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, OSError, ValueError):
+            route_logger.warning(
+                "ViT metadata unavailable, address=%s:%s", address.ip, address.http_port
+            )
+            return None
+        finally:
+            route_logger.debug(
+                "ViT metadata query elapsed_ms=%.3f",
+                (time.monotonic() - started) * 1000,
+            )
 
     @staticmethod
     def _extract_api_key(input: GenerateInput) -> str:

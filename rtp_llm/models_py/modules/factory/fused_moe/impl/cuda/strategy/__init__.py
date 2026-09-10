@@ -24,6 +24,14 @@ from .fp8_per_tensor import (
     CudaFp8PerTensorEpNormalStrategy,
     CudaFp8PerTensorNoDPStrategy,
 )
+from .mxfp8 import (
+    CudaMegaMoeFp8SEStrategy,
+    CudaMegaMoeFp8Strategy,
+    CudaMegaMoeFusedStrategy,
+    CudaMxfp8EpLowLatencyStrategy,
+    CudaMxfp8EpNormalStrategy,
+    CudaMxfp8NoDPStrategy,
+)
 from .no_quant import (
     CudaNoQuantCppStrategy,
     CudaNoQuantDpNormalStrategy,
@@ -58,8 +66,15 @@ __all__ = [
     "CudaFp4EpLowLatencyStrategy",
     "CudaFp4EpNormalStrategy",
     "CudaFp4NoDPStrategy",
+    "CudaMxfp8NoDPStrategy",
+    "CudaMxfp8EpNormalStrategy",
+    "CudaMxfp8EpLowLatencyStrategy",
     "CudaMegaMoeSEStrategy",
     "CudaMegaMoeStrategy",
     "CudaGroupedFp4Strategy",
     "CudaLocalLoopStrategy",
+    # MXFP8 MegaMoE (FP8xFP8 routed experts)
+    "CudaMegaMoeFp8Strategy",
+    "CudaMegaMoeFp8SEStrategy",
+    "CudaMegaMoeFusedStrategy",
 ]

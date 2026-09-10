@@ -196,14 +196,7 @@ class BasicRenderer(CustomChatRenderer):
         # functions with none value may occur exception in llama3 template
         if request_dict.get("functions", None):
             render_args["functions"] = request_dict["functions"]
-        if request.chat_template_kwargs is not None:
-            render_args.update(request.chat_template_kwargs)
-        if (
-            request.extra_configs is not None
-            and request.extra_configs.chat_template_kwargs is not None
-            and isinstance(request.extra_configs.chat_template_kwargs, dict)
-        ):
-            render_args.update(request.extra_configs.chat_template_kwargs)
+        render_args.update(request.get_resolved_chat_template_kwargs())
         rendered = template.render(**render_args)
         logging.debug(
             f"request [{request.model_dump_json(indent=4)}] rendered string: [{rendered}]]"

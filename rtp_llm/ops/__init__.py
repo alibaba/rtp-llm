@@ -391,6 +391,13 @@ def ensure_rdma_ops_loaded() -> None:
     _load_rdma_ops(required=True)
 
 
+def get_multimodal_feature_hash(embedding: torch.Tensor) -> torch.Tensor:
+    ensure_engine_ops_loaded()
+    return importlib.import_module("libth_transformer").get_multimodal_feature_hash(
+        embedding
+    )
+
+
 def __getattr__(name: str):
     if name in _COMPUTE_SYMBOLS:
         _load_compute_ops()

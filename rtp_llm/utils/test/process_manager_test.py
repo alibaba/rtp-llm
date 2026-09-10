@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import threading
 import time
 import unittest
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ from rtp_llm.utils.process_manager import (
     SHUTDOWN_TIMEOUT_ENV,
     STOP_TIMEOUT_MS_ENV,
     ProcessManager,
+    TerminalHealthCheckError,
 )
 
 
@@ -858,6 +860,71 @@ class TestProcessManagerHealthCheck(unittest.TestCase):
         self.assertTrue(result)
         self.assertTrue(self.manager.health_check_status["flaky_service"]["ready"])
         self.assertGreater(call_count[0], 1)  # Should have been called more than once
+
+    def test_terminal_health_check_error_does_not_retry(self):
+        mock_proc = Mock()
+        mock_proc.is_alive.return_value = True
+        mock_proc._mock_name = "mock_proc"
+        check_ready_fn = Mock(
+            side_effect=TerminalHealthCheckError("backend startup failed")
+        )
+        self.manager.register_health_check(
+            processes=[mock_proc],
+            process_name="backend_server",
+            check_ready_fn=check_ready_fn,
+            retry_interval_seconds=0.01,
+        )
+
+        self.manager._health_check_worker("backend_server")
+
+        check_ready_fn.assert_called_once_with()
+        self.assertEqual(
+            self.manager.health_check_status["backend_server"],
+            {"ready": False, "checked": True},
+        )
+
+    def test_health_check_timeout_is_shared_across_threads(self):
+        self.manager.health_check_threads = [Mock(), Mock()]
+        self.manager.health_check_status = {
+            "service_a": {"ready": False, "checked": False},
+            "service_b": {"ready": False, "checked": False},
+        }
+        started = time.monotonic()
+
+        result = self.manager.wait_for_health_checks(timeout=0.15)
+
+        self.assertFalse(result)
+        self.assertLess(time.monotonic() - started, 0.25)
+
+    def test_terminal_failure_does_not_wait_for_blocked_peer_probe(self):
+        mock_proc = Mock()
+        mock_proc.is_alive.return_value = True
+        mock_proc._mock_name = "mock_proc"
+        release_blocked_probe = threading.Event()
+
+        self.manager.register_health_check(
+            processes=[mock_proc],
+            process_name="blocked_frontend",
+            check_ready_fn=lambda: release_blocked_probe.wait(5),
+            retry_interval_seconds=0.01,
+        )
+        self.manager.register_health_check(
+            processes=[mock_proc],
+            process_name="failed_backend",
+            check_ready_fn=Mock(
+                side_effect=TerminalHealthCheckError("rank startup failed")
+            ),
+            retry_interval_seconds=0.01,
+        )
+
+        started = time.monotonic()
+        try:
+            result = self.manager.run_health_checks(timeout=5)
+        finally:
+            release_blocked_probe.set()
+
+        self.assertFalse(result)
+        self.assertLess(time.monotonic() - started, 1)
 
     def test_custom_check_ready_function(self):
         """Test health check with custom check_ready_fn"""
@@ -1812,6 +1879,31 @@ class TestFailureShutdownPaths(unittest.TestCase):
             self.manager.failure_detected,
             "graceful path should not flip failure_detected",
         )
+
+    def test_normal_shutdown_allows_nested_backend_reap_window(self):
+        """The outer manager must not SIGKILL a backend at the same deadline
+        used by the backend's inner rank manager."""
+        frontend = _FakeProc("frontend", dies_on_terminate=True)
+        backend = _FakeProc("backend", dies_on_terminate=False)
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.shutdown_requested = True
+        self.manager.POST_KILL_REAP_WINDOW = 0.01
+        self.manager.normal_reap_window = 0.1
+
+        def finish_backend():
+            time.sleep(0.05)
+            backend._alive = False
+
+        finisher = threading.Thread(target=finish_backend)
+        finisher.start()
+        kills = []
+        with patch("os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))):
+            self.manager._monitor_processes_health()
+        finisher.join()
+
+        self.assertNotIn(signal.SIGKILL, [sig for _, sig in kills])
+        self.assertFalse(self.manager.failure_detected)
 
 
 if __name__ == "__main__":

@@ -292,28 +292,42 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
 
     const auto memory_type = allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
     const auto copy_type   = BatchCopyParams::get_copy_type(memory_type, memory_type);
-    size_t     copy_count  = 0;
-    for (const auto& mapping : copy_mapping) {
-        const auto& group = config_.topology().group(mapping.tag);
-        copy_count += group.layer_ids.size() * (group.kv_scale_stride_bytes > 0 ? 2 : 1);
-    }
-
     BatchCopyParams copy_params;
-    copy_params.reserve(copy_type, copy_count);
     for (const auto& mapping : copy_mapping) {
         const auto& group = config_.topology().group(mapping.tag);
         for (int layer_id : group.layer_ids) {
-            const auto src_addr = convertIndexToAddrByTag(layer_id, mapping.tag, mapping.src);
-            const auto dst_addr = convertIndexToAddrByTag(layer_id, mapping.tag, mapping.dst);
-            RTP_LLM_CHECK_WITH_INFO(src_addr.kv_addr && dst_addr.kv_addr,
-                                    "cache block copy failed for tag=%s layer=%d src=%d dst=%d",
+            const auto src_buffers = convertIndexToBufferByTag(layer_id, mapping.tag, mapping.src);
+            const auto dst_buffers = convertIndexToBufferByTag(layer_id, mapping.tag, mapping.dst);
+            RTP_LLM_CHECK_WITH_INFO(!src_buffers.empty(),
+                                    "cache block copy buffers are empty for tag=%s layer=%d src=%d dst=%d",
                                     mapping.tag.c_str(),
                                     layer_id,
                                     mapping.src,
                                     mapping.dst);
-            copy_params.add(dst_addr.kv_addr, src_addr.kv_addr, group.kv_block_stride_bytes, copy_type);
-            if (group.kv_scale_stride_bytes > 0 && src_addr.kv_scale_addr && dst_addr.kv_scale_addr) {
-                copy_params.add(dst_addr.kv_scale_addr, src_addr.kv_scale_addr, group.kv_scale_stride_bytes, copy_type);
+            RTP_LLM_CHECK_WITH_INFO(src_buffers.size() == dst_buffers.size(),
+                                    "cache block copy buffer count mismatch for tag=%s layer=%d: src=%zu dst=%zu",
+                                    mapping.tag.c_str(),
+                                    layer_id,
+                                    src_buffers.size(),
+                                    dst_buffers.size());
+            for (size_t buffer_id = 0; buffer_id < src_buffers.size(); ++buffer_id) {
+                const auto& src = src_buffers[buffer_id];
+                const auto& dst = dst_buffers[buffer_id];
+                RTP_LLM_CHECK_WITH_INFO(src.addr != nullptr && dst.addr != nullptr,
+                                        "cache block copy buffer is null for tag=%s layer=%d buffer=%zu src=%d dst=%d",
+                                        mapping.tag.c_str(),
+                                        layer_id,
+                                        buffer_id,
+                                        mapping.src,
+                                        mapping.dst);
+                RTP_LLM_CHECK_WITH_INFO(src.size_bytes == dst.size_bytes,
+                                        "cache block copy size mismatch for tag=%s layer=%d buffer=%zu: src=%zu dst=%zu",
+                                        mapping.tag.c_str(),
+                                        layer_id,
+                                        buffer_id,
+                                        src.size_bytes,
+                                        dst.size_bytes);
+                copy_params.add(dst.addr, src.addr, src.size_bytes, copy_type);
             }
         }
     }
@@ -342,6 +356,35 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
         return nullptr;
     }
     if (metrics_reporter_) {
+        int64_t chain_block_count       = 0;
+        int64_t independent_block_count = 0;
+        for (const auto cache_key : evict_result.evicted_keys) {
+            const auto& block_ids = evict_result.evicted_group_block_ids.at(cache_key);
+            const auto  block_count =
+                static_cast<int64_t>(std::count_if(block_ids.begin(), block_ids.end(), [](BlockIdxType block_idx) {
+                    return !isNullBlockIdx(block_idx);
+                }));
+            if (evict_result.evicted_independent_group.count(cache_key)) {
+                independent_block_count += block_count;
+            } else {
+                chain_block_count += block_count;
+            }
+        }
+        auto report_block_count = [&](const char* evict_policy, int64_t block_count) {
+            if (block_count <= 0) {
+                return;
+            }
+            RtpLLMCacheEvictionMetricsCollector collector;
+            collector.evicted_block_count = block_count;
+            kmonitor::MetricsTags tags("scope", "gpu");
+            tags.AddTag("evict_policy", evict_policy);
+            tags.AddTag("backing", "device");
+            metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                       &collector);
+        };
+        report_block_count("chain", chain_block_count);
+        report_block_count("independent", independent_block_count);
+
         for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
             RtpLLMCacheEvictionMetricsCollector collector;
             collector.lifetime_ms = lifetime_ms;

@@ -24,6 +24,7 @@ cc_library(
         ":subscriber",
         "//rtp_llm/cpp/cache:kv_cache_allocator",
         "//rtp_llm/cpp/cache/connector:connector_base",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
     ],
 )

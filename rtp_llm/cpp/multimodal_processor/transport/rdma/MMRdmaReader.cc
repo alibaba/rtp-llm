@@ -10,6 +10,7 @@
 
 #include <torch/python.h>
 
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/rdma_transport/RdmaTransport.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -68,6 +69,14 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
         }
         MultimodalOutput assembled;
         assembled.mm_features = embedding.split(split_sizes, 0);
+        if (output_pb->has_multimodal_feature_hash()) {
+            auto hashes = TensorPbConvert::pbToTorch(output_pb->multimodal_feature_hash());
+            if (output_pb->feature_hash_version() != 1 || hashes.dim() != 1
+                || hashes.scalar_type() != torch::kInt32 || hashes.numel() != split_total) {
+                return false;
+            }
+            assembled.mm_feature_hashes = hashes.split(split_sizes, 0);
+        }
         if (has_pos_id) {
             assembled.mm_position_ids = mm_position_id.split(split_sizes, 0);
         }

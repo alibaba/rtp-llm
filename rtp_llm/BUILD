@@ -140,6 +140,7 @@ requirement([
     "watchdog",
     "zstandard",
     "xgrammar",
+    "fmha-sm100",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -262,6 +263,7 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":torchvision",
+        ":triton",
         ":protobuf",
         ":pyOpenSSL",
     ] + select({
@@ -305,10 +307,11 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 locks ship flashinfer-python (+apache-tvm-ffi, nvidia-cutlass-dsl)
-        # and flash-mla (+tilelang on arm), but not flashinfer-cubin/jit-cache or
-        # fast-hadamard; those rebuilds for torch 2.11+cu130 are tracked separately.
-        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla"],
+        # cuda13 locks ship flashinfer-python + cubin (+apache-tvm-ffi,
+        # nvidia-cutlass-dsl) and flash-mla (+tilelang on arm), but not
+        # flashinfer-jit-cache or fast-hadamard; those rebuilds for torch
+        # 2.11+cu130 are tracked separately.
+        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla"],
         "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
@@ -329,6 +332,10 @@ py_library(
         "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
+    }) + select({
+        # fmha_sm100: SM100/Blackwell-only sparse MSA kernel.
+        "@//:using_cuda13_x86": ["fmha-sm100"],
+        "//conditions:default": [],
     }) + select({
         "@//:using_arm": [],
         "@//:using_cuda13_arm": [],

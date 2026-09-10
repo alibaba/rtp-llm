@@ -621,6 +621,47 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
     EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
 }
 
+TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_RemoteEvictionDisablesQueryEndRemoteWrite) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    resource.resource_context_.enable_remote_cache                 = true;
+    stream_->generate_input_->generate_config->enable_remote_cache = true;
+    resource.resource_context_.enable_tiered_memory_cache          = true;
+    resource.resource_context_.enable_memory_cache_remote_eviction = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coord;
+
+    std::shared_ptr<KVCacheConnectorReadWriteContext> captured_ctx;
+    auto store_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    EXPECT_CALL(*mock_coord, asyncWrite(testing::_))
+        .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+            captured_ctx = connector_context;
+            return store_ctx;
+        }));
+
+    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->fillSubGenerateStatus(StreamState::FINISHED);
+    const int blocks = resource.curBlocksNum();
+    ASSERT_EQ(resource.tryReleaseKVBlock(blocks), blocks);
+
+    ASSERT_NE(captured_ctx, nullptr);
+    ASSERT_NE(captured_ctx->meta(), nullptr);
+    EXPECT_FALSE(captured_ctx->meta()->enableMemoryCache());
+    EXPECT_FALSE(captured_ctx->meta()->enableRemoteCache());
+}
+
 // ============================================================================
 // asyncLoadCache() and loadCacheDone() tests
 // ============================================================================
