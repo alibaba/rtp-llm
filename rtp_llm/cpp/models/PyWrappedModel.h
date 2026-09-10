@@ -196,6 +196,13 @@ private:
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
+    // Rank-synchronized Projection-KTP plan produced during attention-input
+    // preparation and consumed once by the matching forward.
+    py::object ktp_step_plan_;
+    // True only after graph inputs were prepared for ktp_step_plan_'s common
+    // key. Forward consumes this state instead of independently re-running
+    // canRun and potentially diverging from its peer ranks.
+    bool       ktp_graph_ready_{false};
     py::object held_attn_pyobj_;
     // Queried once after Python model initialization; forward/executor hot
     // paths read this immutable model capability without acquiring the GIL.
