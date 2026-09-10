@@ -1534,45 +1534,6 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         }
     });
 
-    // Decode SERVER span: wrapping the handler covers the whole decode
-    // lifecycle of this request; RemoteLoad fan-out stays span-free
-    // (aggregate attribute strategy). RAII guard covers all exit paths.
-    if (telemetry::TelemetryRuntime::isActive()) {
-        auto span = telemetry::startRpcServerSpan(
-            "rtp_llm.decode_remote_generate", server_context, true, "RpcService/RemoteGenerate");
-        decode_context.trace_span_guard =
-            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &decode_context.error_status);
-    }
-    telemetry::PhaseSpanSynthesisScope phase_span_scope([&decode_context](bool exception_unwinding) {
-        if (!decode_context.trace_span_guard || !decode_context.trace_span_guard->valid()) {
-            return;
-        }
-        auto& stream = decode_context.getStream();
-        if (!stream) {
-            return;
-        }
-        const auto             time_info  = stream->getTimeInfo();
-        const bool             request_ok = decode_context.error_status.ok() && !exception_unwinding;
-        telemetry::PhaseTiming phase_timing;
-        phase_timing.begin_time_us           = time_info.begin_time_us;
-        phase_timing.running_started         = time_info.running_started;
-        phase_timing.running_started_time_us = time_info.running_started_time_us;
-        phase_timing.first_token_committed   = time_info.first_token_committed;
-        phase_timing.first_token_time_us     = time_info.first_token_time_us;
-        phase_timing.generation_done         = time_info.generation_done;
-        phase_timing.generation_done_time_us = time_info.generation_done_time_us;
-        phase_timing.synthesis_end_time_us   = currentTimeUs();
-        phase_timing.request_id              = decode_context.request_id;
-        phase_timing.error_type              = DecodeRpcServer::phaseErrorType(
-            request_ok, decode_context.stat_info.stage, decode_context.error_info, decode_context.error_status);
-        telemetry::synthesizePhaseSpans(
-            decode_context.trace_span_guard->sharedSpan(), phase_timing, telemetry::PhaseRole::Decode, request_ok);
-        if (request_ok && time_info.generation_done) {
-            telemetry::setUsageTokenAttributes(
-                *decode_context.trace_span_guard, (int64_t)stream->inputLength(), (int64_t)stream->outputTokenLen());
-        }
-    });
-
     auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
     int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;

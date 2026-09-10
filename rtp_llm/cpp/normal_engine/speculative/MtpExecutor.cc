@@ -661,7 +661,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_bookkeeping_runner_(torch::Stream(c10::Stream::DEFAULT,
                                             torch::Device(torch::kPrivateUse1,
                                                           static_cast<c10::DeviceIndex>(
-                                                              params.parallelism_config.local_rank)))) {
+                                                              params.parallelism_config.local_rank)))),
+    dspark_cache_store_sync_stream_(torch::Stream(c10::Stream::DEFAULT,
+                                                  torch::Device(torch::kPrivateUse1,
+                                                                static_cast<c10::DeviceIndex>(
+                                                                    params.parallelism_config.local_rank)))) {
 #else
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),

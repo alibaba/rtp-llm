@@ -861,52 +861,6 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         }
     });
 
-    // Prefill SERVER span is created only on the PD path, AFTER the fallback
-    // check above, so Local/Prefill each own exactly one SERVER span. RAII
-    // guard covers EXECUTE_STAGE_FUNC early returns and exceptions.
-    if (telemetry::TelemetryRuntime::isActive()) {
-        auto span = telemetry::startRpcServerSpan(
-            "rtp_llm.prefill_generate_stream_call", server_context, true, "RpcService/GenerateStreamCall");
-        prefill_context.trace_span_guard =
-            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &prefill_context.error_status);
-        // Bailian Unitrace index key (string) + internal numeric field
-        prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
-                                                       std::to_string(prefill_context.request_id));
-        prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, prefill_context.request_id);
-    }
-    telemetry::PhaseSpanSynthesisScope phase_span_scope([&prefill_context](bool exception_unwinding) {
-        if (!prefill_context.trace_span_guard || !prefill_context.trace_span_guard->valid()) {
-            return;
-        }
-        auto& stream = prefill_context.getStream();
-        if (!stream) {
-            return;
-        }
-        const auto             time_info  = stream->getTimeInfo();
-        const bool             request_ok = prefill_context.error_status.ok() && !exception_unwinding;
-        telemetry::PhaseTiming phase_timing;
-        phase_timing.begin_time_us           = time_info.begin_time_us;
-        phase_timing.running_started         = time_info.running_started;
-        phase_timing.running_started_time_us = time_info.running_started_time_us;
-        phase_timing.first_token_committed   = time_info.first_token_committed;
-        phase_timing.first_token_time_us     = time_info.first_token_time_us;
-        phase_timing.generation_done         = time_info.generation_done;
-        phase_timing.generation_done_time_us = time_info.generation_done_time_us;
-        phase_timing.synthesis_end_time_us   = currentTimeUs();
-        phase_timing.request_id              = prefill_context.request_id;
-        phase_timing.error_type              = request_ok ?
-                                                   nullptr :
-                                                   (!prefill_context.error_status.ok() ?
-                                                        telemetry::grpcStatusCodeName(prefill_context.error_status.error_code()) :
-                                                        "Exception");
-        telemetry::synthesizePhaseSpans(
-            prefill_context.trace_span_guard->sharedSpan(), phase_timing, telemetry::PhaseRole::Prefill, request_ok);
-        if (request_ok && time_info.generation_done) {
-            telemetry::setUsageTokenAttributes(
-                *prefill_context.trace_span_guard, (int64_t)stream->inputLength(), (int64_t)stream->outputTokenLen());
-        }
-    });
-
     try {
         auto status = syncPrefix(prefill_context);
         if (!status.ok()) {
