@@ -187,7 +187,6 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThrough
                                                                4,
                                                                8,
                                                                4,
-                                                               16,
                                                                10000,
                                                                cache_metrics_reporter);
 
@@ -250,7 +249,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
     auto  disk_pool = makeDiskPool(host_block_size_, 8, temp_dir_.path, std::move(owned_io), "split_batch");
     auto  group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
     auto  engine    = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group}, false, DeviceHostCopyOptions{}, 4, 2, 4, 2);
+        std::vector<GroupSetPtr>{group}, false, DeviceHostCopyOptions{}, 4, 2, 4);
     std::vector<TransferDescriptor> descriptors;
     for (size_t index = 0; index < 5; ++index) {
         descriptors.push_back(
@@ -264,7 +263,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{2, 2, 1}));
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSupportsSixteenDescriptors) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSplitsSeventeenDescriptorsIntoEightEightOne) {
     auto  owned_io  = std::make_unique<RecordingBatchDiskBlockIO>();
     auto* io        = owned_io.get();
     auto  host_pool = makeHostPool(host_block_size_, 17);
@@ -281,7 +280,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSupportsSixteenDe
     context->waitDone();
 
     ASSERT_TRUE(context->success());
-    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{16, 1}));
+    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{8, 8, 1}));
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUseSharedWorkers) {

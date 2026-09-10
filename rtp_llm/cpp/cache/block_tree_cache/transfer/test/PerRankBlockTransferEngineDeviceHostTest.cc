@@ -266,14 +266,14 @@ static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::
     }
 }
 
-TEST(DeviceHostTransferExecutorConfigTest, PrefersStagedSmThenCudaBatchThenGeneric) {
+TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
     EXPECT_TRUE(executor.options_.staged_sm_copy_enabled);
     ASSERT_EQ(executor.strategies_.size(), 3u);
-    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
-    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
+    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
     EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
 }
 
@@ -1047,7 +1047,29 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStagi
     expectStatus(engine, descriptor, TransferStatus::OK);
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceLaneCapacityControlsPhysicalBatchSize) {
+TEST(PerRankBlockTransferEngineIntegrationTest, DefaultStagingCanReserve64FullBlocks) {
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    for (const size_t swa_bytes : {4096u, 16384u}) {
+        auto full_device = makeDevicePool({{8192, 0}}, 1, "default_staging_full");
+        auto swa_device = makeDevicePool({{swa_bytes, 0}}, 1, "default_staging_swa");
+        auto full_group = makeDeviceHostGroup(
+            0, {full_device}, nullptr, {makeGroupBase(CacheGroupType::FULL, {0}, 8192)});
+        auto swa_group = makeDeviceHostGroup(
+            1, {swa_device}, nullptr, {makeGroupBase(CacheGroupType::SWA, {0}, swa_bytes)});
+        auto engine = std::make_shared<PerRankBlockTransferEngine>(
+            std::vector<GroupSetPtr>{full_group, swa_group}, true);
+        auto full = engine->device_disk_executor_->full_staging_pool_->tryMallocBatch(64);
+        ASSERT_TRUE(full.has_value());
+        EXPECT_EQ(full->size(), 64u);
+        const size_t expected_swa_capacity = swa_bytes == 4096 ? 128 : 64;
+        auto swa = engine->device_disk_executor_->swa_staging_pool_->tryMallocBatch(expected_swa_capacity);
+        ASSERT_TRUE(swa.has_value());
+        EXPECT_EQ(swa->size(), expected_swa_capacity);
+        EXPECT_FALSE(engine->device_disk_executor_->swa_staging_pool_->tryMallocBatch(1).has_value());
+    }
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceUsesMinimumOfBatchLimitAndLaneCapacity) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     TempDirGuard temp_dir("per_rank_disk_device_lane_capacity");
 
@@ -1064,7 +1086,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceLaneCapacityControlsPh
     auto swa_group =
         makeDeviceHostGroup(1, {swa_device}, nullptr, {makeGroupBase(CacheGroupType::SWA, {0}, 4096)}, swa_disk);
     auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{full_group, swa_group}, true, DeviceHostCopyOptions{}, 4);
+        std::vector<GroupSetPtr>{full_group, swa_group}, true, DeviceHostCopyOptions{}, 4, 3, 1);
 
     EXPECT_EQ(engine->device_disk_executor_->full_batch_capacity_, 2u);
     EXPECT_EQ(engine->device_disk_executor_->swa_batch_capacity_, 4u);
@@ -1085,7 +1107,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceLaneCapacityControlsPh
     swa_context->waitDone();
     ASSERT_TRUE(swa_context->success());
     EXPECT_EQ(full_io_ptr->batch_sizes, (std::vector<size_t>{2, 2, 1}));
-    EXPECT_EQ(swa_io_ptr->batch_sizes, (std::vector<size_t>{4, 1}));
+    EXPECT_EQ(swa_io_ptr->batch_sizes, (std::vector<size_t>{3, 2}));
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskToDeviceReturnsPendingContext) {
@@ -1457,6 +1479,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
 TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupportedOtherwiseFallsBack) {
     DeviceHostCopyOptions options;
     options.cuda_batch_copy_enabled                          = true;
+    options.staged_sm_copy_enabled                           = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
@@ -1492,15 +1515,16 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
         EXPECT_EQ(d1[i], 0x00);
 
     EXPECT_EQ(counters[0].attempts, 2);
-    EXPECT_EQ(counters[0].not_applicable, 2);
-    EXPECT_EQ(counters[0].done, 0);
     EXPECT_EQ(counters[0].failed, 0);
-    EXPECT_EQ(counters[1].attempts, 2);
     EXPECT_EQ(counters[1].failed, 0);
-    if (counters[1].done == 2) {
-        EXPECT_EQ(counters[1].not_applicable, 0);
+    if (counters[0].done == 2) {
+        EXPECT_EQ(counters[0].not_applicable, 0);
+        EXPECT_EQ(counters[1].attempts, 0);
         EXPECT_EQ(counters[2].attempts, 0);
     } else {
+        EXPECT_EQ(counters[0].done, 0);
+        EXPECT_EQ(counters[0].not_applicable, 2);
+        EXPECT_EQ(counters[1].attempts, 2);
         EXPECT_EQ(counters[1].done, 0);
         EXPECT_EQ(counters[1].not_applicable, 2);
         EXPECT_EQ(counters[2].attempts, 2);
@@ -1579,15 +1603,18 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     for (size_t i = 128; i < staged_layer1.size(); ++i)
         EXPECT_EQ(staged_layer1[i], 0x00);
     EXPECT_EQ(counters[0].attempts, 2);
-    EXPECT_EQ(counters[0].done, 2);
+    EXPECT_EQ(counters[0].not_applicable, 2);
+    EXPECT_EQ(counters[0].done, 0);
     EXPECT_EQ(counters[0].failed, 0);
-    EXPECT_EQ(counters[1].attempts, 0);
+    EXPECT_EQ(counters[1].attempts, 2);
+    EXPECT_EQ(counters[1].done, 2);
+    EXPECT_EQ(counters[1].failed, 0);
     EXPECT_EQ(counters[2].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineStrategyTest, StagedSmTakesPrecedenceWhenBothStrategiesAreEligible) {
+TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchPrecedesStagedSmWithStagedFallback) {
     DeviceHostCopyOptions options;
     options.staged_sm_copy_enabled                           = true;
     options.staged_sm_min_tile_count                         = 1;
@@ -1605,10 +1632,18 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedSmTakesPrecedenceWhenBothSt
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
                  TransferStatus::OK);
     EXPECT_EQ(counters[0].attempts, 1);
-    EXPECT_EQ(counters[0].done, 1);
-    EXPECT_EQ(counters[0].not_applicable, 0);
     EXPECT_EQ(counters[0].failed, 0);
-    EXPECT_EQ(counters[1].attempts, 0);
+    if (counters[0].done == 1) {
+        EXPECT_EQ(counters[0].not_applicable, 0);
+        EXPECT_EQ(counters[1].attempts, 0);
+    } else {
+        EXPECT_EQ(counters[0].done, 0);
+        EXPECT_EQ(counters[0].not_applicable, 1);
+        EXPECT_EQ(counters[1].attempts, 1);
+        EXPECT_EQ(counters[1].done, 1);
+        EXPECT_EQ(counters[1].not_applicable, 0);
+        EXPECT_EQ(counters[1].failed, 0);
+    }
     EXPECT_EQ(counters[2].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);

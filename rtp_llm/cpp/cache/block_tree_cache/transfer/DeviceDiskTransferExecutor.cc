@@ -53,12 +53,15 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
                                                        const std::vector<GroupSetPtr>& group_sets,
                                                        size_t                          staging_block_count,
                                                        BlockTreeTaskPool&              transfer_task_pool,
+                                                       size_t                          max_descriptors_per_batch,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
     device_host_executor_(device_host_executor),
     host_disk_executor_(host_disk_executor),
     transfer_task_pool_(transfer_task_pool),
+    max_descriptors_per_batch_(max_descriptors_per_batch),
     metrics_reporter_(std::move(metrics_reporter)) {
     RTP_LLM_CHECK(staging_block_count >= 2 && staging_block_count % 2 == 0);
+    RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
 
     size_t max_stride  = 0;
     size_t full_stride = 0;
@@ -109,7 +112,7 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
         return context;
     }
     HostStagingBlockPool* pool     = stagingPool(group_type);
-    const size_t          capacity = batchCapacity(group_type);
+    const size_t          capacity = std::min(batchCapacity(group_type), max_descriptors_per_batch_);
     if (pool == nullptr || capacity == 0) {
         context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported disk-to-device cache group type"));
         return context;

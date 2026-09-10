@@ -26,28 +26,27 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                        bool                     enable_disk_cache,
                                                        DeviceHostCopyOptions    device_host_options,
                                                        size_t                   device_disk_staging_block_count,
-                                                       size_t                   max_device_host_descriptors_per_batch,
+                                                       size_t                   max_descriptors_per_batch,
                                                        size_t                   transfer_worker_count,
-                                                       size_t max_non_device_host_descriptors_per_batch,
                                                        size_t transfer_queue_max_size,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
     group_sets_(std::move(group_sets)), transfer_worker_count_(transfer_worker_count) {
-    RTP_LLM_CHECK(max_device_host_descriptors_per_batch > 0);
-    RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch > 0);
+    RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
     transfer_task_pool_ =
         std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferEngine");
     RTP_LLM_CHECK(transfer_task_pool_->start());
     device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(
-        *transfer_task_pool_, max_device_host_descriptors_per_batch, std::move(device_host_options), metrics_reporter);
+        *transfer_task_pool_, max_descriptors_per_batch, std::move(device_host_options), metrics_reporter);
     host_disk_executor_ = std::make_unique<HostDiskTransferExecutor>(
-        *transfer_task_pool_, max_non_device_host_descriptors_per_batch, metrics_reporter);
+        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter);
     if (enable_disk_cache) {
         device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
                                                                              *host_disk_executor_,
                                                                              group_sets_,
                                                                              device_disk_staging_block_count,
                                                                              *transfer_task_pool_,
+                                                                             max_descriptors_per_batch,
                                                                              std::move(metrics_reporter));
     }
 }

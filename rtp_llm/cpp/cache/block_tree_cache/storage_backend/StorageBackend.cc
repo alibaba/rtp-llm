@@ -39,30 +39,13 @@ struct StorageTaskState {
     StorageRequest          request;
     std::vector<Pin>        pins;
     std::once_flag          finish_once;
-    std::mutex              completion_mutex;
-    std::condition_variable completion_cv;
-    bool                    completed{false};
-    bool                    success{false};
-
-    void finish(bool write_success = false) {
-        std::call_once(finish_once, [this, write_success] {
+    void finish() {
+        std::call_once(finish_once, [this] {
             for (const Pin& pin : pins) {
                 pin.pool->decRef(pin.block);
             }
             pins.clear();
-            {
-                std::lock_guard<std::mutex> lock(completion_mutex);
-                success   = write_success;
-                completed = true;
-            }
-            completion_cv.notify_all();
         });
-    }
-
-    bool wait() {
-        std::unique_lock<std::mutex> lock(completion_mutex);
-        completion_cv.wait(lock, [this] { return completed; });
-        return success;
     }
 
     ~StorageTaskState() {
@@ -288,7 +271,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                 success = false;
             }
         }
-        state->finish(success);
+        state->finish();
         if (done) {
             done(success);
         }
@@ -303,27 +286,18 @@ StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
     return StorageWriteTask(prepare(std::move(request)));
 }
 
-bool StorageBackend::write(StorageWriteTask task, bool synchronous) {
+bool StorageBackend::write(StorageWriteTask task) {
     RTP_LLM_CHECK(initialized_);
     RTP_LLM_CHECK(task.state_ != nullptr);
     auto state = std::move(task.state_);
-    if (synchronous && storage_backend_detail::completing_backend == this) {
-        RTP_LLM_LOG_ERROR("synchronous StorageBackend write rejected from the same backend callback");
-        state->finish(false);
-        return false;
-    }
-    const bool admitted = dispatch([this, state](Lifecycle outcome) {
-        bool success = outcome == Lifecycle::ACCEPTING;
-        if (success) {
+    return dispatch([this, state](Lifecycle outcome) {
+        if (outcome == Lifecycle::ACCEPTING) {
             try {
                 writeImpl(state->request);
-            } catch (...) {
-                success = false;
-            }
+            } catch (...) {}
         }
-        state->finish(success);
+        state->finish();
     });
-    return synchronous ? state->wait() : admitted;
 }
 
 }  // namespace rtp_llm
