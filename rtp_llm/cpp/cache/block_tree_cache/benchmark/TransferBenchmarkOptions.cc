@@ -76,7 +76,7 @@ void TransferOptions::printHelp() {
         << "  --disk-access-pattern=PAT    sequential | random (default: sequential)\n"
         << "  --working-set-blocks=N       Transfer pool size (0 = auto: concurrency*4, waves rotate)\n"
         << "  --device-disk-staging-block-count=N  Device<->Disk staging buffers, passed through unchanged "
-           "(default: 4)\n"
+           "(default: 128)\n"
         << "  --help                       Show this help\n";
 }
 

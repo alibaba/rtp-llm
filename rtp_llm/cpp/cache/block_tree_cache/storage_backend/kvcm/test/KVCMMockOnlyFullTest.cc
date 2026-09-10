@@ -172,7 +172,8 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
             EXPECT_EQ(locations[0][1].uri, "actual_rank_0_0");
             return true;
         }));
-    EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 
     for (size_t rank = 0; rank < states.size(); ++rank) {
         const auto requests = snapshotRequests(states[rank]);
@@ -244,7 +245,8 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSession) {
 
     const auto source_ref_count = environment.device_pool->refCount(environment.block_id);
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
-    EXPECT_FALSE(backend->write(backend->prepareWrite(makeStorageRequest(environment)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
     for (const auto& state : states) {
@@ -384,7 +386,8 @@ TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
             return true;
         }));
 
-    EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
@@ -442,7 +445,8 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {
 
     auto request =
         makeStorageRequest(environment, /*keys=*/{101, 102, 103}, /*local_matched_blocks=*/0, /*block_ids=*/block_ids);
-    EXPECT_TRUE(backend->write(backend->prepareWrite(std::move(request)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(std::move(request)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockOnlyFullTest, WriteHonorsSparseBlockMask) {
@@ -499,7 +503,8 @@ TEST(KVCMMockOnlyFullTest, WriteHonorsSparseBlockMask) {
 
     auto request = makeStorageRequest(
         environment, /*keys=*/{101, 102, 103, 104}, /*local_matched_blocks=*/0, /*block_ids=*/block_ids);
-    EXPECT_TRUE(backend->write(backend->prepareWrite(std::move(request)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(std::move(request)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockOnlyFullTest, EmptyWriteLocationsCompleteWithoutPayloadOrFinish) {
@@ -520,7 +525,8 @@ TEST(KVCMMockOnlyFullTest, EmptyWriteLocationsCompleteWithoutPayloadOrFinish) {
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
 
     auto request = makeStorageRequest(environment, /*keys=*/{101, 102, 103});
-    EXPECT_TRUE(backend->write(backend->prepareWrite(std::move(request)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(std::move(request)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockOnlyFullTest, UnchangedActualUrisAreNotRepublished) {
@@ -551,7 +557,8 @@ TEST(KVCMMockOnlyFullTest, UnchangedActualUrisAreNotRepublished) {
             return true;
         }));
 
-    EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockOnlyFullTest, MismatchedActualUriCountAbortsWriteSession) {
@@ -587,7 +594,8 @@ TEST(KVCMMockOnlyFullTest, MismatchedActualUriCountAbortsWriteSession) {
             return true;
         }));
 
-    EXPECT_FALSE(backend->write(backend->prepareWrite(makeStorageRequest(environment)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockOnlyFullTest, StartWriteFailureDoesNotFinishSession) {
@@ -603,7 +611,8 @@ TEST(KVCMMockOnlyFullTest, StartWriteFailureDoesNotFinishSession) {
         .WillOnce(Return(std::make_pair(false, kv_cache_manager::WriteLocation{})));
     EXPECT_CALL(*client_wrapper, saveKvCaches(_, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, _, _, _)).Times(0);
-    EXPECT_FALSE(backend->write(backend->prepareWrite(makeStorageRequest(environment)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
@@ -638,7 +647,8 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
             EXPECT_TRUE(locations.empty());
             return true;
         }));
-    EXPECT_FALSE(backend->write(backend->prepareWrite(makeStorageRequest(environment)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockOnlyFullTest, FinishWriteFailureIsNotRetried) {
@@ -668,7 +678,8 @@ TEST(KVCMMockOnlyFullTest, FinishWriteFailureIsNotRetried) {
             EXPECT_TRUE(locations.empty());
             return false;
         }));
-    EXPECT_FALSE(backend->write(backend->prepareWrite(makeStorageRequest(environment)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 }  // namespace

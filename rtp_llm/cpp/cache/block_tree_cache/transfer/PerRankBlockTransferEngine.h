@@ -23,10 +23,9 @@ public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                         bool                     enable_disk_cache                         = false,
                                         DeviceHostCopyOptions    device_host_options                       = {},
-                                        size_t                   device_disk_staging_block_count           = 4,
-                                        size_t                   max_device_host_descriptors_per_batch     = 8,
+                                        size_t                   device_disk_staging_block_count           = 128,
+                                        size_t                   max_descriptors_per_batch                  = 8,
                                         size_t                   transfer_worker_count                     = 4,
-                                        size_t                   max_non_device_host_descriptors_per_batch = 16,
                                         size_t                   transfer_queue_max_size                   = 10000,
                                         std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter    = nullptr);
     PerRankBlockTransferEngine() = delete;
