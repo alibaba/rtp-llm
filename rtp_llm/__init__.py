@@ -1,5 +1,25 @@
 import importlib
+import os
+import sys
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# DeepGEMM wheel shadow (DSV4_SM120, env-gated, default off).
+#
+# The runfiles bundle a deep_gemm wheel whose C++ asserts "Unsupported
+# architecture" on SM120 for the hyperconnection / split-k kernels the MHC
+# pre-norm path uses (surface symptom: "TileLang mhc_pre failed" wrapping it).
+# The PD launcher sidesteps this via PYTHONPATH, which the bazel test wrapper
+# cannot honour: it appends an inherited PYTHONPATH LAST and de-duplicates
+# keeping the FIRST occurrence, so the bundled wheel always wins.
+#
+# Set DSV4_DEEPGEMM_SHADOW_PATH to a site-packages-like directory - e.g. the
+# SM120-capable nv_dev build in DeepGEMM/build/lib.linux-x86_64-cpython-310 -
+# and it is prepended to sys.path here, before any module imports deep_gemm.
+# ---------------------------------------------------------------------------
+_shadow = os.environ.get("DSV4_DEEPGEMM_SHADOW_PATH")
+if _shadow and _shadow not in sys.path:
+    sys.path.insert(0, _shadow)
 
 
 def __getattr__(name: str) -> Any:
