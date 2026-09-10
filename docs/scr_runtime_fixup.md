@@ -34,17 +34,28 @@ Epsilon 屏障成功返回
 - 不重建 appender、不覆盖旧日志、不改变 rank；不带前缀的原始 access 日志格式保持原样。
 - CPU/frontend 进程不会为了日志主动加载 CUDA 扩展；已加载但缺少新接口的旧 native 库会明确失败。因此交付必须使用匹配的 Python 与 native 构建，不能只热补 Python。
 
-## 后续 restore env 文件的接入点
+## Restore env 文件与缺失降级
 
-`register_restore_env_provider(provider)` 注册进程级回调。回调接收 `generation`，在每次 fixup 时读取平台提供的文件并返回 `Mapping[str, str | None]`。也可以在直接调用统一函数时传入 `restore_env` 映射，用于测试或明确的集成入口。
+默认在每次屏障成功返回后的 fixup 中读取 `/etc/scr/envs.json`。不在 import、seed 初始化或第一次恢复时缓存文件内容，也不要求每个参与进程额外注册 reader。
 
-目前没有定义文件路径、格式，也没有假设该文件已经存在。接入时必须：
+目前按 JSON 对象接入，支持完整环境对象，从中选择已有修复契约允许的字段：
 
-1. 在每个参与进程的屏障之前注册 reader，文件内容在恢复后读取，不在 seed 中预读缓存。
-2. reader 校验恢复输入与当前 Pod / 本次恢复的绑定关系，拒绝过期文件；平台原子发布完整文件。相同 checkpoint generation 可以被重复恢复，不能仅凭 generation 相同认定文件新鲜。
-3. 从完整环境中选择已支持字段，作为数据解析，不能 shell `source`。
-4. 当前支持 RequestedIP、HIPPO_SLAVE_IP、HIPPO_ROLE、HIPPO_ROLE_SHORT_NAME、HIPPO_APP、HIPPO_SERVICE_NAME、kmonitorSinkAddress、kmonitorPort。None 删除对应 seed 环境值；例如删除旧短 role，允许新的 HIPPO_ROLE 生效。新增字段必须同时检查它的派生缓存和使用者。
-5. 明确提供的 RequestedIP 作为当前 Pod 地址；未提供或显式删除时重新解析当前网络身份，绝不回退到旧 RequestedIP。当前 Python 外部地址契约为非 loopback IPv4。
+```json
+{
+  "RequestedIP": "192.0.2.20",
+  "HIPPO_SLAVE_IP": "192.0.2.200",
+  "HIPPO_ROLE": "restored-role",
+  "HIPPO_ROLE_SHORT_NAME": null
+}
+```
+
+- 文件不存在（包括父目录不存在）时返回空更新，继续原有降级流程：从当前网络重新发现 Pod IP，其他环境值保留，然后执行组件 fixup 和正常 release。不会因为缺少文件而直接使 restore 失败；网络发现等原有步骤仍须成功。
+- 文件存在但 JSON/UTF-8 损坏、根节点不是对象、支持字段值非法，或者权限/读取错误，均抛错，阻止正常 release。空文件不是“文件不存在”，不能静默吞掉部分写入。
+- 当前支持 RequestedIP、HIPPO_SLAVE_IP、HIPPO_ROLE、HIPPO_ROLE_SHORT_NAME、HIPPO_APP、HIPPO_SERVICE_NAME、kmonitorSinkAddress、kmonitorPort。其他字段不应用，避免把 GPU 拓扑、SCR 控制变量等未经修复的派生状态一起修改。`null` 删除对应 seed 环境值；不出现的字段保留原值。
+- 明确提供的 RequestedIP 作为当前 Pod 地址；未提供或为 `null` 时重新解析当前网络身份，绝不回退到旧 RequestedIP。当前 Python 外部地址契约为非 loopback IPv4。
+- 平台必须为目标容器原子发布本次恢复的文件，并确保 seed 文件不会被误用。这个扁平 JSON 对象没有 Pod UID/attempt 字段，reader 不能独立认证文件的新鲜度；重新读取仅防止进程缓存，不代替平台的挂载/发布保证。相同 checkpoint generation 可重复恢复，不用它跳过读取。
+
+输入优先级是：显式 `restore_env`（包括空对象）→ 已注册的自定义 provider → 默认文件 reader。`register_restore_env_provider(provider)` 仍可注册进程级回调，在每次 fixup 时调用；传 `None` 恢复默认文件读取。需要不读文件的调用者可以明确传 `restore_env={}`，或注册返回空映射的 provider。自定义 provider 继续负责它自身协议的身份/新鲜度验证。
 
 未提供 HIPPO_SLAVE_IP 时无法从 Pod IP 推导宿主机 IP；代码保留现有环境并记录其新鲜度未验证。该问题需要平台文件输入后才能闭环。GPU 拓扑、模型参数、凭证、路径和 SCR 控制变量不在这个输入接口的覆盖范围。
 
@@ -67,17 +78,32 @@ Epsilon 屏障成功返回
 
 ## 验证与交付界限
 
-新增两组可在 CPU 主机运行的测试：
+可在 CPU 主机运行的直接回归：
 
 ```bash
-python -m unittest rtp_llm.utils.test.scr_native_logger_test rtp_llm.utils.test.scr_runtime_fixup_test -v
+python -m unittest rtp_llm.utils.test.scr_native_logger_test rtp_llm.utils.test.scr_runtime_fixup_test rtp_llm.utils.test.scr_restore_env_file_test -v
 ```
 
 native 测试编译真实 Logger.cc/Logger.h，alog/autil 使用明确的测试替身；检查旧实例、延迟创建实例、连续两次身份变化、trace 前缀、非法输入和并发读写。它不验证真实 alog 文件句柄、pybind 动态加载或 CRIU。
 
 Python 测试通过真实模板入口验证顺序、重复恢复、环境字段校验与删除、旧 native 拒绝、失败阻止正常 release，以及指标 / KV / 前端身份的一致性。原有 Kmonitor、local-comm 和生命周期测试纳入本地回归。
 
-本次核心回归 36 项通过，Python 语法、文档本地链接和 `git diff --check` 通过。测试使用独立的 `../fixup-test-venv`，补充了仓库锁定的 thrift 0.20.0，没有修改全局依赖。
+文件 reader 新增 12 项回归：缺文件正常 release、屏障后读取、同 generation 替换文件重读、第二次恢复文件消失时降级、完整环境过滤、null 删除、空对象、损坏/非法输入阻止 release、权限错误、自定义 provider 与显式输入优先级、普通启动不读文件。
+
+接入默认文件 reader 后，本次核心回归 48 项通过（含新增 12 项），Python 语法、文档本地链接和 `git diff --check` 通过。测试使用原有独立的 `../fixup-test-venv`，没有修改全局依赖。完整核心命令：
+
+```bash
+../fixup-test-venv/bin/python -m unittest \
+  rtp_llm.utils.test.scr_restore_env_file_test \
+  rtp_llm.utils.test.scr_runtime_fixup_test \
+  rtp_llm.utils.test.scr_native_logger_test \
+  rtp_llm.utils.test.scr_kmonitor_lifecycle_test \
+  rtp_llm.utils.test.scr_local_comm_test \
+  rtp_llm.utils.test.scr_template_lifecycle_test \
+  rtp_llm.utils.test.scr_advertise_ip_test -v
+```
+
+额外尝试的 scr_pd_advertisement_test 在导入配置时触发 rtp_llm.ops.find_upper_so 的父目录递归扫描，已中断本次扫描；它未执行到断言，不计入通过项，也没有修改该测试或其依赖代码。
 
 原有 `scr_template_utils_test.test_before_callback_uses_captured_device` 因 `_FakeEpsilon` 缺少 `is_available` 失败，已在未修改的基线独立复现；未修改该测试。涉及真实配置对象的 endpoint 测试依赖本机缺少的 libth_transformer，不能作为本地已通过项目。
 

@@ -1,13 +1,14 @@
 """Repair process-local runtime state before releasing an SCR template.
 
-Restore environment input is supplied as data, never shell code. A future
-platform file adapter should be registered before arrival and read the file
-inside the provider on *each* invocation, not while constructing the seed.
+Restore environment input is supplied as data, never shell code. Read the
+platform file after each barrier, never while constructing the seed. A missing
+file preserves the existing namespace-discovery fallback.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import sys
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
+RESTORE_ENV_FILE = "/etc/scr/envs.json"
 # Identity/metrics inputs only. GPU topology, model config, SCR control state,
 # credentials and filesystem paths require their own explicit repair contracts.
 RESTORE_ENV_KEYS = frozenset(
@@ -56,15 +58,42 @@ def get_restore_runtime_identity() -> RestoreRuntimeIdentity | None:
 
 
 def register_restore_env_provider(provider: RestoreEnvProvider | None) -> None:
-    """Install a process-local adapter before SCR arrival; None disables it.
+    """Override the default file reader; None restores the default reader.
 
     The adapter must validate the file's generation/current Pod identity and select
     supported keys. Returning None for an allowed key removes its seed value.
-    Each participating process needs its own registration. No format/path is
-    assumed until the platform defines the restore environment file contract.
+    Each participating process needs its own registration for a custom adapter.
+    Without one, each fixup reads /etc/scr/envs.json if present.
     """
     global _restore_env_provider
     _restore_env_provider = provider
+
+
+def _read_restore_env_file() -> Mapping[str, str | None]:
+    """Read a freshly published JSON environment object; absence is supported.
+
+    The platform must publish this file for the current container, atomically.
+    A full environment may contain unrelated keys; only repairable identity and
+    metrics inputs are selected. Null explicitly removes an allowed seed key.
+    """
+    try:
+        with open(RESTORE_ENV_FILE, encoding="utf-8") as source:
+            values = json.load(source)
+    except FileNotFoundError:
+        LOGGER.info(
+            "SCR restore environment file %s absent; using namespace discovery "
+            "and retaining other environment values",
+            RESTORE_ENV_FILE,
+        )
+        return {}
+    except (json.JSONDecodeError, UnicodeError):
+        # Do not include file contents (which may contain credentials) in errors.
+        raise ValueError(
+            "SCR restore environment file must contain valid JSON"
+        ) from None
+    if not isinstance(values, dict):
+        raise ValueError("SCR restore environment file must contain a JSON object")
+    return {key: value for key, value in values.items() if key in RESTORE_ENV_KEYS}
 
 
 def _validate_environment(values: Mapping[str, str | None]) -> dict[str, str | None]:
@@ -101,7 +130,11 @@ def fixup_runtime_after_restore(
     """
     global _runtime_identity
     if restore_env is None:
-        restore_env = _restore_env_provider(generation) if _restore_env_provider else {}
+        restore_env = (
+            _restore_env_provider(generation)
+            if _restore_env_provider is not None
+            else _read_restore_env_file()
+        )
     updates = _validate_environment(restore_env)
     # Only an explicitly fresh provider may override namespace discovery.
     # os.environ['RequestedIP'] by itself can still be the seed's value.
