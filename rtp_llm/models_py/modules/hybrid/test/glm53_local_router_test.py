@@ -135,6 +135,13 @@ class Glm53LocalRouterTest(unittest.TestCase):
             for sp in (False, True):
                 self._check_layer(tokens, True, sp, local_shared=True)
 
+    def test_fused_shared_is_added_once_and_padding_stays_zero(self):
+        for tokens in (1, 7, 8, 9, 65):
+            for sp in (False, True):
+                self._check_layer(
+                    tokens, True, sp, local_shared=True, fused_shared=True
+                )
+
     def _check_layer(
         self,
         tokens,
@@ -142,6 +149,7 @@ class Glm53LocalRouterTest(unittest.TestCase):
         sequence_parallel,
         gate_chunk_rows=0,
         local_shared=False,
+        fused_shared=False,
     ):
         x = torch.randn(tokens, 64, device="cuda", dtype=torch.bfloat16)
         gate = Glm53FP32Router(torch.randn(64, 288, device="cuda") / 8, chunk_rows=8)
@@ -187,7 +195,7 @@ class Glm53LocalRouterTest(unittest.TestCase):
             layer.top_k = 8
             layer.fake_balance_expert = None
             layer.correction_bias = bias
-            layer._use_mega_moe_fused_shared = False
+            layer._use_mega_moe_fused_shared = fused_shared
             layer.shared_expert_gate = None
             layer._shared_expert_stream = None
 
@@ -203,9 +211,13 @@ class Glm53LocalRouterTest(unittest.TestCase):
                 )
                 self.assertEqual(torch.count_nonzero(w[valid:]).item(), 0)
                 self.assertEqual(torch.count_nonzero(i[valid:]).item(), 0)
-                return expert(h, w, i)
+                output = expert(h, w, i)
+                if fused_shared:
+                    output = output + (h.float() / 4).bfloat16()
+                return output
 
             def shared(h, **kwargs):
+                self.assertFalse(fused_shared, "fused shared must not execute twice")
                 events.append("shared")
                 torch.testing.assert_close(
                     h, local if local_shared else x, rtol=0, atol=0
@@ -272,7 +284,11 @@ class Glm53LocalRouterTest(unittest.TestCase):
                         else ["dispatch", "gather", "shared"]
                     )
                     if with_shared and sequence_parallel and not local_shared
-                    else ["dispatch", "shared"] if with_shared else ["dispatch"]
+                    else (
+                        ["dispatch", "shared"]
+                        if with_shared and not fused_shared
+                        else ["dispatch"]
+                    )
                 ),
             )
 

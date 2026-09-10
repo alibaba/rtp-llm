@@ -162,3 +162,13 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+# CPU-only regression for the FP8 MegaMoE backend layout contract.
+py_test(
+    name = "glm53_fp8_capacity_test",
+    srcs = [
+        "modules/glm5_mega_moe/fp8_capacity.py",
+        "modules/glm5_mega_moe/test_fp8_capacity.py",
+    ],
+    main = "modules/glm5_mega_moe/test_fp8_capacity.py",
+)

@@ -164,7 +164,8 @@ class GenericMoeLayer(nn.Module):
         self.routed_tp_size = (
             parallelism_config.get_attn_tp_size()
             if config.model_type == "glm5_3_flash"
-            and moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8")
+            and moe_config.moe_strategy
+            in ("mega_moe", "mega_moe_fp8", "mega_moe_fp8_se")
             and self.ep_size > 1
             and not cp_prefill_enabled
             and not is_decode_role
@@ -192,7 +193,10 @@ class GenericMoeLayer(nn.Module):
         shared_expert_gate_weight = weights.get(W.shared_expert_gate, None)
         is_ep_mode = self.ep_size > 1
         use_ep_shared_allreduce_at_init = (
-            self.add_shared_expert and self.ffn_tp_size > 1 and is_ep_mode
+            self.add_shared_expert
+            and self.ffn_tp_size > 1
+            and is_ep_mode
+            and not self.shared_expert_local
         )
         fused_shared_strategies = (
             "mega_moe_se",
@@ -506,7 +510,10 @@ class GenericMoeLayer(nn.Module):
 
         is_ep_mode = self.ep_size > 1
         use_ep_shared_allreduce = (
-            self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and is_ep_mode
+            and not self.shared_expert_local
         )
         use_mega_moe_fused_shared = (
             self.shared_expert is not None
@@ -537,14 +544,15 @@ class GenericMoeLayer(nn.Module):
         )
         if self.shared_expert_local:
             # Full FP8 shared weights consume exactly the routed branch's local
-            # rows. EP dispatch/combine has already completed for routed experts.
-            shared_output = self.shared_expert(routed_hidden, skip_allreduce=True)
-            if self.shared_expert_gate is not None:
-                shared_output = (
-                    torch.sigmoid(self.shared_expert_gate(routed_hidden))
-                    * shared_output
-                )
-            experts_output = experts_output + shared_output
+            # rows. A fused shared expert is already included by EP combine.
+            if not use_mega_moe_fused_shared:
+                shared_output = self.shared_expert(routed_hidden, skip_allreduce=True)
+                if self.shared_expert_gate is not None:
+                    shared_output = (
+                        torch.sigmoid(self.shared_expert_gate(routed_hidden))
+                        * shared_output
+                    )
+                experts_output = experts_output + shared_output
             if sequence_parallel_layout is not None:
                 valid = sequence_parallel_layout.local_valid_tokens
                 if valid < experts_output.shape[0]:
