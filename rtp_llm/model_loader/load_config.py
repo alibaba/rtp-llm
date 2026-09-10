@@ -41,6 +41,8 @@ class LoadConfig(BaseModel):
     ep_rank: int
     dp_size: int
     dp_rank: int
+    ktp_size: int = 1
+    ktp_rank: int = 0
     lm_head_tp_size: int
     lm_head_tp_rank: int
     ffn_tp_size: int

@@ -180,6 +180,8 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
+        self.ktp_size = int(getattr(parallelism_config, "ktp_size", 1))
+        self.ktp_rank = int(getattr(parallelism_config, "ktp_rank", 0))
         self.role_type = getattr(parallelism_config, "role_type", None)
         self.num_nodes: int = (
             parallelism_config.world_size // parallelism_config.local_world_size
@@ -660,6 +662,8 @@ class ModelDeployWeightInfo:
             ep_rank=self.ep_rank,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            ktp_size=self.ktp_size,
+            ktp_rank=self.ktp_rank,
             lm_head_tp_rank=self.lm_head_tp_rank,
             lm_head_tp_size=self.lm_head_tp_size,
             num_nodes=self.num_nodes,
