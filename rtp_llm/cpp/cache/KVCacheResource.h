@@ -112,6 +112,7 @@ public:
 
     const BlockIds& blockIds(std::string_view tag) const;
     const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+    int             groupIdForLayerTag(int layer_id, std::string_view tag) const;
 
     // Shared-row view resolved through this resource's own tag map; keeps async
     // holders aliasing the resource rows without re-deriving a group index.

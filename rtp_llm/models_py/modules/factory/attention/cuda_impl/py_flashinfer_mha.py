@@ -7,7 +7,6 @@ from flashinfer.prefill import (
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
 )
-
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
@@ -1437,9 +1436,38 @@ class PyFlashinferDecodeAttnOp(object):
                 self._plan_decode_wrapper(attn_inputs)
             return
 
-        # Device-metadata compatibility path inherited from the base
-        # implementation. CudaGraphRunner routes graph replay through the
-        # pinned host mirrors above.
+        if self._tensor_core_cuda_graph_needs_replan():
+            # Tensor-core planning consumes the host mirrors. Device-state
+            # callers must therefore refresh both mirrors before rebuilding
+            # the plan; updating only the device buffers would replay stale
+            # sequence lengths and page tables.
+            self.fmha_params.fill_params(
+                _host_i32(
+                    _device_or(
+                        attn_inputs.prefix_lengths_device,
+                        attn_inputs.prefix_lengths,
+                    )
+                ),
+                _host_i32(attn_inputs.sequence_lengths),
+                _host_i32(
+                    _device_or(
+                        attn_inputs.input_lengths_device,
+                        attn_inputs.input_lengths,
+                    )
+                ),
+                _host_i32(
+                    _device_or(
+                        attn_inputs.kv_cache_kernel_block_id_device,
+                        attn_inputs.kv_cache_kernel_block_id,
+                    )
+                ),
+                self.seq_size_per_block,
+                forbid_realloc=True,
+            )
+            self._plan_decode_wrapper(attn_inputs)
+            return
+
+        # CUDA-core device pipeline: update the device-resident buffers in place.
         seq_plus_1 = attn_inputs.sequence_lengths_plus_1_device
         if seq_plus_1 is None or not seq_plus_1.is_cuda:
             seq_plus_1 = (attn_inputs.sequence_lengths.to(torch.int32) + 1).cuda()

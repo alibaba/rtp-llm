@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rtp_llm {
@@ -78,8 +79,9 @@ struct P2PConnectorWorkerConfig {
 };
 
 struct P2PConnectorConfig {
-    RoleType role_type = RoleType::PDFUSION;
-    int      tp_rank   = 0;
+    RoleType                 role_type = RoleType::PDFUSION;
+    int                      tp_rank   = 0;
+    std::vector<std::string> cache_group_tags;
 
     P2PConnectorSchedulerConfig scheduler_config;
     P2PConnectorWorkerConfig    worker_config;
@@ -88,10 +90,12 @@ struct P2PConnectorConfig {
                                      const CacheStoreConfig&  cache_store_config,
                                      const ParallelismConfig& parallelism_config,
                                      const PDSepConfig&       pd_sep_config,
-                                     uint32_t                 layer_all_num) {
+                                     uint32_t                 layer_all_num,
+                                     std::vector<std::string> cache_group_tags = {}) {
         P2PConnectorConfig config;
-        config.role_type = pd_sep_config.role_type;
-        config.tp_rank   = parallelism_config.tp_rank;
+        config.role_type        = pd_sep_config.role_type;
+        config.tp_rank          = parallelism_config.tp_rank;
+        config.cache_group_tags = std::move(cache_group_tags);
         config.scheduler_config =
             P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, pd_sep_config);
         config.worker_config =
