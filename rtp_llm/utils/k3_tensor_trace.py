@@ -47,6 +47,7 @@ class _Frame:
     capture_key: str | None = None
     snapshots: list[_Snapshot] = field(default_factory=list)
     fragment: int = 0
+    payload_bytes: int = 0
 
 
 def _json_copy(value: Any) -> Any:
@@ -63,6 +64,10 @@ class TensorTrace:
     the writer before taking further snapshots. end() marks the final fragment.
     max_pending_bytes bounds live snapshots plus staged CPU copies. Exhaustion
     aborts the trace explicitly instead of dropping or truncating tensors.
+    max_fragment_bytes separately bounds each file's tensor payload. A single
+    larger tensor is written alone if it fits max_pending_bytes; it is never
+    split or truncated. Graph-owned snapshots do not count toward this file
+    limit, so increasing the Graph budget does not enlarge temporary files.
 
     For Graph: begin_capture() BEFORE torch.cuda.graph, record() inside, then
     end_capture() AFTER capture. After EVERY graph.replay() call replay() on
@@ -78,6 +83,7 @@ class TensorTrace:
         identity: dict[str, Any],
         max_pending_bytes: int = 4 * 1024**3,
         compression: str | None = None,
+        max_fragment_bytes: int | None = None,
     ) -> None:
         if max_pending_bytes <= 0:
             raise ValueError("max_pending_bytes must be positive")
@@ -85,6 +91,13 @@ class TensorTrace:
             compression = os.environ.get("K3_TRACE_COMPRESSION", "none")
         if compression not in {"none", "deflate"}:
             raise ValueError("compression must be none or deflate")
+        if max_fragment_bytes is None:
+            max_fragment_bytes = int(
+                os.environ.get("K3_TRACE_MAX_FRAGMENT_BYTES", str(1024**3))
+            )
+        if max_fragment_bytes <= 0:
+            raise ValueError("max_fragment_bytes must be positive")
+        self._fragment_limit = max_fragment_bytes
         self._compression = compression
         self.identity = _json_copy(identity)
         self.directory = Path(directory)
@@ -154,7 +167,7 @@ class TensorTrace:
         with self._lock:
             self._pending -= count
 
-    def _make_room(self, count: int) -> None:
+    def _make_room(self, count: int, payload_bytes: int) -> None:
         """Drain spillable data before reserving an eager snapshot and its D2H."""
         if self._frame is None:
             self._fail("reserving a snapshot outside a frame")
@@ -162,7 +175,11 @@ class TensorTrace:
             self._fail("tensor trace pending-byte budget exceeded by one tensor")
         with self._lock:
             fits = self._pending + count <= self._limit
-        if fits:
+        fragment_fits = (
+            not self._frame.snapshots
+            or self._frame.payload_bytes + payload_bytes <= self._fragment_limit
+        )
+        if fits and fragment_fits:
             return
         if self._frame.snapshots:
             self._flush_fragment(final=False)
@@ -183,6 +200,7 @@ class TensorTrace:
             snapshots=frame.snapshots,
         )
         frame.snapshots = []
+        frame.payload_bytes = 0
         frame.fragment += 1
         self._enqueue(fragment)
 
@@ -236,7 +254,7 @@ class TensorTrace:
         capturing = self._frame.capture_key is not None
         reserved = nbytes * (2 if tensor.is_cuda and not capturing else 1)
         if not capturing:
-            self._make_room(reserved)
+            self._make_room(reserved, nbytes)
         self._reserve(reserved)
         try:
             value = tensor.detach().clone(memory_format=torch.contiguous_format)
@@ -249,6 +267,7 @@ class TensorTrace:
             self._release(reserved)
             self._fail(f"failed to snapshot {name}")
         self._frame.snapshots.append(_Snapshot(name, value, meta, nbytes, ready))
+        self._frame.payload_bytes += nbytes
 
     def end(self) -> None:
         self._check()
@@ -297,6 +316,10 @@ class TensorTrace:
         self._check()
         if key in self._graphs:
             self._fail(f"capture key already registered: {key}")
+        # Finish warmup D2H/writes before capture starts; capture storage cannot
+        # spill or wait for queued writers once the CUDA stream is capturing.
+        self._queue.join()
+        self._check()
         self.begin({"capture_key": key})
         if self._frame is None:
             self._fail("begin_capture did not create a frame")

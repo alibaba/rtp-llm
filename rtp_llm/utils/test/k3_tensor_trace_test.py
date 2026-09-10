@@ -33,6 +33,68 @@ class TensorTraceTest(unittest.TestCase):
     def read(self, frame=0):
         return torch.load(self.root / f"frame-{frame:08d}.pt", weights_only=True)
 
+    def test_file_fragment_limit_is_independent_of_total_snapshot_budget(self):
+        trace = self.trace(max_pending_bytes=1024, max_fragment_bytes=16)
+        trace.begin({"case": "separate-file-budget"})
+        value = torch.zeros(4)
+        for layer in range(4):
+            value.fill_(layer)
+            trace.record(f"layer.{layer}", value)
+        value.fill_(-1)
+        trace.end()
+        trace.close()
+        for layer in range(4):
+            frame = self.read(layer)
+            self.assertEqual(len(frame["tensors"]), 1)
+            torch.testing.assert_close(
+                frame["tensors"][0]["value"], torch.full((4,), float(layer))
+            )
+            self.assertEqual(
+                frame["metadata"]["trace_fragment"],
+                {"index": layer, "final": layer == 3},
+            )
+
+    def test_single_large_tensor_stays_whole_in_dedicated_fragment(self):
+        trace = self.trace(max_pending_bytes=128, max_fragment_bytes=16)
+        trace.begin({"case": "whole-tensor"})
+        trace.record("before", torch.zeros(2))
+        trace.record("large", torch.arange(12))
+        trace.record("after", torch.ones(2))
+        trace.end()
+        trace.close()
+        self.assertEqual(
+            [self.read(i)["tensors"][0]["name"] for i in range(3)],
+            ["before", "large", "after"],
+        )
+        torch.testing.assert_close(
+            self.read(1)["tensors"][0]["value"], torch.arange(12)
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires actual CUDA Graph")
+    def test_capture_larger_than_file_budget_replays_in_lossless_fragments(self):
+        trace = self.trace(max_pending_bytes=1024, max_fragment_bytes=64)
+        value = torch.ones(16, device="cuda")
+        graph = torch.cuda.CUDAGraph()
+        trace.begin_capture("bs1")
+        with torch.cuda.graph(graph):
+            for layer in range(3):
+                trace.record(f"layer.{layer}", value * (layer + 1))
+        trace.end_capture()
+        for step in range(2):
+            value.fill_(step + 2)
+            graph.replay()
+            trace.replay("bs1", {"step": step})
+        trace.close()
+        for step in range(2):
+            for layer in range(3):
+                frame = self.read(step * 3 + layer)
+                self.assertEqual(frame["metadata"]["step"], step)
+                self.assertEqual(frame["tensors"][0]["name"], f"layer.{layer}")
+                torch.testing.assert_close(
+                    frame["tensors"][0]["value"],
+                    torch.full((16,), float((step + 2) * (layer + 1))),
+                )
+
     def test_in_place_overwrite_cannot_change_noncontiguous_bfloat16_snapshot(self):
         trace = self.trace()
         tensor = torch.arange(12, dtype=torch.bfloat16).reshape(3, 4).t()
