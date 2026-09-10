@@ -31,6 +31,13 @@ using ::testing::_;
 using ::testing::Invoke;
 using ::testing::Return;
 
+// Test-only observation of backend-owned I/O completion; not a write mode or
+// a BlockTree task-pool workflow barrier. The fixtures submit no concurrent I/O.
+[[maybe_unused]] bool waitForBackendOperationsForTest(StorageBackend& backend) {
+    std::unique_lock<std::mutex> lock(backend.lifecycle_mutex_);
+    return backend.lifecycle_cv_.wait_for(lock, std::chrono::seconds(5), [&] { return backend.in_flight_ == 0; });
+}
+
 struct KVCMBroadcastState {
     std::mutex                            mutex;
     std::vector<RemoteOperationRequestPB> requests;

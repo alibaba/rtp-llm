@@ -52,8 +52,8 @@ struct TransferOptions {
     // Device<->Disk staging buffer count. The benchmark passes this value
     // through unchanged so staging capacity can be measured independently
     // from transfer concurrency.
-    // Default 4 matches the production BlockTreeCacheConfig default.
-    size_t device_disk_staging_block_count{4};
+    // Default 128 matches the production BlockTreeCacheConfig default.
+    size_t device_disk_staging_block_count{128};
 
     static TransferOptions parse(int& argc, char**& argv);
     static void            printHelp();

@@ -39,7 +39,6 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
         config_.host_cache_sync_timeout_ms,
         config_.disk_cache_sync_timeout_ms,
         config_.max_descriptors_per_transfer_batch,
-        config_.max_descriptors_per_non_device_host_transfer_batch,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
         [this](bool tree_data_mutated, bool check_watermark) {
             onWorkflowSettledLocked(tree_data_mutated, check_watermark);
@@ -81,7 +80,7 @@ bool BlockTreeCache::init() {
     }
     RTP_LLM_LOG_INFO("initialized with %zu group sets, %zu reusable topology groups, "
                      "pool_threads=%d, storage_backend=%s, "
-                     "device=%s, host=%s, disk=%s, remote=%s, write_sync=%s",
+                     "device=%s, host=%s, disk=%s, remote=%s",
                      tree_->groupSets().size(),
                      tree_->reusableGroupCount(),
                      config_.task_pool_size,
@@ -89,8 +88,7 @@ bool BlockTreeCache::init() {
                      config_.enable_device_cache ? "on" : "off",
                      config_.enable_host_cache ? "on" : "off",
                      config_.enable_disk_cache ? "on" : "off",
-                     config_.enable_remote_cache ? "on" : "off",
-                     config_.write_cache_sync ? "on" : "off");
+                     config_.enable_remote_cache ? "on" : "off");
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
         RTP_LLM_LOG_INFO("  group_set[%zu] type=%s host_pool=%s disk_pool=%s",
                          group_set->groupSetId(),
@@ -125,6 +123,11 @@ BlockTreeCache::~BlockTreeCache() {
     }
     task_pool_->stopAdmission();
     transfer_dispatcher_->cancelPendingStagingTransfers();
+    task_pool_->waitForIdle();
+    // Task-body idleness does not imply asynchronous RPC/transfer completion.
+    // Keep dispatcher and cache state alive until transfer callbacks return,
+    // then drain the settlement tasks those callbacks submitted.
+    transfer_dispatcher_->drainTransfers();
     task_pool_->waitForIdle();
     transfer_dispatcher_.reset();
     task_pool_.reset();
@@ -162,16 +165,7 @@ void BlockTreeCache::insert(const CacheKeysType&                              ca
         storage_write = storer_.storeLocked(cache_keys, resources, target_tier, write_remote, is_resident);
     }
     if (storage_write) {
-        const bool success = storage_backend_->write(std::move(storage_write), config_.write_cache_sync);
-        if (config_.write_cache_sync && !success) {
-            RTP_LLM_LOG_WARNING("synchronous remote cache write did not complete successfully");
-        }
-    }
-    if (config_.write_cache_sync && (target_tier == Tier::HOST || target_tier == Tier::DISK)) {
-        // WRITE_CACHE_SYNC is a smoke/compatibility switch, not a per-request
-        // production primitive. HOST/DISK settlement intentionally waits for
-        // every task already admitted to the shared BlockTree pool.
-        task_pool_->waitForIdle();
+        storage_backend_->write(std::move(storage_write));
     }
 }
 

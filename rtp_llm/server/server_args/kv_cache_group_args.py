@@ -204,8 +204,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="DISK_CACHE_STAGING_BLOCK_COUNT",
         bind_to=(kv_cache_config, "disk_cache_staging_block_count"),
         type=int,
-        default=4,
-        help="单个 rank Device<->Disk 直传的 Host staging block 数，决定直传并发容量。",
+        default=128,
+        help="单个 rank Device<->Disk 的 staging 总预算（按最大块大小计），Full/SWA 各占一半；默认各至少容纳 64 块。",
     )
     kv_cache_group.add_argument(
         "--memory_cache_max_descriptors_per_transfer_batch",
@@ -213,7 +213,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "memory_cache_max_descriptors_per_transfer_batch"),
         type=int,
         default=8,
-        help="Device<->Host 单次底层批调用包含的最大 descriptor 数；其他方向默认逐条执行。",
+        help="各传输方向共用的最大 descriptor 批大小；Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。",
     )
     kv_cache_group.add_argument(
         "--block_tree_transfer_worker_count",
@@ -254,14 +254,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
                 default=default,
                 help=f"BlockTreeCache {tier} 淘汰水位 {boundary} 比例。",
             )
-    kv_cache_group.add_argument(
-        "--write_cache_sync",
-        env_name="WRITE_CACHE_SYNC",
-        bind_to=(kv_cache_config, "write_cache_sync"),
-        type=str2bool,
-        default=False,
-        help="Compatibility option: wait for the current remote write and all HOST/DISK BlockTree tasks before insert returns.",
-    )
 
     kv_cache_group.add_argument(
         "--block_tree_full_prefix_scan_interval_ms",

@@ -776,7 +776,6 @@ TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvict
         ASSERT_TRUE(waitForRpcRequests(state, 2, std::chrono::seconds(5)));
         ASSERT_TRUE(waitForBusinessTasksToReturn(*cache, std::chrono::seconds(5)));
         ASSERT_EQ(cache->task_pool_->pending_tasks_.load(), 0);
-        ASSERT_EQ(cache->task_pool_->workflow_credits_.load(), 1u);
         ASSERT_EQ(host_pool->freeBlocksNum(), kPoolSize - 1);
         ASSERT_EQ(disk_pool->freeBlocksNum(), kPoolSize - 1);
 

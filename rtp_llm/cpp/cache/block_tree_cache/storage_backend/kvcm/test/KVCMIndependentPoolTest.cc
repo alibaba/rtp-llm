@@ -255,7 +255,8 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
             return kv_cache_manager::ClientErrorCode::ER_OK;
         }));
     fill(17);
-    EXPECT_TRUE(backend_->write(backend_->prepareWrite(request()), true));
+    backend_->write(backend_->prepareWrite(request()));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend_));
     ASSERT_EQ(state_->locations.size(), 1u);
     ASSERT_EQ(state_->locations[0].size(), 3u);
     EXPECT_EQ(state_->locations[0][0].uri, "linear");
@@ -300,7 +301,8 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesPins)
         .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
     state_->fail_pool = 1;
     fill(29);
-    EXPECT_FALSE(backend_->write(backend_->prepareWrite(request()), true));
+    backend_->write(backend_->prepareWrite(request()));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend_));
     EXPECT_EQ(state_->writes, (std::vector<size_t>{1, 0, 0}));
     for (size_t group = 0; group < pools_.size(); ++group) {
         EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);

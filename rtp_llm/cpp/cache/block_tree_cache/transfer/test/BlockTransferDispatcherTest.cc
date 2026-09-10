@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <deque>
+#include <future>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
@@ -162,7 +164,7 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
     auto third  = std::make_shared<TransferBatchAsyncContext>();
     auto engine =
         std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{first, second, third});
-    BlockTransferDispatcher dispatcher(engine, nullptr, 2, 2);
+    BlockTransferDispatcher dispatcher(engine, nullptr, 2);
 
     size_t    callback_count = 0;
     ErrorInfo final_error    = ErrorInfo::OkStatus();
@@ -190,6 +192,58 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
     EXPECT_FALSE(final_error.ok());
 }
 
+TEST(BlockTransferDispatcherTest, DrainWaitsForCallbackReturnNotOnlyContextReadiness) {
+    auto pending = std::make_shared<TransferBatchAsyncContext>();
+    auto engine = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{pending});
+    BlockTransferDispatcher dispatcher(engine);
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
+        entered.set_value();
+        released.wait();
+    });
+    auto complete = std::async(std::launch::async, [&] { pending->complete(ErrorInfo::OkStatus()); });
+    const auto entered_status = entered_future.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(entered_status, std::future_status::ready);
+    EXPECT_TRUE(pending->done());
+    auto drain = std::async(std::launch::async, [&] { dispatcher.drainTransfers(); });
+    EXPECT_EQ(drain.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    release.set_value();
+    EXPECT_EQ(complete.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(drain.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+}
+
+TEST(BlockTransferDispatcherTest, DrainIncludesNextStageSubmittedByCallback) {
+    auto first = std::make_shared<TransferBatchAsyncContext>();
+    auto second = std::make_shared<TransferBatchAsyncContext>();
+    auto engine = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{first, second});
+    BlockTransferDispatcher dispatcher(engine);
+    bool settled = false;
+    dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo) {
+        dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo) {
+            settled = true;
+        });
+    });
+    auto drain = std::async(std::launch::async, [&] { dispatcher.drainTransfers(); });
+    first->complete(ErrorInfo::OkStatus());
+    EXPECT_EQ(drain.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    second->complete(ErrorInfo::OkStatus());
+    EXPECT_EQ(drain.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(settled);
+}
+
+TEST(BlockTransferDispatcherTest, ThrowingCallbackDoesNotLeaveDrainPending) {
+    auto engine = std::make_shared<ScriptedPerRankEngine>();
+    BlockTransferDispatcher dispatcher(engine);
+    EXPECT_THROW(dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)),
+                                        [](ErrorInfo) { throw std::runtime_error("callback"); }),
+                 std::runtime_error);
+    dispatcher.drainTransfers();
+}
+
 TEST(BlockTransferDispatcherTest, ExpiredTaskFailsWithoutSubmittingABatch) {
     auto                    engine = std::make_shared<ScriptedPerRankEngine>();
     BlockTransferDispatcher dispatcher(engine);
@@ -208,7 +262,40 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsWithoutSubmittingABatch) {
     EXPECT_EQ(engine->submittedBatchCount(), 0u);
 }
 
-TEST(BlockTransferDispatcherTest, DefaultBatchLimitsAreDirectionAware) {
+TEST(BlockTransferDispatcherTest, AllDirectionsUseTheConfiguredBatchLimit) {
+    const std::vector<TransferDescriptor> directions{
+        TransferDescriptor::hostToDevice(0, 1, {1}),
+        TransferDescriptor::deviceToHost(0, {1}, 1),
+        TransferDescriptor::hostToDisk(0, 1, 1),
+        TransferDescriptor::diskToHost(0, 1, 1),
+        TransferDescriptor::diskToDevice(0, 1, {1}),
+        TransferDescriptor::deviceToDisk(0, {1}, 1)};
+    for (const auto& direction : directions) {
+        for (const size_t limit : {2u, 8u, 16u}) {
+            auto engine = std::make_shared<ScriptedPerRankEngine>();
+            BlockTransferDispatcher dispatcher(engine, nullptr, limit);
+            size_t callback_count = 0;
+            dispatcher.runTransfer(
+                TransferTask(std::vector<TransferDescriptor>(100, direction), std::chrono::seconds(30)),
+                [&](ErrorInfo error) {
+                    EXPECT_TRUE(error.ok());
+                    ++callback_count;
+                });
+            const auto& batches = engine->submittedBatches();
+            const size_t expected_count = limit == 2 ? 50 : (limit == 8 ? 13 : 7);
+            ASSERT_EQ(batches.size(), expected_count);
+            size_t total = 0;
+            for (size_t index = 0; index < batches.size(); ++index) {
+                EXPECT_EQ(batches[index].size(), index + 1 == batches.size() ? (limit == 2 ? 2u : 4u) : limit);
+                total += batches[index].size();
+            }
+            EXPECT_EQ(total, 100u);
+            EXPECT_EQ(callback_count, 1u);
+        }
+    }
+}
+
+TEST(BlockTransferDispatcherTest, DefaultBatchLimitIsSharedByDirections) {
     auto                            device_host_engine = std::make_shared<ScriptedPerRankEngine>();
     BlockTransferDispatcher         device_host_dispatcher(device_host_engine);
     std::vector<TransferDescriptor> device_host_descriptors;
@@ -229,7 +316,7 @@ TEST(BlockTransferDispatcherTest, DefaultBatchLimitsAreDirectionAware) {
     auto                            host_disk_engine = std::make_shared<ScriptedPerRankEngine>();
     BlockTransferDispatcher         host_disk_dispatcher(host_disk_engine);
     std::vector<TransferDescriptor> host_disk_descriptors;
-    for (size_t index = 0; index < 3; ++index) {
+    for (size_t index = 0; index < 9; ++index) {
         host_disk_descriptors.push_back(hostDiskDescriptor(0));
     }
     size_t host_disk_callback_count = 0;
@@ -238,8 +325,9 @@ TEST(BlockTransferDispatcherTest, DefaultBatchLimitsAreDirectionAware) {
                                          EXPECT_TRUE(error.ok());
                                          ++host_disk_callback_count;
                                      });
-    ASSERT_EQ(host_disk_engine->submittedBatches().size(), 1u);
-    EXPECT_EQ(host_disk_engine->submittedBatches().front().size(), 3u);
+    ASSERT_EQ(host_disk_engine->submittedBatches().size(), 2u);
+    EXPECT_EQ(host_disk_engine->submittedBatches()[0].size(), 8u);
+    EXPECT_EQ(host_disk_engine->submittedBatches()[1].size(), 1u);
     EXPECT_EQ(host_disk_callback_count, 1u);
 }
 

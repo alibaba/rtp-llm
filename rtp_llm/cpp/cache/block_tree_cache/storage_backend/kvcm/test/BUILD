@@ -60,7 +60,7 @@ cc_test_wrapper(
         "KVCMMockTestBase.h",
         "MockKVCMClient.h",
     ],
-    copts = copts(),
+    copts = ["-fno-access-control"] + copts(),
     tags = ["exclusive-if-local"],
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],
@@ -77,7 +77,7 @@ cc_test_wrapper(
         "KVCMMockTestBase.h",
         "MockKVCMClient.h",
     ],
-    copts = copts(),
+    copts = ["-fno-access-control"] + copts(),
     tags = ["exclusive-if-local"],
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],
@@ -94,7 +94,7 @@ cc_test_wrapper(
         "KVCMMockTestBase.h",
         "MockKVCMClient.h",
     ],
-    copts = copts(),
+    copts = ["-fno-access-control"] + copts(),
     tags = ["exclusive-if-local"],
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],
@@ -145,7 +145,7 @@ cc_test_wrapper(
     name = "kvcm_independent_pool_test",
     testonly = True,
     srcs = ["KVCMIndependentPoolTest.cc", "KVCMMockTestBase.h", "MockKVCMClient.h"],
-    copts = copts(),
+    copts = ["-fno-access-control"] + copts(),
     tags = ["exclusive-if-local"],
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],

@@ -214,14 +214,12 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
                                                      config.device_disk_staging_block_count,
                                                      config.max_descriptors_per_transfer_batch,
                                                      config.transfer_worker_count,
-                                                     config.max_descriptors_per_non_device_host_transfer_batch,
                                                      config.transfer_queue_max_size,
                                                      cache_metrics_reporter);
     auto dispatcher =
         std::make_unique<BlockTransferDispatcher>(engine,
                                                   nullptr,
-                                                  config.max_descriptors_per_transfer_batch,
-                                                  config.max_descriptors_per_non_device_host_transfer_batch);
+                                                  config.max_descriptors_per_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(config.task_pool_size, 1000, "BlockTreeCacheBenchmarkTaskPool");
     auto tree = std::make_unique<BlockTree>(group_sets);

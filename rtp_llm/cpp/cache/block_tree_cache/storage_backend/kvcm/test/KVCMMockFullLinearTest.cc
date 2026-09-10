@@ -215,7 +215,8 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
     StorageRequest request;
     request.keys    = std::make_shared<const CacheKeysType>(CacheKeysType{101});
     request.handles = {{{/*group_id=*/0, environment.block_id}, {/*group_id=*/1, environment.block_id}}};
-    EXPECT_TRUE(backend->write(backend->prepareWrite(std::move(request)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(std::move(request)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
 }
 
@@ -275,7 +276,8 @@ TEST(KVCMMockFullLinearTest, TwoFullTwoLinearWritePreservesMaskOrderAndActualUri
 
     auto request =
         makeGroupedStorageRequest(environment, {101, 102, 103}, /*local_matched_blocks=*/0, block_ids, groups_by_key);
-    EXPECT_TRUE(backend->write(backend->prepareWrite(std::move(request)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(std::move(request)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
 }
 
@@ -326,7 +328,8 @@ TEST(KVCMMockFullLinearTest, AllMissingLinearGroupsWriteOnlyFullPayloads) {
 
     auto request =
         makeGroupedStorageRequest(environment, {101, 102, 103}, /*local_matched_blocks=*/0, block_ids, groups_by_key);
-    EXPECT_TRUE(backend->write(backend->prepareWrite(std::move(request)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(std::move(request)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 }
 
 TEST(KVCMMockFullLinearTest, IncompleteLinearGroupSetFailsBeforeClientIO) {
@@ -345,7 +348,8 @@ TEST(KVCMMockFullLinearTest, IncompleteLinearGroupSetFailsBeforeClientIO) {
     const auto&            block_ids = source_blocks.get();
     auto                   request   = makeGroupedStorageRequest(
         environment, {101}, /*local_matched_blocks=*/0, block_ids, /*groups_by_key=*/{{0, 1}});
-    EXPECT_FALSE(backend->write(backend->prepareWrite(std::move(request)), /*synchronous=*/true));
+    backend->write(backend->prepareWrite(std::move(request)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
 }
 

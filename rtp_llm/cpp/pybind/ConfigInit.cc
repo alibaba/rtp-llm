@@ -453,7 +453,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
-        .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
@@ -548,7 +547,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      5,
+                                      6,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -610,8 +609,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_tree_host_evict_low_watermark_ratio,
                                       self.block_tree_host_evict_high_watermark_ratio,
                                       self.block_tree_disk_evict_low_watermark_ratio,
-                                      self.block_tree_disk_evict_high_watermark_ratio,
-                                      self.write_cache_sync);
+                                      self.block_tree_disk_evict_high_watermark_ratio);
             },
             [](py::tuple t) {
                 constexpr size_t kLegacyFieldCount               = 55;
@@ -619,7 +617,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 constexpr size_t kWriteSyncFieldCount            = 56;
                 constexpr size_t kQueueConfigWriteSyncFieldCount = 65;
                 constexpr size_t kPinnedHostFieldCount           = 64;
-                constexpr size_t kCurrentFieldCount              = 63;
+                constexpr size_t kReserveRemovedFieldCount       = 63;
+                constexpr size_t kCurrentFieldCount              = 62;
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
@@ -630,10 +629,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const bool valid_queue_write_sync_state =
                     version == 3 && t.size() == kQueueConfigWriteSyncFieldCount + 2;
                 const bool valid_pinned_host_state = version == 4 && t.size() == kPinnedHostFieldCount + 2;
-                const bool valid_current_state     = version == 5 && t.size() == kCurrentFieldCount + 2;
+                const bool valid_reserve_removed_state = version == 5 && t.size() == kReserveRemovedFieldCount + 2;
+                const bool valid_current_state         = version == 6 && t.size() == kCurrentFieldCount + 2;
                 if (t[0].cast<std::string>() != "KVCacheConfig"
                     || (!valid_legacy_state && !valid_write_sync_state && !valid_queue_write_sync_state
-                        && !valid_pinned_host_state && !valid_current_state)) {
+                        && !valid_pinned_host_state && !valid_reserve_removed_state && !valid_current_state)) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -696,7 +696,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.dsv4_fixed_pool_use_memory                      = value(53).cast<bool>();
                 c.block_tree_full_prefix_scan_interval_ms         = value(54).cast<int64_t>();
                 if ((valid_legacy_state && t.size() == kQueueConfigFieldCount + 2) || valid_queue_write_sync_state
-                    || valid_pinned_host_state || valid_current_state) {
+                    || valid_pinned_host_state || valid_reserve_removed_state || valid_current_state) {
                     c.block_tree_transfer_worker_count             = value(55).cast<int64_t>();
                     c.block_tree_business_queue_max_size           = value(56).cast<int64_t>();
                     c.block_tree_transfer_queue_max_size           = value(57).cast<int64_t>();
@@ -707,11 +707,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.block_tree_disk_evict_low_watermark_ratio    = value(62).cast<double>();
                     c.block_tree_disk_evict_high_watermark_ratio   = value(63).cast<double>();
                 }
-                if (valid_write_sync_state) {
-                    c.write_cache_sync = value(55).cast<bool>();
-                } else if (valid_queue_write_sync_state || valid_pinned_host_state || valid_current_state) {
-                    c.write_cache_sync = value(64).cast<bool>();
-                }
+                // Legacy write-sync fields are intentionally ignored.
                 return c;
             }));
 

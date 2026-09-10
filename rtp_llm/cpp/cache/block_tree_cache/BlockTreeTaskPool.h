@@ -34,7 +34,7 @@ public:
 
     static constexpr size_t                    kDefaultQueueSize = 10000;
     static constexpr std::chrono::milliseconds kDefaultQueueWaitTimeout{30000};
-    // Normal-queue slots and workflow credits only LOAD tasks may occupy, so
+    // Normal-queue slots only LOAD tasks may occupy, so
     // loads remain admissible while BACKGROUND transfers are queued or awaiting
     // asynchronous settlement. Skipped when queue_size does not exceed it, so
     // small pools never starve BACKGROUND.
@@ -52,12 +52,9 @@ public:
                 std::optional<Clock::time_point> deadline   = std::nullopt,
                 std::function<void()>            on_timeout = {});
     bool submitCompletion(std::function<void()> task);
-    // A workflow credit spans business-task execution, asynchronous transfer,
-    // and final cache-state settlement. The task class must match on release so
-    // BACKGROUND workflows cannot consume LOAD-reserved capacity.
-    bool acquireWorkflowCredit(BlockTreeTaskClass task_class);
-    void releaseWorkflowCredit(BlockTreeTaskClass task_class);
     void stopAdmission();
+    // Wait only for queued/running task bodies, including submitted completions.
+    // External asynchronous transfers must be drained by their owner.
     void waitForIdle();
     void shutdown();
 
@@ -95,8 +92,6 @@ private:
     bool                                       shutdown_{false};
 
     std::atomic<int>        pending_tasks_{0};
-    std::atomic<size_t>     workflow_credits_{0};
-    std::atomic<size_t>     background_workflow_credits_{0};
     std::mutex              wait_mutex_;
     std::condition_variable wait_cv_;
     std::function<void()>   pending_task_wait_observer_for_test_;

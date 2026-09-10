@@ -539,44 +539,55 @@ TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
     EXPECT_TRUE(resource.enableCacheLookup());
 }
 
-TEST_F(StreamCacheResourceTest, testStoreTargetPicksHighestMutuallyPermittedTier) {
+TEST_F(StreamCacheResourceTest, testStoreTargetUsesDeploymentLocalTiers) {
     prepareResource(true);
     auto& resource   = stream_->streamCacheResource();
     auto& request    = *stream_->generate_input_->generate_config;
     auto& deployment = resource.resource_context_;
 
-    request.reuse_cache            = true;
-    request.enable_device_cache    = true;
-    request.enable_host_cache      = true;
-    request.enable_disk_cache      = true;
-    deployment.enable_device_cache = true;
-    deployment.enable_host_cache   = true;
-    deployment.enable_disk_cache   = true;
-    EXPECT_EQ(resource.storeTarget(), Tier::DEVICE);
+    struct DeploymentCase {
+        bool device;
+        bool host;
+        bool disk;
+        Tier target;
+    };
+    const DeploymentCase cases[] = {{false, false, false, Tier::NONE},
+                                    {false, false, true, Tier::DISK},
+                                    {false, true, false, Tier::HOST},
+                                    {false, true, true, Tier::HOST},
+                                    {true, false, false, Tier::DEVICE},
+                                    {true, false, true, Tier::DEVICE},
+                                    {true, true, false, Tier::DEVICE},
+                                    {true, true, true, Tier::DEVICE}};
+    deployment.enable_remote_cache = false;
+    deployment.reuse_cache         = true;
+    for (const auto& test_case : cases) {
+        deployment.enable_device_cache = test_case.device;
+        deployment.enable_host_cache   = test_case.host;
+        deployment.enable_disk_cache   = test_case.disk;
+        for (unsigned request_mask = 0; request_mask < 8; ++request_mask) {
+            request.enable_device_cache = (request_mask & 1) != 0;
+            request.enable_host_cache   = (request_mask & 2) != 0;
+            request.enable_disk_cache   = (request_mask & 4) != 0;
+            for (const bool ignore_request_switches : {false, true}) {
+                SCOPED_TRACE("request_mask=" + std::to_string(request_mask)
+                             + " ignore=" + std::to_string(ignore_request_switches)
+                             + " target=" + std::to_string(static_cast<int>(test_case.target)));
+                deployment.ignore_request_cache_switches = ignore_request_switches;
+                request.reuse_cache                      = true;
+                EXPECT_EQ(resource.storeTarget(), test_case.target);
+                EXPECT_EQ(resource.enableDeviceCache(), test_case.device);
+                EXPECT_EQ(resource.enableHostCache(), test_case.host);
+                EXPECT_EQ(resource.enableDiskCache(), test_case.disk);
 
-    request.enable_device_cache = false;
-    EXPECT_EQ(resource.storeTarget(), Tier::HOST);
-
-    deployment.enable_host_cache = false;
-    EXPECT_EQ(resource.storeTarget(), Tier::DISK);
-
-    request.enable_disk_cache      = false;
-    request.enable_remote_cache    = true;
-    deployment.enable_remote_cache = true;
-    EXPECT_EQ(resource.storeTarget(), Tier::REMOTE);
-
-    request.enable_remote_cache = false;
-    EXPECT_EQ(resource.storeTarget(), Tier::NONE);
-
-    request.enable_disk_cache    = true;
-    deployment.enable_host_cache = false;
-    EXPECT_EQ(resource.storeTarget(), Tier::DISK);
-
-    request.reuse_cache = false;
-    EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+                request.reuse_cache = false;
+                EXPECT_EQ(resource.storeTarget(), ignore_request_switches ? test_case.target : Tier::NONE);
+            }
+        }
+    }
 }
 
-TEST_F(StreamCacheResourceTest, testStoreTargetIgnoresPerRequestSwitchesWhenConfigured) {
+TEST_F(StreamCacheResourceTest, testStoreTargetPreservesReuseCacheOverride) {
     prepareResource(true);
     auto& resource   = stream_->streamCacheResource();
     auto& request    = *stream_->generate_input_->generate_config;

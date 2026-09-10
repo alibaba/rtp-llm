@@ -40,7 +40,6 @@ struct BlockTreeCacheConfig {
     // Compatibility-only settlement barrier. Remote writes wait for their
     // exact backend task; HOST/DISK inserts additionally wait for the entire
     // shared BlockTree task pool. Keep disabled for normal concurrent traffic.
-    bool write_cache_sync{false};
 
     // ---- Per-tier watermark ----
     using TierWatermark = rtp_llm::TierWatermark;
@@ -65,11 +64,11 @@ struct BlockTreeCacheConfig {
     int host_cache_sync_timeout_ms{10000};
     int disk_cache_sync_timeout_ms{30000};
 
-    // Total Device<->Disk staging blocks per rank, split evenly across two pools.
-    size_t device_disk_staging_block_count{4};
-    // Direction-specific descriptor batching limits shared by watermark planning and transfer dispatch.
+    // Total max-stride staging blocks per rank, split evenly across Full/SWA pools.
+    // Default guarantees at least 64 Full blocks; actual capacities depend on payload sizes.
+    size_t device_disk_staging_block_count{128};
+    // Shared descriptor batching limit for watermark planning and all transfer directions.
     size_t max_descriptors_per_transfer_batch{8};
-    size_t max_descriptors_per_non_device_host_transfer_batch{16};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.
