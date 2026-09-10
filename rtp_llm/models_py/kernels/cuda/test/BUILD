@@ -14,7 +14,6 @@ py_test (
     exec_properties = {'gpu':'L20'},
 )
 
-
 py_test (
     name = "cutlass_fp8_grouped_gemm_test",
     srcs = ["cutlass_fp8_grouped_gemm_test.py"],

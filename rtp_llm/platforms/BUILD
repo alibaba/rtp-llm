@@ -220,6 +220,44 @@ py_test(
     }),
 )
 
+py_test(
+    name = "topk_padding_test",
+    srcs = ["ppu/test/test_topk_padding.py"],
+    main = "ppu/test/test_topk_padding.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "ppu_hc_head_options_test",
+    srcs = ["ppu/models/dsv4/test/test_ppu_hc_head_options.py"],
+    main = "ppu/models/dsv4/test/test_ppu_hc_head_options.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "silu_mul_mxfp4_test",
+    srcs = ["ppu/test/test_silu_mul_mxfp4.py"],
+    main = "ppu/test/test_silu_mul_mxfp4.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 # Explicit PPU regression entry; checkpoint/multirank tests keep their existing
 # manual targets. This suite uses generated inputs and one M890P.
 test_suite(
@@ -236,5 +274,8 @@ test_suite(
         ":decode_moe_output_test",
         ":decode_shared_schedule_test",
         ":ppu_tp_shared_weights_test",
+        ":topk_padding_test",
+        ":ppu_hc_head_options_test",
+        ":silu_mul_mxfp4_test",
     ],
 )

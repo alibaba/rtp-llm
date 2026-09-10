@@ -7,8 +7,6 @@ exports_files([
     "test_entry.py",
 ])
 
-# Stdlib-only client contract tests; they start only a local mock HTTP server.
-
 py_library(
     name = "perf_test_lib",
     srcs = [

@@ -14,8 +14,10 @@ std::tuple<torch::Tensor, torch::Tensor> PpuSiluAndMulPostQuantMxfp4(
     TORCH_CHECK(gate_up.is_contiguous(), "gate_up must be contiguous");
     const int64_t num_tokens = gate_up.size(0);
     const int64_t two_hidden = gate_up.size(1);
-    TORCH_CHECK(two_hidden > 0 && two_hidden % 4 == 0,
-                "2H must be positive and H must be even");
+    // Each complete 16-element group writes one aligned uint2 to the packed
+    // output. Keep every row aligned, including in the scalar-tail kernel.
+    TORCH_CHECK(two_hidden > 0 && two_hidden % 32 == 0,
+                "2H must be positive and H must be a multiple of 16");
     const int64_t hidden = two_hidden / 2;
     TORCH_CHECK(hidden <= std::numeric_limits<int>::max() &&
                     num_tokens <= std::numeric_limits<int>::max(),

@@ -1,4 +1,5 @@
 load("@pip_ppu_torch//:requirements.bzl", requirement_ppu="requirement")
+load("@ppu_requirements//:requirements.bzl", "PPU_WHEEL_REQUIREMENTS")
 # to wrapper target relate with different system config
 load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
@@ -94,7 +95,7 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
-        "@rtp_llm//:using_ppu": ['torch@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torch-2.9.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'torchvision@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torchvision-0.24.0%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl', 'triton@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/triton-3.6.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'flash_attn@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'flash_attn_3@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn_3-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'flash_mla@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_mla-2.0.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'flashinfer-python@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flashinfer_python-0.6.8.post1-py3-none-any.whl', 'deep_gemm@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_gemm-1.0.0%2Bppu2.1.0.post1.dev000.g164e851bd-cp310-cp310-linux_x86_64.whl', 'deep_ep@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_ep-1.0.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl', 'fast-hadamard-transform@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/fast_hadamard_transform-1.1.0.post2%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl', 'fast-safetensors@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/ppu/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl', 'mkl==2021.1.1'],
+        "@rtp_llm//:using_ppu": PPU_WHEEL_REQUIREMENTS,
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",

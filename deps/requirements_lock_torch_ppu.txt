@@ -546,9 +546,9 @@ decord==0.6.0 ; platform_machine == "x86_64" \
     --hash=sha256:85ef90d2f872384657d7774cc486c237c5b12df62d4ac5cb5c8d6001fa611323 \
     --hash=sha256:9c20674964fb1490c677bd911d2023d2a09fec7a58a4bb0b7ddf1ccc269f107a \
     --hash=sha256:a0eb1258beade34dceb29d97856a7764d179db1b5182899b61874f3418a1abc8
-deep-ep @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_ep-1.0.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl \
+deep-ep @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_ep-1.0.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=aa09f62cd085bbe0778e0b0d31646e3a9f8b7b21153131349d402ece3a3343d0 \
     --hash=sha256:aa09f62cd085bbe0778e0b0d31646e3a9f8b7b21153131349d402ece3a3343d0
-deep-gemm @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_gemm-1.0.0%2Bppu2.1.0.post1.dev000.g164e851bd-cp310-cp310-linux_x86_64.whl \
+deep-gemm @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_gemm-1.0.0%2Bppu2.1.0.post1.dev000.g164e851bd-cp310-cp310-linux_x86_64.whl#sha256=071dfd0078fcc441589121e3f6b911a0aea4e13d7438ef5aca61bf2d2c884edd \
     --hash=sha256:071dfd0078fcc441589121e3f6b911a0aea4e13d7438ef5aca61bf2d2c884edd
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
@@ -559,9 +559,9 @@ einops==0.8.0 \
 exceptiongroup==1.2.2 \
     --hash=sha256:3111b9d131c238bec2f8f516e123e14ba243563fb135d3fe885990585aa7795b \
     --hash=sha256:47c2edf7c6738fafb49fd34290706d1a1a2f4d1c6df275526b62cbb4aa5393cc
-fast-hadamard-transform @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/fast_hadamard_transform-1.1.0.post2%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl \
+fast-hadamard-transform @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/fast_hadamard_transform-1.1.0.post2%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl#sha256=106a7c3507189ec957e6b28c5afb53b2f78acedaf1305d85098b908a70cf5854 \
     --hash=sha256:106a7c3507189ec957e6b28c5afb53b2f78acedaf1305d85098b908a70cf5854
-fast-safetensors @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/ppu/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl \
+fast-safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/ppu/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl#sha256=936ad54e9e5ccb2a8196e028ed00d0c931a0011045e96e729a2b4aff68bdaa0a \
     --hash=sha256:936ad54e9e5ccb2a8196e028ed00d0c931a0011045e96e729a2b4aff68bdaa0a
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
@@ -569,13 +569,13 @@ fastapi==0.115.6 \
 filelock==3.20.3 \
     --hash=sha256:18c57ee915c7ec61cff0ecf7f0f869936c7c30191bb0cf406f1341778d0834e1 \
     --hash=sha256:4b0dda527ee31078689fc205ec4f1c1bf7d56cf88b6dc9426c4f230e46c2dce1
-flash-attn @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl \
+flash-attn @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=aa75bd709c3e9077dfe44d35ffdd46d9c4e6945850a983032b381324855b9f5c \
     --hash=sha256:aa75bd709c3e9077dfe44d35ffdd46d9c4e6945850a983032b381324855b9f5c
-flash-attn-3 @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn_3-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl \
+flash-attn-3 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn_3-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=03e7e4f92020a4b90bdd53c96823d19a6fd5cb492b8173f0413403edbb73cb39 \
     --hash=sha256:03e7e4f92020a4b90bdd53c96823d19a6fd5cb492b8173f0413403edbb73cb39
-flash-mla @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_mla-2.0.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl \
+flash-mla @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_mla-2.0.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=d966168dfa255fe22bd3d20795799cbb4253e1e6bbf52fa33dd8f3a3e9bd96aa \
     --hash=sha256:d966168dfa255fe22bd3d20795799cbb4253e1e6bbf52fa33dd8f3a3e9bd96aa
-flashinfer-python @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flashinfer_python-0.6.8.post1-py3-none-any.whl \
+flashinfer-python @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flashinfer_python-0.6.8.post1-py3-none-any.whl#sha256=49673d0be5c602baa2522f820c5fbfb0539bc07c273ac74ac203d2fc89c9b400 \
     --hash=sha256:49673d0be5c602baa2522f820c5fbfb0539bc07c273ac74ac203d2fc89c9b400
 fonttools==4.53.1 \
     --hash=sha256:02569e9a810f9d11f4ae82c391ebc6fb5730d95a0657d24d754ed7763fb2d122 \
@@ -2939,9 +2939,9 @@ tokenizers==0.22.2 \
     --hash=sha256:df6c4265b289083bf710dff49bc51ef252f9d5be33a45ee2bed151114a56207b \
     --hash=sha256:e10bf9113d209be7cd046d40fbabbaf3278ff6d18eb4da4c500443185dc1896c \
     --hash=sha256:f01a9c019878532f98927d2bacb79bbb404b43d3437455522a00a30718cdedb5
-torch @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torch-2.9.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl \
+torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torch-2.9.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=f58af1af2f7bfba035b66a14e1ae75fdc21d5c03ee7ac0b4c842a1088d06b0e0 \
     --hash=sha256:f58af1af2f7bfba035b66a14e1ae75fdc21d5c03ee7ac0b4c842a1088d06b0e0
-torchvision @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torchvision-0.24.0%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl \
+torchvision @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torchvision-0.24.0%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl#sha256=8cddf3b92732bd9c4c1e47d6a60587d3ab718fc313298ca5f67915f3d13a91b9 \
     --hash=sha256:8cddf3b92732bd9c4c1e47d6a60587d3ab718fc313298ca5f67915f3d13a91b9
 tqdm==4.66.5 \
     --hash=sha256:90279a3770753eafc9194a0364852159802111925aa30eb3f9d85b0e805ac7cd \
@@ -2949,7 +2949,7 @@ tqdm==4.66.5 \
 transformers==4.57.1 \
     --hash=sha256:b10d05da8fa67dc41644dbbf9bc45a44cb86ae33da6f9295f5fbf5b7890bd267 \
     --hash=sha256:f06c837959196c75039809636cd964b959f6604b75b8eeec6fdfc0440b89cc55
-triton @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/triton-3.6.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl \
+triton @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/triton-3.6.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=b4bb20255329b28666176913c7f67b2df424145fc22afdc0526506621f936b19 \
     --hash=sha256:b4bb20255329b28666176913c7f67b2df424145fc22afdc0526506621f936b19
 typer==0.26.7 \
     --hash=sha256:5c87cfbc5d34491c5346ebf49c23e18d56ccb863268d3a8d592b26087c2f5e58 \

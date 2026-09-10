@@ -216,33 +216,6 @@ class PpuLegacyDeepEPStrategy(DeepEPStrategy):
         )
         return gathered.float()
 
-    def _compute_ppu_grouped_fp4_packed(
-        self,
-        expert_x,
-        expert_num_tokens: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compatibility entry point using full-slot PPU masked execution."""
-        from rtp_llm.platforms.ppu.kernels.ppu_mxfp4_masked import mxfp4_experts_masked
-
-        cfg = self.cfg
-        expected_m = max(
-            1,
-            (
-                cfg.max_tokens_per_rank * cfg.ep_size * cfg.n_activated_experts
-                + cfg.n_routed_experts
-                - 1
-            )
-            // cfg.n_routed_experts,
-        )
-        return mxfp4_experts_masked(
-            expert_x,
-            (self._ppu_w13, self._ppu_s13),
-            (self._ppu_w2, self._ppu_s2),
-            expert_num_tokens,
-            expected_m=expected_m,
-            swiglu_limit=cfg.swiglu_limit if cfg.swiglu_limit > 0 else None,
-        )
-
     def _forward_ppu_grouped_fp4_low_latency(
         self,
         x: torch.Tensor,

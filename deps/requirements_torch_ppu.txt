@@ -1,12 +1,12 @@
-torch @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torch-2.9.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl
-torchvision @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torchvision-0.24.0%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl
-triton @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/triton-3.6.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl
-flash_attn @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl
-flash_attn_3 @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn_3-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl
-flash_mla @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_mla-2.0.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl
-flashinfer-python @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flashinfer_python-0.6.8.post1-py3-none-any.whl
-deep_gemm @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_gemm-1.0.0%2Bppu2.1.0.post1.dev000.g164e851bd-cp310-cp310-linux_x86_64.whl
-deep_ep @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_ep-1.0.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl
-fast-hadamard-transform @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/fast_hadamard_transform-1.1.0.post2%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl
-fast-safetensors @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/ppu/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl
+torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torch-2.9.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=f58af1af2f7bfba035b66a14e1ae75fdc21d5c03ee7ac0b4c842a1088d06b0e0
+torchvision @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torchvision-0.24.0%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl#sha256=8cddf3b92732bd9c4c1e47d6a60587d3ab718fc313298ca5f67915f3d13a91b9
+triton @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/triton-3.6.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=b4bb20255329b28666176913c7f67b2df424145fc22afdc0526506621f936b19
+flash-attn @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=aa75bd709c3e9077dfe44d35ffdd46d9c4e6945850a983032b381324855b9f5c
+flash-attn-3 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_attn_3-2.8.2%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=03e7e4f92020a4b90bdd53c96823d19a6fd5cb492b8173f0413403edbb73cb39
+flash-mla @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flash_mla-2.0.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=d966168dfa255fe22bd3d20795799cbb4253e1e6bbf52fa33dd8f3a3e9bd96aa
+flashinfer-python @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/flashinfer_python-0.6.8.post1-py3-none-any.whl#sha256=49673d0be5c602baa2522f820c5fbfb0539bc07c273ac74ac203d2fc89c9b400
+deep-gemm @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_gemm-1.0.0%2Bppu2.1.0.post1.dev000.g164e851bd-cp310-cp310-linux_x86_64.whl#sha256=071dfd0078fcc441589121e3f6b911a0aea4e13d7438ef5aca61bf2d2c884edd
+deep-ep @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/deep_ep-1.0.0%2Bv0.2.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl#sha256=aa09f62cd085bbe0778e0b0d31646e3a9f8b7b21153131349d402ece3a3343d0
+fast-hadamard-transform @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/fast_hadamard_transform-1.1.0.post2%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl#sha256=106a7c3507189ec957e6b28c5afb53b2f78acedaf1305d85098b908a70cf5854
+fast-safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/ppu/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl#sha256=936ad54e9e5ccb2a8196e028ed00d0c931a0011045e96e729a2b4aff68bdaa0a
 mkl==2021.1.1

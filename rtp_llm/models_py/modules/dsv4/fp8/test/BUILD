@@ -121,6 +121,10 @@ py_test(
     },
     main = "test_indexer_topk_v3_routing.py",
     tags = ["ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 py_test(

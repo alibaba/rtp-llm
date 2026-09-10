@@ -66,3 +66,7 @@ class HCHeadOptionsTest(unittest.TestCase):
         with patch.dict(os.environ, {"DSV4_HC_FALLBACK_CHUNK_TOKENS": "4"}):
             _, chunks = self.run_head(head)
         self.assertEqual(chunks, [4, 4, 3])
+
+
+if __name__ == "__main__":
+    unittest.main()
