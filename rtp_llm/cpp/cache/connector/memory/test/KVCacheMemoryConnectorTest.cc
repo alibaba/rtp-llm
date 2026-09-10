@@ -1,5 +1,6 @@
 // Copyright (c) RTP-LLM
 
+#include <algorithm>
 #include <csignal>
 #include <chrono>
 #include <cstdio>
@@ -2092,8 +2093,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_WhenCacheEntryRemovedAfterM
 
     for (int i = start_read_block_index; i < start_read_block_index + read_block_num; ++i) {
         auto removed = connector_->block_cache_->remove(cache_keys[i]);
-        ASSERT_TRUE(removed.has_value());
-        pool->blockCacheFree({removed->block_index});
+        // The entry disappears immediately, but its cache ref now stays alive
+        // until the pinned read plan releases it.
+        EXPECT_FALSE(removed.has_value());
+        EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[i]));
     }
 
     auto ctx = connector_->asyncRead(res, meta, match_ctx, start_read_block_index, read_block_num);
@@ -2171,6 +2174,51 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemo
     EXPECT_EQ(pool->freeBlocksNum(), free_before - (block_indices.size() - static_cast<size_t>(read_num)));
 }
 
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_RetainsMemoryBackingUntilDelayedReaderReleasesCopyPlan) {
+    CacheKeysType cache_keys{41501, 41502};
+    const size_t  mem_size = memoryCacheBlockBytes();
+    auto          pool     = ensureBlockPool(mem_size);
+    auto          blocks   = putItemsToCache({cache_keys[0]}, mem_size);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto source = pool->convertIndexToBuffer(0, blocks[0]);
+    ASSERT_EQ(source.size(), 1u);
+    setBlockBytes(source[0], 0, source[0].size_bytes, 'a');
+    const auto free_before_read = pool->freeBlocksNum();
+
+    auto resource      = makeCacheResource(cache_keys, {{1, 2}, {1, 2}, {1, 2}, {1, 2}});
+    auto meta          = std::make_shared<TestReadMeta>(true);
+    auto match_context = connector_->asyncMatch(resource, meta);
+    ASSERT_NE(match_context, nullptr);
+    // Reader B pauses before taking its BlockPool request ref.
+    auto delayed_reader = connector_->block_cache_->matchAndMarkInFlight(cache_keys[0]);
+    ASSERT_EQ(delayed_reader.matched_index, blocks[0]);
+    auto read_context = connector_->asyncRead(resource, meta, match_context, 0, 1);
+    ASSERT_NE(read_context, nullptr);
+    ASSERT_TRUE(waitUntilDone(read_context));
+    ASSERT_TRUE(read_context->success());
+    EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[0]));
+    EXPECT_EQ(pool->freeBlocksNum(), free_before_read);
+
+    // Exhaust the free pool: no new writer may obtain B's source block.
+    auto writer_blocks = pool->malloc(pool->freeBlocksNum());
+    EXPECT_EQ(std::count(writer_blocks.begin(), writer_blocks.end(), blocks[0]), 0);
+    pool->requestReference({delayed_reader.matched_index});
+    verifyBlockBytesEq(source[0], 0, source[0].size_bytes, 'a');
+    KVCacheMemoryConnector::CopyInfoPerKey copy_info;
+    copy_info.cache_key  = cache_keys[0];
+    copy_info.mem_block  = delayed_reader.matched_index;
+    copy_info.generation = delayed_reader.generation;
+    auto delayed_plan    = connector_->createCopyPlan({copy_info}, KVCacheMemoryConnector::CopyDirection::H2D);
+    delayed_plan.reset();
+    // The real copy-plan deleter must release the retired cache ref as well.
+    auto recycled = pool->malloc(1);
+    ASSERT_EQ(recycled.size(), 1u);
+    EXPECT_EQ(recycled[0], blocks[0]);
+    pool->requestFree(recycled);
+    pool->requestFree(writer_blocks);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before_read + 1);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock) {
     // Simulate the race: after asyncRead builds its copy plan (capturing old block),
     // a concurrent write upgrades the same cache_key with a new block.
@@ -2216,8 +2264,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock)
         upgraded_item.block_size  = mem_size;
         upgraded_item.is_resident = false;
         upgraded_item.is_complete = true;
-        connector_->block_cache_->remove(cache_keys[1]);
-        pool->blockCacheFree({block_indices[1]});
+        if (auto removed = connector_->block_cache_->remove(cache_keys[1]); removed.has_value()) {
+            pool->blockCacheFree({removed->block_index});
+        }
         auto [ok, popped] = connector_->block_cache_->put(upgraded_item);
         ASSERT_TRUE(ok);
         pool->blockCacheReference({new_block_idx});

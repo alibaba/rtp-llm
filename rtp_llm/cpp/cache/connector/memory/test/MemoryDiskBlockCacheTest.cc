@@ -141,7 +141,7 @@ TEST(MemoryDiskBlockCacheTest, InFlightEntryIsNotEvictable) {
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 2);
 
-    cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1);
+    EXPECT_FALSE(cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1, cache.match(1).generation).has_value());
     evicted = cache.popOldestEvictable();
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 1);
@@ -160,7 +160,7 @@ TEST(MemoryDiskBlockCacheTest, MatchAndMarkInFlightPreventsEviction) {
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 2);
 
-    cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1);
+    EXPECT_FALSE(cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1, match.generation).has_value());
     evicted = cache.popOldestEvictable();
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 1);
@@ -174,6 +174,81 @@ TEST(MemoryDiskBlockCacheTest, RemoveIfMatchChecksBackingAndSlot) {
     auto removed = cache.removeIfMatch(2, CacheBackingType::DISK, NULL_BLOCK_IDX, 20);
     ASSERT_TRUE(removed.has_value());
     EXPECT_FALSE(cache.contains(2));
+}
+
+TEST(MemoryDiskBlockCacheTest, RemovedBackingIsRetainedUntilEveryReaderReleases) {
+    for (const auto& item : {memoryItem(1, 10), diskItem(1, 20)}) {
+        MemoryDiskBlockCache cache;
+        ASSERT_TRUE(cache.putCommitted(item).first);
+        auto reader_a = cache.matchAndMarkInFlight(1);
+        auto reader_b = cache.matchAndMarkInFlight(1);
+        ASSERT_EQ(reader_a.generation, reader_b.generation);
+
+        // B can be paused before acquiring its physical pool request ref when A completes.
+        EXPECT_FALSE(cache.removeIfMatch(1, item.backing_type, item.block_index, item.disk_slot, reader_a.generation)
+                         .has_value());
+        EXPECT_FALSE(cache.contains(1));
+        EXPECT_TRUE(cache.empty());
+        EXPECT_EQ(cache.size(), 0u);
+        EXPECT_TRUE(cache.cacheKeys().empty());
+        EXPECT_TRUE(isNullBlockIdx(cache.matchAndMarkInFlight(1).matched_index));
+        EXPECT_FALSE(cache.popOldestEvictable().has_value());
+        EXPECT_FALSE(cache.releaseInFlight(1, item.backing_type, item.block_index, item.disk_slot, reader_a.generation)
+                         .has_value());
+
+        auto retired =
+            cache.releaseInFlight(1, item.backing_type, item.block_index, item.disk_slot, reader_b.generation);
+        ASSERT_TRUE(retired.has_value());
+        EXPECT_EQ(retired->backing_type, item.backing_type);
+        EXPECT_EQ(retired->block_index, item.block_index);
+        EXPECT_EQ(retired->disk_slot, item.disk_slot);
+        EXPECT_EQ(retired->in_flight_ref, 0u);
+        // Physical reclamation must be returned exactly once.
+        EXPECT_FALSE(cache.releaseInFlight(1, item.backing_type, item.block_index, item.disk_slot, reader_b.generation)
+                         .has_value());
+    }
+}
+
+TEST(MemoryDiskBlockCacheTest, OldReaderDoesNotRemoveOrReleaseNewGenerationInAnotherPool) {
+    for (const auto backing : {CacheBackingType::MEMORY, CacheBackingType::DISK}) {
+        MemoryDiskBlockCache cache;
+        // Complete and incomplete pools can have the same numeric block/slot ID.
+        auto old_item = backing == CacheBackingType::MEMORY ? memoryItem(1, 10, false) : diskItem(1, 10, false);
+        ASSERT_TRUE(cache.putCommitted(old_item).first);
+        auto old_reader = cache.matchAndMarkInFlight(1);
+        ASSERT_FALSE(cache.removeIfMatch(1, backing, old_item.block_index, old_item.disk_slot, old_reader.generation)
+                         .has_value());
+
+        auto new_item        = old_item;
+        new_item.is_complete = true;
+        ASSERT_TRUE(cache.putCommitted(new_item).first);
+        auto new_reader = cache.matchAndMarkInFlight(1);
+        ASSERT_NE(old_reader.generation, new_reader.generation);
+        EXPECT_FALSE(cache.removeIfMatch(1, backing, old_item.block_index, old_item.disk_slot, old_reader.generation)
+                         .has_value());
+        auto retired =
+            cache.releaseInFlight(1, backing, old_item.block_index, old_item.disk_slot, old_reader.generation);
+        ASSERT_TRUE(retired.has_value());
+        EXPECT_FALSE(retired->is_complete);
+        EXPECT_TRUE(cache.contains(1));
+        EXPECT_FALSE(cache.popOldestEvictable().has_value());
+        EXPECT_FALSE(cache.releaseInFlight(1, backing, new_item.block_index, new_item.disk_slot, new_reader.generation)
+                         .has_value());
+        auto evicted = cache.popOldestEvictable();
+        ASSERT_TRUE(evicted.has_value());
+        EXPECT_TRUE(evicted->is_complete);
+    }
+}
+
+TEST(MemoryDiskBlockCacheTest, LegacyRemoveAlsoRetainsPinnedMemoryBacking) {
+    MemoryDiskBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(memoryItem(1, 10)).first);
+    auto reader = cache.matchAndMarkInFlight(1);
+    EXPECT_FALSE(cache.remove(1).has_value());
+    EXPECT_FALSE(cache.contains(1));
+    auto retired = cache.releaseInFlight(1, CacheBackingType::MEMORY, 10, -1, reader.generation);
+    ASSERT_TRUE(retired.has_value());
+    EXPECT_EQ(retired->block_index, 10);
 }
 
 }  // namespace rtp_llm::test

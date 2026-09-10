@@ -1053,8 +1053,11 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                         releasePrefixCacheBacking(*removed_item);
                     }
                 } else {
-                    const auto removed_item = block_cache_->removeIfMatch(
-                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                    const auto removed_item = block_cache_->removeIfMatch(copy_info.cache_key,
+                                                                          copy_info.backing_type,
+                                                                          copy_info.mem_block,
+                                                                          copy_info.disk_slot,
+                                                                          copy_info.generation);
                     if (!removed_item.has_value()) {
                         continue;
                     }
@@ -1105,11 +1108,22 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
             success = false;
             break;
         }
+        auto release_match = [&]() {
+            auto retired_item = block_cache_->releaseInFlight(cache_key,
+                                                              match_result.backing_type,
+                                                              match_result.matched_index,
+                                                              match_result.disk_slot,
+                                                              match_result.generation);
+            if (retired_item.has_value()) {
+                releaseCacheBacking(*retired_item);
+            }
+        };
         // 每次都加引用的原因是为了确保match到的block不会被释放(避免在写时malloc如果cache满弹出该block)
         if (match_result.backing_type == CacheBackingType::MEMORY) {
             auto source_pool = memoryPoolFor(blockKindFromComplete(match_result.is_complete));
             if (!source_pool) {
                 RTP_LLM_LOG_WARNING("build copy plan for read failed, missing memory pool, cache key: %ld", cache_key);
+                release_match();
                 success = false;
                 break;
             }
@@ -1119,6 +1133,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
             if (!disk_pool || !disk_pool->validSlot(match_result.disk_slot)) {
                 RTP_LLM_LOG_WARNING(
                     "build copy plan for read failed, missing disk pool or invalid slot, cache key: %ld", cache_key);
+                release_match();
                 success = false;
                 break;
             }
@@ -1130,6 +1145,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
         copy_info.backing_type = match_result.backing_type;
         copy_info.mem_block    = match_result.matched_index;
         copy_info.disk_slot    = match_result.disk_slot;
+        copy_info.generation   = match_result.generation;
         copy_info.gpu_blocks.reserve(slots.size());
         for (const auto& slot : slots) {
             const auto layer = static_cast<size_t>(slot.layer_id);
@@ -1553,8 +1569,14 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
                         releasePrefixCacheBacking(*retired_item);
                     }
                 } else {
-                    block_cache_->releaseInFlight(
-                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                    auto retired_item = block_cache_->releaseInFlight(copy_info.cache_key,
+                                                                      copy_info.backing_type,
+                                                                      copy_info.mem_block,
+                                                                      copy_info.disk_slot,
+                                                                      copy_info.generation);
+                    if (retired_item.has_value()) {
+                        releaseCacheBacking(*retired_item);
+                    }
                 }
             }
         }

@@ -19,7 +19,7 @@ MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::match(CacheKeyType cache
     }
     touchLocked(it->second);
     const auto& item = it->second;
-    return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete};
+    return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete, item.generation};
 }
 
 MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::matchAndMarkInFlight(CacheKeyType cache_key) {
@@ -32,7 +32,7 @@ MemoryDiskBlockCache::MatchResult MemoryDiskBlockCache::matchAndMarkInFlight(Cac
     touchLocked(it->second);
     it->second.in_flight_ref++;
     const auto& item = it->second;
-    return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete};
+    return {item.backing_type, item.block_index, item.disk_slot, item.block_size, item.is_complete, item.generation};
 }
 
 bool MemoryDiskBlockCache::contains(CacheKeyType cache_key) const {
@@ -59,6 +59,7 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
             auto old_item = existing->second;
             eraseEvictKeyLocked(existing->second);
             item.last_access_seq = ++access_seq_;
+            item.generation      = ++generation_seq_;
             item.created_time_us = item.created_time_us > 0 ? item.created_time_us : currentTimeUs();
             existing->second     = item;
             insertEvictKeyLocked(existing->second);
@@ -68,6 +69,7 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
     }
 
     item.last_access_seq = ++access_seq_;
+    item.generation      = ++generation_seq_;
     item.created_time_us = item.created_time_us > 0 ? item.created_time_us : currentTimeUs();
     auto [it, inserted]  = items_.emplace(item.cache_key, item);
     (void)inserted;
@@ -78,10 +80,14 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
 std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::removeIfMatch(CacheKeyType     cache_key,
                                                                                    CacheBackingType backing_type,
                                                                                    BlockIdxType expected_block_index,
-                                                                                   int32_t      expected_disk_slot) {
+                                                                                   int32_t      expected_disk_slot,
+                                                                                   uint64_t     expected_generation) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto                                it = items_.find(cache_key);
     if (it == items_.end() || it->second.backing_type != backing_type) {
+        return std::nullopt;
+    }
+    if (expected_generation != 0 && it->second.generation != expected_generation) {
         return std::nullopt;
     }
     if (backing_type == CacheBackingType::MEMORY && it->second.block_index != expected_block_index) {
@@ -90,10 +96,24 @@ std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::removeIfMat
     if (backing_type == CacheBackingType::DISK && it->second.disk_slot != expected_disk_slot) {
         return std::nullopt;
     }
-    auto removed_item = it->second;
-    eraseEvictKeyLocked(it->second);
+    return removeLocked(cache_key);
+}
+
+std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::removeLocked(CacheKeyType cache_key) {
+    auto it = items_.find(cache_key);
+    if (it == items_.end()) {
+        return std::nullopt;
+    }
+    auto item = it->second;
+    eraseEvictKeyLocked(item);
     items_.erase(it);
-    return removed_item;
+    if (item.in_flight_ref > 0) {
+        // A reader may still be between the metadata pin and the physical pool
+        // requestReference. Keep the cache ref until every such reader releases.
+        retired_items_.emplace(item.generation, item);
+        return std::nullopt;
+    }
+    return item;
 }
 
 std::pair<bool, std::optional<MemoryBlockCache::CacheItem>>
@@ -115,14 +135,11 @@ MemoryDiskBlockCache::put(const MemoryBlockCache::CacheItem& input_item) {
 
 std::optional<MemoryBlockCache::CacheItem> MemoryDiskBlockCache::remove(CacheKeyType cache_key) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    auto                                it = items_.find(cache_key);
-    if (it == items_.end()) {
+    auto                                removed_item = removeLocked(cache_key);
+    if (!removed_item.has_value()) {
         return std::nullopt;
     }
-    auto removed_item = it->second;
-    eraseEvictKeyLocked(it->second);
-    items_.erase(it);
-    return toMemoryCacheItem(removed_item);
+    return toMemoryCacheItem(*removed_item);
 }
 
 std::optional<MemoryBlockCache::CacheItem> MemoryDiskBlockCache::removeIfMatch(CacheKeyType cache_key,
@@ -214,24 +231,36 @@ bool MemoryDiskBlockCache::markInFlight(CacheKeyType     cache_key,
     return true;
 }
 
-void MemoryDiskBlockCache::releaseInFlight(CacheKeyType     cache_key,
-                                           CacheBackingType backing_type,
-                                           BlockIdxType     block_index,
-                                           int32_t          disk_slot) {
+std::optional<MemoryDiskBlockCache::CacheItem> MemoryDiskBlockCache::releaseInFlight(CacheKeyType     cache_key,
+                                                                                     CacheBackingType backing_type,
+                                                                                     BlockIdxType     block_index,
+                                                                                     int32_t          disk_slot,
+                                                                                     uint64_t         generation) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    auto                                it = items_.find(cache_key);
-    if (it == items_.end() || it->second.backing_type != backing_type) {
-        return;
+    auto                                matches = [&](const CacheItem& item) {
+        if (item.cache_key != cache_key || item.generation != generation || item.backing_type != backing_type) {
+            return false;
+        }
+        return backing_type == CacheBackingType::MEMORY ? item.block_index == block_index : item.disk_slot == disk_slot;
+    };
+    auto it = items_.find(cache_key);
+    if (it != items_.end() && matches(it->second)) {
+        if (it->second.in_flight_ref > 0) {
+            --it->second.in_flight_ref;
+        }
+        return std::nullopt;
     }
-    if (backing_type == CacheBackingType::MEMORY && it->second.block_index != block_index) {
-        return;
+
+    auto retired = retired_items_.find(generation);
+    if (retired == retired_items_.end() || !matches(retired->second)) {
+        return std::nullopt;
     }
-    if (backing_type == CacheBackingType::DISK && it->second.disk_slot != disk_slot) {
-        return;
+    if (--retired->second.in_flight_ref != 0) {
+        return std::nullopt;
     }
-    if (it->second.in_flight_ref > 0) {
-        it->second.in_flight_ref--;
-    }
+    auto item = retired->second;
+    retired_items_.erase(retired);
+    return item;
 }
 
 bool MemoryDiskBlockCache::empty() const {

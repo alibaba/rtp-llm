@@ -33,6 +33,7 @@ public:
         uint64_t         last_access_seq{0};
         int64_t          created_time_us{0};
         uint32_t         in_flight_ref{0};
+        uint64_t         generation{0};
     };
 
     struct MatchResult {
@@ -41,6 +42,7 @@ public:
         int32_t          disk_slot{-1};
         size_t           block_size{0};
         bool             is_complete{false};
+        uint64_t         generation{0};
     };
 
 public:
@@ -49,10 +51,14 @@ public:
     bool        contains(CacheKeyType cache_key) const;
 
     std::pair<bool, std::optional<CacheItem>>                   putCommitted(const CacheItem& item);
+    // Removes the entry from matching immediately. A pinned backing is retained
+    // until releaseInFlight returns it to the caller for physical reclamation.
+    // Async callers must supply the generation captured when pinning the entry.
     std::optional<CacheItem>                                    removeIfMatch(CacheKeyType     cache_key,
                                                                               CacheBackingType backing_type,
                                                                               BlockIdxType     expected_block_index,
-                                                                              int32_t          expected_disk_slot);
+                                                                              int32_t          expected_disk_slot,
+                                                                              uint64_t         expected_generation = 0);
     std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> put(const MemoryBlockCache::CacheItem& item);
     std::optional<MemoryBlockCache::CacheItem>                  remove(CacheKeyType cache_key);
     std::optional<MemoryBlockCache::CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);
@@ -61,8 +67,12 @@ public:
 
     bool
     markInFlight(CacheKeyType cache_key, CacheBackingType backing_type, BlockIdxType block_index, int32_t disk_slot);
-    void
-    releaseInFlight(CacheKeyType cache_key, CacheBackingType backing_type, BlockIdxType block_index, int32_t disk_slot);
+    // The caller must release the physical cache ref of any returned item.
+    [[nodiscard]] std::optional<CacheItem> releaseInFlight(CacheKeyType     cache_key,
+                                                           CacheBackingType backing_type,
+                                                           BlockIdxType     block_index,
+                                                           int32_t          disk_slot,
+                                                           uint64_t         generation);
 
     bool                      empty() const;
     size_t                    size() const;
@@ -86,6 +96,7 @@ private:
     void                               insertEvictKeyLocked(const CacheItem& item);
     void                               eraseEvictKeyLocked(const CacheItem& item);
     void                               touchLocked(CacheItem& item);
+    std::optional<CacheItem>           removeLocked(CacheKeyType cache_key);
     std::optional<CacheItem>           oldestFromSetLocked(std::set<EvictKey>& eviction_set);
     std::optional<CacheItem>           popOldestEvictableLocked(CacheBlockKind kind);
     std::set<EvictKey>&                lruSetLocked(CacheBackingType backing_type, CacheBlockKind kind);
@@ -93,11 +104,13 @@ private:
 private:
     mutable std::shared_mutex                   mutex_;
     std::unordered_map<CacheKeyType, CacheItem> items_;
+    std::unordered_map<uint64_t, CacheItem>     retired_items_;
     std::set<EvictKey>                          memory_complete_lru_;
     std::set<EvictKey>                          memory_incomplete_lru_;
     std::set<EvictKey>                          disk_complete_lru_;
     std::set<EvictKey>                          disk_incomplete_lru_;
     uint64_t                                    access_seq_{0};
+    uint64_t                                    generation_seq_{0};
 };
 
 using MemoryDiskBlockCachePtr = std::shared_ptr<MemoryDiskBlockCache>;

@@ -6,11 +6,13 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <array>
 #include <cstring>
 #include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/connector/memory/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/connector/memory/MemoryDiskBlockCache.h"
 
 namespace rtp_llm::test {
 namespace {
@@ -95,6 +97,63 @@ TEST(DiskBlockPoolTest, InitFailsWhenMountPathDoesNotExist) {
 
     DiskMountGuard guard;
     EXPECT_FALSE(guard.init(temp_dir.path() + "/missing_mount"));
+}
+
+TEST(DiskBlockPoolTest, ConcurrentReadCompletionCannotRecycleSlotBeforeSecondReaderPinsIt) {
+    TempDir        temp_dir;
+    DiskMountGuard guard;
+    ASSERT_TRUE(guard.init(temp_dir.path()));
+    DiskBlockPool pool(makeConfig(guard.workDir(), /*disk_size_bytes=*/4096));
+    ASSERT_TRUE(pool.init());
+    ASSERT_EQ(pool.totalSlots(), 1u);
+    MemoryDiskBlockCache            cache;
+    std::array<unsigned char, 1024> original;
+    std::array<unsigned char, 1024> actual;
+    original.fill(0x11);
+    auto slot = pool.malloc();
+    ASSERT_TRUE(slot.has_value());
+    ASSERT_TRUE(pool.write(*slot, original.data(), original.size()));
+
+    MemoryDiskBlockCache::CacheItem item;
+    item.cache_key    = 101;
+    item.backing_type = CacheBackingType::DISK;
+    item.disk_slot    = *slot;
+    item.block_size   = original.size();
+    pool.blockCacheReference(*slot);
+    pool.requestFree(*slot);
+    ASSERT_TRUE(cache.putCommitted(item).first);
+
+    auto reader_a = cache.matchAndMarkInFlight(item.cache_key);
+    pool.requestReference(reader_a.disk_slot);
+    // Pause B at the exact gap between matchAndMarkInFlight and requestReference.
+    auto reader_b = cache.matchAndMarkInFlight(item.cache_key);
+    auto removed  = cache.removeIfMatch(item.cache_key, item.backing_type, NULL_BLOCK_IDX, *slot, reader_a.generation);
+    if (removed.has_value()) {
+        pool.blockCacheFree(removed->disk_slot);
+    }
+    pool.requestFree(reader_a.disk_slot);
+    auto retired = cache.releaseInFlight(item.cache_key, item.backing_type, NULL_BLOCK_IDX, *slot, reader_a.generation);
+    if (retired.has_value()) {
+        pool.blockCacheFree(retired->disk_slot);
+    }
+    EXPECT_FALSE(cache.contains(item.cache_key));
+    EXPECT_EQ(pool.freeSlots(), 0u);
+    // Before the fix a writer could allocate this slot and overwrite B's source.
+    EXPECT_FALSE(pool.malloc().has_value());
+
+    pool.requestReference(reader_b.disk_slot);
+    ASSERT_TRUE(pool.read(reader_b.disk_slot, actual.data(), actual.size()));
+    EXPECT_EQ(actual, original);
+    pool.requestFree(reader_b.disk_slot);
+    retired = cache.releaseInFlight(item.cache_key, item.backing_type, NULL_BLOCK_IDX, *slot, reader_b.generation);
+    ASSERT_TRUE(retired.has_value());
+    pool.blockCacheFree(retired->disk_slot);
+    EXPECT_EQ(pool.freeSlots(), 1u);
+    // Reclamation is delayed, not leaked: a new writer can now use the slot.
+    auto replacement = pool.malloc();
+    ASSERT_TRUE(replacement.has_value());
+    EXPECT_EQ(*replacement, *slot);
+    pool.requestFree(*replacement);
 }
 
 TEST(DiskBlockPoolTest, MountGuardAllowsTwoPoolsOnSameMountWithoutDeletingFirst) {
