@@ -508,20 +508,8 @@ RemoteConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheCo
 }
 
 bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
-    const auto&              trace_id = request.trace_id();
-    std::vector<std::string> group_tags(request.group_tags().begin(), request.group_tags().end());
-    if (group_tags.empty() && request.group_ids_size() > 0) {
-        group_tags.reserve(request.group_ids_size());
-        const auto& groups = group_policy_->groups();
-        for (const auto group_id : request.group_ids()) {
-            const auto it = groups.find(group_id);
-            RTP_LLM_CHECK_WITH_INFO(
-                it != groups.end(), "remote cache request has unknown legacy group_id=%d", group_id);
-            RTP_LLM_CHECK_WITH_INFO(
-                !it->second.tag.empty(), "remote cache legacy group_id=%d has no local tag mapping", group_id);
-            group_tags.push_back(it->second.tag);
-        }
-    }
+    const auto&                 trace_id = request.trace_id();
+    std::vector<std::string>    group_tags(request.group_tags().begin(), request.group_tags().end());
     std::vector<int32_t>        block_ids(request.block_ids().begin(), request.block_ids().end());
     kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
     RTP_LLM_CHECK_WITH_INFO(group_tags.size() == block_ids.size() && block_ids.size() == uris.size(),
@@ -814,7 +802,6 @@ bool RemoteConnector::genReadRequest(size_t                                   tp
             }
             const auto& spec_info      = iter->second;
             auto        remote_request = requests[spec_info.tp_rank].mutable_remote_request();
-            remote_request->add_group_ids(spec_info.group_id);
             remote_request->add_group_tags(spec_info.tag);
             const auto& block_indices = resource->blocks(spec_info.tag);
             if (block_indices.size() <= block_idx) {
@@ -884,7 +871,6 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
             }
             const auto& spec_info      = iter->second;
             auto        remote_request = requests[spec_info.tp_rank].mutable_remote_request();
-            remote_request->add_group_ids(spec_info.group_id);
             remote_request->add_group_tags(spec_info.tag);
             const auto& block_indices = resource->blocks(spec_info.tag);
             if (block_indices.size() <= cache_key_idx) {
