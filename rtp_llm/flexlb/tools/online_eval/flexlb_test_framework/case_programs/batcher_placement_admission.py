@@ -111,17 +111,17 @@ def batcher_queue_deadline(case):
         params=case.value("batcher_queue_deadline.wave"),
     )
     case.step(
-        "six_admitted",
+        "admitted",
         "admission_check",
         params=case.params(
-            "batcher_queue_deadline.six_admitted", {"rows": output("wave", "rows")}
+            "batcher_queue_deadline.admitted", {"rows": output("wave", "rows")}
         ),
     )
     case.step(
-        "two_rejected",
+        "rejected",
         "admission_check",
         params=case.params(
-            "batcher_queue_deadline.two_rejected", {"rows": output("wave", "rows")}
+            "batcher_queue_deadline.rejected", {"rows": output("wave", "rows")}
         ),
     )
     case.step(
@@ -152,10 +152,10 @@ def batcher_queue_deadline(case):
         params={"waves": [output("wave", "wave")]},
     )
     case.step(
-        "six_completed",
+        "completed",
         "admission_check",
         params=case.params(
-            "batcher_queue_deadline.six_completed", {"rows": output("done", "rows")}
+            "batcher_queue_deadline.completed", {"rows": output("done", "rows")}
         ),
     )
     case.step(

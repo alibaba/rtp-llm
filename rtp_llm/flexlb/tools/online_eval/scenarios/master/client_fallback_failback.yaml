@@ -59,6 +59,8 @@ parameters:
     finish_timeout_s: 90
     fallback_rows:
       route: fallback
+    steady:
+      until_offset_s: -1
     steady_master:
       metric: route_share
       op: eq

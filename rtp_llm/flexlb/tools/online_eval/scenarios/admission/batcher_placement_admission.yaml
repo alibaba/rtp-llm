@@ -84,7 +84,7 @@ parameters:
       op: eq
       scope: all
     fifo:
-      metric: await_fifo
+      metric: consumer_fifo
       expected: true
       op: eq
       scope: all
@@ -143,14 +143,14 @@ parameters:
       request_timeout_s: 30
       schedule_timeout_s: 30
       spacing_s: 0.15
-    six_admitted:
+    admitted:
       metric: admitted_count
-      expected: 6
+      expected: 5
       op: eq
       scope: all
-    two_rejected:
+    rejected:
       metric: reject_count
-      expected: 2
+      expected: 3
       op: eq
       scope: all
     deadline_family:
@@ -169,9 +169,9 @@ parameters:
       op: le
       scope: rejected
     done_timeout_s: 30
-    six_completed:
+    completed:
       metric: success_count
-      expected: 6
+      expected: 5
       op: eq
       scope: all
     no_serving_errors:

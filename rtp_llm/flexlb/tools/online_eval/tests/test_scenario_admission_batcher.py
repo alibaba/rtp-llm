@@ -60,7 +60,9 @@ class BatcherPrograms(unittest.TestCase):
                     i = state.sent
                 self.index = i
                 code = (
-                    8511 if variant == "batcher_queue_deadline" and i in (7, 8) else 200
+                    8511
+                    if variant == "batcher_queue_deadline" and i in (3, 5, 7)
+                    else 200
                 )
                 error = "queue expired" if code != 200 else None
                 end = time.monotonic()
@@ -100,6 +102,7 @@ class BatcherPrograms(unittest.TestCase):
                     # the real drain's next clock read. Short sleeps cannot
                     # guarantee OS thread return order under arbitrary load.
                     clock.local.completion_stamp = state.wait_epoch + 0.005 * rank
+                    self.records[0]["consumer_exit_s"] = clock.local.completion_stamp
 
             def cancel(self, reason):
                 pass

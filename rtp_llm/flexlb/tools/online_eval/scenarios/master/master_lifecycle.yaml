@@ -93,6 +93,8 @@ parameters:
       - B
       - A
       duration_s: 100
+      replay_speed: 0.5
+      live_events: true
     short_begin:
       wait_s: 12
     short_freeze:

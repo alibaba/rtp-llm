@@ -712,11 +712,15 @@ parameters:
       duration_s: 20
     terminal_timeout:
       branch: drain_timeout
+      data_error_codes: [8209]
+      data_error_tokens: ["P->D link closed:", "REMOTE_GENERATE_FAILED"]
     restore_survivor:
       operation: set_perf
       perf:
         decode_scale: 1
     recovery_timeout_s: 100
+    recovery:
+      concurrency: 7
   transient_imbalance:
     setup_timeout_s: 180
     initial_topology_timeout_s: 35

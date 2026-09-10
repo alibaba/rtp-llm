@@ -66,6 +66,7 @@ class FullTests(unittest.TestCase):
         message="",
         transport="OK",
         cancel=False,
+        data_error=False,
     ):
         records = e.ClientRecords(1)
         r = records.issue(1, lambda: 0)
@@ -93,7 +94,18 @@ class FullTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             result = full.terminal(
                 NS(resource=lambda *a: data, artifact_dir=Path(temp)),
-                dict(result="x", branch=branch),
+                dict(
+                    result="x",
+                    branch=branch,
+                    **(
+                        dict(
+                            data_error_codes=[8209],
+                            data_error_tokens=["P->D link closed:"],
+                        )
+                        if data_error
+                        else {}
+                    ),
+                ),
                 NS(check=lambda: None),
             )
             return {c.id: c.status for c in result.checks}
@@ -124,6 +136,23 @@ class FullTests(unittest.TestCase):
             )["terminal_family"],
             "FAIL",
         )
+
+    def test_data_error_requires_timeout_branch_code_message_and_removal(self):
+        for branch, code, message, stamp, expected in [
+            ("drain_timeout", 8209, "P->D link closed: decode stopped", 130, "PASS"),
+            ("drain_ok", 8209, "P->D link closed: decode stopped", 130, "FAIL"),
+            ("drain_timeout", 8209, "unrelated", 130, "FAIL"),
+            ("drain_timeout", 8209, "P->D link closed: decode stopped", 99, "FAIL"),
+            ("drain_timeout", 8210, "P->D link closed: decode stopped", 130, "FAIL"),
+        ]:
+            result = self.terminal_result(
+                branch, code, stamp, message=message, data_error=True
+            )
+            self.assertEqual(
+                expected,
+                result["terminal_family"],
+                (branch, code, message, stamp, result),
+            )
 
     def test_fill_refusal_must_precede_remove_and_terminal_40_is_inclusive(self):
         self.assertEqual(

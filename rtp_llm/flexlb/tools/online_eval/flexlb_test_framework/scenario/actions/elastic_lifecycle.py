@@ -264,7 +264,9 @@ def batch(ctx, params, deadline):
     return bounded_batch(ctx, params["count"], deadline)
 
 
-def bounded_batch(ctx, count, deadline, min_success_rate=1.0, expected_method=None):
+def bounded_batch(
+    ctx, count, deadline, min_success_rate=1.0, expected_method=None, concurrency=10
+):
     from .elastic import RecordedRequests, completeness
 
     records = RecordedRequests(ctx.ops, ctx.env_epoch, ctx.clock)
@@ -300,7 +302,7 @@ def bounded_batch(ctx, count, deadline, min_success_rate=1.0, expected_method=No
                 records.issue(ctx.ops.next_request_id(), ctx.clock)
                 for _ in range(count)
             ]
-            with ThreadPoolExecutor(max_workers=min(10, count)) as pool:
+            with ThreadPoolExecutor(max_workers=min(concurrency, count)) as pool:
                 list(pool.map(run, issued))
         except BaseException as exc:
             error.append(f"{type(exc).__name__}: {exc}")

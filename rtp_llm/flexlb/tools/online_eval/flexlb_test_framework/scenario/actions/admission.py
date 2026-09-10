@@ -330,6 +330,7 @@ METRICS = {
     "schedule_latency_min",
     "deadline_reject_family",
     "await_fifo",
+    "consumer_fifo",
     "await_strict_fifo",
     "latency_min",
     "latency_max",
@@ -415,12 +416,14 @@ def _check(ctx, params, deadline):
             )
             for r in selected
         )
-    elif metric in {"await_fifo", "await_strict_fifo"}:
-        ends = [r.get("await_return_s") for r in selected]
+    elif metric in {"await_fifo", "await_strict_fifo", "consumer_fifo"}:
+        field = "consumer_exit_s" if metric == "consumer_fifo" else "await_return_s"
+        ends = [r.get(field) for r in selected]
         if any(type(t) not in (int, float) or not math.isfinite(t) for t in ends):
-            raise ValueError("FIFO needs actual concurrent wait-return timestamps")
+            raise ValueError("FIFO needs actual completion timestamps")
         actual = len(ends) >= 2 and all(
-            a <= b if metric == "await_fifo" else a < b for a, b in zip(ends, ends[1:])
+            a < b if metric == "await_strict_fifo" else a <= b
+            for a, b in zip(ends, ends[1:])
         )
     elif metric in {"all_reject_code", "all_schedule_code"}:
         checked = rejected if metric == "all_reject_code" else selected

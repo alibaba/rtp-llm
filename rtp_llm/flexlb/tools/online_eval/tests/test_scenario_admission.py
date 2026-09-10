@@ -78,6 +78,20 @@ class AdmissionTests(unittest.TestCase):
             ).status,
         )
 
+    def test_consumer_fifo_ignores_late_waiter_thread_return_order(self):
+        rows = [self.row(elapsed=1), self.row(elapsed=2)]
+        rows[0]["await_return_s"], rows[1]["await_return_s"] = 20.0001, 20.0
+        self.assertEqual(
+            "PASS", self.check(rows, metric="consumer_fifo", expected=True).status
+        )
+        self.assertEqual(
+            "FAIL", self.check(rows, metric="await_fifo", expected=True).status
+        )
+        rows[0]["consumer_exit_s"] = 13
+        self.assertEqual(
+            "FAIL", self.check(rows, metric="consumer_fifo", expected=True).status
+        )
+
     def test_fast_reject_is_strict_less_than_three_seconds(self):
         self.assertEqual(
             "PASS",

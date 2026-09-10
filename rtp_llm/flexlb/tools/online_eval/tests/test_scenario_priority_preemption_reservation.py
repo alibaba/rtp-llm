@@ -16,6 +16,7 @@ from test_scenario_priority_preemption_decode import DecodeBackend
 
 
 class ReservationBackend(DecodeBackend):
+
     def __init__(
         self,
         metric_change=False,
@@ -23,6 +24,7 @@ class ReservationBackend(DecodeBackend):
         scrape_error=False,
         wrong_third=False,
         malformed_labels=False,
+        incoming_code=8403,
     ):
         super().__init__()
         self.metric_change, self.sparse, self.scrape_error = (
@@ -39,7 +41,9 @@ class ReservationBackend(DecodeBackend):
             if req[0] in (5, 10, 15):
                 response = self.ops.responses[-1]
                 response.code = (
-                    8511 if req[0] == 10 or (req[0] == 15 and wrong_third) else 8403
+                    8429
+                    if req[0] == 15 and wrong_third
+                    else (8511 if req[0] == 10 else incoming_code)
                 )
                 response.success = False
             return call
@@ -185,7 +189,11 @@ class ReservationPrograms(unittest.TestCase):
         self.assertEqual(1, len(metrics))
         self.assertIn("unavailable", metrics[0]["error"])
 
-    def test_8511_is_not_added_to_third_wave_reject_family(self):
+    def test_deadline_is_legal_in_all_reservation_waves(self):
+        result, _, _, _ = self.run_program(incoming_code=8511)
+        self.assertEqual("PASS", result["status"], result)
+
+    def test_unknown_rejection_is_not_added_to_third_wave_reject_family(self):
         result, waves, _, backend = self.run_program(wrong_third=True)
         self.assertEqual("FAIL", result["status"], result)
         self.assertEqual(15, len(backend.shapes))

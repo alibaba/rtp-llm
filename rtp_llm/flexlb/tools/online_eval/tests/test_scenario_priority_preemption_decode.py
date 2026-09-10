@@ -17,8 +17,11 @@ from test_scenario_priority import Clean
 
 
 class DecodeBackend(programs.Backend):
-    def __init__(self, incoming_success=False, guard=None):
-        super().__init__(terminals={5: 200 if incoming_success else 8403, 10: 8403})
+
+    def __init__(self, incoming_success=False, guard=None, incoming_code=8403):
+        super().__init__(
+            terminals={5: 200 if incoming_success else incoming_code, 10: incoming_code}
+        )
         self.pressure = {f"d{i}": 0 for i in range(4)}
         self.controls = []
         self.guard = guard
@@ -119,6 +122,10 @@ class DecodePrograms(unittest.TestCase):
         self.assertEqual(80, stages["r2_running"]["timeout_s"])
         self.assertEqual(140, stages["r1_occupants_drain"]["timeout_s"])
         self.assertEqual(35, stages["r2_incoming_drain"]["timeout_s"])
+
+    def test_deadline_rejection_preserves_ev2_contract(self):
+        result, _, _, _ = self.run_program(incoming_code=8511)
+        self.assertEqual("PASS", result["status"], result)
 
     def test_successful_incoming_fails_reserved_ev2_contract(self):
         result, _, _, backend = self.run_program(incoming_success=True)

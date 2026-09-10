@@ -331,10 +331,27 @@ def accounting(ctx, params, deadline):
     return accounting_window(ctx, deadline, 50)
 
 
+def recovery_validate(params, plan):
+    from .elastic import _validate
+
+    p = _validate(params, plan, {"concurrency"})
+    if "concurrency" in p and (
+        type(p["concurrency"]) is not int or not 1 <= p["concurrency"] <= 10
+    ):
+        raise ValueError("recovery concurrency must be an integer in [1,10]")
+    return p
+
+
 def recovery(ctx, params, deadline):
     from .elastic_lifecycle import bounded_batch
 
-    return bounded_batch(ctx, 20, deadline, min_success_rate=0.95)
+    return bounded_batch(
+        ctx,
+        20,
+        deadline,
+        min_success_rate=0.95,
+        concurrency=params.get("concurrency", 10),
+    )
 
 
 def batch_path_validate(params, plan):
@@ -393,7 +410,7 @@ HANDLERS = [
     ),
     StageHandler(
         "elastic_pending_recovery",
-        validate_empty,
+        recovery_validate,
         recovery,
         {"result": "snapshot"},
         checks=frozenset({"complete", "success_rate"}),

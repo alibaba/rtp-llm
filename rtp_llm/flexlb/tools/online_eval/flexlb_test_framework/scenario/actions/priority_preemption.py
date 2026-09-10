@@ -679,15 +679,28 @@ def _decode_running(ctx, p, deadline):
     )
 
 
+def _incoming_codes(p):
+    codes = p.get("incoming_reject_codes")
+    if (
+        not isinstance(codes, list)
+        or not codes
+        or any(type(c) is not int or c < 1 for c in codes)
+    ):
+        raise ValueError("incoming_reject_codes must be a nonempty typed code list")
+    return p
+
+
 def _decode_half_params(p, plan):
     p = _params(
-        p, {"occupants", "incoming", "phase"}, {"occupants", "incoming", "phase"}
+        p,
+        {"occupants", "incoming", "phase", "incoming_reject_codes"},
+        {"occupants", "incoming", "phase"},
     )
     for key in ("occupants", "incoming"):
         plan.reference(p[key], "requests")
     if p["phase"] not in ("reserved", "owned"):
         raise ValueError("unknown Decode phase")
-    return p
+    return _incoming_codes(p)
 
 
 def _decode_half(ctx, p, deadline):
@@ -719,7 +732,7 @@ def _decode_half(ctx, p, deadline):
     forbidden = (8400, 8429) if p["phase"] == "reserved" else (8429,)
     zero = all(c not in forbidden for _, c in outcomes)
     survivors = all(ok for ok, c in outcomes if p["phase"] == "reserved" or c != 8429)
-    rejected = not incoming_ok and code in (8403, 8402, 8510, 8431)
+    rejected = not incoming_ok and code in p["incoming_reject_codes"]
     passed = zero and survivors and rejected
     path = ctx.artifact_dir / f"preemption-decode-{uuid.uuid4().hex}.json"
     path.write_text(
@@ -1039,7 +1052,7 @@ def _reservation_metric(ctx, p, deadline):
 def _reservation_half_params(p, plan):
     p = _params(
         p,
-        {"occupants", "incoming", "wave", "baseline", "after"},
+        {"occupants", "incoming", "wave", "baseline", "after", "incoming_reject_codes"},
         {"occupants", "incoming", "wave"},
     )
     for key in ("occupants", "incoming"):
@@ -1052,7 +1065,7 @@ def _reservation_half_params(p, plan):
     else:
         for key in ("baseline", "after"):
             plan.reference(p.get(key), "snapshot")
-    return p
+    return _incoming_codes(p)
 
 
 def _reservation_half(ctx, p, deadline):
@@ -1093,11 +1106,7 @@ def _reservation_half(ctx, p, deadline):
         if c in victim_codes
     ]
     survivors = all(ok for ok, c in outcomes if c not in victim_codes)
-    legal = (
-        code in (200, 8511, 8403, 8402, 8510, 8431)
-        if p["wave"] == "same"
-        else incoming_ok or code in (8403, 8402, 8510, 8431)
-    )
+    legal = incoming_ok or (not incoming_ok and code in p["incoming_reject_codes"])
     evidence = dict(
         wave=p["wave"],
         occupants=rows,

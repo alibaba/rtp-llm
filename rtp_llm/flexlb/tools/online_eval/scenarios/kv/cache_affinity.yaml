@@ -3386,7 +3386,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w0_r0_spacing:
       seconds: 0.12
@@ -3411,7 +3411,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w0_r1_spacing:
       seconds: 0.12
@@ -3436,7 +3436,7 @@ parameters:
       - 811007
       - 811008
       - 811009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w0_r2_spacing:
       seconds: 0.12
@@ -3461,7 +3461,7 @@ parameters:
       - 811007
       - 811008
       - 811009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w0_r0_done_timeout_s: 30
     saturation_w0_r0_hit:
@@ -3586,7 +3586,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w1_r0_spacing:
       seconds: 0.12
@@ -3611,7 +3611,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w1_r1_spacing:
       seconds: 0.12
@@ -3636,7 +3636,7 @@ parameters:
       - 811007
       - 811008
       - 811009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w1_r2_spacing:
       seconds: 0.12
@@ -3661,7 +3661,7 @@ parameters:
       - 811007
       - 811008
       - 811009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w1_r0_done_timeout_s: 30
     saturation_w1_r0_hit:
@@ -3786,7 +3786,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w2_r0_spacing:
       seconds: 0.12
@@ -3811,7 +3811,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w2_r1_spacing:
       seconds: 0.12
@@ -3836,7 +3836,7 @@ parameters:
       - 811007
       - 811008
       - 811009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w2_r2_spacing:
       seconds: 0.12
@@ -3861,7 +3861,7 @@ parameters:
       - 811007
       - 811008
       - 811009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w2_r0_done_timeout_s: 30
     saturation_w2_r0_hit:
@@ -3986,7 +3986,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w3_r0_spacing:
       seconds: 0.12
@@ -4011,7 +4011,7 @@ parameters:
       - 810007
       - 810008
       - 810009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w3_r1_spacing:
       seconds: 0.12
@@ -4036,7 +4036,7 @@ parameters:
       - 811007
       - 811008
       - 811009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w3_r2_spacing:
       seconds: 0.12
@@ -4061,7 +4061,7 @@ parameters:
       - 811007
       - 811008
       - 811009
-      consume: deferred
+      consume: immediate
       stream_timeout_s: 30
     saturation_w3_r0_done_timeout_s: 30
     saturation_w3_r0_hit:

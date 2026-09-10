@@ -1201,6 +1201,7 @@ def kv_full_shrink(case):
         "recovery",
         "elastic_pending_recovery",
         timeout_s=case.value("kv_full_shrink.recovery_timeout_s"),
+        params=case.value("kv_full_shrink.recovery"),
     )
     case.step("teardown", "teardown")
 

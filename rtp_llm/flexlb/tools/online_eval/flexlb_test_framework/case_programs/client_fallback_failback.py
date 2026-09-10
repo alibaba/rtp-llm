@@ -32,10 +32,13 @@ def all_masters_down(case):
     case.step(
         "steady",
         "master_client_window",
-        params={
-            "rows": output("finish", "rows"),
-            "until": output("kill_a_time", "epoch_s"),
-        },
+        params=case.params(
+            "all_masters_down.steady",
+            {
+                "rows": output("finish", "rows"),
+                "until": output("kill_a_time", "epoch_s"),
+            },
+        ),
     )
     case.step(
         "outage",

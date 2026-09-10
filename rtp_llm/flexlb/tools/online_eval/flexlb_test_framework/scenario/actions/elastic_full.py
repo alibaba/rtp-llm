@@ -232,10 +232,26 @@ def collect(ctx, params, deadline):
 def terminal_validate(params, plan):
     from .elastic import _validate
 
-    p = _validate(params, plan, {"result", "branch"}, {"result", "branch"})
+    p = _validate(
+        params,
+        plan,
+        {"result", "branch", "data_error_codes", "data_error_tokens"},
+        {"result", "branch"},
+    )
     plan.reference(p["result"], "snapshot")
     if p["branch"] not in ("drain_ok", "drain_timeout"):
         raise ValueError("unsupported drain branch")
+    codes, tokens = p.get("data_error_codes", []), p.get("data_error_tokens", [])
+    if not isinstance(codes, list) or any(type(c) is not int or c < 1 for c in codes):
+        raise ValueError("data_error_codes must be typed codes")
+    if not isinstance(tokens, list) or any(
+        not isinstance(t, str) or not t for t in tokens
+    ):
+        raise ValueError("data_error_tokens must be nonempty strings")
+    if bool(codes) != bool(tokens) or (codes and p["branch"] != "drain_timeout"):
+        raise ValueError(
+            "data-plane errors require a drain_timeout code/message contract"
+        )
     return p
 
 
@@ -264,10 +280,18 @@ def terminal(ctx, params, deadline):
             and code == 8510
             and "Decode endpoint generation retired" in message
         )
+        data_error = (
+            params["branch"] == "drain_timeout"
+            and kind == "error"
+            and code in params.get("data_error_codes", [])
+            and any(token in message for token in params.get("data_error_tokens", []))
+            and stamp is not None
+            and stamp >= removed
+        )
         allowed = (
             kind == "completed"
             or pre_refusal
-            or (params["branch"] == "drain_timeout" and retired)
+            or (params["branch"] == "drain_timeout" and (retired or data_error))
         )
         rows.append(
             dict(
@@ -277,6 +301,7 @@ def terminal(ctx, params, deadline):
                 message=message,
                 pre_fill_refusal=pre_refusal,
                 retired=retired,
+                data_error=data_error,
                 allowed=allowed,
                 within_40s=stamp is not None
                 and stamp - removed <= 40
@@ -303,7 +328,8 @@ def terminal(ctx, params, deadline):
         retirement_contract=(
             all(not r["retired"] for r in rows)
             if params["branch"] == "drain_ok"
-            else any(r["retired"] for r in rows)
+            else all(r["allowed"] for r in rows)
+            and any(r["retired"] or r["data_error"] for r in rows)
         ),
     )
     evidence = dict(
