@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CompletableFuture;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -27,7 +28,7 @@ class BlockedRequestIndexTest {
         GlobalQueueEntry low = entry("a", 10);
         blocked.parkExact(low, key, endpoint);
         GlobalQueueEntry high = entry("a", 90);
-        assertNull(blocked.conflict(high, admission), "priority rescue must reach exact admission");
+        assertNull(blocked.findBlockingEndpoint(high, admission), "priority rescue must reach exact admission");
         blocked.parkExact(high, key, endpoint);
         blocked.capacityChanged(key);
         assertFalse(blocked.isBlocked(high));
@@ -82,11 +83,88 @@ class BlockedRequestIndexTest {
         GlobalQueueEntry between = entry("a", 70);
         assertTrue(blocked.isBlocked(between));
 
-        blocked.clearEntry(higher);
+        blocked.removeAndWakeNext(higher);
         assertFalse(blocked.isBlocked(between));
         assertTrue(blocked.isBlocked(entry("a", 40)));
-        blocked.clearEntry(first);
+        blocked.removeAndWakeNext(first);
         assertFalse(blocked.isBlocked(entry("a", 40)));
+    }
+
+    @Test
+    void oneActiveRetryAdvancesUntilItParksAgain() {
+        var endpoint = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
+        when(endpoint.ipPort()).thenReturn("p:1");
+        var key = PlacementKey.exact(RoleType.PREFILL, "a", "p:1");
+        GlobalQueueEntry first = entry("a", 50);
+        GlobalQueueEntry second = entry("a", 50);
+        GlobalQueueEntry third = entry("a", 50);
+        assertNull(blocked.retrySource(first));
+        blocked.parkExact(first, key, endpoint);
+        blocked.parkExact(second, key, endpoint);
+        blocked.parkExact(third, key, endpoint);
+        assertNull(blocked.retrySource(first));
+        assertNull(blocked.retrySource(second));
+        assertNull(blocked.retrySource(third));
+
+        blocked.capacityChanged(key);
+        blocked.capacityChanged(key);
+        assertFalse(blocked.isBlocked(first));
+        assertTrue(blocked.isBlocked(second));
+        assertTrue(blocked.isBlocked(third));
+        var source = new BlockedRequestIndex.WaitTarget(endpoint, key);
+        assertEquals(source, blocked.retrySource(first));
+        assertNull(blocked.retrySource(second));
+        assertNull(blocked.retrySource(third));
+
+        blocked.removeAndWakeNext(first);
+        blocked.removeAndWakeNext(first);
+        assertFalse(blocked.isBlocked(second));
+        assertTrue(blocked.isBlocked(third), "duplicate retirement must not advance twice");
+        assertNull(blocked.retrySource(first));
+        assertEquals(source, blocked.retrySource(second));
+        assertNull(blocked.retrySource(third));
+
+        blocked.parkExact(second, key, endpoint);
+        assertTrue(blocked.isBlocked(second));
+        assertTrue(blocked.isBlocked(third), "a failed active retry stops the chain");
+        assertNull(blocked.retrySource(second));
+        assertNull(blocked.retrySource(third));
+
+        blocked.capacityChanged(key);
+        assertFalse(blocked.isBlocked(second));
+        assertTrue(blocked.isBlocked(third));
+        assertEquals(source, blocked.retrySource(second));
+        assertNull(blocked.retrySource(third));
+        blocked.removeAndWakeNext(second);
+        assertFalse(blocked.isBlocked(third));
+        assertNull(blocked.retrySource(second));
+        assertEquals(source, blocked.retrySource(third));
+    }
+
+    @Test
+    void movingActiveRetryHandsOffOnlyItsOriginalEndpoint() {
+        var source = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
+        var target = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
+        when(source.ipPort()).thenReturn("p:1");
+        when(target.ipPort()).thenReturn("p:2");
+        var sourceKey = PlacementKey.exact(RoleType.PREFILL, "a", "p:1");
+        var targetKey = PlacementKey.exact(RoleType.PREFILL, "a", "p:2");
+        GlobalQueueEntry moving = entry("a", 50);
+        GlobalQueueEntry sourceSuccessor = entry("a", 50);
+        GlobalQueueEntry targetSuccessor = entry("a", 50);
+        blocked.parkExact(moving, sourceKey, source);
+        blocked.parkExact(sourceSuccessor, sourceKey, source);
+        blocked.parkExact(targetSuccessor, targetKey, target);
+        blocked.capacityChanged(sourceKey);
+
+        blocked.parkExact(moving, targetKey, target);
+
+        assertFalse(blocked.isBlocked(sourceSuccessor));
+        assertTrue(blocked.isBlocked(moving));
+        assertTrue(blocked.isBlocked(targetSuccessor));
+        blocked.capacityChanged(targetKey);
+        assertFalse(blocked.isBlocked(moving), "the target retains queue ordering");
+        assertTrue(blocked.isBlocked(targetSuccessor));
     }
 
     private GlobalQueueEntry entry(String group, int priority) {

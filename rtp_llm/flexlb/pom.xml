@@ -394,6 +394,9 @@
         <!-- Run FlexLB API performance regressions in a separate Maven invocation. -->
         <profile>
             <id>api-performance-regression</id>
+            <properties>
+                <flexlb.perf.heap>2g</flexlb.perf.heap>
+            </properties>
             <build>
                 <plugins>
                     <plugin>
@@ -411,9 +414,11 @@
                                       token ids in one fresh fork. Fix the heap size so the gate
                                       measures gRPC/scheduling throughput instead of JVM heap
                                       expansion; production JVM settings are unaffected.
+                                      Larger fleet runs retain more RPC payloads for assertions
+                                      and can set -Dflexlb.perf.heap=8g without relaxing SLOs.
                                     -->
                                     <argLine>
-                                        -Xms2g -Xmx2g
+                                        -Xms${flexlb.perf.heap} -Xmx${flexlb.perf.heap}
                                         --add-modules ALL-SYSTEM
                                         --add-opens java.base/java.lang=ALL-UNNAMED
                                         --add-opens java.base/java.lang.invoke=ALL-UNNAMED

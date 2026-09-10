@@ -13,15 +13,23 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 
-/** Ordered waiters for exact endpoints and overlapping selector domains. */
+/**
+ * Ordered waiters for exact endpoints and overlapping selector domains.
+ *
+ * <p>Each endpoint allows one waiting request to retry at a time:
+ * a capacity notification wakes the first waiter; removing that request wakes
+ * its successor; parking it on the same endpoint stops retries until the next
+ * capacity notification. Waking a request does not reserve capacity.</p>
+ */
 final class BlockedRequestIndex {
 
-    record Conflict(WorkerEndpoint endpoint, PlacementKey blocker) {
+    /** Exact endpoint and capacity key used when a request must wait. */
+    record WaitTarget(WorkerEndpoint endpoint, PlacementKey key) {
     }
 
-    private final Map<WorkerEndpoint, EndpointWaiters> byEndpoint =
+    private final Map<WorkerEndpoint, EndpointWaiters> waitersByEndpoint =
             new IdentityHashMap<>();
-    private final Map<GlobalQueueEntry, EndpointWaiters> membership =
+    private final Map<GlobalQueueEntry, EndpointWaiters> waitersByRequest =
             new IdentityHashMap<>();
     private final Map<String, Set<WorkerEndpoint>> endpointsByAddress =
             new java.util.HashMap<>();
@@ -55,13 +63,22 @@ final class BlockedRequestIndex {
                 && order.compare(waiters.first(), entry) <= 0;
     }
 
-    Conflict conflict(
+    WaitTarget findBlockingEndpoint(
             GlobalQueueEntry entry,
             RouteAdmission admission) {
-        Conflict conflict = conflict(entry, admission.prefillEndpoint());
+        WaitTarget conflict = findBlockingEndpoint(entry, admission.prefillEndpoint());
         return conflict != null
                 ? conflict
-                : conflict(entry, admission.decodeEndpoint());
+                : findBlockingEndpoint(entry, admission.decodeEndpoint());
+    }
+
+    /** Return the active retry's source; ordinary and still-waiting requests have none. */
+    WaitTarget retrySource(GlobalQueueEntry entry) {
+        EndpointWaiters waiters = waitersByRequest.get(entry);
+        if (waiters == null || waiters.activeRetry != entry) {
+            return null;
+        }
+        return new WaitTarget(waiters.endpoint, waiters.blocker);
     }
 
     void parkExact(
@@ -76,39 +93,41 @@ final class BlockedRequestIndex {
                     "exact blocker does not identify its endpoint");
         }
 
-        EndpointWaiters current = membership.get(entry);
+        EndpointWaiters current = waitersByRequest.get(entry);
         if (current != null && current.endpoint == exactEndpoint) {
             current.blocker = exactBlocker;
-            if (current.claimant == entry) {
-                current.claimant = null;
+            if (current.activeRetry == entry) {
+                // Still full: put this request back to sleep without waking its successor.
+                current.activeRetry = null;
             }
             entry.blockedKey = exactBlocker;
             entry.blockedEndpoint = exactEndpoint;
             return;
         }
-        detachEntry(entry, true);
+        removeEndpointWaiterAndWakeNext(entry);
 
-        EndpointWaiters target = byEndpoint.computeIfAbsent(
+        EndpointWaiters target = waitersByEndpoint.computeIfAbsent(
                 exactEndpoint,
                 ignored -> register(new EndpointWaiters(
                         exactEndpoint, exactBlocker)));
         target.blocker = exactBlocker;
         target.entries.add(entry);
-        membership.put(entry, target);
+        waitersByRequest.put(entry, target);
         entry.blockedKey = exactBlocker;
         entry.blockedEndpoint = exactEndpoint;
     }
 
     void parkSelector(GlobalQueueEntry entry, PlacementKey blocker) {
-        clearEntry(entry);
+        removeAndWakeNext(entry);
         entry.blockedKey = Objects.requireNonNull(blocker, "blocker");
         selectorWaiters.add(entry);
         selectorsByGroup.computeIfAbsent(entry.routingGroup,
                 ignored -> new TreeSet<>(order)).add(entry);
     }
 
-    void clearEntry(GlobalQueueEntry entry) {
-        detachEntry(entry, true);
+    /** Remove a waiter and wake its successor only if it was the active retry. */
+    void removeAndWakeNext(GlobalQueueEntry entry) {
+        removeEndpointWaiterAndWakeNext(entry);
         clearSelector(entry);
         entry.blockedKey = null;
         entry.blockedEndpoint = null;
@@ -126,36 +145,13 @@ final class BlockedRequestIndex {
     }
 
     /**
-     * Retire an activated claimant after publication. A commit to the same
-     * endpoint consumed the capacity edge, so its successor remains parked.
-     * A commit on another endpoint leaves the original opportunity unused and
-     * therefore advances the next waiter.
-     */
-    void routeCommitted(
-            GlobalQueueEntry entry,
-            RouteAdmission admission) {
-        EndpointWaiters waiters = membership.get(entry);
-        if (waiters == null) {
-            clearEntry(entry);
-            return;
-        }
-        boolean consumedClaim = waiters.claimant == entry
-                && selects(admission, waiters.endpoint);
-        detachEntry(entry, !consumedClaim);
-        clearSelector(entry);
-        entry.blockedKey = null;
-        entry.blockedEndpoint = null;
-    }
-
-    /**
-     * One physical capacity edge releases one ordered claimant. Once that
-     * claimant finishes or changes route, the next waiter is tried. This
-     * bounds a one-slot release to one success plus at most one confirming
-     * miss instead of replanning every request parked on the endpoint.
+     * Start one ordered retry chain. Multiple releases may share one notification;
+     * successful admission advances the chain until a successor confirms it is full.
+     * Repeated notifications do not wake a second request while a retry is active.
      */
     void capacityChanged(PlacementKey event) {
         releaseSelectors(event);
-        forEachExactEndpoint(event, this::activateNext);
+        forEachExactEndpoint(event, this::wakeNextWaiter);
     }
 
     /** A generation change invalidates every route pinned to that address. */
@@ -180,7 +176,7 @@ final class BlockedRequestIndex {
         }
         for (GlobalQueueEntry entry : List.copyOf(entries)) {
             if (isRelevant(entry.blockedKey, event)) {
-                clearEntry(entry);
+                removeAndWakeNext(entry);
             }
         }
     }
@@ -191,34 +187,27 @@ final class BlockedRequestIndex {
         }
         selectorWaiters.clear();
         selectorsByGroup.clear();
-        for (EndpointWaiters waiters : byEndpoint.values()) {
+        for (EndpointWaiters waiters : waitersByEndpoint.values()) {
             for (GlobalQueueEntry entry : waiters.entries) {
                 entry.blockedKey = null;
                 entry.blockedEndpoint = null;
             }
         }
-        byEndpoint.clear();
-        membership.clear();
+        waitersByEndpoint.clear();
+        waitersByRequest.clear();
         endpointsByAddress.clear();
     }
 
-    private Conflict conflict(
+    private WaitTarget findBlockingEndpoint(
             GlobalQueueEntry entry,
             WorkerEndpoint endpoint) {
-        EndpointWaiters waiters = byEndpoint.get(endpoint);
+        EndpointWaiters waiters = waitersByEndpoint.get(endpoint);
         if (waiters == null || waiters.entries.isEmpty()
-                || waiters.claimant == entry
+                || waiters.activeRetry == entry
                 || order.compare(entry, waiters.entries.first()) < 0) {
             return null;
         }
-        return new Conflict(endpoint, waiters.blocker);
-    }
-
-    private static boolean selects(
-            RouteAdmission admission,
-            WorkerEndpoint endpoint) {
-        return admission.prefillEndpoint() == endpoint
-                || admission.decodeEndpoint() == endpoint;
+        return new WaitTarget(endpoint, waiters.blocker);
     }
 
     private EndpointWaiters register(EndpointWaiters waiters) {
@@ -229,36 +218,36 @@ final class BlockedRequestIndex {
         return waiters;
     }
 
-    private void detachEntry(GlobalQueueEntry entry, boolean advanceClaimant) {
-        EndpointWaiters waiters = membership.remove(entry);
+    private void removeEndpointWaiterAndWakeNext(GlobalQueueEntry entry) {
+        EndpointWaiters waiters = waitersByRequest.remove(entry);
         if (waiters == null) {
             return;
         }
-        boolean wasClaimant = waiters.claimant == entry;
-        if (wasClaimant) {
-            waiters.claimant = null;
+        boolean wasActiveRetry = waiters.activeRetry == entry;
+        if (wasActiveRetry) {
+            waiters.activeRetry = null;
         }
         waiters.entries.remove(entry);
         if (waiters.entries.isEmpty()) {
             unregister(waiters);
-        } else if (wasClaimant && advanceClaimant) {
-            activateNext(waiters.endpoint);
+        } else if (wasActiveRetry) {
+            wakeNextWaiter(waiters.endpoint);
         }
     }
 
-    private void activateNext(WorkerEndpoint endpoint) {
-        EndpointWaiters waiters = byEndpoint.get(endpoint);
-        if (waiters == null || waiters.claimant != null) {
+    private void wakeNextWaiter(WorkerEndpoint endpoint) {
+        EndpointWaiters waiters = waitersByEndpoint.get(endpoint);
+        if (waiters == null || waiters.activeRetry != null) {
             return;
         }
         while (!waiters.entries.isEmpty()) {
             GlobalQueueEntry next = waiters.entries.iterator().next();
             if (next.removed || next.future.isDone()) {
-                membership.remove(next);
+                waitersByRequest.remove(next);
                 waiters.entries.remove(next);
                 continue;
             }
-            waiters.claimant = next;
+            waiters.activeRetry = next;
             next.blockedKey = null;
             next.blockedEndpoint = null;
             return;
@@ -267,22 +256,22 @@ final class BlockedRequestIndex {
     }
 
     private void releaseAll(WorkerEndpoint endpoint) {
-        EndpointWaiters waiters = byEndpoint.get(endpoint);
+        EndpointWaiters waiters = waitersByEndpoint.get(endpoint);
         if (waiters == null) {
             return;
         }
         for (GlobalQueueEntry entry : waiters.entries) {
-            membership.remove(entry);
+            waitersByRequest.remove(entry);
             entry.blockedKey = null;
             entry.blockedEndpoint = null;
         }
         waiters.entries.clear();
-        waiters.claimant = null;
+        waiters.activeRetry = null;
         unregister(waiters);
     }
 
     private void unregister(EndpointWaiters waiters) {
-        byEndpoint.remove(waiters.endpoint);
+        waitersByEndpoint.remove(waiters.endpoint);
         Set<WorkerEndpoint> endpoints =
                 endpointsByAddress.get(waiters.endpoint.ipPort());
         if (endpoints == null) {
@@ -327,7 +316,7 @@ final class BlockedRequestIndex {
         private final WorkerEndpoint endpoint;
         private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);
         private PlacementKey blocker;
-        private GlobalQueueEntry claimant;
+        private GlobalQueueEntry activeRetry;
 
         private EndpointWaiters(
                 WorkerEndpoint endpoint,

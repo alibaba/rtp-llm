@@ -1,11 +1,15 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.engine.grpc.EngineRpcService.EnqueueBatchRequestPB;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -15,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
@@ -23,9 +28,8 @@ import static org.mockito.Mockito.verify;
  * 完全一致：priority 对派发次序无任何影响（严格 FIFO），无任何抢占/victim，
  * 与场景 B 同流量（P70/P50/P30 各 50，轮转提交）。
  *
- * <p>注意：旧逻辑 fixed_window 的排序键是毫秒级 enqueuedAtMs，同毫秒并列时
- * 队列不保证稳定序（这是旧逻辑真实行为，非缺陷）。为使严格 FIFO 断言
- * 良定义，提交时保证每个请求拿到唯一的 enqueuedAtMs（间隔 ≥2ms）。
+ * <p>FIFO 使用唯一递增的 enqueueSeq，同毫秒提交也保持顺序。这里验证单个
+ * Prefill 的批次决策顺序；异步派发线程进入引擎调用的先后不属于 FIFO 保证。
  */
 class BaselineParityE2ETest {
 
@@ -36,14 +40,13 @@ class BaselineParityE2ETest {
     @Test
     @Timeout(90)
     void e_switches_off_priority_has_no_effect_and_dispatch_is_fifo() throws Exception {
-        // autoTpm=false：批队列用 LEGACY 序（构造时冻结），全部开关保持默认关闭
+        // autoTpm=false：批队列用 FIFO 序（构造时冻结），全部开关保持默认关闭
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false)) {
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.fixedWindowDecision().setMaxRequests(2);
             h.startAutoPump(10);
 
-            // 预热：首笔请求走冷 gRPC 通道 + JIT，异步发送可能被后续批次超越
-            // （传输层竞态，非被测行为）。先发一笔不计入断言的请求压热链路。
+            // 预热首笔调度与引擎调用，并从测量记录中排除。
             h.scheduler.submit(h.context(1999, 50)).get(10, TimeUnit.SECONDS);
             AutoTpmE2EHarness.await(() -> !h.engineArrivalOrder.isEmpty(), 5_000,
                     "warm-up request must reach the engine");
@@ -55,14 +58,8 @@ class BaselineParityE2ETest {
             Map<Long, Long> submitNanos = new HashMap<>();
             List<CompletableFuture<Response>> futures = new ArrayList<>();
             long rid = 2000;
-            long lastSubmitMs = 0;
             for (int i = 0; i < PER_PRIORITY; i++) {
                 for (int priority : PRIORITIES) {
-                    // 唯一 enqueuedAtMs：等待时钟前进 ≥2ms 再提交
-                    while (System.currentTimeMillis() - lastSubmitMs < 2) {
-                        Thread.onSpinWait();
-                    }
-                    lastSubmitMs = System.currentTimeMillis();
                     long requestId = rid++;
                     submissionOrder.add(requestId);
                     priorityByRid.put(requestId, priority);
@@ -82,9 +79,27 @@ class BaselineParityE2ETest {
                                 + response.getCode() + ": " + response.getErrorMessage());
             }
 
-            // 旧逻辑 = 严格 FIFO：引擎到达顺序与提交顺序逐位相同，priority 无影响
-            assertEquals(submissionOrder, new ArrayList<>(h.engineArrivalOrder),
-                    "with all switches off the dispatch order must be exactly FIFO");
+            List<Long> arrivals = new ArrayList<>(h.engineArrivalOrder);
+            assertEquals(total, arrivals.size(), "every measured request must reach the engine exactly once");
+            assertEquals(new HashSet<>(submissionOrder), new HashSet<>(arrivals),
+                    "engine arrivals must contain every measured request and no unexpected request");
+
+            // RequestSchedulerTestRuntime supplies incrementing batch IDs. This
+            // fixture has one Prefill and one WorkerBatcher, so BatchDeliveryStrategy
+            // assigns them in decision order before committing and submitting to
+            // the asynchronous dispatcher. Preserve request order within each batch;
+            // ordering RPC batches by ID removes only dispatch-thread arrival races.
+            ArgumentCaptor<EnqueueBatchRequestPB> batches = ArgumentCaptor.forClass(EnqueueBatchRequestPB.class);
+            verify(h.grpcClient, atLeastOnce()).batchEnqueueAsync(anyString(), anyInt(), batches.capture());
+            List<Long> decisionOrder = batches.getAllValues().stream()
+                    .sorted(Comparator.comparingLong(EnqueueBatchRequestPB::getBatchId))
+                    .flatMap(batch -> batch.getDpSlotsList().stream())
+                    .flatMap(slot -> slot.getRequestsList().stream())
+                    .map(request -> request.getInput().getRequestId())
+                    .filter(priorityByRid::containsKey)
+                    .toList();
+            assertEquals(submissionOrder, decisionOrder,
+                    "with all switches off batch decisions and their request order must be exactly FIFO");
 
             // 无任何抢占痕迹
             verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),

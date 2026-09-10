@@ -115,24 +115,6 @@ final class OrderedRequestQueue {
         return markRemoved(entry);
     }
 
-    void pruneCompletedHeads() {
-        if (priorityOrdering) {
-            while (!nonEmptyPriorities.isEmpty()) {
-                int priority = nonEmptyPriorities.previousSetBit(
-                        PRIORITY_LEVELS - 1);
-                Bucket bucket = priorityBuckets[priority];
-                pruneBucket(bucket);
-                if (bucket == null || bucket.isEmpty()) {
-                    nonEmptyPriorities.clear(priority);
-                } else {
-                    break;
-                }
-            }
-        } else {
-            pruneBucket(fifo);
-        }
-    }
-
     List<GlobalQueueEntry> drain() {
         List<GlobalQueueEntry> entries = new ArrayList<>();
         if (priorityOrdering) {
@@ -163,16 +145,6 @@ final class OrderedRequestQueue {
         unlink(entry);
         size--;
         return true;
-    }
-
-    private void pruneBucket(Bucket bucket) {
-        while (bucket != null && !bucket.isEmpty()) {
-            GlobalQueueEntry head = bucket.head;
-            if (!head.future.isDone()) {
-                return;
-            }
-            markRemoved(head);
-        }
     }
 
     private void unlink(GlobalQueueEntry entry) {
