@@ -316,6 +316,9 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
+    begin_decode = getattr(v4, "begin_decode", None)
+    if begin_decode is not None:
+        begin_decode(attn_metadata)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):

@@ -1,9 +1,5 @@
-# DSV4 FP8 unit tests.
-#
-# All tests in this directory exercise the FP8 KV-cache path
-# (``rtp_llm/models_py/modules/dsv4/fp8/``) and require an H20-class GPU
-# for FlashMLA / DeepGEMM kernels.  BF16 path tests stay in the sibling
-# ``rtp_llm/models_py/modules/dsv4/test/`` directory.
+# DSV4 FP8 unit tests.  The lists below separate CPU/mock tests from H20 and
+# SM100 tests that import or execute architecture-specific CUDA extensions.
 
 load("@rules_python//python:defs.bzl", "py_test")
 
@@ -61,7 +57,13 @@ _DSV4_FP8_CPU_TESTS = [
     "test_compressor_start_finish_prefill",
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
+    "test_mega_support",
     "test_prefill_mixed_layer_cache_store",
+]
+
+_DSV4_FP8_SM100_TESTS = [
+    "test_mega_csa_adapter",
+    "test_mega_hca_adapter",
 ]
 
 py_test(
@@ -128,10 +130,43 @@ py_test(
     for t in _DSV4_FP8_CPU_TESTS
 ]
 
+[
+    py_test(
+        name = t,
+        srcs = [t + ".py"],
+        deps = _DSV4_FP8_TEST_DEPS,
+        tags = ["SM100_ARM"],
+        exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    )
+    for t in _DSV4_FP8_SM100_TESTS
+]
+
 py_test(
     name = "test_fused_decode_meta_comprehensive",
     srcs = ["test_fused_decode_meta_comprehensive.py"],
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "test_mega_csa_rtp_eager",
+    srcs = ["test_mega_csa_rtp_eager.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm:deep_gemm",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "long",
+)
+
+py_test(
+    name = "test_mega_hca_rtp_eager",
+    srcs = ["test_mega_hca_rtp_eager.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm:deep_gemm",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "long",
 )
