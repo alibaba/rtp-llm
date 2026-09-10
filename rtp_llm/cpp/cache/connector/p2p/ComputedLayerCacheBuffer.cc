@@ -12,13 +12,6 @@ bool hasFiniteDeadline(int64_t deadline_ms) {
     return deadline_ms > 0 && deadline_ms != std::numeric_limits<int64_t>::max();
 }
 
-int64_t addWithSaturation(int64_t base_ms, int64_t delta_ms) {
-    if (base_ms > std::numeric_limits<int64_t>::max() - delta_ms) {
-        return std::numeric_limits<int64_t>::max();
-    }
-    return base_ms + delta_ms;
-}
-
 }  // namespace
 
 ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(int64_t                                  request_id,
@@ -37,7 +30,7 @@ void ComputedLayerCacheBuffer::addBuffer(const std::shared_ptr<LayerCacheBuffer>
         layer_cache_buffers_[layer_cache_buffer->bufferKey()] = layer_cache_buffer;
     }
     int64_t cur = deadline_ms_.load(std::memory_order_relaxed);
-    if (deadline_ms > cur) {
+    if (deadline_ms < cur) {
         deadline_ms_.store(deadline_ms, std::memory_order_relaxed);
     }
     condition_variable_.notify_all();
@@ -70,8 +63,7 @@ void ComputedLayerCacheBuffer::waitChange(int last_layer_num, int timeout_ms) {
     });
 }
 
-ComputedLayerCacheBufferStore::ComputedLayerCacheBufferStore(int64_t removed_request_ttl_ms):
-    removed_request_ttl_ms_(std::max<int64_t>(1, removed_request_ttl_ms)) {}
+ComputedLayerCacheBufferStore::ComputedLayerCacheBufferStore() = default;
 
 ComputedLayerCacheBufferStore::~ComputedLayerCacheBufferStore() {}
 
@@ -79,7 +71,17 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::addBuff
     int64_t request_id, const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
 
-    if (removed_request_ids_.count(request_id)) {
+    if (removed_request_ids_.count(request_id) || !hasFiniteDeadline(deadline_ms)) {
+        return nullptr;
+    }
+    // Callbacks may carry the request deadline from before StartLoad.
+    // The store's phase deadline is authoritative while holding this lock.
+    auto horizon = request_horizons_.find(request_id);
+    if (horizon == request_horizons_.end()) {
+        return nullptr;
+    }
+    deadline_ms = horizon->second.horizon_ms;
+    if (currentTimeMs() >= deadline_ms) {
         return nullptr;
     }
 
@@ -109,10 +111,16 @@ std::optional<int64_t> ComputedLayerCacheBufferStore::registerRequestHorizon(int
                                                                              int64_t horizon_ms,
                                                                              int64_t request_deadline_ms) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
-    if (removed_request_ids_.count(request_id)) {
+    if (removed_request_ids_.count(request_id) || !hasFiniteDeadline(request_deadline_ms)
+        || !hasFiniteDeadline(horizon_ms) || horizon_ms > request_deadline_ms
+        || currentTimeMs() >= horizon_ms) {
         return std::nullopt;
     }
     auto result = request_horizons_.emplace(request_id, RequestHorizon{horizon_ms, request_deadline_ms});
+    if (result.first->second.request_deadline_ms != request_deadline_ms
+        || currentTimeMs() >= result.first->second.horizon_ms) {
+        return std::nullopt;
+    }
     return result.first->second.horizon_ms;
 }
 
@@ -120,17 +128,17 @@ std::optional<int64_t> ComputedLayerCacheBufferStore::activateRequestHorizon(int
                                                                              int64_t horizon_ms,
                                                                              int64_t request_deadline_ms) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
-    if (removed_request_ids_.count(request_id)) {
+    if (removed_request_ids_.count(request_id) || !hasFiniteDeadline(request_deadline_ms)
+        || !hasFiniteDeadline(horizon_ms) || horizon_ms > request_deadline_ms
+        || currentTimeMs() >= horizon_ms) {
         return std::nullopt;
     }
     auto [it, inserted] = request_horizons_.emplace(request_id, RequestHorizon{horizon_ms, request_deadline_ms});
     if (!inserted) {
-        it->second.horizon_ms = std::max(it->second.horizon_ms, horizon_ms);
-        if (hasFiniteDeadline(request_deadline_ms)) {
-            it->second.request_deadline_ms = hasFiniteDeadline(it->second.request_deadline_ms) ?
-                                                 std::max(it->second.request_deadline_ms, request_deadline_ms) :
-                                                 request_deadline_ms;
+        if (it->second.request_deadline_ms != request_deadline_ms || currentTimeMs() >= it->second.horizon_ms) {
+            return std::nullopt;
         }
+        it->second.horizon_ms = std::min(it->second.horizon_ms, horizon_ms);
     }
     auto buffer_it = computed_buffers_.find(request_id);
     if (buffer_it != computed_buffers_.end()) {
@@ -145,12 +153,12 @@ std::optional<int64_t> ComputedLayerCacheBufferStore::activateRequestHorizon(int
 std::optional<int64_t> ComputedLayerCacheBufferStore::requestHorizon(int64_t request_id) const {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
     auto                        it = request_horizons_.find(request_id);
-    return it == request_horizons_.end() ? std::nullopt : std::make_optional(it->second.horizon_ms);
+    return it == request_horizons_.end() || removed_request_ids_.count(request_id) ?
+               std::nullopt : std::make_optional(it->second.horizon_ms);
 }
 
 void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id, int64_t request_deadline_ms) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
-    const int64_t               now_ms = currentTimeMs();
     std::optional<int64_t>      finite_request_deadline;
     if (hasFiniteDeadline(request_deadline_ms)) {
         finite_request_deadline = request_deadline_ms;
@@ -169,10 +177,9 @@ void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id, int64_t req
     if (buffer_it != computed_buffers_.end()) {
         computed_buffers_.erase(buffer_it);
     }
-    const int64_t expire_at_ms = finite_request_deadline.has_value() ?
-                                     std::max(now_ms, *finite_request_deadline) :
-                                     addWithSaturation(now_ms, removed_request_ttl_ms_);
-    markRemovedLocked(request_id, expire_at_ms);
+    if (finite_request_deadline) {
+        markRemovedLocked(request_id, *finite_request_deadline);
+    }
 }
 
 int64_t ComputedLayerCacheBufferStore::getBuffersCount() const {
@@ -197,23 +204,13 @@ void ComputedLayerCacheBufferStore::checkTimeout() {
         }
         removed_request_expiry_queue_.pop();
     }
-    for (auto iter = computed_buffers_.begin(); iter != computed_buffers_.end();) {
-        if (current_time_ms >= iter->second->deadlineMs()) {
-            std::optional<int64_t> finite_request_deadline;
-            auto                   horizon_it = request_horizons_.find(iter->first);
-            if (horizon_it != request_horizons_.end()) {
-                if (hasFiniteDeadline(horizon_it->second.request_deadline_ms)) {
-                    finite_request_deadline = horizon_it->second.request_deadline_ms;
-                }
-                request_horizons_.erase(horizon_it);
-            }
-            const int64_t expire_at_ms = finite_request_deadline.has_value() ?
-                                             std::max(current_time_ms, *finite_request_deadline) :
-                                             addWithSaturation(current_time_ms, removed_request_ttl_ms_);
-            markRemovedLocked(iter->first, expire_at_ms);
-            iter                              = computed_buffers_.erase(iter);
+    for (auto it = request_horizons_.begin(); it != request_horizons_.end();) {
+        if (current_time_ms >= it->second.horizon_ms) {
+            markRemovedLocked(it->first, it->second.request_deadline_ms);
+            computed_buffers_.erase(it->first);
+            it = request_horizons_.erase(it);
         } else {
-            ++iter;
+            ++it;
         }
     }
 }

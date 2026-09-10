@@ -19,7 +19,7 @@ public:
                              const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
                              int64_t                                  deadline_ms);
 
-    /// @brief 追加一层 cache buffer 并更新 deadline
+    /// @brief 追加一层 cache buffer，deadline 只允许收紧
     void addBuffer(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms);
 
     /// @brief 返回当前已存 buffer 数及指定 layer/tag 集合对应的缓冲区列表
@@ -44,7 +44,7 @@ private:
 
 class ComputedLayerCacheBufferStore {
 public:
-    explicit ComputedLayerCacheBufferStore(int64_t removed_request_ttl_ms = 3600 * 1000);
+    ComputedLayerCacheBufferStore();
     ~ComputedLayerCacheBufferStore();
 
 public:
@@ -58,7 +58,7 @@ public:
     // first value wins so callbacks from later layers cannot roll the horizon.
     std::optional<int64_t>
     registerRequestHorizon(int64_t request_id, int64_t horizon_ms, int64_t request_deadline_ms = 0);
-    // StartLoad has consumed the whole-request resource. Promote the fixed
+    // StartLoad has consumed the whole-request resource. Tighten the fixed
     // layer acceptance horizon to this physical transfer's deadline.
     std::optional<int64_t>
     activateRequestHorizon(int64_t request_id, int64_t horizon_ms, int64_t request_deadline_ms = 0);
@@ -97,7 +97,6 @@ private:
                         std::vector<RemovedRequestExpiry>,
                         RemovedRequestExpiryCompare>
         removed_request_expiry_queue_;
-    int64_t removed_request_ttl_ms_;
 };
 
 }  // namespace rtp_llm

@@ -1,3 +1,4 @@
+#include <limits>
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
@@ -234,6 +235,10 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     if (!pd_separation) {
         RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
         return LocalRpcServer::GenerateStreamCall(server_context, request, response_writer);
+    }
+    if (request->request_deadline_ms() <= currentTimeMs()
+        || request->request_deadline_ms() == std::numeric_limits<int64_t>::max()) {
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "invalid or expired P2P request deadline");
     }
     if (request->generate_config().unique_key().empty()) {
         RTP_LLM_LOG_WARNING("decode_entrance prefill handoff requires non-empty unique_key, request_id=%ld",

@@ -109,4 +109,12 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     ASSERT_TRUE(stream->reuseCache());
 }
 
+TEST_F(GenerateStreamTest, P2PRequestDeadlineDoesNotRestartWithStreamBeginTime) {
+    auto stream = createMockStream({1, 2, 3}, 1001);
+    const int64_t deadline_ms = autil::TimeUtility::currentTimeInMicroSeconds() / 1000 + 1000;
+    stream->generate_input_->request_deadline_ms = deadline_ms;
+    stream->resetBeginTime((deadline_ms + 5000) * 1000);
+    EXPECT_EQ(stream->deadlineMs(), deadline_ms);
+}
+
 }  // namespace rtp_llm

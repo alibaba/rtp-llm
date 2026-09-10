@@ -397,7 +397,7 @@ protected:
 
         prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
             worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
-        prefill_->init(10 * 1000);
+        prefill_->init();
 
         decode_ = std::make_unique<P2PConnectorWorkerDecode>(
             worker_config_, mock_layer_block_converter_, nullptr, mock_receiver_);
@@ -469,6 +469,7 @@ protected:
 
     void addComputedBuffer(int64_t request_id, int layer_id, int64_t deadline_ms) {
         auto layer_cache_buffer = createLayerCacheBuffer(layer_id);
+        computed_buffers_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
         computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
     }
 
@@ -492,17 +493,7 @@ protected:
         }
     }
 
-    void setTransferWaitTimeout(int64_t timeout_ms) {
-        worker_config_.transfer_backend_config.rdma_transfer_wait_timeout_ms = timeout_ms;
-        prefill_.reset();
-        decode_.reset();
-        prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
-            worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
-        prefill_->init(10 * 1000);
-        decode_ = std::make_unique<P2PConnectorWorkerDecode>(
-            worker_config_, mock_layer_block_converter_, nullptr, mock_receiver_);
-        computed_buffers_ = prefill_->getComputedBuffersStore();
-    }
+
 
 protected:
     P2PConnectorWorkerConfig                       worker_config_;
@@ -522,10 +513,9 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     auto    resource   = createKVCacheResource(layer_id, 2);
 
     // Pass nullopt — means "immediately ready" in StoreWaitContext logic.
-    // INT64_MAX deadline → falls back to store_wait_timeout (existing test
-    // behavior; explicit cases for the request-deadline path are below).
+    // A published layer carries the original request deadline.
     bool success = prefill_->writeByLayer(
-        layer_id, resource, request_id, std::shared_ptr<torch::Event>{}, std::numeric_limits<int64_t>::max());
+        layer_id, resource, request_id, std::shared_ptr<torch::Event>{}, currentTimeMs() + 5000);
     EXPECT_TRUE(success);
 
     // Wait for cleanup thread to check once — event is immediately ready so buffer should appear
@@ -550,7 +540,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithTransf
     addComputedBuffer(request_id, 1, deadline_ms);
 
     const int64_t expected_transfer_deadline = deadline_ms;
-    ErrorInfo     result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+    ErrorInfo     result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
     EXPECT_TRUE(result.ok());
 
     for (const auto& c : mock_sender_->getTransferCalls()) {
@@ -562,11 +552,11 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithTransf
 TEST_F(P2PConnectorWorkerTest, SendKVCache_ReadyEmptyLayersCompleteWithoutTransfer) {
     const int64_t request_id  = 2099;
     const int64_t deadline_ms = currentTimeMs() + 5000;
+    computed_buffers_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     computed_buffers_->addBuffer(request_id, std::make_shared<LayerCacheBuffer>(0, "group0"), deadline_ms);
     computed_buffers_->addBuffer(request_id, std::make_shared<LayerCacheBuffer>(1, "group1"), deadline_ms);
 
-    ErrorInfo result = prefill_->sendKVCache(
-        request_id, "ready-empty-layers", deadline_ms, makeRoutePlan({{"127.0.0.1", 12345}}));
+    ErrorInfo result = prefill_->sendKVCache(request_id, "ready-empty-layers", deadline_ms, makeRoutePlan({{"127.0.0.1", 12345}}), deadline_ms);
     EXPECT_TRUE(result.ok());
     EXPECT_TRUE(mock_sender_->getTransferCalls().empty());
     EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
@@ -590,7 +580,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AllLayersTransferSuccess) {
     std::atomic<bool> done{false};
     ErrorInfo         result;
     std::thread       write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -627,7 +617,6 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SenderThrowsFailsWithoutCallbackTimeo
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
-    setTransferWaitTimeout(3000);
     mock_sender_->setThrowOnSend(true);
     mock_sender_->setAsyncCallback(false);
 
@@ -635,7 +624,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SenderThrowsFailsWithoutCallbackTimeo
     addComputedBuffer(request_id, 1, deadline_ms);
 
     const int64_t start_ms = currentTimeMs();
-    ErrorInfo     result   = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+    ErrorInfo     result   = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
     const int64_t cost_ms  = currentTimeMs() - start_ms;
 
     EXPECT_TRUE(result.hasError());
@@ -663,7 +652,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_PartialLayersTransferFaile
     std::atomic<bool> done{false};
     ErrorInfo         result;
     std::thread       write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -713,7 +702,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) 
     std::atomic<bool> done{false};
     ErrorInfo         result;
     std::thread       write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -761,7 +750,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AsymmetricTP_2P4D_Success) 
     std::atomic<bool> done{false};
     ErrorInfo         result;
     std::thread       write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -816,7 +805,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_TransferTimeout) {
     auto              start_time_ms = currentTimeMs();
 
     std::thread write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -926,59 +915,20 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_EmptyBuffers) {
     EXPECT_TRUE(error_info.ok());
 }
 
-// ==================== rdma_transfer_wait_timeout_ms 超时测试 ====================
+// ==================== load deadline 超时测试 ====================
 
-TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_RdmaTransferWaitTimeout) {
-    // rdma_transfer_wait_timeout_ms 必须独立限制 callback 总等待时间。
-    setTransferWaitTimeout(50);  // 50ms
-
-    int64_t     request_id = 4001;
-    std::string unique_key = "test_rdma_transfer_wait_timeout_handleread";
-    // 刻意让 D 远晚于 rdma cap，防止把 cap 错实现为反复轮询分片。
-    int64_t deadline_ms = currentTimeMs() + 5000;
-
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    // 设置 transfer 回调延迟，超过 rdma_transfer_wait_timeout_ms
+TEST_F(P2PConnectorWorkerTest, SendCallbacksUseLoadDeadlineWithoutIndependentCap) {
+    const int64_t request_id = 4001;
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+    const int64_t load_deadline_ms = currentTimeMs() + 2000;
     mock_sender_->setShouldSucceed(true);
     mock_sender_->setAsyncCallback(true);
-    mock_sender_->setCallbackDelayMs(500);  // 500ms，超过 50ms 的超时
-
-    addComputedBuffer(request_id, 0, deadline_ms);
-    addComputedBuffer(request_id, 1, deadline_ms);
-
-    std::atomic<bool> done{false};
-    ErrorInfo         result;
-    auto              start_time_ms = currentTimeMs();
-
-    std::thread write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
-        done   = true;
-    });
-
-    int wait_count = 0;
-    while (!done && wait_count < 500) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        wait_count++;
-    }
-
-    auto elapsed_ms = currentTimeMs() - start_time_ms;
-
-    if (write_thread.joinable()) {
-        write_thread.join();
-    }
-
-    // 验证返回错误（因为 rdma_transfer_wait_timeout_ms 超时）
-    EXPECT_TRUE(result.hasError());
-    EXPECT_TRUE(done);
-
-    // 验证等待时间约为 rdma_transfer_wait_timeout_ms（50ms），而不是回调延迟（500ms）
-    EXPECT_GE(elapsed_ms, 40);   // 允许一些误差
-    EXPECT_LE(elapsed_ms, 300);  // 应该远小于 500ms
-
-    // 验证 transfer 被调用了
-    EXPECT_GT(mock_sender_->getTransferCallCount(), 0);
+    mock_sender_->setCallbackDelayMs(100);
+    addComputedBuffer(request_id, 0, request_deadline_ms);
+    addComputedBuffer(request_id, 1, request_deadline_ms);
+    auto result = prefill_->sendKVCache(request_id, "callback_load_deadline", load_deadline_ms,
+        makeRoutePlan({{"127.0.0.1", 12345}}), request_deadline_ms);
+    EXPECT_TRUE(result.ok());
 }
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
@@ -1198,11 +1148,7 @@ TEST_F(P2PConnectorWorkerTest, CancelRequest_PreventsLateStartLoadFromWaiting) {
     prefill_->cancelRequest(request_id, unique_key, transfer_deadline_ms, request_deadline_ms);
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers{{"127.0.0.1", 12345}};
-    ErrorInfo result = prefill_->sendKVCache(request_id,
-                                             unique_key,
-                                             transfer_deadline_ms,
-                                             makeRoutePlan(decode_transfer_servers),
-                                             request_deadline_ms);
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, transfer_deadline_ms, makeRoutePlan(decode_transfer_servers), request_deadline_ms);
 
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::GENERATE_TIMEOUT);
@@ -1219,11 +1165,7 @@ TEST_F(P2PConnectorWorkerTest, TimedOutRequest_LateStartLoadReturnsImmediately) 
     computed_buffers_->checkTimeout();
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers{{"127.0.0.1", 12345}};
-    ErrorInfo result = prefill_->sendKVCache(request_id,
-                                             unique_key,
-                                             transfer_deadline_ms,
-                                             makeRoutePlan(decode_transfer_servers),
-                                             request_deadline_ms);
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, transfer_deadline_ms, makeRoutePlan(decode_transfer_servers), request_deadline_ms);
 
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::GENERATE_TIMEOUT);
@@ -1260,7 +1202,7 @@ TEST_F(P2PConnectorWorkerTest, CancelRequest_ReturnTrue_ContextFound) {
 
     // 启动 sendKVCache 线程（未添加 computed buffer，sendKVCache 会阻塞等待）
     std::thread handle_read_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -1313,7 +1255,7 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_SkipsQueuedAsyncSendTasks) {
     std::atomic<bool> done{false};
     ErrorInfo         result;
     std::thread       handle_read_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -1349,7 +1291,6 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueued
     worker_config_.tp_rank       = 0;
     worker_config_.layer_all_num = 12;
     worker_config_.topology      = makeOneGroupPerLayerTopology(worker_config_.layer_all_num);
-    setTransferWaitTimeout(50);
 
     int64_t     request_id  = 3008;
     std::string unique_key  = "test_timeout_skips_queued_send";
@@ -1370,7 +1311,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueued
     std::atomic<bool> done{false};
     ErrorInfo         result;
     std::thread       handle_read_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -1420,7 +1361,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Succeeds_StaggeredAsyncCallbacks) {
     std::atomic<bool> done{false};
     ErrorInfo         result;
     std::thread       write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -1445,7 +1386,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Succeeds_StaggeredAsyncCallbacks) {
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackWaitTimeout) {
     int64_t     request_id  = 4001;
     std::string unique_key  = "test_callback_wait_timeout";
-    int64_t     deadline_ms = currentTimeMs() + 5000;
+    int64_t     deadline_ms = currentTimeMs() + 100;
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
@@ -1453,10 +1394,9 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackWaitTimeout) {
     // callback 永不触发（大 delay），验证超时保护下不会误判成功
     mock_sender_->setShouldSucceed(true);
     mock_sender_->setAsyncCallback(true);
-    mock_sender_->setCallbackDelayMs(10000);  // 10s delay，远超 rdma_transfer_wait_timeout_ms
+    mock_sender_->setCallbackDelayMs(500);  // 10s delay，远超 load deadline
 
-    // 设置很短的 rdma_transfer_wait_timeout_ms
-    setTransferWaitTimeout(50);
+    // 设置很短的 load deadline
 
     addComputedBuffer(request_id, 0, deadline_ms);
     addComputedBuffer(request_id, 1, deadline_ms);
@@ -1464,7 +1404,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackWaitTimeout) {
     std::atomic<bool> done{false};
     ErrorInfo         result;
     std::thread       write_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
         done   = true;
     });
 
@@ -1504,7 +1444,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Success_ComputedBufferRemovedImmediat
     // send 前 buffer 存在
     ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
 
-    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
     EXPECT_TRUE(result.ok());
 
     // sendKVCache 完成后应立即移除逐层描述，不等待 checkTimeout。
@@ -1529,7 +1469,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_TransferFailure_ComputedBufferRemoved
 
     ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
 
-    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
     EXPECT_TRUE(result.hasError());
 
     // 即使 transfer 失败，buffer 也应立即释放，不能等到 checkTimeout
@@ -1543,12 +1483,12 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_ReleasesQueuedLayerDescriptio
     worker_config_.tp_rank       = 0;
     worker_config_.layer_all_num = 6;
     worker_config_.topology      = makeOneGroupPerLayerTopology(worker_config_.layer_all_num);
-    setTransferWaitTimeout(50);
 
     const int64_t     request_id  = 5005;
     const std::string unique_key  = "test_timeout_releases_queued_layer_descriptions";
     const int64_t     deadline_ms = currentTimeMs() + 500;
 
+    computed_buffers_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     std::vector<std::weak_ptr<LayerCacheBuffer>> weak_buffers;
     weak_buffers.reserve(worker_config_.layer_all_num);
     for (int layer_id = 0; layer_id < static_cast<int>(worker_config_.layer_all_num); ++layer_id) {
@@ -1569,7 +1509,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_ReleasesQueuedLayerDescriptio
 
     ErrorInfo result;
     std::thread send_thread([&]() {
-        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
     });
 
     const bool observed_four_sends = mock_sender_->waitForTransferCallCount(4, std::chrono::milliseconds(2000));
@@ -1610,7 +1550,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_ReleasesQueuedLayerDescriptio
 // ==================== computed_buffers_ 过期竞态条件测试 ====================
 //
 // 复现线上超时问题（done_tasks=0/60，send_cost_us=3579884468）：
-// Prefill 计算完成后，layers 以 store_wait_timeout_ms（10s）为 deadline 存入 computed_buffers_。
+// Prefill 计算完成后，layers 以 old store wait timeout（10s）为 deadline 存入 computed_buffers_。
 // 如果 decode 在超过该 deadline 后才发起 transfer（正常调度延迟），checkTimeout() 已将 layers
 // 清除，但 sendKVCache 仍创建了一个空 buffer 并死等层数据——永远不会到达。
 //
@@ -1622,8 +1562,10 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) 
     std::string unique_key = "test_layers_expired_race";
 
     // 用一个很短的 deadline 模拟 "layers 已过期" 的情况
-    int64_t expired_deadline_ms = currentTimeMs() - 1;  // 已经过期
+    int64_t expired_deadline_ms = currentTimeMs() + 100;  // 已经过期
 
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+    computed_buffers_->registerRequestHorizon(request_id, expired_deadline_ms, request_deadline_ms);
     // 模拟 prefill 计算完成后 layers 被存入 computed_buffers_（带短 deadline）
     addComputedBuffer(request_id, 0, expired_deadline_ms);
     addComputedBuffer(request_id, 1, expired_deadline_ms);
@@ -1631,6 +1573,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) 
     // 验证 buffer 此时存在
     ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     // 模拟 loopCheckProc 中的 checkTimeout()——删除过期 buffer
     computed_buffers_->checkTimeout();
 
@@ -1648,7 +1591,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) 
     mock_sender_->setAsyncCallback(true);
 
     auto      start_ms   = currentTimeMs();
-    ErrorInfo result     = prefill_->sendKVCache(request_id, unique_key, send_deadline_ms, makeRoutePlan(decode_transfer_servers));
+    ErrorInfo result     = prefill_->sendKVCache(request_id, unique_key, send_deadline_ms, makeRoutePlan(decode_transfer_servers), send_deadline_ms);
     auto      elapsed_ms = currentTimeMs() - start_ms;
 
     // 验证：sendKVCache 快速失败，错误码为 GENERATE_TIMEOUT（buffer 已过期）
@@ -1669,10 +1612,12 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) 
 // 修复后：addBuffer 返回 nullptr（因为 checkTimeout 已将 request_id 加入 removed_request_ids_）
 TEST_F(P2PConnectorWorkerTest, ComputedBufferStore_CheckTimeout_MarksRemoved) {
     int64_t request_id          = 6002;
-    int64_t expired_deadline_ms = currentTimeMs() - 1;
+    int64_t expired_deadline_ms = currentTimeMs() + 100;
 
+    computed_buffers_->registerRequestHorizon(request_id, expired_deadline_ms, currentTimeMs() + 5000);
     // 添加并立即过期
     addComputedBuffer(request_id, 0, expired_deadline_ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     computed_buffers_->checkTimeout();
     ASSERT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
 
@@ -1706,70 +1651,21 @@ TEST_F(P2PConnectorWorkerTest, ComputedBufferStore_RemoveBuffer_MarksRemoved) {
         << "After removeBuffer, addBuffer should return nullptr (blocked by removed_request_ids_)";
 }
 
-// 端到端竞态：当 request 没有业务 deadline（INT64_MAX）时，layer cache buffer
-// 仍按 store_wait_timeout 兜底过期；sendKVCache 在 buffer 过期后应快速返回
-// GENERATE_TIMEOUT，不再死等 RPC deadline。
-TEST_F(P2PConnectorWorkerTest, SendKVCache_FallbackTimeout_FailsFastWithGenerateTimeout) {
-    // 重建 prefill 使用非常短的 store_wait_timeout（50ms）以加速测试
-    prefill_.reset();
-    prefill_ =
-        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
-    prefill_->init(50);  // store_wait_timeout_ms = 50ms
-    computed_buffers_ = prefill_->getComputedBuffersStore();
-
-    int64_t request_id = 6004;
-
-    // 模拟 prefill 前向计算：writeByLayer 存入 layers
-    // INT64_MAX 表示请求无业务 deadline → buffer deadline 退回到 now + store_wait_timeout (50ms)
-    const int64_t no_deadline = std::numeric_limits<int64_t>::max();
-    auto          resource0   = createKVCacheResource(0, 2);
-    auto          resource1   = createKVCacheResource(1, 2);
-    prefill_->writeByLayer(0, resource0, request_id, nullptr, no_deadline);
-    prefill_->writeByLayer(1, resource1, request_id, nullptr, no_deadline);
-
-    // 等待 StoreWaitContextChecker 将 layers 移入 computed_buffers_
-    // （event=nullptr 表示立即就绪，checker 每次 loopCheckProc 会处理）
-    // loopCheckProc 每 1000ms 运行一次
-    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-
-    // 再等一下确保 deadline 过期，然后 checkTimeout 已在 loopCheckProc 中执行
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    computed_buffers_->checkTimeout();
-
-    // 验证 layers 已过期被清除
-    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr)
-        << "Layers should have been expired by checkTimeout after store_wait_timeout_ms";
-
-    // 现在模拟 decode 发起 transfer（在 layers 过期后）
-    std::string                                   unique_key       = "test_e2e_fallback_timeout";
-    int64_t                                       send_deadline_ms = currentTimeMs() + 5000;
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    mock_sender_->setShouldSucceed(true);
-    mock_sender_->setAsyncCallback(true);
-
-    auto      start_ms   = currentTimeMs();
-    ErrorInfo result     = prefill_->sendKVCache(request_id, unique_key, send_deadline_ms, makeRoutePlan(decode_transfer_servers));
-    auto      elapsed_ms = currentTimeMs() - start_ms;
-
-    // 验证快速失败 + 错误码语义清晰
-    EXPECT_TRUE(result.hasError());
-    EXPECT_EQ(result.code(), ErrorCode::GENERATE_TIMEOUT)
-        << "addBuffer-returned-nullptr path must surface as GENERATE_TIMEOUT (603) so decode "
-           "treats it as 'business deadline expired' rather than retryable transfer error.";
-    EXPECT_EQ(mock_sender_->getTransferCallCount(), 0);
-    EXPECT_LE(elapsed_ms, 100) << "Should fail fast, not wait until RPC deadline";
+// 非法期限不能生成回退预算或注册逐层资源。
+TEST_F(P2PConnectorWorkerTest, WriteByLayerRejectsMissingOrInfiniteDeadline) {
+    auto resource = createKVCacheResource(0, 2);
+    prefill_->writeByLayer(0, resource, 6004, nullptr, 0);
+    prefill_->writeByLayer(0, resource, 6004, nullptr, std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(computed_buffers_->getBuffer(6004), nullptr);
+    EXPECT_FALSE(computed_buffers_->requestHorizon(6004).has_value());
 }
 
-// 验证 buffer 生命周期跟着 request deadline 走：即使 store_wait_timeout 已过，
-// 只要 request 自己的 deadline 没到，buffer 仍存活，sendKVCache 仍能成功。
 TEST_F(P2PConnectorWorkerTest, WriteByLayer_BufferDeadlineFollowsRequestDeadline) {
-    // 重建 prefill 使用极短的 store_wait_timeout（50ms）模拟"forward 完成 50ms 后"
+    // 重建 worker，验证等待期间不生成新的资源期限。
     prefill_.reset();
     prefill_ =
         std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
-    prefill_->init(50);  // store_wait_timeout_ms = 50ms
+    prefill_->init();
     computed_buffers_ = prefill_->getComputedBuffersStore();
 
     int64_t request_id = 6005;
@@ -1783,7 +1679,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_BufferDeadlineFollowsRequestDeadline
     // 等待 StoreWaitContextChecker 把 layers 加入 computed_buffers_
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
-    // 关键：此时距离 writeByLayer 已超过 store_wait_timeout_ms (50ms)
+    // 关键：此时距离 writeByLayer 已超过 old store wait timeout (50ms)
     // 但远未到 request deadline (5s)，buffer 必须还在
     computed_buffers_->checkTimeout();
     auto buffer = computed_buffers_->getBuffer(request_id);
@@ -1796,7 +1692,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_RequestDeadlineBoundsStoreWaitFallba
     prefill_.reset();
     prefill_ =
         std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
-    prefill_->init(5000);
+    prefill_->init();
     computed_buffers_ = prefill_->getComputedBuffersStore();
 
     const int64_t request_id          = 6006;

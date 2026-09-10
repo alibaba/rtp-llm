@@ -196,45 +196,18 @@ class EngineConfigTest(TestCase):
                 decode_entrance=True,
             )
 
-    def test_cache_store_config_accepts_legacy_20_field_pickle_state(self):
+    def test_cache_store_config_roundtrip_after_timeout_cleanup(self):
         config = CacheStoreConfig()
         state = config.__getstate__()
-        self.assertEqual(len(state), 28)
-
-        # Recreate the former 29-field layout, including the two removed early
-        # deadline offsets and excluding the new lease query timeout.
-        old_state = state[:12] + (250, 100) + state[12:13] + state[14:]
-        # Legacy state before the three P2P horizon fields and three worker
-        # queue fields were added: first 18 fields + TCP anet thread/queue.
-        legacy_state = old_state[:18] + old_state[21:23]
-        self.assertEqual(len(legacy_state), 20)
-
+        self.assertEqual(len(state), 25)
         restored = CacheStoreConfig()
-        maybe_restored = restored.__setstate__(legacy_state)
+        maybe_restored = restored.__setstate__(state)
         if maybe_restored is not None:
             restored = maybe_restored
-
-        defaults = CacheStoreConfig()
-        self.assertEqual(
-            restored.cache_store_tcp_anet_rpc_thread_num,
-            config.cache_store_tcp_anet_rpc_thread_num,
-        )
-        self.assertEqual(
-            restored.cache_store_tcp_anet_rpc_queue_num,
-            config.cache_store_tcp_anet_rpc_queue_num,
-        )
-        self.assertEqual(
-            restored.p2p_prefill_resource_hold_ms,
-            defaults.p2p_prefill_resource_hold_ms,
-        )
-        self.assertEqual(
-            restored.rdma_transfer_worker_queue_size,
-            defaults.rdma_transfer_worker_queue_size,
-        )
-        self.assertEqual(
-            restored.p2p_rdma_enable_h2d_copy,
-            defaults.p2p_rdma_enable_h2d_copy,
-        )
+        self.assertEqual(restored.__getstate__(), state)
+        for removed in ("p2p_prefill_resource_hold_ms", "p2p_max_transfer_deadline_ms",
+                        "p2p_layer_cache_buffer_store_timeout_ms"):
+            self.assertFalse(hasattr(restored, removed))
 
     def test_cache_store_config_preserves_rdma_h2d_staging_fields(self):
         config = CacheStoreConfig()
@@ -342,7 +315,7 @@ class SetupPdSepConfigTest(TestCase):
 
 
 class CacheStoreGroupArgsBindingTest(TestCase):
-    def test_new_p2p_deadline_args_bind_to_cache_store_config(self):
+    def test_p2p_safety_ttl_arg_binds_to_cache_store_config(self):
         py_env_configs = PyEnvConfigs()
         parser = EnvArgumentParser(add_help=False)
         parser.set_root_config(py_env_configs)
@@ -350,18 +323,12 @@ class CacheStoreGroupArgsBindingTest(TestCase):
 
         parser.parse_args(
             [
-                "--p2p_prefill_resource_hold_ms",
-                "1234",
-                "--p2p_max_transfer_deadline_ms",
-                "5678",
                 "--p2p_cancelled_keys_ttl_ms",
                 "9012",
             ]
         )
 
         config = py_env_configs.cache_store_config
-        self.assertEqual(config.p2p_prefill_resource_hold_ms, 1234)
-        self.assertEqual(config.p2p_max_transfer_deadline_ms, 5678)
         self.assertEqual(config.p2p_cancelled_keys_ttl_ms, 9012)
 
 

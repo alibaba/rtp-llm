@@ -356,6 +356,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     p2p_request->set_request_id(6001);
     p2p_request->set_unique_key("malformed-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
 
     auto* layer_block = p2p_request->add_layer_blocks();
     layer_block->set_layer_id(3);
@@ -380,6 +381,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestIsImplicitl
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
 
     FunctionResponsePB response;
     EXPECT_FALSE(decode_connector->executeFunction(request, response));
@@ -397,6 +399,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplic
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("explicit-empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
 
     FunctionResponsePB response;
     EXPECT_TRUE(cp_connector->executeFunction(request, response));
@@ -414,6 +417,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExp
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("expired-empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() - 1);
+    p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
 
     FunctionResponsePB response;
     EXPECT_FALSE(cp_connector->executeFunction(request, response));
@@ -440,6 +444,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidB
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("invalid-block-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
     auto* layer_block = p2p_request->add_layer_blocks();
     layer_block->set_layer_id(0);
     layer_block->set_cache_tag("full");
@@ -471,6 +476,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLaye
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("duplicate-layer-tag-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
     for (int block_id = 1; block_id <= 2; ++block_id) {
         auto* layer_block = p2p_request->add_layer_blocks();
         layer_block->set_layer_id(0);

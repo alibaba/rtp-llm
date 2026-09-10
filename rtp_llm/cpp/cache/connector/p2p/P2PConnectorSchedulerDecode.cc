@@ -9,6 +9,7 @@
 #include "autil/LockFreeThreadPool.h"
 #include <algorithm>
 #include <memory>
+#include <limits>
 #include <optional>
 
 namespace rtp_llm {
@@ -198,7 +199,8 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     const std::string unique_key          = routing->unique_key;
     const int64_t     request_deadline_ms = routing->deadline_ms;
     const int64_t     now_ms              = currentTimeMs();
-    if (request_deadline_ms <= 0 || now_ms >= request_deadline_ms) {
+    if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
+        || now_ms >= request_deadline_ms || config_.load_cache_timeout_ms <= 0) {
         RTP_LLM_LOG_WARNING("asyncRead: request deadline expired, unique_key: %s", unique_key.c_str());
         return {nullptr, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "P2P request deadline expired")};
     }
@@ -206,7 +208,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     // transfer, while request_deadline_ms only bounds request-level terminal
     // state such as Prefill resource tombstones.
     const int64_t     transfer_deadline_ms =
-        std::min(request_deadline_ms, now_ms + config_.p2p_max_transfer_deadline_ms);
+        now_ms + std::min(request_deadline_ms - now_ms, config_.load_cache_timeout_ms);
     const auto& prefill_addr    = routing->prefill_addr;
     const int   prefill_tp_size = routing->prefill_tp_size;
     const int   prefill_cp_size = routing->prefill_cp_size;

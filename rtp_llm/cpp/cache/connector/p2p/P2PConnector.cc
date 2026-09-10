@@ -1,3 +1,5 @@
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <limits>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
@@ -126,6 +128,17 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
         setP2PResponse(response, error_info);
         return false;
     };
+
+    const auto type = p2p_request.type();
+    if (type == P2PConnectorBroadcastType::READ || type == P2PConnectorBroadcastType::HANDLE_READ
+        || type == P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER) {
+        const auto request_deadline_ms = p2p_request.request_deadline_ms();
+        if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
+            || deadline_ms <= currentTimeMs() || deadline_ms > request_deadline_ms) {
+            setP2PResponse(response, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "invalid or expired P2P deadlines"));
+            return false;
+        }
+    }
 
     switch (p2p_request.type()) {
         case P2PConnectorBroadcastType::HANDLE_READ:

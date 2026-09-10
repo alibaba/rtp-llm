@@ -93,7 +93,10 @@ std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(con
                                                                              const std::string&     ip,
                                                                              uint32_t               port,
                                                                              const std::string&     unique_key,
-                                                                             int64_t                deadline_us) {
+                                                                             int64_t                request_deadline_ms) {
+    if (request_deadline_ms <= currentTimeMs() || request_deadline_ms != request->request_deadline_ms()) {
+        return nullptr;
+    }
     std::string prefill_addr = formatGrpcHostPort(ip, port);
     if (prefill_addr.empty()) {
         RTP_LLM_LOG_WARNING("request [%lld] invalid prefill grpc address, ip: %s, port: %u",
@@ -123,8 +126,8 @@ std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(con
     context->async_state_->request.mutable_generate_config()->set_can_use_pd_separation(true);
     context->async_state_->request.mutable_generate_config()->set_unique_key(unique_key);
 
-    context->async_state_->client_context->set_deadline(std::chrono::system_clock::now()
-                                                        + std::chrono::microseconds(deadline_us));
+    context->async_state_->client_context->set_deadline(std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(request_deadline_ms)));
 
     context->async_state_->reader = async_reader_factory_(context->async_state_->stub,
                                                           context->async_state_->client_context.get(),

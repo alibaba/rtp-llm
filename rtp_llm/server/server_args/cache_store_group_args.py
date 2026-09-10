@@ -139,36 +139,12 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="P2P decode 侧资源 store 周期扫描超时资源的间隔（毫秒）。",
     )
     cache_store_group.add_argument(
-        "--p2p_layer_cache_buffer_store_timeout_ms",
-        env_name="P2P_LAYER_CACHE_BUFFER_STORE_TIMEOUT_MS",
-        bind_to=(cache_store_config, "p2p_layer_cache_buffer_store_timeout_ms"),
-        type=int,
-        default=100000,
-        help="P2P LayerCacheBufferStore 条目保留时长（毫秒），默认 100s。",
-    )
-    cache_store_group.add_argument(
         "--p2p_cancel_broadcast_timeout_ms",
         env_name="P2P_CANCEL_BROADCAST_TIMEOUT_MS",
         bind_to=(cache_store_config, "p2p_cancel_broadcast_timeout_ms"),
         type=int,
         default=1000,
         help="P2P Scheduler 广播 CANCEL 时的 gRPC 超时（毫秒）。",
-    )
-    cache_store_group.add_argument(
-        "--p2p_prefill_resource_hold_ms",
-        env_name="P2P_PREFILL_RESOURCE_HOLD_MS",
-        bind_to=(cache_store_config, "p2p_prefill_resource_hold_ms"),
-        type=int,
-        default=300000,
-        help="Prefill 侧 resource / side-channel 在未被 decode 消费时的最大保留时长（毫秒）。",
-    )
-    cache_store_group.add_argument(
-        "--p2p_max_transfer_deadline_ms",
-        env_name="P2P_MAX_TRANSFER_DEADLINE_MS",
-        bind_to=(cache_store_config, "p2p_max_transfer_deadline_ms"),
-        type=int,
-        default=300000,
-        help="单次 P2P 传输 deadline 的硬上限（毫秒），业务超时会被 clamp 到 now + 该值。",
     )
     cache_store_group.add_argument(
         "--p2p_cancelled_keys_ttl_ms",

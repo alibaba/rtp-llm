@@ -344,17 +344,14 @@ bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& resu
     result->completion_queue = std::make_shared<grpc::CompletionQueue>();
 
     const int64_t now_ms       = currentTimeMs();
-    int64_t       remaining_ms = transfer_deadline_ms > 0 ? (transfer_deadline_ms - now_ms) : 30000;
-    if (remaining_ms < 0) {
-        remaining_ms = 0;
+    if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
+        || transfer_deadline_ms <= now_ms || transfer_deadline_ms > request_deadline_ms) {
+        return false;
     }
-    const int64_t max_int_ms = static_cast<int64_t>(std::numeric_limits<int>::max());
-    if (remaining_ms > max_int_ms) {
-        remaining_ms = max_int_ms;
-    }
-    result->timeout_ms = static_cast<int>(remaining_ms);
-    result->client_context->set_deadline(std::chrono::system_clock::now()
-                                         + std::chrono::milliseconds(result->timeout_ms));
+    result->timeout_ms = static_cast<int>(std::min<int64_t>(
+        transfer_deadline_ms - now_ms, std::numeric_limits<int>::max()));
+    result->client_context->set_deadline(
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(transfer_deadline_ms)));
 
     result->reader = result->stub->PrepareAsyncStartLoad(
         result->client_context.get(), result->request, result->completion_queue.get());

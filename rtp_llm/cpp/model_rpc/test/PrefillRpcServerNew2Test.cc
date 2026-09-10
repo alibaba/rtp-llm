@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "gtest/gtest.h"
 #include <mutex>
 #include <string>
@@ -122,11 +123,28 @@ TEST(PrefillRpcServerNew2Test, StartLoadRejectsMissingEngine) {
     EXPECT_EQ(status.error_message(), "engine is null");
 }
 
+TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsMissingRequestDeadline) {
+    PrefillRpcServerNew2 server;
+    grpc::ServerContext context;
+    GenerateInputPB request;
+    request.set_request_id(43);
+    request.add_token_ids(1);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(8);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
+    config->set_can_use_pd_separation(true);
+    config->set_unique_key("missing_request_deadline");
+    auto status = server.GenerateStreamCall(&context, &request, nullptr);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+}
+
 TEST(PrefillRpcServerNew2Test, GenerateStreamCallRejectsPdRequestWithoutUniqueKey) {
     PrefillRpcServerNew2 server;
     grpc::ServerContext  context;
     GenerateInputPB      request;
     request.set_request_id(42);
+    request.set_request_deadline_ms(currentTimeMs() + 5000);
     request.add_token_ids(1);
     auto* config = request.mutable_generate_config();
     config->set_max_new_tokens(8);

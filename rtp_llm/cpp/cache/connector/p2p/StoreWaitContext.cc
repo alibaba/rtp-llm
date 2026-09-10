@@ -31,14 +31,13 @@ void StoreWaitContextChecker::checkOnce() {
     while (iter != contexts_.end()) {
         auto& context = *iter;
 
-        // StartLoad may begin after this event was queued. Once it consumes
-        // the request resource, use the activated transfer horizon instead of
-        // expiring the layer at the earlier pre-transfer hold deadline.
-        if (computed_buffers_) {
-            if (auto active_horizon = computed_buffers_->requestHorizon(context.request_id)) {
-                context.deadline_ms = *active_horizon;
-            }
+        // Read the current phase on every check; removed requests cannot be revived.
+        const auto deadline = computed_buffers_->requestHorizon(context.request_id);
+        if (!deadline) {
+            iter = contexts_.erase(iter);
+            continue;
         }
+        context.deadline_ms = *deadline;
 
         // check timeout
         if (currentTimeMs() >= context.deadline_ms) {

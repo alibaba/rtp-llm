@@ -17,16 +17,13 @@ inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
 }
 
 struct P2PConnectorSchedulerConfig {
+    int64_t load_cache_timeout_ms = 5000;
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
     std::vector<std::string> p2p_worker_addrs;
     int64_t                  p2p_lease_query_timeout_ms                   = 20 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
-    int64_t                  p2p_prefill_resource_hold_ms                 = 300 * 1000;
-    // Clamp for the P2P RPC deadline at decode/prefill entry; see
-    // CacheStoreConfig::p2p_max_transfer_deadline_ms for rationale.
-    int64_t                     p2p_max_transfer_deadline_ms = 300 * 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     std::shared_ptr<const CacheTopology> topology;
     int                                  cp_rank = 0;
@@ -45,6 +42,7 @@ struct P2PConnectorSchedulerConfig {
         P2PConnectorSchedulerConfig config;
         config.parallelism_config                     = parallelism_config;
         config.role_type                              = pd_sep_config.role_type;
+        config.load_cache_timeout_ms                  = pd_sep_config.load_cache_timeout_ms;
         config.worker_grpc_addrs                      = runtime_config.worker_grpc_addrs;
         config.worker_addrs                           = runtime_config.worker_addrs;
         config.p2p_worker_addrs                       = runtime_config.p2p_worker_addrs;
@@ -52,8 +50,6 @@ struct P2PConnectorSchedulerConfig {
         config.p2p_resource_store_timeout_check_interval_ms =
             cache_store_config.p2p_resource_store_timeout_check_interval_ms;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
-        config.p2p_prefill_resource_hold_ms    = cache_store_config.p2p_prefill_resource_hold_ms;
-        config.p2p_max_transfer_deadline_ms    = cache_store_config.p2p_max_transfer_deadline_ms;
         config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
         return config;
     }
@@ -62,8 +58,6 @@ struct P2PConnectorSchedulerConfig {
 struct P2PConnectorWorkerConfig {
     transfer::TransferBackendConfig transfer_backend_config;
 
-    int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
-    int64_t p2p_prefill_resource_hold_ms            = 300 * 1000;
     int64_t p2p_cancelled_keys_ttl_ms                = 3600 * 1000;
 
     int64_t  tp_size       = 1;
@@ -81,7 +75,6 @@ struct P2PConnectorWorkerConfig {
                                            bool                     is_mla = false) {
         P2PConnectorWorkerConfig config;
         config.transfer_backend_config.cache_store_rdma_mode         = pd_sep_config.cache_store_rdma_mode;
-        config.transfer_backend_config.rdma_transfer_wait_timeout_ms = cache_store_config.rdma_transfer_wait_timeout_ms;
         config.transfer_backend_config.messager_io_thread_count      = cache_store_config.messager_io_thread_count;
         config.transfer_backend_config.messager_worker_thread_count  = cache_store_config.messager_worker_thread_count;
         config.transfer_backend_config.rdma_max_block_pairs_per_connection =
@@ -105,8 +98,6 @@ struct P2PConnectorWorkerConfig {
             cache_store_config.p2p_rdma_staging_block_size_bytes;
         config.transfer_backend_config.rdma_disconnect_after_deadline_ms =
             cache_store_config.p2p_transfer_not_done_resource_hold_ms;
-        config.p2p_layer_cache_buffer_store_timeout_ms = cache_store_config.p2p_layer_cache_buffer_store_timeout_ms;
-        config.p2p_prefill_resource_hold_ms            = cache_store_config.p2p_prefill_resource_hold_ms;
         config.p2p_cancelled_keys_ttl_ms                = cache_store_config.p2p_cancelled_keys_ttl_ms;
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;

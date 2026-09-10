@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <map>
 #include <mutex>
@@ -44,23 +45,14 @@ struct P2PConnectorResourceEntry {
     SideChannelData         side_channel_data;
     bool                    side_channel_ready = false;
     mutable std::mutex      side_channel_mutex;
-    std::condition_variable side_channel_cv;
 };
 
-struct P2PSideChannelStoreEntry {
-    P2PConnectorResourceEntry::SideChannelData data;
-    int64_t                                    deadline_ms = 0;
-    int64_t                                    add_time_us = 0;
-};
-
-// p2p_connector 拉取过程中对应的资源不会释放。当 prefill 请求完成时, 需要将资源从 store 中移除, 如果超时未完成,
-// 需要将资源移除。unique_key 目前由 decode 生成, 后续可能由 master 统一生成保证全局唯一。
+// Prefill rank 0 holds request KV resources until StartLoad takes ownership.
+// Lightweight request state remains until the original request deadline.
 class P2PConnectorResourceStore {
 public:
     P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
-                              int                                 timeout_check_interval_ms,
-                              int64_t                             prefill_resource_hold_ms = 60 * 1000,
-                              int64_t                             cancelled_keys_ttl_ms    = 3600 * 1000);
+                              int                                 timeout_check_interval_ms);
     ~P2PConnectorResourceStore();
 
 public:
@@ -80,14 +72,15 @@ public:
     // immediately; otherwise record the cancellation so that a future addResource() call
     // for the same key is rejected on arrival, preventing blocks from being pinned until
     // the next checkTimeout() cycle.
-    void markCancelled(const std::string& unique_key, int64_t request_deadline_ms = 0);
+    void markCancelled(const std::string& unique_key, int64_t request_deadline_ms);
 
     // Record a terminal request after its resource has been consumed. Late
     // side-channel notifications and duplicate StartLoad calls are rejected.
-    void markTerminal(const std::string& unique_key, int64_t request_deadline_ms = 0);
+    void markTerminal(const std::string& unique_key, int64_t request_deadline_ms);
 
     std::shared_ptr<P2PConnectorResourceEntry> waitAndStealResource(const std::string&    unique_key,
                                                                     int64_t               deadline_ms,
+                                                                    int64_t               request_deadline_ms,
                                                                     std::function<bool()> is_cancelled = nullptr);
 
     // Notify side-channel data ready (called by prefill when first token / SP data is produced)
@@ -100,7 +93,7 @@ public:
                               int64_t               deadline_ms,
                               std::function<bool()> is_cancelled = nullptr);
 
-    // Try to consume side-channel data from the independent map (returns true if data was found and copied)
+    // Try to consume side-channel data from the request state (returns true if data was found and copied)
     bool consumeSideChannelData(const std::string& unique_key, P2PConnectorResourceEntry::SideChannelData& out_data);
     void clearSideChannelData(const std::string& unique_key);
 
@@ -108,48 +101,33 @@ private:
     void checkTimeout();
     void reportMetrics(bool timeout, bool cancelled, int64_t wait_start_time_us);
 
-    // 持有 resource_map_mutex_（unique_lock）时调用。
-    bool                                       waitForResourceOrCancellation(std::unique_lock<std::mutex>&         lock,
-                                                                             const std::string&                    unique_key,
-                                                                             std::chrono::system_clock::time_point timeout_tp,
-                                                                             const std::function<bool()>&          is_cancelled);
-    std::shared_ptr<P2PConnectorResourceEntry> stealResourceEntryLocked(const std::string& unique_key);
-    void                                       clearSideChannelDataLocked(const std::string& unique_key);
+    struct RequestState {
+        int64_t request_deadline_ms;
+        int64_t load_deadline_ms = 0;
+        bool consumed = false;
+        bool terminal = false;
+        std::optional<P2PConnectorResourceEntry::SideChannelData> side_channel_data;
 
-private:
-    mutable std::mutex                                                resource_map_mutex_;
-    std::condition_variable                                           resource_cv_;
+        int64_t deadlineMs() const {
+            return load_deadline_ms > 0 ? load_deadline_ms : request_deadline_ms;
+        }
+    };
+
+    mutable std::mutex resource_map_mutex_;
+    std::condition_variable resource_cv_;
     std::map<std::string, std::shared_ptr<P2PConnectorResourceEntry>> resource_map_;
-    // unique_key → expire_at_ms: terminal keys whose resources were cancelled or expired.
-    // Keeping the terminal state until the original request deadline makes a late StartLoad
-    // fail immediately instead of waiting for a resource that can no longer arrive.
-    std::map<std::string, int64_t> cancelled_keys_;
-    // Side-channel data stored independently from resource entries.
-    // This allows notifySideChannelReady to store data even after the entry has been stolen.
-    std::mutex                                      side_channel_map_mutex_;
-    std::condition_variable                         side_channel_cv_;
-    std::map<std::string, P2PSideChannelStoreEntry> side_channel_data_map_;
-    // Active StartLoad transfer deadline for entries already stolen from
-    // resource_map_. It prevents a later side-channel notification from
-    // falling back to the much longer user-request deadline.
-    std::map<std::string, int64_t> active_side_channel_deadlines_;
+    // Lifecycle survives resource transfer without retaining the KV resource.
+    std::map<std::string, RequestState> request_states_;
 
     kmonitor::MetricsReporterPtr metrics_reporter_;
 
     autil::LoopThreadPtr check_timeout_thread_;
     int                  timeout_check_interval_ms_;
 
-    // Cap entry->deadline_ms to currentTimeMs() + this value, so prefill stops
-    // pinning KV blocks for the full business deadline (commonly ~1h) when
-    // decode never sends StartLoad. See P2PConnectorResourceStore.cc::addResource.
-    int64_t prefill_resource_hold_ms_;
-    // Fallback lifetime used only when a legacy caller does not provide a
-    // valid original request deadline.
-    int64_t cancelled_keys_ttl_ms_;
     std::function<void(int64_t, int64_t)> on_request_released_;
 
 public:
-    // Test hook: peek whether a unique_key is currently in cancelled_keys_.
+    // Test hook: peek whether a unique_key is terminal.
     // Used by handleRead to decide between GENERATE_TIMEOUT (expired here)
     // and the generic RESOURCE_FAILED.
     bool isMarkedCancelled(const std::string& unique_key) const;

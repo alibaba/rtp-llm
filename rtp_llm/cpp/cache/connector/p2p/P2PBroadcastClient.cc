@@ -1,3 +1,4 @@
+#include <limits>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -106,6 +107,16 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
                                       int64_t                        deadline_ms) {
 
     // gRPC 超时与物理传输共用绝对 deadline_ms（D）。
+    for (const auto& request : requests) {
+        const auto request_deadline_ms = request.p2p_request().request_deadline_ms();
+        if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
+            || deadline_ms > request_deadline_ms) {
+            return nullptr;
+        }
+    }
+    if (deadline_ms <= 0) {
+        return nullptr;
+    }
     auto timeout_ms = deadline_ms - currentTimeMs();
     if (timeout_ms <= 0) {
         RTP_LLM_LOG_WARNING("broadcast timeout_ms: %ld <= 0, deadline_ms: %ld current_time_ms: %ld",
@@ -116,15 +127,17 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
     }
 
     // Define the RPC call lambda for ExecuteFunction
-    auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
+    auto rpc_call = [deadline_ms](std::shared_ptr<RpcService::Stub>&    stub,
                        std::shared_ptr<grpc::ClientContext>& client_context,
                        const FunctionRequestPB&              request,
                        grpc::CompletionQueue*                cq) {
+        client_context->set_deadline(
+            std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)));
         return stub->AsyncExecuteFunction(client_context.get(), request, cq);
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(timeout_ms), rpc_call);
+        requests, static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())), rpc_call);
     if (!result) {
         RTP_LLM_LOG_WARNING("broadcast failed, cannot create broadcast result");
         return nullptr;
@@ -167,7 +180,7 @@ void P2PBroadcastClient::genBroadcastRequest(
     p2p_request->set_unique_key(unique_key);
     p2p_request->set_request_id(request_id);
     p2p_request->set_deadline_ms(deadline_ms);
-    p2p_request->set_request_deadline_ms(request_deadline_ms > 0 ? request_deadline_ms : deadline_ms);
+    p2p_request->set_request_deadline_ms(request_deadline_ms);
     p2p_request->set_type(type);
 
     // 本 worker 那一份传输计划。为空即「该 worker 无任务」—— 这取代了

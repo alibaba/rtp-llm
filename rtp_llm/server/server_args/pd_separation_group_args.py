@@ -39,7 +39,7 @@ def init_pd_separation_group_args(parser, pd_separation_config):
         bind_to=(pd_separation_config, 'load_cache_timeout_ms'),
         type=int,
         default=5000,
-        help="KVCache远端加载超时时间（毫秒）",
+        help="KV cache 加载超时（毫秒），共享默认 5000；P2P 部署可显式设置 900000（15min）。",
     )
 
     pd_separation_group.add_argument(

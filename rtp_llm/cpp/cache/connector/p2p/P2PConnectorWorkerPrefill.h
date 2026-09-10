@@ -33,7 +33,7 @@ public:
     ~P2PConnectorWorkerPrefill();
 
 public:
-    bool init(int64_t store_wait_timeout_ms);
+    bool init();
 
     bool writeByLayer(int                           layer_id,
                       const KVCacheResourcePtr&     resource,
@@ -53,21 +53,19 @@ public:
                           const std::string&        unique_key,
                           int64_t                   deadline_ms,
                           const P2PWorkerRoutePlan& worker_plan,
-                          int64_t                   request_deadline_ms = 0);
+                          int64_t                   request_deadline_ms);
 
-    void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms = 0);
+    void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms);
 
     bool cancelRequest(int64_t            request_id,
                        const std::string& unique_key,
                        int64_t            deadline_ms,
-                       int64_t            request_deadline_ms = 0);
+                       int64_t            request_deadline_ms);
 
     std::shared_ptr<ComputedLayerCacheBufferStore> getComputedBuffersStore() const {
         return computed_buffers_;
     }
-    void setStoreWaitTimeoutMs(int64_t store_wait_timeout_ms) {
-        store_wait_timeout_ms_ = store_wait_timeout_ms;
-    }
+
 
 private:
     bool scheduleLayerCacheBuffers(int                                                           layer_id,
@@ -159,13 +157,12 @@ private:
     kmonitor::MetricsReporterPtr                                        metrics_reporter_;
     transfer::IKVCacheSenderPtr                                         sender_;
     std::shared_ptr<ComputedLayerCacheBufferStore>                      computed_buffers_;
-    int64_t                                                             store_wait_timeout_ms_ = 10 * 1000;
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;
     autil::LoopThreadPtr                                                cleanup_thread_;
     // Per in-flight sendKVCache, hold both the cancel signal and a weak handle
     // to its SendTransferResult. The weak handle lets cancelRequest() wake up the
     // wait_for loop in waitSendCallbacksWithTimeout via cv.notify_all() instead
-    // of letting cancel_flag sit unchecked for up to rdma_transfer_wait_timeout_ms
+    // of letting cancel_flag sit unchecked for up to the load deadline
     // (180s by default). Weak ref avoids extending the lifetime of the result.
     struct HandleCancelEntry {
         std::shared_ptr<std::atomic<bool>> cancel_flag;

@@ -79,13 +79,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     decode_transfer_servers.push_back({"127.0.0.1", 12346});
 
     // 执行 broadcast
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ,
-                                     request_deadline_ms);
+    auto result = client_->broadcast(request_id, layer_cache_buffers, decode_transfer_servers, unique_key, deadline_ms, P2PConnectorBroadcastType::READ, request_deadline_ms);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->uniqueKey(), unique_key);
 
@@ -111,12 +105,7 @@ TEST_F(P2PBroadcastClientTest, BroadcastPerRankSendsEachWorkerItsLocalBlockView)
 
     P2PBroadcastClient::RankLayerCacheBuffers rank_buffers = {{rank0_buffer}, {rank1_buffer}};
     const int64_t deadline_ms = currentTimeMs() + 5000;
-    auto result = client_->broadcastPerRank(1010,
-                                            rank_buffers,
-                                            {},
-                                            "cp-rank-view",
-                                            deadline_ms,
-                                            P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcastPerRank(1010, rank_buffers, {}, "cp-rank-view", deadline_ms, P2PConnectorBroadcastType::READ, deadline_ms);
     ASSERT_NE(result, nullptr);
     waitDone(result);
     ASSERT_TRUE(result->success());
@@ -135,12 +124,7 @@ TEST_F(P2PBroadcastClientTest, BroadcastPerRankAllowsEmptyLocalProjection) {
     rank0_buffer->addBlockId(100, 10);
 
     P2PBroadcastClient::RankLayerCacheBuffers rank_buffers = {{rank0_buffer}, {}};
-    auto result = client_->broadcastPerRank(1011,
-                                            rank_buffers,
-                                            {},
-                                            "cp-empty-rank-view",
-                                            currentTimeMs() + 5000,
-                                            P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcastPerRank(1011, rank_buffers, {}, "cp-empty-rank-view", currentTimeMs() + 5000, P2PConnectorBroadcastType::READ, currentTimeMs() + 5000);
     ASSERT_NE(result, nullptr);
     waitDone(result);
     ASSERT_TRUE(result->success());
@@ -152,12 +136,7 @@ TEST_F(P2PBroadcastClientTest, BroadcastPerRankAllowsEmptyLocalProjection) {
 
 TEST_F(P2PBroadcastClientTest, BroadcastPerRankRejectsMismatchedWorkerCount) {
     P2PBroadcastClient::RankLayerCacheBuffers rank_buffers = {{createLayerCacheBuffer(0, 1)}};
-    EXPECT_EQ(client_->broadcastPerRank(1012,
-                                        rank_buffers,
-                                        {},
-                                        "cp-invalid-rank-view",
-                                        currentTimeMs() + 5000,
-                                        P2PConnectorBroadcastType::READ),
+    EXPECT_EQ(client_->broadcastPerRank(1012, rank_buffers, {}, "cp-invalid-rank-view", currentTimeMs() + 5000, P2PConnectorBroadcastType::READ, currentTimeMs() + 5000),
               nullptr);
 }
 
@@ -178,12 +157,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     // 执行 broadcast
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(request_id, layer_cache_buffers, decode_transfer_servers, unique_key, deadline_ms, P2PConnectorBroadcastType::READ, deadline_ms);
 
     ASSERT_NE(result, nullptr);
 
@@ -206,12 +180,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_PartialResponseFailed) {
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(request_id, layer_cache_buffers, decode_transfer_servers, unique_key, deadline_ms, P2PConnectorBroadcastType::READ, deadline_ms);
     ASSERT_NE(result, nullptr);
 
     waitDone(result);
@@ -241,12 +210,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllResponseFailed) {
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(request_id, layer_cache_buffers, decode_transfer_servers, unique_key, deadline_ms, P2PConnectorBroadcastType::READ, deadline_ms);
     ASSERT_NE(result, nullptr);
 
     waitDone(result);
@@ -265,12 +229,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_MissingP2PResponseHasNonSuccessError) {
     servers_[0]->service()->setOmitP2PResponse(true);
     const int64_t deadline_ms = currentTimeMs() + 5000;
 
-    auto result = client_->broadcast(1006,
-                                     {createLayerCacheBuffer(0, 1)},
-                                     {{"127.0.0.1", 12345}},
-                                     "test_broadcast_missing_response",
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(1006, {createLayerCacheBuffer(0, 1)}, {{"127.0.0.1", 12345}}, "test_broadcast_missing_response", deadline_ms, P2PConnectorBroadcastType::READ, deadline_ms);
     ASSERT_NE(result, nullptr);
     waitDone(result);
 
@@ -294,12 +253,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
-    auto result = client_->broadcast(request_id,
-                                     layer_cache_buffers,
-                                     decode_transfer_servers,
-                                     unique_key,
-                                     deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+    auto result = client_->broadcast(request_id, layer_cache_buffers, decode_transfer_servers, unique_key, deadline_ms, P2PConnectorBroadcastType::READ, deadline_ms);
     ASSERT_NE(result, nullptr);
 
     waitDone(result);

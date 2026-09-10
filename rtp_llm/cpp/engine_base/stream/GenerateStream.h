@@ -521,6 +521,9 @@ public:
     }
 
     int64_t deadlineMs() const {
+        if (generate_input_->request_deadline_ms > 0) {
+            return generate_input_->request_deadline_ms;
+        }
         const int timeout_ms = generate_input_->generate_config->timeout_ms;
         if (timeout_ms <= 0) {
             return std::numeric_limits<int64_t>::max();

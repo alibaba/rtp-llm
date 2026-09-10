@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -168,6 +169,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         }
     };
 
+    const int64_t request_entry_ms = currentTimeMs();
     const auto normalized_timeout_ms     = normalizeRpcTimeoutMs(request->generate_config().timeout_ms(),
                                                              maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
     const auto normalized_timeout_ms_i32 = clampRpcTimeoutMsToInt32(normalized_timeout_ms);
@@ -203,6 +205,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         GenerateContext(request_id, normalized_timeout_ms, server_context, metrics_reporter_, meta_);
     auto input                         = QueryConverter::transQuery(effective_request);
     input->generate_config->timeout_ms = normalized_timeout_ms_i32;
+    input->request_deadline_ms = request_entry_ms + normalized_timeout_ms;
 
     // need to check client has buffer at first
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
@@ -250,9 +253,10 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
     PrefillContextGuard                         prefill_context_guard;
     const auto&                                 unique_key  = input->generate_config->unique_key;
-    auto                                        deadline_us = normalized_timeout_ms * 1000;
+    const auto request_deadline_ms = input->request_deadline_ms;
     GenerateInputPB                             prefill_request;
     prefill_request.CopyFrom(*effective_request);
+    prefill_request.set_request_deadline_ms(request_deadline_ms);
     prefill_request.mutable_generate_config()->set_timeout_ms(normalized_timeout_ms_i32);
     prefill_request.mutable_generate_config()->set_unique_key(unique_key);
 
@@ -290,7 +294,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         update_prefill_role_addr(target_ip, target_port);
 
         prefill_caller_ctx =
-            prefill_server_caller_->callPrefill(&prefill_request, target_ip, target_port, unique_key, deadline_us);
+            prefill_server_caller_->callPrefill(&prefill_request, target_ip, target_port, unique_key, request_deadline_ms);
         if (prefill_caller_ctx) {
             if (attempt > 0) {
                 RTP_LLM_LOG_WARNING("request [%ld] recovered async prefill by trying next DP, addr=%s",

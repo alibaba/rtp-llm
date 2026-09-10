@@ -70,6 +70,7 @@ public:
 
     int     prefix_length = 0;
     int64_t begin_time_us = 0;
+    int64_t request_deadline_ms = 0;  // P2P absolute deadline; other paths use timeout_ms.
 
     // Batch grouping params
     int     batch_group_size = 1;

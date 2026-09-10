@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <atomic>
 #include <algorithm>
 #include <chrono>
@@ -322,7 +323,8 @@ protected:
         request.set_request_id(request_id);
         request.add_token_ids(1);
         request.mutable_generate_config()->set_timeout_ms(5000);
-        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, deadline_us);
+        request.set_request_deadline_ms(currentTimeMs() + deadline_us / 1000);
+        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, request.request_deadline_ms());
     }
 
     bool waitDone(const std::shared_ptr<PrefillServerCallerContext>& context,
@@ -440,13 +442,15 @@ TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationR
     request.mutable_generate_config()->set_num_return_sequences(1);
     request.mutable_generate_config()->set_can_use_pd_separation(true);
 
-    auto context = caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", 5 * 1000 * 1000);
+    request.set_request_deadline_ms(currentTimeMs() + 5000);
+    auto context = caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request.request_deadline_ms());
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(waitDone(context));
     ASSERT_TRUE(context->success());
 
     const auto captured_request = server.service()->capturedRequest();
     EXPECT_EQ(captured_request.request_id(), 1010);
+    EXPECT_EQ(captured_request.request_deadline_ms(), request.request_deadline_ms());
     EXPECT_EQ(captured_request.generate_config().max_new_tokens(), 64);
     EXPECT_TRUE(captured_request.generate_config().can_use_pd_separation());
     EXPECT_EQ(captured_request.generate_config().unique_key(), "decode-entrance-key");
@@ -486,7 +490,8 @@ TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailureReturnsNullContext) {
     request.add_token_ids(1);
     request.mutable_generate_config()->set_timeout_ms(5000);
 
-    auto context = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", 5 * 1000 * 1000);
+    request.set_request_deadline_ms(currentTimeMs() + 5000);
+    auto context = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", request.request_deadline_ms());
     EXPECT_EQ(context, nullptr);
 }
 
@@ -496,7 +501,8 @@ TEST_F(PrefillServerCallerTest, AsyncPrefillNormalizesRawIpv6TargetAddress) {
     request.add_token_ids(1);
     request.mutable_generate_config()->set_timeout_ms(1);
 
-    auto context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", 1000);
+    request.set_request_deadline_ms(currentTimeMs() + 5000);
+    auto context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", request.request_deadline_ms());
     ASSERT_NE(context, nullptr);
     EXPECT_EQ(context->prefill_addr_, "[::1]:65535");
     context->cancel();

@@ -902,11 +902,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_lease_query_timeout_ms", &CacheStoreConfig::p2p_lease_query_timeout_ms)
         .def_readwrite("p2p_resource_store_timeout_check_interval_ms",
                        &CacheStoreConfig::p2p_resource_store_timeout_check_interval_ms)
-        .def_readwrite("p2p_layer_cache_buffer_store_timeout_ms",
-                       &CacheStoreConfig::p2p_layer_cache_buffer_store_timeout_ms)
         .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
-        .def_readwrite("p2p_prefill_resource_hold_ms", &CacheStoreConfig::p2p_prefill_resource_hold_ms)
-        .def_readwrite("p2p_max_transfer_deadline_ms", &CacheStoreConfig::p2p_max_transfer_deadline_ms)
         .def_readwrite("p2p_cancelled_keys_ttl_ms", &CacheStoreConfig::p2p_cancelled_keys_ttl_ms)
         .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
         .def_readwrite("cache_store_tcp_anet_rpc_queue_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_queue_num)
@@ -934,10 +930,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_transfer_not_done_resource_hold_ms,
                                       self.p2p_lease_query_timeout_ms,
                                       self.p2p_resource_store_timeout_check_interval_ms,
-                                      self.p2p_layer_cache_buffer_store_timeout_ms,
                                       self.p2p_cancel_broadcast_timeout_ms,
-                                      self.p2p_prefill_resource_hold_ms,
-                                      self.p2p_max_transfer_deadline_ms,
                                       self.p2p_cancelled_keys_ttl_ms,
                                       self.cache_store_tcp_anet_rpc_thread_num,
                                       self.cache_store_tcp_anet_rpc_queue_num,
@@ -949,54 +942,35 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_rdma_staging_block_size_bytes);
             },
             [](py::tuple t) {
-                if (t.size() != 20 && t.size() != 23 && t.size() != 26 && t.size() != 28 && t.size() != 29)
-                    throw std::runtime_error("Invalid state!");
-                CacheStoreConfig c;
-                try {
-                    c.cache_store_rdma_mode                        = t[0].cast<bool>();
-                    c.wrr_available_ratio                          = t[1].cast<int>();
-                    c.rank_factor                                  = t[2].cast<int>();
-                    c.thread_count                                 = t[3].cast<int>();
-                    c.rdma_connect_timeout_ms                      = t[4].cast<int>();
-                    c.rdma_qp_count_per_connection                 = t[5].cast<int>();
-                    c.rdma_io_thread_count                         = t[6].cast<int>();
-                    c.rdma_worker_thread_count                     = t[7].cast<int>();
-                    c.messager_io_thread_count                     = t[8].cast<int>();
-                    c.messager_worker_thread_count                 = t[9].cast<int>();
-                    c.rdma_transfer_wait_timeout_ms                = t[10].cast<int64_t>();
-                    c.rdma_max_block_pairs_per_connection          = t[11].cast<int>();
-                    const bool current_state = t.size() == 28;
-                    int        idx           = 12;
-                    if (!current_state) {
-                        idx += 2;  // removed steal-before and return-before fields
-                    }
-                    c.p2p_transfer_not_done_resource_hold_ms = t[idx++].cast<int64_t>();
-                    if (current_state) {
-                        c.p2p_lease_query_timeout_ms = t[idx++].cast<int64_t>();
-                    }
-                    c.p2p_resource_store_timeout_check_interval_ms = t[idx++].cast<int>();
-                    c.p2p_layer_cache_buffer_store_timeout_ms      = t[idx++].cast<int64_t>();
-                    c.p2p_cancel_broadcast_timeout_ms              = t[idx++].cast<int64_t>();
-                    if (current_state || t.size() == 26 || t.size() == 29) {
-                        c.p2p_prefill_resource_hold_ms = t[idx++].cast<int64_t>();
-                        c.p2p_max_transfer_deadline_ms = t[idx++].cast<int64_t>();
-                        c.p2p_cancelled_keys_ttl_ms    = t[idx++].cast<int64_t>();
-                    }
-                    c.cache_store_tcp_anet_rpc_thread_num   = t[idx++].cast<int>();
-                    c.cache_store_tcp_anet_rpc_queue_num    = t[idx++].cast<int>();
-                    if (current_state || t.size() >= 23) {
-                        c.cache_store_tcp_worker_queue_size = t[idx++].cast<int>();
-                        c.rdma_transfer_worker_thread_count = t[idx++].cast<int>();
-                        c.rdma_transfer_worker_queue_size   = t[idx++].cast<int>();
-                    }
-                    if (current_state || t.size() == 29) {
-                        c.p2p_rdma_enable_h2d_copy          = t[idx++].cast<bool>();
-                        c.p2p_rdma_staging_block_count      = t[idx++].cast<int>();
-                        c.p2p_rdma_staging_block_size_bytes = t[idx++].cast<int64_t>();
-                    }
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
+                if (t.size() != 25) {
+                    throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
+                CacheStoreConfig c;
+                c.cache_store_rdma_mode = t[0].cast<bool>();
+                c.wrr_available_ratio = t[1].cast<int>();
+                c.rank_factor = t[2].cast<int>();
+                c.thread_count = t[3].cast<int>();
+                c.rdma_connect_timeout_ms = t[4].cast<int>();
+                c.rdma_qp_count_per_connection = t[5].cast<int>();
+                c.rdma_io_thread_count = t[6].cast<int>();
+                c.rdma_worker_thread_count = t[7].cast<int>();
+                c.messager_io_thread_count = t[8].cast<int>();
+                c.messager_worker_thread_count = t[9].cast<int>();
+                c.rdma_transfer_wait_timeout_ms = t[10].cast<int64_t>();
+                c.rdma_max_block_pairs_per_connection = t[11].cast<int>();
+                c.p2p_transfer_not_done_resource_hold_ms = t[12].cast<int64_t>();
+                c.p2p_lease_query_timeout_ms = t[13].cast<int64_t>();
+                c.p2p_resource_store_timeout_check_interval_ms = t[14].cast<int>();
+                c.p2p_cancel_broadcast_timeout_ms = t[15].cast<int64_t>();
+                c.p2p_cancelled_keys_ttl_ms = t[16].cast<int64_t>();
+                c.cache_store_tcp_anet_rpc_thread_num = t[17].cast<int>();
+                c.cache_store_tcp_anet_rpc_queue_num = t[18].cast<int>();
+                c.cache_store_tcp_worker_queue_size = t[19].cast<int>();
+                c.rdma_transfer_worker_thread_count = t[20].cast<int>();
+                c.rdma_transfer_worker_queue_size = t[21].cast<int>();
+                c.p2p_rdma_enable_h2d_copy = t[22].cast<bool>();
+                c.p2p_rdma_staging_block_count = t[23].cast<int>();
+                c.p2p_rdma_staging_block_size_bytes = t[24].cast<int64_t>();
                 return c;
             }));
 

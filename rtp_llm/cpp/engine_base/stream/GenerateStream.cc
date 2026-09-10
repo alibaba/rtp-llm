@@ -533,7 +533,10 @@ int64_t GenerateStream::getTimeoutMs() const {
 void GenerateStream::checkTimeout() {
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
-    if (timeout_ms > 0 && timeout_ms < running_time_ms) {
+    const bool timed_out = generate_input_->request_deadline_ms > 0 ?
+                               autil::TimeUtility::currentTimeInMicroSeconds() / 1000 >= deadlineMs() :
+                               timeout_ms > 0 && timeout_ms < running_time_ms;
+    if (timed_out) {
         reportEvent(StreamEvents::Error,
                     ErrorCode::GENERATE_TIMEOUT,
                     "query has been running " + std::to_string(running_time_ms) + " ms, "

@@ -40,6 +40,7 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_NoEvent_TreatedAsReady) {
 
     // null event is treated as ready
     StoreWaitContext context(request_id, nullptr, buffer, deadline_ms, collector);
+    computed_buffers_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     checker.addContext(std::move(context));
 
     EXPECT_EQ(checker.getContextCount(), 1);
@@ -60,6 +61,7 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
 
     // Even with null event, timeout takes precedence
     StoreWaitContext context(request_id, nullptr, buffer, deadline_ms, collector);
+    computed_buffers_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     checker.addContext(std::move(context));
 
     EXPECT_EQ(checker.getContextCount(), 1);
@@ -75,17 +77,28 @@ TEST_F(StoreWaitContextTest, CheckerUsesActivatedTransferHorizon) {
     StoreWaitContextChecker checker(nullptr, computed_buffers_);
 
     const int64_t request_id       = 3005;
-    const int64_t expired_horizon  = currentTimeMs() - 1;
+    const int64_t expired_horizon  = currentTimeMs() + 5000;
     const int64_t transfer_horizon = currentTimeMs() + 1000;
     auto          collector        = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
-    ASSERT_TRUE(computed_buffers_->registerRequestHorizon(request_id, expired_horizon).has_value());
-    ASSERT_TRUE(computed_buffers_->activateRequestHorizon(request_id, transfer_horizon).has_value());
+    ASSERT_TRUE(computed_buffers_->registerRequestHorizon(request_id, expired_horizon, expired_horizon).has_value());
+    ASSERT_TRUE(computed_buffers_->activateRequestHorizon(request_id, transfer_horizon, expired_horizon).has_value());
     checker.addContext(StoreWaitContext(request_id, nullptr, createLayerCacheBuffer(0), expired_horizon, collector));
 
     checker.checkOnce();
     EXPECT_EQ(checker.getContextCount(), 0);
     EXPECT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+}
+
+TEST_F(StoreWaitContextTest, TerminalRequestRejectsAlreadyQueuedEvent) {
+    StoreWaitContextChecker checker(nullptr, computed_buffers_);
+    const auto request_deadline_ms = currentTimeMs() + 5000;
+    ASSERT_TRUE(computed_buffers_->registerRequestHorizon(3006, request_deadline_ms, request_deadline_ms).has_value());
+    checker.addContext(StoreWaitContext(3006, nullptr, createLayerCacheBuffer(0), request_deadline_ms, nullptr));
+    computed_buffers_->removeBuffer(3006, request_deadline_ms);
+    checker.checkOnce();
+    EXPECT_EQ(checker.getContextCount(), 0);
+    EXPECT_EQ(computed_buffers_->getBuffer(3006), nullptr);
 }
 
 }  // namespace rtp_llm

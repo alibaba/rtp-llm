@@ -48,7 +48,7 @@ bool P2PConnectorPrefill::init() {
     }
     worker_ = std::make_shared<P2PConnectorWorkerPrefill>(
         config_.worker_config, layer_block_converter_, metrics_reporter_, sender);
-    if (!worker_->init(10 * 1000)) {
+    if (!worker_->init()) {
         RTP_LLM_LOG_ERROR("prefill connector init failed: worker init failed");
         return false;
     }
@@ -56,9 +56,7 @@ bool P2PConnectorPrefill::init() {
     if (config_.tp_rank == 0) {
         stream_store_ = std::make_shared<P2PConnectorResourceStore>(
             metrics_reporter_,
-            config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms,
-            config_.scheduler_config.p2p_prefill_resource_hold_ms,
-            config_.scheduler_config.p2p_cancelled_keys_ttl_ms);
+            config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms);
         stream_store_->setOnRequestReleased([computed_buffers = worker_->getComputedBuffersStore()](
                                                 int64_t request_id, int64_t request_deadline_ms) {
             if (computed_buffers) {
@@ -137,7 +135,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     }
 
     const std::string& unique_key           = request.unique_key();
-    const int64_t      transfer_deadline_ms = request.deadline_ms();
+    int64_t            transfer_deadline_ms = request.deadline_ms();
     const int64_t      request_deadline_ms  = request.request_deadline_ms();
     const int64_t      now_ms               = currentTimeMs();
     if (unique_key.empty()) {
@@ -145,7 +143,8 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         response.set_error_message("invalid StartLoad unique_key");
         return;
     }
-    if (request_deadline_ms <= 0 || transfer_deadline_ms <= 0 || transfer_deadline_ms > request_deadline_ms) {
+    if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
+        || transfer_deadline_ms <= 0 || transfer_deadline_ms > request_deadline_ms) {
         if (!unique_key.empty() && request_deadline_ms > 0) {
             stream_store_->markTerminal(unique_key, request_deadline_ms);
             stream_store_->clearSideChannelData(unique_key);
@@ -195,11 +194,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         return;
     }
 
-    // The resource-hold deadline only applies while waiting in the store.
-    // Once StartLoad has consumed the entry, response/side-channel waiting is
-    // governed by this transfer's absolute deadline.
-    resource_entry->deadline_ms = transfer_deadline_ms;
-
+    transfer_deadline_ms = resource_entry->deadline_ms;
     int64_t request_id = resource_entry->request_id;
     // Downgrade noisy entry log: total_cost_us in the "handleRead complete" log
     // below already accounts for wait_resource_cost_us; keep this as DEBUG for
@@ -270,59 +265,21 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
 void P2PConnectorPrefill::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
                                               P2PConnectorStartLoadResponsePB&                  response,
                                               std::function<bool()>                             is_cancelled) {
-    // Wait for side-channel data to be ready (notified by prefill engine when first token / SP data is produced)
-    // Note: resource_entry has already been stolen from resource_map_, so we wait on it directly
-    const std::string& unique_key  = resource_entry->unique_key;
-    int64_t            deadline_ms = resource_entry->deadline_ms;
-
-    std::unique_lock<std::mutex> lock(resource_entry->side_channel_mutex);
-    const int64_t                remaining_us = deadline_ms * 1000 - currentTimeUs();
-    if (remaining_us <= 0) {
-        RTP_LLM_LOG_WARNING("waitAndFillResponse: past deadline, unique_key: %s", unique_key.c_str());
+    const auto& unique_key = resource_entry->unique_key;
+    const bool ready = stream_store_->waitSideChannelReady(unique_key, resource_entry->deadline_ms, is_cancelled);
+    P2PConnectorResourceEntry::SideChannelData data;
+    if (!ready || !stream_store_->consumeSideChannelData(unique_key, data)) {
         stream_store_->clearSideChannelData(unique_key);
-        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
-        response.set_error_message("waitAndFillResponse: past deadline");
+        response.set_error_code(transErrorCodeToRPC(
+            is_cancelled && is_cancelled() ? ErrorCode::CANCELLED : ErrorCode::GENERATE_TIMEOUT));
+        response.set_error_message("side-channel wait cancelled or expired");
         return;
     }
-
-    const auto timeout_tp = std::chrono::system_clock::now() + std::chrono::microseconds(remaining_us);
-    while (!resource_entry->side_channel_ready) {
-        if (is_cancelled && is_cancelled()) {
-            RTP_LLM_LOG_DEBUG("waitAndFillResponse: cancelled, unique_key: %s", unique_key.c_str());
-            stream_store_->clearSideChannelData(unique_key);
-            response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
-            response.set_error_message("waitAndFillResponse: cancelled");
-            return;
-        }
-
-        P2PConnectorResourceEntry::SideChannelData side_channel_data;
-        if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
-            resource_entry->side_channel_data  = std::move(side_channel_data);
-            resource_entry->side_channel_ready = true;
-            break;
-        }
-
-        auto next_wake_tp = std::min(timeout_tp, std::chrono::system_clock::now() + std::chrono::milliseconds(10));
-        resource_entry->side_channel_cv.wait_until(lock, next_wake_tp);
-        if (!resource_entry->side_channel_ready) {
-            if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
-                resource_entry->side_channel_data  = std::move(side_channel_data);
-                resource_entry->side_channel_ready = true;
-                break;
-            }
-            if (std::chrono::system_clock::now() >= timeout_tp) {
-                RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s", unique_key.c_str());
-                stream_store_->clearSideChannelData(unique_key);
-                response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
-                response.set_error_message("waitAndFillResponse: timeout");
-                return;
-            }
-        }
+    {
+        std::lock_guard<std::mutex> lock(resource_entry->side_channel_mutex);
+        resource_entry->side_channel_data = std::move(data);
+        resource_entry->side_channel_ready = true;
     }
-
-    // Release lock before calling fillResponseWithStreamInfo to avoid deadlock
-    // (fillResponseWithStreamInfo acquires side_channel_mutex internally)
-    lock.unlock();
 
     grpc::Status fill_status = fillResponseWithStreamInfo(resource_entry, response);
     if (!fill_status.ok()) {
@@ -436,7 +393,7 @@ grpc::Status P2PConnectorPrefill::waitForResourceEntry(
         RTP_LLM_LOG_WARNING("waiting for resource deadline exceeded, unique_key: %s", unique_key.c_str());
         return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource wait deadline exceeded");
     }
-    resource_entry = stream_store_->waitAndStealResource(unique_key, transfer_deadline_ms, is_cancelled);
+    resource_entry = stream_store_->waitAndStealResource(unique_key, transfer_deadline_ms, request_deadline_ms, is_cancelled);
     if (resource_entry) {
         return grpc::Status::OK;
     }
@@ -452,7 +409,7 @@ grpc::Status P2PConnectorPrefill::waitForResourceEntry(
     }
     RTP_LLM_LOG_WARNING("resource not found, unique_key: %s", unique_key.c_str());
     if (stream_store_->isMarkedCancelled(unique_key)) {
-        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource expired: prefill hold time exceeded");
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource phase expired or terminal");
     }
     // The transfer wait window ended before the resource arrived. This
     // StartLoad attempt is terminal; retain that state until the original

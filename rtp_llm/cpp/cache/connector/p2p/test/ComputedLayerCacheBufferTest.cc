@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <memory>
+#include <algorithm>
 #include <thread>
 #include <chrono>
 #include <set>
@@ -47,7 +48,7 @@ TEST_F(ComputedLayerCacheBufferTest, nullBufferFirst) {
     int64_t deadline_ms1 = getDeadlineMs();
 
     computed_buffer.addBuffer(buffer, deadline_ms1);
-    ASSERT_EQ(deadline_ms1, computed_buffer.deadlineMs());
+    ASSERT_EQ(std::min(deadline_ms0, deadline_ms1), computed_buffer.deadlineMs());
 
     auto [layer_count, buffers] = computed_buffer.getBuffers({"0:full", "1:full"});
     EXPECT_EQ(layer_count, 1);
@@ -66,7 +67,7 @@ TEST_F(ComputedLayerCacheBufferTest, fullBufferFirst) {
     int64_t deadline_ms1 = getDeadlineMs();
 
     computed_buffer.addBuffer(nullptr, deadline_ms1);
-    ASSERT_EQ(deadline_ms1, computed_buffer.deadlineMs());
+    ASSERT_EQ(std::min(deadline_ms0, deadline_ms1), computed_buffer.deadlineMs());
 
     auto [layer_count, buffers] = computed_buffer.getBuffers({"0:full", "1:full"});
     EXPECT_EQ(layer_count, 1);
@@ -160,6 +161,7 @@ TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
 
     ASSERT_TRUE(store_->getBuffer(request_id) == nullptr);
 
+    store_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     auto computed_buffer = store_->addBuffer(request_id, buffer, deadline_ms);
     ASSERT_NE(computed_buffer, nullptr);
     EXPECT_EQ(computed_buffer->deadlineMs(), deadline_ms);
@@ -189,6 +191,7 @@ TEST_F(ComputedLayerCacheBufferTest, RemoveBuffer) {
     auto    buffer      = createLayerCacheBuffer(0);
     int64_t deadline_ms = getDeadlineMs();
 
+    store_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     store_->addBuffer(request_id, buffer, deadline_ms);
 
     auto retrieved = store_->getBuffer(request_id);
@@ -208,10 +211,11 @@ TEST_F(ComputedLayerCacheBufferTest, CheckTimeoutMixed) {
     auto    buffer2      = createLayerCacheBuffer(0);
     int64_t deadline_ms2 = getDeadlineMs(-100);  // 已经过期
 
+    store_->registerRequestHorizon(request_id1, deadline_ms1, deadline_ms1);
     store_->addBuffer(request_id1, buffer1, deadline_ms1);
     store_->addBuffer(request_id2, buffer2, deadline_ms2);
 
-    EXPECT_EQ(store_->getBuffersCount(), 2);
+    EXPECT_EQ(store_->getBuffersCount(), 1);
 
     // 检查超时
     store_->checkTimeout();
@@ -231,6 +235,7 @@ TEST_F(ComputedLayerCacheBufferTest, AddBufferRejectedAfterRemove) {
     auto    buffer      = createLayerCacheBuffer(0);
     int64_t deadline_ms = getDeadlineMs();
 
+    store_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
     auto result = store_->addBuffer(request_id, buffer, deadline_ms);
     ASSERT_NE(result, nullptr);
 
@@ -249,8 +254,8 @@ TEST_F(ComputedLayerCacheBufferTest, RequestHorizonDoesNotRollWithLaterLayers) {
     const int64_t initial_horizon  = currentTimeMs() + 1000;
     const int64_t later_candidate  = initial_horizon + 5000;
 
-    auto first = store_->registerRequestHorizon(request_id, initial_horizon);
-    auto later = store_->registerRequestHorizon(request_id, later_candidate);
+    auto first = store_->registerRequestHorizon(request_id, initial_horizon, later_candidate);
+    auto later = store_->registerRequestHorizon(request_id, later_candidate, later_candidate);
 
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(later.has_value());
@@ -258,26 +263,35 @@ TEST_F(ComputedLayerCacheBufferTest, RequestHorizonDoesNotRollWithLaterLayers) {
     EXPECT_EQ(*later, initial_horizon);
 
     store_->removeBuffer(request_id);
-    EXPECT_FALSE(store_->registerRequestHorizon(request_id, later_candidate).has_value());
+    EXPECT_FALSE(store_->registerRequestHorizon(request_id, later_candidate, later_candidate).has_value());
 }
 
-TEST_F(ComputedLayerCacheBufferTest, StartLoadPromotesFixedRequestHorizon) {
-    const int64_t request_id       = 4007;
-    const int64_t initial_horizon  = currentTimeMs() - 1;
-    const int64_t transfer_horizon = currentTimeMs() + 5000;
+TEST_F(ComputedLayerCacheBufferTest, StartLoadTightensDeadlineAndLateLayerCannotExtendIt) {
+    const int64_t request_id = 4007;
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+    const int64_t load_deadline_ms = currentTimeMs() + 1000;
+    ASSERT_EQ(store_->registerRequestHorizon(request_id, request_deadline_ms, request_deadline_ms), request_deadline_ms);
+    auto buffer = store_->addBuffer(request_id, createLayerCacheBuffer(0), request_deadline_ms);
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_EQ(store_->activateRequestHorizon(request_id, load_deadline_ms, request_deadline_ms), load_deadline_ms);
+    store_->addBuffer(request_id, createLayerCacheBuffer(1), request_deadline_ms);
+    EXPECT_EQ(buffer->deadlineMs(), load_deadline_ms);
+    EXPECT_EQ(store_->activateRequestHorizon(request_id, load_deadline_ms + 1000, request_deadline_ms), load_deadline_ms);
+}
 
-    ASSERT_EQ(store_->registerRequestHorizon(request_id, initial_horizon), initial_horizon);
-    ASSERT_NE(store_->addBuffer(request_id, createLayerCacheBuffer(0), initial_horizon), nullptr);
-    ASSERT_EQ(store_->activateRequestHorizon(request_id, transfer_horizon), transfer_horizon);
-    store_->checkTimeout();
-    EXPECT_NE(store_->getBuffer(request_id), nullptr);
-    EXPECT_EQ(store_->requestHorizon(request_id), transfer_horizon);
-    EXPECT_EQ(store_->registerRequestHorizon(request_id, transfer_horizon + 5000), transfer_horizon);
+TEST_F(ComputedLayerCacheBufferTest, StartLoadBeforeLayersKeepsLoadDeadline) {
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+    const int64_t load_deadline_ms = currentTimeMs() + 1000;
+    ASSERT_TRUE(store_->activateRequestHorizon(4008, load_deadline_ms, request_deadline_ms).has_value());
+    ASSERT_EQ(store_->registerRequestHorizon(4008, request_deadline_ms, request_deadline_ms), load_deadline_ms);
+    auto buffer = store_->addBuffer(4008, createLayerCacheBuffer(0), request_deadline_ms);
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->deadlineMs(), load_deadline_ms);
 }
 
 TEST_F(ComputedLayerCacheBufferTest, TerminalTombstoneOutlivesLayerHorizon) {
     const int64_t request_id          = 4006;
-    const int64_t expired_horizon_ms  = currentTimeMs() - 1;
+    const int64_t expired_horizon_ms  = currentTimeMs() + 1000;
     const int64_t request_deadline_ms = currentTimeMs() + 5000;
 
     ASSERT_TRUE(store_->registerRequestHorizon(request_id, expired_horizon_ms, request_deadline_ms).has_value());

@@ -332,23 +332,7 @@ struct CacheStoreConfig {
     int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // D 后查询 lease 的期限；到期仍未确认则 rank 0 abort
 
     int     p2p_resource_store_timeout_check_interval_ms = 100;
-    int64_t p2p_layer_cache_buffer_store_timeout_ms      = 100 * 1000;
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
-    // Prefill-side hold time for P2PConnectorResourceStore::resource_map_ /
-    // side_channel_data_map_. Replaces the per-request business deadline as the
-    // entry expiration so prefill stops pinning KV blocks for the full request
-    // timeout (commonly ~1h) when decode never sends StartLoad.
-    int64_t p2p_prefill_resource_hold_ms = 300 * 1000;
-    // Hard cap on a single P2P transfer's effective deadline. The caller's
-    // business deadline (from generate_config->timeout_ms, often 1h) is
-    // clamped to now + p2p_max_transfer_deadline_ms at the connector entry
-    // points (decode asyncRead + prefill handleRead). Without this cap,
-    // P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout and
-    // P2PConnectorSchedulerPrefill::waitForBroadcastCompletion can sit on
-    // a single hung RDMA transfer for the full business deadline (5/26
-    // incident: 8 reads each blocked ~3600s before broadcast timeout
-    // triggered, cascading into engine scheduler stall).
-    int64_t p2p_max_transfer_deadline_ms = 300 * 1000;
     // TTL for cancelled_keys_ tombstones; should cover the longest expected
     // decode StartLoad arrival skew so we can tell "request expired" vs
     // "request never seen". Keep ≥ business deadline upper bound.

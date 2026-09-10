@@ -33,7 +33,7 @@ public:
                                                             const std::string&     ip,
                                                             uint32_t               port,
                                                             const std::string&     unique_key,
-                                                            int64_t                deadline_us);
+                                                            int64_t                request_deadline_ms);
 
     grpc::Status callPrefill(grpc::ServerContext*                   server_context,
                              const GenerateInputPB*                 request,
