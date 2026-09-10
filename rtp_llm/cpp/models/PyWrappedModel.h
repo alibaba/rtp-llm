@@ -74,6 +74,8 @@ public:
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     bool            hasMtpTargetHiddenBuffer() const override;
+    void            selectMtpIterationTopkCache(const torch::Tensor& select_indices, int64_t total_tokens) override;
+    void            copyMtpIterationTopkCacheFrom(const ModelBase& source) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
@@ -132,16 +134,17 @@ private:
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
 
-    GraphBase* graph_runner_{nullptr};
-    py::object py_model_;
-    py::object py_forward_method_;
-    py::object held_attn_pyobj_;
-    bool       enable_cuda_graph_{false};
-    bool       is_prefill_cuda_graph_mode_{false};
-    bool       use_spec_decoding_{false};
-    bool       has_mtp_hidden_buffer_{false};
-    bool       enable_device_perf_{false};
-    bool       check_nan_{false};
+    GraphBase*    graph_runner_{nullptr};
+    py::object    py_model_;
+    py::object    py_forward_method_;
+    py::object    held_attn_pyobj_;
+    torch::Tensor last_mtp_target_hidden_states_;
+    bool          enable_cuda_graph_{false};
+    bool          is_prefill_cuda_graph_mode_{false};
+    bool          use_spec_decoding_{false};
+    bool          has_mtp_hidden_buffer_{false};
+    bool          enable_device_perf_{false};
+    bool          check_nan_{false};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -348,7 +351,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
-        graph_runner_ = new CudaGraphRunner(graph_params, py_instance, forward_method, params.metrics_reporter);
+        try {
+            graph_runner_ =
+                new CudaGraphRunner(graph_params, py_instance, forward_method, params.metrics_reporter);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("CUDA graph runner construction failed with Python exception:\n%s", e.what());
+            throw;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("CUDA graph runner construction failed:\n%s", e.what());
+            throw;
+        }
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
@@ -378,6 +390,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("Model initialize failed (cuda_graph branch):\n%s", e.what());
+            throw;
         }
     }
 
@@ -394,6 +409,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
         has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();
+    }
+    if (py::hasattr(py_model_, "supports_mtp_target_hidden_states")) {
+        has_mtp_hidden_buffer_ =
+            has_mtp_hidden_buffer_ || py_model_.attr("supports_mtp_target_hidden_states")().cast<bool>();
     }
 
     // Speculative prefill CP needs every target rank to retain the complete
@@ -415,9 +434,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // run only on decode roles, where prefill CP is off (colocated CP is
         // rejected at executor construction).
         //
-        // MTP hidden buffer is a DeepSeek-specific hand-off. It is written after
-        // CP token splitting and already contains rank-local rows, so it must not
-        // be split by the context-parallel processor again.
+        // A model-owned MTP hidden buffer is written after CP token splitting
+        // and already contains rank-local rows, so it must not be split by the
+        // context-parallel processor again.
         const bool split_hidden_states = !has_mtp_hidden_buffer_;
         context_parallel_processor_    = ContextParallelProcessorFactory::create(
             ProcessorType::ZIG_ZAG, params.parallelism_config, split_hidden_states);

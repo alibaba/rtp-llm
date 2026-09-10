@@ -193,9 +193,6 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
 absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (generate_status_->status == StreamState::WAITING) {
-        recordWaitLatency();
-    }
     auto ret = stream_cache_resource_->initKVBlock();
     if (!ret.ok()) {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
@@ -797,6 +794,65 @@ StreamState GenerateStream::moveToNext() {
     return state;
 }
 
+CachePrepareResult GenerateStream::prepareCache() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    if (generate_status_->error_info.hasError()) {
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+    if (generate_status_->hasEvent(StreamEvents::CachePrepared)) {
+        return CachePrepareResult::DONE;
+    }
+
+    if (!generate_status_->hasEvent(StreamEvents::LoadInitiated)) {
+        auto status = stream_cache_resource_->initKVBlock();
+        if (!status.ok()) {
+            if (status.message() == "malloc failed") {
+                return CachePrepareResult::LACK_MEM;
+            }
+            generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
+            generate_status_->reportEvent(StreamEvents::CachePrepared);
+            return CachePrepareResult::DONE;
+        }
+        const bool loading = stream_cache_resource_->asyncLoadCache();
+        generate_status_->reportEvent(StreamEvents::LoadInitiated);
+        if (loading) {
+            return CachePrepareResult::WAIT;
+        }
+        // Match the synchronous first WAITING transition: when no connector
+        // load is needed, non-DECODE roles run with the initial allocation and
+        // do not perform an extra incrKVBlock.
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    } else if (!stream_cache_resource_->loadCacheDone()) {
+        return CachePrepareResult::WAIT;
+    }
+
+    if (generate_status_->error_info.hasError()) {
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+
+    // PREFILL context streams already own all blocks needed by their single
+    // context pass. Decode/fallback streams need the same top-up that the
+    // synchronous WAITING transition performs.
+    if (!(stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+          && stream_cache_resource_->isContextStream())) {
+        auto status = stream_cache_resource_->incrKVBlock();
+        if (!status.ok()) {
+            if (status.message() == "malloc failed") {
+                return CachePrepareResult::LACK_MEM;
+            }
+            generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
+            generate_status_->reportEvent(StreamEvents::CachePrepared);
+            return CachePrepareResult::DONE;
+        }
+    }
+    generate_status_->reportEvent(StreamEvents::CachePrepared);
+    return CachePrepareResult::DONE;
+}
+
 bool GenerateStream::hasError() const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return hasErrorWithoutLock();
@@ -976,16 +1032,36 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     const auto& new_tokens = update_info.new_tokens;
+    const auto  remaining_tokens =
+        maxTokenNum() > static_cast<size_t>(seqLength()) ? maxTokenNum() - static_cast<size_t>(seqLength()) : 0;
+    const auto num_new_tokens = std::clamp(update_info.num_new_tokens, 0, static_cast<int>(remaining_tokens));
 
-    if (isPerfTest()) {
-        const_cast<torch::Tensor&>(new_tokens).zero_();
+    if (num_new_tokens <= 0) {
+        updateOutput({new_tokens,
+                      0,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      update_info.update_remote_generate,
+                      update_info.force_update_info});
+        return;
     }
 
-    auto num_new_tokens = update_info.num_new_tokens;
-    int  cur_cached_len = seqLength() - 1;
+    // Perf tests suppress EOS/stop behavior with zero response tokens, but the
+    // speculative recurrent state must still consume the real committed token.
+    // Never mutate the caller-owned tensor: MTP also exposes a view of it as
+    // target_token_gpu for the following draft refresh.
+    auto output_tokens = isPerfTest() ? torch::zeros_like(new_tokens) : new_tokens;
+
+    int cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
+    if (!complete_token_ids_->update(output_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
                                      generate_input_->inputLength(),
@@ -1107,10 +1183,11 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
-
-    int error_token_id = 0;
+    const auto& new_tokens = update_info.new_tokens;
+    const auto  remaining_tokens =
+        maxTokenNum() > static_cast<size_t>(seqLength()) ? maxTokenNum() - static_cast<size_t>(seqLength()) : 0;
+    const auto num_new_tokens = std::clamp(update_info.num_new_tokens, 0, static_cast<int>(remaining_tokens));
+    int        error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
@@ -1131,13 +1208,15 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     // Update processor state before publishing output, including the batch that
     // finishes the stream, so normal and speculative decoding share one lifecycle.
-    if (auto error = updateNormalLogitProcessorStatus(update_info); error.has_value()) {
+    auto bounded_update_info           = update_info;
+    bounded_update_info.num_new_tokens = num_new_tokens;
+    if (auto error = updateNormalLogitProcessorStatus(bounded_update_info); error.has_value()) {
         reportEventWithoutLock(StreamEvents::Error, error->code(), error->ToString());
         return;
     }
 
     // TODO(xinfei.sxf) fix this (update_queue)
-    updateOutput(update_info);
+    updateOutput(bounded_update_info);
 
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。

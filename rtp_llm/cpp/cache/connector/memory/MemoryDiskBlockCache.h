@@ -33,6 +33,7 @@ public:
         uint64_t         last_access_seq{0};
         int64_t          created_time_us{0};
         uint32_t         in_flight_ref{0};
+        uint64_t         generation{0};
     };
 
     struct MatchResult {
@@ -58,6 +59,10 @@ public:
     std::optional<MemoryBlockCache::CacheItem> removeIfMatch(CacheKeyType cache_key, BlockIdxType expected_block_index);
     std::optional<CacheItem>                   popOldestEvictable();
     std::optional<CacheItem>                   popOldestEvictable(CacheBlockKind kind);
+    std::vector<CacheItem> detachMemoryForRemoteEviction(size_t n);
+    std::vector<CacheItem> popMemoryForImmediateEviction(size_t n);
+    std::optional<CacheItem> finishRemoteEviction(CacheKeyType cache_key, uint64_t generation);
+    size_t remoteEvictingSize() const;
 
     bool
     markInFlight(CacheKeyType cache_key, CacheBackingType backing_type, BlockIdxType block_index, int32_t disk_slot);
@@ -93,11 +98,13 @@ private:
 private:
     mutable std::shared_mutex                   mutex_;
     std::unordered_map<CacheKeyType, CacheItem> items_;
+    std::unordered_map<CacheKeyType, CacheItem> remote_evicting_items_;
     std::set<EvictKey>                          memory_complete_lru_;
     std::set<EvictKey>                          memory_incomplete_lru_;
     std::set<EvictKey>                          disk_complete_lru_;
     std::set<EvictKey>                          disk_incomplete_lru_;
     uint64_t                                    access_seq_{0};
+    uint64_t                                    generation_seq_{0};
 };
 
 using MemoryDiskBlockCachePtr = std::shared_ptr<MemoryDiskBlockCache>;

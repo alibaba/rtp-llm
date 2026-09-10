@@ -18,6 +18,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.VitCacheDirectory;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -33,6 +34,7 @@ public class DefaultRouter {
     private final CostBasedDecodeStrategy decodeSelector;
     private final RandomStrategy vitSelector;
     private final ConfigService configService;
+    private final VitCacheDirectory vitCacheDirectory;
     private final List<RoleType> requiredRoles;
     private final RoleType queueAdmissionRole;
 
@@ -42,7 +44,8 @@ public class DefaultRouter {
             CostBasedDecodeStrategy decodeSelector,
             RandomStrategy vitSelector,
             ConfigService configService,
-            ModelMetaConfig modelMetaConfig) {
+            ModelMetaConfig modelMetaConfig,
+            VitCacheDirectory vitCacheDirectory) {
         this.prefillSelector = Objects.requireNonNull(
                 prefillSelector, "prefillSelector");
         this.decodeSelector = Objects.requireNonNull(
@@ -51,6 +54,8 @@ public class DefaultRouter {
                 vitSelector, "vitSelector");
         this.configService = Objects.requireNonNull(
                 configService, "configService");
+        this.vitCacheDirectory = Objects.requireNonNull(
+                vitCacheDirectory, "vitCacheDirectory");
         this.requiredRoles = List.copyOf(
                 Objects.requireNonNull(
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
@@ -66,6 +71,9 @@ public class DefaultRouter {
         if (validationFailure != null) {
             return validationFailure;
         }
+        if (context.getRequest().isVitRouteOnly()) {
+            return routeVitOnly(context);
+        }
         try (PinnedRouting routing = selectAll(context, requiredRoles)) {
             if (routing.rejection() != null) {
                 return routing.rejection();
@@ -74,6 +82,20 @@ public class DefaultRouter {
                 return buildFailureResponse(routing.failure().role());
             }
             return commitDirect(context, routing.selections());
+        }
+    }
+
+    private Response routeVitOnly(BalanceContext context) {
+        PlacementResult<SelectedRole, RoleType> result =
+                vitCacheDirectory.select(context, resolvePolicyGroup(context));
+        if (result.status() == PlacementResult.Status.REJECTED) {
+            return result.rejection();
+        }
+        if (result.status() == PlacementResult.Status.BLOCKED) {
+            return buildFailureResponse(RoleType.VIT);
+        }
+        try (SelectedRole selected = result.value()) {
+            return commitDirect(context, List.of(selected));
         }
     }
 
@@ -123,6 +145,17 @@ public class DefaultRouter {
     private PinnedRouting selectAll(BalanceContext context, List<RoleType> roles, String policyGroup) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
         String group = policyGroup;
+        SelectedRole selectedVit = null;
+        if (roles.contains(RoleType.VIT)
+                && context.getRequest().getSelectedVit() != null) {
+            selectedVit = vitCacheDirectory.validate(context, policyGroup);
+            if (selectedVit == null) {
+                return new PinnedRouting(
+                        selected, null,
+                        Response.error(StrategyErrorType.VIT_ROUTE_STALE));
+            }
+            group = selectedVit.serverStatus().getGroup();
+        }
         if (StringUtils.isNotBlank(policyGroup)) {
             Logger.info(
                     "Group routing policy selected group, requestId: {}, policy: {}, group: {}",
@@ -133,8 +166,13 @@ public class DefaultRouter {
 
         try {
             for (RoleType role : roles) {
-                PlacementResult<SelectedRole, RoleType> result =
-                        selectRole(context, role, group);
+                PlacementResult<SelectedRole, RoleType> result;
+                if (role == RoleType.VIT && selectedVit != null) {
+                    result = PlacementResult.success(selectedVit);
+                    selectedVit = null;
+                } else {
+                    result = selectRole(context, role, group);
+                }
                 if (result.status() != PlacementResult.Status.SUCCESS) {
                     Logger.debug(
                             "Failed to select {} worker for request {}",
@@ -167,6 +205,10 @@ public class DefaultRouter {
         } catch (RuntimeException | Error failure) {
             closeSelections(selected, failure);
             throw failure;
+        } finally {
+            if (selectedVit != null) {
+                selectedVit.close();
+            }
         }
     }
 

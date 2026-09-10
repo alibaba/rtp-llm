@@ -1,8 +1,12 @@
 #pragma once
 
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "autil/LoopThread.h"
@@ -55,6 +59,15 @@ public:
     std::vector<CacheKeyType> memoryCacheKeys() const;
     std::vector<CacheKeyType> memoryCacheKeysForStatus() const;
 
+    // Enqueue one complete Memory->Remote then Device->Memory transaction.
+    // Transactions sharing this coordinator are strictly serialized.
+    void enqueueTieredEviction(const std::string& trace_id);
+
+    // Pure helpers shared by orchestration and boundary tests.
+    static size_t blocksAboveHighWatermark(size_t total_blocks, size_t free_blocks, int high_watermark_ratio);
+    static size_t projectedBlocksAboveHighWatermark(
+        size_t total_blocks, size_t free_blocks, size_t incoming_blocks, int high_watermark_ratio);
+
     uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
         return allocator_->convertToGlobalLayerId(model_id, layer_id);
     }
@@ -75,6 +88,13 @@ private:
     void processReadContexts();
     void processWriteContexts();
     void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
+    void initTieredEvictionWorker();
+    void stopTieredEvictionWorker();
+    void tieredEvictionLoop();
+    void runTieredEviction(const std::string& trace_id);
+    size_t deviceBlocksAboveHighWatermark() const;
+    size_t memoryBlocksAboveHighWatermark(size_t incoming_blocks) const;
+    void enforceMemoryHighWatermark(size_t incoming_blocks, const std::string& trace_id);
 
     bool isPdInvertMode() const;
 
@@ -99,6 +119,13 @@ private:
     autil::LoopThreadPtr                              update_thread_;
     const int                                         update_interval_ms_{1};
     std::atomic<bool>                                 stop_{false};
+
+    std::mutex              tiered_eviction_mutex_;
+    std::condition_variable tiered_eviction_cv_;
+    std::deque<std::string> tiered_eviction_queue_;
+    std::thread             tiered_eviction_worker_;
+    bool                    tiered_eviction_accepting_{false};
+    bool                    tiered_eviction_stopping_{false};
 };
 
 }  // namespace rtp_llm

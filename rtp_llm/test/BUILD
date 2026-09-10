@@ -10,6 +10,15 @@ py_test(
 )
 
 py_test(
+    name = "model_factory_sp_kv_cache_test",
+    srcs = ["model_factory_sp_kv_cache_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",
@@ -91,6 +100,18 @@ py_test(
         "//rtp_llm:testlib",
     ],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "minimax_m3_renderer_test",
+    srcs = [
+        "minimax_m3_renderer_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -429,4 +450,25 @@ py_test(
         "//rtp_llm:testlib",
     ],
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "minimax_m3_eagle1_test",
+    srcs = ["minimax_m3_eagle1_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "short",
+)
+
+py_test(
+    name = "minimax_m3_eagle3_test",
+    srcs = ["minimax_m3_eagle3_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "short",
+)
+
+py_test(
+    name = "minimax_m3_mtp_test",
+    srcs = ["minimax_m3_mtp_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "short",
 )

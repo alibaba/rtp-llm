@@ -23,6 +23,18 @@ void cp_gather_indexer_k_quant_cache(const torch::Tensor& kv_cache,     // [num_
                                      const torch::Tensor& cu_seq_lens   // [batch_size + 1]
 );
 
+// MHA/GQA main K/V paged write by physical slot mapping.
+// Writes uncompressed K and V (bf16/fp16/fp32) into the HND paged main pool
+//   kv_cache [num_blocks, 2, num_kv_heads, page_size, head_dim]
+// at physical slots given by slot_mapping. slot_mapping[i] < 0 means token i is
+// skipped (e.g. non-owned under CP page-RR sharding, or padding). This mirrors
+// the GLM5/DSV4 writer pattern (indexer_k_quant_and_cache / concat_and_cache_mla)
+// so the MSA main K/V write is sharding-correct without Python slot arithmetic.
+void mha_kv_write_cache(torch::Tensor&       k,             // [num_tokens, num_kv_heads, head_dim]
+                        torch::Tensor&       v,             // [num_tokens, num_kv_heads, head_dim]
+                        torch::Tensor&       kv_cache,      // [num_blocks, 2, num_kv_heads, page_size, head_dim]
+                        const torch::Tensor& slot_mapping);  // [num_tokens] int64, -1 = skip
+
 // Concat and cache MLA (Multi-Head Latent Attention)
 // Concatenates kv_c and k_pe and stores in paged KV cache
 void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_lora_rank]

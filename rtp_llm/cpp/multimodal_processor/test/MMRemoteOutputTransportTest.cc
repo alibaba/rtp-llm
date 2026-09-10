@@ -81,7 +81,7 @@ public:
     ErrorInfo                             failure = ErrorInfo::OkStatus();
 
     ErrorResult<MultimodalOutputPB>
-    request(const std::string&, MultimodalInputsPB& request_pb, DeadlineBudget&) override {
+    request(const std::string&, MultimodalInputsPB& request_pb, DeadlineBudget&, grpc::ServerContext*) override {
         advertised_rdma.push_back(request_pb.support_rdma());
         if (log) {
             log->push_back("request");

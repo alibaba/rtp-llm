@@ -11,8 +11,13 @@ void ResourceContext::initCacheConfig(const KVCacheConfig&       kv_cache_config
     enable_remote_cache        = kv_cache_config.enable_remote_cache;
     enable_device_cache        = kv_cache_config.enable_device_cache;
     write_cache_sync           = kv_cache_config.write_cache_sync;
-    enable_tiered_memory_cache = kv_cache_config.enable_tiered_memory_cache;
-    load_cache_retry_times     = kv_cache_config.load_cache_retry_times;
+    enable_tiered_memory_cache              = kv_cache_config.enable_tiered_memory_cache;
+    enable_memory_cache_remote_eviction      = kv_cache_config.enable_memory_cache_remote_eviction;
+    device_cache_high_watermark_ratio        = kv_cache_config.device_cache_high_watermark_ratio;
+    memory_cache_high_watermark_ratio        = kv_cache_config.memory_cache_high_watermark_ratio;
+    memory_cache_remote_eviction_timeout_ms  = kv_cache_config.memory_cache_remote_eviction_timeout_ms;
+    memory_cache_remote_eviction_max_blocks  = kv_cache_config.memory_cache_remote_eviction_max_blocks;
+    load_cache_retry_times                   = kv_cache_config.load_cache_retry_times;
 
     if (kv_cache_config.device_cache_min_free_blocks > 0) {
         device_cache_min_free_blocks = kv_cache_config.device_cache_min_free_blocks;

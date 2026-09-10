@@ -10,14 +10,23 @@ import torch
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
+from rtp_llm.cpp.model_rpc.model_rpc_client import (
+    ModelRpcClient,
+    multimodal_cache_keys,
+    trans_input,
+)
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
-from rtp_llm.server.master_client import FlexlbResponse, MasterClient
+from rtp_llm.server.master_client import (
+    VIT_ROUTE_STALE_CODE,
+    FlexlbResponse,
+    MasterClient,
+)
 from rtp_llm.server.misc import format_exception
+from rtp_llm.server.mm_cache_routing import multimodal_routing_tokens
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
@@ -74,6 +83,7 @@ class BackendRPCServerVisitor:
         parallelism_config=None,
         prefill_cp_config=None,
         source_role: str = "frontend",
+        mm_model_config=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -96,6 +106,12 @@ class BackendRPCServerVisitor:
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
         self.source_role = source_role
+        self.mm_model_config = mm_model_config
+        self._mm_cache_routing = (
+            vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
+            and getattr(pd_sep_config, "role_type", None) == RoleType.FRONTEND
+            and mm_model_config is not None
+        )
         self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
@@ -134,10 +150,12 @@ class BackendRPCServerVisitor:
         )
         if parallelism_config is not None:
             tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+            configured_cp_size = int(getattr(cp_config, "prefill_cp_size", 0) or 0)
+            page_rr_cp_size = configured_cp_size or tp_size
             kv_cache_sharded = bool(getattr(cp_config, "kv_cache_sharded", False))
-            if kv_cache_sharded and tp_size > 1:
+            if kv_cache_sharded and page_rr_cp_size > 1:
                 self._page_rr_route_cache_keys = True
-                self._page_rr_cp_size = tp_size
+                self._page_rr_cp_size = page_rr_cp_size
         self.master_client = MasterClient(
             host_service=self.host_service,
             server_config=server_config,
@@ -252,6 +270,71 @@ class BackendRPCServerVisitor:
             if len(input.token_ids.shape) == 2
             else input.token_ids.tolist()
         )
+        route_args = {}
+        selected_vit = None
+        if self._mm_cache_routing and getattr(input, "mm_inputs", None):
+            keys = multimodal_cache_keys(input)
+            metadata = None
+            if keys and len(keys) <= 256 and all(len(key) <= 4096 for key in keys):
+                vit_result = await self.master_client.get_backend_role_addrs(
+                    block_cache_keys=[],
+                    cache_key_block_size=self._cache_key_block_size(),
+                    input=input,
+                    request_id=input.request_id,
+                    media_keys=keys,
+                    vit_only=True,
+                )
+                if vit_result.is_ok:
+                    vit_addrs = [
+                        addr for addr in vit_result.role_addrs if addr.role == RoleType.VIT
+                    ]
+                    if len(vit_addrs) != 1:
+                        raise FtRuntimeException(
+                            ExceptionType.ROUTE_ERROR,
+                            "master returned invalid ViT route",
+                        )
+                    selected_vit = vit_addrs[0]
+                    selected_status = None
+                    for status in vit_result.server_status or []:
+                        if not isinstance(status, dict):
+                            continue
+                        role = status.get("role")
+                        role_name = (
+                            role
+                            if isinstance(role, str)
+                            else getattr(role, "name", None)
+                        )
+                        if role_name == RoleType.VIT.name:
+                            selected_status = dict(status)
+                            selected_status["role"] = RoleType.VIT.name
+                            break
+                    if selected_status is None:
+                        raise FtRuntimeException(
+                            ExceptionType.ROUTE_ERROR,
+                            "master returned ViT route without matching server status",
+                        )
+                    route_args["selected_vit"] = selected_status
+                    metadata = await self.master_client.get_vit_cache_metadata(
+                        selected_vit, keys
+                    )
+                elif not vit_result.connection_failed:
+                    return vit_result
+            try:
+                token_ids, full_length = multimodal_routing_tokens(
+                    token_ids,
+                    self.mm_model_config.mm_sep_tokens,
+                    self.mm_model_config.include_sep_tokens,
+                    keys,
+                    metadata,
+                    self.max_seq_len,
+                )
+                if full_length is not None:
+                    route_args["seq_len"] = full_length - input.prefix_length
+            except (ValueError, KeyError, TypeError, ImportError):
+                route_logger.warning(
+                    "Invalid ViT routing metadata, request_id=%s", input.request_id
+                )
+                token_ids = []
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
@@ -267,7 +350,19 @@ class BackendRPCServerVisitor:
                 input=input,
                 request_id=input.request_id,
                 input_pb=input_pb,
+                **route_args,
             )
+            if selected_vit is not None and route_result.error_code == VIT_ROUTE_STALE_CODE:
+                route_args.pop("selected_vit")
+                selected_vit = None
+                route_result = await self.master_client.get_backend_role_addrs(
+                    block_cache_keys=[],
+                    cache_key_block_size=self._cache_key_block_size(),
+                    input=input,
+                    request_id=input.request_id,
+                    input_pb=input_pb,
+                    **route_args,
+                )
         except BaseException as e:
             exception_json = format_exception(e)
             kmonitor.report(
@@ -278,6 +373,10 @@ class BackendRPCServerVisitor:
             raise
 
         if route_result.is_ok:
+            if selected_vit is not None and selected_vit not in route_result.role_addrs:
+                raise FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR, "master changed the selected ViT route"
+                )
             input.generate_config.role_addrs = route_result.role_addrs
             input.enqueued_by_master = route_result.enqueued_by_master
             route_logger.debug(
@@ -774,4 +873,5 @@ def create_backend_rpc_server_visitor(
         parallelism_config=engine_config.parallelism_config,
         prefill_cp_config=py_env_configs.prefill_cp_config,
         source_role=source_role,
+        mm_model_config=getattr(model_config, "mm_model_config", None),
     )

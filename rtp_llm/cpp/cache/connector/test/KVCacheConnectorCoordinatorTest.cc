@@ -125,6 +125,20 @@ CacheConfig makeCpFullPlusSwaCacheConfig(bool cp_compact_swa_group, size_t cp_si
 
 }  // namespace
 
+TEST(KVCacheConnectorCoordinatorWatermarkTest, DeviceWatermarkUsesCeilingFreeBlockTarget) {
+    EXPECT_EQ(KVCacheConnectorCoordinator::blocksAboveHighWatermark(1000, 20, 95), 30);
+    EXPECT_EQ(KVCacheConnectorCoordinator::blocksAboveHighWatermark(1000, 50, 95), 0);
+    EXPECT_EQ(KVCacheConnectorCoordinator::blocksAboveHighWatermark(99, 3, 95), 2);
+    EXPECT_EQ(KVCacheConnectorCoordinator::blocksAboveHighWatermark(100, 200, 95), 0);
+}
+
+TEST(KVCacheConnectorCoordinatorWatermarkTest, MemoryWatermarkAccountsForIncomingBlocks) {
+    EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(1000, 80, 50, 95), 20);
+    EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(1000, 50, 0, 95), 0);
+    EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(1000, 40, 7, 95), 17);
+    EXPECT_EQ(KVCacheConnectorCoordinator::projectedBlocksAboveHighWatermark(100, 200, 5, 95), 0);
+}
+
 class KVCacheConnectorCoordinatorTest: public ::testing::Test {
 protected:
     void SetUp() override {

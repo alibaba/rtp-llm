@@ -55,9 +55,10 @@ void MMTransportMetrics::reportRpcMetrics(const std::string& endpoint,
 
 // ---- MMRemoteOutputTransport ----
 
-ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string&  endpoint,
-                                                             MultimodalInputsPB& request_pb) {
-    DeadlineBudget budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_));
+ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string&   endpoint,
+                                                             MultimodalInputsPB&  request_pb,
+                                                             grpc::ServerContext* server_context) {
+    DeadlineBudget  budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_));
     DeliveryContext context{endpoint, budget, *control_};
 
     std::vector<MMReceiptReader*> advertised;
@@ -67,7 +68,7 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
         }
     }
 
-    auto receipt = control_->request(endpoint, request_pb, budget);
+    auto receipt = control_->request(endpoint, request_pb, budget, server_context);
     if (!receipt.ok()) {
         return receipt.status();
     }

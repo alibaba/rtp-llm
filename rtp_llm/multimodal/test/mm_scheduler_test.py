@@ -13,7 +13,13 @@ from unittest import TestCase, main, mock
 import torch
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
+from rtp_llm.multimodal.multimodal_util import (
+    build_multimodal_output_pb,
+    maybe_tensor_to_list,
+)
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
     MMSchedulerExecutionError,
@@ -36,6 +42,7 @@ class _FakeMMPart:
         oom_over: Optional[int] = None,
         short_over: Optional[int] = None,
         block_until: Optional[threading.Event] = None,
+        work_budget: Optional[MMWorkEstimate] = None,
     ):
         self.delay = delay
         # Raise a CUDA OOM when a single forward carries more than this many items.
@@ -48,8 +55,14 @@ class _FakeMMPart:
         # Set the first time a forward is entered, so a test can wait until a
         # request is actually inside the (blocked) forward.
         self.forward_entered = threading.Event()
+        self.work_budget = work_budget
         self.calls: List[int] = []
+        self.call_values: List[List[float]] = []
+        self.call_started = threading.Event()
         self._lock = threading.Lock()
+
+    def get_batch_work_budget(self, max_batch_media: int) -> Optional[MMWorkEstimate]:
+        return self.work_budget
 
     @staticmethod
     def _is_poison(data: Any) -> bool:
@@ -61,6 +74,17 @@ class _FakeMMPart:
     ) -> List[torch.Tensor]:
         with self._lock:
             self.calls.append(len(data_list))
+            self.call_values.append(
+                [
+                    (
+                        float(data.reshape(-1)[0])
+                        if isinstance(data, torch.Tensor)
+                        else 0.0
+                    )
+                    for data in data_list
+                ]
+            )
+            self.call_started.set()
         self.forward_entered.set()
         if self.block_until is not None:
             # Bounded so a broken test fails fast instead of hanging forever.
@@ -109,6 +133,7 @@ class _FakeWorkItem:
         timeout_ms: int = 5000,
         mm_type: MMUrlType = MMUrlType.IMAGE,
         preprocess_result: Any = None,
+        input_patches: Optional[int] = None,
     ):
         # mm_inputs is the raw media list; its length is what the scheduler
         # bounds batches by (sum(len(wi.mm_inputs)) across a request).
@@ -121,6 +146,11 @@ class _FakeWorkItem:
         self.embedding_result: Optional[Any] = None
         self.need_check_cache = False
         self.cache_key = None
+        self.work_estimate = (
+            MMWorkEstimate(input_patches=input_patches)
+            if input_patches is not None
+            else None
+        )
 
 
 class _BlockingClaimFuture(Future):
@@ -187,6 +217,53 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    def test_queue_metrics_report_depth_and_wait(self):
+        """Queue gauges expose backlog depth and time before a forward starts."""
+        fake = _FakeMMPart(delay=0.2)
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1)
+        errors: List[Optional[Exception]] = [None, None]
+
+        def submit(index: int):
+            try:
+                sched.submit_and_wait([_FakeWorkItem(timeout_ms=5000)])
+            except Exception as error:  # noqa: BLE001 - asserted below
+                errors[index] = error
+
+        with mock.patch("rtp_llm.multimodal.mm_scheduler.kmonitor.report") as report:
+            first = threading.Thread(target=submit, args=(0,))
+            second = threading.Thread(target=submit, args=(1,))
+            try:
+                first.start()
+                self.assertTrue(fake.call_started.wait(timeout=1.0))
+                second.start()
+                # Keep the second request behind the first forward so its queue
+                # wait is observable rather than a scheduler race.
+                time.sleep(0.03)
+                second.join(timeout=2.0)
+                first.join(timeout=2.0)
+            finally:
+                sched.close()
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [None, None])
+
+            depth_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args
+                and call.args[0] == GaugeMetrics.VIT_EMBEDDING_QUEUE_SIZE_METRIC
+            ]
+            wait_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args
+                and call.args[0] == GaugeMetrics.VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC
+            ]
+            self.assertIn(1, depth_values)
+            self.assertEqual(depth_values[-1], 0)
+            self.assertGreater(max(wait_values), 50.0)
+
     def test_multi_request_batching(self):
         """Several concurrent submissions are merged into one forward."""
         fake = _FakeMMPart()
@@ -289,6 +366,118 @@ class MMSchedulerTest(TestCase):
                 )
         finally:
             sched.close()
+
+    def test_cost_budget_splits_cross_request_batch(self):
+        """Model work, not just media count, limits cross-request packing."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
+        sched = MMScheduler(
+            fake, batch_wait_ms=300, max_batch_size=8, max_batch_images=100
+        )
+        barrier = threading.Barrier(4)
+        try:
+            errors = _submit_concurrently(
+                sched,
+                [[_FakeWorkItem(input_patches=6)] for _ in range(4)],
+                barrier=barrier,
+            )
+        finally:
+            sched.close()
+
+        self.assertTrue(all(e is None for e in errors), errors)
+        self.assertEqual(fake.calls, [1, 1, 1, 1])
+
+    def test_cost_aware_model_splits_large_request(self):
+        """An opted-in model advances an oversized request in bounded chunks."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=8, max_batch_images=5)
+        items = [
+            _FakeWorkItem(images=3, input_patches=6),
+            _FakeWorkItem(images=3, input_patches=6),
+        ]
+        try:
+            sched.submit_and_wait(items)
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [1, 1])
+        self.assertTrue(all(item.embedding_result is not None for item in items))
+
+    def test_split_request_yields_to_waiting_request(self):
+        """A large request queues each next chunk at the tail for fairness."""
+        fake = _FakeMMPart(
+            delay=0.05,
+            work_budget=MMWorkEstimate(input_patches=10),
+        )
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1, max_batch_images=5)
+        large_items = [
+            _FakeWorkItem(
+                preprocess_result=torch.tensor([1.0]),
+                input_patches=6,
+            ),
+            _FakeWorkItem(
+                preprocess_result=torch.tensor([2.0]),
+                input_patches=6,
+            ),
+        ]
+        small_item = _FakeWorkItem(
+            preprocess_result=torch.tensor([3.0]),
+            input_patches=1,
+        )
+        large_error: List[Exception] = []
+
+        def submit_large_request():
+            try:
+                sched.submit_and_wait(large_items)
+            except Exception as error:
+                large_error.append(error)
+
+        large_thread = threading.Thread(target=submit_large_request)
+        try:
+            large_thread.start()
+            self.assertTrue(fake.call_started.wait(timeout=1.0))
+            sched.submit_and_wait([small_item])
+            large_thread.join(timeout=1.0)
+        finally:
+            sched.close()
+
+        self.assertFalse(large_thread.is_alive())
+        self.assertEqual(large_error, [])
+        self.assertEqual(fake.call_values, [[1.0], [3.0], [2.0]])
+
+    def test_cost_aware_model_requires_work_estimate(self):
+        """Opting into cost admission requires every preprocessed item to estimate."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
+        sched = MMScheduler(fake, max_batch_images=5)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "has no work estimate"):
+                sched.submit_and_wait([_FakeWorkItem()])
+        finally:
+            sched.close()
+
+    def test_cost_aware_model_requires_typed_work_estimate(self):
+        """A non-null estimate still has to satisfy the generic cost contract."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
+        sched = MMScheduler(fake, max_batch_images=5)
+        item = _FakeWorkItem()
+        item.work_estimate = object()
+        try:
+            with self.assertRaisesRegex(TypeError, "must be MMWorkEstimate"):
+                sched.submit_and_wait([item])
+        finally:
+            sched.close()
+
+    def test_cost_aware_model_runs_oversized_single_item_alone(self):
+        """One indivisible item may exceed the soft model budget."""
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=8, max_batch_images=5)
+        item = _FakeWorkItem(images=1, input_patches=15)
+        try:
+            sched.submit_and_wait([item])
+        finally:
+            sched.close()
+
+        self.assertEqual(fake.calls, [1])
+        self.assertIsNotNone(item.embedding_result)
 
     def test_failure_isolated_across_batches(self):
         """A failing forward only fails its own batch; other batches still succeed."""
@@ -789,6 +978,96 @@ class VitEmbeddingSchedulerArgsTest(TestCase):
         cfg.gpu_batch_wait_ms = -1
         with self.assertRaises(ValueError):
             cfg.embedding_scheduler_args()
+
+
+class MMWorkEstimateTest(TestCase):
+    def test_add_scale_and_budget(self):
+        first = MMWorkEstimate(
+            input_patches=4,
+            output_tokens=2,
+            estimated_workspace_bytes=40,
+            max_attention_segment=3,
+            attention_work=9,
+        )
+        second = MMWorkEstimate(
+            input_patches=5,
+            output_tokens=3,
+            estimated_workspace_bytes=50,
+            max_attention_segment=4,
+            attention_work=16,
+        )
+
+        total = first + second
+        self.assertEqual(total.input_patches, 9)
+        self.assertEqual(total.output_tokens, 5)
+        self.assertEqual(total.estimated_workspace_bytes, 90)
+        self.assertEqual(total.max_attention_segment, 4)
+        self.assertEqual(total.attention_work, 25)
+        self.assertTrue(total.fits_within(total))
+        self.assertFalse(total.fits_within(MMWorkEstimate(input_patches=8)))
+
+        scaled = first.scaled(3)
+        self.assertEqual(scaled.input_patches, 12)
+        self.assertEqual(scaled.max_attention_segment, 3)
+        self.assertEqual(scaled.attention_work, 27)
+
+    def test_negative_field_rejected(self):
+        with self.assertRaisesRegex(ValueError, "input_patches"):
+            MMWorkEstimate(input_patches=-1)
+
+
+class MaybeTensorToListTest(TestCase):
+    def test_none_returns_empty(self):
+        self.assertEqual(maybe_tensor_to_list(None), [])
+
+    def test_non_tensor_returned_as_is(self):
+        obj = ["a", "b"]
+        self.assertIs(maybe_tensor_to_list(obj), obj)
+
+    def test_at_or_below_dim_wraps_single(self):
+        t = torch.zeros(3, 4)  # 2-D, ndim_threshold=2 -> single-element list
+        out = maybe_tensor_to_list(t, ndim_threshold=2)
+        self.assertEqual(len(out), 1)
+        self.assertIs(out[0], t)
+
+    def test_above_dim_splits_leading(self):
+        t = torch.zeros(5, 3, 4)  # 3-D, ndim_threshold=2 -> split into 5 of (3, 4)
+        out = maybe_tensor_to_list(t, ndim_threshold=2)
+        self.assertEqual(len(out), 5)
+        self.assertEqual(tuple(out[0].shape), (3, 4))
+
+    def test_extra_input_dim1(self):
+        t = torch.zeros(2, 6)  # 2-D, ndim_threshold=1 -> split into 2 of shape (6,)
+        out = maybe_tensor_to_list(t, ndim_threshold=1)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(tuple(out[0].shape), (6,))
+
+
+class BuildMultimodalOutputPbTest(TestCase):
+    def test_empty_embeddings_returns_empty_pb(self):
+        pb = build_multimodal_output_pb([], [], [])
+        self.assertEqual(list(pb.split_size), [])
+        self.assertFalse(pb.HasField("multimodal_pos_id"))
+        self.assertEqual(len(pb.multimodal_extra_input), 0)
+
+    def test_split_size_and_fields(self):
+        embeddings = [torch.randn(2, 4), torch.randn(3, 4)]
+        position_ids = [torch.zeros(2, 3), torch.zeros(3, 3)]
+        extra_input = [torch.zeros(7), torch.zeros(9)]
+        pb = build_multimodal_output_pb(embeddings, position_ids, extra_input)
+
+        # split_size records the per-image leading dim so the receiver can re-split.
+        self.assertEqual(list(pb.split_size), [2, 3])
+        self.assertTrue(pb.HasField("multimodal_embedding"))
+        self.assertTrue(pb.HasField("multimodal_pos_id"))
+        self.assertEqual(len(pb.multimodal_extra_input), 2)
+
+    def test_without_position_or_extra(self):
+        pb = build_multimodal_output_pb([torch.randn(1, 4)], [], [])
+        self.assertEqual(list(pb.split_size), [1])
+        self.assertTrue(pb.HasField("multimodal_embedding"))
+        self.assertFalse(pb.HasField("multimodal_pos_id"))
+        self.assertEqual(len(pb.multimodal_extra_input), 0)
 
 
 if __name__ == "__main__":

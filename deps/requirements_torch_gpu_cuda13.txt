@@ -1,8 +1,8 @@
--r requirements_base.txt
+-r ../../open_source/deps/requirements_base.txt
 
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # First-version scope: torch + torchvision + triton + deep_gemm + flash_mla
-# + fast_safetensors + fastsafetensors (the last two rebuilt against
+# + tilelang + fast_safetensors + fastsafetensors (the last two rebuilt against
 # torch 2.11+cu130 and mirrored to oss://rtp-maga/0502/).  Other
 # torch-ABI-bound wheels (flash_attn, flashinfer, deep_ep, rtp_kernel,
 # fast_hadamard, nvidia_cutlass_dsl) are deferred — see plan
@@ -19,13 +19,26 @@ triton==3.6.0
 
 # Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
 # against torch 2.11+cu130 with gcc-toolset-12; SHAs encoded in filename).
-http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
+# REBASE CONFLICT CONTEXT(de00ad608d): apply final source branch
+# deepgemm 71eb60f update over the earlier 80c3fbb wheel.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.6.1+e46e564.cu132-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/flash_mla/flash_mla-1.0.0%2Bcb10b79-cp310-cp310-linux_x86_64.whl
 
-# rtp_kernel built from gitlab cuda_extension main (sm_80/90a/100a)
+# DSV4 mHC uses TileLang by default.  Keep the same version as cuda12_9.
+tilelang==0.1.9
+
+# fast_hadamard_transform rebuilt against torch 2.11+cu130 (CUDA 13.2).
+# Required by GLM-5 / DeepSeek-V3.2 DSA indexer.
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl
+
+# deep_ep rebuilt against torch 2.11+cu130 (CUDA 13.2).
+# Expert Parallelism for MoE models (DeepSeek-V3, GLM-5).
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl
+
+# rtp_kernel built from gitlab cuda_extension main (sm_80/90a/100a/103a/120a)
 # against torch 2.11+cu130; flashinfer-dependent submodules (xqa,
 # sparse_attention*, clustered_gather) are import-tolerant in this build.
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel-0.1.0%2B125c29e5.20260612140519-cp310-cp310-linux_x86_64.whl
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
@@ -47,3 +60,15 @@ tabulate==0.9.0
 # auto_gptq      # deferred — torch 2.11 ABI rebuild needed
 # autoawq        # deferred
 # tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).
+
+# nvidia-cutlass-dsl: CUTLASS Python DSL for JIT-compiled kernels (CuteDSL MoE, etc).
+nvidia-cutlass-dsl==4.6.0.dev0
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/nvidia_cutlass_dsl_libs_base-4.6.0.dev0-cp310-cp310-manylinux_2_28_x86_64.whl
+quack-kernels==0.5.3
+apache-tvm-ffi>=0.1.12
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl
+# flashinfer wheels (cubin + python) built for CUDA 13.2 / SM100.
+# cubin contains precompiled GPU kernels; python is the API layer.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260608/flashinfer_python-0.6.12-py3-none-any.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260608/flashinfer_cubin-0.6.12-py3-none-any.whl

@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {

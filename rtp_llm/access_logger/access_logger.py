@@ -180,6 +180,7 @@ class MMAccessLogger(AccessLogger):
         self,
         logger,
         request: List[MultimodalInput],
+        request_id: int = 0,
         exception: Optional[BaseException] = None,
         response: Optional[Any] = None,
     ) -> None:
@@ -192,6 +193,7 @@ class MMAccessLogger(AccessLogger):
         logger.info(
             dump_json(
                 {
+                    "id": request_id,
                     "query": [mm_input.to_string() for mm_input in request],
                     "log_time": log_time,
                     "exception": exception,
@@ -200,15 +202,23 @@ class MMAccessLogger(AccessLogger):
             )
         )
 
-    def log_query_access(self, mm_inputs: List[MultimodalInput]) -> None:
-        self.log(self.query_logger, mm_inputs)
+    def log_query_access(
+        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+    ) -> None:
+        self.log(self.query_logger, mm_inputs, request_id=request_id)
 
     def log_exception_access(
-        self, mm_inputs: List[MultimodalInput], exception: BaseException
+        self,
+        mm_inputs: List[MultimodalInput],
+        exception: BaseException,
+        request_id: int = 0,
     ) -> None:
-        self.log(self.logger, mm_inputs, exception=exception)
+        self.log(self.logger, mm_inputs, request_id=request_id, exception=exception)
 
     def log_success_access(
-        self, mm_inputs: List[MultimodalInput], response: Any
+        self,
+        mm_inputs: List[MultimodalInput],
+        response: Any,
+        request_id: int = 0,
     ) -> None:
-        self.log(self.logger, mm_inputs, response=response)
+        self.log(self.logger, mm_inputs, request_id=request_id, response=response)

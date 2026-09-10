@@ -8,7 +8,7 @@ import traceback
 from contextlib import suppress
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
-from typing import List
+from typing import List, Optional
 
 import torch
 from setproctitle import setproctitle
@@ -27,6 +27,7 @@ from rtp_llm.utils.concurrency_controller import (
     set_global_controller,
 )
 from rtp_llm.utils.oom_diag import install_oom_dump
+from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -43,16 +44,20 @@ def _install_hot_hook_runtime(role: str) -> None:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
 
-def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str = ""):
+def _send_pipe_status(
+    pipe_writer, status: str, message: str, error_trace: str = ""
+) -> None:
     if pipe_writer is None:
         return
     try:
         pipe_writer.send(
             {"status": status, "message": message, "traceback": error_trace}
         )
-        pipe_writer.close()
     except Exception as e:
         logging.warning(f"Failed to send status via pipe: {e}")
+    finally:
+        with suppress(Exception):
+            pipe_writer.close()
 
 
 def local_rank_start(
@@ -60,20 +65,38 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    expected_parent_pid: Optional[int] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
+    if expected_parent_pid is not None:
+        arm_parent_death_sigkill(expected_parent_pid)
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
     backend_manager = None
+    startup_complete = False
     logging.info(f"[PROCESS_START]Start local rank process")
 
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
+        if not startup_complete:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            raise KeyboardInterrupt(f"signal {signum} during rank startup")
         try:
             backend_manager.request_shutdown()
         except Exception as e:
             logging.error(f"Error during backend manager shutdown: {e}")
+
+    def install_signal_handlers(stage: str):
+        # Some native runtimes install their own SIGTERM/SIGINT handlers during
+        # model/distributed initialization. Reinstall our handler after startup so
+        # ProcessManager SIGTERM still reaches BackendManager.stop().
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        logging.info("Installed local rank signal handlers at %s", stage)
+
+    install_signal_handlers("process start")
 
     copy_gemm_config()
 
@@ -96,9 +119,8 @@ def local_rank_start(
 
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
-        # Defer these handlers until model loading completes.
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
+        startup_complete = True
+        install_signal_handlers("after backend start")
         logging.info("Backend server initialized successfully, sending ready status")
 
         _send_pipe_status(
@@ -171,6 +193,9 @@ def _create_rank_processes(
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
+    # Capture the parent before spawn so each rank arms PDEATHSIG against this
+    # manager, not against whatever reparents it if the manager dies first.
+    parent_pid = os.getpid()
     for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
@@ -178,7 +203,7 @@ def _create_rank_processes(
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = ctx.Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(global_controller, py_env_configs, world_rank, writer, parent_pid),
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
@@ -259,6 +284,7 @@ def _wait_for_ranks_startup(
                 except Exception as e:
                     logging.error(f"Failed to receive status from rank {i}: {e}")
                     raise
+
                 ranks_received[i] = True
                 if data.get("status") == "success":
                     logging.info(
@@ -272,7 +298,8 @@ def _wait_for_ranks_startup(
                     raise Exception(f"Rank {i} startup failed: {error_msg}")
             if all(ranks_received):
                 break
-            time.sleep(5)
+            # No extra sleep: reader.poll already paces the loop, and a rank that
+            # dies must be noticed on the next liveness check, not 5s later.
 
         logging.info(f"All {local_world_size} ranks started successfully")
     finally:
@@ -294,13 +321,8 @@ def multi_rank_start(
         )
         local_world_size = len(processes)
 
-        if py_env_configs.distribute_config.fake_gang_env:
-            # Test-only path: returning releases the manager, which publishes one
-            # last snapshot; the caller-owned ranks keep serving from the local tree.
-            _close_readers(rank_pipe_readers)
-            return processes
-
-        # Wait for all ranks to report startup status
+        # Fake gang mode uses the same handshake as normal mode: the ranks arm
+        # PDEATHSIG against this manager, so returning early here would kill them.
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
 
         manager = ProcessManager(
@@ -317,32 +339,48 @@ def multi_rank_start(
         )
         pipe_writer = None  # success closed it; a later abort speaks via exit code
     except BaseException as e:
+        # Cleanup must not be interrupted into multiprocessing atexit by the
+        # outer manager's SIGTERM. A later TERM now kills this manager directly;
+        # PDEATHSIG then kills any ranks that cleanup has not reaped yet.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         error_msg = str(e) or type(e).__name__
         error_trace = traceback.format_exc()
         logging.error(f"Multi-rank startup failed: {error_msg}")
 
         # Report failure via external pipe
         _send_pipe_status(pipe_writer, "failed", error_msg, error_trace)
-
         _close_readers(rank_pipe_readers)
 
         # Terminate all processes if any rank failed
         logging.error("Terminating all ranks due to startup failures")
         for proc in processes:
             if proc.pid is not None and proc.is_alive():
-                proc.terminate()
+                with suppress(Exception):
+                    proc.terminate()
 
-        # timeout join + kill to avoid terminate failed
+        # Use shared deadlines so teardown is bounded for the whole rank set,
+        # rather than taking 5+2 seconds per unresponsive rank.
+        terminate_deadline = time.monotonic() + 5
         for proc in processes:
             if proc.pid is None:
                 continue
-            proc.join(timeout=5)
-            if proc.is_alive():
-                logging.warning(f"Force killing process {proc.name} (pid={proc.pid})")
-                proc.kill()
-                proc.join(timeout=2)
+            with suppress(Exception):
+                proc.join(timeout=max(0, terminate_deadline - time.monotonic()))
 
-        alive_procs = [p for p in processes if p.pid is not None and p.is_alive()]
+        survivors = [p for p in processes if p.pid is not None and p.is_alive()]
+        for proc in survivors:
+            logging.warning(f"Force killing process {proc.name} (pid={proc.pid})")
+            with suppress(Exception):
+                proc.kill()
+
+        kill_deadline = time.monotonic() + 2
+        for proc in survivors:
+            with suppress(Exception):
+                proc.join(timeout=max(0, kill_deadline - time.monotonic()))
+
+        # os._exit to avoid atexit deadlock
+        alive_procs = [p for p in survivors if p.is_alive()]
         if alive_procs:
             logging.error(f"{len(alive_procs)} processes still alive after kill")
             if cleanup:
@@ -365,7 +403,15 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    expected_parent_pid: Optional[int] = None,
 ):
+    # Only a spawned backend manager is parent-guarded. The debug-load path
+    # runs inline in the top-level server and must not bind that server to its
+    # shell/launcher. The parent captures this PID before spawn so the helper's
+    # post-prctl comparison closes the parent-before-prctl race.
+    if expected_parent_pid is not None:
+        arm_parent_death_sigkill(expected_parent_pid)
+
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
     # local_rank_start / ProcessManager install the runtime handlers later.
@@ -373,7 +419,7 @@ def start_backend_server(
         # A second signal must kill immediately, not be swallowed by teardown.
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
-        raise KeyboardInterrupt(f"signal {signum} during startup")
+        raise KeyboardInterrupt(f"signal {signum} during backend startup")
 
     signal.signal(signal.SIGTERM, abort)
     signal.signal(signal.SIGINT, abort)

@@ -24,6 +24,7 @@ namespace rtp_llm {
 class KVCacheAllocator;
 class RemoteAsyncMatchContext;
 class RemoteConnectorAsyncContext;
+class KVCacheMemoryConnector;
 
 class RemoteConnector: public KVCacheConnector {
 public:
@@ -40,6 +41,7 @@ public:
     ~RemoteConnector() override;
 
     bool init();
+    void setMemoryConnector(const std::shared_ptr<KVCacheMemoryConnector>& connector);
 
     // for rank_0:
     std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
@@ -49,6 +51,10 @@ public:
                                                  const std::shared_ptr<AsyncMatchContext>& match_context,
                                                  int                                       start_read_block_index,
                                                  int                                       read_block_num) override;
+    std::shared_ptr<AsyncContext> asyncWriteMemory(const CacheKeysType& cache_keys,
+                                                   const std::vector<int32_t>& memory_block_ids,
+                                                   const std::shared_ptr<Meta>& meta,
+                                                   const std::shared_ptr<void>& buffer_lease);
     std::shared_ptr<AsyncContext>      asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                   const std::shared_ptr<Meta>&            meta) override;
     std::shared_ptr<AsyncContext>
@@ -68,6 +74,25 @@ private:
                        int                                                 read_block_num,
                        const std::shared_ptr<RemoteConnectorAsyncContext>& async_context,
                        const std::shared_ptr<RemoteAsyncMatchContext>&     match_context);
+    using WriteRequestBuilder =
+        std::function<bool(const kv_cache_manager::Locations&,
+                           const std::vector<size_t>&,
+                           const std::string&,
+                           std::vector<FunctionRequestPB>&,
+                           ActualUriGather&)>;
+    void asyncWriteMemoryTask(CacheKeysType cache_keys,
+                              std::vector<int32_t> memory_block_ids,
+                              const std::shared_ptr<Meta>& meta,
+                              const std::shared_ptr<void>& buffer_lease,
+                              const std::shared_ptr<RemoteConnectorAsyncContext>& async_context);
+    void asyncWriteCommonTask(CacheKeysType cache_keys,
+                              std::vector<int64_t> tokens,
+                              std::vector<std::string> location_spec_group_names,
+                              std::string unique_id,
+                              std::string trace_id,
+                              WriteRequestBuilder request_builder,
+                              std::shared_ptr<void> buffer_lease,
+                              const std::shared_ptr<RemoteConnectorAsyncContext>& async_context);
     void asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
                         const std::shared_ptr<Meta>&                        meta,
                         const std::shared_ptr<RemoteConnectorAsyncContext>& async_context);
@@ -81,7 +106,7 @@ private:
                         size_t&                                  new_reuse_block_num) const;
     bool genWriteRequest(size_t                                  tp_size,
                          const kv_cache_manager::Locations&      locations,
-                         const kv_cache_manager::BlockMask&      block_mask,
+                         const std::vector<size_t>&              selected_indices,
                          const std::string&                      trace_id,
                          const std::shared_ptr<KVCacheResource>& resource,
                          std::vector<FunctionRequestPB>&         requests,
@@ -91,6 +116,10 @@ private:
               const std::vector<std::string>&    group_tags,
               const std::vector<int32_t>&        block_ids,
               const kv_cache_manager::UriStrVec& uri_str_vec);
+    bool WriteMemory(const std::string&                 trace_id,
+                     const std::vector<int32_t>&        block_ids,
+                     const kv_cache_manager::UriStrVec& uri_str_vec,
+                     kv_cache_manager::UriStrVec&       out_uri_str_vec);
     bool Write(const std::string&                 trace_id,
                const std::vector<std::string>&    group_tags,
                const std::vector<int32_t>&        block_ids,
@@ -126,6 +155,7 @@ private:
     std::shared_ptr<InitParams>                      init_params_;
 
     std::unique_ptr<remote_connector::GroupPolicy> group_policy_;
+    std::weak_ptr<KVCacheMemoryConnector>           memory_connector_;
     const kmonitor::MetricsReporterPtr             metrics_reporter_;
 };
 

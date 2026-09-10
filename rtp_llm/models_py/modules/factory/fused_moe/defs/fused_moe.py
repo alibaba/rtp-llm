@@ -275,6 +275,23 @@ class FusedMoe(torch.nn.Module):
         self.expert_num = expert_num
         self.strategy_name = strategy_name
 
+    def clone_for_cuda_graph(self) -> "FusedMoe":
+        """Return a clone whose executor owns graph-private staging buffers.
+
+        Executors that stage into a persistent buffer must not share it across
+        captured graphs. Routers hold no per-graph state, so the clone reuses
+        this one. Executors without the hook keep being shared, which is the
+        long-standing behaviour for stateless ones.
+        """
+        if not hasattr(self.fused_experts, "clone_for_cuda_graph"):
+            return self
+        return FusedMoe(
+            self.router,
+            self.fused_experts.clone_for_cuda_graph(),
+            expert_num=self.expert_num,
+            strategy_name=self.strategy_name,
+        )
+
     @property
     def includes_shared_expert(self) -> bool:
         return bool(self.fused_experts.includes_shared_expert)

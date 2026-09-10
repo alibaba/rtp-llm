@@ -14,11 +14,24 @@ deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn = ["flash_attn","flash-attn-3"]
+# FA4 (Blackwell paged fp8) — cuda13 x86 only, see arch_select _CUDA13_X86_ONLY.
+flashattn4 = ["flash-attn-4"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
+requirement(flashattn4)
+
+py_test(
+    name = "test_glm5_mega_moe_wrapper_layout",
+    srcs = ["modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py"],
+    main = "modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py",
+    deps = [
+        ":modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
 
 
 filegroup(
@@ -95,6 +108,11 @@ py_library(
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
+        "//conditions:default": [],
+    }) + select({
+        # FA4 (Blackwell paged fp8) — cuda13 x86 only; used by the CP ALL_GATHER
+        # prefill path (allgather_cp_impl.py). Empty elsewhere via _CUDA13_X86_ONLY.
+        "@//:using_cuda13_x86": flashattn4,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

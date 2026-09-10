@@ -129,6 +129,7 @@ class GenerateConfig(BaseModel):
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
     thinking_mode: ThinkingMode = ThinkingMode.UNSPECIFIED
+    enable_think_logits_processor: Optional[bool] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     begin_think_token_ids: List[int] = []
     end_think_token_ids: List[int] = []
@@ -248,9 +249,10 @@ class GenerateConfig(BaseModel):
     resized_shape: Optional[List[int]] = None
     max_pixels: Optional[int] = None
     min_pixels: Optional[int] = None
-    fps: Optional[int] = None
+    fps: Optional[float] = None
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
+    max_long_side_pixel: Optional[int] = None
     crop_positions: Optional[List[float]] = None
     mm_timeout_ms: Optional[int] = None
 
@@ -825,7 +827,7 @@ class GenerateConfig(BaseModel):
                     if self.in_think_mode
                     else ThinkingMode.DISABLED
                 )
-            if resolved_thinking_mode in (
+            if self.enable_think_logits_processor and resolved_thinking_mode in (
                 ThinkingMode.ADAPTIVE,
                 ThinkingMode.ENABLED,
             ):
@@ -837,7 +839,10 @@ class GenerateConfig(BaseModel):
                     is_list_positive_integer(self.end_think_token_ids),
                     f"end_think_token_ids {self.end_think_token_ids} is wrong data type",
                 )
-            if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
+            if (
+                self.enable_think_logits_processor
+                and resolved_thinking_mode == ThinkingMode.ADAPTIVE
+            ):
                 check_with_info(
                     is_list_positive_integer(self.begin_think_token_ids),
                     f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",

@@ -9,11 +9,19 @@
 #endif
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
 
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("mtp_msa_target_verify_addressing_prepare",
+                  &mtpMsaTargetVerifyAddressingPrepare,
+                  py::arg("request_block_table"),
+                  py::arg("prefix_lengths"),
+                  py::arg("input_lengths"),
+                  py::arg("tokens_per_batch"));
+
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",

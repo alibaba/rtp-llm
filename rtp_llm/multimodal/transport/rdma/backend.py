@@ -9,6 +9,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.multimodal_util import add_multimodal_feature_hashes
 from rtp_llm.multimodal.transport.base import (
     MMOutputResult,
     MMTransportBackend,
@@ -84,6 +85,7 @@ class RdmaOutputBackend(MMTransportBackend):
             raise RuntimeError(f"invalid RDMA descriptor: {parse_error}") from parse_error
 
         receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
+        add_multimodal_feature_hashes(receipt, res.embeddings, res.feature_hashes)
         role_bytes: Dict[int, int] = {}
         for slot in slots:
             receipt.output_rdma_slots.add().CopyFrom(slot)

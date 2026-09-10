@@ -7,6 +7,12 @@ py_test(
 )
 
 py_test(
+    name = "exceptions_test",
+    srcs = ["exceptions_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "server_config_setup_test",
     srcs = [
         "server_config_setup_test.py",

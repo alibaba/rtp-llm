@@ -19,7 +19,8 @@ public:
 
 private:
     bool writeResponseBlock(const std::shared_ptr<BlockBuffer>&     block,
-                            const std::shared_ptr<BlockBufferInfo>& peer_block);
+                            const std::shared_ptr<BlockBufferInfo>& peer_block,
+                            const std::vector<SourceRange>&         ranges);
 };
 
 }  // namespace rtp_llm

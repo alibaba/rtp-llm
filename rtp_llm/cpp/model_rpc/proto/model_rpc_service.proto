@@ -153,6 +153,9 @@ message GenerateConfigPB {
     google.protobuf.StringValue structural_tag = 72;
     ThinkingModePB thinking_mode = 73;
     reserved 74;
+    // Kill switch for the think logits processor: when the structural-tag
+    // envelope already enforces think boundaries, the processor is redundant.
+    google.protobuf.BoolValue enable_think_logits_processor = 75;
 }
 
 message MMPreprocessConfigPB {
@@ -160,11 +163,12 @@ message MMPreprocessConfigPB {
     int32 height = 2;
     int32 min_pixels = 3;
     int32 max_pixels = 4;
-    int32 fps = 5;
+    float fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
     repeated float crop_positions = 8;
     int32 mm_timeout_ms = 9;
+    int32 max_long_side_pixel = 11;
 }
 
 message MultimodalInputPB {
@@ -178,6 +182,9 @@ message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
     // LLM can receive the output through GPUDirect RDMA.
     bool support_rdma = 2;
+    // Globally unique RTP-LLM request id. Propagated to the VIT worker for
+    // access logging and downstream data-inspection correlation.
+    int64 request_id = 3;
 }
 
 enum TensorDataTypePB {
@@ -229,6 +236,9 @@ message MultimodalOutputPB {
     repeated int32 split_size = 4;
     // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
     repeated MMRdmaSlotPB output_rdma_slots = 5;
+    // Compact CPU row hashes stay inline for both gRPC and RDMA payloads.
+    TensorPB multimodal_feature_hash = 7;
+    uint32 feature_hash_version = 8;
 }
 
 message ReleaseLeasePB {
@@ -383,6 +393,10 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    // CP size used by prefill node; > 1 means kv cache is page-RR sharded across
+    // cp_size physical blocks per virtual block. Default 0 keeps backward
+    // compatibility (treated as 1 by decode side).
+    int32 prefill_cp_size = 13;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.
@@ -669,6 +683,8 @@ message MemoryOperationRequestPB {
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
+    // Coordinator-generated id used to correlate one copy plan across all TP ranks.
+    uint64 copy_plan_id = 3;
 }
 
 message MemoryOperationResponsePB {
@@ -762,6 +778,7 @@ enum RemoteOpType {
     REMOTE_OPERATION_UNSPECIFIED = 0;
     REMOTE_OPERATION_READ = 1;
     REMOTE_OPERATION_WRITE = 2;
+    REMOTE_OPERATION_WRITE_MEMORY = 3;
 }
 
 message RemoteBoolMasksTypePB { repeated bool values = 1; }
@@ -932,6 +949,15 @@ service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+    // Optional compatibility endpoint for clients that explicitly prefetch ViT work.
+    // The RTP-LLM frontend no longer calls it on the normal generation path.
+    rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);
+    // GreenNet content-safety gate. It starts any missing ViT work itself and
+    // blocks before prefill. Returns EmptyPB when all inputs pass; on a violation
+    // the server aborts with PERMISSION_DENIED and an ErrorDetailsPB
+    // (error_code=UNSAFE_INPUT_CONTENT) in the grpc-status-details-bin trailer,
+    // which the client converts back to FtRuntimeException.
+    rpc WaitGreenNetVerdict(MultimodalInputsPB) returns (EmptyPB);
     // Best-effort release after the LLM finishes reading remote slots.
     rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
 }

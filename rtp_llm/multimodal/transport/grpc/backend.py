@@ -9,6 +9,7 @@ from rtp_llm.multimodal.transport.base import (
     MMTerminalBackend,
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.multimodal_util import add_multimodal_feature_hashes
 from rtp_llm.utils.grpc_util import trans_from_tensor
 
 TRANSPORT_BYTES = "bytes"
@@ -54,6 +55,7 @@ class GrpcInlineOutputBackend(MMTerminalBackend):
             multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
             split_size=[e.shape[0] for e in res.embeddings],
         )
+        add_multimodal_feature_hashes(receipt, res.embeddings, res.feature_hashes)
         if contain_pos:
             receipt.multimodal_pos_id.CopyFrom(
                 trans_from_tensor(torch.concat(res.position_ids))

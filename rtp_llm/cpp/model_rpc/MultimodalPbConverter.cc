@@ -6,8 +6,10 @@
 
 namespace rtp_llm {
 
-MultimodalInputsPB MultimodalPbConverter::inputsToPb(const std::vector<MultimodalInput>& mm_inputs) {
+MultimodalInputsPB MultimodalPbConverter::inputsToPb(const std::vector<MultimodalInput>& mm_inputs,
+                                                     int64_t                             request_id) {
     MultimodalInputsPB mm_inputs_pb;
+    mm_inputs_pb.set_request_id(request_id);
     for (const auto& mm_input : mm_inputs) {
         auto now_input = mm_inputs_pb.add_multimodal_inputs();
         now_input->set_multimodal_url(mm_input.url);
@@ -21,11 +23,12 @@ MultimodalInputsPB MultimodalPbConverter::inputsToPb(const std::vector<Multimoda
 ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const MultimodalOutputPB& output_pb) {
     // Convert malformed remote data into an error instead of propagating torch exceptions.
     try {
-        torch::Tensor mm_embedding = TensorPbConvert::pbToTorch(output_pb.multimodal_embedding()), mm_position_id;
+        torch::Tensor mm_embedding = TensorPbConvert::pbToPinnedTorch(output_pb.multimodal_embedding());
+        torch::Tensor mm_position_id;
         bool          contain_pos         = output_pb.has_multimodal_pos_id();
         bool          contain_extra_input = output_pb.multimodal_extra_input_size() > 0;
         if (contain_pos) {
-            mm_position_id = TensorPbConvert::pbToTorch(output_pb.multimodal_pos_id());
+            mm_position_id = TensorPbConvert::pbToPinnedTorch(output_pb.multimodal_pos_id());
         }
         // RDMA receipts have no inline embedding and must not reach this decoder.
         if (mm_embedding.dim() == 0) {
@@ -45,6 +48,14 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
                                  + std::to_string(mm_embedding.size(0)));
         }
         mm_output.mm_features = mm_embedding.split(split_sizes, 0);
+        if (output_pb.has_multimodal_feature_hash()) {
+            auto hashes = TensorPbConvert::pbToTorch(output_pb.multimodal_feature_hash());
+            if (output_pb.feature_hash_version() != 1 || hashes.dim() != 1
+                || hashes.scalar_type() != torch::kInt32 || hashes.numel() != split_total) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal feature hash metadata");
+            }
+            mm_output.mm_feature_hashes = hashes.split(split_sizes, 0);
+        }
         if (contain_pos) {
             if (mm_position_id.dim() == 0 || split_total != mm_position_id.size(0)) {
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
@@ -65,7 +76,7 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
             std::vector<torch::Tensor> extra_inputs;
             extra_inputs.reserve(output_pb.multimodal_extra_input_size());
             for (const auto& extra_input_pb : output_pb.multimodal_extra_input()) {
-                extra_inputs.emplace_back(TensorPbConvert::pbToTorch(extra_input_pb));
+                extra_inputs.emplace_back(TensorPbConvert::pbToPinnedTorch(extra_input_pb));
             }
             mm_output.mm_extra_input = std::move(extra_inputs);
         }
@@ -86,6 +97,7 @@ void MultimodalPbConverter::preprocessConfigToPb(MMPreprocessConfigPB* config_pb
     config_pb->set_min_frames(config.min_frames);
     config_pb->set_max_frames(config.max_frames);
     config_pb->set_mm_timeout_ms(config.mm_timeout_ms);
+    config_pb->set_max_long_side_pixel(config.max_long_side_pixel);
     for (const float& crop_position : config.crop_positions) {
         config_pb->add_crop_positions(crop_position);
     }

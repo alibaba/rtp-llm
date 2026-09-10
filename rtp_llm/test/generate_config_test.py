@@ -210,6 +210,7 @@ class GenerateConfigTest(TestCase):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
+        generate_env_config.max_thinking_tokens = 64
         special_tokens = SpecialTokens()
         tokenizer = QWenTokenizer(
             f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
@@ -226,6 +227,20 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.max_thinking_tokens, 109)
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [102])
+
+    def test_add_thinking_params_uses_env_default(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_end_token_id = 102
+        generate_env_config.max_thinking_tokens = 64
+        generate_config = Pipeline.create_generate_config(
+            generate_config=self._create_generate_config(),
+            vocab_size=100,
+            special_tokens=SpecialTokens(),
+            tokenizer=None,
+            generate_env_config=generate_env_config,
+        )
+
+        self.assertEqual(generate_config.max_thinking_tokens, 64)
 
     def test_add_thinking_params_with_think_token(self):
         generate_env_config = GenerateEnvConfig()
@@ -527,6 +542,57 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_thinking_tokens, 0)
         self.assertEqual(config.end_think_token_ids, [102])
 
+    def test_renderer_chat_constraints_are_applied_to_generate_config(self):
+        class Renderer:
+            def apply_chat_completion_constraints(self, request, config):
+                config.structural_tag = '{"type":"test"}'
+
+        config = GenerateConfig()
+
+        OpenaiEndpoint._apply_renderer_chat_constraints(
+            Renderer(),
+            ChatCompletionRequest(messages=[]),
+            config,
+        )
+
+        self.assertEqual(config.structural_tag, '{"type":"test"}')
+
+    def test_default_renderer_chat_constraints_allow_non_forcing_tool_choice(self):
+        renderer = CustomChatRenderer.__new__(CustomChatRenderer)
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+        for tool_choice in (None, "auto", "none"):
+            with self.subTest(tool_choice=tool_choice):
+                OpenaiEndpoint._apply_renderer_chat_constraints(
+                    renderer,
+                    ChatCompletionRequest(
+                        messages=[],
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    ),
+                    GenerateConfig(),
+                )
+
+        with self.assertRaisesRegex(Exception, "is not supported"):
+            OpenaiEndpoint._apply_renderer_chat_constraints(
+                renderer,
+                ChatCompletionRequest(
+                    messages=[],
+                    tools=tools,
+                    tool_choice="required",
+                ),
+                GenerateConfig(),
+            )
+
     def test_disable_thinking_zeroes_backend_thinking_budget(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
@@ -540,8 +606,80 @@ class OpenaiGenerateConfigTest(TestCase):
         config = self._extract_openai_generation_config(request, generate_env_config)
 
         self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.thinking_mode, ThinkingMode.DISABLED)
         self.assertEqual(config.max_thinking_tokens, 0)
         self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_unspecified_request_defaults_to_adaptive(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_start_tag = "<think>"
+        generate_env_config.think_end_token_id = 102
+        request = ChatCompletionRequest(messages=[])
+
+        config = self._extract_openai_generation_config(request, generate_env_config)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ADAPTIVE)
+        self.assertFalse(config.in_think_mode)
+        self.assertTrue(config.enable_think_logits_processor)
+        self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode("<think>", add_special_tokens=False),
+        )
+        self.assertEqual(config.end_think_token_ids, [102])
+
+    def test_extra_config_explicit_thinking_mode_is_preserved(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(thinking_mode=ThinkingMode.ENABLED),
+        )
+
+        config = self._extract_openai_generation_config(request)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertTrue(config.in_think_mode)
+
+    def test_resolved_chat_template_kwargs_match_backend_thinking_mode(self):
+        cases = [
+            ({}, ThinkingMode.ADAPTIVE, "adaptive", None),
+            ({"enable_thinking": True}, ThinkingMode.ENABLED, "enabled", True),
+            ({"enable_thinking": False}, ThinkingMode.DISABLED, "disabled", False),
+        ]
+        for (
+            request_kwargs,
+            expected_mode,
+            expected_template_mode,
+            expected_enabled,
+        ) in cases:
+            with self.subTest(request_kwargs=request_kwargs):
+                request = ChatCompletionRequest(messages=[], **request_kwargs)
+
+                self.assertEqual(request.resolve_thinking_mode(), expected_mode)
+                template_kwargs = request.get_resolved_chat_template_kwargs()
+                self.assertEqual(
+                    template_kwargs["thinking_mode"], expected_template_mode
+                )
+                self.assertEqual(
+                    template_kwargs.get("enable_thinking"), expected_enabled
+                )
+
+    def test_chat_template_kwargs_are_merged_before_resolving_thinking(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            chat_template_kwargs={"enable_thinking": False, "request_arg": 1},
+            extra_configs=GenerateConfig(chat_template_kwargs={"extra_arg": 2}),
+        )
+
+        self.assertEqual(request.resolve_thinking_mode(), ThinkingMode.DISABLED)
+        self.assertEqual(
+            request.get_resolved_chat_template_kwargs(),
+            {
+                "enable_thinking": False,
+                "thinking_mode": "disabled",
+                "request_arg": 1,
+                "extra_arg": 2,
+            },
+        )
 
     def test_openai_max_completion_tokens_thinking_budget_keeps_backend_limit(self):
         generate_env_config = GenerateEnvConfig()
@@ -560,6 +698,35 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
         self.assertTrue(config.in_think_mode)
+
+    def test_openai_env_thinking_budget_is_default_only(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_end_token_id = 102
+        generate_env_config.max_thinking_tokens = 64
+
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(messages=[], enable_thinking=True),
+            generate_env_config,
+        )
+        self.assertEqual(config.max_thinking_tokens, 64)
+
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(
+                messages=[], enable_thinking=True, thinking_budget=10
+            ),
+            generate_env_config,
+        )
+        self.assertEqual(config.max_thinking_tokens, 10)
+
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(
+                messages=[],
+                enable_thinking=True,
+                extra_configs=GenerateConfig(max_thinking_tokens=12),
+            ),
+            generate_env_config,
+        )
+        self.assertEqual(config.max_thinking_tokens, 12)
 
     def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
         generate_env_config = GenerateEnvConfig()

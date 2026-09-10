@@ -69,6 +69,14 @@ __global__ void embedding_lookup_kernel(T*            from_tensor,
             }
         }
 
+        // Multimodal placeholder positions carry input_id = -1 (their embedding comes from the
+        // injected vision features, not the word table). Skip the table lookup to avoid an
+        // out-of-bounds (negative offset) access even when text_tokens_mask is absent.
+        if (input_id < 0) {
+            from_tensor[index] = pos_embed + type_embed;
+            continue;
+        }
+
         embedding = embedding_table[input_id * hidden_units + col_index];
 
         // embedding *= input_embedding_scalar;
@@ -107,8 +115,6 @@ __global__ void embedding_lookup_kernel_vec(T*            from_tensor,
         const int64_t col_index   = index % aligned_hidden_units;
         const int     input_id    = input_ids[token_index];
 
-        VectorType embedding_vec = reinterpret_cast<const VectorType*>(
-            &(embedding_table[input_id * hidden_units + col_index * vector_size]))[0];
         VectorType pos_embed_vec  = {.0f, .0f, .0f, .0f};
         VectorType type_embed_vec = {.0f, .0f, .0f, .0f};
 
@@ -118,7 +124,7 @@ __global__ void embedding_lookup_kernel_vec(T*            from_tensor,
         }
         if constexpr (USE_TYPE_ID_EMB) {
             assert(type_table != nullptr);
-            type_embed_vec = LDST128BITS(type_table[input_pos[token_index] * hidden_units + col_index * vector_size]);
+            type_embed_vec = LDST128BITS(type_table[input_type[token_index] * hidden_units + col_index * vector_size]);
         }
         if constexpr (USE_MASK) {
             assert(input_mask != nullptr);
@@ -131,6 +137,22 @@ __global__ void embedding_lookup_kernel_vec(T*            from_tensor,
                 continue;
             }
         }
+
+        // Multimodal placeholder positions carry input_id = -1 (their embedding comes from the
+        // injected vision features, not the word table). Skip the table lookup to avoid an
+        // out-of-bounds (negative offset) access even when text_tokens_mask is absent. Reading the
+        // word embedding only after this check also mirrors the scalar embedding_lookup_kernel.
+        if (input_id < 0) {
+#pragma unroll
+            for (int i = 0; i < vector_size; ++i) {
+                from_tensor[index * vector_size + i] =
+                    reinterpret_cast<T*>(&pos_embed_vec)[i] + reinterpret_cast<T*>(&type_embed_vec)[i];
+            }
+            continue;
+        }
+
+        VectorType embedding_vec = reinterpret_cast<const VectorType*>(
+            &(embedding_table[input_id * hidden_units + col_index * vector_size]))[0];
 
 #pragma unroll
         for (int i = 0; i < vector_size; ++i) {

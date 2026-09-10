@@ -23,6 +23,15 @@ MOE_STRATEGY_CHOICES = (
     "fp4_no_dp",
     "mega_moe",
     "mega_moe_se",
+    # MXFP8 1x32 routed experts, used by MiniMax-M3.
+    "mxfp8_no_dp",
+    "mxfp8_ep_normal",
+    "mxfp8_ep_low_latency",
+    # MegaMoE variants: FP8xFP8 routed experts, optionally with the shared
+    # expert folded into the kernel.
+    "mega_moe_fp8",
+    "mega_moe_fp8_se",
+    "mega_moe_fused",
     "grouped_fp4",
     "local_loop",
     "rocm_ep_normal",

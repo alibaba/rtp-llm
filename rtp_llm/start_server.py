@@ -28,6 +28,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
+    TerminalHealthCheckError,
 )
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -49,6 +50,10 @@ STARTUP_REAL_WARMUP_MIN_TOKEN_LEN = 2
 STARTUP_REAL_WARMUP_TIMEOUT_S = 600.0
 STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
+STARTUP_HEALTH_CHECK_TIMEOUT_S = 60 * 60
+# The backend manager gets one window to terminate ranks and another to reap
+# them. Give only the top-level manager a small scheduling margin beyond both.
+NORMAL_BACKEND_REAP_WINDOW_S = ProcessManager.POST_KILL_REAP_WINDOW * 2 + 2
 
 
 class StartupRealWarmupAddressResolutionError(RuntimeError):
@@ -123,7 +128,10 @@ def start_backend_server_impl(
     try:
         backend_process = torch.multiprocessing.Process(
             target=start_backend_server,
-            args=(global_controller, py_env_configs, pipe_writer),
+            # Capture the expected parent before spawn. Sampling getppid() in
+            # the child would accept init/subreaper as its parent if this
+            # process died before the child armed PDEATHSIG.
+            args=(global_controller, py_env_configs, pipe_writer, os.getpid()),
             name="backend_manager",
         )
         backend_process.start()
@@ -139,7 +147,6 @@ def start_backend_server_impl(
     pipe_writer.close()  # Parent process closes write end
 
     # Create check_ready_fn for pipe-based health check
-    max_wait_seconds = 60 * 60
     startup_status = {"ready": False, "error": None}
 
     def check_backend_ready():
@@ -148,7 +155,7 @@ def start_backend_server_impl(
             return True
 
         if startup_status["error"]:
-            raise Exception(startup_status["error"])
+            raise TerminalHealthCheckError(startup_status["error"])
 
         # Non-blocking check if data is available
         if pipe_reader.poll(timeout=0):
@@ -171,12 +178,12 @@ def start_backend_server_impl(
                     error = f"Backend server start failed: {error_msg}"
                     startup_status["error"] = error
                     pipe_reader.close()
-                    raise Exception(error)
+                    raise TerminalHealthCheckError(error)
             except EOFError:
                 error = "Backend server pipe closed unexpectedly"
                 startup_status["error"] = error
                 pipe_reader.close()
-                raise Exception(error)
+                raise TerminalHealthCheckError(error)
 
         return False
 
@@ -665,6 +672,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         backend_post_frontend_drain_seconds=(
             py_env_configs.server_config.backend_post_frontend_drain_seconds
         ),
+        normal_reap_window=NORMAL_BACKEND_REAP_WINDOW_S,
     )
     # Backward compat: VIT_SEPARATION=ROLE without ROLE_TYPE=VIT
     if (
@@ -720,7 +728,9 @@ def start_server(py_env_configs: PyEnvConfigs):
                 )
 
         # Start parallel health checks and wait for completion
-        if not process_manager.run_health_checks():
+        if not process_manager.run_health_checks(
+            timeout=STARTUP_HEALTH_CHECK_TIMEOUT_S
+        ):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 

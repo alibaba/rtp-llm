@@ -180,17 +180,29 @@ struct KVCacheConfig {
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy             = false;
-    bool    enable_remote_cache                     = false;
-    bool    write_cache_sync                        = false;
-    bool    enable_tiered_memory_cache              = false;
-    bool    enable_gpu_prefix_tree                  = false;
-    bool    enable_prefix_tree_memory_cache         = false;
-    bool    enable_legacy_memory_connector_fallback = true;
-    int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
-    bool    enable_independent_group_eviction       = false;
-    int64_t device_cache_min_free_blocks            = 0;
-    int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
+    bool        enable_memory_cache_sm_copy             = false;
+    std::string memory_cache_h2d_copy_mode              = "auto";
+    bool        memory_cache_h2d_copy_strict            = false;
+    bool        enable_memory_cache_h2d_3d_batch_auto   = false;
+    std::string memory_cache_d2h_copy_mode              = "auto";
+    bool        memory_cache_d2h_copy_strict            = false;
+    bool        enable_memory_cache_d2h_3d_batch_auto   = false;
+    bool        enable_remote_cache                     = false;
+    bool        write_cache_sync                        = false;
+    bool        enable_tiered_memory_cache              = false;
+    bool        enable_gpu_prefix_tree                  = false;
+    bool        enable_prefix_tree_memory_cache         = false;
+    bool        enable_legacy_memory_connector_fallback = true;
+    int64_t     prefix_tree_memory_state_swa_pool_ratio = 0;
+    bool        enable_independent_group_eviction       = false;
+    int64_t     device_cache_min_free_blocks            = 0;
+    bool        enable_memory_cache_remote_eviction     = false;
+    int         device_cache_high_watermark_ratio       = 95;
+    int         memory_cache_high_watermark_ratio       = 95;
+    int         memory_cache_remote_eviction_timeout_ms = 2000;
+    int         memory_cache_remote_eviction_max_blocks = 32;
+    int         load_cache_retry_times = 1;  // Maximum retry attempts for load cache transfer failures
+
 
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
@@ -271,7 +283,19 @@ struct HWKernelConfig {
     std::vector<int> decode_capture_batch_sizes;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
-    std::string      to_string() const;
+    bool             deterministic_gemm     = false;
+    bool             deterministic_attn     = false;
+    // Master switch for ALL Triton fuse kernels in the model_py path
+    // (Qwen3.5/Qwen3-Next decoder fuses, GLM5/DSV3.2 MLA fuses,
+    // strided_slice_copy_, _apply_output_bmm, etc.). Set ``false`` to
+    // bypass to the unfused baseline path everywhere — useful for
+    // debugging/verifying precision against the pre-fuse implementation.
+    bool enable_fuse_kernels = true;
+    // Tri-state override for the speculative-prefill CUDA graph: "auto" keeps
+    // the MegaMoE policy in MtpExecutor, "on" forces the graph, "off" forces
+    // eager. The DISABLE_/FORCE_ env vars still win over it.
+    std::string sp_prefill_cuda_graph_mode = "auto";
+    std::string to_string() const;
 };
 
 struct DeviceResourceConfig {
@@ -315,16 +339,18 @@ enum SpeculativeType {
 };
 
 struct SpeculativeExecutionConfig {
-    std::string     model_type                    = "";
-    SpeculativeType type                          = SP_TYPE_NONE;
-    int64_t         sp_min_token_match            = 2;
-    int64_t         sp_max_token_match            = 2;
-    std::string     tree_decode_config            = "";
-    int64_t         gen_num_per_cycle             = 1;
-    bool            force_stream_sample           = false;
-    bool            force_score_context_attention = true;
-    std::string     quantization                  = "";
-    std::string     checkpoint_path               = "";
+    std::string     model_type                      = "";
+    SpeculativeType type                            = SP_TYPE_NONE;
+    int64_t         sp_min_token_match              = 2;
+    int64_t         sp_max_token_match              = 2;
+    std::string     tree_decode_config              = "";
+    int64_t         gen_num_per_cycle               = 1;
+    bool            force_stream_sample             = false;
+    bool            deterministic_draft_exact_match = false;
+    bool            force_score_context_attention   = true;
+    int             fp8_kv_cache                    = -1;
+    std::string     quantization                    = "";
+    std::string     checkpoint_path                 = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
     int64_t     sp_dspark_mask_token_id = -1;
@@ -404,6 +430,7 @@ PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
 struct FIFOSchedulerConfig {
     int64_t max_context_batch_size = 1;
     int64_t max_batch_tokens_size  = 0;
+    int64_t max_batch_kv_len       = 0;
     // PDFUSION scheduler mode. Supported values:
     //   ""      -> default FIFO/decode-first scheduler
     //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio

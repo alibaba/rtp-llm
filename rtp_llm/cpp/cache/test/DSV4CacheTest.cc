@@ -1903,8 +1903,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
                                                      kv_cache_config,
                                                      sp_config,
                                                      std::nullopt,
-                                                     true,
-                                                     false);
+                                                     true);
 
     ASSERT_EQ(config.layer_num, 43u);
     ASSERT_EQ(config.layer_all_num, 45u);

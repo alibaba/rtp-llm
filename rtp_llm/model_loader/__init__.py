@@ -16,6 +16,7 @@ from .mixed_fp4_quant_weight import MixedFp4Weight
 from .omni_quant_weight import OmniQuantWeightInfo
 from .online_modelopt_fp4_quant_weight import OnlineModelOptFp4MoeWeight
 from .per_block_fp8_quant_weight import PerBlockFp8Weight
+from .mxfp8_quant_weight import Mxfp8Weight
 from .per_channel_fp8_quant_weight import PerChannelFp8Weight
 from .per_group_fp4_quant_weight import PerGroupFp4Weight
 from .per_tensor_int8_quant_weight import PerTensorInt8QuantWeight

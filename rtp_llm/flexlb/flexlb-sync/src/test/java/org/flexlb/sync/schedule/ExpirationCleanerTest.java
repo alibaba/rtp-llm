@@ -9,6 +9,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -97,6 +98,27 @@ class ExpirationCleanerTest {
                     status.beginRetirementAfterEndpointGateClosed();
                     return detached;
                 });
+    }
+
+    @Test
+    void shouldCreateBeanThroughSpringConstructorInjection() {
+        try (AnnotationConfigApplicationContext context =
+                     new AnnotationConfigApplicationContext()) {
+            ConfigService configService = mock(ConfigService.class);
+            when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+            context.registerBean(ConfigService.class, () -> configService);
+            context.registerBean(
+                    CacheAwareService.class,
+                    () -> mock(CacheAwareService.class));
+            context.registerBean(
+                    WorkerDirectory.class,
+                    () -> mock(WorkerDirectory.class));
+            context.register(ExpirationCleaner.class);
+
+            context.refresh();
+
+            assertTrue(context.containsBean("expirationCleaner"));
+        }
     }
 
     private static WorkerStatus status(String ip, int port) {

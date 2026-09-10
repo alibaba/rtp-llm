@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from rtp_llm.test.perf_test.cache_grid_runner import CacheGridRunner
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
@@ -38,7 +38,11 @@ from rtp_llm.test.perf_test.perf_utils import (
     write_test_info,
 )
 from rtp_llm.test.perf_test.server import EngineServer
-from rtp_llm.test.perf_test.test_util import create_query
+from rtp_llm.test.perf_test.test_util import (
+    create_query,
+    create_reuse_cache_queries,
+    create_reuse_cache_queries_for_length,
+)
 from rtp_llm.test.perf_test.tps_runner import TpsBinarySearchRunner
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
 
@@ -436,6 +440,7 @@ def _run_decode(
     engine_status: Dict[str, Any],
     **kwargs: Any,
 ) -> None:
+    grid_cases = kwargs.pop("grid_cases", None)
     max_kv = (
         float(engine_status.get("max_kv_tokens", float("inf")))
         if engine_status
@@ -471,6 +476,17 @@ def _run_decode(
                 input_query_dict,
                 **kwargs,
             ).run()
+        elif grid_cases:
+            GridRunner(
+                port,
+                dp_size,
+                config.batch_size_list,
+                config.input_len_list,
+                input_query_dict,
+                is_decode=True,
+                grid_cases=grid_cases,
+                **kwargs,
+            ).run()
         else:
             for input_len in config.input_len_list:
                 filtered_bs = filter_bs_by_kvcache(
@@ -497,6 +513,73 @@ def _run_decode(
 # ---------------------------------------------------------------------------
 
 
+def _parse_grid_cases(grid_cases: str) -> Optional[List[Tuple[int, int]]]:
+    if not grid_cases.strip():
+        return None
+    cases: List[Tuple[int, int]] = []
+    seen = set()
+    for raw_case in grid_cases.split(","):
+        case = raw_case.strip()
+        if not case:
+            continue
+        parts = case.split(":")
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid --grid_cases item {case!r}; expected batch:input_len"
+            )
+        try:
+            parsed_case = (int(parts[0]), int(parts[1]))
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid --grid_cases item {case!r}; values must be integers"
+            ) from e
+        if parsed_case[0] <= 0 or parsed_case[1] <= 0:
+            raise ValueError(
+                f"Invalid --grid_cases item {case!r}; values must be positive"
+            )
+        if parsed_case not in seen:
+            seen.add(parsed_case)
+            cases.append(parsed_case)
+    if not cases:
+        raise ValueError("--grid_cases did not contain any valid cases")
+    return cases
+
+
+def _positive_int_arg(argv: List[str], key: str, default: int) -> int:
+    value = extract_arg(argv, key)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as e:
+        raise ValueError(f"Invalid --{key} value {value!r}; expected integer") from e
+    if parsed <= 0:
+        raise ValueError(f"Invalid --{key} value {value!r}; expected positive integer")
+    return parsed
+
+
+def _reuse_query_variant_count(profile: bool = True) -> int:
+    warmup_runs = int(os.environ.get("PERF_FORMAL_WARMUP_RUNS", "1"))
+    measure_runs = int(os.environ.get("PERF_MEASURE_RUNS", "1"))
+    profile_runs = int(os.environ.get("PERF_PROFILE_RUNS", "1" if profile else "0"))
+    return max(1, warmup_runs + measure_runs + profile_runs)
+
+
+def _parse_reuse_cache_lengths(value: str, input_len: int) -> List[int]:
+    lengths = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if not lengths:
+        raise ValueError("--prefill_reuse_cache_lengths is empty")
+    if len(set(lengths)) != len(lengths):
+        raise ValueError("--prefill_reuse_cache_lengths contains duplicates")
+    invalid = [length for length in lengths if not 0 <= length < input_len]
+    if invalid:
+        raise ValueError(
+            "reuse lengths must be in [0, input_len): "
+            f"input_len={input_len}, invalid={invalid}"
+        )
+    return lengths
+
+
 def main() -> str:
     from rtp_llm.config.log_config import setup_logging
 
@@ -510,6 +593,7 @@ def main() -> str:
     # batch_decode_test always needs BatchDecodeScheduler
     if extract_arg(remaining, "use_batch_decode_scheduler") is None:
         remaining.extend(["--use_batch_decode_scheduler", "1"])
+    tp_size = _positive_int_arg(remaining, "tp_size", 1)
     generate_config = json.loads(args.generate_config)
     os.makedirs(args.result_dir, exist_ok=True)
     EngineServer.propagate_engine_env(remaining)
@@ -640,6 +724,14 @@ def main() -> str:
 
     # Phase 1: Configure
     config = prepare_config(args, remaining)
+    grid_cases = _parse_grid_cases(args.grid_cases)
+    if config.is_distribution and grid_cases:
+        raise ValueError("--grid_cases is only supported in grid mode")
+    if grid_cases:
+        config.batch_size_list = sorted({case[0] for case in grid_cases})
+        config.input_len_list = sorted({case[1] for case in grid_cases})
+        config.all_seq_lens = list(config.input_len_list)
+        config.max_concurrency = max(config.batch_size_list)
     if not config.is_distribution:
         config.max_seq_len = _effective_grid_max_seq_len(args, config.input_len_list)
     effective_runtime_config = _effective_performance_config(
@@ -661,6 +753,37 @@ def main() -> str:
         effective_runtime_config=effective_runtime_config,
     )
 
+    # Build reuse-cache prompts before server start so tokenizer failures
+    # do not burn a full engine bring-up.
+    reuse_cache_query_dict = None
+    if (
+        args.prefill_reuse_cache_hit_rate > 0.0
+        and args.partial == 2
+        and not args.prefill_reuse_cache_lengths
+    ):
+        tokenizer_path = (
+            extract_arg(remaining, "tokenizer_path")
+            or extract_arg(remaining, "checkpoint_path")
+            or os.environ.get("TOKENIZER_PATH", "")
+        )
+        reuse_cache_query_dict = create_reuse_cache_queries(
+            tokenizer_path=tokenizer_path,
+            input_len_list=config.input_len_list,
+            hit_rate=args.prefill_reuse_cache_hit_rate,
+            seq_size_per_block=_positive_int_arg(
+                remaining, "seq_size_per_block", 1
+            ),
+            num_variants=max(
+                _reuse_query_variant_count(),
+                max(
+                    _explicit_batch_size_list(args)
+                    or config.batch_size_list
+                    or [1]
+                )
+                * args.dp_size,
+            ),
+        )
+
     # Phase 2: Serve
     server = EngineServer(args, remaining)
     try:
@@ -679,7 +802,56 @@ def main() -> str:
             decode_test_length=args.decode_test_length,
             generate_config=generate_config,
             num_measures=args.num_measures,
+            tp_size=tp_size,
         )
+
+        if args.prefill_reuse_cache_lengths:
+            if args.prefill_reuse_cache_hit_rate > 0.0:
+                raise ValueError(
+                    "exact reuse lengths and reuse hit rate are mutually exclusive"
+                )
+            if args.partial != 2:
+                raise ValueError("exact reuse-length sweep requires --partial 2")
+            if config.is_distribution or len(config.input_len_list) != 1 or grid_cases:
+                raise ValueError(
+                    "exact reuse-length sweep requires exactly one --input_len "
+                    "and no --grid_cases"
+                )
+            input_len = config.input_len_list[0]
+            tokenizer_path = (
+                extract_arg(remaining, "tokenizer_path")
+                or extract_arg(remaining, "checkpoint_path")
+                or os.environ.get("TOKENIZER_PATH", "")
+            )
+            for prefix_variant, reuse_len in enumerate(
+                _parse_reuse_cache_lengths(
+                    args.prefill_reuse_cache_lengths, input_len
+                )
+            ):
+                case_dir = os.path.join(args.result_dir, f"reuse_{reuse_len}")
+                os.makedirs(case_dir, exist_ok=True)
+                reuse_query_dict = create_reuse_cache_queries_for_length(
+                    tokenizer_path=tokenizer_path,
+                    input_len=input_len,
+                    target_reuse_len=reuse_len,
+                    num_variants=_reuse_query_variant_count(),
+                    prefix_variant=prefix_variant,
+                )
+                case_kwargs = dict(runner_kwargs)
+                case_kwargs["dump_json_path"] = case_dir
+                case_kwargs["reuse_cache_query_dict"] = reuse_query_dict
+                _run_prefill(
+                    server.port,
+                    args.dp_size,
+                    config,
+                    input_query_dict,
+                    batch_size_list=_explicit_batch_size_list(args),
+                    **case_kwargs,
+                )
+            collect_timeline_files(args.result_dir)
+            server.stop()
+            write_test_info(args, remaining)
+            return args.result_dir
 
         if args.partial == 2:
             _run_prefill(
@@ -688,6 +860,8 @@ def main() -> str:
                 config,
                 input_query_dict,
                 batch_size_list=_explicit_batch_size_list(args),
+                grid_cases=grid_cases,
+                reuse_cache_query_dict=reuse_cache_query_dict,
                 **runner_kwargs,
             )
 
@@ -699,6 +873,7 @@ def main() -> str:
                 config,
                 input_query_dict,
                 engine_status,
+                grid_cases=grid_cases,
                 **runner_kwargs,
             )
 

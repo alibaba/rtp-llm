@@ -161,12 +161,28 @@ def init_vit_group_args(parser, vit_config):
         help="视频文件大小上限，单位为KB",
     )
     vit_group.add_argument(
+        "--mm_video_max_frames",
+        env_name="MM_VIDEO_MAX_FRAMES",
+        bind_to=(vit_config, "mm_video_max_frames"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES,
+        help="多模态视频最大采样帧数",
+    )
+    vit_group.add_argument(
         "--mm_cache_item_num",
         env_name="MM_CACHE_ITEM_NUM",
         bind_to=(vit_config, "mm_cache_item_num"),
         type=int,
         default=10,
         help="多模态开启的Cache的大小",
+    )
+    vit_group.add_argument(
+        "--mm_hash_key_cache_item_num",
+        env_name="MM_HASH_KEY_CACHE_ITEM_NUM",
+        bind_to=(vit_config, "mm_hash_key_cache_item_num"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_HASH_KEY_CACHE_ITEM_NUM,
+        help="ViT cache-affinity hash key索引的最大条目数（仅保存轻量级key）",
     )
     vit_group.add_argument(
         "--url_cache_item_num",
@@ -223,6 +239,22 @@ def init_vit_group_args(parser, vit_config):
         type=int,
         default=4,
         help="多模态预处理时最大线程数量",
+    )
+    vit_group.add_argument(
+        "--vit_concurrency",
+        env_name="VIT_CONCURRENCY",
+        bind_to=(vit_config, "vit_concurrency"),
+        type=int,
+        default=64,
+        help="ViT 异步计算的最大并发数",
+    )
+    vit_group.add_argument(
+        "--vit_max_queue_size",
+        env_name="VIT_MAX_QUEUE_SIZE",
+        bind_to=(vit_config, "vit_max_queue_size"),
+        type=int,
+        default=64,
+        help="ViT 异步计算等待队列的最大任务数",
     )
     vit_group.add_argument(
         "--biencoder_preprocess",
@@ -395,7 +427,8 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "gpu_max_batch_images"),
         type=int,
         default=200,
-        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；同时限制单个请求的最大图片数，",
+        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；提供成本估算的模型可将"
+        "多work-item请求拆成多个有界forward，其他模型仍以该值同时限制单个请求的最大图片数",
     )
     vit_group.add_argument(
         "--mm_max_queue_size",

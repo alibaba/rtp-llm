@@ -140,6 +140,7 @@ requirement([
     "watchdog",
     "zstandard",
     "xgrammar",
+    "fmha-sm100",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -262,6 +263,7 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":torchvision",
+        ":triton",
         ":protobuf",
         ":pyOpenSSL",
     ] + select({
@@ -329,6 +331,10 @@ py_library(
         "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
+    }) + select({
+        # fmha_sm100: SM100/Blackwell-only sparse MSA kernel.
+        "@//:using_cuda13_x86": ["fmha-sm100"],
+        "//conditions:default": [],
     }) + select({
         "@//:using_arm": [],
         "@//:using_cuda13_arm": [],

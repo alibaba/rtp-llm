@@ -292,28 +292,42 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
 
     const auto memory_type = allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
     const auto copy_type   = BatchCopyParams::get_copy_type(memory_type, memory_type);
-    size_t     copy_count  = 0;
-    for (const auto& mapping : copy_mapping) {
-        const auto& group = config_.topology().group(mapping.tag);
-        copy_count += group.layer_ids.size() * (group.kv_scale_stride_bytes > 0 ? 2 : 1);
-    }
-
     BatchCopyParams copy_params;
-    copy_params.reserve(copy_type, copy_count);
     for (const auto& mapping : copy_mapping) {
         const auto& group = config_.topology().group(mapping.tag);
         for (int layer_id : group.layer_ids) {
-            const auto src_addr = convertIndexToAddrByTag(layer_id, mapping.tag, mapping.src);
-            const auto dst_addr = convertIndexToAddrByTag(layer_id, mapping.tag, mapping.dst);
-            RTP_LLM_CHECK_WITH_INFO(src_addr.kv_addr && dst_addr.kv_addr,
-                                    "cache block copy failed for tag=%s layer=%d src=%d dst=%d",
+            const auto src_buffers = convertIndexToBufferByTag(layer_id, mapping.tag, mapping.src);
+            const auto dst_buffers = convertIndexToBufferByTag(layer_id, mapping.tag, mapping.dst);
+            RTP_LLM_CHECK_WITH_INFO(!src_buffers.empty(),
+                                    "cache block copy buffers are empty for tag=%s layer=%d src=%d dst=%d",
                                     mapping.tag.c_str(),
                                     layer_id,
                                     mapping.src,
                                     mapping.dst);
-            copy_params.add(dst_addr.kv_addr, src_addr.kv_addr, group.kv_block_stride_bytes, copy_type);
-            if (group.kv_scale_stride_bytes > 0 && src_addr.kv_scale_addr && dst_addr.kv_scale_addr) {
-                copy_params.add(dst_addr.kv_scale_addr, src_addr.kv_scale_addr, group.kv_scale_stride_bytes, copy_type);
+            RTP_LLM_CHECK_WITH_INFO(src_buffers.size() == dst_buffers.size(),
+                                    "cache block copy buffer count mismatch for tag=%s layer=%d: src=%zu dst=%zu",
+                                    mapping.tag.c_str(),
+                                    layer_id,
+                                    src_buffers.size(),
+                                    dst_buffers.size());
+            for (size_t buffer_id = 0; buffer_id < src_buffers.size(); ++buffer_id) {
+                const auto& src = src_buffers[buffer_id];
+                const auto& dst = dst_buffers[buffer_id];
+                RTP_LLM_CHECK_WITH_INFO(src.addr != nullptr && dst.addr != nullptr,
+                                        "cache block copy buffer is null for tag=%s layer=%d buffer=%zu src=%d dst=%d",
+                                        mapping.tag.c_str(),
+                                        layer_id,
+                                        buffer_id,
+                                        mapping.src,
+                                        mapping.dst);
+                RTP_LLM_CHECK_WITH_INFO(src.size_bytes == dst.size_bytes,
+                                        "cache block copy size mismatch for tag=%s layer=%d buffer=%zu: src=%zu dst=%zu",
+                                        mapping.tag.c_str(),
+                                        layer_id,
+                                        buffer_id,
+                                        src.size_bytes,
+                                        dst.size_bytes);
+                copy_params.add(dst.addr, src.addr, src.size_bytes, copy_type);
             }
         }
     }

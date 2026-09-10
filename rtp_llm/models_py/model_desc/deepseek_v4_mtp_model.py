@@ -37,6 +37,10 @@ from rtp_llm.utils.model_weight import W
 
 
 class DeepSeekV4MtpModel(DeepSeekV4Model):
+    # This model routes graph prefill through its fixed-B decode-style hidden path.
+    # Keep max-batch token rows even for smaller capture keys.
+    cuda_graph_prefill_requires_full_token_capacity = True
+
     def __init__(
         self,
         model_config: ModelConfig,

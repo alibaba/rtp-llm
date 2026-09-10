@@ -10,6 +10,7 @@
 #include "gtest/gtest.h"
 #include "autil/TimeUtility.h"
 
+#define private public
 #define protected public
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
@@ -2668,6 +2669,54 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     // input_len * batch_size fan-out was removed: checkInputLength deliberately
     // ignores fan-out (see testCheckInputLengthIgnoresBatchSizeFanOut and commit
     // 2238d50cf); per-round token budgeting happens at schedule time instead.
+}
+
+TEST_F(FIFOSchedulerTest, testMaxBatchKvLenUsesSumKvLengthAndIsOptIn) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 1000;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
+    runtime_config.fifo_scheduler_config.max_batch_kv_len      = 100;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_stream = [&](int seq_len, int reuse_len = 0) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::arange(seq_len, torch::kInt32);
+        query->generate_config = std::make_shared<GenerateConfig>();
+        auto stream =
+            std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setReuseLength(reuse_len);
+        return stream;
+    };
+
+    // Uneven requests: 70 + 20 fits. A max-length-times-batch rule would reject this pair as 140 tokens.
+    std::list<GenerateStreamPtr> admitted{make_stream(70)};
+    EXPECT_TRUE(scheduler.evaluateRunningMemory(admitted, make_stream(20)));
+
+    // Disabled by default: MAX_BATCH_TOKENS_SIZE retains the main branch's full-token and padded-shape limits.
+    runtime_config.fifo_scheduler_config.max_batch_kv_len = 0;
+    FIFOScheduler legacy_scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    EXPECT_FALSE(legacy_scheduler.evaluateRunningMemory(admitted, make_stream(20)));
+
+    // The cap uses full visible KV, not post-reuse query length.
+    std::list<GenerateStreamPtr> reuse_admitted{make_stream(60, 50)};
+    EXPECT_FALSE(scheduler.evaluateRunningMemory(reuse_admitted, make_stream(50, 40)));
+
+    // Preserve the strict upper bound: 70 + 20 + 10 == 100 does not fit.
+    admitted.push_back(make_stream(20));
+    EXPECT_FALSE(scheduler.evaluateRunningMemory(admitted, make_stream(10)));
 }
 
 TEST_F(FIFOSchedulerTest, testEnqueueGroup) {

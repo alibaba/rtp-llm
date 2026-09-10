@@ -18,6 +18,10 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
     return params.tiles.empty();
 }
 
+bool exec3DBatchedMemoryCopy(const BatchedMemoryCopy3DParams& params) {
+    return params.runs.empty();
+}
+
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch*) {
     return params.tiles.empty();
 }

@@ -98,6 +98,7 @@ public:
     void           replayPrefill(int seq_len);
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
+    torch::Tensor  getMtpTargetHiddenStates(const CudaGraphState& state, int64_t num_tokens) override;
     void           initCapture() override;
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct

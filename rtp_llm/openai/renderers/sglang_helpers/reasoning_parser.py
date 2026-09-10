@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, Optional, Tuple, Type
 
 
@@ -64,14 +65,14 @@ class BaseReasoningFormatDetector:
         If stream_reasoning is True:
             Streams reasoning content as it arrives
         """
-        logging.info(
+        logging.debug(
             f"[REASONING_DEBUG] parse_streaming_increment: buffer={repr(self._buffer)}, new_text={repr(new_text)}"
         )
         self._buffer += new_text
         current_text = self._buffer
 
         # If the current text is a prefix of the think token, keep buffering
-        logging.info(
+        logging.debug(
             f"[REASONING_DEBUG] parse_streaming_increment: current_text={repr(current_text)}, in_reasoning={self._in_reasoning}"
         )
         if any(
@@ -192,6 +193,144 @@ class KimiDetector(BaseReasoningFormatDetector):
         )
 
 
+MM_THINK_START_TOKEN = "<mm:think>"
+MM_THINK_END_TOKEN = "</mm:think>"
+
+# Besides the `<mm:think>` / `</mm:think>` added tokens, M3 also emits the markers
+# as plain tokens with zero-width characters spliced in (`</\u200bmm:think>`). That
+# is a different token sequence, so a literal comparison never matches it and the
+# marker leaks into the content. Worse, the chat template keys the "did this turn
+# think?" check off the same literal, so a leaked marker fed back through the
+# history makes the template prepend yet another marker every turn. Folding the
+# escaped variants back to the literal form breaks that feedback loop.
+_ZERO_WIDTH_CHARS = "\u200b\u200c\u200d\ufeff"
+_ZW = f"[{_ZERO_WIDTH_CHARS}]*"
+_MM_THINK_TAG_RE = re.compile(
+    "<" + _ZW + "(/?)" + _ZW + _ZW.join("mm:think") + _ZW + ">"
+)
+_MM_THINK_TOKENS = (MM_THINK_START_TOKEN, MM_THINK_END_TOKEN)
+
+
+def normalize_mm_think_tags(text: str) -> str:
+    """Fold zero-width-escaped M3 think markers back to their literal form."""
+    if not text:
+        return text
+    normalized = _MM_THINK_TAG_RE.sub(lambda m: f"<{m.group(1)}mm:think>", text)
+    return _unescape_trailing_partial_tag(normalized)
+
+
+def _unescape_trailing_partial_tag(text: str) -> str:
+    """Drop zero-width chars from a partial think marker at the end of the text.
+
+    Streaming delivers the marker one token at a time, so the buffer routinely ends
+    mid-marker (`</`, `</\u200b`, `</\u200bmm`, ...). The base detector only keeps
+    buffering while the text is a literal prefix of a think token, so the zero-width
+    chars have to go before it can recognise the partial marker.
+    """
+    idx = text.rfind("<")
+    if idx == -1 or not any(c in text[idx:] for c in _ZERO_WIDTH_CHARS):
+        return text
+    head, tail = text[:idx], text[idx:]
+    stripped = "".join(c for c in tail if c not in _ZERO_WIDTH_CHARS)
+    if any(token.startswith(stripped) for token in _MM_THINK_TOKENS):
+        return head + stripped
+    return text
+
+
+def strip_mm_think_tags(text: str) -> str:
+    """Remove any complete think marker left in text destined for `content`."""
+    if not text:
+        return text
+    for token in _MM_THINK_TOKENS:
+        text = text.replace(token, "")
+    return text
+
+
+def _trailing_marker_prefix_len(text: str) -> int:
+    """Length of the trailing run that could still grow into a think marker.
+
+    A lone `<` counts: chunk boundaries fall wherever the token stream puts them, so
+    a marker really can start at the very end of a chunk. This mirrors what the base
+    class already does with its own buffer, and carries the same caveat — a response
+    whose final character is `<` has it held back.
+    """
+    longest = max(len(token) for token in _MM_THINK_TOKENS) - 1
+    for n in range(min(len(text), longest), 0, -1):
+        if any(token.startswith(text[-n:]) for token in _MM_THINK_TOKENS):
+            return n
+    return 0
+
+
+class MiniMaxM3ReasoningDetector(BaseReasoningFormatDetector):
+    """
+    Detector for MiniMax-M3 models.
+    Assumes reasoning format:
+      (<mm:think>)*(.*)</mm:think>
+
+    M3 always closes with `</mm:think>`, even when it skips thinking: its system
+    prompt instructs it to "begin your response directly after the </mm:think>
+    prefix". Reasoning is therefore forced, as for DeepSeek-R1 — otherwise a
+    non-thinking reply, which opens with a bare `</mm:think>`, leaks that tag
+    into the content.
+
+    M3 also repeats the closing marker, so the base class's single-shot split is
+    not enough: once reasoning has ended every further marker would be treated as
+    ordinary text. Markers are control tokens and never belong in `content`, so
+    the leftovers are dropped instead.
+    """
+
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = True):
+        super().__init__(
+            MM_THINK_START_TOKEN,
+            MM_THINK_END_TOKEN,
+            force_reasoning=True,
+            stream_reasoning=stream_reasoning,
+        )
+        self._marker_carry = ""
+
+    def detect_and_parse(self, text: str) -> StreamingParseResult:
+        result = super().detect_and_parse(normalize_mm_think_tags(text))
+        result.normal_text = strip_mm_think_tags(result.normal_text)
+        return result
+
+    def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
+        # Normalize the retained buffer together with the new chunk: a marker can be
+        # split across chunks, so the escape only becomes visible once the pieces are
+        # joined. Folding is idempotent, so re-running it on the buffer is safe.
+        combined = normalize_mm_think_tags(self._buffer + new_text)
+        self._buffer = ""
+        result = super().parse_streaming_increment(combined)
+        result.normal_text = self._drop_markers(result.normal_text)
+        return result
+
+    def _drop_markers(self, text: str) -> str:
+        """Strip markers, carrying a trailing partial marker to the next chunk.
+
+        The base class only keeps buffering while the *whole* buffer is a prefix of a
+        marker, so a chunk ending in `answer</` fails that test and the marker gets
+        emitted piecemeal — no single chunk ever contains a complete marker to strip.
+        Multi-token steps (MTP) hit this routinely because one delta carries both text
+        and the marker's opening.
+        """
+        if not text and not self._marker_carry:
+            return text
+        combined = strip_mm_think_tags(
+            normalize_mm_think_tags(self._marker_carry + text)
+        )
+        keep = _trailing_marker_prefix_len(combined)
+        self._marker_carry = combined[len(combined) - keep :] if keep else ""
+        return combined[: len(combined) - keep]
+
+    def flush_markers(self) -> str:
+        """Release a held-back partial marker once no more tokens are coming.
+
+        Without this, a reply whose last characters look like the start of a marker
+        (`...<`, `...</`) would have them silently dropped.
+        """
+        carry, self._marker_carry = self._marker_carry, ""
+        return carry
+
+
 class ReasoningParser:
     """
     Parser that handles both streaming and non-streaming scenarios for extracting
@@ -209,6 +348,7 @@ class ReasoningParser:
         "glm45": Qwen3Detector,
         "kimi": KimiDetector,
         "kimi_k2": Qwen3Detector,
+        "minimax_m3": MiniMaxM3ReasoningDetector,
         "qwen3": Qwen3Detector,
         "qwen3-thinking": Qwen3Detector,
         "step3": DeepSeekR1Detector,
@@ -243,3 +383,11 @@ class ReasoningParser:
         """Streaming call: incremental parsing"""
         ret = self.detector.parse_streaming_increment(chunk_text)
         return ret.reasoning_text, ret.normal_text
+
+    def flush_markers(self) -> str:
+        """Release any text a detector held back pending more tokens.
+
+        Only detectors that buffer beyond the base class implement this.
+        """
+        flush = getattr(self.detector, "flush_markers", None)
+        return flush() if flush else ""

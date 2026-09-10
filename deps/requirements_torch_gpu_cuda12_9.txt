@@ -1,26 +1,37 @@
--r requirements_base.txt
+-r ../../open_source/deps/requirements_base.txt
 auto_gptq
 autoawq
-apache-tvm-ffi==0.1.9
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/tensorrt_cu12_libs-10.3.0-py2.py3-none-manylinux_2_17_x86_64.whl
-datasets
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/sqlglot-19.8.4.dev4-py3-none-any.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_python-0.6.9-py3-none-any.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_jit_cache-0.6.9-cp39-abi3-manylinux_2_28_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_cubin-0.6.9-py3-none-any.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel_260612/rtp_kernel-0.1.0%2B125c29e5-cp310-cp310-linux_x86_64.whl
+apache-tvm-ffi
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/nv/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl
+https://artlab.alibaba-inc.com/1/pypi/pypi-releases/fastsafetensors/fastsafetensors-0.1.19rc5+ali-cp310-cp310-linux_x86_64.whl
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls%2Ftensorrt_cu12_libs-10.3.0-py2.py3-none-manylinux_2_17_x86_64.whl
+http://naruto-zb.oss-cn-zhangjiakou.aliyuncs.com/openlm/libs/release/datasets-2.14.6.latest-py3-none-any.whl
+http://naruto-zb.oss-cn-zhangjiakou.aliyuncs.com/openlm/libs/release/sqlglot-19.8.4.dev4-py3-none-any.whl
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260228/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl
+https://artlab.alibaba-inc.com/1/PYPI/pytorch/whl/torch/%252Fwhl%252Fcu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
+https://artlab.alibaba-inc.com/1/PYPI/pytorch/whl/torchvision/%252Fwhl%252Fcu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/891d57b4db1071624b5c8fa0d1e51cb317fa709f/deep_gemm-2.5.0%2Blocal-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer_260319/flashinfer_python-0.6.6-py3-none-any.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer_260319/flashinfer_jit_cache-0.6.6-cp39-abi3-manylinux_2_28_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer_260319/flashinfer_cubin-0.6.6-py3-none-any.whl
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl
+http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer_260115/nvidia_cutlass_dsl-4.3.5-cp310-cp310-manylinux_2_28_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260423/rtp_kernel-0.1.0%2B125c29e5.20260423102158-cp310-cp310-linux_x86_64.whl
+safetensors==0.7.0
 mysql-connector-python
-tensorrt==10.3.0
-tensorrt-cu12-bindings==10.3.0
+tensorrt==10.3.0 ; platform_machine == "x86_64"
+tensorrt-cu12-bindings==10.3.0 ; platform_machine == "x86_64"
 tabulate==0.9.0
-tilelang==0.1.6
+# tilelang 0.1.6 bundles its own libtvm.so (with internal TVMFFI symbols)
+# which collides with flashinfer's apache-tvm-ffi at runtime
+# (Conflicting static index 72 between ffi.Map and ffi.NDArray).
+# 0.1.8+ moves to an external apache-tvm-ffi dep — same one flashinfer
+# already pulls in — so the two coexist.  Constraint intersection:
+# flashinfer 0.6.6 needs apache-tvm-ffi >=0.1.6,<0.2,!=0.1.8,!=0.1.8.post0;
+# tilelang 0.1.9 needs apache-tvm-ffi >=0.1.2,~=0.1.0; both satisfied by
+# 0.1.8.post2 (which is what already ships in the lock).
+# See docs/dsv4/B200/tvm_ffi_collision.md for the full diagnosis.
+tilelang==0.1.9

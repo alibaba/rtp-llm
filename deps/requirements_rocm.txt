@@ -1,13 +1,10 @@
--r requirements_base.txt
+-r ../../open_source/deps/requirements_base.txt
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/amd/fast_safetensors-0.7.3%2Btorch2.1.2.rocm-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64"
+https://artlab.alibaba-inc.com/1/pypi/pypi-releases/fastsafetensors/fastsafetensors-0.1.19rc5+ali-cp310-cp310-linux_x86_64.whl ; platform_machine == "x86_64"
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl
 https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.24.0%2Brocm7.2.0.gitb919bd0c-cp310-cp310-linux_x86_64.whl
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.7.0%2Bamd.rocm7.2.0.gitd0d77a509-cp310-cp310-linux_x86_64.whl
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.5.1%2Brocm7.2.0.gita272dfa8-cp310-cp310-linux_x86_64.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl
+https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar ; platform_machine == "x86_64"
 pyrsmi==0.2.0
 pyyaml==6.0.2
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.21.dev80%2Bg987203ba5.d20260825-cp310-cp310-linux_x86_64.whl
-# FLA kernels directly import FlyDSL (including private flydsl._mlir APIs), so
-# pin it explicitly rather than relying on AITER's transitive dependency. 0.3.1
-# is the version required by the pinned AITER 0.1.21 wheel.
-flydsl==0.3.1
-https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar

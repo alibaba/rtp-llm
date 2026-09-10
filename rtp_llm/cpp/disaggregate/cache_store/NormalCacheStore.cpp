@@ -7,6 +7,9 @@
 
 #include <cstring>
 #include <vector>
+#include <sstream>
+#include <stdexcept>
+#include <thread>
 
 namespace rtp_llm {
 
@@ -14,8 +17,152 @@ namespace {
 
 constexpr size_t kMaxDevicePinFailuresBeforeDrain = 3;
 constexpr int    kDevicePinRetryBackoffMs         = 1000;
+const bool kPdDebugEnabled = []() {
+    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
+    return env != nullptr && std::string(env) == "1";
+}();
+
+const size_t kTcpLoadMaxInflightChunks = []() {
+    constexpr size_t kDefaultMaxInflightChunks = 1;
+    const char*      env                       = std::getenv("CACHE_STORE_TCP_LOAD_MAX_INFLIGHT_CHUNKS");
+    if (env == nullptr || std::strlen(env) == 0) {
+        return kDefaultMaxInflightChunks;
+    }
+    char* end = nullptr;
+    auto  val = std::strtoull(env, &end, 10);
+    if (end == env || val == 0) {
+        return kDefaultMaxInflightChunks;
+    }
+    return static_cast<size_t>(val);
+}();
+
+bool pdDebugEnabled() {
+    return kPdDebugEnabled;
+}
+
+std::string summarizeBlocks(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, size_t limit = 3) {
+    if (request_block_buffer == nullptr) {
+        return "null";
+    }
+    std::ostringstream oss;
+    oss << "request_id=" << request_block_buffer->getRequestId()
+        << " request_key=" << request_block_buffer->getRequestKey()
+        << " blocks=" << request_block_buffer->getBlocksCount() << " bytes=" << request_block_buffer->getBlocksSize();
+    auto   blocks = request_block_buffer->getBlocks();
+    size_t idx    = 0;
+    oss << " sample_keys=[";
+    for (const auto& [key, block] : blocks) {
+        if (idx++ >= limit) {
+            oss << "...";
+            break;
+        }
+        if (idx > 1) {
+            oss << ",";
+        }
+        oss << key << ":" << (block == nullptr ? 0 : block->len)
+            << (block != nullptr && block->gpu_mem ? ":gpu" : ":cpu");
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::vector<std::shared_ptr<RequestBlockBuffer>>
+chunkTcpLoadBuffersImpl(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                        size_t                                                  max_chunk_bytes,
+                        size_t                                                  max_chunk_layers) {
+    std::vector<std::shared_ptr<RequestBlockBuffer>> chunked;
+    chunked.reserve(request_block_buffers.size());
+
+    std::vector<std::shared_ptr<BlockBuffer>> pending_blocks;
+    std::string                               pending_request_id;
+    std::string                               first_request_key;
+    std::string                               last_request_key;
+    size_t                                    pending_bytes  = 0;
+    size_t                                    pending_layers = 0;
+
+    auto flush = [&]() {
+        if (pending_blocks.empty()) {
+            return;
+        }
+        std::string chunk_key = first_request_key;
+        if (last_request_key != first_request_key) {
+            chunk_key += "..";
+            chunk_key += last_request_key;
+        }
+        auto combined = std::make_shared<RequestBlockBuffer>(pending_request_id, chunk_key);
+        combined->addBlocks(pending_blocks);
+        chunked.push_back(std::move(combined));
+        pending_blocks.clear();
+        pending_request_id.clear();
+        first_request_key.clear();
+        last_request_key.clear();
+        pending_bytes  = 0;
+        pending_layers = 0;
+    };
+
+    for (const auto& request_block_buffer : request_block_buffers) {
+        if (request_block_buffer == nullptr || request_block_buffer->getBlocksCount() == 0) {
+            flush();
+            if (request_block_buffer != nullptr) {
+                chunked.push_back(request_block_buffer);
+            }
+            continue;
+        }
+
+        const auto& request_id       = request_block_buffer->getRequestId();
+        const auto& request_key      = request_block_buffer->getRequestKey();
+        auto        blocks           = request_block_buffer->getBlocks();
+        bool        starts_new_layer = true;
+
+        pending_blocks.reserve(pending_blocks.size() + blocks.size());
+        for (auto& [_, block] : blocks) {
+            const size_t block_bytes = block == nullptr ? 0 : block->len;
+            if (!pending_blocks.empty()
+                && (request_id != pending_request_id || (starts_new_layer && pending_layers >= max_chunk_layers)
+                    || pending_bytes + block_bytes > max_chunk_bytes)) {
+                flush();
+                starts_new_layer = true;
+            }
+
+            if (pending_blocks.empty()) {
+                pending_request_id = request_id;
+                first_request_key  = request_key;
+            }
+            if (starts_new_layer) {
+                last_request_key = request_key;
+                ++pending_layers;
+                starts_new_layer = false;
+            }
+
+            pending_blocks.push_back(block);
+            pending_bytes += block_bytes;
+        }
+    }
+    flush();
+
+    return chunked;
+}
+
+size_t tcpLoadMaxInflightChunks() {
+    // This limit is per load context (one decode request loading from one
+    // prefill peer). In PD with decode DP x prefill TP, total server-side TCP
+    // load fanout is dp_size * request_concurrency * this value per prefill
+    // rank. Keep the default at one rolling chunk per context so large
+    // 20-40MiB TCP responses do not overrun the prefill RPC worker pool.
+    return kTcpLoadMaxInflightChunks;
+}
 
 }  // namespace
+
+std::vector<std::shared_ptr<RequestBlockBuffer>>
+cache_store_detail::chunkTcpLoadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                                        size_t                                                  max_chunk_bytes,
+                                        size_t                                                  max_chunk_layers) {
+    if (max_chunk_bytes == 0 || max_chunk_layers == 0) {
+        throw std::invalid_argument("TCP load chunk limits must be positive");
+    }
+    return chunkTcpLoadBuffersImpl(request_block_buffers, max_chunk_bytes, max_chunk_layers);
+}
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
@@ -292,6 +439,23 @@ NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuff
                               int                                                     partition_id) {
     if (request_block_buffers.empty() || ip.empty()) {
         return nullptr;
+    }
+
+    std::vector<std::shared_ptr<RequestBlockBuffer>> tcp_chunked_buffers;
+    const auto*                                      load_buffers = &request_block_buffers;
+    if (!memory_util_->isRdmaMode()) {
+        constexpr size_t kMaxChunkBytes  = 48ULL * 1024ULL * 1024ULL;
+        constexpr size_t kMaxChunkLayers = 4;
+        tcp_chunked_buffers =
+            cache_store_detail::chunkTcpLoadBuffers(request_block_buffers, kMaxChunkBytes, kMaxChunkLayers);
+        if (!tcp_chunked_buffers.empty()) {
+            load_buffers = &tcp_chunked_buffers;
+        }
+        if (pdDebugEnabled() && load_buffers->size() < request_block_buffers.size()) {
+            RTP_LLM_LOG_INFO("normal cache store tcp load chunked request buffers from %zu to %zu",
+                             request_block_buffers.size(),
+                             load_buffers->size());
+        }
     }
 
     auto load_context = std::make_shared<LoadContext>(shared_from_this(), memory_util_->isRdmaMode());

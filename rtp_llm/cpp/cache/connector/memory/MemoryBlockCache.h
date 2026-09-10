@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <shared_mutex>
 #include <optional>
+#include <unordered_map>
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/LRUCache.h"
@@ -22,6 +23,8 @@ public:
         // 表示是否是完整的 KVCache, 只有当所有层都有 cache 时才为 true
         // 对于全注意力模型: 这个值始终为 true ; 对于混合注意力模型: 所有层都有 cache 时才为 true
         bool is_complete{true};
+        // Identity used to reject stale asynchronous eviction callbacks.
+        uint64_t generation{0};
     };
 
     struct MatchResult {
@@ -48,6 +51,14 @@ public:
 
     std::vector<BlockIdxType> pop(int n);
 
+    std::vector<CacheItem> detachForRemoteEviction(int n);
+
+    std::vector<CacheItem> popForImmediateEviction(int n);
+
+    std::optional<CacheItem> finishRemoteEviction(CacheKeyType cache_key, uint64_t generation);
+
+    size_t remoteEvictingSize() const;
+
     bool empty() const;
 
     size_t size() const;
@@ -55,8 +66,10 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
 
 private:
-    mutable LRUCache<CacheKeyType, CacheItem> lru_cache_;
-    mutable std::shared_mutex                 mutex_;
+    mutable LRUCache<CacheKeyType, CacheItem>   lru_cache_;
+    std::unordered_map<CacheKeyType, CacheItem> remote_evicting_items_;
+    uint64_t                                    next_generation_{1};
+    mutable std::shared_mutex                   mutex_;
 };
 
 using MemoryBlockCachePtr = std::shared_ptr<MemoryBlockCache>;

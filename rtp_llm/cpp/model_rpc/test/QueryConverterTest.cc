@@ -7,6 +7,7 @@
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -18,6 +19,35 @@ using namespace std;
 namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
+
+TEST_F(QueryConverterTest, testMultimodalFeatureHashRoundTripAndLegacyFallback) {
+    MultimodalOutputPB output;
+    QueryConverter::transTensorPB(output.mutable_multimodal_embedding(), torch::ones({3, 4}, torch::kFloat32));
+    output.add_split_size(2);
+    output.add_split_size(1);
+    auto hashes = torch::tensor({-123, 456, -789}, torch::kInt32);
+    QueryConverter::transTensorPB(output.mutable_multimodal_feature_hash(), hashes);
+    output.set_feature_hash_version(1);
+
+    auto decoded_result = MultimodalPbConverter::inlineOutputFromPb(output);
+    ASSERT_TRUE(decoded_result.ok());
+    auto decoded = std::move(decoded_result.value());
+    ASSERT_TRUE(decoded.mm_feature_hashes.has_value());
+    ASSERT_EQ(decoded.mm_feature_hashes->size(), 2);
+    EXPECT_TRUE(torch::equal(torch::cat(*decoded.mm_feature_hashes), hashes));
+    EXPECT_EQ(decoded.mm_features[0].size(0), 2);
+    EXPECT_EQ(decoded.mm_features[1].size(0), 1);
+
+    output.set_feature_hash_version(2);
+    EXPECT_FALSE(MultimodalPbConverter::inlineOutputFromPb(output).ok());
+    output.set_feature_hash_version(1);
+    QueryConverter::transTensorPB(output.mutable_multimodal_feature_hash(), torch::ones({2}, torch::kInt32));
+    EXPECT_FALSE(MultimodalPbConverter::inlineOutputFromPb(output).ok());
+    output.clear_multimodal_feature_hash();
+    auto legacy = MultimodalPbConverter::inlineOutputFromPb(output);
+    ASSERT_TRUE(legacy.ok());
+    EXPECT_FALSE(legacy.value().mm_feature_hashes.has_value());
+}
 
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
@@ -49,6 +79,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
     generate_config_pb->set_thinking_mode(GenerateConfigPB::THINKING_MODE_ADAPTIVE);
+    generate_config_pb->mutable_enable_think_logits_processor()->set_value(false);
     for (int i = 0; i < 2; ++i) {
         auto* stop_words = generate_config_pb->mutable_stop_words_list()->add_rows();
         for (int j = 0; j < 3; ++j) {
@@ -85,6 +116,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_TRUE(generate_config->return_hidden_states);
     ASSERT_FALSE(generate_config->return_logits);
     ASSERT_EQ(generate_config->thinking_mode, ThinkingMode::ADAPTIVE);
+    ASSERT_FALSE(generate_config->enable_think_logits_processor);
     ASSERT_EQ(generate_config->stop_words_list.size(), 2);
     vector<int> stop_words_1{0, 1, 2};
     vector<int> stop_words_2{3, 4, 5};
@@ -163,6 +195,32 @@ TEST_F(QueryConverterTest, RoleAddrPreservesPdfusionDefaultAndRejectsConflicts) 
     GenerateConfigPB omitted_legacy_default;
     omitted_legacy_default.add_role_addrs();
     EXPECT_EQ(QueryConverter::getRoleAddrs(&omitted_legacy_default)[0].role, RoleType::PDFUSION);
+}
+
+TEST_F(QueryConverterTest, MultimodalInputsPBPreservesRequestId) {
+    const int64_t request_id = 987654321;
+    auto          output     = MultimodalPbConverter::inputsToPb({}, request_id);
+
+    EXPECT_EQ(output.request_id(), request_id);
+}
+
+TEST_F(QueryConverterTest, testTransMMPreprocessConfigFractionalFps) {
+    MMPreprocessConfig config(-1, -1, -1, -1, 0.2f, -1, 64, {}, -1, 1008);
+    MultimodalInput    input("https://example.com/video.mp4", 2, torch::empty({0}), config);
+
+    auto output = MultimodalPbConverter::inputsToPb({input});
+    ASSERT_EQ(output.multimodal_inputs_size(), 1);
+    const auto& config_pb = output.multimodal_inputs(0).mm_preprocess_config();
+    EXPECT_FLOAT_EQ(config_pb.fps(), 0.2f);
+    EXPECT_EQ(config_pb.max_long_side_pixel(), 1008);
+
+    GenerateInputPB query;
+    query.add_token_ids(1);
+    *query.add_multimodal_inputs() = output.multimodal_inputs(0);
+    auto round_trip                = QueryConverter::transQuery(&query);
+    ASSERT_EQ(round_trip->multimodal_inputs.size(), 1);
+    EXPECT_FLOAT_EQ(round_trip->multimodal_inputs[0].mm_preprocess_config.fps, 0.2f);
+    EXPECT_EQ(round_trip->multimodal_inputs[0].mm_preprocess_config.max_long_side_pixel, 1008);
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {

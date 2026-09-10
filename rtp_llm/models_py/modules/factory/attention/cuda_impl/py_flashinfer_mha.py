@@ -15,6 +15,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    force_py_flashinfer,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
@@ -31,7 +34,13 @@ from rtp_llm.ops.compute_ops import (
 )
 
 # Constants
-DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+# FlashInfer's batch-prefill plan allocates a few internal scratch tensors
+# (e.g. ``batch_prefill_tmp_v``) out of this workspace. The size scales with
+# max_batch_tokens * num_qo_heads * head_dim, so 128MB can overflow for wide
+# GQA models. Allow overriding via env and default to a roomier 512MB.
+DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = int(
+    __import__("os").environ.get("PY_FLASHINFER_WORKSPACE_SIZE_MB", "512")
+)
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
@@ -173,6 +182,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             "HND",
             backend=backend,
         )
+        # prepare() installs graph-owned metadata buffers before the first
+        # graph plan. Eager prefill must retain FlashInfer's normal mode.
+        self.prefill_wrapper._use_cuda_graph = self.enable_cuda_graph
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -235,6 +247,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
             ]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
+            # Both full-capacity and compact graphs need FlashInfer's fixed
+            # padded grid. In particular, compact draft-prefill enables
+            # split-KV below, so the number of active KV chunks may change at
+            # replay even though its Q layout and batch size are fixed.
             self.prefill_wrapper._use_cuda_graph = True
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
             self.prefill_wrapper._paged_kv_indptr_buf = (
@@ -279,6 +295,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             qo_indptr = self.qo_indptr
 
+        # CUDA graphs use a fixed padded grid with dynamic split-KV schedules.
+        # Re-plan before every replay to refresh chunk mappings and
+        # block_valid_mask in stable workspace buffers.
         self.prefill_wrapper.plan(
             qo_indptr,
             self.fmha_params.decode_page_indptr_d,
@@ -874,7 +893,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         3. MhaRotaryEmbeddingOp supports the inputs
         """
         return (
-            not is_sm10x()
+            (not is_sm10x() or force_py_flashinfer())
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
@@ -1231,6 +1250,31 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         return not attn_configs.use_mla
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        replay_params = self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
+        if replay_params is not None:
+            self.fmha_params = replay_params
+        if self.need_rope_kv_cache and self.rope_kvcache_impl is not None:
+            new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            if self.rope_params is None:
+                self.rope_params = new_rope_params
+            else:
+                common.copy_kv_cache_offset(
+                    self.rope_params.kv_cache_offset,
+                    new_rope_params.kv_cache_offset,
+                )
+                if new_rope_params.position_ids is not None:
+                    if (
+                        self.rope_params.position_ids is not None
+                        and self.rope_params.position_ids.shape
+                        == new_rope_params.position_ids.shape
+                    ):
+                        self.rope_params.position_ids.copy_(
+                            new_rope_params.position_ids
+                        )
+                    else:
+                        self.rope_params.position_ids = new_rope_params.position_ids
 
     def forward(
         self,
