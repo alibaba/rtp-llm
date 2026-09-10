@@ -80,6 +80,7 @@ cc_library(
     hdrs = [
         "CacheConfig.h",
         "CacheTopology.h",
+        "CacheStoreTransferLayout.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

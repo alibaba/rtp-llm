@@ -385,6 +385,10 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
 
 
 def setup_default_args(py_env_configs):
+    # Apply the parsed cache-store flag before configuring RDMA environment defaults.
+    py_env_configs.pd_separation_config.cache_store_rdma_mode = (
+        py_env_configs.cache_store_config.cache_store_rdma_mode
+    )
     set_parallelism_config(
         py_env_configs.parallelism_config,
         py_prefill_cp_config=py_env_configs.prefill_cp_config,

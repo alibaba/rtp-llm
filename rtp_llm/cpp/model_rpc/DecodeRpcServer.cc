@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/cache/CacheStoreTransferLayout.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -624,9 +625,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
 
-    if (load_context.prefill_cp_size > 1) {
-        // CP-sharded prefill: every decode rank must pull the shard owned by
-        // every prefill CP peer.
+    const bool linear_fan_in =
+        load_context.prefill_cp_size <= 1 && maga_init_params_.parallelism_config.get_attn_tp_size() == 1
+        && hasLinearCacheGroup(engine_->resourceContext().cache_manager->cacheConfig().topology());
+    if (load_context.prefill_cp_size > 1 || linear_fan_in) {
+        // CP-sharded prefill, or head-sharded linear state: pull every peer.
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
@@ -1046,7 +1049,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     };
     auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx) {
         if (!is_page_level_rr) {
-            return true;
+            return cfg.specForGroup(gid)->type != KVCacheSpecType::MultiHeadLatentAttention || peer_idx == 0;
         }
         if (group_type == CacheGroupType::FULL) {
             return true;
@@ -1114,6 +1117,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
                     cache_config.seqSizePerBlockForGroup(gid), cache_config.seq_size_per_block);
 
+                const auto& transfer_group = cache_config.topology().groupById(gid);
+                const auto  transfer_segments =
+                    cacheStoreTransferSegments(transfer_group, hasLinearCacheGroup(cache_config.topology()));
                 if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, i)) {
                     continue;
                 }
@@ -1135,7 +1141,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
                     const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
-                    if (use_whole_kv_block) {
+                    if (!transfer_segments.empty()) {
+                        parts = cacheStoreDestinationSegments(
+                            transfer_group,
+                            transfer_segments,
+                            cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag),
+                            is_page_level_rr ? 1 : peer_cnt,
+                            is_page_level_rr ? 0 : i);
+                    } else if (use_whole_kv_block) {
                         parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag);
                     } else {
                         parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag, peer_cnt, i);
@@ -1165,7 +1178,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                     };
 
-                    if (use_kv_key_prefix) {
+                    if (!transfer_segments.empty()) {
+                        for (size_t segment_id = 0; segment_id < transfer_segments.size(); ++segment_id) {
+                            addBufBlock(transfer_segments[segment_id].key_prefix + cache_key, parts[segment_id]);
+                        }
+                    } else if (use_kv_key_prefix) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                 "unexpected mla convertIndexToBuffer parts size=%zu",
                                                 parts.size());
@@ -1253,6 +1270,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
                                 mtp_cache_cfg.seqSizePerBlockForGroup(gid), mtp_cache_cfg.seq_size_per_block);
 
+                            const auto& transfer_group    = mtp_cache_cfg.topology().groupById(gid);
+                            const auto  transfer_segments = cacheStoreTransferSegments(
+                                transfer_group, hasLinearCacheGroup(mtp_cache_cfg.topology()));
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
                                 continue;
                             }
@@ -1277,7 +1297,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
                                 const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
-                                if (mtp_use_whole_kv_block) {
+                                if (!transfer_segments.empty()) {
+                                    parts = cacheStoreDestinationSegments(
+                                        transfer_group,
+                                        transfer_segments,
+                                        cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag),
+                                        is_page_level_rr ? 1 : peer_cnt,
+                                        is_page_level_rr ? 0 : i);
+                                } else if (mtp_use_whole_kv_block) {
                                     parts = cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag);
                                 } else {
                                     parts = cache_manager->convertIndexToBufferByTag(
@@ -1312,7 +1339,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                         key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                                 };
 
-                                if (mtp_use_kv_key_prefix) {
+                                if (!transfer_segments.empty()) {
+                                    for (size_t segment_id = 0; segment_id < transfer_segments.size(); ++segment_id) {
+                                        addBufBlock(transfer_segments[segment_id].key_prefix + cache_key,
+                                                    parts[segment_id]);
+                                    }
+                                } else if (mtp_use_kv_key_prefix) {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                             "unexpected mtp mla convertIndexToBuffer parts size=%zu",
                                                             parts.size());
@@ -1565,7 +1597,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

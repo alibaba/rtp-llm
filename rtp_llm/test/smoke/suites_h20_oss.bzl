@@ -559,8 +559,8 @@ def h20_oss_suites():
                 name="qwen35_moe_vl_fp8",
                 task_info="data/model/qwen35/q_r_35b_moe_vl_fp8.json",
                 smoke_args = {
-                    "prefill": "--use_local 1 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
-                    "decode":  "--use_local 1 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "prefill": "--use_local 1 --cache_store_rdma_mode 0 --role_type PREFILL --tp_size 2 --ep_size 2 --world_size 2 --act_type BF16 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --reuse_cache 0 --concurrency_limit 16 --reserver_runtime_mem_mb 49152 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --enable_flashinfer_trtllm_gen 1 --enable_flashinfer_trt_fmha_v2 1 --enable_paged_flashinfer_trt_fmha_v2 1 --enable_open_source_fmha 1 --disable_flashinfer_native 0 --disable_flashinfer_hybrid_prefill 1",
+                    "decode":  "--use_local 1 --cache_store_rdma_mode 0 --load_cache_timeout_ms 120000 --role_type DECODE  --dp_size 2 --ep_size 2 --world_size 2 --act_type BF16 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --reuse_cache 0 --concurrency_limit 16 --reserver_runtime_mem_mb 49152 --use_deepep_moe 1 --use_deepep_low_latency 1 --use_all_gather 0 --enable_flashinfer_trtllm_gen 1 --enable_flashinfer_trt_fmha_v2 1 --enable_paged_flashinfer_trt_fmha_v2 1 --enable_open_source_fmha 1 --disable_flashinfer_native 0 --disable_flashinfer_hybrid_prefill 1",
                 },
                 envs={
                     # Pin the FP8 per-token-group quant to the legacy kernel: the
@@ -569,8 +569,8 @@ def h20_oss_suites():
                     # prompt sits on a razor-thin argmax tie (~token 60) that then
                     # varies per pod (JIT autotune state), breaking golden-exact
                     # comparison. Production keeps the auto default.
-                    "prefill": ["ACCL_LOW_LATENCY_OPTIMIZE=1", "DSV4_FP8_QUANT_KERNEL=legacy"],
-                    "decode":  ["ACCL_LOW_LATENCY_OPTIMIZE=1", "DSV4_FP8_QUANT_KERNEL=legacy"],
+                    "prefill": ["ACCL_LOW_LATENCY_OPTIMIZE=1", "DSV4_FP8_QUANT_KERNEL=legacy", "FLASHINFER_DISABLE_VERSION_CHECK=1"],
+                    "decode":  ["ACCL_LOW_LATENCY_OPTIMIZE=1", "DSV4_FP8_QUANT_KERNEL=legacy", "FLASHINFER_DISABLE_VERSION_CHECK=1"],
                 },
                 gpu_type=["H20"],
                 data=native.glob(['data/model/qwen_vl/*.jpeg']),
