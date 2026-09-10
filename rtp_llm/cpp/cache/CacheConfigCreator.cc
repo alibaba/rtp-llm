@@ -205,9 +205,11 @@ void validateStageScopedDescsForPP(const ModelConfig& stage_config) {
 }
 
 ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       model_config,
-                                                       const ParallelismConfig& parallelism_config) {
+                                                       const ParallelismConfig& parallelism_config,
+                                                       bool                     is_draft_model) {
+
     const int64_t pp_size = std::max<int64_t>(1, parallelism_config.pp_size);
-    if (pp_size <= 1) {
+    if (pp_size <= 1 || is_draft_model) {
         return model_config;
     }
 
@@ -260,7 +262,8 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp,
-                                                  int                      gen_num_per_cycle) {
+                                                  int                      gen_num_per_cycle,
+                                                  bool                     is_draft_model) {
     checkPpIndependentPools(model_config, parallelism_config);
     CacheConfig config;
     if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
@@ -268,11 +271,12 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
         no_override_config.seq_size_per_block        = 0;
         no_override_config.kernel_seq_size_per_block = 0;
         config                                       = HybridPoolConfigCreator::createConfig(
-            model_config, parallelism_config, no_override_config, is_mtp, gen_num_per_cycle);
+            model_config, parallelism_config, no_override_config, is_mtp, gen_num_per_cycle, is_draft_model);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
         config = HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     } else {
-        config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
+        config = SingleConfigCreator::createSingleConfig(
+            model_config, parallelism_config, is_mtp, gen_num_per_cycle, is_draft_model);
     }
 
     if (!model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
@@ -334,21 +338,36 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1,
-                            "pipeline parallelism (pp_size=%ld) cannot be combined with speculative execution yet",
-                            parallelism_config.pp_size);
-    CacheConfig score_config =
-        score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
-            HybridPoolConfigCreator::createConfig(
-                score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle) :
-            CacheConfigCreator::createBasicConfig(
-                score_model_config, parallelism_config, false, sp_config.gen_num_per_cycle);
-    CacheConfig propose_config =
-        propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
-            HybridPoolConfigCreator::createConfig(
-                propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle) :
-            CacheConfigCreator::createBasicConfig(
-                propose_model_config, parallelism_config, is_mtp, sp_config.gen_num_per_cycle);
+    RTP_LLM_CHECK_WITH_INFO(
+        parallelism_config.pp_size <= 1
+            || (is_mtp && !is_eagle && sp_config.type == SP_TYPE_MTP
+                && PPLayout::fromParallelismConfig(parallelism_config, score_model_config.num_layers).hasLmHead()),
+        "pipeline parallelism (pp_size=%ld) requires MTP cache configuration on the last stage",
+        parallelism_config.pp_size);
+    CacheConfig score_config   = score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+                                     HybridPoolConfigCreator::createConfig(score_model_config,
+                                                                         parallelism_config,
+                                                                         kv_cache_config,
+                                                                         false,
+                                                                         sp_config.gen_num_per_cycle,
+                                                                         /*is_draft_model=*/false) :
+                                     CacheConfigCreator::createBasicConfig(score_model_config,
+                                                                         parallelism_config,
+                                                                         false,
+                                                                         sp_config.gen_num_per_cycle,
+                                                                         /*is_draft_model=*/false);
+    CacheConfig propose_config = propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+                                     HybridPoolConfigCreator::createConfig(propose_model_config,
+                                                                           parallelism_config,
+                                                                           kv_cache_config,
+                                                                           is_mtp,
+                                                                           sp_config.gen_num_per_cycle,
+                                                                           /*is_draft_model=*/true) :
+                                     CacheConfigCreator::createBasicConfig(propose_model_config,
+                                                                           parallelism_config,
+                                                                           is_mtp,
+                                                                           sp_config.gen_num_per_cycle,
+                                                                           /*is_draft_model=*/true);
 
     const int joint_step       = std::max(1, kv_cache_config.linear_step);
     score_config.linear_step   = joint_step;
@@ -358,7 +377,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     setupKernelSeqSize(propose_config, kv_cache_config, "propose");
 
     int num_mtp_modules = 1;
-    if (is_mtp) {
+    if (is_mtp && parallelism_config.pp_size == 1) {
         num_mtp_modules = sp_config.gen_num_per_cycle;
         if (is_eagle || sp_config.type == SP_TYPE_DSPARK) {
             // DSpARK is one multi-layer block-draft model; gamma is its

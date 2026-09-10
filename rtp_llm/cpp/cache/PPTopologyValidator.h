@@ -80,7 +80,7 @@ private:
     StageCacheSnapshot snapshot_;
 };
 
-// Exchanges serialized snapshots over the PP process group; collective, all stages must reach it.
+// Exchanges serialized snapshots within one (dp_rank, tp_rank) PP lane; all stages in that lane must participate.
 class PPSnapshotCollector: public StageSnapshotCollector {
 public:
     explicit PPSnapshotCollector(StageCacheSnapshot local_snapshot): local_(std::move(local_snapshot)) {}
@@ -91,7 +91,8 @@ private:
     StageCacheSnapshot local_;
 };
 
-// Collect + validate; on failure the caller must abort startup.
+// Collect + validate; PPSnapshotCollector performs a collective exchange before validation.
+// On failure the caller must abort startup.
 PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector, double capacity_skew_threshold = 1.5);
 
 // Fuse over the composed config: every local group must carry exactly its
@@ -116,7 +117,8 @@ private:
     double capacity_skew_threshold_;
 };
 
-// Fills each local group's canonical_idx by tag pairing; must run before KVCacheManager::init().
+// Fills each local group's canonical_idx by tag pairing, including MTP sub-configs;
+// must run before KVCacheManager::init().
 void applyPPCanonicalIndices(CacheConfig& config, const PPValidationResult& validation);
 
 }  // namespace rtp_llm

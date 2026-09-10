@@ -956,7 +956,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
-void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
+void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info, bool update_processor) {
     // Worker-thread MTP bookkeeping updates tokens/output and finish checks
     // before the next async dispatch. The speculative propose_step+1 window
     // already covers stop/EOS/max-token boundaries.
@@ -1007,20 +1007,24 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     // The stream token history is authoritative. Advance every processor exactly
     // once before mutating speculative buffers, cache layout or published output.
-    if (auto error = updateLogitProcessorStatus(new_tokens, accept_token_num); error.has_value()) {
-        reportEventWithoutLock(StreamEvents::Error, error->code(), error->ToString());
-        return;
+    if (update_processor) {
+        if (auto error = updateLogitProcessorStatus(new_tokens, accept_token_num); error.has_value()) {
+            reportEventWithoutLock(StreamEvents::Error, error->code(), error->ToString());
+            return;
+        }
     }
 
     // update speculative output buffer
+    const auto draft_count = update_info.draft_tokens.defined() ? update_info.draft_tokens.numel() : 0;
+    RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_ && sp_output_buffer_->tokens.defined()
+                                && sp_output_buffer_->tokens.numel() >= draft_count + 1,
+                            "speculative token buffer must contain target and draft slots");
     int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
-    if (update_info.draft_token >= 0) {
-        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
-                                "speculative token buffer must contain target and draft slots");
-        spec_tokens[1] = update_info.draft_token;
-        propose_token_ = {target_last_token, update_info.draft_token};
+    if (draft_count > 0) {
+        sp_output_buffer_->tokens.flatten().narrow(0, 1, draft_count).copy_(update_info.draft_tokens);
+        propose_token_.assign(spec_tokens, spec_tokens + draft_count + 1);
     } else {
         // Commit-only speculative steps (DSpARK prefill/decode tail) publish
         // only accepted target tokens. Their next proposal is produced at the

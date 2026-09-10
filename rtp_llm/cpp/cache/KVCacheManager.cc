@@ -677,31 +677,25 @@ void KVCacheManager::initConnectorCoordinator() {
 void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
     RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "allocateAndSync requires positive global block_num");
-    uint32_t           synced_block_num = static_cast<uint32_t>(config_.block_num);
-    const bool         use_lane_scope   = parallelism_config_.pp_size > 1;
-    const size_t       sync_size        = use_lane_scope ?
-                                              static_cast<size_t>(parallelism_config_.tp_size) :
-                                              static_cast<size_t>(parallelism_config_.tp_size * parallelism_config_.dp_size);
-    const ParallelMode mode             = use_lane_scope ? ParallelMode::TP : ParallelMode::WORLD;
-    if (sync_size > 1) {
-        const size_t local_rank    = use_lane_scope ?
-                                         static_cast<size_t>(parallelism_config_.tp_rank) :
-                                         static_cast<size_t>(parallelism_config_.tp_size * parallelism_config_.dp_rank
-                                                          + parallelism_config_.tp_rank);
-        auto         block_num_t   = torch::empty({(int64_t)sync_size}, torch::kInt32).pin_memory();
-        auto         block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank]  = config_.block_num;
-        execAllGather({{block_num_t}, mode});
+    uint32_t     synced_block_num = static_cast<uint32_t>(config_.block_num);
+    const size_t stage_size       = parallelism_config_.tp_size * parallelism_config_.dp_size;
+    if (stage_size > 1) {
+        const size_t stage_rank =
+            parallelism_config_.dp_rank * parallelism_config_.tp_size + parallelism_config_.tp_rank;
+        auto block_num_t          = torch::empty({(int64_t)stage_size}, torch::kInt32).pin_memory();
+        auto block_num_ptr        = block_num_t.data_ptr<int>();
+        block_num_ptr[stage_rank] = config_.block_num;
+        execAllGather({{block_num_t}, ParallelMode::STAGE});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
         if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
             synced_block_num = 1;
         } else {
-            synced_block_num = static_cast<uint32_t>(*std::min_element(block_num_ptr, block_num_ptr + sync_size));
+            synced_block_num = static_cast<uint32_t>(*std::min_element(block_num_ptr, block_num_ptr + stage_size));
         }
     }
-    if (use_lane_scope) {
+    if (parallelism_config_.pp_size > 1) {
         // The cross-stage agreement runs on the stage-aligned capacity, so every
         // lane reduces the same per-stage value and converges to one table.
         RTP_LLM_CHECK_WITH_INFO(capacity_negotiator_ != nullptr,
@@ -715,7 +709,7 @@ void KVCacheManager::allocateAndSync() {
     } else {
         config_.finalizeBlockNums(synced_block_num, runtime_config_);
     }
-    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
+    RTP_LLM_LOG_INFO("block_num is %d after cache capacity sync", config_.block_num);
 }
 
 void KVCacheManager::reportMetricsLoop() {

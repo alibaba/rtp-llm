@@ -170,8 +170,12 @@ class BaseModel(object):
         return f"cuda:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")
-    def load(self, skip_python_model: bool = False):
-        if self.parallelism_config.pp_size > 1 and not self.support_pp():
+    def load(self, skip_python_model: bool = False, apply_pp_partition: bool = True):
+        if (
+            apply_pp_partition
+            and self.parallelism_config.pp_size > 1
+            and not self.support_pp()
+        ):
             raise Exception("current model can't support pipeline parallelism")
         if (
             self.hw_kernel_config.enable_cuda_graph
@@ -180,7 +184,7 @@ class BaseModel(object):
             raise Exception("current model can't support cuda graph in py model mode")
 
         self.custom_module = self._init_custom_module()
-        self.model_weights_loader = self.create_model_loader()
+        self.model_weights_loader = self.create_model_loader(apply_pp_partition=apply_pp_partition)
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
@@ -310,6 +314,7 @@ class BaseModel(object):
         moe_pure_tp_preshard: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        apply_pp_partition: bool = True,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -323,6 +328,7 @@ class BaseModel(object):
             max_generate_batch_size: Maximum batch size for generation
             merge_lora: Whether to merge LoRA weights
             device_resource_config: DeviceResourceConfig for device resource configuration
+            apply_pp_partition: Whether weight loading uses the current PP stage partition
         """
         # All metadata is in model_config
         model = cls(
@@ -358,7 +364,7 @@ class BaseModel(object):
 
         # 在加载前后分别记录内存使用
         logging.info(f"Before loading: {get_host_memory_usage():.2f} MB")
-        model.load(skip_python_model=skip_python_model)
+        model.load(skip_python_model=skip_python_model, apply_pp_partition=apply_pp_partition)
         logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
 
@@ -477,7 +483,7 @@ class BaseModel(object):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
 
-    def create_model_loader(self) -> ModelLoader:
+    def create_model_loader(self, apply_pp_partition: bool = True) -> ModelLoader:
         # Create database locally, only used for model loading
         database = CkptDatabase(
             self.model_config.ckpt_path,
@@ -510,4 +516,5 @@ class BaseModel(object):
             load_method=self.load_method,
             force_cpu_load_weights=self.force_cpu_load_weights,
             moe_pure_tp_preshard=self.moe_pure_tp_preshard,
+            apply_pp_partition=apply_pp_partition,
         )

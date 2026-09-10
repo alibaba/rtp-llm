@@ -17,6 +17,7 @@ from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_WORLD = 2
+_CPP_PARALLEL_MODE_STAGE = 6
 _UDS_SUN_PATH_LIMIT = 108
 
 
@@ -120,7 +121,7 @@ def init_distributed_environment(
 ):
     """Initialize distributed environment and create process groups.
 
-    This function creates DP, TP, PP and WORLD process groups using torch.distributed.
+    This function creates DP, TP, STAGE, PP, and WORLD groups using torch.distributed.
     It can only be called once unless destroy_distributed_environment() has been called.
 
     Args:
@@ -222,7 +223,7 @@ def _create_process_groups(
     backend: str,
     timeout: Optional[timedelta],
 ):
-    """Create DP and TP process groups.
+    """Create stage-local DP/TP/STAGE groups and cross-stage PP lane groups.
 
     Args:
         parallelism_config: Configuration for parallelism setup
@@ -293,6 +294,21 @@ def _create_process_groups(
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
 
     if pp_size > 1:
+        for stage_ranks in layout.groups(Group.STAGE):
+            first = layout.coord_of(stage_ranks[0])
+            stage_group = torch.distributed.new_group(
+                ranks=stage_ranks,
+                backend=backend,
+                timeout=timedelta(days=36500),
+            )
+            if world_rank in stage_ranks:
+                group_key = Group.STAGE.name + str(first.pp)
+                _group_map[group_key] = stage_group
+                logging.info(
+                    f"[rank: {world_rank}] Stored STAGE group with key: {group_key} with ranks: {stage_ranks}"
+                )
+            torch.distributed.barrier()
+
         # PP groups: ranks of the same (dp_rank, tp_rank) lane across stages.
         for pp_ranks in layout.groups(Group.PP):
             first = layout.coord_of(pp_ranks[0])
@@ -319,6 +335,8 @@ def _create_process_groups(
                     f"[rank: {world_rank}] Stored PP group with key: {group_key} {pp_group} with ranks: {pp_ranks}"
                 )
             torch.distributed.barrier()
+    else:
+        _group_map[Group.STAGE] = torch.distributed.group.WORLD
 
 
 def _register_process_groups_to_cpp():
@@ -352,6 +370,10 @@ def _register_process_groups_to_cpp():
             if _CPP_PARALLEL_MODE_WORLD not in registered_modes:
                 mode_to_group[_CPP_PARALLEL_MODE_WORLD] = pg
                 registered_modes.add(_CPP_PARALLEL_MODE_WORLD)
+        elif group_key == Group.STAGE or (
+            isinstance(group_key, str) and group_key.startswith(Group.STAGE.name)
+        ):
+            mode_to_group[_CPP_PARALLEL_MODE_STAGE] = pg
         elif isinstance(group_key, str):
             if group_key.startswith(Group.TP.name):
                 if my_coord is not None:
@@ -408,7 +430,7 @@ def _register_process_groups_to_cpp():
         Args:
             tensors: Tensors to broadcast, each is broadcast in-place from root.
             root: Source rank that holds the data.
-            mode: ParallelMode int (0=TP, 1=DP, 2=WORLD) selecting process group.
+            mode: ParallelMode int (0=TP, 1=DP, 2=WORLD, 6=STAGE) selecting process group.
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
@@ -437,7 +459,7 @@ def _register_process_groups_to_cpp():
         Args:
             tensor: Input tensor to reduce.
             op: ReduceOp int (0=SUM, 1=PROD, 2=MAX, 3=MIN, 4=AVG).
-            mode: ParallelMode int (0=TP, 1=DP, 2=WORLD) selecting process group.
+            mode: ParallelMode int (0=TP, 1=DP, 2=WORLD, 6=STAGE) selecting process group.
             dest: If not None, result is written here instead of reducing in-place on tensor.
         Returns:
             The reduced tensor (dest if provided, otherwise tensor).
@@ -467,7 +489,7 @@ def _register_process_groups_to_cpp():
 
         Args:
             recv_buffers: Output tensors, each of size [world_size * per_rank_numel].
-            mode: ParallelMode int (0=TP, 1=DP, 2=WORLD) selecting process group.
+            mode: ParallelMode int (0=TP, 1=DP, 2=WORLD, 6=STAGE) selecting process group.
             send_buffers: Per-rank input tensors (used when inplace=False).
             inplace: If True, each rank's send data is extracted from its slice in recv_buffers;
                      if False, send data comes from send_buffers.
@@ -714,7 +736,7 @@ def _get_group(
     If not initialized and _parallelism_config is available, it will attempt to initialize.
 
     Args:
-        group: Group type (DP, TP, PP, or WORLD)
+        group: Group type (DP, TP, STAGE, PP, or WORLD)
         cpu_backend: Only valid for Group.PP; selects the gloo twin group
             used for CPU-object transport.
 
@@ -755,6 +777,7 @@ def _get_group(
         (group == Group.DP and dp_size > 1 and world_size != dp_size)
         or (group == Group.TP and tp_size > 1 and world_size != tp_size)
         or (group == Group.PP and pp_size > 1)
+        or (group == Group.STAGE and pp_size > 1)
     )
     if needs_key:
         layout = RankLayout.from_parallelism_config(_parallelism_config)
@@ -768,10 +791,14 @@ def _get_group(
             group_key = Group.DP.name + str(coord.pp * tp_size + coord.tp)
         elif group == Group.TP:
             group_key = Group.TP.name + str(coord.pp * dp_size + coord.dp)
+        elif group == Group.STAGE:
+            group_key = Group.STAGE.name + str(coord.pp)
         else:
             group_key = Group.PP.name + str(coord.dp * tp_size + coord.tp)
             if cpu_backend:
                 group_key = group_key + "_gloo"
+    elif group == Group.STAGE:
+        group_key = Group.STAGE
     else:
         # WORLD always uses Group.WORLD as key
         group_key = Group.WORLD

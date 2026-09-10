@@ -53,7 +53,7 @@ struct StreamSpecUpdateInfo {
     const torch::Tensor new_tokens;
     int                 num_new_tokens;
 
-    int                 draft_token;
+    torch::Tensor       draft_tokens;
     const torch::Tensor draft_hidden_states;
     const torch::Tensor draft_token_probs;
     // GPU tensor of propose tokens for the next step.
@@ -147,7 +147,7 @@ public:
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
     void         updateFromPP(const StreamUpdateInfo& update_info);
-    void         specUpdate(const StreamSpecUpdateInfo& update_info);
+    void         specUpdate(const StreamSpecUpdateInfo& update_info, bool update_processor = true);
     bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {

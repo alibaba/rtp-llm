@@ -269,9 +269,9 @@ class FakeSpeculativeSampler: public spec::SpeculativeSampler {
 public:
     FakeSpeculativeSampler(size_t propose_step): spec::SpeculativeSampler(torch::Tensor(), propose_step) {}
 
-    spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
-                                           SamplerOutput&                      draft_sampler_output,
-                                           SamplerOutput&                      target_sampler_output) override {
+    spec::SpeculativeSamplerOutput forward(const spec::SpeculativeSamplingParams& params,
+                                          SamplerOutput&                        draft_sampler_output,
+                                          SamplerOutput&                        target_sampler_output) override {
         return output_holder.get();
     }
 
@@ -780,7 +780,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto stream1_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto stream1_draft_token_probs = torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}});
 
-    StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens, 1, 3, stream1_hidden_states, stream1_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info1{
+        stream1_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream1_hidden_states, stream1_draft_token_probs};
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info1);
@@ -940,7 +941,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
@@ -1031,7 +1032,7 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
@@ -1122,8 +1123,10 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto stream2_hidden_states     = torch::tensor({{2.1f, 2.12f}});
     auto stream2_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
 
-    StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens, 1, 2, stream1_hidden_states, stream1_draft_token_probs};
-    StreamSpecUpdateInfo spec_update_info2{stream2_new_tokens, 1, 3, stream2_hidden_states, stream2_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info1{
+        stream1_new_tokens, 1, torch::tensor({2}, torch::kInt32), stream1_hidden_states, stream1_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info2{
+        stream2_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream2_hidden_states, stream2_draft_token_probs};
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, spec_update_info1);
@@ -1509,7 +1512,7 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
@@ -1594,7 +1597,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     // Simulate the commit-only prefill handoff: append the first target token
     // but leave proposal/probability/hidden state empty. The first decode
     // round must produce its proposal at the round head.
-    StreamSpecUpdateInfo spec_update_info{torch::tensor({{2}}, torch::kInt32), 1, -1, {}, {}};
+    StreamSpecUpdateInfo spec_update_info{torch::tensor({{2}}, torch::kInt32), 1, torch::Tensor(), {}, {}};
     stream->specUpdate(spec_update_info);
     EXPECT_TRUE(stream->getProposeToken().empty());
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
@@ -1697,7 +1700,7 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     StreamSpecUpdateInfo update_info{
-        torch::tensor({7}, torch::kInt32).reshape({1, 1}), 1, -1, torch::Tensor(), torch::Tensor()};
+        torch::tensor({7}, torch::kInt32).reshape({1, 1}), 1, torch::Tensor(), torch::Tensor(), torch::Tensor()};
     stream->specUpdate(update_info);
 
     EXPECT_EQ((std::vector<int32_t>{7}), toVec<int32_t>(sp_buffer->tokens));

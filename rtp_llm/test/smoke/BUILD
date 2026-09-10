@@ -38,6 +38,14 @@ load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
 load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
+
+custom_smoke_test(
+    name = "qwen35_dense_mtp_pp_test",
+    main = "mtp_pp_test.py",
+    smoke_args = "--tp_size 2 --pp_size 2 --dp_size 1 --ep_size 1 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 2048 --ssm_state_dtype fp32 --kv_cache_mem_mb 8192 --warm_up 0 --model_warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
+    gpu_type = ["H20"],
+)
 
 h20_oss_suites()
 sm8x_suites()

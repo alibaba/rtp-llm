@@ -274,9 +274,10 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                             const ParallelismConfig& parallelism_config,
                                             const KVCacheConfig&     kv_cache_config,
                                             bool                     is_mtp,
-                                            int                      gen_num_per_cycle) {
-    // With pp_size>1 every stage builds independent-pool geometry only for its own layer range.
-    const ModelConfig stage_model_config = CacheConfigCreator::stageScopedModelConfig(model_config, parallelism_config);
+                                            int                      gen_num_per_cycle,
+                                            bool                     is_draft_model) {
+    const ModelConfig stage_model_config =
+        CacheConfigCreator::stageScopedModelConfig(model_config, parallelism_config, is_draft_model);
 
     const auto    dtype                  = MemoryEvaluationHelper::getDataTypeForCache(stage_model_config);
     constexpr int kDefaultKvCacheSeqSize = 64;
@@ -352,9 +353,10 @@ CacheConfig HybridPoolConfigCreator::createConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp,
-                                                  int                      gen_num_per_cycle) {
+                                                  int                      gen_num_per_cycle,
+                                                  bool                     is_draft_model) {
     return createHybridAttentionPoolConfig(
-        model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
+        model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle, is_draft_model);
 }
 
 }  // namespace rtp_llm

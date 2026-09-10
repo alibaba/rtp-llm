@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -61,15 +62,20 @@ def make_load_config(
 
 
 def make_loader(
-    load_config: LoadConfig, task_type=TaskType.LANGUAGE_MODEL
+    load_config: LoadConfig, task_type=TaskType.LANGUAGE_MODEL,
+    apply_pp_partition: bool = True,
 ) -> ModelLoader:
-    # Bypass __init__; only fields used by _maybe_skip_weight are needed.
-    loader = object.__new__(ModelLoader)
-    loader._task_type = task_type
-    loader._load_config = load_config
-    # Normally set in __init__ (global-weight-alias feature); empty = no aliases.
-    loader._global_weight_aliases = {}
-    return loader
+    weights_info = MagicMock(is_attn_model=False)
+    weights_info.create_load_config.return_value = load_config
+    # Exercise scope selection in the real constructor without device/EPLB setup.
+    with patch.object(ModelLoader, "create_eplb", return_value=(None, None)), patch(
+        "rtp_llm.device.get_current_device"
+    ):
+        return ModelLoader(
+            SimpleNamespace(task_type=task_type, compute_dtype=load_config.compute_dtype),
+            weights_info, [], load_config.database,
+            apply_pp_partition=apply_pp_partition,
+        )
 
 
 class FakeWeight:
@@ -103,6 +109,81 @@ class PPLayerRangeTest(unittest.TestCase):
             cfg = make_load_config(pp_size=3, pp_rank=pp_rank)
             flags.append((cfg.has_pp_embedding, cfg.has_pp_lm_head))
         self.assertEqual(flags, [(True, False), (False, False), (False, True)])
+
+
+class DraftPPLoadingTest(unittest.TestCase):
+    def test_draft_keeps_all_layers_and_globals_with_target_partition(self):
+        for pp_size, pp_rank, counts in [(1, 0, None), (3, 2, [2, 3, 2])]:
+            with self.subTest(pp_size=pp_size):
+                cfg = make_load_config(
+                    num_layers=2,
+                    pp_size=pp_size,
+                    pp_rank=pp_rank,
+                    pp_stage_layer_counts=counts,
+                )
+                cfg.tp_size, cfg.tp_rank = 2, 1
+                cfg.dp_size, cfg.dp_rank = 2, 1
+                loader = make_loader(cfg, apply_pp_partition=False)
+                for name in PPSkipWeightTest.GLOBAL_NAMES:
+                    self.assertFalse(loader._maybe_skip_weight(FakeWeight(name)))
+                self.assertEqual((cfg.tp_size, cfg.tp_rank, cfg.dp_size, cfg.dp_rank), (2, 1, 2, 1))
+                self.assertEqual((cfg.pp_size, cfg.pp_rank, cfg.pp_stage_layer_counts), (pp_size, pp_rank, counts))
+
+    def test_both_loader_paths_follow_selected_range(self):
+        for num_layers, pp_size, pp_rank, apply_pp, expected in (
+            (7, 3, 0, True, [0, 1]),
+            (7, 3, 1, True, [2, 3, 4]),
+            (7, 3, 2, True, [5, 6]),
+            (2, 3, 2, False, [0, 1]),
+            (2, 1, 0, False, [0, 1]),
+            (2, 1, 0, True, [0, 1]),
+        ):
+            with self.subTest(pp_size=pp_size, pp_rank=pp_rank, apply_pp=apply_pp):
+                cfg = make_load_config(
+                    num_layers=num_layers, pp_size=pp_size, pp_rank=pp_rank,
+                    pp_stage_layer_counts=[2, 3, 2] if pp_size > 1 else None,
+                )
+                loader = make_loader(cfg, apply_pp_partition=apply_pp)
+                weights = [MagicMock() for _ in range(num_layers)]
+                for idx, weight in enumerate(weights):
+                    weight.get_components.return_value = [weight]
+                    weight.get_tensor_names.return_value = [f"layer.{idx}"]
+                loader._model_weights_info = SimpleNamespace(
+                    layer_weights=[[weight] for weight in weights], weights=[]
+                )
+                loader._load_layer_weights = MagicMock(return_value={"weight": torch.ones(1)})
+                self.assertEqual([row[0] for row in loader.prepare_weights("cpu")], expected)
+                with patch("rtp_llm.model_loader.loader.TensorCollector"):
+                    _, weight_infos = loader._generate_weight_info()
+                self.assertEqual([info.layer_id for info in weight_infos], expected)
+
+    def test_full_loading_preserves_alias_and_task_filters(self):
+        cfg = make_load_config(num_layers=2, pp_size=3, pp_rank=2, pp_stage_layer_counts=[2, 3, 2])
+        loader = make_loader(cfg, apply_pp_partition=False)
+        loader._global_weight_aliases = {W.embedding: torch.ones(1)}
+        self.assertTrue(loader._maybe_skip_weight(FakeWeight(W.embedding)))
+        self.assertFalse(loader._maybe_skip_weight(FakeWeight(W.lm_head)))
+        loader = make_loader(cfg, TaskType.DENSE_EMBEDDING, apply_pp_partition=False)
+        self.assertTrue(loader._maybe_skip_weight(FakeWeight(W.lm_head)))
+
+    def test_lm_head_fallback_uses_selected_ownership(self):
+        for apply_pp in (True, False):
+            with self.subTest(apply_pp=apply_pp):
+                cfg = make_load_config(num_layers=2, pp_size=3, pp_rank=0, pp_stage_layer_counts=[2, 3, 2])
+                loader = make_loader(cfg, apply_pp_partition=apply_pp)
+                loader._weights_info.model_config = SimpleNamespace(
+                    normalize_lm_head_weight=False, logit_scale=1.0, vocab_size=4,
+                )
+                embedding = torch.ones(4, 4)
+                weights = MagicMock(global_weights={W.embedding: embedding})
+                weights.steal_global_weight.return_value = None
+                loader._load_dynamic_weights(weights, "cpu")
+                if apply_pp:
+                    weights.steal_global_weight.assert_not_called()
+                    weights.set_global_weight.assert_not_called()
+                else:
+                    weights.steal_global_weight.assert_called_once_with(W.lm_head)
+                    weights.set_global_weight.assert_called_once_with(W.lm_head, embedding)
 
 
 class PPMaterializedPartitionTest(unittest.TestCase):

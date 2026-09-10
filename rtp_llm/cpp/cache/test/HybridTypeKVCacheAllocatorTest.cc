@@ -771,6 +771,110 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsShortTargetGroup) {
                  std::runtime_error);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAllowsUnevenTargetGroupsWithIndependentPools) {
+    CacheConfig main_config;
+    main_config.layer_num                  = 32;
+    main_config.layer_all_num              = 32;
+    main_config.group_layer_num            = 24;
+    main_config.use_independent_block_pools = true;
+
+    std::vector<int> full_layers;
+    std::vector<int> linear_layers;
+    for (int layer_id = 0; layer_id < 32; ++layer_id) {
+        ((layer_id + 1) % 4 == 0 ? full_layers : linear_layers).push_back(layer_id);
+    }
+    main_config.fromGroupedSpecs(
+        {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1),
+         makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
+        {full_layers, linear_layers},
+        {CacheGroupType::FULL, CacheGroupType::LINEAR},
+        {"full", "linear"});
+    main_config.layer_to_block_stride_bytes.assign(34, 1);
+
+    auto propose_config = makeSingleLayerCacheConfig(
+        makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL);
+    propose_config.use_independent_block_pools = true;
+
+    const auto first_sub_config =
+        main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/32);
+    const auto full_gid   = static_cast<size_t>(main_config.groupIdForTag("full"));
+    const auto linear_gid = static_cast<size_t>(main_config.groupIdForTag("linear"));
+    EXPECT_EQ(main_config.layerIdsForGroup(full_gid).size(), 9u);
+    EXPECT_EQ(main_config.layerIdsForGroup(full_gid).back(), 32);
+    EXPECT_EQ(main_config.layerIdsForGroup(linear_gid).size(), 24u);
+    EXPECT_EQ(first_sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
+    EXPECT_TRUE(first_sub_config->layerIdsForGroup(linear_gid).empty());
+
+    for (int invalid_module_index : {0, 2}) {
+        auto invalid_config = main_config;
+        EXPECT_THROW(invalid_config.mergeMTPModule(propose_config, invalid_module_index, /*main_layer_num=*/32),
+                     std::runtime_error);
+    }
+
+    const auto second_sub_config =
+        main_config.mergeMTPModule(propose_config, /*module_index=*/1, /*main_layer_num=*/32);
+    EXPECT_EQ(main_config.layerIdsForGroup(full_gid).size(), 10u);
+    EXPECT_EQ(main_config.layerIdsForGroup(full_gid).back(), 33);
+    EXPECT_EQ(main_config.layerIdsForGroup(linear_gid).size(), 24u);
+    EXPECT_EQ(second_sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
+    EXPECT_TRUE(second_sub_config->layerIdsForGroup(linear_gid).empty());
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpPreservesTargetCanonicalIndices) {
+    for (bool linear_first : {false, true}) {
+        for (bool remap_canonical_indices : {false, true}) {
+            for (const std::string draft_tag : {"full", "default"}) {
+                SCOPED_TRACE(::testing::Message() << "linear_first=" << linear_first
+                                                 << " remap=" << remap_canonical_indices
+                                                 << " draft_tag=" << draft_tag);
+                CacheConfig main_config;
+                main_config.layer_num                   = 4;
+                main_config.layer_all_num               = 4;
+                main_config.group_layer_num             = 3;
+                main_config.use_independent_block_pools = true;
+                main_config.fromGroupedSpecs(
+                    {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1),
+                     makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
+                    {{3}, {0, 1, 2}},
+                    {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                    {"full", "linear"});
+                auto groups = main_config.topology().groups();
+                if (linear_first) {
+                    std::swap(groups[0], groups[1]);
+                }
+                for (size_t gid = 0; gid < groups.size(); ++gid) {
+                    groups[gid].canonical_idx = remap_canonical_indices ? 7 - gid * 4 : gid;
+                }
+                main_config.setTopology(std::move(groups), main_config.topology().layers());
+                main_config.layer_to_block_stride_bytes.assign(6, 1);
+                const auto expected_canonical = main_config.topology().canonicalIndicesSnapshot();
+                const auto expected_tags      = main_config.topology().groupTagsSnapshot();
+                const auto full_gid           = main_config.topology().groupIdForTag("full");
+                const auto linear_gid         = main_config.topology().groupIdForTag("linear");
+
+                auto propose_config = makeSingleLayerCacheConfig(
+                    makeMhaSpec(draft_tag, 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL);
+                propose_config.use_independent_block_pools = true;
+                for (int module_index = 0; module_index < 2; ++module_index) {
+                    const auto sub_config =
+                        main_config.mergeMTPModule(propose_config, module_index, /*main_layer_num=*/4);
+                    EXPECT_EQ(sub_config->topology().canonicalIndicesSnapshot(), expected_canonical);
+                    EXPECT_EQ(main_config.topology().canonicalIndicesSnapshot(), expected_canonical);
+                    EXPECT_EQ(sub_config->topology().groupTagsSnapshot(), expected_tags);
+                    EXPECT_EQ(sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
+                    EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
+                    EXPECT_EQ(main_config.layerIdsForGroup(full_gid).back(), 4 + module_index);
+                    EXPECT_EQ(main_config.layerIdsForGroup(linear_gid), std::vector<int>({0, 1, 2}));
+                    EXPECT_EQ(sub_config->specForGroup(full_gid)->type, KVCacheSpecType::MultiHeadAttention);
+                    EXPECT_EQ(sub_config->kvBlockStrideBytesForGroup(full_gid),
+                              propose_config.kvBlockStrideBytesForGroup(0));
+                }
+                EXPECT_EQ(propose_config.topology().canonicalIndicesSnapshot(), std::vector<size_t>({0}));
+            }
+        }
+    }
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsPartialOrReorderedSourceGroup) {
     auto main_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);

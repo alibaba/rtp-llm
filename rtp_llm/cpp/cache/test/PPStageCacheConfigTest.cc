@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <pybind11/embed.h>
 
 #include <algorithm>
 #include <map>
@@ -14,6 +15,9 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
 namespace rtp_llm {
+
+void registerExecCtxOps(pybind11::module& m);
+
 namespace test {
 
 static ModelConfig makeHybridModelConfig(int64_t num_layers) {
@@ -359,26 +363,376 @@ TEST(PPStageCacheConfig, arbitraryRetainedTagNamesPassThrough) {
     EXPECT_NO_THROW(CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 0), false, 0));
 }
 
-TEST(PPStageCacheConfig, speculativeGate) {
-    const auto score   = makeSingleModelConfig(4);
-    const auto propose = makeSingleModelConfig(1);
+TEST(PPStageCacheConfig, mtpOnlyLastStageOwnsCompleteDraftCache) {
+    const auto    score   = makeSingleModelConfig(7);
+    const auto    propose = makeSingleModelConfig(2);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num            = 32;
+    kv_cache_config.kernel_seq_size_per_block = 2;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type = SP_TYPE_MTP;
 
-    RuntimeConfig              runtime_config;
-    KVCacheConfig              kv_cache_config;
+    for (int tp_size : {1, 2}) {
+        for (int steps : {1, 2, 4}) {
+            sp_config.gen_num_per_cycle = steps;
+            for (int rank = 0; rank < 3; ++rank) {
+                auto pc                      = makePpConfig(7, 3, rank);
+                pc.pp_stage_layer_counts     = {2, 3, 2};
+                pc.tp_size                   = tp_size;
+                const auto     config        = rank == 2 ?
+                                                   CacheConfigCreator::createSpConfig(score,
+                                                                           propose,
+                                                                           pc,
+                                                                           RuntimeConfig{},
+                                                                           kv_cache_config,
+                                                                           sp_config,
+                                                                           std::nullopt,
+                                                                           true,
+                                                                           false) :
+                                                   CacheConfigCreator::createConfig(
+                                            score, pc, RuntimeConfig{}, kv_cache_config, std::nullopt, sp_config);
+                const uint32_t target_layers = pc.pp_stage_layer_counts[rank];
+                const uint32_t draft_layers  = rank == 2 ? 2 : 0;
+                const uint32_t total_layers  = target_layers + draft_layers;
+                EXPECT_EQ(config.layer_num, target_layers);
+                EXPECT_EQ(config.layer_all_num, total_layers);
+                ASSERT_EQ(config.topology().layers().size(), total_layers);
+                ASSERT_EQ(config.groupNums(), 1);
+                EXPECT_EQ(config.layerIdsForGroup(0).size(), total_layers);
+                EXPECT_EQ(config.block_num, 32);
+                // K/V * two KV heads / TP * head dim * four tokens * FP16 bytes.
+                EXPECT_EQ(config.block_size_bytes, total_layers * (512u / tp_size));
+                EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(0), 2u);
+                ASSERT_EQ(config.mtp_sub_configs.size(), rank == 2 ? 1 : 0);
+                for (const auto& sub : config.mtp_sub_configs) {
+                    ASSERT_TRUE(sub);
+                    EXPECT_EQ(sub->layer_num, 2u);
+                    EXPECT_EQ(sub->layer_all_num, 2u);
+                    EXPECT_EQ(sub->block_num, config.block_num);
+                    EXPECT_EQ(sub->tagForGroup(0), config.tagForGroup(0));
+                    EXPECT_EQ(sub->layerIdsForGroup(0), (std::vector<int>{0, 1}));
+                    EXPECT_EQ(sub->kernelBlocksPerKvBlockForGroup(0), 2u);
+                }
+                EXPECT_EQ(pc.pp_size, 3);
+                EXPECT_EQ(pc.pp_rank, rank);
+                EXPECT_EQ(pc.pp_stage_layer_counts, (std::vector<int64_t>{2, 3, 2}));
+            }
+        }
+    }
+}
+
+TEST(PPStageCacheConfig, mtpJointBudgetUsesLocalTargetAndDraftLayers) {
+    for (bool independent_pools : {false, true}) {
+        auto score                                                        = makeSingleModelConfig(8);
+        auto propose                                                      = makeSingleModelConfig(2);
+        score.hybrid_attention_config.enable_independent_kv_cache_pools   = independent_pools;
+        propose.hybrid_attention_config.enable_independent_kv_cache_pools = independent_pools;
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.kv_cache_mem_mb = 1;
+        SpeculativeExecutionConfig sp_config;
+        sp_config.type              = SP_TYPE_MTP;
+        sp_config.gen_num_per_cycle = 2;
+        std::vector<CacheConfig>        configs;
+        std::vector<StageCacheSnapshot> snapshots;
+        for (int rank = 0; rank < 2; ++rank) {
+            auto pc                  = makePpConfig(8, 2, rank);
+            pc.pp_stage_layer_counts = {5, 3};
+            const auto config =
+                rank == 1 ?
+                    CacheConfigCreator::createSpConfig(
+                        score, propose, pc, RuntimeConfig{}, kv_cache_config, sp_config, std::nullopt, true, false) :
+                    CacheConfigCreator::createConfig(
+                        score, pc, RuntimeConfig{}, kv_cache_config, std::nullopt, sp_config);
+            const size_t bytes_per_block = 5u * 512u;
+            const auto   expected_blocks = (1024u * 1024u) / bytes_per_block;
+            EXPECT_EQ(config.block_size_bytes, bytes_per_block);
+            EXPECT_EQ(config.block_num, expected_blocks);
+            EXPECT_EQ(config.blockNumForGroup(0), expected_blocks);
+            for (const auto& sub : config.mtp_sub_configs) {
+                EXPECT_EQ(sub->block_num, expected_blocks);
+                EXPECT_EQ(sub->blockNumForGroup(0), expected_blocks);
+            }
+            configs.push_back(config);
+            snapshots.push_back(StageCacheSnapshot::fromConfig(config));
+        }
+        const auto validation = validatePPTopology(snapshots);
+        ASSERT_TRUE(validation.ok) << validation.error;
+        ASSERT_EQ(validation.canonical_groups.size(), 1u);
+        EXPECT_EQ(validation.canonical_groups[0].logical_block_num, 409u);
+        for (auto& config : configs) {
+            config.finalizeBlockNums(
+                validation.agreed.paged_block_num, RuntimeConfig{}, &validation.agreed.block_num_overrides);
+            EXPECT_NO_THROW(validatePPComposedBlockNums(config, validation.agreed));
+            applyPPCanonicalIndices(config, validation);
+            EXPECT_EQ(config.block_num, 409u);
+            EXPECT_EQ(config.blockNumForGroup(0), 409u);
+            for (const auto& sub : config.mtp_sub_configs) {
+                EXPECT_EQ(sub->block_num, 409u);
+                EXPECT_EQ(sub->blockNumForGroup(0), 409u);
+            }
+        }
+    }
+}
+
+TEST(PPStageCacheConfig, negotiatedCapacityUpdatesMtpSubConfigsAndCanonicalGroups) {
+    for (bool independent_pools : {false, true}) {
+        for (int steps : {1, 2, 4}) {
+            auto score                                                        = makeSingleModelConfig(4);
+            auto propose                                                      = makeSingleModelConfig(2);
+            score.hybrid_attention_config.enable_independent_kv_cache_pools   = independent_pools;
+            propose.hybrid_attention_config.enable_independent_kv_cache_pools = independent_pools;
+            if (independent_pools) {
+                // Stage 0 owns [first_only, full]; the last stage and draft only own [full].
+                score.kv_cache_spec_descs[0][0].tag = "first_only";
+            }
+            KVCacheConfig kv_cache_config;
+            kv_cache_config.test_block_num            = 24;
+            kv_cache_config.kernel_seq_size_per_block = 2;
+            SpeculativeExecutionConfig sp_config;
+            sp_config.type              = SP_TYPE_MTP;
+            sp_config.gen_num_per_cycle = steps;
+            const auto first_config     = CacheConfigCreator::createConfig(
+                score, makePpConfig(4, 2, 0), RuntimeConfig{}, kv_cache_config, std::nullopt, sp_config);
+            kv_cache_config.test_block_num = 32;
+            const auto last_pc             = makePpConfig(4, 2, 1);
+            const auto config              = CacheConfigCreator::createSpConfig(
+                score, propose, last_pc, RuntimeConfig{}, kv_cache_config, sp_config, std::nullopt, true, false);
+            ASSERT_EQ(config.groupNums(), 1);
+            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+            const auto draft_topology = config.mtp_sub_configs[0]->topologyPtr();
+            const auto draft_strides  = config.mtp_sub_configs[0]->layer_to_block_stride_bytes;
+            ASSERT_EQ(draft_topology->groupById(0).block_num, 32u);
+            ASSERT_EQ(draft_topology->groupById(0).canonical_idx, 0u);
+            const size_t canonical_idx = independent_pools ? 1u : 0u;
+            ASSERT_EQ(first_config.groupIdForTag(config.tagForGroup(0)), static_cast<int>(canonical_idx));
+            const auto validation = validatePPTopology(
+                {StageCacheSnapshot::fromConfig(first_config), StageCacheSnapshot::fromConfig(config)});
+            ASSERT_TRUE(validation.ok) << validation.error;
+
+            auto capped = config;
+            capped.finalizeBlockNums(
+                validation.agreed.paged_block_num, RuntimeConfig{}, &validation.agreed.block_num_overrides);
+            EXPECT_NO_THROW(validatePPComposedBlockNums(capped, validation.agreed));
+            applyPPCanonicalIndices(capped, validation);
+            EXPECT_EQ(capped.block_num, 24u);
+            EXPECT_EQ(capped.blockNumForGroup(0), 24u);
+            EXPECT_EQ(capped.topology().groupById(0).canonical_idx, canonical_idx);
+            EXPECT_EQ(capped.layer_to_block_stride_bytes, config.layer_to_block_stride_bytes);
+            EXPECT_EQ(capped.layerIdsForGroup(0), config.layerIdsForGroup(0));
+            for (const auto& sub_config : capped.mtp_sub_configs) {
+                const auto& sub = *sub_config;
+                ASSERT_EQ(sub.groupNums(), 1);
+                EXPECT_EQ(sub.block_num, 24u);
+                EXPECT_EQ(sub.blockNumForGroup(0), 24u);
+                EXPECT_EQ(sub.topology().groupById(0).canonical_idx, canonical_idx);
+                EXPECT_EQ(sub.layer_num, 2u);
+                EXPECT_EQ(sub.layer_all_num, 2u);
+                EXPECT_EQ(sub.layerIdsForGroup(0), (std::vector<int>{0, 1}));
+                EXPECT_EQ(sub.layer_to_block_stride_bytes, draft_strides);
+                EXPECT_EQ(sub.kvBlockStrideBytesForGroup(0), draft_topology->groupById(0).kv_block_stride_bytes);
+                EXPECT_EQ(sub.kvScaleStrideBytesForGroup(0), draft_topology->groupById(0).kv_scale_stride_bytes);
+                EXPECT_EQ(sub.kernelBlocksPerKvBlockForGroup(0), 2u);
+            }
+        }
+    }
+}
+
+class PPCacheNegotiationTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        ops_ = pybind11::module_::import("types").attr("ModuleType")("pp_cache_test").cast<pybind11::module_>();
+        registerExecCtxOps(ops_);
+        const auto unused_p2p = pybind11::cpp_function([]() { ADD_FAILURE() << "unexpected P2P call"; });
+        ops_.attr("register_pp_ops")(
+            unused_p2p, unused_p2p, pybind11::cpp_function([this](const pybind11::bytes& payload) {
+                local_snapshot_ = StageCacheSnapshot::deserialize(static_cast<std::string>(payload));
+                pybind11::list snapshots;
+                snapshots.append(pybind11::bytes(first_snapshot_.serialize()));
+                snapshots.append(payload);
+                return snapshots;
+            }));
+    }
+
+    void TearDown() override {
+        ops_.attr("clear_pp_ops")();
+    }
+
+    pybind11::scoped_interpreter interpreter_;
+    pybind11::module_            ops_;
+    StageCacheSnapshot           first_snapshot_;
+    StageCacheSnapshot           local_snapshot_;
+};
+
+TEST_F(PPCacheNegotiationTest, snapshotSizingDoesNotMutateMtpConfig) {
+    for (bool independent_pools : {false, true}) {
+        for (uint32_t first_blocks : {24u, 8u}) {
+            SCOPED_TRACE(::testing::Message() << "independent_pools=" << independent_pools
+                                             << ", first_blocks=" << first_blocks);
+            auto score                                                        = makeSingleModelConfig(4);
+            auto propose                                                      = makeSingleModelConfig(2);
+            score.hybrid_attention_config.enable_independent_kv_cache_pools   = independent_pools;
+            propose.hybrid_attention_config.enable_independent_kv_cache_pools = independent_pools;
+            KVCacheConfig kv_cache_config;
+            kv_cache_config.test_block_num = first_blocks;
+            SpeculativeExecutionConfig sp_config;
+            sp_config.type              = SP_TYPE_MTP;
+            sp_config.gen_num_per_cycle = 2;
+            const auto first_config = CacheConfigCreator::createConfig(
+                score, makePpConfig(4, 2, 0), RuntimeConfig{}, kv_cache_config, std::nullopt, sp_config);
+            first_snapshot_                = StageCacheSnapshot::fromConfig(first_config);
+            local_snapshot_                = {};
+            kv_cache_config.test_block_num = 32;
+            const auto config = CacheConfigCreator::createSpConfig(score,
+                                                                   propose,
+                                                                   makePpConfig(4, 2, 1),
+                                                                   RuntimeConfig{},
+                                                                   kv_cache_config,
+                                                                   sp_config,
+                                                                   std::nullopt,
+                                                                   true,
+                                                                   false);
+            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+            const auto topology       = config.topologyPtr();
+            const auto draft          = config.mtp_sub_configs[0];
+            const auto draft_topology = draft->topologyPtr();
+            PPCacheCapacityNegotiator negotiator;
+            if (first_blocks == 24u) {
+                const auto validation = negotiator.negotiate(config, 28, RuntimeConfig{});
+                ASSERT_TRUE(validation.ok) << validation.error;
+                EXPECT_EQ(validation.agreed.paged_block_num, 24u);
+            } else {
+                try {
+                    negotiator.negotiate(config, 28, RuntimeConfig{});
+                    FAIL() << "expected PP capacity skew rejection";
+                } catch (const std::exception& e) {
+                    EXPECT_NE(std::string(e.what()).find("capacity skew"), std::string::npos);
+                }
+            }
+            EXPECT_EQ(local_snapshot_.block_nums, (std::vector<uint32_t>{28u}));
+            EXPECT_EQ(local_snapshot_.group_tags, StageCacheSnapshot::fromConfig(config).group_tags);
+            EXPECT_EQ(config.block_num, 32u);
+            EXPECT_EQ(config.topologyPtr(), topology);
+            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+            EXPECT_EQ(config.mtp_sub_configs[0], draft);
+            EXPECT_EQ(draft->block_num, 32u);
+            EXPECT_EQ(draft->topologyPtr(), draft_topology);
+        }
+    }
+}
+
+TEST(PPStageCacheConfig, composedCapacityRejectsMtpSubConfigMismatch) {
+    for (bool independent_pools : {false, true}) {
+        auto score                                                        = makeSingleModelConfig(4);
+        auto propose                                                      = makeSingleModelConfig(2);
+        score.hybrid_attention_config.enable_independent_kv_cache_pools   = independent_pools;
+        propose.hybrid_attention_config.enable_independent_kv_cache_pools = independent_pools;
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.test_block_num = 24;
+        SpeculativeExecutionConfig sp_config;
+        sp_config.type              = SP_TYPE_MTP;
+        sp_config.gen_num_per_cycle = 2;
+        auto config = CacheConfigCreator::createSpConfig(score,
+                                                         propose,
+                                                         makePpConfig(4, 2, 1),
+                                                         RuntimeConfig{},
+                                                         kv_cache_config,
+                                                         sp_config,
+                                                         std::nullopt,
+                                                         true,
+                                                         false);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+        const auto validation = validatePPTopology({StageCacheSnapshot::fromConfig(config)});
+        ASSERT_TRUE(validation.ok) << validation.error;
+        const auto topology = config.topologyPtr();
+        auto&      draft    = *config.mtp_sub_configs[0];
+        config.mtp_sub_configs.push_back(nullptr);
+        for (uint32_t draft_blocks : {23u, 25u}) {
+            draft.finalizeBlockNums(draft_blocks, RuntimeConfig{});
+            const auto draft_topology = draft.topologyPtr();
+            EXPECT_THROW(validatePPComposedBlockNums(config, validation.agreed), std::exception);
+            EXPECT_EQ(config.block_num, 24u);
+            EXPECT_EQ(config.topologyPtr(), topology);
+            EXPECT_EQ(draft.block_num, draft_blocks);
+            EXPECT_EQ(draft.topologyPtr(), draft_topology);
+        }
+        draft.finalizeBlockNums(24, RuntimeConfig{});
+        EXPECT_NO_THROW(validatePPComposedBlockNums(config, validation.agreed));
+    }
+}
+
+TEST(PPStageCacheConfig, mtpPp1KeepsAllTargetAndDraftLayers) {
+    for (bool independent_pools : {false, true}) {
+        auto score                                                        = makeSingleModelConfig(7);
+        auto propose                                                      = makeSingleModelConfig(2);
+        score.hybrid_attention_config.enable_independent_kv_cache_pools   = independent_pools;
+        propose.hybrid_attention_config.enable_independent_kv_cache_pools = independent_pools;
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.test_block_num = 32;
+        SpeculativeExecutionConfig sp_config;
+        sp_config.type              = SP_TYPE_MTP;
+        sp_config.gen_num_per_cycle = 2;
+        const auto config           = CacheConfigCreator::createSpConfig(score,
+                                                               propose,
+                                                               ParallelismConfig{},
+                                                               RuntimeConfig{},
+                                                               kv_cache_config,
+                                                               sp_config,
+                                                               std::nullopt,
+                                                               true,
+                                                               false);
+        EXPECT_EQ(config.layer_num, 7u);
+        EXPECT_EQ(config.layer_all_num, 11u);
+        EXPECT_EQ(config.block_size_bytes, 11u * 512u);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+        for (const auto& sub : config.mtp_sub_configs) {
+            EXPECT_EQ(sub->layer_num, 2u);
+            EXPECT_EQ(sub->block_num, 32u);
+        }
+    }
+}
+
+TEST(PPStageCacheConfig, speculativeGateRejectsMtpOnNonLastStages) {
+    const auto    score   = makeSingleModelConfig(7);
+    const auto    propose = makeSingleModelConfig(2);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 32;
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = 1;
+    for (int rank : {0, 1}) {
+        EXPECT_THROW(CacheConfigCreator::createSpConfig(score,
+                                                        propose,
+                                                        makePpConfig(7, 3, rank),
+                                                        RuntimeConfig{},
+                                                        kv_cache_config,
+                                                        sp_config,
+                                                        std::nullopt,
+                                                        true,
+                                                        false),
+                     std::exception);
+    }
+}
 
-    EXPECT_THROW(CacheConfigCreator::createSpConfig(score,
-                                                    propose,
-                                                    makePpConfig(4, 2, 0),
-                                                    runtime_config,
-                                                    kv_cache_config,
-                                                    sp_config,
-                                                    std::nullopt,
-                                                    /*is_mtp=*/true,
-                                                    /*is_eagle=*/false),
-                 std::exception);
+TEST(PPStageCacheConfig, speculativeGateRejectsOtherDraftTypes) {
+    const auto    score   = makeSingleModelConfig(4);
+    const auto    propose = makeSingleModelConfig(1);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 32;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 1;
+    for (auto type : {SP_TYPE_VANILLA, SP_TYPE_EAGLE3, SP_TYPE_DSPARK}) {
+        sp_config.type = type;
+        EXPECT_THROW(CacheConfigCreator::createSpConfig(score,
+                                                        propose,
+                                                        makePpConfig(4, 2, 1),
+                                                        RuntimeConfig{},
+                                                        kv_cache_config,
+                                                        sp_config,
+                                                        std::nullopt,
+                                                        true,
+                                                        false),
+                     std::exception);
+    }
 }
 
 TEST(PPStageCacheConfig, overrideTableAppliesPerTagCounts) {
@@ -461,31 +815,44 @@ TEST(PPStageCacheConfig, managerConstructorRequiresNegotiatorUnderPp) {
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 0), false, 0);
     config.finalizeBlockNums(100, RuntimeConfig{});
 
-    EXPECT_THROW(KVCacheManager(config, false, nullptr, KVCacheConfig{}, makePpConfig(8, 2, 0), RuntimeConfig{}),
-                 std::exception);
+    EXPECT_THROW(
+        KVCacheManager(config, false, nullptr, KVCacheConfig{}, makePpConfig(8, 2, 0), RuntimeConfig{}), std::exception);
+}
+
+TEST(PPStageCacheConfig, managerWarmupSkipsCapacityCommunicationUnderPp) {
+    const auto mc = makeIndependentPoolModelConfig(8);
+    auto       pc = makePpConfig(8, 2, 0);
+    pc.tp_size    = 2;
+    pc.dp_size    = 2;
+    pc.world_size = 8;
+    auto config   = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    config.finalizeBlockNums(100, RuntimeConfig{});
+
+    KVCacheManager manager(config, true, nullptr, KVCacheConfig{}, pc, RuntimeConfig{});
+    EXPECT_EQ(manager.cacheConfig().block_num, 1u);
+    for (const auto& group : manager.cacheConfig().topology().groups()) {
+        EXPECT_EQ(group.block_num, 1u);
+    }
 }
 
 TEST(PPStageCacheConfig, managerAppliesNegotiatedCountsByTag) {
     const auto mc     = makeIndependentPoolModelConfig(8);
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 0), false, 0);
     config.finalizeBlockNums(100, RuntimeConfig{});
-    const auto group_num = static_cast<size_t>(config.groupNums());
-    ASSERT_GT(group_num, 1u);
-
-    PPValidationResult validation;
-    validation.ok                     = true;
-    validation.agreed.paged_block_num = 60;
-    std::map<std::string, uint32_t> expected_by_tag;
+    ASSERT_EQ(config.groupNums(), 2);
+    auto       first_snapshot = StageCacheSnapshot::fromConfig(config);
+    auto       last_snapshot  = first_snapshot;
+    const auto group_num      = static_cast<size_t>(config.groupNums());
     for (size_t gid = 0; gid < group_num; ++gid) {
-        const auto tag       = config.tagForGroup(gid);
-        const auto count     = gid == 0 ? 60u : 70u;
-        expected_by_tag[tag] = count;
-        CanonicalGroupEntry entry;
-        entry.tag               = tag;
-        entry.logical_block_num = count;
-        validation.canonical_groups.push_back(std::move(entry));
-        validation.agreed.block_num_overrides.emplace(tag, count);
+        const bool is_full             = config.tagForGroup(gid) == "full";
+        first_snapshot.block_nums[gid] = is_full ? 90u : 80u;
+        last_snapshot.block_nums[gid]  = is_full ? 70u : 90u;
     }
+    const auto validation = validatePPTopology({first_snapshot, last_snapshot});
+    ASSERT_TRUE(validation.ok) << validation.error;
+    EXPECT_EQ(validation.agreed.paged_block_num, 70u);
+    EXPECT_EQ(validation.agreed.block_num_overrides.at("full"), 70u);
+    EXPECT_EQ(validation.agreed.block_num_overrides.at("linear"), 80u);
 
     class FixedNegotiator: public CacheCapacityNegotiator {
     public:
@@ -518,9 +885,9 @@ TEST(PPStageCacheConfig, managerAppliesNegotiatedCountsByTag) {
 
     const auto& capped = manager.cacheConfig();
     for (size_t gid = 0; gid < group_num; ++gid) {
-        EXPECT_EQ(capped.blockNumForGroup(gid), expected_by_tag[capped.tagForGroup(gid)]) << "gid=" << gid;
+        EXPECT_EQ(capped.blockNumForGroup(gid), capped.tagForGroup(gid) == "full" ? 70u : 80u) << "gid=" << gid;
     }
-    EXPECT_EQ(capped.block_num, 60);
+    EXPECT_EQ(capped.block_num, 70u);
 }
 
 }  // namespace test

@@ -297,23 +297,39 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
                     source_group.layer_ids[local_layer_id]);
             }
 
-            const size_t expected_existing_layers =
-                static_cast<size_t>(group_layer_num) + static_cast<size_t>(module_index) * mtp_layer_num;
-            RTP_LLM_CHECK_WITH_INFO(target_groups[target_gid].layer_ids.size() == expected_existing_layers,
+            const auto& target_group_layers = target_groups[target_gid].layer_ids;
+            const auto  main_group_layers   = static_cast<size_t>(
+                std::count_if(target_group_layers.begin(), target_group_layers.end(), [main_layer_num](int layer_id) {
+                    return layer_id >= 0 && static_cast<uint32_t>(layer_id) < main_layer_num;
+                }));
+            const size_t existing_mtp_layers          = target_group_layers.size() - main_group_layers;
+            const size_t expected_existing_mtp_layers = static_cast<size_t>(module_index) * mtp_layer_num;
+            RTP_LLM_CHECK_WITH_INFO(existing_mtp_layers == expected_existing_mtp_layers,
                                     "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s gid=%zu "
-                                    "physical group alignment mismatch: "
-                                    "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
+                                    "MTP module alignment mismatch: existing_mtp_layers=%zu expected=%zu "
+                                    "module=%d module_layers=%u",
                                     source_group.tag.c_str(),
                                     tag.c_str(),
                                     target_gid,
-                                    target_groups[target_gid].layer_ids.size(),
-                                    expected_existing_layers,
+                                    existing_mtp_layers,
+                                    expected_existing_mtp_layers,
                                     module_index,
-                                    group_layer_num,
                                     mtp_layer_num);
+            // Independent pools use each group's actual layer count. Only the shared pool requires equal slots.
+            RTP_LLM_CHECK_WITH_INFO(use_independent_block_pools
+                                        || main_group_layers == static_cast<size_t>(group_layer_num),
+                                    "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s gid=%zu "
+                                    "shared physical group alignment mismatch: main_group_layers=%zu expected=%d",
+                                    source_group.tag.c_str(),
+                                    tag.c_str(),
+                                    target_gid,
+                                    main_group_layers,
+                                    group_layer_num);
         }
 
         GroupBase sub_group = source_group;
+        // The merged draft view uses the target's canonical group table, not the draft's local numbering.
+        sub_group.canonical_idx = target_groups[target_gid].canonical_idx;
         sub_group.layer_ids.clear();
         if (uses_default_alias) {
             RTP_LLM_LOG_INFO("CacheConfig::mergeMTPModule aliases propose tag=default to target tag=%s: "

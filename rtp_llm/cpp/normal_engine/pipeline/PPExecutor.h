@@ -1,8 +1,8 @@
 #pragma once
 
 #include <functional>
+#include <list>
 #include <memory>
-#include <unordered_map>
 #include <vector>
 
 #include <torch/torch.h>
@@ -21,17 +21,20 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTransport.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 
 namespace rtp_llm {
 
 struct EngineInitParams;
 struct GptModelInitParams;
+struct ProposeModelEngineInitParams;
 class KVCacheManager;
 class ModelBase;
 class Sampler;
 class ExpertBalancer;
 class ModelInputsLogger;
+class SpecLogitsVerifyRunner;
 
 using PPTickets = std::vector<std::unique_ptr<PPCommTicket>>;
 
@@ -42,7 +45,8 @@ public:
                bool                                   warm_up             = false,
                MlaOpsType                             mla_ops_type        = MlaOpsType::AUTO,
                std::function<void()>                  profile_step_start  = nullptr,
-               std::function<void()>                  profile_step_finish = nullptr);
+               std::function<void()>                  profile_step_finish = nullptr,
+               ProposeModelEngineInitParams*          propose_params      = nullptr);
 
     ~PPExecutor() override;
 
@@ -62,37 +66,65 @@ public:
     static ModelFactory test_model_factory;
 
 private:
-    absl::Status warmUp(const ScheduleOutput& schedule_output);
-
     struct InflightBatch {
         bool         skip_run = true;
         StreamGroups stream_groups;
         int64_t      schedule_time_us = 0;
-        PPTickets    plan_sends;
-        PPTickets    activation_sends;
-        PPTickets    execution_result_sends;
+
+        PPTickets plan_sends;
+        PPTickets activation_sends;
+        PPTickets execution_result_sends;
 
         void reset();
     };
 
-    void                            sendObject(const torch::Tensor& object, PPTickets& tickets);
-    torch::Tensor                   receiveObject();
-    void                            asyncSendPlan(const PPExecutionPlan& plan, bool empty_plan, PPTickets& tickets);
-    PPExecutionPlan                 receivePlan();
-    void                            asyncSendExecutionResult(const PPExecutionResult& result, PPTickets& tickets);
-    void                            asyncSendTensors(const PPIntermediateTensors& tensors, PPTickets& tickets);
-    PPIntermediateTensors           receiveTensors(PPTickets& tickets);
-    static void                     waitAll(PPTickets& tickets);
-    absl::Status                    processExecutionResult(InflightBatch& batch);
+    absl::Status warmUp(const ScheduleOutput& schedule_output);
+
+    void prepareStreams(const std::list<GenerateStreamPtr>& streams) const;
+
     absl::StatusOr<PPExecutionPlan> buildPlan(const StreamGroups&         stream_groups,
                                               const std::vector<int64_t>& finished_request_ids);
-    absl::StatusOr<SamplerInputs>   makeSamplerInputs(const PPSamplingPlan& sampling_plan,
-                                                      const PPOutputConfig& output_config,
-                                                      const torch::Tensor&  logits);
 
-    void advanceSamplingStates(const PPSamplingPlan& sampling_plan,
-                               const SamplerOutput&  sampler_output,
-                               PPExecutionResult&    result);
+    absl::StatusOr<PPExecutionResult> sampleTokens(const PPExecutionPlan& plan, const GptModelOutputs& model_output);
+
+    void advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result);
+
+    absl::Status processExecutionResult(InflightBatch& batch);
+
+    absl::StatusOr<PPExecutionResult> verifyDraftTokens(const PPExecutionPlan& plan,
+                                                        const torch::Tensor&   target_logits);
+
+    GptModelInputs prepareDraftInputForPrefill(const GptModelInputs&  target_input,
+                                               const GptModelOutputs& target_output,
+                                               const torch::Tensor&   sampled_token_ids,
+                                               const torch::Tensor&   next_position_ids);
+
+    GptModelInputs prepareDraftInputForDecode(const GptModelInputs&  target_input,
+                                              const GptModelOutputs& target_output,
+                                              const torch::Tensor&   accepted_token_ids,
+                                              const torch::Tensor&   accepted_lengths);
+
+    void draftSampleAndPropose(const PPExecutionPlan& plan,
+                               const GptModelOutputs& model_output,
+                               PPExecutionResult&     execution_result);
+
+    torch::Tensor proposeDraftTokens(GptModelInputs draft_input, size_t num_draft_tokens);
+
+    void asyncSendPlan(const PPExecutionPlan& plan, bool empty_plan, PPTickets& tickets);
+
+    PPExecutionPlan receivePlan();
+
+    void asyncSendTensors(const PPIntermediateTensors& tensors, PPTickets& tickets);
+
+    PPIntermediateTensors receiveTensors(PPTickets& tickets);
+
+    void asyncSendExecutionResult(const PPExecutionResult& result, PPTickets& tickets);
+
+    void sendObject(const torch::Tensor& object, PPTickets& tickets);
+
+    torch::Tensor receiveObject();
+
+    static void waitAll(PPTickets& tickets);
 
     bool isFirstStage() const {
         return pp_layout_.hasEmbedding();
@@ -107,28 +139,37 @@ private:
     }
 
 private:
-    std::unique_ptr<ModelBase>                                               model_;
-    std::unique_ptr<Sampler>                                                 sampler_;
-    std::unique_ptr<PPBatchStreamProcessor>                                  batch_stream_processor_;
-    std::shared_ptr<KVCacheManager>                                          cache_manager_;
-    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
-    const int64_t                                                            processor_eos_token_id_;
-    const bool                                                               warm_up_;
-    kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
+    const bool                                 warm_up_;
+    std::shared_ptr<KVCacheManager>            cache_manager_;
+    std::unique_ptr<ModelBase>                 model_;
+    std::unique_ptr<Sampler>                   sampler_;
+    std::unique_ptr<PPBatchStreamProcessor>    batch_stream_processor_;
+    std::shared_ptr<ExpertBalancer>            expert_balancer_;
+    TensorHolder                               buffer_holder_;
+    SamplingStates                            sampling_states_;
+
+    bool                                             mtp_enabled_            = false;
+    size_t                                           propose_step_           = 0;
+    size_t                                           position_id_len_factor_ = 1;
+    std::unique_ptr<SpecLogitsVerifyRunner>          spec_logits_verify_runner_;
+    std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
+    std::unique_ptr<ModelBase>                       draft_model_;
+    std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
+
+    const ParallelismConfig      parallelism_config_;
+    const PPLayout               pp_layout_;
+    std::unique_ptr<PPTransport> transport_;
+    std::vector<InflightBatch>   slots_;
+    size_t                       current_slot_ = 0;
+
+    bool                               enable_detail_log_ = false;
+    std::shared_ptr<ModelInputsLogger> model_inputs_logger_;
+    std::function<void()>              profile_step_start_;
+    std::function<void()>              profile_step_finish_;
+    kmonitor::MetricsReporterPtr       metrics_reporter_ = nullptr;
+
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
-    bool                    enable_detail_log_ = false;
-    const ParallelismConfig parallelism_config_;
-    // Stage-role flags and materialized partition, shared with cache creation and the Python side.
-    const PPLayout                             pp_layout_;
-    std::unique_ptr<PPTransport>               transport_;
-    std::function<void()>                      profile_step_start_;
-    std::function<void()>                      profile_step_finish_;
-    std::vector<InflightBatch>                 slots_;
-    TensorHolder                               buffer_holder_;
-    std::unordered_map<int64_t, SamplingState> sampling_states_;
-    size_t                                     current_slot_ = 0;
 };
 
 }  // namespace rtp_llm

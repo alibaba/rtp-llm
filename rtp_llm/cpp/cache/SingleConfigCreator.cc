@@ -90,11 +90,12 @@ uint32_t localKvHeadNumForSpec(KVCacheSpecType          type,
 CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp,
-                                                    int                      gen_num_per_cycle) {
+                                                    int                      gen_num_per_cycle,
+                                                    bool                     is_draft_model) {
     (void)is_mtp;
 
-    // With pp_size>1 every stage builds cache geometry only for its own layer range.
-    const ModelConfig stage_model_config = CacheConfigCreator::stageScopedModelConfig(model_config, parallelism_config);
+    const ModelConfig stage_model_config =
+        CacheConfigCreator::stageScopedModelConfig(model_config, parallelism_config, is_draft_model);
 
     auto       dtype            = MemoryEvaluationHelper::getDataTypeForCache(stage_model_config);
     const auto tokens_per_block = static_cast<uint32_t>(stage_model_config.attn_config.tokens_per_block);

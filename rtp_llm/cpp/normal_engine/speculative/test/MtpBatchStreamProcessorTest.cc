@@ -12,6 +12,7 @@
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
+#include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -893,7 +894,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
             .reshape({6, 2});
 
     processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
+        model_input, model_output, spec_decode_output, hidden_states_d_t, holder);
 
     auto        combo_tokens        = model_input.combo_tokens.cpu();
     vector<int> expect_combo_tokens = {2, 3, 1, 2};
@@ -925,6 +926,10 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDens
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     GptModelInputs model_input;
+    model_input.is_target_verify = true;
+    model_input.input_lengths = torch::tensor({3, 3}, torch::kInt32).cuda();
+    model_input.prefix_lengths = torch::tensor({5, 9}, torch::kInt32).cuda();
+    model_input.combo_position_ids = torch::tensor({5, 6, 7, 9, 10, 11}, torch::kInt32);
     speculative::SpeculativeSamplerOutput spec_decode_output;
     spec_decode_output.accept_len    = torch::tensor({3, 1}, torch::kInt32).to(torch::kCUDA);
     spec_decode_output.accept_tokens = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32).to(torch::kCUDA);
@@ -938,13 +943,18 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDens
     TensorHolder  holder;
 
     processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
+        model_input, model_output, spec_decode_output, hidden_states_d_t, holder);
 
     EXPECT_TRUE(model_input.combo_tokens.is_cuda());
     EXPECT_EQ((vector<int>{2, 3, 1, 2, 0, 0}), toVec<int>(model_input.combo_tokens));
     EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
     EXPECT_EQ((vector<int>{2, 3}), toVec<int>(model_input.lm_output_indexes));
     EXPECT_EQ(6, model_input.last_hidden_states.size(0));
+    EXPECT_TRUE(torch::equal(hidden_states_d_t, model_output.all_hidden_states));
+    EXPECT_EQ((vector<int>{3, 3}), toVec<int>(model_input.input_lengths));
+    EXPECT_EQ((vector<int>{5, 9}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ((vector<int>{5, 6, 7, 9, 10, 11}), toVec<int>(model_input.combo_position_ids));
+    EXPECT_FALSE(model_input.is_target_verify);
     unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
 }
 
@@ -1027,7 +1037,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
                                                    torch::kFloat32)
                                          .reshape({9, 2});
 
-    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, 3, hidden_states_d_t, holder);
+    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, hidden_states_d_t, holder);
 
     auto        combo_position_ids        = model_input.combo_position_ids;
     vector<int> expect_combo_position_ids = {10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 70, 71, 72};
@@ -1463,6 +1473,201 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     EXPECT_TRUE(torch::equal(model_input.lm_output_indexes, lm_output_indexes));
     EXPECT_TRUE(torch::equal(model_input.last_hidden_states, target_features));
     EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::COMMIT);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, SharedPrefillInputPreservesTargetTensors) {
+    for (bool device_input : {false, true}) {
+        const auto device = device_input ? torch::kCUDA : torch::kCPU;
+        GptModelInputs target_input;
+        target_input.is_target_verify = true;
+        target_input.combo_tokens = torch::tensor({11, 21, 22}, torch::kInt32).to(device);
+        target_input.input_lengths = torch::tensor({1, 2}, torch::kInt32).to(device);
+        target_input.combo_position_ids =
+            torch::tensor({5, 6, 7, 10, 11, 12, 11, 12, 13}, torch::kInt32).to(device);
+        auto sampled_tokens = torch::tensor({{-1, 12}, {-1, 23}}, torch::kInt32).to(device);
+        auto next_positions = torch::tensor({6, 7, 8, 12, 13, 14}, torch::kInt32).to(device);
+        auto hidden_states = torch::arange(6, torch::kFloat32).reshape({3, 2}).cuda();
+        auto draft_input = target_input;
+        TensorHolder holder;
+
+        mtp::prepareDraftInputForPrefill(draft_input, hidden_states, sampled_tokens, next_positions, 3, holder);
+
+        EXPECT_EQ(toVec<int32_t>(draft_input.combo_tokens), (std::vector<int32_t>{12, 22, 23}));
+        EXPECT_EQ(toVec<int32_t>(draft_input.input_lengths), (std::vector<int32_t>{1, 2}));
+        EXPECT_EQ(toVec<int32_t>(draft_input.combo_position_ids),
+                  (std::vector<int32_t>{6, 7, 8, 11, 12, 13, 12, 13, 14}));
+        EXPECT_TRUE(draft_input.combo_tokens.is_cuda());
+        EXPECT_TRUE(draft_input.combo_position_ids.is_pinned());
+        EXPECT_TRUE(torch::equal(draft_input.last_hidden_states, hidden_states));
+        EXPECT_FALSE(draft_input.is_target_verify);
+        EXPECT_TRUE(target_input.is_target_verify);
+        EXPECT_EQ(toVec<int32_t>(target_input.combo_tokens), (std::vector<int32_t>{11, 21, 22}));
+        EXPECT_EQ(toVec<int32_t>(target_input.combo_position_ids),
+                  (std::vector<int32_t>{5, 6, 7, 10, 11, 12, 11, 12, 13}));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, SharedDecodeInputCompactsDifferentAcceptLengths) {
+    for (bool device_input : {false, true}) {
+        const auto device = device_input ? torch::kCUDA : torch::kCPU;
+        GptModelInputs verify_input;
+        verify_input.is_target_verify = true;
+        verify_input.combo_position_ids = torch::tensor({10, 11, 12, 20, 21, 22}, torch::kInt32).to(device);
+        verify_input.prefix_lengths = torch::tensor({10, 20}, torch::kInt32).to(device);
+        auto hidden_states = torch::arange(12, torch::kFloat32).reshape({6, 2}).cuda();
+        auto accepted_lengths = torch::tensor({1, 3}, torch::kInt32).to(device);
+        auto accepted_token_ids = torch::tensor({{4, 0, 0}, {5, 6, 7}}, torch::kInt32).to(device);
+        auto draft_input = verify_input;
+        TensorHolder holder;
+
+        mtp::prepareDraftInputForDecode(
+            draft_input, hidden_states, accepted_token_ids, accepted_lengths, mtp::DraftInputLayout::COMPACT, 1, holder);
+
+        EXPECT_EQ(toVec<int32_t>(draft_input.combo_tokens), (std::vector<int32_t>{4, 5, 6, 7}));
+        EXPECT_EQ(toVec<int32_t>(draft_input.input_lengths), (std::vector<int32_t>{1, 3}));
+        EXPECT_EQ(toVec<int32_t>(draft_input.lm_output_indexes), (std::vector<int32_t>{0, 3}));
+        EXPECT_EQ(toVec<int32_t>(draft_input.combo_position_ids), (std::vector<int32_t>{10, 20, 21, 22}));
+        EXPECT_EQ(toVec<int32_t>(draft_input.prefix_lengths), (std::vector<int32_t>{10, 20}));
+        EXPECT_TRUE(draft_input.combo_tokens.is_pinned());
+        EXPECT_TRUE(draft_input.combo_position_ids.is_pinned());
+        EXPECT_FALSE(draft_input.is_target_verify);
+        EXPECT_TRUE(torch::equal(draft_input.last_hidden_states, hidden_states.index_select(
+            0, torch::tensor({0, 3, 4, 5}, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA)))));
+        EXPECT_TRUE(verify_input.is_target_verify);
+        EXPECT_EQ(toVec<int32_t>(verify_input.combo_position_ids), (std::vector<int32_t>{10, 11, 12, 20, 21, 22}));
+        EXPECT_EQ(toVec<int32_t>(accepted_token_ids), (std::vector<int32_t>{4, 0, 0, 5, 6, 7}));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, SharedAdvancePreservesHiddenStatesAcrossBufferReuse) {
+    for (bool device_input : {false, true}) {
+        const auto device = device_input ? torch::kCUDA : torch::kCPU;
+        GptModelInputs input;
+        input.combo_tokens = torch::tensor({1, 2}, torch::kInt32).to(device);
+        input.sequence_lengths = torch::tensor({8, 10}, torch::kInt32).to(device);
+        input.combo_position_ids = torch::tensor({7, 9}, torch::kInt32).to(device);
+        auto original_lengths = input.sequence_lengths;
+        auto original_positions = input.combo_position_ids;
+        auto hidden_buffer = torch::ones({2, 2}, torch::TensorOptions().device(torch::kCUDA));
+        auto draft_tokens = torch::tensor({3, 4}, torch::kInt32).reshape({2, 1}).cuda();
+        TensorHolder holder;
+
+        mtp::advanceDraftInput(input, hidden_buffer, draft_tokens, 1, holder);
+        hidden_buffer.fill_(9);
+
+        EXPECT_EQ(toVec<int32_t>(input.combo_tokens), (std::vector<int32_t>{3, 4}));
+        EXPECT_EQ(toVec<int32_t>(input.sequence_lengths), (std::vector<int32_t>{9, 11}));
+        EXPECT_EQ(toVec<int32_t>(input.combo_position_ids), (std::vector<int32_t>{8, 10}));
+        EXPECT_TRUE(input.sequence_lengths.is_cuda());
+        EXPECT_TRUE(input.combo_position_ids.is_pinned());
+        EXPECT_TRUE(torch::equal(input.last_hidden_states, torch::ones_like(hidden_buffer)));
+        EXPECT_EQ(toVec<int32_t>(original_lengths), (std::vector<int32_t>{8, 10}));
+        EXPECT_EQ(toVec<int32_t>(original_positions), (std::vector<int32_t>{7, 9}));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, SharedRejectionUsesExplicitSamplingParams) {
+    speculative::SpeculativeSampler sampler(torch::Tensor(), 2);
+    speculative::SpeculativeSamplingParams params;
+    params.do_sample = torch::tensor({false, false}, torch::kBool);
+    params.force_accept = torch::tensor({false, false}, torch::kBool);
+    params.generators.resize(2);
+    SamplerOutput draft;
+    draft.token_ids = torch::tensor({{1, 2}, {1, 2}}, torch::kInt32).cuda();
+    draft.all_probs = torch::zeros({2, 2, 4}, torch::TensorOptions().device(torch::kCUDA));
+    draft.all_probs.scatter_(-1, draft.token_ids.to(torch::kLong).unsqueeze(-1), 1.0);
+    SamplerOutput target;
+    target.token_ids = torch::tensor({{1}, {2}, {3}, {3}, {2}, {0}}, torch::kInt32).cuda();
+    target.all_probs = torch::zeros({2, 3, 4}, torch::TensorOptions().device(torch::kCUDA));
+    target.all_probs.scatter_(-1, target.token_ids.to(torch::kLong).reshape({2, 3, 1}), 1.0);
+
+    SpecLogitsVerifyRunner::LaunchResult verify_result;
+    verify_result.processor_errors.resize(2);
+    verify_result.processor_errors[1] = ErrorInfo(ErrorCode::INVALID_PARAMS, "speculative verification failed");
+    speculative::SpeculativeSamplerOutput accepted;
+    mtp::runRejectionSampling(sampler, params, draft, target, verify_result, accepted);
+    ASSERT_TRUE(accepted.accept_tokens_cpu.defined());
+    ASSERT_TRUE(accepted.accept_len_cpu.defined());
+    accepted.transfer_done_event->synchronize();
+    EXPECT_EQ(toVec<int32_t>(accepted.accept_len_cpu), (std::vector<int32_t>{3, 1}));
+    EXPECT_EQ(toVec<int32_t>(accepted.accept_tokens_cpu[0]), (std::vector<int32_t>{1, 2, 3}));
+    EXPECT_EQ(toVec<int32_t>(accepted.accept_len), (std::vector<int32_t>{3, 1}));
+    EXPECT_EQ(toVec<int32_t>(accepted.accept_tokens[0]), (std::vector<int32_t>{1, 2, 3}));
+    EXPECT_EQ(accepted.accept_tokens[1][0].item<int32_t>(), 3);
+    ASSERT_EQ(accepted.processor_errors.size(), 2);
+    EXPECT_FALSE(accepted.processor_errors[0].has_value());
+    ASSERT_TRUE(accepted.processor_errors[1].has_value());
+    EXPECT_EQ(accepted.processor_errors[1]->code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(accepted.processor_errors[1]->ToString(), "speculative verification failed");
+
+    params.force_accept[1] = true;
+    mtp::runRejectionSampling(sampler, params, draft, target, {}, accepted);
+    accepted.transfer_done_event->synchronize();
+    EXPECT_EQ(toVec<int32_t>(accepted.accept_len_cpu), (std::vector<int32_t>{3, 3}));
+    EXPECT_EQ(toVec<int32_t>(accepted.accept_tokens_cpu[1]), (std::vector<int32_t>{1, 2, 0}));
+    EXPECT_EQ(toVec<int32_t>(accepted.accept_len), (std::vector<int32_t>{3, 3}));
+    EXPECT_EQ(toVec<int32_t>(accepted.accept_tokens[1]), (std::vector<int32_t>{1, 2, 0}));
+    EXPECT_TRUE(accepted.processor_errors.empty());
+}
+
+TEST_F(MtpBatchStreamProcessorTest, SharedRejectionAppliesCapBeforeCpuTransfer) {
+    speculative::SpeculativeSampler sampler(torch::Tensor(), 2);
+    speculative::SpeculativeSamplingParams params;
+    params.do_sample = torch::tensor({false, false, false}, torch::kBool);
+    params.force_accept = torch::tensor({true, false, false}, torch::kBool);
+    params.generators.resize(3);
+    SamplerOutput draft;
+    draft.token_ids = torch::tensor({{1, 2}, {4, 0}, {5, 6}}, torch::kInt32).cuda();
+    draft.token_ids_are_point_mass = true;
+    SamplerOutput target;
+    target.token_ids =
+        torch::tensor({{-1, 8}, {-1, 9}, {-1, 10}, {-1, 11}, {-1, 12}, {-1, 13}, {-1, 5}, {-1, 6}, {-1, 7}},
+                      torch::kInt32).cuda();
+    target.all_probs = torch::zeros({3, 3, 17}, torch::TensorOptions().device(torch::kCUDA));
+    target.all_probs.scatter_(-1, target.token_ids.select(1, 1).to(torch::kLong).reshape({3, 3, 1}), 1.0);
+
+    for (bool device_cap : {false, true}) {
+        SpecLogitsVerifyRunner::LaunchResult verify_result;
+        verify_result.spec_cap_cpu = torch::tensor({1, 1, 2}, torch::kInt32);
+        if (device_cap) {
+            verify_result.spec_cap_gpu = verify_result.spec_cap_cpu.cuda();
+            verify_result.spec_cap_cpu = torch::zeros_like(verify_result.spec_cap_cpu);
+            verify_result.ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            verify_result.ready_event->record(cuda_graph::graphGetCurrentStream());
+            verify_result.consumed_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        }
+        verify_result.processor_errors.resize(3);
+        verify_result.processor_errors[1] = ErrorInfo(ErrorCode::INVALID_PARAMS, "speculative cap failed");
+        speculative::SpeculativeSamplerOutput accepted;
+        mtp::runRejectionSampling(sampler, params, draft, target, verify_result, accepted);
+
+        ASSERT_TRUE(accepted.accept_tokens_cpu.defined());
+        ASSERT_TRUE(accepted.accept_len_cpu.defined());
+        EXPECT_TRUE(accepted.accept_tokens_cpu.device().is_cpu());
+        EXPECT_TRUE(accepted.accept_len_cpu.device().is_cpu());
+        EXPECT_TRUE(accepted.accept_tokens_cpu.is_contiguous());
+        EXPECT_TRUE(accepted.accept_len_cpu.is_contiguous());
+        accepted.transfer_done_event->synchronize();
+        EXPECT_EQ(toVec<int32_t>(accepted.accept_len_cpu), (std::vector<int32_t>{2, 1, 3}));
+        EXPECT_EQ(toVec<int32_t>(accepted.accept_tokens_cpu[0]), (std::vector<int32_t>{1, 9, 10}));
+        EXPECT_EQ(accepted.accept_tokens_cpu[1][0].item<int32_t>(), 11);
+        EXPECT_EQ(toVec<int32_t>(accepted.accept_tokens_cpu[2]), (std::vector<int32_t>{5, 6, 7}));
+        EXPECT_TRUE(accepted.accept_tokens.is_cuda());
+        EXPECT_TRUE(accepted.accept_len.is_cuda());
+        EXPECT_EQ(toVec<int32_t>(accepted.accept_len), (std::vector<int32_t>{2, 1, 3}));
+        EXPECT_EQ(toVec<int32_t>(accepted.accept_tokens[0]), (std::vector<int32_t>{1, 9, 10}));
+        EXPECT_EQ(accepted.accept_tokens[1][0].item<int32_t>(), 11);
+        EXPECT_EQ(toVec<int32_t>(accepted.accept_tokens[2]), (std::vector<int32_t>{5, 6, 7}));
+        ASSERT_EQ(accepted.processor_errors.size(), 3);
+        EXPECT_FALSE(accepted.processor_errors[0].has_value());
+        ASSERT_TRUE(accepted.processor_errors[1].has_value());
+        EXPECT_EQ(accepted.processor_errors[1]->code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(accepted.processor_errors[1]->ToString(), "speculative cap failed");
+        EXPECT_FALSE(accepted.processor_errors[2].has_value());
+        if (verify_result.consumed_event) {
+            verify_result.consumed_event->synchronize();
+        }
+    }
 }
 
 }  // namespace rtp_llm

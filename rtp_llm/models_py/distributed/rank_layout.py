@@ -17,8 +17,7 @@ class Group(Enum):
     layout model and collective communication. WORLD spans all ranks
     (torch.distributed WORLD; the former "DP_AND_TP", named before PP existed);
     STAGE spans one pipeline stage's dp*tp ranks (WORLD narrowed per stage).
-    Both are composite groups, not single-axis slices. STAGE is layout-level
-    only: its torch process group is materialized when a consumer appears.
+    Both are composite groups, not single-axis slices.
     PCP is reserved, not materialized yet."""
 
     TP = "TP"

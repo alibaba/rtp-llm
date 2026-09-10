@@ -361,7 +361,7 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         }
     }
 
-    // Skew guard over the whole table: an oversized owner would overrun a smaller owner's pool.
+    // Reject excessive capacity imbalance even though logical counts are capped at the owner minimum.
     for (size_t c = 0; c < result.canonical_groups.size(); ++c) {
         const auto& entry = result.canonical_groups[c];
         if (static_cast<double>(canonical_max_blocks[c]) / static_cast<double>(entry.logical_block_num)
@@ -413,6 +413,11 @@ void validatePPComposedBlockNums(const CacheConfig& composed, const NegotiatedCa
                                 group.block_num,
                                 it->second);
     }
+    for (const auto& sub_config : composed.mtp_sub_configs) {
+        if (sub_config != nullptr) {
+            validatePPComposedBlockNums(*sub_config, agreed);
+        }
+    }
 }
 
 PPValidationResult PPCacheCapacityNegotiator::negotiate(const CacheConfig&   topology,
@@ -423,6 +428,7 @@ PPValidationResult PPCacheCapacityNegotiator::negotiate(const CacheConfig&   top
     // minima. The snapshot derives counts on a throwaway copy through the same
     // finalize rule the composition uses.
     CacheConfig sized = topology;
+    sized.mtp_sub_configs.clear();
     sized.finalizeBlockNums(local_block_num, runtime_config);
     PPSnapshotCollector collector(StageCacheSnapshot::fromConfig(sized));
     auto                validation = initPPCacheGeometry(collector, capacity_skew_threshold_);
@@ -462,6 +468,11 @@ void applyPPCanonicalIndices(CacheConfig& config, const PPValidationResult& vali
         group.canonical_idx = it->second;
     }
     config.setTopology(std::move(groups), config.topology().layers());
+    for (auto& sub_config : config.mtp_sub_configs) {
+        if (sub_config != nullptr) {
+            applyPPCanonicalIndices(*sub_config, validation);
+        }
+    }
 }
 
 }  // namespace rtp_llm

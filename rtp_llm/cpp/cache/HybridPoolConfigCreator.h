@@ -12,7 +12,8 @@ public:
                                     const ParallelismConfig& parallelism_config,
                                     const KVCacheConfig&     kv_cache_config,
                                     bool                     is_mtp,
-                                    int                      gen_num_per_cycle);
+                                    int                      gen_num_per_cycle,
+                                    bool                     is_draft_model = false);
 };
 
 }  // namespace rtp_llm

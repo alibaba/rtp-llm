@@ -20,6 +20,10 @@ public:
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
 
+    size_t positionIdLenFactor() const {
+        return model_input_gatherer_config_.position_id_len_factor;
+    }
+
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
                                  const MergedOutput& propose_output) const;
@@ -114,7 +118,6 @@ public:
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                         const size_t                                 batch_size,
                                          torch::Tensor&                               hidden_states_d_t,
                                          TensorHolder&                                host_holder);
 
@@ -146,10 +149,6 @@ protected:
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
-
-    torch::Tensor compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
-                                             const std::vector<int>& accept_lens,
-                                             size_t                  total_accept_len) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 

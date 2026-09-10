@@ -28,6 +28,8 @@ enum class ParallelMode {
     FFN_TP = 3,
     EP     = 4,
     EPLB   = 5,
+    // All TP/DP ranks in the current PP stage; WORLD when pp_size == 1.
+    STAGE = 6,
 };
 
 // A batch includes two parts: context batch and decoder batch.

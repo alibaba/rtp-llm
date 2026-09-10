@@ -15,7 +15,6 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -25,6 +24,7 @@ namespace rtp_llm {
 
 class CPSlotMapper;
 class CacheStore;
+class CacheCapacityNegotiator;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
 class PrefillCacheHitMetricsReporter;
@@ -190,7 +190,7 @@ private:
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
     // Cross-stage capacity agreement hook, required under pp_size>1; consulted
-    // in allocateAndSync after the intra-stage TP alignment.
+    // in allocateAndSync after the intra-stage TP/DP alignment.
     const std::shared_ptr<CacheCapacityNegotiator> capacity_negotiator_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;

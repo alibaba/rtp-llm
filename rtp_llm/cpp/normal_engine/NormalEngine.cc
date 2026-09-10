@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
+#include "rtp_llm/cpp/config/PPLayout.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -112,8 +113,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         const char* stream_async = std::getenv("RTP_LLM_STREAM_ASYNC");
         RTP_LLM_CHECK_WITH_INFO(stream_async == nullptr || std::strcmp(stream_async, "1") != 0,
                                 "pipeline parallelism does not support async runner (RTP_LLM_STREAM_ASYNC)");
-        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
-                                "pipeline parallelism does not support speculative decoding");
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE || sp_config.type == SP_TYPE_MTP,
+                                "pipeline parallelism only supports MTP speculative decoding");
         RTP_LLM_CHECK_WITH_INFO(!eplb_config.enable_eplb(), "pipeline parallelism does not support EPLB");
         RTP_LLM_CHECK_WITH_INFO(!ffn_disaggregate_config.enable_ffn_disaggregate,
                                 "pipeline parallelism does not support FFN disaggregation");
@@ -129,8 +130,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_CHECK_WITH_INFO(!parallelism_config.use_ub_comm,
                                 "pipeline parallelism does not support user-buffer communication");
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.world_size
-                                    == parallelism_config.pp_size * parallelism_config.tp_size,
-                                "pipeline parallelism requires world_size == pp_size * tp_size");
+                                    == parallelism_config.pp_size * parallelism_config.dp_size
+                                           * parallelism_config.tp_size,
+                                "pipeline parallelism requires world_size == pp_size * dp_size * tp_size");
         RTP_LLM_CHECK_WITH_INFO(pd_sep_config.role_type == RoleType::PDFUSION
                                     || pd_sep_config.role_type == RoleType::PREFILL
                                     || pd_sep_config.role_type == RoleType::DECODE,
@@ -146,7 +148,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         // Multimodal + PP is gated python-side by BaseModel.support_pp().
     }
     if (!model_config_.output_vocab_ids.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
         RTP_LLM_CHECK_WITH_INFO(!runtime_config.warm_up_with_loss,
                                 "output vocabulary pruning does not support warm_up_with_loss");
@@ -170,8 +172,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_CHECK_WITH_INFO(model_config_.output_vocab_padded_size >= static_cast<int64_t>(output_vocab_ids.size()),
                                 "output_vocab_padded_size must be >= output_vocab_ids.size()");
     }
-    if (propose_params_) {
-        reserve_step_ = propose_params_->gen_num_per_circle + 1;
+    if (sp_config.type != SP_TYPE_NONE) {
+        reserve_step_ = sp_config.gen_num_per_cycle + 1;
     } else {
         reserve_step_ = 0;
     }
@@ -210,7 +212,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
-    initExecutor(params, propose_params_);
+    initExecutor(params);
 
     RTP_LLM_LOG_INFO("create normal executor done");
 
@@ -223,19 +225,19 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     (void)startLoop();
 }
 
-void NormalEngine::initExecutor(const EngineInitParams&                        params,
-                                std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
-    if (propose_params_) {
-        executor_.reset(new MtpExecutor(
-            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
-    } else if (parallelism_config.pp_size > 1) {
+void NormalEngine::initExecutor(const EngineInitParams& params) {
+    if (parallelism_config.pp_size > 1) {
         executor_.reset(new PPExecutor(
             params,
             resource_context_.cache_manager,
             false,
             mla_ops_type_,
             [this]() { step_profiler_.startStep(); },
-            [this]() { step_profiler_.finishStep(); }));
+            [this]() { step_profiler_.finishStep(); },
+            propose_params_.get()));
+    } else if (sp_config.type != SP_TYPE_NONE) {
+        executor_.reset(new MtpExecutor(
+            params, propose_params_, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -500,7 +502,12 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
-    if (propose_params_ && propose_params_->draftModel()) {
+    const auto pp_layout = PPLayout::fromParallelismConfig(parallelism_config, model_config_.num_layers);
+    std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
+    if (parallelism_config.pp_size > 1) {
+        pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
+    }
+    if (propose_params_ && propose_params_->draftModel() && pp_layout.hasLmHead()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,
                                                          parallelism_config,
@@ -520,7 +527,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       sp_config,
                                                                       pd_sep_config,
                                                                       cache_store_config,
-                                                                      use_cuda_malloc_block_pool);
+                                                                      use_cuda_malloc_block_pool,
+                                                                      pp_negotiator);
         resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
@@ -536,12 +544,6 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                          result.block_num,
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        // PP stages agree on cache capacity inside allocateAndSync, before any
-        // pool exists; the hook keeps the exchange and its rules out of the engine.
-        std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
-        if (parallelism_config.pp_size > 1) {
-            pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
-        }
         resource_context_.cache_manager = make_shared<KVCacheManager>(result,
                                                                       false,
                                                                       metrics_reporter_,
@@ -701,7 +703,7 @@ absl::Status NormalEngine::step() {
         // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
         // has no callbacks yet, so bracket the propose path here on the engine
         // loop thread (Kineto requires enable/disable on the same thread).
-        if (propose_params_) {
+        if (sp_config.type != SP_TYPE_NONE) {
             step_profiler_.startStep();
         }
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
@@ -712,7 +714,7 @@ absl::Status NormalEngine::step() {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
         }
-        if (propose_params_) {
+        if (sp_config.type != SP_TYPE_NONE) {
             step_profiler_.finishStep();
         }
     }
@@ -812,29 +814,22 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 }
 
 bool NormalEngine::isMTPEagle() {
-    if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
-               || propose_params_->sp_type == SP_TYPE_DSPARK;
-    }
-    return false;
+    return sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_DSPARK;
 }
 
 bool NormalEngine::isEagle() {
-    if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_EAGLE;
-    }
-    return false;
+    return sp_config.type == SP_TYPE_EAGLE;
 }
 
 bool NormalEngine::isDSpark() {
-    return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
+    return sp_config.type == SP_TYPE_DSPARK;
 }
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
-    if (isMTPEagle()) {
+    if (propose_params_ && isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
         int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
-        const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
+        const bool is_dspark      = sp_config.type == SP_TYPE_DSPARK;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {

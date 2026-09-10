@@ -99,6 +99,7 @@ enum GptModelInputIndex : size_t {
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
+    isTargetVerify,
     gptModelInputLength,
 };
 

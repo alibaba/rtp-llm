@@ -30,7 +30,8 @@ public:
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,
                                          bool                     is_mtp,
-                                         int                      gen_num_per_cycle);
+                                         int                      gen_num_per_cycle,
+                                         bool                     is_draft_model = false);
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
                                     const RuntimeConfig&                             runtime_config,
@@ -53,10 +54,11 @@ public:
                                                       const SpecBuildContext&      ctx,
                                                       int64_t                      expected_layer_num);
 
-    /* Stage-scoped model config for cache creation: layer-dimension fields sliced to this rank's
-       partition at pp_size>1, identical to the input at pp_size=1. */
+    /* Stage-scoped model config for cache creation: target layer-dimension fields sliced to this rank's
+       partition at pp_size>1. Draft models and pp_size=1 retain the complete input config. */
     static ModelConfig stageScopedModelConfig(const ModelConfig&       model_config,
-                                              const ParallelismConfig& parallelism_config);
+                                              const ParallelismConfig& parallelism_config,
+                                              bool                     is_draft_model = false);
 
 private:
     // Removed functions moved to MemoryEvaluationHelper:

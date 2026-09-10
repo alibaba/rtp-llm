@@ -15,7 +15,7 @@ namespace {
 /* Versioned byte stream; readers bounds-check every field. The tensor
    presence flag encodes definedness so defined-but-empty tensors survive;
    host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
-constexpr uint32_t kVersion = 4;
+constexpr uint32_t kVersion = 6;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -290,6 +290,8 @@ void writeSamplingPlan(ByteWriter& w, const PPSamplingPlan& s) {
     w.tensor(s.no_repeat_ngram_size);
     w.tensor(s.do_sample);
     w.tensor(s.finished_mask);
+    w.tensor(s.spec_do_sample);
+    w.tensor(s.force_sp_accept);
 }
 
 void readSamplingPlan(ByteReader& r, PPSamplingPlan& s) {
@@ -342,6 +344,8 @@ void readSamplingPlan(ByteReader& r, PPSamplingPlan& s) {
     s.no_repeat_ngram_size = r.tensor();
     s.do_sample            = r.tensor();
     s.finished_mask        = r.tensor();
+    s.spec_do_sample       = r.tensor();
+    s.force_sp_accept      = r.tensor();
 }
 
 void writeOutputConfig(ByteWriter& w, const PPOutputConfig& output_config) {
@@ -392,6 +396,8 @@ torch::Tensor serializePlan(const PPExecutionPlan& plan, bool empty_plan) {
         writeModelInput(w, plan.model_input);
         writeSamplingPlan(w, plan.sampling_plan);
         writeOutputConfig(w, plan.output_config);
+        w.flag(plan.is_decode);
+        w.tensor(plan.draft_next_position_ids);
         w.val<uint64_t>(plan.finished_request_ids.size());
         for (const auto request_id : plan.finished_request_ids) {
             w.val<int64_t>(request_id);
@@ -410,6 +416,8 @@ PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
     readModelInput(r, plan.model_input);
     readSamplingPlan(r, plan.sampling_plan);
     readOutputConfig(r, plan.output_config);
+    plan.is_decode = r.flag();
+    plan.draft_next_position_ids = r.tensor();
     const auto finished_request_num = r.val<uint64_t>();
     plan.finished_request_ids.resize(finished_request_num);
     for (uint64_t index = 0; index < finished_request_num; ++index) {
@@ -424,6 +432,8 @@ torch::Tensor serializeExecutionResult(const PPExecutionResult& result) {
     w.val<uint32_t>(kVersion);
     w.tensor(result.request_ids);
     w.tensor(result.new_token_ids);
+    w.tensor(result.accept_len);
+    w.tensor(result.propose_token_ids);
     w.tensor(result.sample_success);
     w.tensor(result.hidden_states);
     w.tensor(result.logits);
@@ -463,6 +473,8 @@ PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
     PPExecutionResult result;
     result.request_ids       = r.tensor();
     result.new_token_ids     = r.tensor();
+    result.accept_len        = r.tensor();
+    result.propose_token_ids = r.tensor();
     result.sample_success    = r.tensor();
     result.hidden_states     = r.tensor();
     result.logits            = r.tensor();

@@ -4,6 +4,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <torch/torch.h>
@@ -14,6 +15,9 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 
 namespace rtp_llm {
+
+struct SamplingState;
+using SamplingStates = std::unordered_map<int64_t, SamplingState>;
 
 struct RequestLogitsProcessorConfig {
     std::string grammar_type;   // scalar per stream
@@ -46,6 +50,9 @@ struct PPSamplingPlan {
     torch::Tensor no_repeat_ngram_size;  // [total_batch_size]
     torch::Tensor do_sample;             // [total_batch_size]
     torch::Tensor finished_mask;         // [total_batch_size]
+
+    torch::Tensor spec_do_sample;   // [stream_count], !top1()
+    torch::Tensor force_sp_accept;  // [stream_count]
 };
 
 struct PPPromptLogitsRequest {
@@ -75,6 +82,9 @@ struct PPExecutionPlan {
     PPSamplingPlan       sampling_plan;
     PPOutputConfig       output_config;
     std::vector<int64_t> finished_request_ids;
+
+    bool          is_decode = false;        // Request phase; verify may use a prefill input shape
+    torch::Tensor draft_next_position_ids;  // [stream_count * position_id_len_factor], MTP prefill
 };
 
 struct PPIntermediateTensors {
@@ -84,7 +94,7 @@ struct PPIntermediateTensors {
 /** Final outputs produced by the lm-head stage TP root. */
 struct PPExecutionResult {
     torch::Tensor request_ids;     // [stream_count]
-    torch::Tensor new_token_ids;   // [total_batch_size, 1]
+    torch::Tensor new_token_ids;   // [total_batch_size, 1]; MTP decode: [total_batch_size, propose_step + 1]
     torch::Tensor sample_success;  // [total_batch_size]
 
     torch::Tensor logits;         // optional [total_batch_size, vocab_size]
@@ -99,6 +109,9 @@ struct PPExecutionResult {
 
     std::vector<std::optional<PromptLogitsOutput>> prompt_logits;     // [stream_count]
     std::vector<std::optional<ErrorInfo>>          processor_errors;  // [total_batch_size]
+
+    torch::Tensor accept_len;         // [total_batch_size], includes correction/bonus
+    torch::Tensor propose_token_ids;  // [total_batch_size, propose_step], next candidates in target vocabulary
 };
 
 }  // namespace rtp_llm
