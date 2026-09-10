@@ -6,9 +6,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
-from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
-    DeepSeekV4DSparkModel,
-)
+from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextGatedDeltaNetDecode,

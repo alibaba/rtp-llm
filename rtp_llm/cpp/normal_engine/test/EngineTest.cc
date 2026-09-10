@@ -38,6 +38,8 @@ TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerC
     auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
     params.hw_kernel_config.enable_cuda_graph                        = true;
     params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
+    params.parallelism_config.role_type                              = RoleType::PDFUSION;
+    params.pd_sep_config.role_type                                   = RoleType::PDFUSION;
 
     // Exercise the real constructor, not just the wrapper ownership predicate.
     // Both the configured execution mode and a supplied propose model must
@@ -61,6 +63,39 @@ TEST_F(NormalEngineTest, testRejectGenerationPrefillWithSpeculativeBeforeRunnerC
                           std::string::npos)
                     << error.what();
             }
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculativeConfig) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.hw_kernel_config.enable_cuda_graph                        = true;
+    params.hw_kernel_config.generation_prefill_capture_token_buckets = {8, 16};
+    params.runtime_config.warm_up                                    = false;
+
+    // Keep the real NormalEngine constructor and its configuration checks.
+    // Only model execution is mocked; no draft model is needed to exercise the
+    // retained speculative configuration that previously failed at startup.
+    NormalExecutor::test_model_factory = [vocab = model_config.vocab_size](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset_guard;
+
+    for (const auto role_type : {RoleType::PREFILL, RoleType::DECODE}) {
+        for (const auto speculative_type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+            SCOPED_TRACE(::testing::Message() << "role_type=" << static_cast<int>(role_type)
+                                              << " speculative_type=" << static_cast<int>(speculative_type));
+            params.parallelism_config.role_type = role_type;
+            params.pd_sep_config.role_type      = role_type;
+            params.sp_config.type               = speculative_type;
+            EXPECT_NO_THROW({ NormalEngine engine(params, nullptr); });
         }
     }
 }

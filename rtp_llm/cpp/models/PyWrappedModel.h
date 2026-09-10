@@ -86,6 +86,7 @@ public:
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     bool            hasMtpTargetHiddenBuffer() const override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string     waitCacheStorePublication() override;
 
@@ -177,7 +178,6 @@ private:
     std::atomic<bool>               prepared_attention_inputs_{false};
     torch_ext::PyAttentionInputs    attention_inputs_;
     torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
-    torch_ext::BertEmbeddingInputs  bert_embedding_inputs_;
     CudaGraphState                  graph_state_;
     CudaGraphState                  generation_prefill_cuda_graph_state_;
 };

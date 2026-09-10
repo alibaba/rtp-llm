@@ -102,11 +102,18 @@ void CudaGraphRunner::capturePrefill() {
         inputs.attention_inputs.context_total_kv_length = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
-        if (inputs.bert_embedding_inputs.combo_position_ids.defined()) {
+        if (isGenerationPrefillCudaGraph()) {
+            if (inputs.bert_embedding_inputs.combo_position_ids.defined()) {
+                inputs.bert_embedding_inputs.combo_position_ids =
+                    inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);
+            }
+            if (inputs.bert_embedding_inputs.combo_tokens_type_ids.defined()) {
+                inputs.bert_embedding_inputs.combo_tokens_type_ids =
+                    inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
+            }
+        } else if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             inputs.bert_embedding_inputs.combo_position_ids =
                 inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);
-        }
-        if (inputs.bert_embedding_inputs.combo_tokens_type_ids.defined()) {
             inputs.bert_embedding_inputs.combo_tokens_type_ids =
                 inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
         }
@@ -168,18 +175,16 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     std::vector<int> result = prefill_capture_seq_lens_;
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
-    // A generation-prefill bucket is the total token capacity of one graph and
-    // is intentionally bounded by the model sequence limit. Embedding prefill
-    // predates that role and captures a flattened batch, so its legal capacity
-    // is max_bs * tokens_per_batch rather than one request's max_seq_len.
-    const int64_t capture_token_limit = isGenerationPrefillCudaGraph() ?
-                                            static_cast<int64_t>(max_seq_len_) :
-                                            static_cast<int64_t>(max_bs_) * num_tokens_per_bs_;
-    RTP_LLM_CHECK_WITH_INFO(result.front() > 0 && result.back() <= capture_token_limit,
-                            "prefill CUDA graph buckets must be in [1, capture_token_limit=%ld], got min=%d max=%d",
-                            capture_token_limit,
-                            result.front(),
-                            result.back());
+    if (isGenerationPrefillCudaGraph()) {
+        // Generation-prefill buckets describe total token capacity. Do not
+        // impose this new limit on legacy embedding/MTP capture configurations.
+        RTP_LLM_CHECK_WITH_INFO(result.front() > 0 && result.back() <= max_seq_len_,
+                                "generation prefill CUDA graph buckets must be in [1, max_seq_len=%d], "
+                                "got min=%d max=%d",
+                                max_seq_len_,
+                                result.front(),
+                                result.back());
+    }
 
     RTP_LLM_LOG_INFO(
         "Total sequence lengths to capture: %zu (min: %d, max: %d)", result.size(), result.front(), result.back());

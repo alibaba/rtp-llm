@@ -2,6 +2,8 @@ import types
 import unittest
 from unittest.mock import patch
 
+import torch
+
 from rtp_llm.models_py.modules.factory.attention import attn_factory
 
 
@@ -16,6 +18,10 @@ class _StubAttentionImpl:
     @classmethod
     def support_parallelism_config(cls, _parallelism_config):
         return True
+
+    @classmethod
+    def is_sparse(cls):
+        return False
 
     def __init__(self, *_args, **_kwargs):
         pass
@@ -150,6 +156,49 @@ class AttentionFactoryGenerationPrefillCudaGraphTest(unittest.TestCase):
     def test_decode_graph_fails_when_no_backend_supports_graph(self):
         with self.assertRaisesRegex(Exception, "can not find mha type"):
             self._select_decode([_NoCudaGraphAttentionImpl])
+
+
+class AttentionFactoryGenerationPrefillMlaCudaGraphTest(
+    AttentionFactoryGenerationPrefillCudaGraphTest
+):
+    def setUp(self):
+        super().setUp()
+        self.attn_configs.indexer_topk = 0
+        self.attn_configs.is_sparse = False
+        self.attn_inputs.cu_kv_seqlens_device = torch.tensor([0, 1])
+        self.weight = types.SimpleNamespace(
+            weights={}, get_global_weight_or_none=lambda _name: None
+        )
+
+    def _select(self, implementations, mode=None, is_cuda_graph=True):
+        with patch.object(attn_factory, "PREFILL_MLA_IMPS", implementations):
+            return attn_factory.get_mla_impl(
+                self.attn_configs,
+                self.weight,
+                self.attn_inputs,
+                is_cuda_graph=is_cuda_graph,
+                cuda_graph_selection_mode=mode,
+            )
+
+    def _select_decode(self, implementations):
+        self.attn_inputs.is_prefill = False
+        with patch.object(attn_factory, "DECODE_MLA_IMPS", implementations):
+            return attn_factory.get_mla_impl(
+                self.attn_configs, self.weight, self.attn_inputs, is_cuda_graph=True
+            )
+
+    def test_decode_graph_fails_when_no_backend_supports_graph(self):
+        with self.assertRaisesRegex(Exception, "can not find mla type"):
+            self._select_decode([_NoCudaGraphAttentionImpl])
+
+    def test_default_modes_keep_existing_routing(self):
+        # Unlike MHA, MLA construction errors are not swallowed in eager mode.
+        self.assertIsInstance(
+            self._select([_UnsafeAttentionImpl], mode=None, is_cuda_graph=False),
+            _UnsafeAttentionImpl,
+        )
+        with self.assertRaises(ValueError):
+            self._select([_SafeAttentionImpl], mode="invalid_graph_mode")
 
 
 if __name__ == "__main__":

@@ -135,6 +135,7 @@ void cuda_graph_copy_small2large(at::Tensor& input_tensor,
                                                         max_seq_len,
                                                         input_lengths_ptr,
                                                         hidden_size,
+                                                        input_tensor.size(0),
                                                         cu_seq_len_ptr,
                                                         stream);
         return true;
@@ -185,6 +186,7 @@ void cuda_graph_copy_large2small(at::Tensor& input_tensor,
                                                         max_seq_len,
                                                         input_lengths_ptr,
                                                         hidden_size,
+                                                        output_tensor.size(0),
                                                         cu_seq_len_ptr,
                                                         stream);
         return true;

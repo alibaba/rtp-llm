@@ -9,8 +9,13 @@
 
 namespace rtp_llm {
 
-inline bool isGenerationPrefillCudaGraphRequested(const HWKernelConfig& hw_kernel_config) {
-    return hw_kernel_config.enable_cuda_graph && !hw_kernel_config.generation_prefill_capture_token_buckets.empty();
+// A deployment-wide configuration may retain generation-prefill buckets on
+// non-PDFUSION roles. Those roles ignore the feature, including its execution-
+// mode conflict checks. Keep this scope shared by engine validation and runner
+// ownership; speculative execution is checked separately within that scope.
+inline bool isGenerationPrefillCudaGraphRequested(const HWKernelConfig& hw_kernel_config, RoleType role_type) {
+    return role_type == RoleType::PDFUSION && hw_kernel_config.enable_cuda_graph
+           && !hw_kernel_config.generation_prefill_capture_token_buckets.empty();
 }
 
 inline bool supportsGenerationPrefillCudaGraphExecutionMode(SpeculativeType speculative_type, bool has_propose_model) {
@@ -54,14 +59,14 @@ inline bool generationPrefillCudaGraphMaxRequestsFitsCapacity(int64_t max_reques
 // its initial prompt prefill remains eager in the first implementation.
 // This predicate describes wrapper ownership, not configuration acceptance.
 // NormalEngine rejects an explicit generation-prefill/speculative combination
-// before any wrapper is constructed.
+// on PDFUSION before any wrapper is constructed; other roles ignore it.
 inline bool shouldCreateGenerationPrefillCudaGraph(const HWKernelConfig& hw_kernel_config,
                                                    bool                  allow_cuda_graph,
                                                    bool                  primary_graph_is_prefill,
                                                    RoleType              role_type,
                                                    SpeculativeType       speculative_type) {
-    return isGenerationPrefillCudaGraphRequested(hw_kernel_config) && allow_cuda_graph && !primary_graph_is_prefill
-           && role_type == RoleType::PDFUSION
+    return isGenerationPrefillCudaGraphRequested(hw_kernel_config, role_type) && allow_cuda_graph
+           && !primary_graph_is_prefill
            && supportsGenerationPrefillCudaGraphExecutionMode(speculative_type, /*has_propose_model=*/false);
 }
 

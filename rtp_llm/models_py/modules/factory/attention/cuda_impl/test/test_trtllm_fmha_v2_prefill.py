@@ -277,25 +277,32 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
             )
 
         for head_num_kv in (2, 8):
-            with self.subTest(head_num_kv=head_num_kv):
-                self._run_prefill_cuda_graph_rope_kv_and_dynamic_batch(head_num_kv)
+            for token_capacity in (64, 256):
+                with self.subTest(
+                    head_num_kv=head_num_kv, token_capacity=token_capacity
+                ):
+                    self._run_prefill_cuda_graph_rope_kv_and_dynamic_batch(
+                        head_num_kv, token_capacity
+                    )
 
-    def _run_prefill_cuda_graph_rope_kv_and_dynamic_batch(self, head_num_kv: int):
+    def _run_prefill_cuda_graph_rope_kv_and_dynamic_batch(
+        self, head_num_kv: int, token_capacity: int
+    ):
         """Capture five fixed slots and replay dynamic request layouts.
 
         Capture five fixed sequence slots (four real slots plus one sentinel),
         then replay two real requests with a padded sentinel. This covers real
         RoPE, BF16 KV writes, dynamic zero-length slots, block-table refresh,
-        and scratch isolation in one graph.
+        and isolation of real KV pages in one graph. The multi-page case uses
+        the production sentinel layout: every padding page aliases block 0.
         """
         max_requests = 4
-        token_capacity = 64
         capture_lengths = [0] * max_requests + [token_capacity]
         head_num = 8
         head_dim = 64
         tokens_per_block = 64
         real_block_ids = [1, 2, 3, 4]
-        scratch_block_id = 6
+        scratch_block_id = 0 if token_capacity > tokens_per_block else 6
         total_blocks = 8
 
         attn_configs = self._create_config(
@@ -426,10 +433,14 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
                         rtol=5e-3,
                         atol=5e-3,
                     )
-                # Empty request rows are encoded with block id 0. They must
-                # never publish sentinel KV into the allocator's null block.
-                self.assertEqual(graph_cache.kv_cache_base[0].count_nonzero().item(), 0)
-                self.assertEqual(graph_cache.kv_cache_base[5].count_nonzero().item(), 0)
+                # Only real request pages and the sentinel page may be written.
+                # In the multi-page case, do not compare sentinel bytes: those
+                # writes intentionally alias, and no real request reads them.
+                touched = set(real_block_ids[: len(real_lengths)]) | {scratch_block_id}
+                for block_id in set(range(total_blocks)) - touched:
+                    self.assertEqual(
+                        graph_cache.kv_cache_base[block_id].count_nonzero().item(), 0
+                    )
                 scratch_nonzero = (
                     graph_cache.kv_cache_base[scratch_block_id].count_nonzero().item()
                 )

@@ -9,13 +9,10 @@ from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
 from rtp_llm.ops import HWKernelConfig, RoleType, TaskType
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
-
-from rtp_llm.config.test.kv_cache_event_test_values import (
-    KV_CACHE_EVENT_ENV_CASES,
-)
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -554,7 +551,34 @@ class ServerArgsSetTest(TestCase):
                 )
                 validate_resolved_config(configs, task_type=task_type)
 
-        # Parsing preserves both options so NormalEngine can reject the
+        # P/D roles ignore retained generation-prefill configuration with or
+        # without speculative execution, including its capacity constraints.
+        for role_type in ("PREFILL", "DECODE"):
+            for speculative_type in (None, "mtp", "dspark"):
+                with self.subTest(
+                    role_type=role_type, speculative_type=speculative_type
+                ):
+                    mode_args = ["--role_type", role_type]
+                    if speculative_type is not None:
+                        mode_args.extend(["--sp_type", speculative_type])
+                    configs = server_args.setup_args(
+                        [
+                            "--enable_cuda_graph",
+                            "1",
+                            "--generation_prefill_capture_config",
+                            "64",
+                            "--generation_prefill_cuda_graph_max_requests",
+                            "8",
+                            "--max_context_batch_size",
+                            "1",
+                            "--concurrency_limit",
+                            "1",
+                            *mode_args,
+                        ]
+                    )
+                    validate_resolved_config(configs)
+
+        # Parsing preserves both options so NormalEngine can reject the PDFUSION
         # combination in C++. This is not a successful-service-startup test:
         # the constructor rejection is covered by NormalEngineTest.
         for speculative_type in ("mtp", "dspark"):
@@ -854,6 +878,17 @@ class ServerArgsSetTest(TestCase):
                         )
             finally:
                 os.unlink(config_path)
+
+    def test_generation_prefill_invalid_bucket_preserves_exception_cause(self):
+        from argparse import ArgumentTypeError
+
+        from rtp_llm.server.server_args.hw_kernel_group_args import (
+            _parse_generation_prefill_capture_config,
+        )
+
+        with self.assertRaisesRegex(ArgumentTypeError, "invalid literal") as caught:
+            _parse_generation_prefill_capture_config("64,invalid")
+        self.assertIsInstance(caught.exception.__cause__, ValueError)
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"
