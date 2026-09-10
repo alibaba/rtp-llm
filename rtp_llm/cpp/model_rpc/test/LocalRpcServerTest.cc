@@ -200,17 +200,29 @@ std::shared_ptr<MockGenerateStream> createMockStream() {
     return std::make_shared<MockGenerateStream>(input, model_config, RuntimeConfig{});
 }
 
-TEST(LocalRpcServerTest, WorkerStatusSerializesNonzeroPriorityForRunningAndFinishedTasks) {
+TEST(LocalRpcServerTest, WorkerStatusSerializesPriorityForEveryTaskState) {
     EngineScheduleInfo schedule_info;
     EngineScheduleInfo::TaskInfo running_task;
     running_task.request_id = 101;
     running_task.priority   = 37;
     schedule_info.running_task_info_list.push_back(running_task);
 
+    EngineScheduleInfo::TaskInfo canceling_task;
+    canceling_task.request_id                   = 103;
+    canceling_task.priority                     = 61;
+    canceling_task.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
+    schedule_info.running_task_info_list.push_back(canceling_task);
+
     EngineScheduleInfo::TaskInfo finished_task;
     finished_task.request_id = 102;
     finished_task.priority   = 83;
     schedule_info.finished_task_info_list.push_back(finished_task);
+
+    EngineScheduleInfo::TaskInfo canceled_task;
+    canceled_task.request_id                   = 104;
+    canceled_task.priority                     = 97;
+    canceled_task.priority_preemption_progress = PriorityPreemptionProgress::CANCELED;
+    schedule_info.finished_task_info_list.push_back(canceled_task);
 
     TestLocalRpcServer server;
     server.configureWorkerStatus(std::move(schedule_info));
@@ -222,12 +234,18 @@ TEST(LocalRpcServerTest, WorkerStatusSerializesNonzeroPriorityForRunningAndFinis
     const auto status = server.GetWorkerStatus(&context, &request, &response);
 
     ASSERT_TRUE(status.ok());
-    ASSERT_EQ(response.running_task_info_size(), 1);
+    ASSERT_EQ(response.running_task_info_size(), 2);
     EXPECT_EQ(response.running_task_info(0).request_id(), 101);
     EXPECT_EQ(response.running_task_info(0).priority(), 37);
-    ASSERT_EQ(response.finished_task_list_size(), 1);
+    EXPECT_EQ(response.running_task_info(1).request_id(), 103);
+    EXPECT_EQ(response.running_task_info(1).priority(), 61);
+    EXPECT_EQ(response.running_task_info(1).priority_preemption_progress(), PRIORITY_PREEMPTION_CANCELING);
+    ASSERT_EQ(response.finished_task_list_size(), 2);
     EXPECT_EQ(response.finished_task_list(0).request_id(), 102);
     EXPECT_EQ(response.finished_task_list(0).priority(), 83);
+    EXPECT_EQ(response.finished_task_list(1).request_id(), 104);
+    EXPECT_EQ(response.finished_task_list(1).priority(), 97);
+    EXPECT_EQ(response.finished_task_list(1).priority_preemption_progress(), PRIORITY_PREEMPTION_CANCELED);
 }
 
 std::shared_ptr<NormalGenerateStream> createNormalStream() {
