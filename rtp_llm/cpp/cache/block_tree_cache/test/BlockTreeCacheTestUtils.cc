@@ -605,8 +605,7 @@ bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache,
     if (force_drop) {
         return cache.evictor_.dropLocked(group_set_id, tier, /*notify_settled=*/true);
     }
-    size_t scheduled_count = 0;
-    return cache.evictor_.batchEvictLocked(group_set_id, tier, /*max_victim_count=*/1, scheduled_count);
+    return cache.evictor_.batchEvictLocked(group_set_id, tier, /*max_victim_count=*/1).madeProgress();
 }
 
 int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
