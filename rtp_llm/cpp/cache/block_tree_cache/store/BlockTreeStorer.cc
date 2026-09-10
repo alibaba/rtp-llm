@@ -108,24 +108,13 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         cache_keys,
         std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_));
 
-    bool                                   workflow_credit_acquired = false;
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task, &workflow_credit_acquired]() {
-        if (workflow_credit_acquired) {
-            task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
-        }
+    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() {
         settleLocked(*task, /*publish=*/false);
     });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
     }
-    if (!task_pool_->acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND)) {
-        RTP_LLM_LOG_WARNING("store aborted: workflow limit reached, target=%s blocks=%zu",
-                            tierName(target_tier),
-                            task->descriptors().size());
-        return;
-    }
-    workflow_credit_acquired = true;
     const int64_t queue_begin = currentTimeUs();
     auto          on_timeout  = [this, task, queue_begin]() {
         metrics_reporter_.reportQueueWaitMetric(false,
@@ -198,8 +187,6 @@ void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInf
 }
 
 void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
-    block_tree_cache_detail::ScopeRollback credit_guard(
-        [this]() { task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND); });
     bool   stopping = false;
     size_t accepted = 0;
     {

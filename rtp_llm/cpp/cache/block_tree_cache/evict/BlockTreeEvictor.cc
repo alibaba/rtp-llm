@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -20,24 +19,6 @@
 
 namespace rtp_llm {
 
-namespace {
-
-constexpr int64_t    kFullPruneLogIntervalUs = 1'000'000;
-std::atomic<int64_t> g_last_full_prune_log_us{0};
-
-bool shouldLogFullPruneEvent(int64_t now_us) {
-    int64_t last_log_us = g_last_full_prune_log_us.load(std::memory_order_relaxed);
-    while (last_log_us == 0 || now_us - last_log_us >= kFullPruneLogIntervalUs) {
-        if (g_last_full_prune_log_us.compare_exchange_weak(
-                last_log_us, now_us, std::memory_order_relaxed, std::memory_order_relaxed)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-}  // namespace
-
 BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    EvictionPolicy                 device_policy,
                                    EvictionPolicy                 host_policy,
@@ -48,8 +29,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    std::mutex&                    mutex,
                                    int                            host_timeout_ms,
                                    int                            disk_timeout_ms,
-                                   size_t                         max_device_host_batch,
-                                   size_t                         max_non_device_host_batch,
+                                   size_t                         max_descriptors_per_batch,
                                    IsTierEnabledFn                is_tier_enabled,
                                    SettledFn                      settled):
     tree_(tree),
@@ -61,8 +41,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     task_runner_(std::make_unique<EvictionTaskRunner>(tree->groupSets(), transfer_dispatcher)),
     host_timeout_ms_(host_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
-    max_device_host_batch_(max_device_host_batch),
-    max_non_device_host_batch_(max_non_device_host_batch) {
+    max_descriptors_per_batch_(max_descriptors_per_batch) {
     // GroupSetFactory has already validated that group_set_id equals the vector
     // position. Own one heap per (group resource, tier).
     heaps_.resize(tree_->groupSets().size());
@@ -302,10 +281,6 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>     de
                                                                                        host_timeout_ms_);
     auto task_ptr =
         std::make_shared<EvictionTransferTask>(TransferTask(std::move(descriptors), timeout), std::move(timings));
-    if (!task_pool_->acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND)) {
-        rollbackTransferLocked(task_ptr->descriptors());
-        return false;
-    }
     updatePendingRelease(task_ptr->descriptors(), true);
     const int64_t queue_begin = currentTimeUs();
     auto          on_timeout  = [this, task_ptr, queue_begin]() {
@@ -336,7 +311,6 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>     de
         deadline,
         std::move(on_timeout));
     if (!submitted) {
-        task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
         updatePendingRelease(task_ptr->descriptors(), false);
         rollbackTransferLocked(task_ptr->descriptors());
         return false;
@@ -414,8 +388,6 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
                                                   bool                                        success) noexcept {
     auto settle = [this, task = std::move(task), success]() noexcept {
-        block_tree_cache_detail::ScopeRollback credit_guard(
-            [this]() { task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND); });
         bool                 any_detached     = false;
         bool                 any_not_detached = false;
         EvictionTransferTask settled_task(task->transfer_task.subtask({}));
@@ -546,13 +518,13 @@ Tier BlockTreeEvictor::watermarkTargetTier(Tier source_tier) const {
 
 size_t BlockTreeEvictor::watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const {
     if (source_tier == Tier::DEVICE && target_tier == Tier::HOST) {
-        return max_device_host_batch_;
+        return max_descriptors_per_batch_;
     }
     if (source_tier == Tier::DEVICE && target_tier == Tier::DISK) {
         return 1;
     }
     if (source_tier == Tier::HOST && target_tier == Tier::DISK) {
-        return max_non_device_host_batch_;
+        return max_descriptors_per_batch_;
     }
     return std::numeric_limits<size_t>::max();
 }
@@ -1050,16 +1022,6 @@ EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor eviction_de
     reserveSource(task.dependent_prune_descs);
     for (const auto& [node, group_set_id] : detached_resources) {
         node->group_set_resources[group_set_id].transfer_detached = true;
-    }
-    if (task.hasFullPrune() && shouldLogFullPruneEvent(currentTimeUs())) {
-        RTP_LLM_LOG_WARNING("event=block_tree_full_prune root_key=%ld trigger_group_set_id=%zu source_tier=%s "
-                            "closure_nodes=%zu dependent_resources=%zu detached_resources=%zu",
-                            task.primary_desc.node->cache_key,
-                            task.primary_desc.group_set_id,
-                            tierName(task.primary_desc.source_tier),
-                            task.full_prune_nodes_bottom_up.size(),
-                            task.dependent_prune_descs.size(),
-                            detached_resources.size());
     }
     return task;
 }

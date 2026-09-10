@@ -22,9 +22,8 @@
 namespace rtp_llm::block_tree_cache_test {
 class LoadShutdownTestPeer {
 public:
-    static void setPendingTaskWaitObserver(BlockTreeCache& cache, const std::function<void()>& observer) {
-        std::lock_guard<std::mutex> lock(cache.task_pool_->wait_mutex_);
-        cache.task_pool_->pending_task_wait_observer_for_test_ = observer;
+    static void setTransferDrainObserver(BlockTreeCache& cache, const std::function<void()>& observer) {
+        BlockTreeCacheTestPeer::setTransferDrainObserverForTest(cache, observer);
     }
 };
 }  // namespace rtp_llm::block_tree_cache_test
@@ -72,12 +71,7 @@ size_t transferBatchCount(const std::vector<TransferDescriptor>& descriptors, co
 
     size_t batch_count = 0;
     for (const auto& [key, descriptor_count] : groups) {
-        const Tier source = std::get<0>(key);
-        const Tier target = std::get<1>(key);
-        const bool device_host_direction =
-            (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
-        const size_t batch_limit = device_host_direction ? config.max_descriptors_per_transfer_batch :
-                                                           config.max_descriptors_per_non_device_host_transfer_batch;
+        const size_t batch_limit = config.max_descriptors_per_transfer_batch;
         batch_count += (descriptor_count + batch_limit - 1) / batch_limit;
     }
     return batch_count;
@@ -612,7 +606,6 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkChecksLowerTierBeforeUpperTier) {
     config.watermark_host                                     = {/*low_ratio=*/0.01, /*high_ratio=*/0.02};
     config.task_pool_size                                     = 1;
     config.max_descriptors_per_transfer_batch                 = 1;
-    config.max_descriptors_per_non_device_host_transfer_batch = 1;
 
     std::vector<GroupSetPtr> groups{group};
     auto                     cache = makeBlockTreeCacheForTest(std::move(groups), config);
@@ -904,12 +897,11 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedStoreCo
         ASSERT_TRUE(manual_transfer_engine->waitUntilSubmitted(1, kRaceWaitTimeout));
         waitForCacheTasksToDrain(*cache);
         EXPECT_EQ(cache->task_pool_->pending_tasks_.load(), 0);
-        EXPECT_EQ(cache->task_pool_->workflow_credits_.load(), 1u);
         EXPECT_EQ(host_pool->freeBlocksNum(), kPoolSize - 1);
 
         std::promise<void> wait_started;
         auto               wait_started_future = wait_started.get_future();
-        LoadShutdownTestPeer::setPendingTaskWaitObserver(*cache, [&wait_started] { wait_started.set_value(); });
+        LoadShutdownTestPeer::setTransferDrainObserver(*cache, [&wait_started] { wait_started.set_value(); });
         auto       destroy = std::async(std::launch::async, [cache = std::move(cache)]() mutable { cache.reset(); });
         const bool wait_observed = wait_started_future.wait_for(kRaceWaitTimeout) == std::future_status::ready;
         EXPECT_TRUE(wait_observed);
@@ -1000,7 +992,6 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedLoadCon
         ASSERT_TRUE(manual_transfer_engine->waitUntilSubmitted(1, kRaceWaitTimeout));
         waitForCacheTasksToDrain(*cache);
         EXPECT_EQ(cache->task_pool_->pending_tasks_.load(), 0);
-        EXPECT_EQ(cache->task_pool_->workflow_credits_.load(), 1u);
         EXPECT_EQ(disk_pool->treeRefCount(source_block), 2u);
         // The request and the tree umbrella keep two outer references while LOAD protects the target internally.
         EXPECT_EQ(device_pool->refCount(target_block), 2u);
@@ -1025,7 +1016,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedLoadCon
         EXPECT_EQ(submitted_descriptors[0].target_blocks, (std::vector<BlockIdxType>{target_block}));
 
         ThreadCompletion destruction;
-        LoadShutdownTestPeer::setPendingTaskWaitObserver(*cache, [&destruction] { destruction.markEntered(); });
+        LoadShutdownTestPeer::setTransferDrainObserver(*cache, [&destruction] { destruction.markEntered(); });
         std::thread destroy_thread([cache = std::move(cache), &destruction]() mutable {
             cache.reset();
             destruction.markFinished();

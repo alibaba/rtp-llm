@@ -174,7 +174,7 @@ void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int
 absl::Status StreamCacheResource::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
-    // Follow-up allocations (incrKVBlock) will respect reuseCache() && enableDeviceCache().
+    // Follow-up allocations (incrKVBlock) use enableCacheLookup().
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
@@ -492,18 +492,16 @@ bool StreamCacheResource::reuseCache() const {
 }
 
 bool StreamCacheResource::enableHostCache() const {
-    return resource_context_.enable_host_cache
-           && (resource_context_.ignore_request_cache_switches || stream_->enableHostCache());
+    // Local tiers are deployment policy; request fields remain wire-compatible only.
+    return resource_context_.enable_host_cache;
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
-    return resource_context_.enable_device_cache
-           && (resource_context_.ignore_request_cache_switches || stream_->enableDeviceCache());
+    return resource_context_.enable_device_cache;
 }
 
 bool StreamCacheResource::enableDiskCache() const {
-    return resource_context_.enable_disk_cache
-           && (resource_context_.ignore_request_cache_switches || stream_->enableDiskCache());
+    return resource_context_.enable_disk_cache;
 }
 
 bool StreamCacheResource::enableRemoteCache() const {

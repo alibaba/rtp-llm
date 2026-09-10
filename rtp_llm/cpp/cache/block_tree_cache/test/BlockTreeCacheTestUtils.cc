@@ -460,7 +460,6 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                      config.device_disk_staging_block_count,
                                                      config.max_descriptors_per_transfer_batch,
                                                      config.transfer_worker_count,
-                                                     config.max_descriptors_per_non_device_host_transfer_batch,
                                                      config.transfer_queue_max_size,
                                                      cache_metrics_reporter);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
@@ -468,7 +467,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
     auto transfer_dispatcher =
-        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
+        std::make_unique<BlockTransferDispatcher>(
+            std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
     auto tree  = std::make_unique<BlockTree>(std::move(group_sets));
@@ -658,9 +658,20 @@ bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::restore() {
 }
 
 void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& cache) {
-    cache.task_pool_->waitForIdle();
-    cache.transfer_dispatcher_->per_rank_engine_->transfer_task_pool_->waitForIdle();
-    cache.task_pool_->waitForIdle();
+    for (;;) {
+        cache.task_pool_->waitForIdle();
+        cache.transfer_dispatcher_->drainTransfers();
+        cache.transfer_dispatcher_->per_rank_engine_->transfer_task_pool_->waitForIdle();
+        cache.task_pool_->waitForIdle();
+        std::lock_guard<std::mutex> lock(cache.transfer_dispatcher_->completion_mutex_);
+        if (cache.transfer_dispatcher_->transfer_completions_.empty()) {
+            return;
+        }
+    }
+}
+
+void BlockTreeCacheTestPeer::setTransferDrainObserverForTest(BlockTreeCache& cache, std::function<void()> observer) {
+    cache.transfer_dispatcher_->drain_observer_for_test_ = std::move(observer);
 }
 
 bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
