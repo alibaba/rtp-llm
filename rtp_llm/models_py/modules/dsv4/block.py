@@ -12,14 +12,38 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4 import _profiler
+from rtp_llm.models_py.modules.dsv4.chunk_env import chunked_moe_enabled
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     AttentionFP8,
     CommitOnlyAttentionFP8,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
-from rtp_llm.models_py.modules.dsv4.moe import MoE
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    ChunkedFp8Fp4MoeLayer,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
+    adapt_split_moe_weights,
+)
+from rtp_llm.utils.model_weight import W
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
+
+_MOE_WEIGHT_NAMES = {
+    "routed_gate": W.v4_routed_w1_w,
+    "routed_gate_scale": W.v4_routed_w1_s,
+    "routed_up": W.v4_routed_w3_w,
+    "routed_up_scale": W.v4_routed_w3_s,
+    "routed_down": W.v4_routed_w2_w,
+    "routed_down_scale": W.v4_routed_w2_s,
+    "router": W.v4_router_w,
+    "router_bias": W.v4_router_bias,
+    "router_tid2eid": W.v4_router_tid2eid,
+    "shared_gate_up": W.v4_shared_w13_w,
+    "shared_gate_up_scale": W.v4_shared_w13_s,
+    "shared_down": W.v4_shared_w2_w,
+    "shared_down_scale": W.v4_shared_w2_s,
+}
 
 
 def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -73,10 +97,14 @@ class Block(nn.Module):
         tp_rank: int = 0,
         ep_size: int = 1,
         ep_rank: int = 0,
+        world_size: Optional[int] = None,
+        world_rank: Optional[int] = None,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
+        moe_strategy: str = "auto",
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
+        n_physical_experts: Optional[int] = None,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -120,7 +148,12 @@ class Block(nn.Module):
             self._prefill_fast_hc_impls_cached = None
             return
 
-        self.ffn = MoE(
+        if layer_weights is None:
+            raise ValueError("Block requires per-layer weights")
+        adapt_split_moe_weights(
+            layer_weights, moe_inter_dim, n_shared_experts, _MOE_WEIGHT_NAMES
+        )
+        self.ffn = ChunkedFp8Fp4MoeLayer(
             layer_id=layer_id,
             dim=dim,
             moe_inter_dim=moe_inter_dim,
@@ -135,16 +168,23 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             ep_size=ep_size,
             ep_rank=ep_rank,
+            world_size=world_size,
+            world_rank=world_rank,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
+            strategy=moe_strategy,
+            n_physical_experts=n_physical_experts,
+            chunking_enabled=chunked_moe_enabled(),
+            model_type="deepseek_v4",
+            moe_w1_layout="gate_up",
+            observer_factory=self._moe_observer,
+            record_function_scope=_profiler.moe_record_function_scope,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight
         # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
         # ``[T, dim]`` from the hc_pre output, so framework ``RMSNorm``
         # (which expects 2D) drops in directly.
-        from rtp_llm.utils.model_weight import W
-
         self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], norm_eps)
         self.ffn_norm = RMSNorm(layer_weights[W.v4_ffn_norm], norm_eps)
 
@@ -174,15 +214,47 @@ class Block(nn.Module):
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
 
+    def _moe_observer(self, positions: Optional[torch.Tensor]):
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        if not _rt.should_record_layer(self.layer_id):
+            return None
+        names = {
+            "input": "moe_x_in",
+            "topk_weights": "moe_topk_weights",
+            "topk_indices": "moe_topk_indices",
+            "routed_y": "moe_routed_y",
+            "shared_y": "moe_shared_y",
+            "final_y": "moe_y",
+        }
+        global_pos = int(_rt._DBG_GLOBAL_POS)
+
+        def observe(kind: str, tensor: torch.Tensor) -> None:
+            suffix = names.get(kind)
+            if suffix is None:
+                return
+            name = f"L{self.layer_id:02d}_{suffix}"
+            _rt.record_if_level(2, name, tensor)
+            if (
+                global_pos < 0
+                or positions is None
+                or positions.numel() != tensor.size(0)
+            ):
+                return
+            mask = positions.to(device=tensor.device, dtype=torch.long).reshape(-1)
+            mask = mask == global_pos
+            _rt.record_if_level(2, f"{name}_pos{global_pos}", tensor[mask].contiguous())
+
+        return observe
+
     def _sync_after_first_cp_prefill_attention(self) -> None:
         if self._cp_sync_after_attn_done:
             return
         if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
             return
-        if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
-            "mega",
-            "mega_fused",
-            "mega_se",
+        if self.ffn.strategy_name not in (
+            "mega_moe",
+            "mega_moe_se",
         ):
             return
         if getattr(self.attn, "_cp_ctx", None) is None:
@@ -344,7 +416,7 @@ class Block(nn.Module):
         x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
+        ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
@@ -606,12 +678,9 @@ class Block(nn.Module):
             else torch.zeros(x.size(0), dtype=torch.long, device=x.device)
         )
         if _dbg_layer and dbg_pos_mask is not None:
-            setattr(self.ffn, "_dbg_positions", dbg_positions)
-        try:
+            ffn_out = self.ffn(x_pre, ffn_in_ids, positions=dbg_positions)
+        else:
             ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
-        finally:
-            if _dbg_layer and hasattr(self.ffn, "_dbg_positions"):
-                setattr(self.ffn, "_dbg_positions", None)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
             if dbg_pos_mask is not None:

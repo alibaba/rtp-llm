@@ -1,14 +1,47 @@
 import logging
-from typing import Optional, Type
+from importlib import import_module
+from typing import TYPE_CHECKING, Optional, Type
 
-from rtp_llm.device.device_base import DeviceBase
-from rtp_llm.device.device_impl import AscendImpl, ArmCpuImpl, CpuImpl, CudaImpl, PpuImpl, RocmImpl
 from rtp_llm.device.device_type import DeviceType, get_device_type
 
-_current_device: Optional[DeviceBase] = None
+if TYPE_CHECKING:
+    from rtp_llm.device.device_base import DeviceBase
+
+_current_device: Optional["DeviceBase"] = None
+
+_LAZY_EXPORTS = {
+    "DeviceBase": ("rtp_llm.device.device_base", "DeviceBase"),
+    "ArmCpuImpl": ("rtp_llm.device.device_impl", "ArmCpuImpl"),
+    "AscendImpl": ("rtp_llm.device.device_impl", "AscendImpl"),
+    "CpuImpl": ("rtp_llm.device.device_impl", "CpuImpl"),
+    "CudaImpl": ("rtp_llm.device.device_impl", "CudaImpl"),
+    "PpuImpl": ("rtp_llm.device.device_impl", "PpuImpl"),
+    "RocmImpl": ("rtp_llm.device.device_impl", "RocmImpl"),
+}
+
+
+def __getattr__(name: str):
+    module_name, attr_name = _LAZY_EXPORTS.get(name, (None, None))
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value
 
 
 def get_device_cls(type: DeviceType) -> Type:
+    # Importing device_impl loads the compiled compute operators. Keep that
+    # runtime-only so lightweight device-type checks remain usable on CPU-only
+    # workers that do not provide libcuda.so.
+    from rtp_llm.device.device_impl import (
+        ArmCpuImpl,
+        AscendImpl,
+        CpuImpl,
+        CudaImpl,
+        PpuImpl,
+        RocmImpl,
+    )
+
     if type == DeviceType.Cpu:
         return CpuImpl
     elif type == DeviceType.ArmCpu:
@@ -25,7 +58,7 @@ def get_device_cls(type: DeviceType) -> Type:
         raise ValueError(f"Invalid device type {type}")
 
 
-def get_current_device() -> DeviceBase:
+def get_current_device() -> "DeviceBase":
     global _current_device
 
     if _current_device != None:

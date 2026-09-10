@@ -176,7 +176,7 @@ class TestCudaNoQuantFallbackStrategies(unittest.TestCase):
             self._conditions_pass(
                 CudaNoQuantCppStrategy,
                 create_model_config_without_quant(),
-                "no_auant_cpp",
+                "no_quant_cpp",
             )
         )
 
@@ -185,7 +185,7 @@ class TestCudaNoQuantFallbackStrategies(unittest.TestCase):
             self._conditions_pass(
                 CudaNoQuantCppStrategy,
                 create_model_config_with_w8a8_int8_per_channel_quant(),
-                "no_auant_cpp",
+                "no_quant_cpp",
             )
         )
 
@@ -654,7 +654,9 @@ class TestCudaFp8PerBlockPureCPStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    def test_can_handle_false_auto_falls_back_to_deepep(self, mock_has_deep_gemm: Any) -> None:
+    def test_can_handle_false_auto_falls_back_to_deepep(
+        self, mock_has_deep_gemm: Any
+    ) -> None:
         """moe_strategy=auto + pure CP+EP topology should NOT auto-select PureCP (falls back to DeepEP)."""
         mock_has_deep_gemm.return_value = True
 
@@ -773,7 +775,9 @@ class TestCudaFp8PerBlockPureDPStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    def test_can_handle_false_auto_falls_back_to_deepep(self, mock_has_deep_gemm: Any) -> None:
+    def test_can_handle_false_auto_falls_back_to_deepep(
+        self, mock_has_deep_gemm: Any
+    ) -> None:
         """moe_strategy=auto + pure DP+EP topology should NOT auto-select PureDP (falls back to DeepEP)."""
         mock_has_deep_gemm.return_value = True
 
