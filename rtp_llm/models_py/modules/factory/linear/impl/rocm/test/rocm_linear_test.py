@@ -38,6 +38,7 @@ class LinearTorch(nn.Module):
 
 
 class FakeFusedMoe(nn.Module):
+    includes_shared_expert = False
     topk_ids_dtype = torch.int32
 
     router = SimpleNamespace(

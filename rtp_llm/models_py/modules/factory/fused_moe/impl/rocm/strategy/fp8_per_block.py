@@ -15,6 +15,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
 class RocmFp8PerBlockPureTPStrategy(MoeStrategy):
     """Rocm FP8 PerBlock pure TP strategy"""
 
+    strategy_name = "fp8_per_block_no_dp"
+
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
             RocmExpertsFp8PerBlock,

@@ -397,6 +397,16 @@ class ModelFactory:
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
             max_seq_len=model_config.max_seq_len,
         )
+        scheduler_config = engine_config.runtime_config.fifo_scheduler_config
+        # Generic MoE executors allocate their fixed-capacity communication
+        # buffers while the Python model is constructed. Preserve the finalized
+        # scheduler prefill bound on the model config so those buffers cover a
+        # full admitted context batch, not just one maximum-length request.
+        model_config.moe_prefill_max_tokens_per_rank = min(
+            int(scheduler_config.max_context_batch_size)
+            * int(model_config.max_seq_len),
+            int(scheduler_config.max_batch_tokens_size),
+        )
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name

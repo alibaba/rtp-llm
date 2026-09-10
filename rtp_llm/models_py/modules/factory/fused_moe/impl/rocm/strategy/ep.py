@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 class RocmEpNormalStrategy(MoeStrategy):
     """ROCm EP normal mode strategy"""
 
+    strategy_name = "rocm_ep_normal"
+
     _SUPPORTED_QUANT_METHODS = {
         None,
         "FP8_PER_CHANNEL_COMPRESSED",
@@ -58,6 +60,7 @@ class RocmEpNormalStrategy(MoeStrategy):
             RocmExpertsFp8PerBlock,
             RocmExpertsFp8PerChannel,
         )
+
         config = getattr(self, "_config", None)
         quant_method = self._get_quant_method(config) if config else None
 
@@ -166,6 +169,8 @@ class RocmEpNormalStrategy(MoeStrategy):
 
 class RocmEpLowLatencyStrategy(MoeStrategy):
     """ROCm EP low latency strategy (not supported)"""
+
+    strategy_name = "rocm_ep_low_latency"
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:

@@ -47,6 +47,7 @@ def _make_layer(
     if with_shared_expert_gate:
         weights[W.shared_expert_gate] = torch.empty(8, 1)
     fused_moe = SimpleNamespace(
+        includes_shared_expert=False,
         topk_ids_dtype=torch.int32,
         router=SimpleNamespace(
             supports_skip_tp_allreduce=supports_skip_tp_allreduce,

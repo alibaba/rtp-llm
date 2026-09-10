@@ -1022,7 +1022,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 hw_kernel_config=hw_kernel_config,
             )
 
-        if config.moe_style == 2:
+        if config.moe_style in (1, 2):
             self.mlp = GenericMoeLayer(
                 config,
                 parallelism_config,
