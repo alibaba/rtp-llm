@@ -236,7 +236,6 @@ class PyAttentionInputs:
     decode_cu_seqlens_device: torch.Tensor
     decode_cu_seqlens: torch.Tensor
     dtype: TypeMeta
-    gdn_decode_state_pool_size: int
     input_lengths: torch.Tensor
     is_cuda_graph: bool
     is_prefill: bool

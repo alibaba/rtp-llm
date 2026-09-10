@@ -13,7 +13,6 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextGatedDeltaNetDecode,
     Qwen3NextMetadata,
-    Qwen3NextModel,
     _cpu_sequence_lengths,
     _is_cuda_graph_forward,
     _maybe_write_cp_cache_store,
@@ -86,29 +85,6 @@ class AttentionInputRoutingTest(unittest.TestCase):
             }
         )
         self.assertTrue(_is_cuda_graph_forward(inputs))
-
-    def test_graph_warmup_records_state_pool_bounds_for_all_selected_tags(self):
-        model = object.__new__(Qwen3NextModel)
-        model._gdn_decode_state_pool_sizes = {"stale": 99}
-        inputs = SimpleNamespace(
-            attention_inputs={
-                "full": SimpleNamespace(
-                    is_cuda_graph=True,
-                    gdn_decode_state_pool_size=0,
-                ),
-                # Linear attention is not an FMHA target, so its own graph flag
-                # remains false even while it participates in graph warmup.
-                "linear": SimpleNamespace(
-                    is_cuda_graph=False,
-                    gdn_decode_state_pool_size=17,
-                ),
-            }
-        )
-
-        with patch.object(torch.version, "hip", "test-rocm"):
-            model._record_gdn_decode_graph_state_pool_sizes(inputs)
-
-        self.assertEqual(model.get_gdn_decode_state_pool_sizes(), {"linear": 17})
 
     def test_aiter_prefill_metadata_is_bound_to_exact_cu_seqlens(self):
         cu_seqlens = torch.tensor([0, 8], dtype=torch.int32)

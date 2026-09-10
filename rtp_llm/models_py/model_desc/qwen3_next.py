@@ -39,6 +39,7 @@ from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
 from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
     AiterFlydslGdnDecodeStateMetadata,
+    _is_aiter_flydsl_gdn_decode_disabled,
     aiter_flydsl_gdn_decode,
     is_aiter_flydsl_gdn_decode_supported,
     prepare_aiter_flydsl_gdn_decode_state_indices,
@@ -120,9 +121,9 @@ class Qwen3NextMetadata(object):
         cp_local_extract_indices: Optional[torch.Tensor] = None,
         cp_local_valid_mask: Optional[torch.Tensor] = None,
         is_cuda_graph: bool = False,
-        aiter_gdn_prefill_metadata: Optional[
-            dict[int, tuple[torch.Tensor, object]]
-        ] = None,
+        aiter_gdn_prefill_metadata: (
+            dict[int, tuple[torch.Tensor, object]] | None
+        ) = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
@@ -199,14 +200,190 @@ def _validate_aiter_flydsl_gdn_decode_eager_state(
     A disabled graph and a graph miss both call ``prepare_fmha_impl(...,
     False)`` before normal forward, so ``is_cuda_graph`` is false in both eager
     cases. Captured inputs use synthetic zero block tables and are validated
-    later by ``CudaGraphRunner`` after live host metadata has been copied.
+    later by the model's replay hook after live host metadata has been copied.
     """
     if not is_cuda_graph:
         validate_aiter_flydsl_gdn_decode_real_state_indices(state_metadata)
 
 
-def _is_cuda_graph_forward(inputs: PyModelInputs) -> bool:
+class _QwenGraphAttentionImpls(dict):
+    """Keep the existing FMHA callback set and carry graph identity."""
+
+    def __init__(self, impls, replay=None):
+        super().__init__(impls)
+        self.replay = replay
+
+    def bind_graph_inputs(self, inputs):
+        if self.replay is not None:
+            self.replay.bind_graph_inputs(inputs)
+
+
+@dataclass(frozen=True)
+class _GdnReplayBuffers:
+    sequence_lengths: torch.Tensor
+    kv_cache_kernel_block_id: torch.Tensor
+    sequence_lengths_plus_1_device: torch.Tensor
+
+
+class _QwenGdnGraphDelegate:
+    """Bind actual capture tensors, then validate through one FMHA callback.
+
+    Each warmup/capture forward registers its bucket's real destination
+    tensors. Replay copies into these tensors before the existing callback.
+    No assumption about different buckets sharing storage is required.
+    """
+
+    def __init__(self, bounds_by_tag, anchor, delegate):
+        self.bounds_by_tag = bounds_by_tag
+        self.anchor = anchor
+        self.delegate = delegate
+        self._buckets = {}
+
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
+
+    @staticmethod
+    def _key(lengths):
+        return (lengths.data_ptr(), tuple(lengths.shape), lengths.stride())
+
+    def bind_graph_inputs(self, inputs):
+        if not self.bounds_by_tag:
+            return
+        groups = get_attention_inputs_value(inputs)
+        if isinstance(groups, PyAttentionInputs):
+            groups = {"": groups}
+        anchor_lengths = groups[self.anchor].sequence_lengths
+        registrations = []
+        cleared = set()
+        for tag, bounds in self.bounds_by_tag.items():
+            group = groups[tag]
+            buffers = _GdnReplayBuffers(
+                group.sequence_lengths,
+                group.kv_cache_kernel_block_id,
+                group.sequence_lengths_plus_1_device,
+            )
+            clear_key = (
+                self._key(buffers.sequence_lengths),
+                self._key(buffers.sequence_lengths_plus_1_device),
+            )
+            registrations.append(
+                (_GdnDecodeGraphReplay(bounds), buffers, clear_key not in cleared)
+            )
+            cleared.add(clear_key)
+        # Retain the anchor owner too, so pointer reuse cannot match an old
+        # registry entry after its original storage has been released.
+        self._buckets[self._key(anchor_lengths)] = (anchor_lengths, registrations)
+
+    def prepare_cuda_graph(self, inputs):
+        if self.bounds_by_tag:
+            key = self._key(inputs.sequence_lengths)
+            if key not in self._buckets:
+                raise RuntimeError(
+                    "GDN replay bucket was not registered during capture"
+                )
+            _, registrations = self._buckets[key]
+            for hook, buffers, clear in registrations:
+                hook.prepare_cuda_graph(buffers, clear_padding=clear)
+        if self.delegate is not None:
+            self.delegate.prepare_cuda_graph(inputs)
+
+
+class _GdnDecodeGraphReplay:
+    """Qwen ROCm-only replay hook using the existing attention callback.
+
+    Each captured implementation owns its pool bounds. The graph runner has
+    already refreshed CPU lengths (zero padded) and block tables before this
+    callback; no device-to-host copy or synchronization is needed here.
+    """
+
+    def __init__(self, bounds, delegate=None):
+        self.bounds = tuple(sorted(set(bounds)))
+        self.delegate = delegate
+        self._host_views = None
+
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
+
+    def prepare_cuda_graph(self, inputs, *, clear_padding=True):
+        if not self.bounds:
+            if self.delegate is not None:
+                self.delegate.prepare_cuda_graph(inputs)
+            return
+        lengths = inputs.sequence_lengths
+        blocks = inputs.kv_cache_kernel_block_id
+        views = self._host_views
+        if (
+            views is None
+            or views[0] is not blocks
+            or views[1] is not lengths
+            or views[2].shape != tuple(blocks.shape)
+            or views[3].shape != tuple(lengths.shape)
+        ):
+            if (
+                lengths.device.type != "cpu"
+                or lengths.ndim != 1
+                or lengths.dtype not in (torch.int32, torch.int64)
+                or blocks.device.type != "cpu"
+                or blocks.ndim != 2
+                or blocks.dtype != torch.int32
+                or blocks.stride(1) != 1
+                or blocks.shape[0] != lengths.numel()
+            ):
+                raise RuntimeError(
+                    "GDN graph replay requires matching CPU integer length/block mirrors"
+                )
+            # Keep owning tensors alive; a new capture/view must rebuild these
+            # zero-copy views. Replays update their contents, never snapshots.
+            # Publish one complete tuple, and use the local tuple throughout
+            # this invocation if another graph bucket replaces the cache.
+            views = (blocks, lengths, blocks.numpy(), lengths.numpy())
+            self._host_views = views
+        values = views[3].tolist()
+        live_batch = next(
+            (i for i, length in enumerate(values) if length == 0), len(values)
+        )
+        if any(length <= 0 for length in values[:live_batch]) or any(
+            values[live_batch:]
+        ):
+            raise RuntimeError(
+                "GDN graph lengths must be positive live rows followed by zero padding"
+            )
+        # View the existing host mirror without copying. Scalar host checks
+        # avoid dispatching many tiny Torch CPU ops on the replay hot path.
+        table = views[2]
+        for pool_size, block_size in self.bounds:
+            if pool_size <= 0 or block_size <= 0 or blocks.shape[1] <= 0:
+                raise RuntimeError("GDN graph replay requires positive cache bounds")
+            for row, length in enumerate(values[:live_batch]):
+                read_pos = (length - 1) // block_size
+                write_pos = length // block_size
+                if write_pos >= blocks.shape[1]:
+                    raise RuntimeError(
+                        "GDN decode real request exceeds host block-table width"
+                    )
+                read_id = int(table[row, read_pos])
+                write_id = int(table[row, write_pos])
+                if not (0 < read_id < pool_size and 0 < write_id < pool_size):
+                    raise RuntimeError(
+                        f"GDN decode real request has invalid state block IDs at row {row}"
+                    )
+        # Only the tail is cleared; valid lengths were updated by the existing
+        # graph input copy. Keep the captured GDN index kernel unchanged.
+        if clear_padding and live_batch < len(values):
+            inputs.sequence_lengths_plus_1_device[live_batch : len(values)].zero_()
+        if self.delegate is not None:
+            self.delegate.prepare_cuda_graph(inputs)
+
+
+def _is_cuda_graph_forward(inputs: PyModelInputs, fmha_impl=None) -> bool:
     """Return the graph state propagated by any prepared attention group."""
+    if torch.version.hip is not None and isinstance(
+        fmha_impl,
+        (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate),
+    ):
+        # PyModelInputs crosses pybind by value; the implementation identity,
+        # unlike scalar fields changed on an earlier wrapper, survives.
+        return True
     attention_inputs = get_attention_inputs_value(inputs)
     if isinstance(attention_inputs, PyAttentionInputs):
         return attention_inputs.is_cuda_graph
@@ -641,10 +818,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             and not is_target_verify
             and block_map is not None
         ):
-            # Persisted on the captured attention-input object. Before every
-            # replay C++ validates the refreshed host block table for the real
-            # batch against this pool bound; padding rows are excluded there.
-            attn_inputs.gdn_decode_state_pool_size = ssm_states.shape[0]
+            # Graph replay validation belongs to the model's per-tag hook.
             sequence_lengths = attn_inputs.sequence_lengths_plus_1_device
             state_metadata = AiterFlydslGdnDecodeStateMetadata(
                 block_map=block_map,
@@ -677,8 +851,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                 )
                 if supported:
                     # Graph capture uses synthetic zero block tables and is
-                    # validated by C++ before each real replay using the pool
-                    # bound persisted from eager graph warmup. Both graph-off
+                    # validated by the model callback before each real replay
+                    # using that capture's cache pool bounds. Both graph-off
                     # decode and a graph miss enter normal forward with this
                     # flag false, so validate their live host metadata here
                     # before selecting AITER instead of silently mapping a bad
@@ -1352,31 +1526,44 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
-        self._gdn_decode_state_pool_sizes: dict[str, int] = {}
 
-    def get_gdn_decode_state_pool_sizes(self) -> dict[str, int]:
-        """Return state-pool bounds observed during the latest graph warmup."""
-        return self._gdn_decode_state_pool_sizes.copy()
-
-    def _record_gdn_decode_graph_state_pool_sizes(self, inputs: PyModelInputs) -> None:
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
         if torch.version.hip is None:
-            return
+            return impls
         attention_inputs = get_attention_inputs_value(inputs)
-        tagged_inputs = (
+        groups = (
             {"": attention_inputs}
             if isinstance(attention_inputs, PyAttentionInputs)
             else attention_inputs
         )
-        # At least one prepared FMHA group carries the reliable graph flag in a
-        # mixed-cache model. Linear groups are intentionally not FMHA targets,
-        # so their individual flag alone is not authoritative.
-        if not _is_cuda_graph_forward(inputs):
-            return
-        self._gdn_decode_state_pool_sizes = {
-            str(tag): int(group_inputs.gdn_decode_state_pool_size)
-            for tag, group_inputs in tagged_inputs.items()
-            if group_inputs.gdn_decode_state_pool_size > 0
-        }
+        for group in groups.values():
+            group.is_cuda_graph = is_cuda_graph
+        if not is_cuda_graph or self.kv_cache is None:
+            return impls
+        bounds_by_tag = {}
+        for idx, layer in enumerate(self.layers):
+            if (
+                layer.layer_type != HybridAttentionType.LINEAR
+                or _is_aiter_flydsl_gdn_decode_disabled()
+            ):
+                continue
+            for cache in self.kv_cache.get_layer_cache_groups(idx):
+                tag = str(cache.tag) if isinstance(impls, dict) else ""
+                # Target verification retains Triton and may refresh its
+                # block table again after the normal attention callback.
+                if groups[tag].is_prefill or groups[tag].is_target_verify:
+                    continue
+                bounds_by_tag.setdefault(tag, []).append(
+                    (cache.kv_cache_base.shape[0], cache.seq_size_per_block)
+                )
+        if isinstance(impls, dict):
+            if not bounds_by_tag:
+                return _QwenGraphAttentionImpls(impls)
+            anchor = next(iter(impls), next(iter(bounds_by_tag)))
+            replay = _QwenGdnGraphDelegate(bounds_by_tag, anchor, impls.get(anchor))
+            return _QwenGraphAttentionImpls({**impls, anchor: replay}, replay)
+        return _QwenGdnGraphDelegate(bounds_by_tag, "", impls)
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
@@ -1451,9 +1638,13 @@ class Qwen3NextModel(GptModelBase):
         return self.embed_tokens(input_ids)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if torch.version.hip is not None and isinstance(
+            fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
+        ):
+            fmha_impl.bind_graph_inputs(inputs)
         hidden_states = self.word_embedding(inputs)
 
-        is_cuda_graph = _is_cuda_graph_forward(inputs)
+        is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         linear_layer_idx = next(
             (
@@ -1578,7 +1769,6 @@ class Qwen3NextModel(GptModelBase):
                 attn_meta=attn_meta,
             )
 
-        self._record_gdn_decode_graph_state_pool_sizes(inputs)
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states)
 

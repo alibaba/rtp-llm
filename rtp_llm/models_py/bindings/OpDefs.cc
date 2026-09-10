@@ -160,7 +160,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("cache_store_writer", &PyAttentionInputs::cache_store_writer)
         .def_readwrite("context_parallel_info", &PyAttentionInputs::context_parallel_info)
         .def_readwrite("combo_position_ids", &PyAttentionInputs::combo_position_ids)
-        .def_readwrite("gdn_decode_state_pool_size", &PyAttentionInputs::gdn_decode_state_pool_size)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)

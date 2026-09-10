@@ -3,6 +3,27 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "qwen_gdn_graph_replay_test_rocm",
+    srcs = ["qwen_gdn_graph_replay_test.py"],
+    main = "qwen_gdn_graph_replay_test.py",
+    data = ["//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qwen_gdn_graph_replay_test",
+    srcs = ["qwen_gdn_graph_replay_test.py"],
+    main = "qwen_gdn_graph_replay_test.py",
+    data = ["//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+)
+
+py_test(
     name = "qwen3_next_moe_test",
     srcs = ["qwen3_next_moe_test.py"],
     deps = py_test_deps + [

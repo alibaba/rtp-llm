@@ -320,11 +320,6 @@ struct PyAttentionInputs {
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
-    // Set by the ROCm Qwen3.5 linear-attention capture path. A positive value
-    // enables host-side validation of real-request state block IDs before each
-    // graph replay; zero leaves unrelated attention implementations unchanged.
-    int64_t gdn_decode_state_pool_size = 0;
-
     std::optional<PyContextParallelParams> context_parallel_info;
 
     // Headwise attention config (Python dict or None).
