@@ -188,6 +188,17 @@ def _clear_module_device_caches() -> list[str]:
             )
     except Exception as e:  # module may be absent on non-dsv4 models
         notes.append(f"mega_buf cache skip: {e}")
+    try:
+        from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import mega_se_buffer_bytes
+
+        output_bytes, symm_bytes = mega_se_buffer_bytes()
+        notes.append(
+            f"Mega-SE output ~{output_bytes / _MiB:.1f} MiB logical (pausable; "
+            "not a physical-residency count); "
+            f"symm KEPT ~{symm_bytes / _MiB:.1f} MiB (peer-import lifetime)"
+        )
+    except Exception as e:
+        notes.append(f"Mega-SE cache diagnosis skipped: {e}")
     return notes
 
 

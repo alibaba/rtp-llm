@@ -135,8 +135,13 @@ class Dsv4SharedRuntimeBufferStore:
         self._mtp_hidden_hc_dim = (
             int(mtp_hidden.hc_dim) if mtp_hidden is not None else 0
         )
+        from rtp_llm.model_loader.weight_memory_saver import pausable_empty
+
+        # Per-request scratch: drain finishes its last consumer before pause,
+        # and the next target forward writes every consumed row before MTP reads
+        # it. Level 2 may discard the contents, but must preserve graph-baked VA.
         self._mtp_hidden_storage = (
-            torch.empty(
+            pausable_empty(
                 self._mtp_hidden_token_capacity,
                 self._mtp_hidden_hc_dim,
                 dtype=dtype,

@@ -697,8 +697,8 @@ def weights_region() -> Iterator[None]:
     # Level 1 backs weights up to pinned host on pause (fast wake, holds host
     # RAM). Level 2 opens the region without host backup: pause frees GPU without
     # a host copy and resume remaps blank pages at the same VA; the sleep hooks
-    # dump/reload the weights via a local-disk raw backup. tms freezes this
-    # choice at allocation time, hence it is a startup-level knob.
+    # reload weights from the original checkpoint, without a sleep-time backup.
+    # tms freezes this choice at allocation time, hence it is a startup-level knob.
     enable_cpu_backup = sleep_mode_level() != 2
     _region_depth.value = 1
     try:

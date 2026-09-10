@@ -189,9 +189,27 @@ def _get_or_create_mega_se_output(capacity, hidden, dtype, device):
     cached = _MEGA_SE_OUTPUT_CACHE.get(key)
     if cached is not None and cached.size(0) >= capacity:
         return cached
-    cached = torch.empty((max(capacity, 1), hidden), dtype=dtype, device=device)
+    from rtp_llm.model_loader.weight_memory_saver import pausable_empty
+
+    # Kernel output, overwritten before every use. It has no cross-rank peer
+    # imports (unlike the symmetric buffer), so fixed-VA pause/remap is safe
+    # even when a decode graph captures this tensor's address.
+    cached = pausable_empty((max(capacity, 1), hidden), dtype=dtype, device=device)
     _MEGA_SE_OUTPUT_CACHE[key] = cached
     return cached
+
+
+def mega_se_buffer_bytes() -> tuple[int, int]:
+    """Logical output bytes and resident symmetric bytes, for sleep diagnosis.
+
+    Output storage is pausable; its tensor size does not imply physical residency
+    after sleep. Symmetric buffers retain their peer imports across the cycle.
+    """
+    output = sum(t.numel() * t.element_size() for t in _MEGA_SE_OUTPUT_CACHE.values())
+    symm = sum(
+        b.buffer.numel() * b.buffer.element_size() for b in _MEGA_SE_BUF_CACHE.values()
+    )
+    return output, symm
 
 
 def _signature_has(callable_obj, required: tuple[str, ...]) -> str | None:
