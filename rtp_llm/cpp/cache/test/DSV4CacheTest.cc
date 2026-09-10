@@ -1006,13 +1006,13 @@ TEST(HybridPoolConfigCreatorTest, LinearValueHeadsMustDivideAttentionTp) {
     EXPECT_NO_THROW((void)CacheConfigCreator::createBasicConfig(mc, pc, false, 0));
 }
 
-TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {
+TEST(HybridPoolConfigCreatorTest, HybridAttentionUsesIndependentPerGroupBlockCounts) {
     ParallelismConfig pc;
     auto config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
 
-    EXPECT_FALSE(config.use_independent_block_pools);
+    EXPECT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
-    EXPECT_TRUE(config.groupBlockNumsSnapshot().empty());
+    EXPECT_EQ(config.groupBlockNumsSnapshot(), std::vector<uint32_t>({0, 0}));
 }
 
 TEST(HybridConfigCreatorTest, HybridAttentionTypesMustCoverAllLayers) {
@@ -1652,7 +1652,7 @@ TEST(CacheConfigTest, ExactBlockBudgetHandlesStepAndRoundingBoundaries) {
     EXPECT_EQ(maxKVCacheBlockNumForBudget(/*total_budget_bytes=*/34, budget, /*linear_step=*/0), 3u);
 }
 
-TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
+TEST(CacheConfigTest, FinalizeBlockNumsUpdatesHybridPerGroupBlockNums) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 8;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 4;
@@ -1673,8 +1673,8 @@ TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
     auto hybrid_config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
     hybrid_config.finalizeBlockNums(123, runtime_config);
     EXPECT_EQ(hybrid_config.block_num, 123u);
-    EXPECT_FALSE(hybrid_config.use_independent_block_pools);
-    EXPECT_TRUE(hybrid_config.groupBlockNumsSnapshot().empty());
+    EXPECT_TRUE(hybrid_config.use_independent_block_pools);
+    EXPECT_EQ(hybrid_config.groupBlockNumsSnapshot(), std::vector<uint32_t>({123, 123}));
     EXPECT_EQ(hybrid_config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
