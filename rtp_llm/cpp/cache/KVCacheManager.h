@@ -54,7 +54,8 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
-    void         insertIntoCache(const InsertInfo& insert_info);
+    // Outputs the resident key-prefix count; ordinary inserts report zero.
+    void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
