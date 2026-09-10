@@ -44,6 +44,23 @@ def _mtp_indexer_share_active(
     )
 
 
+class _Hy4MtpFinalNorm(nn.Module):
+    """Normalize the BF16 residual sum at HY4's final MTP boundary."""
+
+    def __init__(self, weight: torch.Tensor, eps: float):
+        super().__init__()
+        from rtp_llm.models_py.triton_kernels.common.hy4_mtp_final_norm import (
+            hy4_mtp_final_norm,
+        )
+
+        self.weight = weight
+        self.eps = eps
+        self._kernel = hy4_mtp_final_norm
+
+    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        return self._kernel(hidden_states, residual, self.weight, self.eps)
+
+
 class GenericMoeMTPModel(GptModelBase):
     def __init__(
         self,
@@ -104,7 +121,12 @@ class GenericMoeMTPModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSResNorm(
+        final_norm_cls = (
+            _Hy4MtpFinalNorm
+            if getattr(model_config, "model_type", "") == "hy_v4_mtp"
+            else RMSResNorm
+        )
+        self.norm = final_norm_cls(
             weights.global_weights[W.multi_tokens_predict_final_ln_gamma],
             eps=model_config.layernorm_eps,
         )

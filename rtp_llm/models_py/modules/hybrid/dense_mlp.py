@@ -24,6 +24,7 @@ if _DEVICE_TYPE == DeviceType.Cuda:
         CudaMxfp8Linear,
     )
     from rtp_llm.models_py.triton_kernels.common.activation import (
+        hy4_silu_and_mul,
         silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
     )
 else:
@@ -62,6 +63,7 @@ class DenseMLP(nn.Module):
         weights: Dict[str, torch.Tensor],
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        round_silu_bf16: bool = False,
     ):
         super().__init__()
 
@@ -71,6 +73,9 @@ class DenseMLP(nn.Module):
             raise ValueError(f"Unsupported activation type: {activation_type}")
         self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
         self.is_gated = activation_type in _GATED_ACTIVATION_TYPE_LIST
+        self._round_silu_bf16 = bool(
+            round_silu_bf16 and self.is_gated and _DEVICE_TYPE == DeviceType.Cuda
+        )
 
         if self.is_gated:
             if W.ffn_w13 not in weights:
@@ -176,6 +181,7 @@ class DenseMLP(nn.Module):
                     up.contiguous(),
                     quant_group_size=128,
                     scale_ue8m0=scale_ue8m0,
+                    round_silu_bf16=getattr(self, "_round_silu_bf16", False),
                 )
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
@@ -193,11 +199,16 @@ class DenseMLP(nn.Module):
                     quant_group_size=32,
                     scale_ue8m0=True,
                     mxfp8_semantics=True,
+                    round_silu_bf16=getattr(self, "_round_silu_bf16", False),
                 )
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
         else:
-            activated = self.act_fn(up)
+            activated = (
+                hy4_silu_and_mul(up)
+                if getattr(self, "_round_silu_bf16", False)
+                else self.act_fn(up)
+            )
             output = self.down_proj(activated)
         if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)

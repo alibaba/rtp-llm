@@ -266,6 +266,8 @@ class GenericMoeLayer(nn.Module):
                     weights,
                     quant_config,
                     hw_kernel_config=hw_kernel_config,
+                    round_silu_bf16=getattr(config, "model_type", "")
+                    in ("hy_v4", "hy_v4_mtp"),
                 )
         else:
             self.shared_expert = None

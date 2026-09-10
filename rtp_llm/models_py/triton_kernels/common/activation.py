@@ -844,6 +844,7 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
     MXFP8_SEMANTICS: tl.constexpr,
+    ROUND_SILU_BF16: tl.constexpr,
 ):
     """Fused: SiLU-and-mul + per-token-group FP8 quant.
 
@@ -872,14 +873,15 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
             group_idx = base_group_idx + g
             offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
             mask = offs_in_d < size_n
-            # Match baseline ``FusedSiluAndMul`` + sgl quant: silu(gate_fp32) is
-            # multiplied by up_fp32 fully in fp32, rounded to bf16 (the
-            # FusedSiluAndMul output dtype), and ONLY then quantized to fp8.
+            # The default rounds once after FP32 SiLU/mul. HY4 additionally
+            # rounds SiLU before mul, matching its BF16 activation boundary.
             gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
             up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(
                 tl.float32
             )
             silu_gate = gate / (1 + tl.exp(-gate))
+            if ROUND_SILU_BF16:
+                silu_gate = silu_gate.to(tl.bfloat16).to(tl.float32)
             gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
             gate_up = gate_up_bf16.to(tl.float32)
             _absmax = tl.max(tl.abs(gate_up))
@@ -924,6 +926,8 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
         gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
         up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(tl.float32)
         silu_gate = gate / (1 + tl.exp(-gate))
+        if ROUND_SILU_BF16:
+            silu_gate = silu_gate.to(tl.bfloat16).to(tl.float32)
         gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
         gate_up = gate_up_bf16.to(tl.float32)
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-4)
@@ -950,6 +954,7 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     quant_group_size: int = 128,
     scale_ue8m0: bool = True,
     mxfp8_semantics: bool = False,
+    round_silu_bf16: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dense 2-D fused SiLU-and-mul + per-token-group FP8 quant.
 
@@ -963,6 +968,7 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
                       False for H20-style fp32 scales.
         mxfp8_semantics: use native group-32 FlashInfer MXFP8 zero/subnormal
                         scale semantics instead of generic FP8 quantization.
+        round_silu_bf16: HY4 rounds SiLU to BF16 before multiplying by up.
 
     Returns:
         (fp8_output, output_scale) tuple.
@@ -974,6 +980,7 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     assert input.is_contiguous(), "input must be contiguous"
     assert input.dim() == 2
     assert input.shape[-1] % 2 == 0
+    round_silu_bf16 = round_silu_bf16 and input.dtype == torch.bfloat16
     size_n = input.shape[-1] // 2
     assert size_n % quant_group_size == 0
     if mxfp8_semantics:
@@ -986,7 +993,9 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     if T >= _SILU_MUL_FP8_QUANT_M_THRESHOLD:
         from rtp_llm.models_py.modules.base import FusedSiluAndMul
 
-        activated = FusedSiluAndMul()(input)
+        activated = (
+            hy4_silu_and_mul(input) if round_silu_bf16 else FusedSiluAndMul()(input)
+        )
         if mxfp8_semantics:
             from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
                 mxfp8_quant_act_packed,
@@ -1053,9 +1062,41 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         NUM_STAGE=NUM_STAGE,
         SCALE_UE8M0=scale_ue8m0,
         MXFP8_SEMANTICS=mxfp8_semantics,
+        ROUND_SILU_BF16=round_silu_bf16,
         num_warps=1,
     )
     return output, output_scale
+
+
+@triton.jit
+def _hy4_silu_and_mul_kernel(x, y, D: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    gate = tl.load(x + row * (2 * D) + cols, cols < D, 0).to(tl.float32)
+    up = tl.load(x + row * (2 * D) + D + cols, cols < D, 0).to(tl.float32)
+    silu = (gate / (1 + tl.exp(-gate))).to(tl.bfloat16).to(tl.float32)
+    tl.store(y + row * D + cols, silu * up, cols < D)
+
+
+def hy4_silu_and_mul(input: torch.Tensor) -> torch.Tensor:
+    """HY4 gate-first SwiGLU with the checkpoint runtime's BF16 SiLU boundary."""
+    if input.dim() < 1 or input.shape[-1] == 0 or input.shape[-1] % 2:
+        raise ValueError("expected a nonzero even gate/up dimension")
+    if input.dtype != torch.bfloat16:
+        from rtp_llm.models_py.modules.base import FusedSiluAndMul
+
+        return FusedSiluAndMul()(input)
+    input = input.contiguous()
+    width = input.shape[-1] // 2
+    output = torch.empty(
+        (*input.shape[:-1], width), device=input.device, dtype=input.dtype
+    )
+    rows = input.numel() // input.shape[-1]
+    if rows:
+        _hy4_silu_and_mul_kernel[(rows, triton.cdiv(width, 256))](
+            input, output, width, 256
+        )
+    return output
 
 
 def create_packed_scale_tensor(

@@ -156,6 +156,7 @@ class Hy4DecoderLayer(nn.Module):
                 weights,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                round_silu_bf16=True,
             )
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
