@@ -65,8 +65,11 @@ The interface is fully compatible with the old version, no need to modify existi
 ### B12X FP4
 
 The `fp4_b12x` strategy and `b12x` FP4 operator require BF16 ModelOpt NVFP4
-weights, an SM120/SM121 GPU, and `ep_size=1`. The kernel uses global expert
-IDs and therefore does not support expert-sharded weights or DeepEP routing.
+weights, an SM120/SM121 GPU, `ep_size=1`, and `dp_size=1`. Standard pure-TP
+configurations support `tp_size>=1`. With prefill CP enabled, the physical
+`tp_size` may be greater than 1 while the adapter presents `tp_size=1` to the
+logical MoE view. The kernel uses global expert IDs and therefore does not
+support expert-sharded weights or DeepEP routing.
 The B12x wrapper requires a CUDA 13 toolchain. The local adapter checks for the
 FlashInfer B12x APIs it consumes instead of restricting the package version, so
 dependency updates must retain those APIs and include GPU test coverage.
