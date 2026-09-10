@@ -30,6 +30,11 @@ def cache_store_advertise_ip(world_info, parallelism_config):
     validate_local_members(world_info, parallelism_config)
     if world_info.members[0].ip != "127.0.0.1":
         return None
+    from rtp_llm.utils.scr_runtime_fixup import get_restore_runtime_identity
+
+    identity = get_restore_runtime_identity()
+    if identity is not None:
+        return identity.pod_ip
     return current_pod_ip()
 
 

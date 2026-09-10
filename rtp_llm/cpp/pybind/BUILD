@@ -96,6 +96,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
         "@xgrammar//:xgrammar",

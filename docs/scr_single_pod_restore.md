@@ -27,6 +27,12 @@ pool is quiesced before the barrier and recreated when the template is released.
 The public integration switch is `RTPLLM_ENABLE_SCR=1`; the external controller
 selects `SCR_PHASE`.
 
+Process-local identity repair now runs through `fixup_runtime_after_restore`
+before component fixups and release. See [runtime fixup and audit](scr_runtime_fixup.md)
+for Logger repair, the future restore-environment provider contract, and remaining
+host/routing/transport risks. Rereading the restored process environment alone
+does not establish that host identity is fresh.
+
 The internal entrypoint sets `NCCL_SOCKET_IFNAME=lo` in this mode and preloads the
 SCR-injected NCCL interposer for the checkpoint phase. The interposer and the
 underlying NCCL implementation must exist before startup. The image retains the

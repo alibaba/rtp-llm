@@ -29,6 +29,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Mapping as TypingMapping, Optional
 
 from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
+from rtp_llm.utils.scr_runtime_fixup import (
+    fixup_runtime_after_restore,
+    get_restore_runtime_identity,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -78,7 +82,12 @@ class _NativeKmonitorTemplateHook:
         # identity before native Kmonitor rebuilds its configuration.
         if os.environ.get("HIPPO_ROLE"):
             try:
-                os.environ["RequestedIP"] = socket.gethostbyname(socket.gethostname())
+                identity = get_restore_runtime_identity()
+                os.environ["RequestedIP"] = (
+                    identity.pod_ip
+                    if identity is not None and identity.generation == generation
+                    else socket.gethostbyname(socket.gethostname())
+                )
             except OSError:
                 LOGGER.warning(
                     "Cannot resolve current container IP for native Kmonitor",
@@ -174,8 +183,12 @@ class _BackendVisitorTemplateHook:
         )
         from rtp_llm.utils.scr_local_comm import current_pod_ip, local_comm_enabled
 
-        if local_comm_enabled():
-            # Request correlation must identify the restored frontend, not its seed.
+        # Request correlation must identify the restored frontend in all
+        # topologies. Retain the legacy standalone local hook fallback.
+        identity = get_restore_runtime_identity()
+        if identity is not None and identity.generation == generation:
+            self.visitor.source_ip = identity.pod_ip
+        elif local_comm_enabled():
             self.visitor.source_ip = current_pod_ip()
 
     def release_template(self, generation: str) -> None:
@@ -1495,7 +1508,7 @@ def arrive_scr_template_barrier(
             generation=generation,
             fail_closed=fail_closed,
         )
-        lifecycle.restore_fixup(actual_generation)
+        fixup_runtime_after_restore(actual_generation, lifecycle)
         lifecycle.release_template(actual_generation)
         return result
     except BaseException:
