@@ -34,14 +34,6 @@ _stub_package(
     os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
 )
 _stub_package(
-    "rtp_llm.models_py.modules.dsv4.moe",
-    os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4", "moe"),
-)
-_stub_package(
-    "rtp_llm.models_py.modules.dsv4.moe.strategies",
-    os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4", "moe", "strategies"),
-)
-_stub_package(
     "rtp_llm.models_py.kernels",
     os.path.join(_REPO, "rtp_llm", "models_py", "kernels"),
 )
@@ -50,24 +42,15 @@ _stub_package(
     os.path.join(_REPO, "rtp_llm", "models_py", "kernels", "cuda"),
 )
 
-# Expert construction is bypassed in these CPU tests; keep its type importable
-# without loading platform kernels from qlinear.py.
-_qlinear = types.ModuleType("rtp_llm.models_py.modules.dsv4.qlinear")
-
-
-class _UnusedQuantizedLinear(nn.Module):
-    pass
-
-
-_qlinear.QuantizedLinear = _UnusedQuantizedLinear
-sys.modules.setdefault("rtp_llm.models_py.modules.dsv4.qlinear", _qlinear)
-
-from rtp_llm.models_py.modules.dsv4.moe import expert as expert_module
-from rtp_llm.models_py.modules.dsv4.moe.expert import Expert
-from rtp_llm.models_py.modules.dsv4.moe.strategies import local_loop as local_loop_module
-from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
-from rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop import (
-    LocalLoopStrategy,
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4 import (
+    expert as expert_module,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import Expert
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors import (
+    local_loop as local_loop_module,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.local_loop import (
+    LocalLoopExecutor as LocalLoopStrategy,
 )
 
 
@@ -193,9 +176,7 @@ class LocalLoopE8Top2OccupancyTest(unittest.TestCase):
         eager_actual = torch.zeros_like(x)
         graph_actual = torch.zeros_like(x)
         self.strategy._forward_eager(x, weights, indices, eager_actual, 0, 8)
-        self.strategy._forward_graph_safe(
-            x, weights, indices, graph_actual, 0, 8
-        )
+        self.strategy._forward_graph_safe(x, weights, indices, graph_actual, 0, 8)
         expected = _local_loop_oracle(indices, weights, self.dim)
         self.assertTrue(torch.allclose(eager_actual, expected, atol=0.0, rtol=0.0))
         self.assertTrue(torch.allclose(graph_actual, expected, atol=0.0, rtol=0.0))
@@ -232,58 +213,62 @@ class LocalLoopE8Top2OccupancyTest(unittest.TestCase):
 
 
 class LocalLoopRoutedStorageTest(unittest.TestCase):
-    def test_fp8_geometry_uses_platform_linears_without_fp4_scale_packing(self):
+    def test_canonical_fp4_weights_are_consumed_without_payload_copies(self):
         from rtp_llm.utils.model_weight import W
 
-        cfg = MoeCfg(
-            layer_id=0,
-            dim=8,
-            moe_inter_dim=8,
-            n_routed_experts=2,
-            n_activated_experts=1,
-            swiglu_limit=10.0,
-            ep_size=1,
-            ep_rank=0,
+        cfg = SimpleNamespace(
+            dim=128,
+            moe_inter_dim=64,
+            moe_w1_layout="gate_up",
             n_local_experts=2,
+            n_routed_experts=2,
             local_expert_start=0,
             local_expert_end=2,
-            max_tokens_per_rank=1,
-            tp_size=2,
+            swiglu_limit=10,
+            tp_size=1,
         )
+        w13 = torch.zeros(2, 128, 64, dtype=torch.int8)
         weights = {
-            W.v4_routed_w1_w: torch.zeros((2, 4, 8), dtype=torch.uint8),
-            W.v4_routed_w1_s: torch.ones((2, 1, 1), dtype=torch.float32),
-            W.v4_routed_w2_w: torch.zeros((2, 8, 4), dtype=torch.uint8),
-            W.v4_routed_w2_s: torch.ones((2, 1, 1), dtype=torch.float32),
-            W.v4_routed_w3_w: torch.zeros((2, 4, 8), dtype=torch.uint8),
-            W.v4_routed_w3_s: torch.ones((2, 1, 1), dtype=torch.float32),
+            W.moe_w1: w13,
+            W.moe_s1: torch.ones(2, 128, 4),
+            W.moe_w2: torch.zeros(2, 128, 32, dtype=torch.int8),
+            W.moe_s2: torch.ones(2, 128, 2),
         }
-        seen_storage: list[str] = []
+        seen = []
 
-        class _FakeExpert(nn.Module):
-            def __init__(self, *_args, storage: str, **_kwargs):
+        class FakeExpert(nn.Module):
+            def __init__(self, *_args, expert_weights, **_kwargs):
                 super().__init__()
-                seen_storage.append(storage)
+                seen.append(expert_weights)
 
-        strategy = LocalLoopStrategy(cfg)
-        with mock.patch.object(local_loop_module, "Expert", _FakeExpert), mock.patch.object(
+        strategy = LocalLoopStrategy.__new__(LocalLoopStrategy)
+        nn.Module.__init__(strategy)
+        strategy.cfg = cfg
+        with mock.patch.object(
+            local_loop_module, "Expert", FakeExpert
+        ), mock.patch.object(
             local_loop_module,
             "prepare_fp4_weight_scale_for_deepgemm",
-            side_effect=AssertionError("FP8 weights must not enter FP4 scale packing"),
+            side_effect=lambda s, *args: s.to(torch.int32),
         ):
             strategy.setup_weights(weights)
-
-        self.assertEqual(strategy._routed_storage, "fp8")
-        self.assertEqual(seen_storage, ["fp8", "fp8"])
-        self.assertIsNone(strategy._W1_s_gemm)
-        self.assertEqual(strategy.routed_tp_size, 2)
+        self.assertEqual(strategy._routed_storage, "fp4")
+        self.assertEqual(strategy.routed_tp_size, 1)
+        self.assertEqual(weights, {})
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(
+            seen[0]["w1_w"].untyped_storage().data_ptr(),
+            w13.untyped_storage().data_ptr(),
+        )
 
 
 class LocalLoopFastPathQuantizationSpyTest(unittest.TestCase):
     def _strategy(self) -> LocalLoopStrategy:
         strategy = LocalLoopStrategy.__new__(LocalLoopStrategy)
         nn.Module.__init__(strategy)
-        strategy.cfg = SimpleNamespace(dim=2, moe_inter_dim=3, swiglu_limit=10.0)
+        strategy.cfg = SimpleNamespace(
+            dim=2, moe_inter_dim=3, swiglu_limit=10.0, n_routed_experts=1
+        )
         strategy._W1_w = torch.ones((1, 1), dtype=torch.int8)
         strategy._W2_w = torch.full((1, 1), 2, dtype=torch.int8)
         strategy._W3_w = torch.full((1, 1), 3, dtype=torch.int8)
@@ -296,13 +281,8 @@ class LocalLoopFastPathQuantizationSpyTest(unittest.TestCase):
     def _fake_kernel_modules(
         self, quant_inputs: list[torch.Tensor]
     ) -> dict[str, types.ModuleType]:
-        deepgemm = types.ModuleType(
-            "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper"
-        )
+        deepgemm = types.ModuleType("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper")
         fp8_kernel = types.ModuleType("rtp_llm.models_py.kernels.cuda.fp8_kernel")
-        silu_module = types.ModuleType(
-            "rtp_llm.models_py.modules.dsv4._silu_mul_split_triton"
-        )
 
         def fake_quant(x, **_kwargs):
             quant_inputs.append(x.detach().clone())
@@ -321,11 +301,9 @@ class LocalLoopFastPathQuantizationSpyTest(unittest.TestCase):
 
         deepgemm.fp8_fp4_gemm_nt = fake_gemm
         fp8_kernel.sgl_per_token_group_quant_fp8 = fake_quant
-        silu_module.silu_mul_split = _reference_silu_mul
         return {
             deepgemm.__name__: deepgemm,
             fp8_kernel.__name__: fp8_kernel,
-            silu_module.__name__: silu_module,
         }
 
     def _run(
@@ -338,7 +316,11 @@ class LocalLoopFastPathQuantizationSpyTest(unittest.TestCase):
         indices = torch.zeros((n_tokens, 1), dtype=torch.long)
         y = torch.zeros((n_tokens, 2), dtype=torch.float32)
         modules = self._fake_kernel_modules(quant_inputs)
-        with mock.patch.dict(sys.modules, modules):
+        with mock.patch.dict(sys.modules, modules), mock.patch.object(
+            local_loop_module,
+            "require_silu_mul_split",
+            return_value=_reference_silu_mul,
+        ):
             getattr(strategy, method_name)(x, weights, indices, y)
         return y, quant_inputs
 

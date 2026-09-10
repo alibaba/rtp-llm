@@ -20,7 +20,7 @@ def run_rank(rank, world, rendezvous):
         DeepEPWrapper,
         DeepepWrapperConfig,
     )
-    from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
+    from rtp_llm.platforms.ppu.models.dsv4.ppu_moe_config import PpuMoeConfig as MoeCfg
     from rtp_llm.platforms.ppu.models.dsv4.ppu_deepep_fp4 import PpuDeepEPFP4Strategy
     from rtp_llm.utils.model_weight import W
 

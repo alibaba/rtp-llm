@@ -17,11 +17,7 @@ from functools import lru_cache
 from typing import Dict, Tuple
 
 import torch
-from rtp_llm.models_py.modules.dsv4.moe.strategies.base import (
-    MoeCfg,
-    RoutedExpertsStrategy,
-    register_strategy,
-)
+from .ppu_moe_config import PpuMoeConfig as MoeCfg
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +149,7 @@ def _derive_inter_local_and_tp(
     return inter_local, routed_tp_size
 
 
-@register_strategy
-class PpuGroupedFP4Strategy(RoutedExpertsStrategy):
+class PpuGroupedFP4Strategy(torch.nn.Module):
     """Strict M890P packed-MXFP4 strategy for DSV4 TP4/EP1."""
 
     name = "ppu_grouped_fp4"
@@ -169,7 +164,8 @@ class PpuGroupedFP4Strategy(RoutedExpertsStrategy):
         fused_gather=None,
         fused_scale_gather=None,
     ):
-        super().__init__(cfg)
+        super().__init__()
+        self.cfg = cfg
         self.sglang_moe = (
             (os.environ.get("DSV4_PPU_SGLANG_MOE", "0") == "1")
             if sglang_moe is None
@@ -306,7 +302,9 @@ class PpuGroupedFP4Strategy(RoutedExpertsStrategy):
         if token_count == 0:
             return torch.zeros((0, dim), dtype=torch.float32, device=x.device)
 
-        from rtp_llm.models_py.modules.dsv4.moe.expert import require_silu_mul_split
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import (
+            require_silu_mul_split,
+        )
         from rtp_llm.platforms.ppu.kernels.ppu_moe_exact_gather import (
             gather_local_loop_compatible,
         )

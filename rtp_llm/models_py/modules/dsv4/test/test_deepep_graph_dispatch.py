@@ -6,8 +6,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPMode, DeepEPWrapper
-from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
-from rtp_llm.models_py.modules.dsv4.moe.strategies.deepep import DeepEPStrategy
+from rtp_llm.platforms.ppu.models.dsv4.ppu_moe_config import PpuMoeConfig as MoeCfg
 from rtp_llm.platforms.ppu.models.dsv4.ppu_legacy_deepep import (
     PpuLegacyDeepEPStrategy,
     _select_ppu_grouped_fp4_capacity,
@@ -86,7 +85,7 @@ class _FakeLocal:
 
 
 def _strategy(max_tokens_per_rank=1):
-    strategy = DeepEPStrategy.__new__(DeepEPStrategy)
+    strategy = PpuLegacyDeepEPStrategy.__new__(PpuLegacyDeepEPStrategy)
     torch.nn.Module.__init__(strategy)
     strategy.cfg = MoeCfg(
         layer_id=0,
@@ -102,7 +101,9 @@ def _strategy(max_tokens_per_rank=1):
         local_expert_end=32,
         max_tokens_per_rank=max_tokens_per_rank,
     )
-    strategy._local = _FakeLocal()
+    strategy._compute_local = lambda recv_x, *_args, **_kwargs: torch.zeros_like(
+        recv_x, dtype=torch.float32
+    )
     return strategy
 
 
@@ -141,7 +142,7 @@ class DeepEPGraphDispatchTest(unittest.TestCase):
     def test_graph_warmup_syncs_and_uses_capture_shape(self) -> None:
         os.environ["RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"] = "1"
         with patch("torch.cuda.is_available", return_value=False), patch(
-            "rtp_llm.models_py.modules.dsv4.moe.strategies.deepep.sync_cuda_graph_warmup_ranks"
+            "rtp_llm.platforms.ppu.models.dsv4.ppu_legacy_deepep.sync_cuda_graph_warmup_ranks"
         ) as sync:
             _strategy()(self.x, self.weights, self.indices)
 

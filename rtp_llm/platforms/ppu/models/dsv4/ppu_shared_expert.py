@@ -3,15 +3,22 @@
 import torch
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
     SharedExpertExecutor,
     W13SharedExpert,
 )
 
 
 class PpuSharedExpert(W13SharedExpert):
-    def __init__(self, *args, sglang_moe=False, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args, sglang_moe=False, platform_provider, **kwargs):
+        from functools import partial
+        from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
+
+        super().__init__(
+            *args,
+            linear_factory=partial(_v4_fp8_linear, platform_provider=platform_provider),
+            **kwargs,
+        )
         self.preserve_output_dtype = bool(sglang_moe)
 
     def forward(self, x, weights=None):

@@ -6,8 +6,8 @@ from functools import partial
 import torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.moe.gate import Gate
-from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
+from .ppu_gate import PpuGate as Gate
+from .ppu_moe_config import PpuMoeConfig as MoeCfg
 from rtp_llm.utils.model_weight import W
 from torch import nn
 
@@ -39,6 +39,12 @@ class PpuTPMoE(nn.Module):
         *,
         tp_rank,
         platform_provider,
+        world_size=None,
+        world_rank=None,
+        strategy=None,
+        n_physical_experts=None,
+        observer_factory=None,
+        record_function_scope=None,
     ):
         super().__init__()
         if tp_size != 4 or ep_size != 1 or ep_rank != 0 or is_decode_role:
@@ -49,6 +55,8 @@ class PpuTPMoE(nn.Module):
             )
         if platform_provider is None:
             raise ValueError("PPU TP MoE requires an instance-owned operator adapter")
+        if n_physical_experts not in (None, n_routed_experts):
+            raise ValueError("PPU TP MoE does not support redundant experts")
         self.layer_id, self.dim = layer_id, dim
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.route_scale = float(route_scale)
@@ -89,6 +97,7 @@ class PpuTPMoE(nn.Module):
             ),
         )
         self._strategy.setup_weights(layer_weights)
+        self.strategy_name = self._strategy.name
         if self._strategy.routed_tp_size != tp_size:
             raise ValueError(
                 "Shared/routed BF16 reduction requires TP-sharded routed weights"
@@ -143,7 +152,9 @@ class PpuTPMoE(nn.Module):
             recorder.record_if_level(2, prefix + "_tp_reduced_bf16", result)
         return result
 
-    def forward(self, x, input_ids):
+    def forward(self, x, input_ids, *, is_decode_forward=False, positions=None):
+        if is_decode_forward:
+            raise RuntimeError("PPU TP MoE v2 supports eager Prefill only")
         if x.dtype != torch.bfloat16 or x.shape[-1] != self.dim:
             raise ValueError(
                 "PPU TP MoE requires BF16 input with the configured hidden size"

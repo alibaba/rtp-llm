@@ -16,14 +16,5 @@ def _register() -> None:
     register_m890p_dsv4_provider(device_name=torch.cuda.get_device_name(), ep_size=1)
 
 
-def _register_moe_strategy() -> None:
-    from rtp_llm.device.device_type import DeviceType, get_device_type
-
-    if get_device_type() != DeviceType.Ppu:
-        return
-    from . import ppu_grouped_fp4  # noqa: F401
-
-
 def install() -> None:
     register_backend_hook("dsv4", _register)
-    register_backend_hook("dsv4_moe_strategy", _register_moe_strategy)

@@ -10,3 +10,5 @@ deep-ep @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/
 fast-hadamard-transform @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/fast_hadamard_transform-1.1.0.post2%2Bv0.1.0.ppu2.1.0.ce-cp310-cp310-linux_x86_64.whl#sha256=106a7c3507189ec957e6b28c5afb53b2f78acedaf1305d85098b908a70cf5854
 fast-safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/c2/yuanyuxing.yyx/dist/ppu/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl#sha256=936ad54e9e5ccb2a8196e028ed00d0c931a0011045e96e729a2b4aff68bdaa0a
 mkl==2021.1.1
+# Flash checkpoints contain F8_E8M0 scale tensors.
+safetensors==0.8.0

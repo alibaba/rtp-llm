@@ -190,7 +190,9 @@ class Mxfp4MaskedTest(unittest.TestCase):
             )
 
     def test_dsv4_weight_setup_preserves_ep_slice_and_prepares_scales(self):
-        from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
+        from rtp_llm.platforms.ppu.models.dsv4.ppu_moe_config import (
+            PpuMoeConfig as MoeCfg,
+        )
         from rtp_llm.platforms.ppu.models.dsv4.ppu_deepep_fp4 import (
             PpuDeepEPFP4Strategy,
         )

@@ -78,7 +78,7 @@ py_test(
     srcs = ["ppu/test/test_decode_shared_expert.py"],
     main = "ppu/test/test_decode_shared_expert.py",
     data = [":platform_sources", ":ppu_sources"],
-    deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
     tags = ["manual", "gpu", "ppu"],
 )
 
@@ -86,7 +86,7 @@ py_test(
     name = "test_ppu_grouped_fp4_strategy_source",
     srcs = ["ppu/models/dsv4/test/test_ppu_grouped_fp4_strategy_source.py"],
     main = "ppu/models/dsv4/test/test_ppu_grouped_fp4_strategy_source.py",
-    data = [":platform_sources", ":ppu_sources", "//rtp_llm/models_py:dsv4_moe_registry_source"],
+    data = [":platform_sources", ":ppu_sources"],
     tags = ["source-only"],
     visibility = ["//visibility:public"],
 )

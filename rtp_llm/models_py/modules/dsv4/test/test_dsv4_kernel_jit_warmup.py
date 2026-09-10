@@ -66,9 +66,16 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     warmup_mhc_head_fused_jit,
     warmup_mhc_prenorm_gemm_jit,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4 import (
+    GroupedFp4Executor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    ChunkedFp8Fp4MoeLayer,
+)
 
 
 def _module_type(name, attrs):
+
     def __init__(self):
         nn.Module.__init__(self)
         for key, value in attrs.items():
@@ -410,16 +417,20 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
         root.add_module("fp4", Fp4Linear())
 
-        Grouped = _module_type(
-            "GroupedFP4Strategy",
-            {
-                "_w13": torch.empty((2, 10, 32), dtype=torch.int8),
-                "_s13_dense_t": torch.empty((2, 2, 10), dtype=torch.int32),
-                "_w2": torch.empty((2, 64, 5), dtype=torch.int8),
-                "_s2_dense_t": torch.empty((2, 1, 64), dtype=torch.int32),
-            },
-        )
-        root.add_module("grouped", Grouped())
+        grouped = GroupedFp4Executor.__new__(GroupedFp4Executor)
+        nn.Module.__init__(grouped)
+        grouped._w13 = torch.empty((2, 10, 32), dtype=torch.int8)
+        grouped._s13_dense_t = torch.empty((2, 2, 10), dtype=torch.int32)
+        grouped._w2 = torch.empty((2, 64, 5), dtype=torch.int8)
+        grouped._s2_dense_t = torch.empty((2, 1, 64), dtype=torch.int32)
+        fused_moe = nn.Module()
+        fused_moe.add_module("fused_experts", grouped)
+        common_moe = nn.Module()
+        common_moe.add_module("fused_moe", fused_moe)
+        dsv4_moe = ChunkedFp8Fp4MoeLayer.__new__(ChunkedFp8Fp4MoeLayer)
+        nn.Module.__init__(dsv4_moe)
+        dsv4_moe.add_module("_moe", common_moe)
+        root.add_module("moe", dsv4_moe)
 
         shapes = _collect_dsv4_dense_gemm_shapes(root)
         self.assertEqual(

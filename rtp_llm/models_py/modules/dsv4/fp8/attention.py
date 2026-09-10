@@ -190,6 +190,7 @@ def _build_suffix_pool_slot_mapping(
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
     ring_entries: int,
+    max_gather: Optional[int] = None,
 ) -> torch.Tensor:
     """Build request-major flat slots for a suffix gather.
 
@@ -209,7 +210,8 @@ def _build_suffix_pool_slot_mapping(
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
     assert int(gather_lens_l.numel()) == B
-    max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
+    if max_gather is None:
+        max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
     if max_gather <= 0:
         return torch.empty((B, 0), dtype=torch.long, device=device)
 
@@ -979,7 +981,7 @@ class AttentionFP8(nn.Module):
         # the ``fp8_einsum`` production path uses the pre-stacked
         # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
         # fallback path inline-dequants from these via
-        # ``_fp8_dequant_to_fp32``.
+        # ``dequantize_fp8_weight``.
         assert (n_heads * head_dim) % o_groups == 0
         wo_a_w = layer_weights[W.v4_attn_wo_a_w]
         wo_a_s = layer_weights[W.v4_attn_wo_a_s]
@@ -2580,6 +2582,8 @@ class AttentionFP8(nn.Module):
         assert (
             x.dim() == 2
         ), f"DSv4 Attention prefill expects flat [T, dim]; got shape {tuple(x.shape)}"
+        if x.size(0) == 0:
+            return x
         # Prefill is FP8-only on this branch — every downstream helper
         # (``_prefill_write_swa_fp8_paged``, ``_attn_fp8_swa_via_kv_full``,
         # ``_attn_via_workspace``) hard-assumes FP8 KV-cache pools. Hoist
@@ -2613,6 +2617,8 @@ class AttentionFP8(nn.Module):
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        if x.size(0) == 0:
+            return x
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
         if kv_cache is not None:
@@ -3915,6 +3921,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        any_cont: Optional[bool] = None,
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -3979,6 +3986,14 @@ class AttentionFP8(nn.Module):
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         sp_per_req = _flat_1d(sp_per_req)
+        if any_cont is None:
+            if prefix_lengths.is_cuda and torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "CUDA Graph prefill metadata requires host-derived any_cont"
+                )
+            any_cont = bool((prefix_lengths > 0).any().item())
+        else:
+            any_cont = bool(any_cont)
         assert (
             position_ids.numel() == seqlen
         ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
@@ -4028,8 +4043,6 @@ class AttentionFP8(nn.Module):
                     req_id_per_token,
                 )
             )
-            any_cont = bool((prefix_lengths > 0).any().item())
-
         with record_function_range("dsv4.fp8.meta.swa_varlen"):
             swa_meta = self._build_swa_prefill_meta_varlen(
                 seqlen=seqlen,
@@ -4050,7 +4063,11 @@ class AttentionFP8(nn.Module):
 
         # row_seqlens_full: [1] long tensor. Reused by SWA pool read/write
         # helpers (BF16 path) — they refuse a None for the per-row seqlens.
-        row_seqlens_full = torch.tensor([seqlen_full], device=device, dtype=torch.long)
+        # ``torch.tensor([host_int], device="cuda")`` stages through CPU and is
+        # illegal during CUDA Graph capture. ``full`` emits a device-side fill.
+        row_seqlens_full = torch.full(
+            (1,), seqlen_full, device=device, dtype=torch.long
+        )
 
         # ``use_varlen`` stays explicit because lower builders share one
         # metadata contract.
@@ -4505,15 +4522,25 @@ class AttentionFP8(nn.Module):
             P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
             gather_len_per_req = S_i32 + P_per_req  # [B]
 
-            # One existing metadata D2H: include the compressed-token total used
-            # to validate fused restore geometry instead of adding a per-layer
-            # ``seq_lens.sum().item()`` synchronization in the reader.
-            host_geometry = torch.stack(
-                [N_per_req.max(), gather_len_per_req.max(), N_per_req.sum()]
-            )
-            N_max, gather_len_max, total_cmp_tokens = (
-                int(v) for v in host_geometry.tolist()
-            )
+            if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+                # Replay can change device lengths/prefixes. Size from the
+                # fixed block-table/token capacities, not capture-time values.
+                N_max = (
+                    int(cmp_bt.shape[1])
+                    * _dsv4_pool_tokens_per_block(self._kv_cache, tag=cmp_at)
+                    // ratio
+                )
+                gather_len_max = (seq_len_full if cp_active else seqlen) + win - 1
+                total_cmp_tokens = None
+            else:
+                # Fold the compressed-token total into the existing metadata D2H
+                # so the reader does not add a per-layer synchronization.
+                host_geometry = torch.stack(
+                    [N_per_req.max(), gather_len_per_req.max(), N_per_req.sum()]
+                )
+                N_max, gather_len_max, total_cmp_tokens = (
+                    int(v) for v in host_geometry.tolist()
+                )
             N = N_max
             M = N_max + gather_len_max
 
@@ -4676,6 +4703,11 @@ class AttentionFP8(nn.Module):
             entries_per_block=swa_eb,
             tokens_per_block_for_block_table=swa_tokens_per_block,
             ring_entries=swa_eb,
+            max_gather=(
+                win - 1
+                if device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+                else None
+            ),
         )
         swa_cache_compaction = self._build_swa_cp_byte_compaction(
             swa_cache_slot_mapping,
@@ -4988,10 +5020,12 @@ class AttentionFP8(nn.Module):
             num_decodes=0,
             window_size=win,
         )
-        # Single .item() sync per forward — ``combined_gather_lens`` already
-        # encodes ``input_lengths[b] + min(prefix_lengths[b], win-1)`` per
-        # request; its max is exactly ``combined_gather_len_max``.
-        combined_gather_len_max = int(combined_gather_lens.max().item())
+        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            # Every request has at most write_num_tokens new tokens and
+            # win-1 cached tokens. Keep this bound valid across graph replays.
+            combined_gather_len_max = write_num_tokens + (win - 1 if any_cont else 0)
+        else:
+            combined_gather_len_max = int(combined_gather_lens.max().item())
         M = max(combined_gather_len_max, 1)
 
         # cache_* + combined_* only populated on continuation (via_concat).
@@ -5021,6 +5055,12 @@ class AttentionFP8(nn.Module):
                 entries_per_block=eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
                 ring_entries=eb,
+                max_gather=(
+                    win - 1
+                    if device.type == "cuda"
+                    and torch.cuda.is_current_stream_capturing()
+                    else None
+                ),
             )
             cache_compaction = self._build_swa_cp_byte_compaction(
                 cache_slot_mapping,
@@ -5040,7 +5080,8 @@ class AttentionFP8(nn.Module):
                 combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices_cp(
                     topk_indices=topk_indices_empty,
                     global_positions=_flat_1d(cp_ctx.global_positions),
-                    sp_int=int(prefix_lengths[0].item()),
+                    # Varlen consumes prefix_lengths on device, not sp_int.
+                    sp_int=0,
                     window_size=win,
                     compress_ratio=1,
                     topk=0,
@@ -5560,7 +5601,9 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
         with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
-            all_reduce(out, Group.TP)
+            reduced = all_reduce(out, Group.TP, inplace=True)
+            if reduced is not out:
+                out.copy_(reduced)
 
     def _prefill_output_proj(
         self,

@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.moe._shared_expert_triton import fused_moe_epilogue
+from rtp_llm.models_py.triton_kernels.moe.shared_expert import fused_moe_epilogue
 from rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency import (
     low_latency_mxfp4_moe,
 )

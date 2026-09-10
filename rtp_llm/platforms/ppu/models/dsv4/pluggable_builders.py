@@ -40,11 +40,11 @@ def build_decode_moe(*, build_ctx, request, platform_provider, **kwargs):
         or not kwargs.get("is_decode_role")
     ):
         raise ValueError("PPU Decode MoE requires TP1/EP8 Decode resources")
-    return baseline.build_moe(
-        build_ctx=build_ctx,
-        request=request,
+    from .ppu_ep_moe import PpuEPMoE
+
+    baseline.validate_arguments(build_ctx, request, kwargs)
+    return PpuEPMoE(
         platform_provider=platform_provider,
-        execution_options=build_ctx.selection.model_metadata["execution_options"],
         strategy_type=PpuDeepEPFP4Strategy,
         strategy_kwargs={
             "expected_m_policy": platform_provider._moe_hint,

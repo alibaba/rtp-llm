@@ -31,14 +31,12 @@ _stub_package(
     "rtp_llm.models_py.modules.dsv4",
     os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
 )
-_stub_package(
-    "rtp_llm.models_py.modules.dsv4.moe",
-    os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4", "moe"),
-)
 
-from rtp_llm.models_py.modules.dsv4.moe import gate as gate_module
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4 import (
+    gate as gate_module,
+)
 from rtp_llm.models_py.modules.dsv4 import platform_provider as provider_module
-from rtp_llm.models_py.modules.dsv4.moe.gate import (
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
     Gate,
     _select_routes_with_nonfinite_fallback,
 )
@@ -90,6 +88,7 @@ def _gate_from_logits(
     gate.score_func = "sqrtsoftplus"
     gate.route_scale = route_scale
     gate.hash = False
+    gate.fuse_hash_gate = False
     gate.bias = bias.to(device=device, dtype=torch.float32).contiguous()
     gate.weight = torch.eye(n_experts, device=device, dtype=torch.float32)
     gate._dbg_prefix = None
@@ -177,12 +176,8 @@ class RouterEagerContractTest(unittest.TestCase):
         ranking = torch.ones_like(original)
         expected_w, expected_i = _canonical_finite_oracle(original, ranking, 6)
 
-        first = _select_routes_with_nonfinite_fallback(
-            original, ranking, 6, 1.0, True
-        )
-        second = _select_routes_with_nonfinite_fallback(
-            original, ranking, 6, 1.0, True
-        )
+        first = _select_routes_with_nonfinite_fallback(original, ranking, 6, 1.0, True)
+        second = _select_routes_with_nonfinite_fallback(original, ranking, 6, 1.0, True)
 
         self.assertTrue(torch.equal(first[1], expected_i))
         self.assertTrue(torch.equal(first[1], second[1]))
@@ -244,9 +239,7 @@ class RouterEagerContractTest(unittest.TestCase):
         self.assertEqual(indices[1].tolist(), [5, 4])
 
     def test_actual_eager_gate_scale_switch_preserves_default_api(self):
-        gate = _gate_from_logits(
-            8, 2, 2.5, torch.zeros(8, dtype=torch.float32)
-        )
+        gate = _gate_from_logits(8, 2, 2.5, torch.zeros(8, dtype=torch.float32))
         logits = torch.zeros((2, 8), dtype=torch.float32)
         input_ids = torch.arange(2, dtype=torch.long)
         with mock.patch.dict(
@@ -264,67 +257,101 @@ class RouterEagerContractTest(unittest.TestCase):
         scores = torch.ones((2, 8), dtype=torch.float32)
         rank3_scores = scores.view(2, 2, 4)
         cases = (
-            (ValueError, "rank", lambda: _select_routes_with_nonfinite_fallback(
-                rank3_scores, rank3_scores, 2, 1.0, True
-            )),
-            (ValueError, "shape", lambda: _select_routes_with_nonfinite_fallback(
-                scores, scores[:, :7], 2, 1.0, True
-            )),
-            (ValueError, "topk_zero", lambda: _select_routes_with_nonfinite_fallback(
-                scores, scores, 0, 1.0, True
-            )),
-            (ValueError, "topk_large", lambda: _select_routes_with_nonfinite_fallback(
-                scores, scores, 9, 1.0, True
-            )),
-            (ValueError, "logit_shape", lambda: _select_routes_with_nonfinite_fallback(
-                scores,
-                scores,
-                2,
-                1.0,
-                True,
-                router_logits=scores[:, :7],
-            )),
-            (ValueError, "index_shape", lambda: _select_routes_with_nonfinite_fallback(
-                scores,
-                scores,
-                2,
-                1.0,
-                True,
-                indices=torch.zeros((2, 3), dtype=torch.long),
-            )),
-            (TypeError, "index_dtype", lambda: _select_routes_with_nonfinite_fallback(
-                scores,
-                scores,
-                2,
-                1.0,
-                True,
-                indices=torch.zeros((2, 2), dtype=torch.int32),
-            )),
-            (ValueError, "index_device", lambda: _select_routes_with_nonfinite_fallback(
-                scores,
-                scores,
-                2,
-                1.0,
-                True,
-                indices=torch.zeros((2, 2), dtype=torch.long, device="meta"),
-            )),
-            (RuntimeError, "index_oob", lambda: _select_routes_with_nonfinite_fallback(
-                scores,
-                scores,
-                2,
-                1.0,
-                True,
-                indices=torch.tensor([[0, 8], [1, 2]], dtype=torch.long),
-            )),
+            (
+                ValueError,
+                "rank",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    rank3_scores, rank3_scores, 2, 1.0, True
+                ),
+            ),
+            (
+                ValueError,
+                "shape",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    scores, scores[:, :7], 2, 1.0, True
+                ),
+            ),
+            (
+                ValueError,
+                "topk_zero",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    scores, scores, 0, 1.0, True
+                ),
+            ),
+            (
+                ValueError,
+                "topk_large",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    scores, scores, 9, 1.0, True
+                ),
+            ),
+            (
+                ValueError,
+                "logit_shape",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    scores,
+                    scores,
+                    2,
+                    1.0,
+                    True,
+                    router_logits=scores[:, :7],
+                ),
+            ),
+            (
+                ValueError,
+                "index_shape",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    scores,
+                    scores,
+                    2,
+                    1.0,
+                    True,
+                    indices=torch.zeros((2, 3), dtype=torch.long),
+                ),
+            ),
+            (
+                TypeError,
+                "index_dtype",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    scores,
+                    scores,
+                    2,
+                    1.0,
+                    True,
+                    indices=torch.zeros((2, 2), dtype=torch.int32),
+                ),
+            ),
+            (
+                ValueError,
+                "index_device",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    scores,
+                    scores,
+                    2,
+                    1.0,
+                    True,
+                    indices=torch.zeros((2, 2), dtype=torch.long, device="meta"),
+                ),
+            ),
+            (
+                RuntimeError,
+                "index_oob",
+                lambda: _select_routes_with_nonfinite_fallback(
+                    scores,
+                    scores,
+                    2,
+                    1.0,
+                    True,
+                    indices=torch.tensor([[0, 8], [1, 2]], dtype=torch.long),
+                ),
+            ),
         )
         for error, name, call in cases:
             with self.subTest(name=name), self.assertRaises(error):
                 call()
 
 
-_ACTUAL_FUSED_AVAILABLE = bool(
-    torch.cuda.is_available() and gate_module._GATE_FUSED_OK
-)
+_ACTUAL_FUSED_AVAILABLE = bool(torch.cuda.is_available() and gate_module._GATE_FUSED_OK)
 
 
 @unittest.skipUnless(
@@ -335,9 +362,7 @@ class RouterActualFusedContractTest(unittest.TestCase):
     def _run_actual_fused(
         self, logits: torch.Tensor, bias: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, mock.Mock]:
-        gate = _gate_from_logits(
-            logits.size(1), 6, 1.5, bias, device=logits.device
-        )
+        gate = _gate_from_logits(logits.size(1), 6, 1.5, bias, device=logits.device)
         # Construction freezes this choice; preserve FP32 extreme inputs before
         # exercising the actual fused router's finite/nonfinite contract.
         gate._fp32_gemm = True

@@ -1,7 +1,6 @@
 """Instance-selected V4 routed experts on the engine's PPU DeepEP LL group."""
 
 import torch
-from rtp_llm.models_py.modules.dsv4.moe.strategies.base import RoutedExpertsStrategy
 
 
 def prepare_routed_mxfp4_weights(cfg, layer_weights):
@@ -47,7 +46,7 @@ def prepare_routed_mxfp4_weights(cfg, layer_weights):
     return result
 
 
-class PpuDeepEPFP4Strategy(RoutedExpertsStrategy):
+class PpuDeepEPFP4Strategy(torch.nn.Module):
     """TP1, DP/EP routed compute; selection is explicit, never process-global."""
 
     name = "ppu_deepep_fp4"
@@ -73,7 +72,8 @@ class PpuDeepEPFP4Strategy(RoutedExpertsStrategy):
     def __init__(
         self, cfg, *, expected_m_policy="capacity", output_dtype=torch.float32
     ):
-        super().__init__(cfg)
+        super().__init__()
+        self.cfg = cfg
         if output_dtype not in (torch.float32, torch.bfloat16):
             raise ValueError("PPU routed output must be FP32 or BF16")
         self.output_dtype = output_dtype

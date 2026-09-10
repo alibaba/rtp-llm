@@ -1,11 +1,15 @@
 from types import SimpleNamespace
 
+import json
 import os
+import tempfile
+from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v4 import DeepSeekV4
 from rtp_llm.models.dsv4_kv_cache import (
@@ -39,6 +43,7 @@ from rtp_llm.ops import (
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
 )
+from rtp_llm.server.server_args.server_args import setup_args
 
 # CSA / HCA / SWA / SWA / CSA -- covers every routing branch plus a repeat.
 LAYER_COMPRESS_RATIOS = [4, 128, 0, 0, 4]
@@ -291,6 +296,83 @@ class Dsv4KvCacheSpecTest(TestCase):
 
 
 class Dsv4PostBuildModelConfigTest(TestCase):
+
+    def test_fixed_pool_memory_cli_and_env_reach_model_factory(self):
+        for env_value, cli_value, expected in (
+            (None, "1", True),
+            ("0", "1", True),
+            ("1", "0", False),
+            ("1", None, True),
+            (None, None, False),
+        ):
+            with (
+                self.subTest(env=env_value, cli=cli_value),
+                tempfile.TemporaryDirectory() as ckpt,
+            ):
+                Path(ckpt, "config.json").write_text(
+                    json.dumps({"torch_dtype": "bfloat16"})
+                )
+                env = (
+                    {}
+                    if env_value is None
+                    else {"DSV4_FIXED_POOL_USE_MEMORY": env_value}
+                )
+                argv = [
+                    "--model_type",
+                    "deepseek_v4",
+                    "--checkpoint_path",
+                    ckpt,
+                    "--act_type",
+                    "BF16",
+                ]
+                if cli_value is not None:
+                    argv += ["--dsv4_fixed_pool_use_memory", cli_value]
+                with patch.dict(os.environ, env, clear=True):
+                    configs = setup_args(argv)
+                    architecture = self._model_config()
+                    architecture.attn_config.head_num = 1
+                    architecture.hidden_size = HEAD_DIM
+                    with patch.object(
+                        DeepSeekV4, "_create_config", return_value=architecture
+                    ):
+                        config = ModelFactory.create_model_config(
+                            model_args=configs.model_args,
+                            lora_config=configs.lora_config,
+                            kv_cache_config=configs.kv_cache_config,
+                            profiling_debug_logging_config=configs.profiling_debug_logging_config,
+                        )
+                self.assertEqual(config.dsv4_fixed_pool_use_memory, expected)
+                by_tag = {
+                    desc.tag: desc
+                    for layer in config.kv_cache_spec_descs
+                    for desc in layer
+                }
+                for tag in (
+                    INDEXER_STATE_TAG,
+                    CSA_STATE_TAG,
+                    HCA_STATE_TAG,
+                    SWA_KV_TAG,
+                ):
+                    if expected:
+                        self.assertEqual(
+                            by_tag[tag].memory.placement,
+                            CacheMemoryPlacement.HOST_PINNED,
+                        )
+                        self.assertFalse(by_tag[tag].capacity.charge_to_paged_budget)
+                    else:
+                        self.assertIsNone(by_tag[tag].memory)
+                for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
+                    self.assertIsNone(by_tag[tag].memory)
+
+    def test_direct_post_build_preserves_environment_setting(self):
+        with patch.dict(os.environ, {"DSV4_FIXED_POOL_USE_MEMORY": "1"}):
+            config = self._model_config()
+            DeepSeekV4._post_build_model_config(config)
+        swa = next(
+            desc for desc in config.kv_cache_spec_descs[0] if desc.tag == SWA_KV_TAG
+        )
+        self.assertEqual(swa.memory.placement, CacheMemoryPlacement.HOST_PINNED)
+
     def _model_config(self, tokens_per_block=FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK):
         config = ModelConfig()
         config.num_layers = len(LAYER_COMPRESS_RATIOS)

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
+from rtp_llm.platforms.ppu.models.dsv4.ppu_moe_config import PpuMoeConfig as MoeCfg
 from rtp_llm.platforms.ppu.models.dsv4 import pluggable_builders
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
@@ -38,16 +38,28 @@ class DecodeMoeHintTest(unittest.TestCase):
 
         context = SimpleNamespace(
             selection=SimpleNamespace(
-                model_metadata={"execution_options": provider.execution_options}
+                model_metadata={
+                    "execution_options": provider.execution_options,
+                    "hidden_size": cfg.dim,
+                    "tp_size": 1,
+                }
             )
         )
-        with patch.object(
-            pluggable_builders.baseline, "build_moe", side_effect=factory
+        request = SimpleNamespace(
+            module_id="rtp.dsv4.moe",
+            path="layers.0.ffn",
+            metadata={"layer_id": cfg.layer_id},
+        )
+        with patch(
+            "rtp_llm.platforms.ppu.models.dsv4.ppu_ep_moe.PpuEPMoE",
+            side_effect=factory,
         ):
             strategy = pluggable_builders.build_decode_moe(
                 build_ctx=context,
-                request=object(),
+                request=request,
                 platform_provider=provider,
+                layer_id=cfg.layer_id,
+                dim=cfg.dim,
                 tp_size=1,
                 ep_size=8,
                 is_decode_role=True,

@@ -78,9 +78,8 @@ class M890PDsv4Provider:
 
     Construction factories preserve provider identity while delegating to the
     supplied factory. Attention uses the verified public rich-FlashMLA path;
-    EP1/TP4 MoE forces the PPU grouped-FP4 strategy. Other EP1 topologies keep
-    their existing selection, while EP8 keeps the verified DeepEP normal-mode
-    dispatch/combine path. Other EP sizes remain blocked.
+    EP1/TP4 MoE forces the PPU grouped-FP4 strategy, while TP1/EP8 keeps the
+    DeepEP normal-mode dispatch/combine path. Other topologies fail closed.
     """
 
     name = "m890p-dsv4-candidate"
@@ -126,6 +125,11 @@ class M890PDsv4Provider:
             sglang_moe=self._bool("DSV4_PPU_SGLANG_MOE", False),
             **kwargs,
         )
+
+    def build_shared_expert_executor(self, **kwargs):
+        from .ppu_shared_expert import PpuSharedExpertExecutor
+
+        return PpuSharedExpertExecutor()
 
     def build_prefill_topk(self, default_factory):
         from .ppu_topk import PpuPrefillTopK
@@ -199,32 +203,24 @@ class M890PDsv4Provider:
         if ep_size == 8 and self._bool("DSV4_PPU_GROUPED_FP4", False):
             from .ppu_legacy_deepep import PpuLegacyDeepEPStrategy
 
-            if kwargs.pop("strategy", None) not in (None, "deepep"):
+            if kwargs.pop("strategy", None) not in (None, "auto", "deepep"):
                 raise ValueError(
                     "PPU grouped DeepEP conflicts with the requested strategy"
                 )
-            return default_factory(
+            from .ppu_ep_moe import PpuEPMoE
+
+            return PpuEPMoE(
                 *args,
                 strategy_type=PpuLegacyDeepEPStrategy,
                 strategy_kwargs={"options": self.execution_options},
                 platform_provider=self,
-                execution_options=self.execution_options,
                 **kwargs,
             )
-        forced_strategy = None
-        if ep_size == 1 and type(tp_size) is int and tp_size == 4:
-            forced_strategy = "ppu_grouped_fp4"
-            kwargs["strategy"] = forced_strategy
-        _log_moe_selection(
-            provider=self.name,
-            tp_size=tp_size,
-            ep_size=ep_size,
-            requested_strategy=requested_strategy,
-            strategy=kwargs.get("strategy"),
-            forced_strategy=forced_strategy,
-            decision="delegate",
-        )
-        return default_factory(*args, **kwargs)
+        if ep_size == 1 and tp_size == 4:
+            from .ppu_tp_moe import PpuTPMoE
+
+            return PpuTPMoE(*args, platform_provider=self, **kwargs)
+        _fail_closed(f"MoE construction for tp_size={tp_size!r}, ep_size={ep_size!r}")
 
     def build_fp8_linear(
         self, default_factory: Callable[..., Any], *args: Any, **kwargs: Any

@@ -1,12 +1,13 @@
 """Exercise MoE routing order and pending shared-output ownership."""
 
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.moe.moe_layer import MoE
+from rtp_llm.platforms.ppu.models.dsv4.ppu_ep_moe import PpuEPMoE as MoE
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 
@@ -23,9 +24,10 @@ class SharedScheduleTest(unittest.TestCase):
         model.dim = 8
         model.layer_id = 5
         model.max_tokens_per_rank = 8
-        model._gate_pack_static = False
-        model._routed_includes_shared = fused
-        model._should_chunk = lambda tokens: False
+        model._is_decode_role = False
+        model.chunking_enabled = True
+        model._observer_factory = None
+        model._record_function_scope = nullcontext
         model.shared_experts = object()
         calls, pending = [], []
 
@@ -65,7 +67,7 @@ class SharedScheduleTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
             return_value=False,
         ), patch(
-            "rtp_llm.models_py.modules.dsv4.moe.moe_layer.combine_routed_and_shared",
+            "rtp_llm.platforms.ppu.models.dsv4.ppu_ep_moe.combine_routed_and_shared",
             side_effect=_combine,
         ):
             for early in (False, True):
@@ -99,10 +101,17 @@ class SharedScheduleTest(unittest.TestCase):
             )
             self.assertFalse(pending)
 
-    def test_fused_strategy_does_not_start_a_standalone_shared_expert(self):
-        model, calls, _ = self.model(True, fused=True)
-        model._route_and_start_shared(torch.ones(1, 8), torch.zeros(1))
-        self.assertEqual(calls, ["route"])
+    def test_routed_failure_drains_started_shared_work(self):
+        model, calls, pending = self.model(True)
+
+        def fail(*args):
+            raise ValueError("routed failed")
+
+        model._strategy = fail
+        with self.assertRaisesRegex(ValueError, "routed failed"):
+            model(torch.ones(1, 8), torch.zeros(1))
+        self.assertEqual(calls, ["start", "route", "finish"])
+        self.assertFalse(pending)
 
     def test_provider_owns_early_shared_execution(self):
         provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)

@@ -10,7 +10,7 @@ from unittest.mock import patch
 import torch
 from safetensors import safe_open
 
-from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
     FusedSharedExpertFastPath,
     SequentialSharedExpertExecutor,
 )
@@ -55,7 +55,7 @@ class DecodeSharedExpertTest(unittest.TestCase):
         executor = self.provider.build_shared_expert_executor()
         executor.prepare(self.shared)
         torch.manual_seed(890413)
-        with patch.dict(os.environ, {"DSV4_MOE_STRICT_FUSED": "1"}), patch.object(
+        with patch.dict(os.environ, {"MOE_STRICT_FUSED": "1"}), patch.object(
             FusedSharedExpertFastPath,
             "run",
             side_effect=AssertionError("CUDA scale ABI"),
@@ -99,13 +99,15 @@ class DecodeSharedExpertTest(unittest.TestCase):
         executor.prepare(self.shared)
         with self.assertRaisesRegex(RuntimeError, "prepared module"):
             executor.start(torch.nn.Identity(), x)
-        with patch.dict(os.environ, {"DSV4_MOE_STRICT_FUSED": "1"}):
-            with self.assertRaisesRegex(RuntimeError, "forbids generic"):
+        with patch.dict(os.environ, {"MOE_STRICT_FUSED": "1"}):
+            with self.assertRaisesRegex(
+                RuntimeError, "forbids.*generic.*shared-expert fallback"
+            ):
                 SequentialSharedExpertExecutor().start(self.shared, x)
 
     @torch.inference_mode()
     def test_overlap_graph_joins_producer_and_consumer(self):
-        from rtp_llm.models_py.modules.dsv4.moe.moe_layer import MoE
+        from rtp_llm.platforms.ppu.models.dsv4.ppu_ep_moe import PpuEPMoE as MoE
 
         provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)
         executor = provider.build_shared_expert_executor()
@@ -133,7 +135,7 @@ class DecodeSharedExpertTest(unittest.TestCase):
 
         torch.manual_seed(890414)
         with patch.object(self.shared, "forward", side_effect=observed), patch.dict(
-            os.environ, {"DSV4_MOE_STRICT_FUSED": "1"}
+            os.environ, {"MOE_STRICT_FUSED": "1"}
         ):
             for batch in (1, 3, 8, 32, 128):
                 with self.subTest(batch=batch):
@@ -146,7 +148,7 @@ class DecodeSharedExpertTest(unittest.TestCase):
                             _routed_includes_shared=False,
                             _shared_executor=executor,
                             shared_experts=self.shared,
-                            _route=lambda values, ids: (values * 0.5, ids),
+                            gate=lambda values, ids: (values * 0.5, ids),
                         )
                         routed, _ = MoE._route_and_start_shared(context, x, None)
                         shared = executor.finish()
