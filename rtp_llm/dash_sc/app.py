@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import signal
 import threading
 import time
@@ -495,18 +496,55 @@ class DashScApp:
         self._enqueue_loop = None
         self._enqueue_loop_thread = None
 
+    def _dispatch_signal_events(self) -> None:
+        while True:
+            kind, signum = self._signal_events.get()
+            try:
+                if kind == "pre_stop":
+                    logging.info(
+                        "[DashScApp] received pre-stop drain signal %s", signum
+                    )
+                    self._start_pre_stop_watchdog(signum)
+                else:
+                    logging.info(
+                        "[DashScApp] received signal %s, shutting down", signum
+                    )
+                    keep_unavailable = (
+                        signum == signal.SIGTERM
+                        and self._effective_pre_stop_drain_seconds() > 0
+                    )
+                    self._begin_shutdown(signum, start_draining=not keep_unavailable)
+            except Exception:
+                # Never let the dispatcher die: a lost signal means a server that
+                # ignores SIGTERM.
+                logging.exception(
+                    "[DashScApp] signal dispatch failed for %s", signum
+                )
+
     def _install_signal_handlers(self) -> None:
+        # Signal handlers run on the main thread and can be entered mid-update,
+        # so they must not log or take locks: _begin_shutdown's logging can
+        # re-enter the stderr writer and raise "reentrant call inside
+        # <_io.BufferedWriter ...>", which escapes the handler and takes the
+        # shutdown path with it. SimpleQueue.put is reentrant-safe and usable
+        # from a handler, so the handlers only hand the signal over and return;
+        # the worker below does the real work off the handler. Same approach as
+        # FrontendApp.
+        self._signal_events: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._signal_worker = threading.Thread(
+            target=self._dispatch_signal_events,
+            name="dash-sc-signal-dispatch",
+            daemon=True,
+        )
+        self._signal_worker.start()
+
         def _drain_only_handler(signum, frame):
-            logging.info("[DashScApp] received pre-stop drain signal %s", signum)
-            self._start_pre_stop_watchdog(signum)
+            # Signal-handler context: hand off and return.
+            self._signal_events.put(("pre_stop", signum))
 
         def _handler(signum, frame):
-            logging.info("[DashScApp] received signal %s, shutting down", signum)
-            keep_unavailable = (
-                signum == signal.SIGTERM
-                and self._effective_pre_stop_drain_seconds() > 0
-            )
-            self._begin_shutdown(signum, start_draining=not keep_unavailable)
+            # Signal-handler context: hand off and return.
+            self._signal_events.put(("exit", signum))
 
         try:
             try:
