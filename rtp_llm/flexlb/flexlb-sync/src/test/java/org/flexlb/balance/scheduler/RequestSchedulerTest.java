@@ -4,6 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -12,6 +13,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -19,10 +21,14 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,8 +36,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -479,76 +487,207 @@ class RequestSchedulerTest {
     }
 
     @Test
-    void endpointConflictNeverLetsSameEndpointSuffixOvertake() {
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        SchedulingTestConfig.useFifoQueue(config);
-        config.queueScheduler().getDecision().setMaxCollectionWaitMs(0L);
-        ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(config);
-        DefaultRouter router = mock(DefaultRouter.class);
-        when(router.queueAdmissionRole()).thenReturn(RoleType.PREFILL);
-        EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
-        when(endpointRegistry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);
-        RequestRegistry lifecycle = mock(RequestRegistry.class);
-        PlacementAvailability availability = new PlacementAvailability();
+    void endpointConflictNeverLetsSameEndpointSuffixOvertake() throws Exception {
+        try (CapacityFixture fixture = new CapacityFixture(0, false)) {
+            fixture.submitBlockedRequests();
+            assertEquals(List.of(), fixture.admitted);
+            assertEquals(1, fixture.requests.get(0).attempts.get());
+            assertEquals(0, fixture.requests.get(1).attempts.get());
+            assertEquals(0, fixture.requests.get(2).attempts.get());
 
-        BalanceContext older = context(805L);
-        BalanceContext younger = context(806L);
-        CompletableFuture<Response> olderFuture = new CompletableFuture<>();
-        CompletableFuture<Response> youngerFuture = new CompletableFuture<>();
-        when(lifecycle.register(older)).thenReturn(olderFuture);
-        when(lifecycle.register(younger)).thenReturn(youngerFuture);
-        when(lifecycle.claimAdmissionMutation(805L, olderFuture)).thenReturn(
-                mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(806L, youngerFuture)).thenReturn(
-                mock(AdmissionMutation.class));
+            fixture.releaseSlots(1);
+            fixture.requests.get(0).future.get(5, TimeUnit.SECONDS);
+            assertTrue(fixture.requests.get(1).blockedAttempt.await(5, TimeUnit.SECONDS),
+                    "the next waiter must confirm that the single released slot was consumed");
+            fixture.awaitIndependentCommit();
+            assertEquals(List.of(820L), fixture.admitted);
+            assertEquals(0, fixture.availableSlots.get());
+            assertEquals(1, fixture.requests.get(1).attempts.get());
+            assertEquals(0, fixture.requests.get(2).attempts.get(),
+                    "the suffix must remain parked behind the first confirming miss");
 
-        PrefillEndpoint fullEndpoint = mock(PrefillEndpoint.class);
-        RouteAdmission olderRoute = mock(RouteAdmission.class);
-        RouteAdmission youngerRoute = mock(RouteAdmission.class);
-        ScheduledRequest olderItem = mock(ScheduledRequest.class);
-        PlacementKey exactBlocker = PlacementKey.exact(
-                RoleType.PREFILL, "g1", "full-prefill:8080");
-        when(router.select(older, null)).thenReturn(
-                PlacementResult.success(olderRoute));
-        when(router.select(younger, null)).thenReturn(
-                PlacementResult.success(youngerRoute));
-        when(olderRoute.tryEnqueue(older, olderFuture, lifecycle))
-                .thenReturn(
-                        PlacementResult.blocked(exactBlocker),
-                        PlacementResult.success(olderItem));
-        when(olderRoute.blockedEndpoint()).thenReturn(fullEndpoint);
-        when(fullEndpoint.ipPort()).thenReturn("full-prefill:8080");
-        when(olderRoute.prefillEndpoint()).thenReturn(fullEndpoint);
-        when(youngerRoute.prefillEndpoint()).thenReturn(fullEndpoint);
-        when(olderItem.prefillEp()).thenReturn(fullEndpoint);
+            // Another ingress wakeup does not grant capacity or retry the blocked head.
+            fixture.awaitIndependentCommit();
+            assertEquals(1, fixture.requests.get(1).attempts.get());
+            assertEquals(0, fixture.requests.get(2).attempts.get());
 
-        RequestScheduler scheduler = new RequestScheduler(
-                configService,
-                router,
-                endpointRegistry,
-                mock(BatchSchedulerReporter.class),
-                mock(EvictionManager.class),
-                lifecycle,
-                availability);
-        try {
-            scheduler.submit(older);
-            scheduler.submit(younger);
+            fixture.releaseSlots(2);
+            fixture.awaitAllPublished();
+            assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
+            assertEquals(0, fixture.availableSlots.get());
+        }
+    }
 
-            verify(olderRoute, timeout(1_000).times(1))
-                    .tryEnqueue(older, olderFuture, lifecycle);
-            verify(youngerRoute, after(100).never())
-                    .tryEnqueue(younger, youngerFuture, lifecycle);
-            assertFalse(olderFuture.isDone());
-            assertFalse(youngerFuture.isDone());
+    @Test
+    void oneCapacityEventAdmitsAllReleasedSlotsInFifoOrder() throws Exception {
+        assertReleasedCapacityAdmitsWaiters(3, 0);
+    }
 
-            availability.capacityChanged(exactBlocker);
-            verify(olderRoute, timeout(1_000).times(2))
-                    .tryEnqueue(older, olderFuture, lifecycle);
-            verify(youngerRoute, after(100).never())
-                    .tryEnqueue(younger, youngerFuture, lifecycle);
-        } finally {
-            scheduler.closePlacement();
+    @Test
+    void capacityReleasedDuringPublicationAdmitsWaitersWithoutAnotherEvent() throws Exception {
+        assertReleasedCapacityAdmitsWaiters(1, 2);
+    }
+
+    @Test
+    void capacityReleasedBeforeBlockedReturnRetriesActiveRequestWithoutLosingWakeup() throws Exception {
+        try (CapacityFixture fixture = new CapacityFixture(0, false)) {
+            fixture.submitBlockedRequests();
+            CapacityRequest head = fixture.requests.get(0);
+            head.beforeBlockedReturn = () -> fixture.releaseSlots(1);
+
+            // Activate the head while the endpoint is still full. Its failed
+            // admission publishes a release after reading capacity but before park.
+            fixture.availability.capacityChanged(fixture.key);
+            head.future.get(5, TimeUnit.SECONDS);
+            assertTrue(fixture.requests.get(1).blockedAttempt.await(5, TimeUnit.SECONDS));
+            fixture.awaitIndependentCommit();
+
+            assertEquals(List.of(820L), fixture.admitted);
+            assertEquals(0, fixture.availableSlots.get());
+            assertEquals(3, head.attempts.get(),
+                    "the stale full observation must trigger a fresh successful admission");
+            assertEquals(1, fixture.requests.get(1).attempts.get());
+            assertEquals(0, fixture.requests.get(2).attempts.get());
+            fixture.awaitIndependentCommit();
+            assertEquals(1, fixture.requests.get(1).attempts.get(),
+                    "the confirming miss must stop the chain until another capacity edge");
+        }
+    }
+
+    @Test
+    void fullSourceEndpointStopsActiveRetriesBeforeRoutingThemToAnotherFullEndpoint() throws Exception {
+        try (CapacityFixture fixture = new CapacityFixture(0, false,
+                new CompletableFuture<>(), 1)) {
+            WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
+            when(pin.endpoint()).thenReturn(fixture.endpoint);
+            when(fixture.endpoint.tryPinGeneration()).thenReturn(pin);
+            when(fixture.endpoint.canAcceptRequest()).thenAnswer(
+                    invocation -> fixture.availableSlots.get() > 0);
+            fixture.submitBlockedRequests();
+
+            PrefillEndpoint otherFullEndpoint = mock(PrefillEndpoint.class);
+            PlacementKey otherKey = PlacementKey.exact(
+                    RoleType.PREFILL, "g1", "other-full-prefill:8080");
+            when(otherFullEndpoint.ipPort()).thenReturn(otherKey.endpoint());
+            for (CapacityRequest request : fixture.requests.subList(1, 3)) {
+                RouteAdmission otherRoute = mock(RouteAdmission.class);
+                when(otherRoute.prefillEndpoint()).thenReturn(otherFullEndpoint);
+                when(otherRoute.blockedEndpoint()).thenReturn(otherFullEndpoint);
+                when(otherRoute.tryEnqueue(request.context, request.future, fixture.lifecycle))
+                        .thenReturn(PlacementResult.blocked(otherKey));
+                doAnswer(invocation -> PlacementResult.success(
+                        fixture.availableSlots.get() > 0 ? request.route : otherRoute))
+                        .when(fixture.router).select(request.context, null);
+            }
+
+            fixture.releaseSlots(1);
+            fixture.requests.get(0).future.get(5, TimeUnit.SECONDS);
+            fixture.awaitIndependentCommit();
+            assertEquals(List.of(820L), fixture.admitted);
+            for (CapacityRequest request : fixture.requests.subList(1, 3)) {
+                verify(fixture.router, times(1)).select(request.context, null);
+                assertEquals(0, request.attempts.get(),
+                        "a full source must stop the chain before migrating its waiters");
+            }
+
+            fixture.releaseSlots(2);
+            fixture.awaitAllPublished();
+            assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
+            assertEquals(0, fixture.availableSlots.get());
+            for (CapacityRequest request : fixture.requests.subList(1, 3)) {
+                verify(fixture.router, times(2)).select(request.context, null);
+            }
+        }
+    }
+
+    @Test
+    void cancellingActiveRetryHandsUnusedCapacityToNextWaiter() throws Exception {
+        try (CapacityFixture fixture = new CapacityFixture(0, true)) {
+            fixture.submitBlockedRequests();
+            fixture.releaseSlots(1);
+            assertTrue(fixture.headRetryStarted.await(5, TimeUnit.SECONDS));
+
+            assertTrue(fixture.requests.get(0).future.cancel(false));
+            fixture.allowHeadRetry.countDown();
+            fixture.requests.get(1).future.get(5, TimeUnit.SECONDS);
+            assertTrue(fixture.requests.get(2).blockedAttempt.await(5, TimeUnit.SECONDS));
+            fixture.awaitIndependentCommit();
+
+            assertEquals(List.of(821L), fixture.admitted);
+            assertEquals(0, fixture.availableSlots.get());
+            assertEquals(1, fixture.requests.get(0).attempts.get(),
+                    "the cancelled active request must not consume the released slot");
+            assertEquals(1, fixture.requests.get(2).attempts.get());
+        }
+    }
+
+    @Test
+    void pruningCompletedActiveRetryPreservesHandoffBeforeDelayedCompletionCallback() throws Exception {
+        ConcurrentLinkedQueue<Runnable> callbacks = new ConcurrentLinkedQueue<>();
+        CompletableFuture<Response> headFuture = new CompletableFuture<>() {
+            @Override
+            public CompletableFuture<Response> whenComplete(
+                    BiConsumer<? super Response, ? super Throwable> action) {
+                return super.whenCompleteAsync(action, callbacks::add);
+            }
+        };
+        try (CapacityFixture fixture = new CapacityFixture(0, false, headFuture, 1)) {
+            fixture.submitBlockedRequests();
+            PrefillEndpoint independent = mock(PrefillEndpoint.class);
+            when(independent.ipPort()).thenReturn("independent:8080");
+            when(independent.getIp()).thenReturn("independent");
+            CapacityRequest first = fixture.createRequest(840L, independent);
+            CountDownLatch publicationStarted = new CountDownLatch(1);
+            CountDownLatch allowPublication = new CountDownLatch(1);
+            first.beforePublication = () -> {
+                publicationStarted.countDown();
+                assertTrue(allowPublication.await(5, TimeUnit.SECONDS));
+                return null;
+            };
+            try {
+                fixture.scheduler.submit(first.context);
+                assertTrue(publicationStarted.await(5, TimeUnit.SECONDS));
+                fixture.releaseSlots(1);
+                assertTrue(headFuture.complete(new Response()));
+                assertEquals(1, callbacks.size(), "the completed active request's cleanup must still be deferred");
+
+                CapacityRequest second = fixture.createRequest(841L, independent);
+                fixture.scheduler.submit(second.context);
+                allowPublication.countDown();
+                // With a one-plan frontier, this request cannot commit until
+                // the decision thread has run its next completed-head prune.
+                second.future.get(5, TimeUnit.SECONDS);
+                assertEquals(1, callbacks.size(), "pruning must not rely on running completion callbacks");
+                assertTrue(fixture.requests.get(1).future.isDone(),
+                        "head pruning must hand off before the delayed completion callback runs");
+                Runnable callback;
+                while ((callback = callbacks.poll()) != null) {
+                    callback.run();
+                }
+
+                // Even a subsequent edge must not be swallowed by an active request
+                // that was removed from the ordered queue during pruning.
+                fixture.availability.capacityChanged(fixture.key);
+                fixture.requests.get(1).future.get(5, TimeUnit.SECONDS);
+                assertEquals(List.of(821L), fixture.admitted);
+                assertEquals(0, fixture.availableSlots.get());
+                assertEquals(1, fixture.requests.get(0).attempts.get());
+            } finally {
+                allowPublication.countDown();
+            }
+        }
+    }
+
+    private void assertReleasedCapacityAdmitsWaiters(
+            int initiallyReleasedSlots,
+            int slotsReleasedDuringPublication) throws Exception {
+        try (CapacityFixture fixture = new CapacityFixture(slotsReleasedDuringPublication, false)) {
+            fixture.submitBlockedRequests();
+            fixture.releaseSlots(initiallyReleasedSlots);
+            fixture.awaitAllPublished();
+
+            assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
+            assertEquals(0, fixture.availableSlots.get());
         }
     }
 
@@ -689,6 +828,189 @@ class RequestSchedulerTest {
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 priority, System.currentTimeMillis() + 60_000L));
         return context;
+    }
+
+    /** Real ordered scheduler with an exact endpoint whose free slots are explicitly controlled. */
+    private static final class CapacityFixture implements AutoCloseable {
+        private final DefaultRouter router = mock(DefaultRouter.class);
+        private final RequestRegistry lifecycle = mock(RequestRegistry.class);
+        private final PlacementAvailability availability = new PlacementAvailability();
+        private final PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        private final PlacementKey key = PlacementKey.exact(
+                RoleType.PREFILL, "g1", "capacity-prefill:8080");
+        private final AtomicInteger availableSlots = new AtomicInteger();
+        private final List<Long> admitted = new CopyOnWriteArrayList<>();
+        private final List<CapacityRequest> requests = new ArrayList<>();
+        private final ConcurrentLinkedQueue<CapacityRequest> pendingReports = new ConcurrentLinkedQueue<>();
+        private final CountDownLatch followersParked = new CountDownLatch(2);
+        private final CountDownLatch allPublished = new CountDownLatch(3);
+        private final CountDownLatch headRetryStarted = new CountDownLatch(1);
+        private final CountDownLatch allowHeadRetry = new CountDownLatch(1);
+        private final int slotsReleasedDuringPublication;
+        private final boolean pauseHeadRetry;
+        private final CompletableFuture<Response> headFuture;
+        private final RequestScheduler scheduler;
+        private long nextIndependentId = 830L;
+
+        private CapacityFixture(int slotsReleasedDuringPublication, boolean pauseHeadRetry) {
+            this(slotsReleasedDuringPublication, pauseHeadRetry, new CompletableFuture<>(), 0);
+        }
+
+        private CapacityFixture(int slotsReleasedDuringPublication, boolean pauseHeadRetry,
+                CompletableFuture<Response> headFuture, int plannerThreads) {
+            this.slotsReleasedDuringPublication = slotsReleasedDuringPublication;
+            this.pauseHeadRetry = pauseHeadRetry;
+            this.headFuture = headFuture;
+            FlexlbConfig config = SchedulingTestConfig.batchConfig();
+            if (plannerThreads > 0) {
+                config = spy(config);
+                var runtime = spy(config.getInternalRuntime());
+                when(runtime.getQueuePlannerThreads()).thenReturn(plannerThreads);
+                when(config.getInternalRuntime()).thenReturn(runtime);
+            }
+            SchedulingTestConfig.useFifoQueue(config);
+            SchedulingTestConfig.useSingleDecision(config);
+            SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(3);
+            ConfigService configService = mock(ConfigService.class);
+            when(configService.loadBalanceConfig()).thenReturn(config);
+            when(endpoint.ipPort()).thenReturn(key.endpoint());
+            when(endpoint.getIp()).thenReturn("capacity-prefill");
+
+            BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+            doAnswer(invocation -> {
+                CapacityRequest request = pendingReports.remove();
+                // The coordinator reports only after retiring the queue entry. Completing
+                // here cannot hide a lost handoff with an earlier completion callback.
+                request.future.complete(new Response());
+                if (request.primaryEndpoint) {
+                    allPublished.countDown();
+                }
+                return null;
+            }).when(reporter).reportRouteSubmitTimeMs(any(), any(), anyLong());
+            for (long requestId = 820L; requestId < 823L; requestId++) {
+                requests.add(createRequest(requestId, endpoint));
+            }
+            scheduler = new RequestScheduler(
+                    configService,
+                    router,
+                    mock(EndpointRegistry.class),
+                    reporter,
+                    mock(EvictionManager.class),
+                    lifecycle,
+                    availability);
+        }
+
+        private CapacityRequest createRequest(long requestId, PrefillEndpoint target) {
+            CapacityRequest request = new CapacityRequest(requestId, target == endpoint,
+                    requestId == 820L ? headFuture : new CompletableFuture<>());
+            RouteAdmission route = request.route;
+            ScheduledRequest item = mock(ScheduledRequest.class);
+            ServerStatus prefill = mock(ServerStatus.class);
+            when(prefill.getRole()).thenReturn(RoleType.PREFILL);
+            when(item.prefill()).thenReturn(prefill);
+            when(item.prefillEp()).thenReturn(target);
+            when(lifecycle.register(request.context)).thenReturn(request.future);
+            when(lifecycle.claimAdmissionMutation(requestId, request.future))
+                    .thenReturn(mock(AdmissionMutation.class));
+            when(route.prefillEndpoint()).thenReturn(target);
+            when(route.blockedEndpoint()).thenReturn(target);
+            AtomicInteger plans = new AtomicInteger();
+            when(router.select(request.context, null)).thenAnswer(invocation -> {
+                if (plans.incrementAndGet() == 2 && requestId == 820L && pauseHeadRetry) {
+                    headRetryStarted.countDown();
+                    assertTrue(allowHeadRetry.await(5, TimeUnit.SECONDS),
+                            "the cancelled active request's planning gate must be released");
+                }
+                return PlacementResult.success(route);
+            });
+            when(route.tryEnqueue(request.context, request.future, lifecycle)).thenAnswer(invocation -> {
+                request.attempts.incrementAndGet();
+                request.beforePublication.call();
+                if (request.primaryEndpoint) {
+                    int slots = availableSlots.getAndUpdate(value -> value > 0 ? value - 1 : value);
+                    if (slots == 0) {
+                        request.blockedAttempt.countDown();
+                        Runnable hook = request.beforeBlockedReturn;
+                        request.beforeBlockedReturn = null;
+                        if (hook != null) {
+                            hook.run();
+                        }
+                        return PlacementResult.blocked(key);
+                    }
+                    admitted.add(requestId);
+                    if (requestId == 820L && slotsReleasedDuringPublication > 0) {
+                        // Status reconciliation releases capacity before publication returns
+                        // and before the global queue can retire this active request.
+                        releaseSlots(slotsReleasedDuringPublication);
+                    }
+                }
+                pendingReports.add(request);
+                return PlacementResult.success(item);
+            });
+            AtomicInteger closes = new AtomicInteger();
+            doAnswer(invocation -> {
+                if (closes.incrementAndGet() == 1
+                        && request.primaryEndpoint && requestId != 820L) {
+                    // Followers close their first plan only after the endpoint
+                    // conflict has parked them behind the initially full head.
+                    followersParked.countDown();
+                }
+                return null;
+            }).when(route).close();
+            return request;
+        }
+
+        private void submitBlockedRequests() throws InterruptedException {
+            for (CapacityRequest request : requests) {
+                scheduler.submit(request.context);
+            }
+            assertTrue(followersParked.await(5, TimeUnit.SECONDS),
+                    "all three requests must be parked before the first capacity event");
+        }
+
+        private void releaseSlots(int count) {
+            availableSlots.addAndGet(count);
+            availability.capacityChanged(key);
+        }
+
+        private void awaitAllPublished() throws InterruptedException {
+            assertTrue(allPublished.await(5, TimeUnit.SECONDS),
+                    () -> "released slots must be consumed without another event; admitted=" + admitted
+                            + ", freeSlots=" + availableSlots.get());
+        }
+
+        private void awaitIndependentCommit() throws Exception {
+            long requestId = nextIndependentId++;
+            PrefillEndpoint independent = mock(PrefillEndpoint.class);
+            when(independent.ipPort()).thenReturn("independent-" + requestId + ":8080");
+            when(independent.getIp()).thenReturn("independent-" + requestId);
+            CapacityRequest request = createRequest(requestId, independent);
+            scheduler.submit(request.context);
+            request.future.get(5, TimeUnit.SECONDS);
+        }
+
+        @Override
+        public void close() {
+            allowHeadRetry.countDown();
+            scheduler.closePlacement();
+        }
+    }
+
+    private static final class CapacityRequest {
+        private final BalanceContext context;
+        private final CompletableFuture<Response> future;
+        private final AtomicInteger attempts = new AtomicInteger();
+        private final RouteAdmission route = mock(RouteAdmission.class);
+        private final CountDownLatch blockedAttempt = new CountDownLatch(1);
+        private final boolean primaryEndpoint;
+        private Callable<Void> beforePublication = () -> null;
+        private Runnable beforeBlockedReturn;
+
+        private CapacityRequest(long requestId, boolean primaryEndpoint, CompletableFuture<Response> future) {
+            context = context(requestId);
+            this.primaryEndpoint = primaryEndpoint;
+            this.future = future;
+        }
     }
 
     private static final class Fixture {
