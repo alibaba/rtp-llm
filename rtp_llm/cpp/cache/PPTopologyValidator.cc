@@ -30,6 +30,32 @@ PPValidationResult fail(std::string error) {
     return result;
 }
 
+// Fills per-tag construction inputs from the completed canonical table.
+void deriveConstructionInputs(PPValidationResult& result) {
+    uint32_t paged_min = std::numeric_limits<uint32_t>::max();
+    uint32_t any_max   = 0;
+    result.agreed.block_num_overrides.clear();
+    result.agreed.block_num_overrides.reserve(result.canonical_groups.size());
+    for (const auto& entry : result.canonical_groups) {
+        result.agreed.block_num_overrides.emplace(entry.tag, entry.logical_block_num);
+        any_max = std::max(any_max, entry.logical_block_num);
+        // Explicit and SWA pools are decoupled from the paged yardstick.
+        const bool follows_global_budget =
+            entry.explicit_block_num == 0
+            && (entry.type == CacheGroupType::FULL || entry.type == CacheGroupType::LINEAR);
+        if (follows_global_budget) {
+            paged_min = std::min(paged_min, entry.logical_block_num);
+        }
+    }
+    if (paged_min == std::numeric_limits<uint32_t>::max()) {
+        // All pools explicitly sized, so nothing follows the budget: take the
+        // largest so the top-level value never understates an actual pool.
+        paged_min = any_max;
+    }
+    RTP_LLM_CHECK_WITH_INFO(paged_min > 0, "PP canonical table yielded a non-positive top-level block count");
+    result.agreed.paged_block_num = paged_min;
+}
+
 }  // namespace
 
 bool StageCacheSnapshot::internallyConsistent() const {
@@ -182,6 +208,7 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                 entry.policy_fingerprint        = stages[0].policy_fingerprints[g];
                 result.canonical_groups.push_back(std::move(entry));
             }
+            deriveConstructionInputs(result);
         }
         return result;
     }
@@ -348,6 +375,7 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
     }
 
     result.ok = true;
+    deriveConstructionInputs(result);
     return result;
 }
 
@@ -371,60 +399,45 @@ std::vector<StageCacheSnapshot> PPSnapshotCollector::collect() {
     return stages;
 }
 
-void applyPPLogicalBlockNums(CacheConfig& config, const PPValidationResult& validation) {
-    RTP_LLM_CHECK_WITH_INFO(validation.ok, "applyPPLogicalBlockNums requires a successful PP validation");
-    const size_t group_num = static_cast<size_t>(config.groupNums());
-    if (group_num == 0) {
-        return;
-    }
-
-    // Pair by tag; strides untouched (geometry already validated).
-    std::unordered_map<std::string, uint32_t> logical_blocks;
-    logical_blocks.reserve(validation.canonical_groups.size());
-    // Top-level block_num only follows the budget-following paged pools.
-    uint32_t paged_min = std::numeric_limits<uint32_t>::max();
-    for (const auto& entry : validation.canonical_groups) {
-        logical_blocks.emplace(entry.tag, entry.logical_block_num);
-        const bool follows_global_budget =
-            entry.explicit_block_num == 0
-            && (entry.type == CacheGroupType::FULL || entry.type == CacheGroupType::LINEAR);
-        if (follows_global_budget) {
-            paged_min = std::min(paged_min, entry.logical_block_num);
-        }
-    }
-
-    std::vector<uint32_t> block_nums;
-    std::vector<size_t>   kv_strides;
-    std::vector<size_t>   scale_strides;
-    block_nums.reserve(group_num);
-    kv_strides.reserve(group_num);
-    scale_strides.reserve(group_num);
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        const auto& group = config.topology().groupById(gid);
-        const auto  it    = logical_blocks.find(group.tag);
-        RTP_LLM_CHECK_WITH_INFO(it != logical_blocks.end(),
+void validatePPComposedBlockNums(const CacheConfig& composed, const NegotiatedCapacity& agreed) {
+    for (const auto& group : composed.topology().groups()) {
+        const auto it = agreed.block_num_overrides.find(group.tag);
+        RTP_LLM_CHECK_WITH_INFO(it != agreed.block_num_overrides.end(),
                                 "local group [%s] is missing from the PP canonical group table",
                                 group.tag.c_str());
-        // The min includes this stage's snapshot, so a violation means capacity changed after the exchange.
-        RTP_LLM_CHECK_WITH_INFO(group.block_num >= it->second,
-                                "local group [%s] block_num %u is below the PP canonical logical min %u; "
-                                "local capacity changed after the startup snapshot exchange",
+        // Equality holds by construction; a mismatch means the table lost a tag
+        // or local capacity moved after the negotiation.
+        RTP_LLM_CHECK_WITH_INFO(group.block_num == it->second,
+                                "composed group [%s] block_num %u != cross-stage agreed %u",
                                 group.tag.c_str(),
                                 group.block_num,
                                 it->second);
-        block_nums.push_back(it->second);
-        kv_strides.push_back(group.kv_block_stride_bytes);
-        scale_strides.push_back(group.kv_scale_stride_bytes);
     }
+}
 
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
-    // Keep the top-level block count consistent with the capped paged pools; only decreases.
-    if (paged_min != std::numeric_limits<uint32_t>::max() && config.block_num > static_cast<int>(paged_min)) {
-        RTP_LLM_LOG_INFO("PP logical capacity caps local block_num %d to %u (paged-pool canonical min)",
-                         config.block_num,
-                         paged_min);
-        config.block_num = static_cast<int>(paged_min);
+PPValidationResult PPCacheCapacityNegotiator::negotiate(const CacheConfig&   topology,
+                                                        uint32_t             local_block_num,
+                                                        const RuntimeConfig& runtime_config) {
+    // Startup barrier: every stage reports its geometry and stage-aligned
+    // capacity, then all reduce the collected snapshots to the same per-tag
+    // minima. The snapshot derives counts on a throwaway copy through the same
+    // finalize rule the composition uses.
+    CacheConfig sized = topology;
+    sized.finalizeBlockNums(local_block_num, runtime_config);
+    PPSnapshotCollector collector(StageCacheSnapshot::fromConfig(sized));
+    auto                validation = initPPCacheGeometry(collector, capacity_skew_threshold_);
+    if (!validation.ok) {
+        RTP_LLM_FAIL("PP cache topology validation failed: %s", validation.error.c_str());
     }
+    RTP_LLM_LOG_INFO("PP cache negotiation: local block_num %u -> agreed paged %u over %zu canonical groups",
+                     local_block_num,
+                     validation.agreed.paged_block_num,
+                     validation.canonical_groups.size());
+    return validation;
+}
+
+void PPCacheCapacityNegotiator::validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed) {
+    validatePPComposedBlockNums(composed, agreed);
 }
 
 void applyPPCanonicalIndices(CacheConfig& config, const PPValidationResult& validation) {

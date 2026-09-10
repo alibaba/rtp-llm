@@ -531,40 +531,29 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
-        /* Fail-fast cross-stage cache geometry validation: runs after computeBlockNum
-           (counts final) and before any request traffic, so it acts as a startup barrier. */
-        PPValidationResult pp_validation;
-        {
-            const auto                              local_snapshot = StageCacheSnapshot::fromConfig(result);
-            std::unique_ptr<StageSnapshotCollector> pp_snapshot_collector;
-            if (parallelism_config.pp_size > 1) {
-                pp_snapshot_collector = std::make_unique<PPSnapshotCollector>(local_snapshot);
-            } else {
-                pp_snapshot_collector = std::make_unique<LocalStageSnapshotCollector>(local_snapshot);
-            }
-            pp_validation = initPPCacheGeometry(*pp_snapshot_collector);
-            RTP_LLM_CHECK_WITH_INFO(
-                pp_validation.ok, "pp cache geometry validation failed: %s", pp_validation.error.c_str());
-        }
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          result.block_num,
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        // The manager caps per-group block counts to the validated cross-stage min before building pools.
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            result,
-            false,
-            metrics_reporter_,
-            kv_cache_config,
-            parallelism_config,
-            runtime_config,
-            SpeculativeExecutionConfig{},
-            pd_sep_config,
-            cache_store_config,
-            use_cuda_malloc_block_pool,
-            parallelism_config.pp_size > 1 ? std::make_optional(pp_validation) : std::nullopt);
-        resource_context_.role_type = pd_sep_config.role_type;
+        // PP stages agree on cache capacity inside allocateAndSync, before any
+        // pool exists; the hook keeps the exchange and its rules out of the engine.
+        std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
+        if (parallelism_config.pp_size > 1) {
+            pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
+        }
+        resource_context_.cache_manager = make_shared<KVCacheManager>(result,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      kv_cache_config,
+                                                                      parallelism_config,
+                                                                      runtime_config,
+                                                                      SpeculativeExecutionConfig{},
+                                                                      pd_sep_config,
+                                                                      cache_store_config,
+                                                                      use_cuda_malloc_block_pool,
+                                                                      pp_negotiator);
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -744,8 +733,8 @@ absl::Status NormalEngine::step() {
 absl::Status NormalEngine::pp_step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.pp_step_work");
 
-    const int64_t pp_rank                  = parallelism_config.pp_rank;
-    const bool    is_first_stage_scheduler = pp_rank == 0 && parallelism_config.tp_rank == 0;
+    // pp_rank is materialized by the Python-side RankLayout at startup.
+    const bool is_first_stage_scheduler = parallelism_config.pp_rank == 0 && parallelism_config.tp_rank == 0;
 
     // Pauses only new admission so other ranks keep draining in-flight batches.
     if (is_first_stage_scheduler) {

@@ -459,14 +459,30 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
     setTopology(std::move(new_groups), std::move(new_layers));
 }
 
-void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
+                                    const RuntimeConfig&       runtime_config,
+                                    const PPBlockNumOverrides* pp_overrides) {
     // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
     (void)runtime_config;
+    // Per-tag PP agreement wins over the derivation rule; a non-positive
+    // agreed count cannot size a pool and aborts startup.
+    const auto resolve_override = [pp_overrides](const std::string& tag, uint32_t rule_blocks) {
+        if (pp_overrides == nullptr) {
+            return rule_blocks;
+        }
+        const auto it = pp_overrides->find(tag);
+        if (it == pp_overrides->end()) {
+            return rule_blocks;
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            it->second > 0, "PP block-count override for tag=%s must be positive, got %u", tag.c_str(), it->second);
+        return it->second;
+    };
     if (global_block_num > 0) {
         block_num = global_block_num;
         for (auto& sub_cfg : mtp_sub_configs) {
             if (sub_cfg != nullptr) {
-                sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
+                sub_cfg->finalizeBlockNums(global_block_num, runtime_config, pp_overrides);
             }
         }
     }
@@ -476,7 +492,7 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         if (groupNums() > 0) {
             auto groups = topology().groups();
             for (auto& group : groups) {
-                group.block_num = global_block_num;
+                group.block_num = resolve_override(group.tag, global_block_num);
             }
             setTopology(std::move(groups), topology().layers());
         }
@@ -494,11 +510,11 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         } else if (groups[gid].policy.group_type == CacheGroupType::SWA) {
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
-        groups[gid].block_num = rule_blocks;
+        groups[gid].block_num = resolve_override(groups[gid].tag, rule_blocks);
 
         // Only groups that opt in reserve paged-pool budget for explicit blocks.
         if (explicit_independent_blocks > 0 && groups[gid].policy.charge_to_paged_budget) {
-            reserve += static_cast<size_t>(rule_blocks) * groups[gid].layer_ids.size()
+            reserve += static_cast<size_t>(groups[gid].block_num) * groups[gid].layer_ids.size()
                        * (groups[gid].kv_block_stride_bytes + groups[gid].kv_scale_stride_bytes);
         }
     }

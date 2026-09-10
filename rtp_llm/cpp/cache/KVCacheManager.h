@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -30,19 +31,17 @@ class PrefillCacheHitMetricsReporter;
 
 class KVCacheManager {
 public:
-    /* pp_logical_capacity: validated cross-stage logical block counts, required under pp_size>1
-       (applied right after allocateAndSync's finalizeBlockNums); nullopt for pp_size<=1. */
-    KVCacheManager(const CacheConfig&                       config,
-                   bool                                     warmup                     = false,
-                   const kmonitor::MetricsReporterPtr       metrics_reporter           = nullptr,
-                   const KVCacheConfig&                     kv_cache_config            = KVCacheConfig{},
-                   const ParallelismConfig&                 parallelism_config         = ParallelismConfig{},
-                   const RuntimeConfig&                     runtime_config             = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&        sp_config                  = SpeculativeExecutionConfig{},
-                   const PDSepConfig&                       pd_sep_config              = PDSepConfig{},
-                   const CacheStoreConfig&                  cache_store_config         = CacheStoreConfig{},
-                   bool                                     use_cuda_malloc_block_pool = false,
-                   const std::optional<PPValidationResult>& pp_logical_capacity        = std::nullopt);
+    KVCacheManager(const CacheConfig&                              config,
+                   bool                                            warmup             = false,
+                   const kmonitor::MetricsReporterPtr              metrics_reporter   = nullptr,
+                   const KVCacheConfig&                            kv_cache_config    = KVCacheConfig{},
+                   const ParallelismConfig&                        parallelism_config = ParallelismConfig{},
+                   const RuntimeConfig&                            runtime_config     = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&               sp_config          = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                              pd_sep_config      = PDSepConfig{},
+                   const CacheStoreConfig&                         cache_store_config = CacheStoreConfig{},
+                   bool                                            use_cuda_malloc_block_pool = false,
+                   const std::shared_ptr<CacheCapacityNegotiator>& capacity_negotiator        = nullptr);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -182,15 +181,17 @@ private:
     CacheConfig         config_;
     KVCacheAllocatorPtr allocator_;
 
-    const kmonitor::MetricsReporterPtr      metrics_reporter_;
-    const KVCacheConfig                     kv_cache_config_;
-    const ParallelismConfig                 parallelism_config_;
-    const RuntimeConfig                     runtime_config_;
-    const SpeculativeExecutionConfig        sp_config_;
-    const PDSepConfig                       pd_sep_config_;
-    const CacheStoreConfig                  cache_store_config_;
-    const bool                              use_cuda_malloc_block_pool_;
-    const std::optional<PPValidationResult> pp_logical_capacity_;
+    const kmonitor::MetricsReporterPtr metrics_reporter_;
+    const KVCacheConfig                kv_cache_config_;
+    const ParallelismConfig            parallelism_config_;
+    const RuntimeConfig                runtime_config_;
+    const SpeculativeExecutionConfig   sp_config_;
+    const PDSepConfig                  pd_sep_config_;
+    const CacheStoreConfig             cache_store_config_;
+    const bool                         use_cuda_malloc_block_pool_;
+    // Cross-stage capacity agreement hook, required under pp_size>1; consulted
+    // in allocateAndSync after the intra-stage TP alignment.
+    const std::shared_ptr<CacheCapacityNegotiator> capacity_negotiator_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;

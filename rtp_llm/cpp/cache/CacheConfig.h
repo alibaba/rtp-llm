@@ -20,6 +20,8 @@
 
 namespace rtp_llm {
 
+using PPBlockNumOverrides = std::unordered_map<std::string, uint32_t>;
+
 // Residency (memory_placement) and budget (charge_to_paged_budget) are independent
 // knobs: CacheConfig::finalizeBlockNums only consults charge_to_paged_budget when it
 // accumulates explicitly_sized_pool_reserve_bytes. A pool that lives on host memory
@@ -355,7 +357,9 @@ public:
                                  const std::vector<CacheGroupType>&   types,
                                  const std::vector<std::string>&      tags     = {},
                                  const std::vector<CacheGroupPolicy>& policies = {});
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    void        finalizeBlockNums(uint32_t                   global_block_num,
+                                  const RuntimeConfig&       runtime_config,
+                                  const PPBlockNumOverrides* pp_overrides = nullptr);
     std::string debugString(size_t indent = 0) const;
 };
 

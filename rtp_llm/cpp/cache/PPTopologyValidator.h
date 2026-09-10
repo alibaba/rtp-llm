@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
@@ -49,6 +50,7 @@ struct PPValidationResult {
     std::string error;
     // Cross-stage union of cache groups; valid only when ok.
     std::vector<CanonicalGroupEntry> canonical_groups;
+    NegotiatedCapacity               agreed;  // construction inputs, valid when ok
 };
 
 /* Validates cache geometry across PP stages and builds the canonical group
@@ -92,11 +94,27 @@ private:
 // Collect + validate; on failure the caller must abort startup.
 PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector, double capacity_skew_threshold = 1.5);
 
-/* Sizes every local group to its canonical entry's cross-stage min, paired
-   by tag; a local count below the min aborts startup. Top-level block_num
-   follows the budget-following paged pools only. Must run after
-   finalizeBlockNums and before KVCacheManager::init(). */
-void applyPPLogicalBlockNums(CacheConfig& config, const PPValidationResult& validation);
+// Fuse over the composed config: every local group must carry exactly its
+// agreed count. A mismatch means a tag fell back to the derivation rule, or
+// local capacity moved after the negotiation.
+void validatePPComposedBlockNums(const CacheConfig& composed, const NegotiatedCapacity& agreed);
+
+// PP implementation of CacheCapacityNegotiator: exchange snapshots, validate,
+// and reduce the canonical table to the agreed inputs.
+// Both hooks abort startup on failure.
+class PPCacheCapacityNegotiator: public CacheCapacityNegotiator {
+public:
+    explicit PPCacheCapacityNegotiator(double capacity_skew_threshold = 1.5):
+        capacity_skew_threshold_(capacity_skew_threshold) {}
+
+    PPValidationResult
+    negotiate(const CacheConfig& topology, uint32_t local_block_num, const RuntimeConfig& runtime_config) override;
+
+    void validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed) override;
+
+private:
+    double capacity_skew_threshold_;
+};
 
 // Fills each local group's canonical_idx by tag pairing; must run before KVCacheManager::init().
 void applyPPCanonicalIndices(CacheConfig& config, const PPValidationResult& validation);

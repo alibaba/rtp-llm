@@ -22,11 +22,12 @@ namespace rtp_llm {
 enum class ParallelMode {
     TP = 0,
     DP = 1,
-    // TODO(naming debt): actually WORLD semantics (spans ALL ranks including every PP stage); never narrow per stage.
-    DP_AND_TP = 2,
-    FFN_TP    = 3,
-    EP        = 4,
-    EPLB      = 5,
+    // WORLD: spans ALL ranks including every PP stage; never narrow it per
+    // stage. Formerly named DP_AND_TP (pre-PP legacy).
+    WORLD  = 2,
+    FFN_TP = 3,
+    EP     = 4,
+    EPLB   = 5,
 };
 
 // A batch includes two parts: context batch and decoder batch.

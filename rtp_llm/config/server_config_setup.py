@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
     ParallelismConfig,
@@ -300,18 +301,15 @@ def set_parallelism_config(
     parallelism_config.local_rank = (
         parallelism_config.world_rank % parallelism_config.local_world_size
     )
-    parallelism_config.tp_rank = (
-        parallelism_config.world_rank % parallelism_config.tp_size
-    )
-    # PP-outermost layout: "% dp_size" strips the pp component (no-op at pp_size == 1).
-    parallelism_config.dp_rank = (
-        parallelism_config.world_rank // parallelism_config.tp_size
-    ) % max(parallelism_config.dp_size, 1)
-    parallelism_config.pp_rank = parallelism_config.world_rank // (
-        max(parallelism_config.dp_size, 1) * parallelism_config.tp_size
-    )
-    parallelism_config.ep_rank = (
-        parallelism_config.world_rank % parallelism_config.ep_size
+    # Unchecked: the world may contain ranks outside the pp*dp*tp lattice
+    # (e.g. FFN-disaggregate replicas/service ranks); derivation is tolerant.
+    layout = RankLayout.from_parallelism_config(parallelism_config)
+    coord = layout.coord_of_unchecked(parallelism_config.world_rank)
+    parallelism_config.tp_rank = coord.tp
+    parallelism_config.dp_rank = coord.dp
+    parallelism_config.pp_rank = coord.pp
+    parallelism_config.ep_rank = layout.ep_rank_of(
+        parallelism_config.world_rank, parallelism_config.ep_size
     )
     parallelism_config.ffn_tp_rank = (
         parallelism_config.tp_rank % parallelism_config.ffn_tp_size

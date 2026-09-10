@@ -525,9 +525,6 @@ public:
     int getEpSize() const {
         return ep_size_;
     }
-    int getTpRank() const {
-        return world_rank_ % tp_size_;
-    }
     void setWorldRank(int world_rank) {
         world_rank_ = world_rank;
     }

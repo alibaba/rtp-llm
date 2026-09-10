@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -161,17 +162,17 @@ bool cacheStatusSnapshotEnabled() {
 
 }  // namespace
 
-KVCacheManager::KVCacheManager(const CacheConfig&                       config,
-                               bool                                     warmup,
-                               const kmonitor::MetricsReporterPtr       metrics_reporter,
-                               const KVCacheConfig&                     kv_cache_config,
-                               const ParallelismConfig&                 parallelism_config,
-                               const RuntimeConfig&                     runtime_config,
-                               const SpeculativeExecutionConfig&        sp_config,
-                               const PDSepConfig&                       pd_sep_config,
-                               const CacheStoreConfig&                  cache_store_config,
-                               bool                                     use_cuda_malloc_block_pool,
-                               const std::optional<PPValidationResult>& pp_logical_capacity):
+KVCacheManager::KVCacheManager(const CacheConfig&                              config,
+                               bool                                            warmup,
+                               const kmonitor::MetricsReporterPtr              metrics_reporter,
+                               const KVCacheConfig&                            kv_cache_config,
+                               const ParallelismConfig&                        parallelism_config,
+                               const RuntimeConfig&                            runtime_config,
+                               const SpeculativeExecutionConfig&               sp_config,
+                               const PDSepConfig&                              pd_sep_config,
+                               const CacheStoreConfig&                         cache_store_config,
+                               bool                                            use_cuda_malloc_block_pool,
+                               const std::shared_ptr<CacheCapacityNegotiator>& capacity_negotiator):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -181,22 +182,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                       config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool),
-    pp_logical_capacity_(pp_logical_capacity) {
+    capacity_negotiator_(capacity_negotiator) {
     if (warmup) {
         config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
     } else {
         allocateAndSync();
-        // Cap each group's logical block count at the cross-stage min, before init() builds the pools.
-        if (parallelism_config_.pp_size > 1) {
-            RTP_LLM_CHECK_WITH_INFO(pp_logical_capacity.has_value(),
-                                    "pp_size=%ld requires the PP logical capacity (validator result); "
-                                    "construct KVCacheManager with the initPPCacheGeometry outcome",
-                                    parallelism_config_.pp_size);
-            RTP_LLM_CHECK_WITH_INFO(
-                pp_logical_capacity->ok, "pp logical capacity is invalid: %s", pp_logical_capacity->error.c_str());
-            applyPPCanonicalIndices(config_, *pp_logical_capacity);
-            applyPPLogicalBlockNums(config_, *pp_logical_capacity);
-        }
     }
 
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
@@ -686,27 +676,45 @@ void KVCacheManager::initConnectorCoordinator() {
 
 void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
-    size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
-    /* The allgather below sizes its buffer for tp*dp ranks, but DP_AND_TP spans every stage
-       under pp_size>1; cross-stage capacity is agreed by the PP topology validator instead,
-       so keep the locally measured block count here. */
-    const bool pp_active = parallelism_config_.pp_size > 1;
-    if (world_size > 1 && !pp_active) {
-        size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
-        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
-        auto   block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank] = config_.block_num;
-        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
+    RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "allocateAndSync requires positive global block_num");
+    uint32_t           synced_block_num = static_cast<uint32_t>(config_.block_num);
+    const bool         use_lane_scope   = parallelism_config_.pp_size > 1;
+    const size_t       sync_size        = use_lane_scope ?
+                                              static_cast<size_t>(parallelism_config_.tp_size) :
+                                              static_cast<size_t>(parallelism_config_.tp_size * parallelism_config_.dp_size);
+    const ParallelMode mode             = use_lane_scope ? ParallelMode::TP : ParallelMode::WORLD;
+    if (sync_size > 1) {
+        const size_t local_rank    = use_lane_scope ?
+                                         static_cast<size_t>(parallelism_config_.tp_rank) :
+                                         static_cast<size_t>(parallelism_config_.tp_size * parallelism_config_.dp_rank
+                                                          + parallelism_config_.tp_rank);
+        auto         block_num_t   = torch::empty({(int64_t)sync_size}, torch::kInt32).pin_memory();
+        auto         block_num_ptr = block_num_t.data_ptr<int>();
+        block_num_ptr[local_rank]  = config_.block_num;
+        execAllGather({{block_num_t}, mode});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
         if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            config_.block_num = 1;
+            synced_block_num = 1;
         } else {
-            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+            synced_block_num = static_cast<uint32_t>(*std::min_element(block_num_ptr, block_num_ptr + sync_size));
         }
     }
-    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+    if (use_lane_scope) {
+        // The cross-stage agreement runs on the stage-aligned capacity, so every
+        // lane reduces the same per-stage value and converges to one table.
+        RTP_LLM_CHECK_WITH_INFO(capacity_negotiator_ != nullptr,
+                                "pp_size=%ld requires a cache capacity negotiator",
+                                parallelism_config_.pp_size);
+        const auto validation = capacity_negotiator_->negotiate(config_, synced_block_num, runtime_config_);
+        config_.finalizeBlockNums(
+            validation.agreed.paged_block_num, runtime_config_, &validation.agreed.block_num_overrides);
+        capacity_negotiator_->validateComposed(config_, validation.agreed);
+        applyPPCanonicalIndices(config_, validation);
+    } else {
+        config_.finalizeBlockNums(synced_block_num, runtime_config_);
+    }
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
 

@@ -39,6 +39,16 @@ py_test(
     exec_properties = {'gpu':'H20', 'gpu_count':'4'},
 )
 
+# Pure stdlib unit test; no testlib dep so it builds without torch/triton repos.
+py_test(
+    name = "rank_layout_test",
+    srcs = ["rank_layout_test.py"],
+    deps = [
+        "//rtp_llm/models_py/distributed:rank_layout",
+    ],
+    timeout = "short",
+)
+
 # PP-aware process group topology: CPU-only gloo, no GPU.
 py_test(
     name = "pp_group_topology_test",

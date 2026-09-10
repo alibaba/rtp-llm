@@ -12,7 +12,8 @@ py_library(
         "//rtp_llm:models",
         "//rtp_llm:openai_api",
         "//rtp_llm/server:server",
-        "//rtp_llm/tools:model_assistant_api"
+        "//rtp_llm/tools:model_assistant_api",
+        "//rtp_llm/models_py/distributed:rank_layout",
     ]
 )
 

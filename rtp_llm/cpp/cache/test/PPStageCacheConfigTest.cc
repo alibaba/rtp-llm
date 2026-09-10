@@ -381,95 +381,67 @@ TEST(PPStageCacheConfig, speculativeGate) {
                  std::exception);
 }
 
-TEST(PPStageCacheConfig, applyLogicalBlockNumsCapsByTagNotGid) {
+TEST(PPStageCacheConfig, overrideTableAppliesPerTagCounts) {
+    // Different counts per group: the case no single global count can express,
+    // which is why the agreement lands as per-tag overrides.
     const auto mc     = makeIndependentPoolModelConfig(8);
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 0), false, 0);
     config.finalizeBlockNums(100, RuntimeConfig{});
-    ASSERT_EQ(config.block_num, 100);
     const auto group_num = static_cast<size_t>(config.groupNums());
     ASSERT_GT(group_num, 1u);
 
-    PPValidationResult validation;
-    validation.ok = true;
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        CanonicalGroupEntry entry;
-        entry.tag               = config.tagForGroup(gid);
-        entry.logical_block_num = gid == 0 ? 60u : 70u;
-        validation.canonical_groups.push_back(std::move(entry));
-    }
-    std::reverse(validation.canonical_groups.begin(), validation.canonical_groups.end());
-
+    PPBlockNumOverrides             overrides;
     std::map<std::string, uint32_t> expected_by_tag;
-    for (const auto& entry : validation.canonical_groups) {
-        expected_by_tag[entry.tag] = entry.logical_block_num;
-    }
-    std::vector<size_t> kv_strides_before;
-    std::vector<size_t> scale_strides_before;
     for (size_t gid = 0; gid < group_num; ++gid) {
-        kv_strides_before.push_back(config.kvBlockStrideBytesForGroup(gid));
-        scale_strides_before.push_back(config.kvScaleStrideBytesForGroup(gid));
+        const auto tag       = config.tagForGroup(gid);
+        expected_by_tag[tag] = gid == 0 ? 60u : 70u;
+        overrides.emplace(tag, gid == 0 ? 60u : 70u);
     }
-
-    applyPPLogicalBlockNums(config, validation);
+    config.finalizeBlockNums(60, RuntimeConfig{}, &overrides);
 
     for (size_t gid = 0; gid < group_num; ++gid) {
         EXPECT_EQ(config.blockNumForGroup(gid), expected_by_tag[config.tagForGroup(gid)]) << "gid=" << gid;
-        EXPECT_EQ(config.kvBlockStrideBytesForGroup(gid), kv_strides_before[gid]) << "gid=" << gid;
-        EXPECT_EQ(config.kvScaleStrideBytesForGroup(gid), scale_strides_before[gid]) << "gid=" << gid;
     }
     EXPECT_EQ(config.block_num, 60);
 }
 
-TEST(PPStageCacheConfig, applyLogicalBlockNumsCapsAtCanonicalMin) {
+TEST(PPStageCacheConfig, overrideCapsSingleGroup) {
     const auto mc     = makeSingleModelConfig(8);
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 1), false, 0);
     config.finalizeBlockNums(50, RuntimeConfig{});
     ASSERT_EQ(config.groupNums(), 1);
-    const auto tag = config.tagForGroup(0);
 
-    PPValidationResult validation;
-    validation.ok = true;
-    CanonicalGroupEntry entry;
-    entry.tag               = tag;
-    entry.logical_block_num = 30;
-    validation.canonical_groups.push_back(entry);
-    applyPPLogicalBlockNums(config, validation);
+    PPBlockNumOverrides overrides{{config.tagForGroup(0), 30u}};
+    config.finalizeBlockNums(30, RuntimeConfig{}, &overrides);
     EXPECT_EQ(config.blockNumForGroup(0), 30u);
     EXPECT_EQ(config.block_num, 30);
 }
 
-TEST(PPStageCacheConfig, applyLogicalBlockNumsRejectsLocalBelowCanonicalMin) {
-    /* The canonical min includes this stage's own snapshot, so a lower local
-       count means capacity changed after snapshot exchange; must abort. */
-    const auto mc     = makeSingleModelConfig(8);
-    auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 1), false, 0);
-    config.finalizeBlockNums(50, RuntimeConfig{});
-    ASSERT_EQ(config.groupNums(), 1);
-
-    PPValidationResult validation;
-    validation.ok = true;
-    CanonicalGroupEntry entry;
-    entry.tag               = config.tagForGroup(0);
-    entry.logical_block_num = 90;  // larger than the local 50 -> invariant broken
-    validation.canonical_groups.push_back(entry);
-    EXPECT_THROW(applyPPLogicalBlockNums(config, validation), std::exception);
-}
-
-TEST(PPStageCacheConfig, applyLogicalBlockNumsRejectsTagMissingFromCanonicalTable) {
+TEST(PPStageCacheConfig, fuseRejectsComposedBelowAgreed) {
+    /* The agreement covers this stage's own snapshot, so a composed count off
+       the agreed value means capacity moved after the negotiation; must abort. */
     const auto mc     = makeSingleModelConfig(8);
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 1), false, 0);
     config.finalizeBlockNums(50, RuntimeConfig{});
 
-    PPValidationResult validation;
-    validation.ok = true;
-    CanonicalGroupEntry entry;
-    entry.tag               = "some-other-tag";
-    entry.logical_block_num = 30;
-    validation.canonical_groups.push_back(entry);
-    EXPECT_THROW(applyPPLogicalBlockNums(config, validation), std::exception);
+    NegotiatedCapacity agreed;
+    agreed.paged_block_num                            = 90;
+    agreed.block_num_overrides[config.tagForGroup(0)] = 90;
+    EXPECT_THROW(validatePPComposedBlockNums(config, agreed), std::exception);
 }
 
-TEST(PPStageCacheConfig, applyLogicalBlockNumsExplicitPoolDoesNotCapTopLevel) {
+TEST(PPStageCacheConfig, fuseRejectsTagMissingFromAgreement) {
+    const auto mc     = makeSingleModelConfig(8);
+    auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 1), false, 0);
+    config.finalizeBlockNums(50, RuntimeConfig{});
+
+    NegotiatedCapacity agreed;
+    agreed.paged_block_num                       = 30;
+    agreed.block_num_overrides["some-other-tag"] = 30;
+    EXPECT_THROW(validatePPComposedBlockNums(config, agreed), std::exception);
+}
+
+TEST(PPStageCacheConfig, explicitPoolKeepsPinnedCountUnderOverride) {
     const auto mc     = makeIndependentPoolModelConfig(8);
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 0), false, 0);
     config.finalizeBlockNums(100, RuntimeConfig{});
@@ -477,27 +449,14 @@ TEST(PPStageCacheConfig, applyLogicalBlockNumsExplicitPoolDoesNotCapTopLevel) {
     const auto linear_gid = config.tagForGroup(0) == "linear" ? 0 : 1;
     const auto full_gid   = 1 - linear_gid;
 
-    PPValidationResult validation;
-    validation.ok = true;
-    CanonicalGroupEntry full_entry;
-    full_entry.tag               = "full";
-    full_entry.type              = CacheGroupType::FULL;
-    full_entry.logical_block_num = 100;
-    validation.canonical_groups.push_back(full_entry);
-    CanonicalGroupEntry linear_entry;
-    linear_entry.tag                = "linear";
-    linear_entry.type               = CacheGroupType::LINEAR;
-    linear_entry.logical_block_num  = 50;
-    linear_entry.explicit_block_num = 50;  // explicitly sized -> decoupled
-    validation.canonical_groups.push_back(linear_entry);
-
-    applyPPLogicalBlockNums(config, validation);
+    PPBlockNumOverrides overrides{{"full", 100u}, {"linear", 50u}};
+    config.finalizeBlockNums(100, RuntimeConfig{}, &overrides);
     EXPECT_EQ(config.blockNumForGroup(static_cast<size_t>(full_gid)), 100u);
     EXPECT_EQ(config.blockNumForGroup(static_cast<size_t>(linear_gid)), 50u);
     EXPECT_EQ(config.block_num, 100);
 }
 
-TEST(PPStageCacheConfig, managerConstructorRequiresCapacityUnderPp) {
+TEST(PPStageCacheConfig, managerConstructorRequiresNegotiatorUnderPp) {
     const auto mc     = makeIndependentPoolModelConfig(8);
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 0), false, 0);
     config.finalizeBlockNums(100, RuntimeConfig{});
@@ -506,7 +465,7 @@ TEST(PPStageCacheConfig, managerConstructorRequiresCapacityUnderPp) {
                  std::exception);
 }
 
-TEST(PPStageCacheConfig, managerConstructorCapsGroupsByTag) {
+TEST(PPStageCacheConfig, managerAppliesNegotiatedCountsByTag) {
     const auto mc     = makeIndependentPoolModelConfig(8);
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 0), false, 0);
     config.finalizeBlockNums(100, RuntimeConfig{});
@@ -514,16 +473,36 @@ TEST(PPStageCacheConfig, managerConstructorCapsGroupsByTag) {
     ASSERT_GT(group_num, 1u);
 
     PPValidationResult validation;
-    validation.ok = true;
+    validation.ok                     = true;
+    validation.agreed.paged_block_num = 60;
     std::map<std::string, uint32_t> expected_by_tag;
     for (size_t gid = 0; gid < group_num; ++gid) {
         const auto tag       = config.tagForGroup(gid);
-        expected_by_tag[tag] = gid == 0 ? 60u : 70u;
+        const auto count     = gid == 0 ? 60u : 70u;
+        expected_by_tag[tag] = count;
         CanonicalGroupEntry entry;
         entry.tag               = tag;
-        entry.logical_block_num = gid == 0 ? 60u : 70u;
+        entry.logical_block_num = count;
         validation.canonical_groups.push_back(std::move(entry));
+        validation.agreed.block_num_overrides.emplace(tag, count);
     }
+
+    class FixedNegotiator: public CacheCapacityNegotiator {
+    public:
+        explicit FixedNegotiator(PPValidationResult validation): validation_(std::move(validation)) {}
+
+        PPValidationResult
+        negotiate(const CacheConfig& topology, uint32_t local_block_num, const RuntimeConfig& runtime_config) override {
+            return validation_;
+        }
+
+        void validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed) override {
+            validatePPComposedBlockNums(composed, agreed);
+        }
+
+    private:
+        PPValidationResult validation_;
+    };
 
     KVCacheManager manager(config,
                            false,
@@ -535,7 +514,7 @@ TEST(PPStageCacheConfig, managerConstructorCapsGroupsByTag) {
                            PDSepConfig{},
                            CacheStoreConfig{},
                            false,
-                           validation);
+                           std::make_shared<FixedNegotiator>(validation));
 
     const auto& capped = manager.cacheConfig();
     for (size_t gid = 0; gid < group_num; ++gid) {

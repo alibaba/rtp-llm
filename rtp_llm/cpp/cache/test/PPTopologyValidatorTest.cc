@@ -400,4 +400,27 @@ TEST(PPTopologyValidatorTest, PolicyMismatchFails) {
     EXPECT_NE(result.error.find("policy"), std::string::npos);
 }
 
+TEST(PPTopologyValidatorTest, AgreedInputsReducedFromCanonicalTable) {
+    auto result = validatePPTopology({makeHybridSnapshot(100, 50), makeHybridSnapshot(90, 55)});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.agreed.block_num_overrides.at("full"), 90u);
+    EXPECT_EQ(result.agreed.block_num_overrides.at("linear"), 50u);
+    EXPECT_EQ(result.agreed.paged_block_num, 50u);
+}
+
+TEST(PPTopologyValidatorTest, AgreedInputsDecoupleExplicitPools) {
+    auto make = [](uint32_t full_blocks) {
+        StageCacheSnapshot s     = makeHybridSnapshot(full_blocks, 50);
+        s.explicit_block_nums[1] = 50;
+        s.policy_fingerprints[1] = "t1:r1:e0:v1:x50:c0:p0:a0:w1:m0:s0";
+        return s;
+    };
+    auto result = validatePPTopology({make(100), make(80)});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.agreed.block_num_overrides.at("full"), 80u);
+    EXPECT_EQ(result.agreed.block_num_overrides.at("linear"), 50u);
+    // The explicit linear pool does not drag the paged yardstick down.
+    EXPECT_EQ(result.agreed.paged_block_num, 80u);
+}
+
 }  // namespace rtp_llm

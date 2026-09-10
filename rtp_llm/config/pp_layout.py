@@ -11,7 +11,81 @@ pp_has_lm_head), cache geometry and the C++ side
 re-derive the partition rule (see stage_layer_range).
 """
 
+from enum import Enum
 from typing import Callable, List, Optional
+
+from rtp_llm.models_py.distributed.rank_layout import RankLayout
+
+
+class ModuleKind(Enum):
+    """Non-layer modules whose owning stage is decided by placement rules."""
+
+    EMBEDDING = "EMBEDDING"
+    LM_HEAD = "LM_HEAD"
+    MTP = "MTP"
+
+
+class MtpPlacementStrategy(Enum):
+    PIN_LAST_STAGE = "PIN_LAST_STAGE"  # MTP sits with lm_head/sampler on the last stage
+    DISTRIBUTED = "DISTRIBUTED"  # reserved, not implemented
+
+
+class ModulePlacement:
+    """Module -> owning-stage view.
+
+    Data sources: pp_size + materialized layer partition + MTP strategy.
+    Current placement rules are fully derivable from these (pure function);
+    if a non-derivable placement shape appears later, switch to consuming
+    materialized placement data without changing this API.
+    """
+
+    def __init__(
+        self,
+        pp_size: int = 1,
+        layer_counts: Optional[List[int]] = None,
+        num_layers: Optional[int] = None,
+        has_mtp: bool = False,
+        mtp_strategy: MtpPlacementStrategy = MtpPlacementStrategy.PIN_LAST_STAGE,
+    ):
+        if has_mtp and mtp_strategy is MtpPlacementStrategy.DISTRIBUTED:
+            raise NotImplementedError("DISTRIBUTED MTP placement is not implemented")
+        self._pp_size = max(int(pp_size or 1), 1)
+        self._layer_counts = list(layer_counts) if layer_counts else None
+        self._num_layers = num_layers
+        self._has_mtp = bool(has_mtp)
+        self._mtp_strategy = mtp_strategy
+
+    @staticmethod
+    def from_parallelism_config(cfg, has_mtp: bool = False) -> "ModulePlacement":
+        return ModulePlacement(
+            pp_size=getattr(cfg, "pp_size", 1),
+            layer_counts=getattr(cfg, "pp_stage_layer_counts", None),
+            has_mtp=has_mtp,
+        )
+
+    def owner_of(self, module: ModuleKind) -> int:
+        if module is ModuleKind.EMBEDDING:
+            return 0
+        if module is ModuleKind.LM_HEAD:
+            return self._pp_size - 1
+        if module is ModuleKind.MTP:
+            if not self._has_mtp:
+                raise ValueError("MTP module queried but has_mtp is False")
+            return self._pp_size - 1  # PIN_LAST_STAGE
+        raise ValueError(f"unknown module: {module}")
+
+    def owns(self, module: ModuleKind, pp_rank: int) -> bool:
+        return self.owner_of(module) == pp_rank
+
+    def layer_range(self, pp_rank: int) -> range:
+        """Global layer ids owned by `pp_rank` (delegates to the
+        materialized-partition lookup shared with weight loading)."""
+        num_layers = self._num_layers
+        if num_layers is None and self._layer_counts:
+            num_layers = sum(self._layer_counts)
+        if num_layers is None:
+            raise ValueError("layer_range requires num_layers or layer_counts")
+        return stage_layer_range(num_layers, self._pp_size, pp_rank, self._layer_counts)
 
 
 def even_split_counts(num_layers: int, pp_size: int) -> List[int]:
@@ -116,20 +190,19 @@ def stage_layer_range(
 
 def derive_pp_rank(world_rank: int, dp_size: int, tp_size: int) -> int:
     """Fallback pp_rank for configs that only carry sizes (fake configs in
-    tests). PP is the outermost dim of the world-rank layout:
-    world_rank = pp_rank * (dp_size * tp_size) + dp_rank * tp_size + tp_rank.
-    Production configs carry pp_rank directly and never need this."""
-    dp_size = max(int(dp_size or 1), 1)
-    tp_size = max(int(tp_size or 1), 1)
-    return int(world_rank or 0) // (dp_size * tp_size)
+    tests). Production configs carry pp_rank directly and never need this;
+    the rank formula itself lives solely in RankLayout."""
+    layout = RankLayout(dp_size=int(dp_size or 1), tp_size=int(tp_size or 1))
+    return layout.coord_of_unchecked(int(world_rank or 0)).pp
 
 
 def stage_has_embedding(pp_rank: int) -> bool:
-    """The first stage owns the token/positional embedding."""
-    return pp_rank == 0
+    """Thin wrapper over ModulePlacement (kept for existing callsites);
+    the first stage owns the token/positional embedding."""
+    return ModulePlacement().owns(ModuleKind.EMBEDDING, pp_rank)
 
 
 def stage_has_lm_head(pp_rank: int, pp_size: int) -> bool:
-    """The last stage owns lm_head + final_layernorm. With pp_size=1 the
-    single stage is both first and last."""
-    return pp_rank == pp_size - 1
+    """Thin wrapper over ModulePlacement (kept for existing callsites);
+    the last stage owns lm_head + final_layernorm."""
+    return ModulePlacement(pp_size=pp_size).owns(ModuleKind.LM_HEAD, pp_rank)
