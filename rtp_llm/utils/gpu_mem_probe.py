@@ -65,6 +65,10 @@ def log_gpu_mem(tag: str, device: object = None) -> None:
     non_torch = physical_used - torch_reserved (context + JIT + NCCL + symm +
     plugin workspaces; the part TMS pause cannot reclaim).
     """
+    # Init snapshots are diagnostics, not part of normal startup. Reuse the
+    # allocation-history opt-in and do not touch CUDA when it is disabled.
+    if os.environ.get("RTP_LLM_RECORD_MEM_HISTORY", "0") != "1":
+        return
     try:
         if not torch.cuda.is_available():
             return

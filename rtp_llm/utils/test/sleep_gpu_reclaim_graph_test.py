@@ -4,6 +4,28 @@ from unittest import mock
 
 
 class TestCudaGraphSleepReclaim(unittest.TestCase):
+    def test_init_memory_probe_is_opt_in(self):
+        from rtp_llm.utils import gpu_mem_probe
+
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            gpu_mem_probe.torch, "cuda"
+        ) as cuda:
+            gpu_mem_probe.log_gpu_mem("start/baseline")
+            self.assertEqual(cuda.mock_calls, [])
+
+        with mock.patch.dict(
+            os.environ, {"RTP_LLM_RECORD_MEM_HISTORY": "1"}, clear=True
+        ), mock.patch.object(gpu_mem_probe.torch, "cuda") as cuda, mock.patch.object(
+            gpu_mem_probe, "_maybe_enable_mem_history"
+        ) as history:
+            cuda.is_available.return_value = True
+            cuda.mem_get_info.return_value = (100, 200)
+            cuda.memory_reserved.return_value = 10
+            cuda.memory_allocated.return_value = 5
+            gpu_mem_probe.log_gpu_mem("start/baseline", device=1)
+            history.assert_called_once_with()
+            cuda.mem_get_info.assert_called_once_with(1)
+
     def setUp(self):
         from rtp_llm.models_py.utils import cuda_graph_state
 
