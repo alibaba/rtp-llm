@@ -858,22 +858,57 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         fusedCopy(d2d_copies_);
     }
 
-    graph_state_         = CudaGraphState();
-    auto empty_tensor    = torch::Tensor();
-    auto py_model_inputs = PyModelInputs({empty_tensor,
+    graph_state_      = CudaGraphState();
+    ktp_graph_ready_  = false;
+    auto empty_tensor = torch::Tensor();
+    auto py_model_inputs = PyModelInputs({inputs.combo_tokens,
                                           empty_tensor,
                                           empty_tensor,
                                           torch_ext::PyEmbeddingInputs(),
                                           torch_ext::PyMultimodalInputs(),
                                           attention_inputs_,
                                           torch_ext::BertEmbeddingInputs()});
+    py_model_inputs.force_disable_sp_run = inputs.force_disable_sp_run;
 
-    // Projection-KTP must coordinate and pad every rank before selecting a
-    // common graph key.  Defer graph preparation to forward(), where the
-    // rank-synchronized PyModelInputs are available.
-    if (ktp_size_ <= 1 && enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+    if (ktp_size_ > 1) {
+        // Coordinate the common bucket while attention preparation is still
+        // running on its existing async path.  Graph preparation can then use
+        // the padded temporary view without moving onto the forward critical
+        // path.  Keep attention_inputs_ unpadded; forward applies the same plan
+        // once to the complete PyModelInputs, including tokens and embeddings.
+        // Evaluate every rank-local graph constraint before synchronization.
+        // The common KTP plan will AND these results so a rank-local fallback
+        // can never split the collective wave into graph and eager execution.
+        {
+            py::gil_scoped_acquire gil;
+            // The plan is single-use. Clear it before any validation so an
+            // exception cannot leave the previous wave available to forward.
+            ktp_step_plan_ = py::none();
+        }
+        CudaGraphState local_graph_state;
+        const bool local_graph_eligible =
+            enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, local_graph_state);
+
+        py::gil_scoped_acquire gil;
+        ktp_step_plan_ = py_model_.attr("coordinate_ktp_step_plan")(
+            py_model_inputs, enable_cuda_graph_, inputs.is_fake_stream, local_graph_eligible);
+        py_model_inputs = py_model_.attr("apply_ktp_step_plan")(py_model_inputs, ktp_step_plan_)
+                              .cast<PyModelInputs>();
+    }
+
+    const bool use_cuda_graph = ktp_size_ > 1 ? py_model_inputs.ktp_use_cuda_graph :
+                                               enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_);
+    if (use_cuda_graph) {
+        if (ktp_size_ > 1) {
+            // canRun now selects the synchronized common key. All rank-local
+            // fallback predicates were already folded into the shared plan.
+            RTP_LLM_CHECK_WITH_INFO(
+                graph_runner_->canRun(py_model_inputs, graph_state_),
+                "Projection-KTP common CUDA Graph plan failed local validation after synchronization");
+        }
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
+        ktp_graph_ready_ = ktp_size_ > 1;
     }
 }
 
@@ -904,15 +939,24 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     // CUDA-graph case: refresh the captured held buffers + FlashInfer plan
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
     if (enable_cuda_graph_) {
-        auto empty_tensor    = torch::Tensor();
-        auto py_model_inputs = PyModelInputs({empty_tensor,
-                                              empty_tensor,
-                                              empty_tensor,
+        auto empty_tensor = torch::Tensor();
+        auto py_model_inputs = PyModelInputs({ktp_size_ > 1 ? inputs.combo_tokens : empty_tensor,
+                                              ktp_size_ > 1 ? inputs.last_hidden_states : empty_tensor,
+                                              ktp_size_ > 1 ? inputs.combo_position_ids : empty_tensor,
                                               torch_ext::PyEmbeddingInputs(),
                                               torch_ext::PyMultimodalInputs(),
                                               attention_inputs_,
                                               torch_ext::BertEmbeddingInputs()});
-        if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
+        if (ktp_size_ > 1) {
+            py::gil_scoped_acquire gil;
+            RTP_LLM_CHECK_WITH_INFO(ktp_step_plan_.ptr() && !ktp_step_plan_.is_none(),
+                                    "Projection-KTP KV block refresh requires the prepared common step plan");
+            py_model_inputs = py_model_.attr("apply_ktp_step_plan")(py_model_inputs, ktp_step_plan_)
+                                  .cast<PyModelInputs>();
+        }
+        const bool update_graph = ktp_size_ > 1 ? ktp_graph_ready_ :
+                                                 graph_runner_->canRun(py_model_inputs, graph_state_);
+        if (update_graph) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
     }
@@ -935,6 +979,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             flag.store(false, std::memory_order_release);
         }
     } flag_guard{prepared_attention_inputs_};
+    struct KtpGraphReadyGuard {
+        bool& ready;
+        ~KtpGraphReadyGuard() {
+            ready = false;
+        }
+    } ktp_graph_guard{ktp_graph_ready_};
 
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
@@ -1004,10 +1054,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         py_model_inputs.force_disable_sp_run = inputs.force_disable_sp_run;
         if (ktp_size_ > 1) {
             py::gil_scoped_acquire gil;
-            py_model_inputs = py_model_
-                                  .attr("coordinate_ktp_step")(
-                                      py_model_inputs, enable_cuda_graph_, inputs.is_fake_stream)
+            RTP_LLM_CHECK_WITH_INFO(ktp_step_plan_.ptr() && !ktp_step_plan_.is_none(),
+                                    "Projection-KTP forward requires a synchronized step plan");
+            py_model_inputs = py_model_.attr("apply_ktp_step_plan")(py_model_inputs, ktp_step_plan_)
                                   .cast<PyModelInputs>();
+            ktp_step_plan_ = py::none();
             if (py_model_inputs.ktp_all_idle) {
                 GptModelOutputs skipped;
                 skipped.skip_run = true;
@@ -1018,7 +1069,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+        const bool use_cuda_graph = ktp_size_ > 1 ? py_model_inputs.ktp_use_cuda_graph :
+                                                   enable_cuda_graph_
+                                                       && graph_runner_->canRun(py_model_inputs, graph_state_);
+        if (use_cuda_graph) {
+            RTP_LLM_CHECK_WITH_INFO(ktp_size_ <= 1 || ktp_graph_ready_,
+                                    "Projection-KTP CUDA Graph forward has no prepared common graph state");
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
             RTP_LLM_LOG_DEBUG(

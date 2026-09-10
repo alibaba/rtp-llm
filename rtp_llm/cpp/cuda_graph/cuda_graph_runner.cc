@@ -664,16 +664,18 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
                             static_cast<int>(inputs.attention_inputs.input_lengths.size(0));
     state.current_batch_size = cuda_graph_bs;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
-    RTP_LLM_CHECK_WITH_INFO(!capture_range_.empty(),
-                            "decode cuda graph: capture_range_ is empty, cannot run "
-                            "(should not happen when enable_cuda_graph=true)");
+    if (capture_range_.empty()) {
+        RTP_LLM_LOG_WARNING("decode cuda graph: capture range is empty; fallback to eager execution");
+        return false;
+    }
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_batch_size);
     // No captured graph for batch >= current (all captures smaller)
-    RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),
-                            "decode batch size %d exceeds max captured %d "
-                            "(extend decode_capture_batch_sizes or reduce batch size)",
-                            state.current_batch_size,
-                            capture_range_.back());
+    if (it == capture_range_.end()) {
+        RTP_LLM_LOG_DEBUG("decode batch size %d exceeds max captured %d; fallback to eager execution",
+                          state.current_batch_size,
+                          capture_range_.back());
+        return false;
+    }
     state.current_real_graph_bs = *it;
     RTP_LLM_LOG_DEBUG(
         "batch size used in replay: %d (graph key %d)", state.current_batch_size, state.current_real_graph_bs);
