@@ -1,5 +1,3 @@
-#include <ATen/cuda/CachingHostAllocator.h>
-
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -20,13 +18,17 @@
 #include <exception>
 #include <string>
 #include <utility>
+#include <torch/version.h>
 
 #include <sys/mman.h>
 #include <unistd.h>
 
 #if USING_CUDA
 #include <cuda_runtime.h>
+#include <ATen/cuda/CachingHostAllocator.h>
+#if __has_include(<ATen/cuda/MemPool.h>)
 #include <ATen/cuda/MemPool.h>
+#endif
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <c10/cuda/CUDAFunctions.h>
 #endif
@@ -180,8 +182,17 @@ torch::Tensor BlockPool::allocatePausableDeviceBacking(size_t size_bytes) {
         // The pool is created and never released: the arena lives for the whole process, and there
         // is exactly one per KV cache, so a permanent private-pool refcount is intentional.
         const auto device  = c10::cuda::current_device();
+#if __has_include(<ATen/cuda/MemPool.h>)
         const auto pool_id = at::cuda::MemPool::graph_pool_handle(/*is_user_created=*/true);
+#else
+        // PyTorch < 2.10 declares MemPool in c10::cuda instead of ATen.
+        const auto pool_id = c10::cuda::MemPool::graph_pool_handle(/*is_user_created=*/true);
+#endif
+#if (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
         c10::cuda::CUDACachingAllocator::createOrIncrefPool(device, pool_id);
+#else
+        c10::cuda::CUDACachingAllocator::ensureExistsAndIncrefPool(device, pool_id);
+#endif
         // Return unused default-pool reservations to the driver first (belt-and-suspenders; the
         // fresh private pool already guarantees a cache miss).
         c10::cuda::CUDACachingAllocator::emptyCache();
@@ -564,7 +575,10 @@ void BlockPool::releaseHostBuffer() {
     // the tensor only returns the block to torch's pinned-memory *cache*, NOT to the OS.
     // Flush that cache so the pinned pages are actually cudaHostFree'd and RAM is reclaimed
     // (the whole point of discarding the memory cache on sleep). Only frees unused blocks.
-    at::getHostAllocator(at::kCUDA)->empty_cache();
+#if USING_CUDA
+    // This entry point is also available in the CUDA 12 build's PyTorch 2.6.
+    at::cuda::CachingHostAllocator_emptyCache();
+#endif
     host_released_ = true;
     const double release_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - release_start).count();
