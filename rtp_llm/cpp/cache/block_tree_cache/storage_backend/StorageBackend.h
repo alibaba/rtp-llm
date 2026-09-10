@@ -89,11 +89,9 @@ public:
     void             match(StorageRequest request, MatchDone done);
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
-    // Async mode returns whether the task was admitted. Sync mode returns the
-    // exact write result after source pins have been released. Sync writes
-    // from this backend's own I/O/completion callback are rejected to avoid
-    // self-deadlock.
-    bool write(StorageWriteTask task, bool synchronous = false);
+    // Returns admission only, not the I/O result; never waits for completion.
+    // Source pins live until execution or rejection.
+    bool write(StorageWriteTask task);
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 

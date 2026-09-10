@@ -174,7 +174,7 @@ struct KVCacheConfig {
     int64_t                                 disk_cache_size_mb                              = 0;
     bool                                    disk_cache_buffered_io                          = true;
     int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
-    int64_t                                 disk_cache_staging_block_count                  = 4;
+    int64_t                                 disk_cache_staging_block_count                  = 128;
     int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
     int64_t                                 block_tree_transfer_worker_count                = 4;
     int64_t                                 block_tree_business_queue_max_size              = 10000;
@@ -198,7 +198,6 @@ struct KVCacheConfig {
     bool        enable_host_cache         = false;
     bool        enable_disk_cache         = false;
     bool        enable_remote_cache       = false;
-    bool        write_cache_sync          = false;
     std::string device_eviction_policy    = "lru";
     std::string host_eviction_policy      = "lru";
     std::string disk_eviction_policy      = "fifo";

@@ -51,7 +51,7 @@ TEST(BlockTreeTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
-TEST(BlockTreeTaskPoolTest, ExternalAsyncCompletionNeedsAnExplicitWorkflowCredit) {
+TEST(BlockTreeTaskPoolTest, WaitForIdleOnlyTracksTaskBodyNotExternalAsyncCompletion) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
 
@@ -72,104 +72,48 @@ TEST(BlockTreeTaskPoolTest, ExternalAsyncCompletionNeedsAnExplicitWorkflowCredit
     EXPECT_TRUE(transfer_done.load());
 }
 
-TEST(BlockTreeTaskPoolTest, WorkflowCreditKeepsIdleBlockedUntilCompletionSettlement) {
+TEST(BlockTreeTaskPoolTest, CompletionCanArriveAfterIdleAndStopAdmission) {
     BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
-    ASSERT_TRUE(pool.acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND));
-    EXPECT_FALSE(pool.acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND));
-
-    std::promise<void>    transfer_registered;
-    std::future<void>     registered = transfer_registered.get_future();
     std::function<void()> finish_transfer;
-    std::atomic<bool>     settled{false};
+    std::atomic<bool> settled{false};
     ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         finish_transfer = [&] {
-            ASSERT_TRUE(pool.submitCompletion([&] {
-                settled.store(true);
-                pool.releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
-            }));
+            EXPECT_TRUE(pool.submitCompletion([&] { settled.store(true); }));
         };
-        transfer_registered.set_value();
     }));
-    ASSERT_EQ(registered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-
+    pool.waitForIdle();
     pool.stopAdmission();
-    auto idle = std::async(std::launch::async, [&pool] { pool.waitForIdle(); });
-    EXPECT_EQ(idle.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    EXPECT_FALSE(settled.load());
     ASSERT_TRUE(finish_transfer);
     finish_transfer();
-    EXPECT_EQ(idle.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_TRUE(settled.load());
-    EXPECT_EQ(pool.workflow_credits_.load(), 0u);
-}
-
-TEST(BlockTreeTaskPoolTest, WorkflowCreditsPreserveLoadCapacityAfterBackgroundTasksDequeue) {
-    const size_t      queue_size       = BlockTreeTaskPool::kLoadReservedSlots + 2;
-    const size_t      background_limit = queue_size - BlockTreeTaskPool::kLoadReservedSlots;
-    BlockTreeTaskPool pool(1, queue_size, "BlockTreeTaskPoolTest");
-    ASSERT_TRUE(pool.start());
-
-    auto entered_count   = std::make_shared<std::atomic<size_t>>(0);
-    auto entered_promise = std::make_shared<std::promise<void>>();
-    auto entered_future  = entered_promise->get_future();
-    for (size_t index = 0; index < background_limit; ++index) {
-        ASSERT_TRUE(pool.acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND));
-        if (!pool.submit(BlockTreeTaskClass::BACKGROUND, [entered_count, entered_promise, background_limit] {
-                if (entered_count->fetch_add(1) + 1 == background_limit) {
-                    entered_promise->set_value();
-                }
-            })) {
-            pool.releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
-            FAIL() << "failed to submit background workflow";
-        }
-    }
-    ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    {
-        std::lock_guard<std::mutex> lock(pool.lifecycle_mutex_);
-        EXPECT_TRUE(pool.background_queue_.empty());
-    }
-    EXPECT_EQ(pool.workflow_credits_.load(), background_limit);
-    EXPECT_EQ(pool.background_workflow_credits_.load(), background_limit);
-    const bool extra_background_credit = pool.acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
-    EXPECT_FALSE(extra_background_credit);
-    if (extra_background_credit) {
-        pool.releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
-    }
-
-    for (size_t index = 0; index < BlockTreeTaskPool::kLoadReservedSlots; ++index) {
-        ASSERT_TRUE(pool.acquireWorkflowCredit(BlockTreeTaskClass::LOAD));
-    }
-    const bool extra_load_credit = pool.acquireWorkflowCredit(BlockTreeTaskClass::LOAD);
-    EXPECT_FALSE(extra_load_credit);
-    if (extra_load_credit) {
-        pool.releaseWorkflowCredit(BlockTreeTaskClass::LOAD);
-    }
-    for (size_t index = 1; index < BlockTreeTaskPool::kLoadReservedSlots; ++index) {
-        pool.releaseWorkflowCredit(BlockTreeTaskClass::LOAD);
-    }
-
-    auto load_settled   = std::make_shared<std::promise<void>>();
-    auto settled_future = load_settled->get_future();
-    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&pool, load_settled] {
-        const bool accepted = pool.submitCompletion([&pool, load_settled] {
-            pool.releaseWorkflowCredit(BlockTreeTaskClass::LOAD);
-            load_settled->set_value();
-        });
-        if (!accepted) {
-            pool.releaseWorkflowCredit(BlockTreeTaskClass::LOAD);
-            load_settled->set_value();
-        }
-        EXPECT_TRUE(accepted);
-    }));
-    ASSERT_EQ(settled_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-
-    for (size_t index = 0; index < background_limit; ++index) {
-        pool.releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
-    }
     pool.waitForIdle();
-    EXPECT_EQ(pool.workflow_credits_.load(), 0u);
-    EXPECT_EQ(pool.background_workflow_credits_.load(), 0u);
+    EXPECT_TRUE(settled.load());
+    EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
+
+
+TEST(BlockTreeTaskPoolTest, ExternalTransfersDoNotConsumeNormalQueueCapacity) {
+    BlockTreeTaskPool pool(1, BlockTreeTaskPool::kLoadReservedSlots + 2, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+    std::vector<std::function<void()>> completions;
+    int settled = 0;
+    for (int i = 0; i < 8; ++i) {
+        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
+            completions.push_back([&] { ++settled; });
+        }));
+        pool.waitForIdle();
+    }
+    EXPECT_EQ(settled, 0);
+    ASSERT_EQ(completions.size(), 8u);
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [] {}));
+    pool.waitForIdle();
+    for (auto& complete : completions) {
+        complete();
+    }
+    EXPECT_EQ(settled, 8);
+}
+
 
 TEST(BlockTreeTaskPoolTest, ThrowingTaskStillSettlesPendingCount) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
