@@ -333,18 +333,12 @@ void StreamCacheResource::reportCacheReuseMetrics() {
     }
     const int64_t input_length       = stream_->inputLength();
     const int64_t total_reuse_length = stream_->initialReuseLength();
-    const auto    reuse_rate         = [input_length](int64_t reuse_length) {
-        return input_length > 0 ? static_cast<float>(reuse_length * 100.0 / input_length) : 0.0f;
-    };
     cache_reuse_metrics_.kv_cache_reuse_length = total_reuse_length;
     cache_reuse_metrics_.device_reuse_length   = stream_->deviceReuseLength();
     cache_reuse_metrics_.host_reuse_length     = stream_->hostReuseLength();
     cache_reuse_metrics_.disk_reuse_length     = stream_->diskReuseLength();
     cache_reuse_metrics_.remote_reuse_length   = stream_->remoteReuseLength();
-    cache_reuse_metrics_.kv_cache_hit_rate     = reuse_rate(total_reuse_length);
-    cache_reuse_metrics_.device_hit_rate       = reuse_rate(cache_reuse_metrics_.device_reuse_length);
-    cache_reuse_metrics_.host_hit_rate         = reuse_rate(cache_reuse_metrics_.host_reuse_length);
-    cache_reuse_metrics_.disk_hit_rate         = reuse_rate(cache_reuse_metrics_.disk_reuse_length);
+    resource_context_.cache_manager->recordCacheHitTokens(input_length, cache_reuse_metrics_);
     cache_reuse_metrics_.report_reuse_metrics  = true;
     kmonitor::MetricsTags tags;
     stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
