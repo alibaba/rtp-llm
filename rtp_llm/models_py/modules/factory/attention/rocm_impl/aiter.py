@@ -1764,7 +1764,11 @@ class AiterPrefillImplPaged(FMHAImplBase):
         return "triton" if self._use_triton_paged_prefill(attn_inputs) else "batch"
 
     def support_cuda_graph(self) -> bool:
-        return self.backend == "triton"
+        # Both dispatched backends implement prepare_cuda_graph().  In
+        # particular, DSpARK COMMIT runs gamma + 1 query tokens (8 for the
+        # common 7-token proposal), which selects CK batch-prefill instead of
+        # the short-query Triton path.
+        return self.backend in ("triton", "batch")
 
     def _prepare_backend(self, backend: str) -> FMHAParams:
         if backend == "triton":

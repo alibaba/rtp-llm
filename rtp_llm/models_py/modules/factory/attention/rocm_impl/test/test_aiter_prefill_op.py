@@ -896,16 +896,17 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             observed_pad_query,
         )
 
-    def test_cuda_graph_supports_only_triton_backend(self):
-        for input_lengths, expected_backend in (([4, 1], "triton"), ([5, 1], "batch")):
+    def test_cuda_graph_supports_triton_and_batch_backends(self):
+        for input_lengths, expected_backend in (
+            ([4, 1], "triton"),
+            ([8, 8], "batch"),
+        ):
             with self.subTest(expected_backend=expected_backend):
                 impl, batch_impl, triton_impl, *_ = self._make_impl_with_mocked_prepare(
                     input_lengths, True
                 )
                 self.assertEqual(impl.backend, expected_backend)
-                self.assertEqual(
-                    impl.support_cuda_graph(), expected_backend == "triton"
-                )
+                self.assertTrue(impl.support_cuda_graph())
                 selected = triton_impl if expected_backend == "triton" else batch_impl
                 rejected = batch_impl if expected_backend == "triton" else triton_impl
                 selected.prepare.assert_called_once_with(impl.attn_inputs)
