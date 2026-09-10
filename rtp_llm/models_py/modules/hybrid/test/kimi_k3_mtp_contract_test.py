@@ -19,6 +19,68 @@ class _Attention(nn.Module):
 
 
 class KimiK3MtpContractTest(unittest.TestCase):
+    def test_page_rr_swa_rejected_before_weight_loading(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.model_factory import ModelFactory
+        from rtp_llm.ops import HybridAttentionType, ParallelismConfig, SpeculativeType
+
+        # name, TP, Prefill sharding, Decode sharding, remote CP, model, SWA, reject
+        cases = (
+            ("prefill", 8, True, False, 0, "kimi_k3", "draft", True),
+            ("decode", 8, False, True, 0, "kimi_k3", "draft", True),
+            ("fusion", 8, True, True, 0, "kimi_k3", "draft", True),
+            ("p8_d1", 1, True, False, 8, "kimi_k3", "draft", True),
+            ("target_swa", 8, True, False, 0, "kimi_k3", "target", True),
+            ("plain_tp8", 8, False, False, 0, "kimi_k3", "draft", False),
+            ("c1", 1, True, True, 1, "kimi_k3", "draft", False),
+            ("remote_flag_off", 1, False, False, 8, "kimi_k3", "draft", False),
+            ("mtp", 8, True, True, 8, "kimi_k3", "none", False),
+            ("target_only", 8, True, True, 8, "kimi_k3", "no_draft", False),
+            ("dsv4", 8, True, True, 8, "deepseek_v4", "target", False),
+        )
+        for name, tp, prefill, decode, remote_cp, model_type, swa, reject in cases:
+            with self.subTest(name=name):
+                target = ModelConfig()
+                target.model_type = model_type
+                target.hybrid_attention_config.hybrid_attention_types = [
+                    HybridAttentionType.LINEAR, HybridAttentionType.NONE
+                ]
+                draft = None
+                if swa != "no_draft":
+                    draft = ModelConfig()
+                    draft.model_type = "kimi_k3_mtp"
+                    draft.hybrid_attention_config.hybrid_attention_types = [
+                        HybridAttentionType.NONE
+                    ]
+                if swa in ("target", "draft"):
+                    config = target if swa == "target" else draft
+                    config.hybrid_attention_config.hybrid_attention_types = [
+                        HybridAttentionType.SLIDING_WINDOW
+                    ]
+                parallelism = ParallelismConfig()
+                parallelism.tp_size = tp
+                parallelism.prefill_cp_config.kv_cache_sharded = prefill
+                parallelism.decode_cp_kv_cache_sharded = decode
+                parallelism.prefill_cp_config.prefill_cp_size = remote_cp
+                engine = SimpleNamespace(
+                    parallelism_config=parallelism,
+                    sp_config=SimpleNamespace(type=SpeculativeType.MTP, gen_num_per_cycle=3),
+                )
+                with patch.object(
+                    ModelFactory, "_create_model", side_effect=RuntimeError("weight loading reached")
+                ) as create_model:
+                    error = ValueError if reject else RuntimeError
+                    message = "Page-RR CP does not support SWA" if reject else "weight loading reached"
+                    with self.assertRaisesRegex(error, message):
+                        ModelFactory.from_model_configs(
+                            model_config=target, engine_config=engine,
+                            world_info=None, vit_config=None, propose_model_config=draft,
+                        )
+                    if reject:
+                        create_model.assert_not_called()
+                    else:
+                        create_model.assert_called_once()
+
     def test_weight_manifest_uses_config_source_layer_for_every_tp_rank(self):
         from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3Mtp
         from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight

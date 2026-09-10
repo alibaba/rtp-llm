@@ -302,6 +302,11 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
+        if model_config.model_type == "kimi_k3":
+            ModelFactory.get_model_cls(model_config.model_type).validate_page_rr_config(
+                model_config, propose_model_config, engine_config.parallelism_config
+            )
+
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
         # for RoPE cache sizing in speculative decoding
         model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
