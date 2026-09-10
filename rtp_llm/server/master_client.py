@@ -27,6 +27,10 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
 from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.frontend_request_metrics import (
+    frontend_metric_tags,
+    mark_master_route_error_reported,
+)
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.worker_status import _coerce_role_type
@@ -144,6 +148,8 @@ class MasterClient:
             master_config if master_config is not None else MasterConfig()
         )
         self.host_service: Optional[HostService] = host_service
+        self.rank_id = str(getattr(server_config, "rank_id", 0))
+        self.server_id = str(getattr(server_config, "frontend_server_id", 0))
         self._channels: Dict[str, grpc.aio.Channel] = {}
         self.latest_queue_length: int = 0
 
@@ -341,16 +347,20 @@ class MasterClient:
                 message,
                 admission_reject_reason.name,
             )
-            kmonitor.report(
-                AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
-                1,
-                {"error_code": str(response.code)},
-            )
-            raise FtRuntimeException(
+            error = FtRuntimeException(
                 exception_type=exception_type,
                 message=message,
                 admission_reject_reason=admission_reject_reason,
             )
+            tags = frontend_metric_tags(self.rank_id, self.server_id)
+            tags["error_code"] = str(response.code)
+            kmonitor.report(
+                AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+                1,
+                tags,
+            )
+            mark_master_route_error_reported(error)
+            raise error
 
         role_addrs = [
             RoleAddr(

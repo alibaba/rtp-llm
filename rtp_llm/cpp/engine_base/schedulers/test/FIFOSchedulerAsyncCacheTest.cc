@@ -109,11 +109,13 @@ protected:
                                    bool                    reuse_cache         = false,
                                    bool                    enable_memory_cache = false,
                                    int                     max_new_tokens      = 1,
-                                   const std::vector<int>& variable_num_beams  = {}) {
+                                   const std::vector<int>& variable_num_beams  = {},
+                                   RoleType                role_type           = RoleType::PDFUSION) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
         resource_context.enable_memory_cache = enable_memory_cache;
+        resource_context.role_type           = role_type;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
@@ -176,6 +178,23 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
 // 2. scheduleNew: stream with reuse_cache and connector enters loading_ queue
 // ============================================================================
 
+TEST_F(FIFOSchedulerAsyncCacheTest, testCacheProbeDirectRunUsesOneScheduleRound) {
+    autil::EnvGuard non_perf_scope("PERF_TEST", "0");
+    auto            scheduler = createScheduler();
+    auto stream = createStream({1, 2, 3}, false, false, 1, {}, RoleType::PREFILL);
+
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+
+    const auto snapshot = stream->cacheScheduleObservation()->snapshot();
+    ASSERT_TRUE(snapshot.active);
+    EXPECT_TRUE(snapshot.reached_running);
+    EXPECT_FALSE(snapshot.invalid);
+    EXPECT_FALSE(snapshot.loading_entered);
+    EXPECT_EQ(snapshot.cache_dependency, CacheDependency::NONE);
+    EXPECT_EQ(snapshot.schedule_rounds, 1);
+}
+
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithReuseCache_EntersLoadingQueue) {
     setupMockCoordinator();
     auto pending_ctx = createPendingAsyncContext();
@@ -227,6 +246,34 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_LoadDone_MovesToRunning) {
     ASSERT_EQ(result2.value().size(), 1);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0u);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testCacheProbeLoadingSpansTwoScheduleRounds) {
+    autil::EnvGuard non_perf_scope("PERF_TEST", "0");
+    setupMockCoordinator();
+
+    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
+    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
+    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
+    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
+    ON_CALL(*mock_ctx, readyTimeUs())
+        .WillByDefault(Return(std::optional<int64_t>(autil::TimeUtility::currentTimeInMicroSeconds())));
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
+
+    auto scheduler = createScheduler();
+    auto stream = createStream({1, 2, 3}, true, true, 1, {}, RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    stream->recordCacheDependency(CacheDependency::DATA);
+
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_TRUE(scheduler->schedule().ok());
+
+    const auto snapshot = stream->cacheScheduleObservation()->snapshot();
+    EXPECT_TRUE(snapshot.reached_running);
+    EXPECT_FALSE(snapshot.invalid);
+    EXPECT_TRUE(snapshot.loading_entered);
+    EXPECT_EQ(snapshot.cache_dependency, CacheDependency::DATA);
+    EXPECT_EQ(snapshot.schedule_rounds, 2);
 }
 
 // ============================================================================

@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -25,6 +26,9 @@ public:
     virtual ErrorInfo errorInfo() const {
         return ErrorInfo::OkStatus();
     }
+    virtual std::optional<int64_t> readyTimeUs() const {
+        return std::nullopt;
+    }
 };
 
 class AsyncMatchContext: public AsyncContext {
@@ -42,9 +46,10 @@ public:
 
 public:
     void      waitDone() override;
-    bool      done() const override;
-    bool      success() const override;
-    ErrorInfo errorInfo() const override;
+    bool                   done() const override;
+    bool                   success() const override;
+    ErrorInfo              errorInfo() const override;
+    std::optional<int64_t> readyTimeUs() const override;
 
     const std::vector<std::shared_ptr<AsyncContext>>& contexts() const {
         return contexts_;
@@ -62,11 +67,12 @@ public:
     ~FusedAsyncReadContext() override = default;
 
 public:
-    bool      done() const override;
-    bool      success() const override;
-    ErrorInfo errorInfo() const override;
-    void      waitDone() override;
-    void      notifyDone();
+    bool                   done() const override;
+    bool                   success() const override;
+    ErrorInfo              errorInfo() const override;
+    std::optional<int64_t> readyTimeUs() const override;
+    void                   waitDone() override;
+    void                   notifyDone();
     // NOTE: `setFusedReadContext()` must be called eventually to avoid blocking waitDone() on the read stage.
     void setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context);
     const std::shared_ptr<FusedAsyncContext>  fusedReadContext() const;
@@ -82,6 +88,7 @@ private:
 
     std::atomic<bool>  read_ctx_set_{false};
     mutable std::mutex read_ctx_mutex_;
+    int64_t            read_context_set_time_us_ = 0;
 
     std::mutex              done_mutex_;
     std::condition_variable done_cv_;

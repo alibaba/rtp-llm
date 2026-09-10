@@ -96,13 +96,15 @@ private:
     // finalized. FIFOSchedulerBase::evaluateWaitingStreams() is left untouched for the other
     // FIFOSchedulerBase subclasses.
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
-                             const std::list<GenerateStreamPtr>& already_admitted_streams);
+                             const std::list<GenerateStreamPtr>& already_admitted_streams,
+                             uint64_t                            round_id);
+    void onStreamEnqueued(const GenerateStreamPtr& stream) override;
 
     void cancelGroups(StreamGroupQueue& group_queue);
-    void evaluateWaitingGroupQueue();
-    void evaluateLoadingCacheGroupQueue();
+    void evaluateWaitingGroupQueue(uint64_t round_id);
+    void evaluateLoadingCacheGroupQueue(uint64_t round_id);
     bool loadingGroupReady() const;
-    void advanceLoadingGroup(StreamGroup& group);
+    void advanceLoadingGroup(StreamGroup& group, uint64_t round_id);
     void moveGroupToNewStreams(StreamGroup& group);
     void moveGroupToAllocatingGroup(StreamGroup& group);
     void dispatchPreparedGroup(StreamGroup& group);
@@ -130,6 +132,7 @@ private:
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;
     AdmissionLane                active_admission_lane_        = AdmissionLane::NONE;
     bool                         prefer_group_next_            = false;
+    uint64_t                     round_id_                     = 0;
 
     // TODO @wangyin support different beams run togather
 };

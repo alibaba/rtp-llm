@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
@@ -28,6 +29,54 @@
 namespace rtp_llm {
 
 // GenerateStream-owned buffers stay on host by default; KV cache is the device-side exception.
+
+struct CacheScheduleSnapshot {
+    bool            active                    = false;
+    bool            loading_entered           = false;
+    bool            reached_running           = false;
+    bool            recovered                 = false;
+    bool            invalid                   = false;
+    CacheDependency cache_dependency          = CacheDependency::UNKNOWN;
+    int64_t         enqueue_to_canrun_us      = 0;
+    int64_t         canrun_to_running_us      = 0;
+    int64_t         loading_cache_latency_us  = 0;
+    int64_t         load_done_to_running_us   = 0;
+    int64_t         ready_wait_us             = 0;
+    uint64_t        schedule_rounds           = 0;
+};
+
+class CacheScheduleObservation {
+public:
+    void activate(int64_t enqueue_time_us);
+    void reset();
+    void recordCanRun(int64_t time_us, std::optional<uint64_t> round_id);
+    void recordLoadingStart(int64_t time_us);
+    void recordLoadReady(std::optional<int64_t> ready_time_us, int64_t observed_time_us);
+    void recordLoadingDone(int64_t time_us);
+    void recordRunning(int64_t time_us, std::optional<uint64_t> round_id);
+    void recordDependency(CacheDependency dependency);
+    void markRecovered();
+    void markInvalid();
+    CacheScheduleSnapshot snapshot() const;
+
+private:
+    mutable std::mutex      mutex_;
+    bool                    active_          = false;
+    bool                    loading_entered_ = false;
+    bool                    reached_running_ = false;
+    bool                    recovered_       = false;
+    bool                    invalid_         = false;
+    CacheDependency         cache_dependency_ = CacheDependency::UNDETERMINED;
+    std::optional<int64_t>  enqueue_time_us_;
+    std::optional<int64_t>  canrun_time_us_;
+    std::optional<int64_t>  loading_start_time_us_;
+    std::optional<int64_t>  ready_time_us_;
+    std::optional<int64_t>  observed_ready_time_us_;
+    std::optional<int64_t>  loading_done_time_us_;
+    std::optional<int64_t>  running_time_us_;
+    std::optional<uint64_t> canrun_round_;
+    std::optional<uint64_t> running_round_;
+};
 
 struct StreamUpdateInfo {
     const torch::Tensor new_tokens;
@@ -264,10 +313,19 @@ public:
     int64_t getTimeoutMs() const;
     void    recordWaitLatency();
     void    recordSchedulerEnqueueTime(int64_t time_us);
-    void    recordCanRunTime();
+    void    recordCanRunTime(std::optional<uint64_t> round_id = std::nullopt);
     void    recordLoadingCacheStartTime();
     void    recordLoadingCacheDoneTime();
-    void    recordRunningTime();
+    void    recordRunningTime(std::optional<uint64_t> round_id = std::nullopt);
+    void    activateCacheScheduleObservation();
+    void    reportCanRun(uint64_t round_id);
+    void    recordCacheLoadReady(std::optional<int64_t> ready_time_us, int64_t observed_time_us);
+    void    recordCacheDependency(CacheDependency dependency);
+    void    markCacheScheduleRecovered();
+    void    markCacheScheduleInvalid();
+    std::shared_ptr<CacheScheduleObservation> cacheScheduleObservation() const {
+        return cache_schedule_observation_;
+    }
 
     // 统一的事件上报接口，替代原先所有 reportXX 方法。
     // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
@@ -313,7 +371,7 @@ public:
     size_t reserveStep() const {
         return reserve_step_;
     }
-    StreamState moveToNext();
+    StreamState moveToNext(std::optional<uint64_t> round_id = std::nullopt);
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
@@ -777,6 +835,7 @@ protected:
     void                     resizeSubGenerateStatus(size_t new_size);
 
     void reportStreamMetrics();
+    void reportCacheScheduleMetrics() const;
     void reportCacheReuseMetrics() const;
     void reportMetricOnce();
 
@@ -799,7 +858,9 @@ protected:
     int64_t                               first_running_time_us_       = 0;
     int64_t                               loading_cache_latency_us_    = 0;
     int64_t                               load_done_to_running_us_     = 0;
-    std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
+    std::shared_ptr<CacheScheduleObservation> cache_schedule_observation_ =
+        std::make_shared<CacheScheduleObservation>();
+    std::shared_ptr<StreamCacheResource> stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_    = 0;
     size_t                                sp_iter_count_ = 0;

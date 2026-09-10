@@ -198,6 +198,31 @@ TEST(AsyncContextTest, FusedAsyncReadContext_SuccessDependsOnReadContext) {
     EXPECT_FALSE(ctx->success());
 }
 
+TEST(AsyncContextTest, FusedAsyncContext_ReadyTimeUsesLatestChild) {
+    auto first = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto last  = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*first, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*first, readyTimeUs()).WillByDefault(testing::Return(std::optional<int64_t>(100)));
+    ON_CALL(*last, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*last, readyTimeUs()).WillByDefault(testing::Return(std::optional<int64_t>(200)));
+
+    FusedAsyncContext fused({first, nullptr, last});
+    ASSERT_TRUE(fused.readyTimeUs().has_value());
+    EXPECT_EQ(*fused.readyTimeUs(), 200);
+}
+
+TEST(AsyncContextTest, FusedAsyncReadContext_EmptyReadUsesPublicationTime) {
+    auto match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{});
+    auto meta  = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    auto ctx   = std::make_shared<FusedAsyncReadContext>(match, std::shared_ptr<KVCacheResource>{}, meta);
+
+    EXPECT_FALSE(ctx->readyTimeUs().has_value());
+    ctx->setFusedReadContext(std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{}));
+
+    ASSERT_TRUE(ctx->readyTimeUs().has_value());
+    EXPECT_GT(*ctx->readyTimeUs(), 0);
+}
+
 TEST(AsyncContextTest, FusedAsyncReadContext_WaitDone_WaitsForLateReadContext) {
     // match succeeds quickly
     auto match_child = std::make_shared<BlockingAsyncContext>();

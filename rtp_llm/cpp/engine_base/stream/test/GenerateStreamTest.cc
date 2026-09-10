@@ -705,4 +705,80 @@ TEST_F(GenerateStreamTest, testDynamicBeamSoftmaxHistoryFollowsParentRows) {
     EXPECT_FLOAT_EQ(probabilities[2][3].item<float>(), 0.8f);
 }
 
+TEST(CacheScheduleObservationTest, PreservesZeroDurationsAndSameRound) {
+    CacheScheduleObservation observation;
+    observation.activate(100);
+    observation.recordCanRun(100, 7);
+    observation.recordDependency(CacheDependency::NONE);
+    observation.recordRunning(100, 7);
+
+    const auto snapshot = observation.snapshot();
+    EXPECT_TRUE(snapshot.active);
+    EXPECT_TRUE(snapshot.reached_running);
+    EXPECT_FALSE(snapshot.invalid);
+    EXPECT_EQ(snapshot.cache_dependency, CacheDependency::NONE);
+    EXPECT_EQ(snapshot.enqueue_to_canrun_us, 0);
+    EXPECT_EQ(snapshot.canrun_to_running_us, 0);
+    EXPECT_EQ(snapshot.loading_cache_latency_us, 0);
+    EXPECT_EQ(snapshot.load_done_to_running_us, 0);
+    EXPECT_EQ(snapshot.ready_wait_us, 0);
+    EXPECT_EQ(snapshot.schedule_rounds, 1);
+}
+
+TEST(CacheScheduleObservationTest, ComputesLoadingIntervalsAcrossRounds) {
+    CacheScheduleObservation observation;
+    observation.activate(100);
+    observation.recordCanRun(110, 7);
+    observation.recordDependency(CacheDependency::DATA);
+    observation.recordLoadingStart(115);
+    observation.recordLoadReady(112, 120);
+    observation.recordLoadingDone(120);
+    observation.recordRunning(130, 8);
+
+    const auto snapshot = observation.snapshot();
+    EXPECT_FALSE(snapshot.invalid);
+    EXPECT_TRUE(snapshot.loading_entered);
+    EXPECT_EQ(snapshot.cache_dependency, CacheDependency::DATA);
+    EXPECT_EQ(snapshot.enqueue_to_canrun_us, 10);
+    EXPECT_EQ(snapshot.canrun_to_running_us, 20);
+    EXPECT_EQ(snapshot.loading_cache_latency_us, 5);
+    EXPECT_EQ(snapshot.load_done_to_running_us, 10);
+    EXPECT_EQ(snapshot.ready_wait_us, 5);
+    EXPECT_EQ(snapshot.schedule_rounds, 2);
+}
+
+TEST(CacheScheduleObservationTest, PreservesDependencyPriorityAndRecovery) {
+    CacheScheduleObservation observation;
+    observation.activate(100);
+    observation.recordCanRun(110, 1);
+    observation.recordDependency(CacheDependency::LOOKUP_ONLY);
+    observation.recordDependency(CacheDependency::UNKNOWN);
+    observation.recordDependency(CacheDependency::DATA);
+    observation.markRecovered();
+    observation.recordRunning(120, 1);
+
+    const auto snapshot = observation.snapshot();
+    EXPECT_EQ(snapshot.cache_dependency, CacheDependency::DATA);
+    EXPECT_TRUE(snapshot.recovered);
+    EXPECT_FALSE(snapshot.invalid);
+}
+
+TEST(CacheScheduleObservationTest, UnresolvedDependencyIsExcludedAndFrozenSnapshotSurvivesReset) {
+    CacheScheduleObservation unresolved;
+    unresolved.activate(100);
+    unresolved.recordCanRun(110, 1);
+    unresolved.recordRunning(120, 1);
+    const auto unresolved_snapshot = unresolved.snapshot();
+    EXPECT_EQ(unresolved_snapshot.cache_dependency, CacheDependency::UNKNOWN);
+    EXPECT_TRUE(unresolved_snapshot.invalid);
+
+    CacheScheduleObservation frozen;
+    frozen.activate(100);
+    frozen.recordCanRun(110, 1);
+    frozen.recordDependency(CacheDependency::NONE);
+    frozen.recordRunning(120, 1);
+    frozen.reset();
+    EXPECT_FALSE(frozen.snapshot().invalid);
+}
+
 }  // namespace rtp_llm

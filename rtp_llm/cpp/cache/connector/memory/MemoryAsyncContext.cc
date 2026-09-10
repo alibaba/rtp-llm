@@ -3,10 +3,21 @@
 #include <exception>
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
 // ----------------------------- MemoryAsyncMatchContext ---------------------------------
+
+MemoryAsyncMatchContext::MemoryAsyncMatchContext(size_t                matched_block_count,
+                                                 int                   start_read_block_index,
+                                                 int                   read_block_num,
+                                                 std::shared_ptr<void> read_copy_plan):
+    matched_block_count_(matched_block_count),
+    start_read_block_index_(start_read_block_index),
+    read_block_num_(read_block_num),
+    read_copy_plan_(std::move(read_copy_plan)),
+    ready_time_us_(currentTimeUs()) {}
 
 void MemoryAsyncMatchContext::waitDone() {
     return;
@@ -18,6 +29,10 @@ bool MemoryAsyncMatchContext::done() const {
 
 bool MemoryAsyncMatchContext::success() const {
     return true;
+}
+
+std::optional<int64_t> MemoryAsyncMatchContext::readyTimeUs() const {
+    return ready_time_us_;
 }
 
 size_t MemoryAsyncMatchContext::matchedBlockCount() const {
@@ -43,7 +58,7 @@ void MemoryAsyncMatchContext::clearReadCopyPlan() {
 // ----------------------------- MemoryAsyncContext ---------------------------------
 
 bool MemoryAsyncContext::done() const {
-    return already_done_.load();
+    return already_done_.load(std::memory_order_acquire);
 }
 
 bool MemoryAsyncContext::successLocked() const {
@@ -65,6 +80,14 @@ bool MemoryAsyncContext::successLocked() const {
 bool MemoryAsyncContext::success() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return successLocked();
+}
+
+std::optional<int64_t> MemoryAsyncContext::readyTimeUs() const {
+    if (!already_done_.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ready_time_us_ > 0 ? std::optional<int64_t>(ready_time_us_) : std::nullopt;
 }
 
 void MemoryAsyncContext::waitDone() {
@@ -94,7 +117,8 @@ void MemoryAsyncContext::waitDone() {
     auto finalize = [this]() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            already_done_.store(true);
+            ready_time_us_ = currentTimeUs();
+            already_done_.store(true, std::memory_order_release);
             finalizing_ = false;
         }
         cv_.notify_all();

@@ -701,12 +701,16 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         if (!checkLayerRegionBlocks(layer_attn_block_ids, slots, cache_keys_size)) {
             RTP_LLM_LOG_WARNING("async match failed, invalid layer_attn_block_ids, cache_keys_size=%zu",
                                 cache_keys_size);
+            meta->recordCacheDependency(CacheDependency::UNKNOWN);
+            meta->recordCacheRecovery();
             return nullptr;
         }
     } else {
         layer_block_ids = resource->layerBlocks();
         if (!checkLayerBlocks(layer_block_ids, cache_keys_size)) {
             RTP_LLM_LOG_WARNING("async match failed, invalid layer_block_ids, cache_keys_size=%zu", cache_keys_size);
+            meta->recordCacheDependency(CacheDependency::UNKNOWN);
+            meta->recordCacheRecovery();
             return nullptr;
         }
     }
@@ -765,6 +769,8 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
                                                     read_block_num);
         if (!copy_plan || copy_plan->copy_infos.empty()) {
             reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, already_reuse_num);
+            meta->recordCacheDependency(CacheDependency::UNKNOWN);
+            meta->recordCacheRecovery();
             return nullptr;
         }
         reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
@@ -820,6 +826,8 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
             matched_num,
             cache_keys_size);
         reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, already_reuse_num);
+        meta->recordCacheDependency(CacheDependency::UNKNOWN);
+        meta->recordCacheRecovery();
         return nullptr;
     }
 
@@ -937,6 +945,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     const auto  cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
     if (cache_keys_size == 0) {
         RTP_LLM_LOG_DEBUG("async read skip, cache keys is empty");
+        meta->recordCacheDependency(CacheDependency::UNKNOWN);
+        meta->recordCacheRecovery();
         return nullptr;
     }
 
@@ -952,12 +962,16 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         layer_attn_block_ids = resourceLayerRegionBlocks(*resource, slots);
         if (!checkLayerRegionBlocks(layer_attn_block_ids, slots, cache_keys_size)) {
             reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
+            meta->recordCacheDependency(CacheDependency::UNKNOWN);
+            meta->recordCacheRecovery();
             return nullptr;
         }
     } else {
         layer_block_ids = resource->layerBlocks();
         if (!checkLayerBlocks(layer_block_ids, cache_keys_size)) {
             reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
+            meta->recordCacheDependency(CacheDependency::UNKNOWN);
+            meta->recordCacheRecovery();
             return nullptr;
         }
     }
@@ -970,6 +984,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
             read_block_num,
             cache_keys_size);
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
+        meta->recordCacheDependency(CacheDependency::UNKNOWN);
+        meta->recordCacheRecovery();
         return nullptr;
     }
 
@@ -1008,6 +1024,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     }
     if (!copy_plan || copy_plan->copy_infos.empty()) {
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
+        meta->recordCacheDependency(CacheDependency::UNKNOWN);
+        meta->recordCacheRecovery();
         return nullptr;
     }
 
@@ -1059,6 +1077,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     if (!startCopyAsync(context, copy_plan)) {
         RTP_LLM_LOG_WARNING("async read failed, start copy plan async failed");
         read_done(false);
+        meta->recordCacheDependency(CacheDependency::UNKNOWN);
+        meta->recordCacheRecovery();
         return nullptr;
     }
     return context;

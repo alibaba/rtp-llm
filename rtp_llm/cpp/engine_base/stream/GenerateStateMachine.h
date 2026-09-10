@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -43,7 +44,7 @@ public:
         return events_.has(event);
     }
 
-    StreamState moveToNext();
+    StreamState moveToNext(std::optional<uint64_t> round_id = std::nullopt);
 
     StreamState getStatus() const {
         return status.load(std::memory_order_acquire);
@@ -76,7 +77,7 @@ public:
     ErrorInfo                error_info;
 
 private:
-    void handleWaiting();
+    void handleWaiting(std::optional<uint64_t> round_id);
     void handleLoading();
     void handleRunning();
     void releaseResource();

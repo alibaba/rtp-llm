@@ -19,6 +19,14 @@ from rtp_llm.config.model_config import (
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
+from rtp_llm.metrics.frontend_request_metrics import (
+    ROUTE_BATCH,
+    ROUTE_EMBEDDING,
+    ROUTE_NORMAL,
+    ROUTE_OPENAI_CHAT,
+    frontend_metric_tags,
+    get_current_frontend_request_token,
+)
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
@@ -138,6 +146,24 @@ class FrontendServer(object):
         if self._frontend_worker is not None:
             self._frontend_worker.stop()
 
+    def _acquire_concurrency(self, route: str) -> int:
+        try:
+            sequence = self._global_controller.increment()
+        except ConcurrencyException:
+            token = get_current_frontend_request_token()
+            if token is not None:
+                token.reject_concurrency()
+            kmonitor.report(
+                AccMetrics.CONFLICT_QPS_METRIC,
+                1,
+                frontend_metric_tags(self.rank_id, self.server_id, route),
+            )
+            raise
+        token = get_current_frontend_request_token()
+        if token is not None:
+            token.admit()
+        return sequence
+
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
         try:
@@ -146,7 +172,7 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
             )
-            sequence = self._global_controller.increment() % 4096  # 12 bits
+            sequence = self._acquire_concurrency(ROUTE_EMBEDDING) % 4096  # 12 bits
             request[request_id_field_name] = generate_request_id(
                 self.py_env_configs.server_config.ip,
                 self.py_env_configs.server_config.server_port,
@@ -154,6 +180,11 @@ class FrontendServer(object):
                 sequence,
             )
         except Exception as e:
+            token = get_current_frontend_request_token()
+            if token is not None and isinstance(
+                e, (json.JSONDecodeError, AssertionError)
+            ):
+                token.reject_invalid()
             return self._handle_exception(request, e)
 
         try:
@@ -245,7 +276,7 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            sequence = self._global_controller.increment() % 4096  # 12 bits
+            sequence = self._acquire_concurrency(ROUTE_NORMAL) % 4096  # 12 bits
             req[request_id_field_name] = generate_request_id(
                 self.py_env_configs.server_config.ip,
                 self.py_env_configs.server_config.server_port,
@@ -256,6 +287,11 @@ class FrontendServer(object):
                 getattr(raw_request, "headers", None)
             )
         except Exception as e:
+            token = get_current_frontend_request_token()
+            if token is not None and isinstance(
+                e, (json.JSONDecodeError, AssertionError)
+            ):
+                token.reject_invalid()
             return self._handle_exception(req, e)
 
         def generate_call():
@@ -290,7 +326,7 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        sequence = self._global_controller.increment() % 4096  # 12 bits
+        sequence = self._acquire_concurrency(ROUTE_OPENAI_CHAT) % 4096  # 12 bits
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
             self.py_env_configs.server_config.server_port,
@@ -330,7 +366,7 @@ class FrontendServer(object):
     async def batch_chat_completion(self, request, raw_request: Request):
         from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
 
-        sequence = self._global_controller.increment() % 4096
+        sequence = self._acquire_concurrency(ROUTE_BATCH) % 4096
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
             self.py_env_configs.server_config.server_port,
@@ -357,7 +393,7 @@ class FrontendServer(object):
         # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
         # reject under the same concurrency_limit; the trade-off is that a large batch occupies
         # only one slot regardless of N.
-        sequence = self._global_controller.increment() % 4096
+        sequence = self._acquire_concurrency(ROUTE_BATCH) % 4096
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
             self.py_env_configs.server_config.server_port,
@@ -388,7 +424,7 @@ class FrontendServer(object):
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
-            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
+            pass
         elif isinstance(e, asyncio.CancelledError):
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,

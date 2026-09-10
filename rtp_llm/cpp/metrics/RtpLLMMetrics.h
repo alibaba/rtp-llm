@@ -193,11 +193,12 @@ private:
 
 class RtpLLMStreamMetricsCollector final {
 public:
-    bool qps               = false;
-    bool cancel_qps        = false;
-    bool error_qps         = false;
-    bool is_streaming_qps  = false;
-    bool not_streaming_qps = true;
+    bool qps                          = false;
+    bool cancel_qps                   = false;
+    bool error_qps                    = false;
+    bool is_streaming_qps             = false;
+    bool not_streaming_qps            = true;
+    bool report_cache_schedule_values = false;
 
     int64_t total_latency_us         = 0;
     int64_t first_token_latency_us   = 0;
@@ -256,6 +257,26 @@ public:
     kmonitor::MutableMetric* malloc_failed_times_metric = nullptr;
 
 private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMCacheScheduleMetricsCollector final {
+public:
+    bool     report_values   = false;
+    int64_t  ready_wait_us   = 0;
+    uint64_t schedule_rounds = 0;
+};
+
+class RtpLLMCacheScheduleMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheScheduleMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* cache_probe_qps_metric = nullptr;
+    kmonitor::MutableMetric* schedule_rounds_metric = nullptr;
+    kmonitor::MutableMetric* ready_wait_us_metric   = nullptr;
+
     AUTIL_LOG_DECLARE();
 };
 

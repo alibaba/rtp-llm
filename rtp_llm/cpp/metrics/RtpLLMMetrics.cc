@@ -11,6 +11,7 @@ AUTIL_LOG_SETUP(rtp_llm, RpcWorkerStatusMetrics);
 AUTIL_LOG_SETUP(rtp_llm, PrefillRecentCacheKeyMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcCacheStatusMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheScheduleMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
@@ -236,10 +237,17 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(total_latency_us);
     REPORT_GAUGE(first_token_latency_us);
     REPORT_GAUGE(wait_latency_us);
-    REPORT_GAUGE(enqueue_to_canrun_us);
-    REPORT_GAUGE(canrun_to_running_us);
-    REPORT_GAUGE(loading_cache_latency_us);
-    REPORT_GAUGE(load_done_to_running_us);
+    if (collector->report_cache_schedule_values) {
+        enqueue_to_canrun_us_metric->Report(tags, collector->enqueue_to_canrun_us);
+        canrun_to_running_us_metric->Report(tags, collector->canrun_to_running_us);
+        loading_cache_latency_us_metric->Report(tags, collector->loading_cache_latency_us);
+        load_done_to_running_us_metric->Report(tags, collector->load_done_to_running_us);
+    } else {
+        REPORT_GAUGE(enqueue_to_canrun_us);
+        REPORT_GAUGE(canrun_to_running_us);
+        REPORT_GAUGE(loading_cache_latency_us);
+        REPORT_GAUGE(load_done_to_running_us);
+    }
     REPORT_GAUGE(pause_latency_us);
     REPORT_GAUGE(iterate_count);
     REPORT_GAUGE(reuse_length);
@@ -253,6 +261,23 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(batch_with_prefill_len);
 
     REPORT_GAUGE(malloc_failed_times);
+}
+
+bool RtpLLMCacheScheduleMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(cache_probe_qps_metric, "rtp_llm_stream_cache_probe_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(schedule_rounds_metric, "rtp_llm_stream_canrun_to_running_schedule_rounds");
+    REGISTER_GAUGE_MUTABLE_METRIC(ready_wait_us_metric, "rtp_llm_stream_loading_cache_ready_wait_us");
+    return true;
+}
+
+void RtpLLMCacheScheduleMetrics::report(const kmonitor::MetricsTags*             tags,
+                                        RtpLLMCacheScheduleMetricsCollector* collector) {
+    cache_probe_qps_metric->Report(tags, 1);
+    if (!collector->report_values) {
+        return;
+    }
+    schedule_rounds_metric->Report(tags, collector->schedule_rounds);
+    ready_wait_us_metric->Report(tags, collector->ready_wait_us);
 }
 
 // for rpc request

@@ -8,6 +8,12 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.metrics.frontend_request_metrics import (
+    ROUTE_NORMAL,
+    FrontendRequestMetrics,
+    bind_frontend_request_token,
+    get_current_frontend_request_token,
+)
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -405,6 +411,31 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(client.inputs[1].generate_config, input.generate_config)
         self.assertIs(client.inputs[1].token_ids, input.token_ids)
         self.assertEqual(input.request_id, 123)
+
+    async def test_retry_reenters_route_then_returns_to_backend_stage(self):
+        client = _RetryingModelRpcClient()
+        visitor = self._visitor(client)
+        visitor.host_service.service_available = True
+        visitor.set_request_id_factory(lambda: 456)
+        route_stages = []
+
+        async def route_ips(_input):
+            route_stages.append(get_current_frontend_request_token().stage)
+
+        visitor.route_ips = route_ips
+        tracker = FrontendRequestMetrics(Mock(), rank_id=1, server_id=2)
+        token = tracker.begin(ROUTE_NORMAL)
+        token.admit()
+
+        with bind_frontend_request_token(token):
+            stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+            outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
+        self.assertEqual(route_stages, ["route", "route"])
+        self.assertEqual(token.stage, "backend")
+        self.assertEqual(tracker.snapshot()[ROUTE_NORMAL]["backend"], 1)
+        token.close()
 
     async def test_non_streaming_replays_successful_outputs_in_order(self):
         client = _SuccessfulModelRpcClient(["first-output", "second-output"])

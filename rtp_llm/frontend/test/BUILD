@@ -29,6 +29,15 @@ py_test(
 )
 
 py_test(
+    name = "frontend_request_metrics_test",
+    srcs = ["frontend_request_metrics_test.py"],
+    deps = [
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "frontend_shutdown_test",
     srcs = [
         "frontend_shutdown_test.py",

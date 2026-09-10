@@ -119,9 +119,12 @@ TEST_F(MemoryAsyncContextTest, waitDone_ReturnVoid_WhenBroadcastResultNullAndCal
     ctx->setBroadcastResult(nullptr);
     EXPECT_FALSE(ctx->done());
     EXPECT_FALSE(ctx->success());
+    EXPECT_FALSE(ctx->readyTimeUs().has_value());
 
     ctx->waitDone();
     EXPECT_TRUE(ctx->done());
+    ASSERT_TRUE(ctx->readyTimeUs().has_value());
+    EXPECT_GT(*ctx->readyTimeUs(), 0);
     EXPECT_EQ(callback_cnt, 1);
     EXPECT_FALSE(last_ok);
 

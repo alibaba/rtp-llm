@@ -13,6 +13,14 @@ namespace rtp_llm {
 // Forward declaration for type-safe generateStream() return type
 class GenerateStream;
 
+enum class CacheDependency {
+    UNDETERMINED,
+    NONE,
+    LOOKUP_ONLY,
+    DATA,
+    UNKNOWN,
+};
+
 class Meta {
 public:
     virtual ~Meta() = default;
@@ -23,6 +31,9 @@ public:
     virtual const std::string&          trace_id() const          = 0;
     virtual const std::string&          unique_id() const         = 0;
     virtual const std::vector<int64_t>& tokens() const            = 0;
+
+    virtual void recordCacheDependency(CacheDependency dependency) {}
+    virtual void recordCacheRecovery() {}
 
     // P2P read extension: returns GenerateStream pointer for type safety.
     // Non-P2P scenarios can return nullptr by default.

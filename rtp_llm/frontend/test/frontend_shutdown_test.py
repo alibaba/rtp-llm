@@ -3,7 +3,7 @@ import signal
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, create_autospec, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
@@ -16,6 +16,7 @@ from rtp_llm.frontend.frontend_app import (
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
+from rtp_llm.metrics.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 
 
@@ -83,6 +84,10 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         app_owner.separated_frontend = True
         app_owner.server_config = SimpleNamespace(http_port=0)
         app_owner.grpc_client = None
+        reporter = Mock()
+        app_owner.frontend_request_metrics = FrontendRequestMetrics(
+            reporter, rank_id=0, server_id=0
+        )
 
         app = app_owner.create_app()
         client = TestClient(app)
@@ -95,6 +100,14 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         response = client.post("/", json={"prompt": "hello"})
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.headers.get("retry-after"), "1")
+        self.assertEqual(
+            [
+                call.args[2]["event"]
+                for call in reporter.report.call_args_list
+                if "event" in call.args[2]
+            ],
+            ["received", "reject_unavailable"],
+        )
         chat_response = client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hello"}]},

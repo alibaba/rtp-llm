@@ -5,6 +5,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -64,10 +65,12 @@ protected:
         return 0;
     }
     virtual void fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {}
+    virtual void onStreamEnqueued(const GenerateStreamPtr& stream) {}
 
     bool   checkInputLength(const GenerateStreamPtr& stream);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
-    size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
+    size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams,
+                                    std::optional<uint64_t>       round_id = std::nullopt);
     void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     size_t countInitedKVCacheStreams() const;

@@ -12,6 +12,11 @@ from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.frontend_request_metrics import (
+    frontend_metric_tags,
+    get_current_frontend_request_token,
+    master_route_error_reported,
+)
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
@@ -95,6 +100,8 @@ class BackendRPCServerVisitor:
         self.sp_config = sp_config
         self.source_role = source_role
         self.source_ip = str(getattr(server_config, "ip", "") or "")
+        self.rank_id = str(getattr(server_config, "rank_id", 0))
+        self.server_id = str(getattr(server_config, "frontend_server_id", 0))
         assert self.max_seq_len > 0
 
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
@@ -196,6 +203,13 @@ class BackendRPCServerVisitor:
     def set_request_id_factory(self, factory: Callable[[], int]) -> None:
         self.request_id_factory = factory
 
+    def _metric_tags(self, **extra) -> dict:
+        tags = frontend_metric_tags(
+            getattr(self, "rank_id", 0), getattr(self, "server_id", 0)
+        )
+        tags.update(extra)
+        return tags
+
     @staticmethod
     def get_backend_role_list(
         pd_sep_config,
@@ -267,12 +281,15 @@ class BackendRPCServerVisitor:
                 input_pb=input_pb,
             )
         except BaseException as e:
-            exception_json = format_exception(e)
-            kmonitor.report(
-                AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
-                1,
-                {"error_code": exception_json.get("error_code_str", "")},
-            )
+            if not master_route_error_reported(e):
+                exception_json = format_exception(e)
+                kmonitor.report(
+                    AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+                    1,
+                    self._metric_tags(
+                        error_code=exception_json.get("error_code_str", "")
+                    ),
+                )
             raise
 
         if route_result.is_ok:
@@ -283,7 +300,9 @@ class BackendRPCServerVisitor:
                 input.request_id,
                 route_result.role_addrs,
             )
-            kmonitor.report(AccMetrics.MASTER_ROUTE_QPS_METRIC, 1)
+            kmonitor.report(
+                AccMetrics.MASTER_ROUTE_QPS_METRIC, 1, self._metric_tags()
+            )
             return None
 
         route_logger.error(
@@ -350,6 +369,7 @@ class BackendRPCServerVisitor:
             kmonitor.report(
                 AccMetrics.DOMAIN_ROUTE_QPS_METRIC,
                 1,
+                self._metric_tags(),
             )
         else:
             route_logger.error(
@@ -369,7 +389,11 @@ class BackendRPCServerVisitor:
                     f"{threshold}, "
                     f"proactively rejecting request <{input.request_id}>"
                 )
-                kmonitor.report(AccMetrics.MASTER_QUEUE_REJECT_QPS_METRIC, 1)
+                kmonitor.report(
+                    AccMetrics.MASTER_QUEUE_REJECT_QPS_METRIC,
+                    1,
+                    self._metric_tags(),
+                )
                 raise FtRuntimeException(
                     exception_type=ExceptionType.TRAFFIC_LIMIT_ERROR,
                     message=f"Flexlb queue length {queue_length} exceeds threshold {threshold}",
@@ -388,7 +412,9 @@ class BackendRPCServerVisitor:
                 with Timer() as master_route_timer:
                     master_route_result = await self.get_master_route_addrs(input)
                 kmonitor.report(
-                    GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
+                    GaugeMetrics.MASTER_ROUTE_RT_METRIC,
+                    master_route_timer.cost_ms(),
+                    self._metric_tags(),
                 )
             elif not role_addrs_specified:
                 route_logger.warning(
@@ -409,11 +435,17 @@ class BackendRPCServerVisitor:
                 with Timer() as domain_route_timer:
                     await self.get_domain_route_addrs(input)
                 kmonitor.report(
-                    GaugeMetrics.DOMAIN_ROUTE_RT_METRIC, domain_route_timer.cost_ms()
+                    GaugeMetrics.DOMAIN_ROUTE_RT_METRIC,
+                    domain_route_timer.cost_ms(),
+                    self._metric_tags(),
                 )
             route_logger.debug("routing to master done")
 
-        kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
+        kmonitor.report(
+            GaugeMetrics.ROUTE_RT_METRIC,
+            route_timer.cost_ms(),
+            self._metric_tags(),
+        )
         if not input.generate_config.role_addrs:
             route_error = FtRuntimeException(
                 ExceptionType.ROUTE_ERROR,
@@ -557,8 +589,13 @@ class BackendRPCServerVisitor:
             raise
 
         async def route_and_enqueue(attempt_input: GenerateInput):
+            token = get_current_frontend_request_token()
             if self.host_service.service_available:
+                if token is not None:
+                    token.enter_route()
                 await self.route_ips(attempt_input)
+            if token is not None:
+                token.enter_backend()
             return self.model_rpc_client.enqueue(attempt_input)
 
         async def stream_with_aux_info():
@@ -645,9 +682,14 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
+        token = get_current_frontend_request_token()
         if self.host_service.service_available:
+            if token is not None:
+                token.enter_route()
             for input in inputs:
                 await self.route_ips(input)
+        if token is not None:
+            token.enter_backend()
 
         return await self.model_rpc_client.batch_enqueue(inputs)
 

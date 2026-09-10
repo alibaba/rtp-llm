@@ -127,6 +127,22 @@ inline std::string genLocationSpecName(int tp_rank, const std::string& group_nam
 
 }  // namespace
 
+void RemoteConnectorState::setState(State state) {
+    if (state >= State::RCS_SUCCESS || state == State::RCS_ERROR) {
+        int64_t unset = 0;
+        ready_time_us_.compare_exchange_strong(unset, currentTimeUs(), std::memory_order_relaxed);
+    }
+    state_.store(state, std::memory_order_release);
+}
+
+std::optional<int64_t> RemoteConnectorState::readyTimeUs() const {
+    if (!doneImpl()) {
+        return std::nullopt;
+    }
+    const auto ready_time_us = ready_time_us_.load(std::memory_order_relaxed);
+    return ready_time_us > 0 ? std::optional<int64_t>(ready_time_us) : std::nullopt;
+}
+
 bool RemoteConnectorState::doneImpl() const {
     auto cur_state = state();
     return cur_state >= State::RCS_SUCCESS || cur_state == State::RCS_ERROR;
@@ -149,6 +165,10 @@ bool RemoteConnectorAsyncContext::success() const {
     return state_.successImpl();
 }
 
+std::optional<int64_t> RemoteConnectorAsyncContext::readyTimeUs() const {
+    return state_.readyTimeUs();
+}
+
 void RemoteConnectorAsyncContext::waitDone() {
     return;
 }
@@ -159,6 +179,10 @@ bool RemoteAsyncMatchContext::done() const {
 
 bool RemoteAsyncMatchContext::success() const {
     return state_.successImpl();
+}
+
+std::optional<int64_t> RemoteAsyncMatchContext::readyTimeUs() const {
+    return state_.readyTimeUs();
 }
 
 RemoteConnector::RemoteConnector(const CacheConfig&                        cache_config,
@@ -445,6 +469,10 @@ std::shared_ptr<AsyncMatchContext> RemoteConnector::asyncMatch(const std::shared
             this->asyncMatchTask(resource, meta, async_match_context);
         },
         false);
+    if (ec != autil::ThreadPoolBase::ERROR_TYPE::ERROR_NONE) {
+        meta->recordCacheDependency(CacheDependency::UNKNOWN);
+        meta->recordCacheRecovery();
+    }
     CHECK_THREAD_POOL_EC("asyncMatch", async_match_context, ec);
     return async_match_context;
 }
@@ -456,6 +484,10 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<K
                                                          int read_block_num) {
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, resource is null");
+        if (meta) {
+            meta->recordCacheDependency(CacheDependency::UNKNOWN);
+            meta->recordCacheRecovery();
+        }
         return nullptr;
     }
 
@@ -469,10 +501,18 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<K
                     resource, start_read_block_index, read_block_num, async_context, remote_match_context);
             },
             false);
+        if (ec != autil::ThreadPoolBase::ERROR_TYPE::ERROR_NONE && meta) {
+            meta->recordCacheDependency(CacheDependency::UNKNOWN);
+            meta->recordCacheRecovery();
+        }
         CHECK_THREAD_POOL_EC("asyncRead", async_context, ec);
         return async_context;
     }
     RTP_LLM_LOG_WARNING("cast meta to RemoteConnectorMeta failed");
+    if (meta) {
+        meta->recordCacheDependency(CacheDependency::UNKNOWN);
+        meta->recordCacheRecovery();
+    }
     return nullptr;
 }
 
@@ -596,6 +636,7 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&    
     RETURN_IF(block_mask >= keys.size(), match);
     const std::string&          unique_id  = meta->unique_id();
     kv_cache_manager::QueryType query_type = kv_cache_manager::QueryType::QT_PREFIX_MATCH;
+    meta->recordCacheDependency(CacheDependency::LOOKUP_ONLY);
     async_context->setState(RemoteConnectorState::State::RCS_READ_MATCH);
     auto match_result = client_wrapper_->match(unique_id, match_trace_id, query_type, keys, block_mask, {});
     CHECK_AND_LOG(match_result.first, RCS_READ_MATCH_ERROR, "asyncGet match failed, [%s]", match_trace_id.c_str());
@@ -660,8 +701,8 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
     // TODO : maybe not all locations are loaded successfuly
     helper.collector.remote_read_fail_qps  = false;
     helper.collector.remote_read_token_num = new_reuse_block_num * init_params_->cache_config.seq_size_per_block;
-    async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
     resource->setRemoteReuseBlockNum(new_reuse_block_num);
+    async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
 }
 
 void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,

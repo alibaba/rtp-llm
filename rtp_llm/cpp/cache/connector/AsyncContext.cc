@@ -1,8 +1,11 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 
+#include <algorithm>
+
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -48,6 +51,24 @@ ErrorInfo FusedAsyncContext::errorInfo() const {
         }
     }
     return ErrorInfo::OkStatus();
+}
+
+std::optional<int64_t> FusedAsyncContext::readyTimeUs() const {
+    if (!done()) {
+        return std::nullopt;
+    }
+    int64_t ready_time_us = 0;
+    for (const auto& context : contexts_) {
+        if (!context) {
+            continue;
+        }
+        const auto child_ready_time_us = context->readyTimeUs();
+        if (!child_ready_time_us) {
+            return std::nullopt;
+        }
+        ready_time_us = std::max(ready_time_us, *child_ready_time_us);
+    }
+    return ready_time_us;
 }
 
 // --------------------------------- FusedAsyncReadContext ---------------------------------
@@ -104,10 +125,45 @@ ErrorInfo FusedAsyncReadContext::errorInfo() const {
     return ErrorInfo::OkStatus();
 }
 
+std::optional<int64_t> FusedAsyncReadContext::readyTimeUs() const {
+    if (!done() || !fused_match_context_) {
+        return std::nullopt;
+    }
+    const auto match_ready_time_us = fused_match_context_->readyTimeUs();
+    if (!match_ready_time_us) {
+        return std::nullopt;
+    }
+    if (!fused_match_context_->success()) {
+        return match_ready_time_us;
+    }
+
+    std::shared_ptr<FusedAsyncContext> read_context;
+    int64_t                            read_context_set_time_us = 0;
+    {
+        std::lock_guard<std::mutex> lock(read_ctx_mutex_);
+        if (!read_ctx_set_.load(std::memory_order_acquire) || read_context_set_time_us_ == 0) {
+            return std::nullopt;
+        }
+        read_context             = fused_read_context_;
+        read_context_set_time_us = read_context_set_time_us_;
+    }
+
+    int64_t ready_time_us = std::max(*match_ready_time_us, read_context_set_time_us);
+    if (read_context) {
+        const auto read_ready_time_us = read_context->readyTimeUs();
+        if (!read_ready_time_us) {
+            return std::nullopt;
+        }
+        ready_time_us = std::max(ready_time_us, *read_ready_time_us);
+    }
+    return ready_time_us;
+}
+
 void FusedAsyncReadContext::setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context) {
     std::lock_guard<std::mutex> lk(read_ctx_mutex_);
-    fused_read_context_ = fused_read_context;
-    read_ctx_set_.store(true);
+    fused_read_context_        = fused_read_context;
+    read_context_set_time_us_  = currentTimeUs();
+    read_ctx_set_.store(true, std::memory_order_release);
 }
 
 const std::shared_ptr<FusedAsyncContext> FusedAsyncReadContext::fusedReadContext() const {

@@ -62,6 +62,8 @@ std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourc
     if (config_.role_type == RoleType::PREFILL) {
         if (!stream_store_->addResource(meta, resource)) {
             RTP_LLM_LOG_WARNING("asyncMatch failed, stream_store add resource failed");
+            meta->recordCacheDependency(CacheDependency::UNKNOWN);
+            meta->recordCacheRecovery();
             return nullptr;
         }
         return nullptr;

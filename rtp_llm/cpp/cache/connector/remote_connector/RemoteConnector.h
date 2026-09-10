@@ -159,14 +159,14 @@ protected:
 
     bool successImpl() const;
 
-    inline void setState(State state) {
-        state_.store(state, std::memory_order_release);
+    void setState(State state);
+    State state() const {
+        return state_.load(std::memory_order_acquire);
     }
-    inline State state() const {
-        return state_.load(std::memory_order_relaxed);
-    }
+    std::optional<int64_t> readyTimeUs() const;
 
-    std::atomic<State> state_ = State::RCS_INIT;
+    std::atomic<State>   state_         = State::RCS_INIT;
+    std::atomic<int64_t> ready_time_us_ = 0;
 };
 
 class RemoteAsyncMatchContext: public AsyncMatchContext {
@@ -174,9 +174,10 @@ public:
     explicit RemoteAsyncMatchContext(size_t prev_reuse_blocks_num): prev_reuse_blocks_num_(prev_reuse_blocks_num) {}
     ~RemoteAsyncMatchContext() override = default;
 
-    bool done() const override;
-    bool success() const override;
-    void waitDone() override {
+    bool                   done() const override;
+    bool                   success() const override;
+    std::optional<int64_t> readyTimeUs() const override;
+    void                   waitDone() override {
         return;
     }
     size_t matchedBlockCount() const override {
@@ -224,9 +225,10 @@ public:
     ~RemoteConnectorAsyncContext() override = default;
 
 public:
-    bool done() const override;
-    bool success() const override;
-    void waitDone() override;
+    bool                   done() const override;
+    bool                   success() const override;
+    std::optional<int64_t> readyTimeUs() const override;
+    void                   waitDone() override;
 
     inline RemoteConnectorState::State state() const {
         return state_.state();

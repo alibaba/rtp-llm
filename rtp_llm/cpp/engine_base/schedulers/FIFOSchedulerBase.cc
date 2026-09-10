@@ -92,6 +92,7 @@ absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
         return absl::InvalidArgumentError("Check input length failed");
     }
     stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    onStreamEnqueued(stream);
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
@@ -119,6 +120,7 @@ FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         for (auto& stream : valid_streams) {
             stream->recordSchedulerEnqueueTime(enqueue_time_us);
+            onStreamEnqueued(stream);
         }
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.insert(waiting_streams_.end(), valid_streams.begin(), valid_streams.end());
@@ -128,12 +130,13 @@ FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     return {std::move(enqueue_successes), streams};
 }
 
-size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
+size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams,
+                                                   std::optional<uint64_t>       round_id) {
     RTP_LLM_PROFILE_FUNCTION();
     size_t moved_count = 0;
     for (auto it = streams.begin(); it != streams.end();) {
         auto state     = (*it)->getStatus();
-        auto new_state = (*it)->moveToNext();
+        auto new_state = (*it)->moveToNext(round_id);
         if (new_state != state) {
             addStreamToNewState(*it, new_state);
             it = streams.erase(it);

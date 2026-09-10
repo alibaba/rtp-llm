@@ -2,15 +2,25 @@ import asyncio
 import json
 from typing import Any
 from unittest import TestCase, main
+from unittest.mock import Mock, patch
 
 from pydantic import BaseModel
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.metrics.frontend_request_metrics import (
+    ROUTE_NORMAL,
+    FrontendRequestMetrics,
+    bind_frontend_request_token,
+)
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
-from rtp_llm.utils.concurrency_controller import init_controller, set_global_controller
+from rtp_llm.utils.concurrency_controller import (
+    ConcurrencyException,
+    init_controller,
+    set_global_controller,
+)
 
 
 class FakePipelinResponse(BaseModel):
@@ -105,6 +115,30 @@ class FrontendServerTest(TestCase):
         self.assertTrue(self.frontend_server.check_health())
         visitor = self.frontend_server._frontend_worker.backend_rpc_server_visitor
         self.assertEqual(visitor.refresh_calls, [False])
+
+    def test_concurrency_reject_is_classified_and_reported_once(self):
+        class RejectingController:
+            def increment(self):
+                raise ConcurrencyException("busy")
+
+        self.frontend_server._global_controller = RejectingController()
+        tracker = FrontendRequestMetrics(Mock(), rank_id=0, server_id=0)
+        token = tracker.begin(ROUTE_NORMAL)
+
+        with patch("rtp_llm.frontend.frontend_server.kmonitor") as reporter:
+            with bind_frontend_request_token(token):
+                with self.assertRaises(ConcurrencyException):
+                    self.frontend_server._acquire_concurrency(ROUTE_NORMAL)
+
+        self.assertEqual(token.outcome, "reject_concurrency")
+        reporter.report.assert_called_once()
+        tags = reporter.report.call_args.args[2]
+        self.assertEqual(tags["route"], ROUTE_NORMAL)
+        self.assertEqual(tags["rank_id"], "0")
+        self.assertEqual(tags["server_id"], "0")
+        self.assertNotIn("admission_probe", tags)
+        token.close()
+
     def test_close_uses_production_frontend_server_contract(self):
         asyncio.run(self.frontend_server.close())
 

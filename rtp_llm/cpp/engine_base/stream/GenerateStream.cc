@@ -10,6 +10,7 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -50,7 +51,183 @@ bool useStreamAsyncReserveTokens() {
     return enabled;
 }
 
+int cacheDependencyPriority(CacheDependency dependency) {
+    switch (dependency) {
+        case CacheDependency::UNDETERMINED:
+            return -1;
+        case CacheDependency::NONE:
+            return 0;
+        case CacheDependency::LOOKUP_ONLY:
+            return 1;
+        case CacheDependency::UNKNOWN:
+            return 2;
+        case CacheDependency::DATA:
+            return 3;
+    }
+    return 2;
+}
+
+const char* cacheDependencyName(CacheDependency dependency) {
+    switch (dependency) {
+        case CacheDependency::UNDETERMINED:
+            return "unknown";
+        case CacheDependency::NONE:
+            return "none";
+        case CacheDependency::LOOKUP_ONLY:
+            return "lookup_only";
+        case CacheDependency::DATA:
+            return "data";
+        case CacheDependency::UNKNOWN:
+            return "unknown";
+    }
+    return "unknown";
+}
+
 }  // namespace
+
+void CacheScheduleObservation::activate(int64_t enqueue_time_us) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_) {
+        return;
+    }
+    active_          = true;
+    enqueue_time_us_ = enqueue_time_us;
+}
+
+void CacheScheduleObservation::reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_ && !reached_running_) {
+        invalid_ = true;
+    }
+}
+
+void CacheScheduleObservation::recordCanRun(int64_t time_us, std::optional<uint64_t> round_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || canrun_time_us_) {
+        return;
+    }
+    canrun_time_us_ = time_us;
+    canrun_round_   = round_id;
+}
+
+void CacheScheduleObservation::recordLoadingStart(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || reached_running_ || loading_start_time_us_) {
+        return;
+    }
+    loading_entered_      = true;
+    loading_start_time_us_ = time_us;
+}
+
+void CacheScheduleObservation::recordLoadReady(std::optional<int64_t> ready_time_us, int64_t observed_time_us) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || reached_running_ || observed_ready_time_us_) {
+        return;
+    }
+    ready_time_us_          = ready_time_us;
+    observed_ready_time_us_ = observed_time_us;
+    if (!ready_time_us) {
+        invalid_ = true;
+    }
+}
+
+void CacheScheduleObservation::recordLoadingDone(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || reached_running_ || loading_done_time_us_) {
+        return;
+    }
+    loading_done_time_us_ = time_us;
+}
+
+void CacheScheduleObservation::recordRunning(int64_t time_us, std::optional<uint64_t> round_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || reached_running_) {
+        return;
+    }
+    running_time_us_ = time_us;
+    running_round_   = round_id;
+    reached_running_ = true;
+}
+
+void CacheScheduleObservation::recordDependency(CacheDependency dependency) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || reached_running_) {
+        return;
+    }
+    if (cacheDependencyPriority(dependency) > cacheDependencyPriority(cache_dependency_)) {
+        cache_dependency_ = dependency;
+    }
+}
+
+void CacheScheduleObservation::markRecovered() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_ && !reached_running_) {
+        recovered_ = true;
+    }
+}
+
+void CacheScheduleObservation::markInvalid() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_ && !reached_running_) {
+        invalid_ = true;
+    }
+}
+
+CacheScheduleSnapshot CacheScheduleObservation::snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    CacheScheduleSnapshot      result;
+    result.active           = active_;
+    result.loading_entered  = loading_entered_;
+    result.reached_running  = reached_running_;
+    result.recovered        = recovered_;
+    result.invalid          = invalid_ || cache_dependency_ == CacheDependency::UNDETERMINED;
+    result.cache_dependency = cache_dependency_ == CacheDependency::UNDETERMINED ? CacheDependency::UNKNOWN :
+                                                                                   cache_dependency_;
+    if (!active_ || !reached_running_) {
+        result.invalid = active_;
+        return result;
+    }
+
+    const bool common_complete = enqueue_time_us_ && canrun_time_us_ && running_time_us_ && canrun_round_
+                                 && running_round_ && *canrun_time_us_ >= *enqueue_time_us_
+                                 && *running_time_us_ >= *canrun_time_us_ && *running_round_ >= *canrun_round_;
+    if (!common_complete) {
+        result.invalid = true;
+        return result;
+    }
+
+    result.enqueue_to_canrun_us = *canrun_time_us_ - *enqueue_time_us_;
+    result.canrun_to_running_us = *running_time_us_ - *canrun_time_us_;
+    result.schedule_rounds      = *running_round_ - *canrun_round_ + 1;
+
+    if (!loading_entered_) {
+        return result;
+    }
+
+    const bool loading_complete = loading_start_time_us_ && ready_time_us_ && observed_ready_time_us_
+                                  && loading_done_time_us_ && *ready_time_us_ <= *observed_ready_time_us_
+                                  && *loading_start_time_us_ <= *loading_done_time_us_
+                                  && *observed_ready_time_us_ <= *loading_done_time_us_
+                                  && *loading_done_time_us_ <= *running_time_us_;
+    if (!loading_complete) {
+        result.invalid = true;
+        return result;
+    }
+
+    const int64_t ready_wait_start = std::max(*loading_start_time_us_, *ready_time_us_);
+    if (*observed_ready_time_us_ < ready_wait_start) {
+        result.invalid = true;
+        return result;
+    }
+    result.loading_cache_latency_us = *loading_done_time_us_ - *loading_start_time_us_;
+    result.load_done_to_running_us  = *running_time_us_ - *loading_done_time_us_;
+    result.ready_wait_us            = *observed_ready_time_us_ - ready_wait_start;
+    if (result.canrun_to_running_us < result.loading_cache_latency_us + result.load_done_to_running_us
+        || result.ready_wait_us > result.loading_cache_latency_us) {
+        result.invalid = true;
+    }
+    return result;
+}
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
@@ -167,6 +344,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
+    cache_schedule_observation_->reset();
     begin_time_us_               = begin_time_us;
     wait_time_us_                = 0;
     scheduler_enqueue_time_us_   = 0;
@@ -682,32 +860,64 @@ void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
     }
 }
 
-void GenerateStream::recordCanRunTime() {
+void GenerateStream::activateCacheScheduleObservation() {
+    if (resourceContext().role_type == RoleType::PREFILL && isContextStream() && !isFakeStream() && !isPerfTest()) {
+        cache_schedule_observation_->activate(scheduler_enqueue_time_us_);
+    }
+}
+
+void GenerateStream::recordCanRunTime(std::optional<uint64_t> round_id) {
     if (can_run_time_us_ == 0) {
         can_run_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        cache_schedule_observation_->recordCanRun(can_run_time_us_, round_id);
     }
+}
+
+void GenerateStream::reportCanRun(uint64_t round_id) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    recordCanRunTime(round_id);
+    reportEventWithoutLock(StreamEvents::CanRun);
 }
 
 void GenerateStream::recordLoadingCacheStartTime() {
     if (loading_cache_start_time_us_ == 0) {
         loading_cache_start_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        cache_schedule_observation_->recordLoadingStart(loading_cache_start_time_us_);
     }
+}
+
+void GenerateStream::recordCacheLoadReady(std::optional<int64_t> ready_time_us, int64_t observed_time_us) {
+    cache_schedule_observation_->recordLoadReady(ready_time_us, observed_time_us);
+}
+
+void GenerateStream::recordCacheDependency(CacheDependency dependency) {
+    cache_schedule_observation_->recordDependency(dependency);
+}
+
+void GenerateStream::markCacheScheduleRecovered() {
+    cache_schedule_observation_->markRecovered();
+}
+
+void GenerateStream::markCacheScheduleInvalid() {
+    cache_schedule_observation_->markInvalid();
 }
 
 void GenerateStream::recordLoadingCacheDoneTime() {
     if (loading_cache_done_time_us_ == 0) {
         loading_cache_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        cache_schedule_observation_->recordLoadingDone(loading_cache_done_time_us_);
         if (loading_cache_start_time_us_ > 0) {
             loading_cache_latency_us_ = loading_cache_done_time_us_ - loading_cache_start_time_us_;
         }
     }
 }
 
-void GenerateStream::recordRunningTime() {
+void GenerateStream::recordRunningTime(std::optional<uint64_t> round_id) {
     if (first_running_time_us_ != 0) {
         return;
     }
     first_running_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    cache_schedule_observation_->recordRunning(first_running_time_us_, round_id);
     if (loading_cache_done_time_us_ > 0) {
         load_done_to_running_us_ = first_running_time_us_ - loading_cache_done_time_us_;
     }
@@ -758,14 +968,14 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
     complete_token_ids_->setReserveStep(static_cast<int>(reserve_step));
 }
 
-StreamState GenerateStream::moveToNext() {
+StreamState GenerateStream::moveToNext(std::optional<uint64_t> round_id) {
     StreamState state;
     bool        should_report_metric = false;
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         checkTimeoutWithoutLock();
         const auto old_status = getStatus();
-        state                 = generate_status_->moveToNext();
+        state                 = generate_status_->moveToNext(round_id);
         const auto new_status = getStatus();
 
         if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
@@ -1277,6 +1487,7 @@ void GenerateStream::reportMetricOnce() {
 
 void GenerateStream::reportMetric() {
     reportStreamMetrics();
+    reportCacheScheduleMetrics();
     reportCacheReuseMetrics();
 }
 
@@ -1291,6 +1502,7 @@ void GenerateStream::reportStreamMetrics() {
         collector.error_qps         = hasError() && !cancelled;
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
+        const bool cache_probe_active = cache_schedule_observation_->snapshot().active;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
             collector.reuse_length       = initial_reuse_length_;
             collector.input_token_length = inputLength();
@@ -1304,14 +1516,16 @@ void GenerateStream::reportStreamMetrics() {
             RTP_LLM_LOG_DEBUG(
                 "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
             collector.wait_latency_us = wait_time_us_;
-            if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
-                collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
+            if (!cache_probe_active) {
+                if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
+                    collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
+                }
+                if (can_run_time_us_ > 0 && first_running_time_us_ > can_run_time_us_) {
+                    collector.canrun_to_running_us = first_running_time_us_ - can_run_time_us_;
+                }
+                collector.loading_cache_latency_us = loading_cache_latency_us_;
+                collector.load_done_to_running_us  = load_done_to_running_us_;
             }
-            if (can_run_time_us_ > 0 && first_running_time_us_ > can_run_time_us_) {
-                collector.canrun_to_running_us = first_running_time_us_ - can_run_time_us_;
-            }
-            collector.loading_cache_latency_us = loading_cache_latency_us_;
-            collector.load_done_to_running_us  = load_done_to_running_us_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
             collector.malloc_failed_times      = stream_cache_resource_->mallocFailedTimes();
@@ -1323,6 +1537,44 @@ void GenerateStream::reportStreamMetrics() {
         static kmonitor::MetricsTags timeout_tag("timeout", "true");
         metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
                                                                                      &collector);
+    }
+}
+
+void GenerateStream::reportCacheScheduleMetrics() const {
+    if (!metrics_reporter_) {
+        return;
+    }
+    const auto snapshot = cache_schedule_observation_->snapshot();
+    if (!snapshot.active) {
+        return;
+    }
+
+    const bool single_pass = snapshot.reached_running && !snapshot.recovered && !snapshot.invalid
+                             && snapshot.cache_dependency != CacheDependency::UNKNOWN;
+    const char* sample_status = single_pass ? "single_pass" :
+                                snapshot.reached_running && snapshot.recovered ? "recovered" : "excluded";
+
+    kmonitor::MetricsTags tags;
+    tags.AddTag("cache_probe", "v1");
+    tags.AddTag("cache_dependency", cacheDependencyName(snapshot.cache_dependency));
+    tags.AddTag("loading_entered", snapshot.loading_entered ? "true" : "false");
+    tags.AddTag("sample_status", sample_status);
+
+    RtpLLMCacheScheduleMetricsCollector collector;
+    collector.report_values   = single_pass;
+    collector.ready_wait_us   = snapshot.ready_wait_us;
+    collector.schedule_rounds = snapshot.schedule_rounds;
+    metrics_reporter_->report<RtpLLMCacheScheduleMetrics, RtpLLMCacheScheduleMetricsCollector>(&tags, &collector);
+
+    if (single_pass) {
+        RtpLLMStreamMetricsCollector stage_collector;
+        stage_collector.not_streaming_qps            = false;
+        stage_collector.report_cache_schedule_values = true;
+        stage_collector.enqueue_to_canrun_us          = snapshot.enqueue_to_canrun_us;
+        stage_collector.canrun_to_running_us          = snapshot.canrun_to_running_us;
+        stage_collector.loading_cache_latency_us      = snapshot.loading_cache_latency_us;
+        stage_collector.load_done_to_running_us       = snapshot.load_done_to_running_us;
+        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(&tags, &stage_collector);
     }
 }
 

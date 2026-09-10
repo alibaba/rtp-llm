@@ -16,6 +16,7 @@ public:
     MOCK_METHOD(bool, done, (), (const, override));
     MOCK_METHOD(bool, success, (), (const, override));
     MOCK_METHOD(ErrorInfo, errorInfo, (), (const, override));
+    MOCK_METHOD(std::optional<int64_t>, readyTimeUs, (), (const, override));
 };
 
 }  // namespace rtp_llm

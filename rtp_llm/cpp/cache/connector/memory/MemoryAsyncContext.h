@@ -19,18 +19,15 @@ public:
     explicit MemoryAsyncMatchContext(size_t                matched_block_count,
                                      int                   start_read_block_index = -1,
                                      int                   read_block_num         = 0,
-                                     std::shared_ptr<void> read_copy_plan         = nullptr):
-        matched_block_count_(matched_block_count),
-        start_read_block_index_(start_read_block_index),
-        read_block_num_(read_block_num),
-        read_copy_plan_(std::move(read_copy_plan)) {}
+                                     std::shared_ptr<void> read_copy_plan         = nullptr);
     ~MemoryAsyncMatchContext() override = default;
 
 public:
-    void                  waitDone() override;
-    bool                  done() const override;
-    bool                  success() const override;
-    size_t                matchedBlockCount() const override;
+    void                   waitDone() override;
+    bool                   done() const override;
+    bool                   success() const override;
+    std::optional<int64_t> readyTimeUs() const override;
+    size_t                 matchedBlockCount() const override;
     int                   startReadBlockIndex() const;
     int                   readBlockNum() const;
     std::shared_ptr<void> readCopyPlan() const;
@@ -41,6 +38,7 @@ private:
     int                   start_read_block_index_{-1};
     int                   read_block_num_{0};
     std::shared_ptr<void> read_copy_plan_;
+    int64_t               ready_time_us_{0};
 };
 
 // 用于 memory connector read/write
@@ -50,9 +48,10 @@ public:
     ~MemoryAsyncContext() override = default;
 
 public:
-    void waitDone() override;
-    bool done() const override;
-    bool success() const override;
+    void                   waitDone() override;
+    bool                   done() const override;
+    bool                   success() const override;
+    std::optional<int64_t> readyTimeUs() const override;
     void setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
     void markFailed(const std::string& reason);
 
@@ -68,6 +67,7 @@ private:
     bool                                                                    finalizing_{false};
     bool                                                                    failed_{false};
     std::string                                                             failure_reason_;
+    int64_t                                                                 ready_time_us_{0};
     std::atomic<bool>                                                       already_done_{false};
 };
 

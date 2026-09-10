@@ -29,6 +29,7 @@ class AccMetrics(Enum):
     QPS_METRIC = "py_rtp_framework_qps"
     ERROR_QPS_METRIC = "py_rtp_framework_error_qps"
     CONFLICT_QPS_METRIC = "py_rtp_framework_concurrency_exception_qps"
+    FRONTEND_ADMISSION_QPS_METRIC = "py_rtp_frontend_admission_qps"
     ITER_QPS_METRIC = "py_rtp_response_iterate_qps"
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
@@ -77,6 +78,7 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+    FRONTEND_INFLIGHT_METRIC = "py_rtp_frontend_inflight"
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"

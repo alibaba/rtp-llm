@@ -105,16 +105,23 @@ void KVCacheConnectorCoordinator::initUpdateThread() {
 std::shared_ptr<AsyncContext>
 KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (stop_.load()) {
-        return nullptr;
-    }
     if (!connector_context) {
         RTP_LLM_LOG_WARNING("async read failed, connector context is null");
+        return nullptr;
+    }
+    if (stop_.load()) {
+        if (connector_context->meta()) {
+            connector_context->meta()->recordCacheDependency(CacheDependency::UNKNOWN);
+            connector_context->meta()->recordCacheRecovery();
+        }
         return nullptr;
     }
     const auto& kvcache_resource = connector_context->kvCacheResource();
     // empty cache keys will not handled by coordinator.
     if (kvcache_resource.cacheKeys().empty()) {
+        if (connector_context->meta()) {
+            connector_context->meta()->recordCacheDependency(CacheDependency::NONE);
+        }
         return nullptr;
     }
 
@@ -128,6 +135,9 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         // block, so the canonical last-rank-key namespace is empty by design.
         // Skip silently — connector activity for these is a no-op anyway.
         if (ref_keys.empty()) {
+            if (connector_context->meta()) {
+                connector_context->meta()->recordCacheDependency(CacheDependency::NONE);
+            }
             return nullptr;
         }
         ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
@@ -137,12 +147,19 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
+        if (connector_context->meta()) {
+            connector_context->meta()->recordCacheDependency(CacheDependency::UNKNOWN);
+            connector_context->meta()->recordCacheRecovery();
+        }
         return nullptr;
     }
 
     std::vector<std::shared_ptr<AsyncContext>> match_contexts(connectors_.size());
     for (int i = 0; i < connectors_.size(); i++) {
         match_contexts.at(i) = connectors_.at(i)->asyncMatch(resource, connector_context->meta());
+    }
+    if (connector_context->meta()) {
+        connector_context->meta()->recordCacheDependency(CacheDependency::NONE);
     }
 
     auto fused_match_context = std::make_shared<FusedAsyncContext>(std::move(match_contexts));
@@ -333,6 +350,9 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
         const auto matched_num = match_context->matchedBlockCount();
         if (matched_num <= already_reuse_num) {
             continue;
+        }
+        if (fused_read_context->meta()) {
+            fused_read_context->meta()->recordCacheDependency(CacheDependency::DATA);
         }
         auto connector_read_context = connectors_.at(i)->asyncRead(fused_read_context->resource(),
                                                                    fused_read_context->meta(),

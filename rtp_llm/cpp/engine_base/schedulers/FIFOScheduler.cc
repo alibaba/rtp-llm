@@ -76,6 +76,10 @@ void FIFOScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector)
     collector.group_fallback_count = pending_group_fallback_count_.exchange(0, std::memory_order_relaxed);
 }
 
+void FIFOScheduler::onStreamEnqueued(const GenerateStreamPtr& stream) {
+    stream->activateCacheScheduleObservation();
+}
+
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
@@ -111,6 +115,7 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         const auto                  enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         for (auto& stream : valid_streams) {
             stream->recordSchedulerEnqueueTime(enqueue_time_us);
+            onStreamEnqueued(stream);
         }
         if (fallback_to_individual_streams) {
             waiting_streams_.insert(waiting_streams_.end(), valid_streams.begin(), valid_streams.end());
@@ -304,7 +309,8 @@ bool FIFOScheduler::waitPredicate() {
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
-                                        const list<GenerateStreamPtr>& already_admitted_streams) {
+                                        const list<GenerateStreamPtr>& already_admitted_streams,
+                                        uint64_t                       round_id) {
     RTP_LLM_PROFILE_FUNCTION();
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
@@ -349,7 +355,7 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
 
         if (stream->hasError()) {
             auto state     = stream->getStatus();
-            auto new_state = stream->moveToNext();
+            auto new_state = stream->moveToNext(round_id);
             if (new_state != state) {
                 addStreamToNewState(stream, new_state);
                 waiting_streams.erase(current);
@@ -384,10 +390,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         const auto state                 = stream->getStatus();
         const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
         if (!stream->hasEvent(StreamEvents::CanRun)) {
-            stream->reportEvent(StreamEvents::CanRun);
+            stream->reportCanRun(round_id);
         }
 
-        const auto new_state           = stream->moveToNext();
+        const auto new_state           = stream->moveToNext(round_id);
         const bool kv_initialized      = !already_inited_kv && stream->curBlocksNum() > 0;
         const bool load_initiated      = !load_initiated_before && stream->hasEvent(StreamEvents::LoadInitiated);
         const bool scheduling_progress = new_state == StreamState::RUNNING || new_state == StreamState::LOADING_CACHE
@@ -418,13 +424,13 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     }
 }
 
-void FIFOScheduler::advanceLoadingGroup(StreamGroup& group) {
+void FIFOScheduler::advanceLoadingGroup(StreamGroup& group, uint64_t round_id) {
     for (auto it = group.begin(); it != group.end();) {
-        auto state = (*it)->moveToNext();
+        auto state = (*it)->moveToNext(round_id);
         // Cache completion returns to WAITING, but this group already owns its admission.
         // Resume it immediately so a ready group does not consume another scheduling round.
         if (state == StreamState::WAITING) {
-            state = (*it)->moveToNext();
+            state = (*it)->moveToNext(round_id);
         }
         if (state == StreamState::FINISHED) {
             it = group.erase(it);
@@ -455,13 +461,13 @@ void FIFOScheduler::dispatchPreparedGroup(StreamGroup& group) {
     }
 }
 
-void FIFOScheduler::evaluateLoadingCacheGroupQueue() {
+void FIFOScheduler::evaluateLoadingCacheGroupQueue(uint64_t round_id) {
     if (loading_cache_group_queue_.empty()) {
         return;
     }
 
     auto& group = loading_cache_group_queue_.front();
-    advanceLoadingGroup(group);
+    advanceLoadingGroup(group, round_id);
     if (group.empty()) {
         loading_cache_group_queue_.pop_front();
         return;
@@ -486,7 +492,7 @@ bool FIFOScheduler::loadingGroupReady() const {
                           [](const auto& stream) { return stream->getStatus() == StreamState::RUNNING; });
 }
 
-void FIFOScheduler::evaluateWaitingGroupQueue() {
+void FIFOScheduler::evaluateWaitingGroupQueue(uint64_t round_id) {
     if (!running_streams_.empty() || !new_streams_.empty() || !loading_cache_group_queue_.empty()
         || waiting_group_queue_.empty()) {
         return;
@@ -497,7 +503,7 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     const size_t original_size = group.size();
     for (auto it = group.begin(); it != group.end();) {
         if ((*it)->hasError()) {
-            (*it)->moveToNext();
+            (*it)->moveToNext(round_id);
             it = group.erase(it);
         } else {
             ++it;
@@ -524,9 +530,9 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
         }
 
         if (!stream->hasEvent(StreamEvents::CanRun)) {
-            stream->reportEvent(StreamEvents::CanRun);
+            stream->reportCanRun(round_id);
         }
-        const auto state = stream->moveToNext();
+        const auto state = stream->moveToNext(round_id);
         if (!already_inited_kv && stream->curBlocksNum() > 0) {
             ++newly_inited_kv_streams;
         }
@@ -574,12 +580,13 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
 
-    schedule_trigger_                 = false;
+    const uint64_t round_id = ++round_id_;
+    schedule_trigger_       = false;
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
 
-    evaluateAndUpdateStreams(running_streams_);
+    evaluateAndUpdateStreams(running_streams_, round_id);
 
     if (running_streams_.empty()) {
         active_admission_lane_ = AdmissionLane::NONE;
@@ -588,7 +595,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // Advance the group-loading lane first. It can publish to new_streams_ only
     // when the current execution batch is empty, so a ready explicit group
     // owns that boundary without being mixed with ordinary work.
-    evaluateLoadingCacheGroupQueue();
+    evaluateLoadingCacheGroupQueue(round_id);
     if (!new_streams_.empty()) {
         active_admission_lane_ = AdmissionLane::GROUP;
         prefer_group_next_     = false;
@@ -603,9 +610,9 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             // Ordinary streams already loading cache belong to the active
             // NORMAL lane. Always advance them; a group arriving later is the
             // barrier for new waiting streams, not for already-owned work.
-            evaluateAndUpdateStreams(loading_cache_streams_);
+            evaluateAndUpdateStreams(loading_cache_streams_, round_id);
             if (!group_barrier) {
-                admitWaitingStreams(waiting_streams_, new_streams_);
+                admitWaitingStreams(waiting_streams_, new_streams_, round_id);
             } else {
                 // Do not admit another waiting stream after a group arrives.
                 // The current normal lane (including completed cache loads)
@@ -619,7 +626,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         // itself; otherwise dispatching a group below would mix the two lanes in
         // one scheduler result. A still-pending load does not block an executable
         // group, so cache I/O cannot starve group traffic.
-        evaluateAndUpdateStreams(loading_cache_streams_);
+        evaluateAndUpdateStreams(loading_cache_streams_, round_id);
         const bool has_waiting_group = !waiting_group_queue_.empty();
         if (!new_streams_.empty()) {
             active_admission_lane_ = AdmissionLane::NORMAL;
@@ -627,7 +634,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             if (!has_waiting_group) {
                 // With no group boundary to protect, ordinary cache completions
                 // and ordinary waiters are the same lane and may batch together.
-                admitWaitingStreams(waiting_streams_, new_streams_);
+                admitWaitingStreams(waiting_streams_, new_streams_, round_id);
             }
         }
 
@@ -636,7 +643,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         if (!new_streams_.empty()) {
             // The completed ordinary loads above own this execution boundary.
         } else if (has_waiting_group && (prefer_group_next_ || !has_normal_waiting)) {
-            evaluateWaitingGroupQueue();
+            evaluateWaitingGroupQueue(round_id);
             if (!new_streams_.empty()) {
                 active_admission_lane_ = AdmissionLane::GROUP;
                 prefer_group_next_     = false;
@@ -644,7 +651,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
                 // The attempted group produced no executable work. Ordinary
                 // loads were already polled above; admit an ordinary waiter so
                 // it can release any inited-KV slot blocking the group.
-                admitWaitingStreams(waiting_streams_, new_streams_);
+                admitWaitingStreams(waiting_streams_, new_streams_, round_id);
                 if (!new_streams_.empty()) {
                     active_admission_lane_ = AdmissionLane::NORMAL;
                     prefer_group_next_     = true;
@@ -654,7 +661,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             // This round has explicitly selected the NORMAL lane. Advance its
             // waiters after polling cache completions above; a queued group is
             // the barrier for the *next* execution boundary.
-            admitWaitingStreams(waiting_streams_, new_streams_);
+            admitWaitingStreams(waiting_streams_, new_streams_, round_id);
             if (!new_streams_.empty()) {
                 active_admission_lane_ = AdmissionLane::NORMAL;
                 prefer_group_next_     = has_waiting_group;
@@ -663,7 +670,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
                 // normal stream entered the execution batch, so trying one
                 // explicit group here preserves isolation while avoiding
                 // head-of-line deadlock between the two lanes.
-                evaluateWaitingGroupQueue();
+                evaluateWaitingGroupQueue(round_id);
                 if (!new_streams_.empty()) {
                     active_admission_lane_ = AdmissionLane::GROUP;
                     prefer_group_next_     = false;

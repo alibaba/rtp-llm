@@ -403,7 +403,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenStop) {
 
     coordinator->stop_.store(true);
 
-    auto ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    auto                  ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    std::shared_ptr<Meta> null_meta;
+    ON_CALL(*ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
 
     EXPECT_CALL(*allocator, incrKVCacheRef(testing::_, testing::_, testing::_)).Times(0);
     EXPECT_EQ(coordinator->asyncRead(ctx), nullptr);

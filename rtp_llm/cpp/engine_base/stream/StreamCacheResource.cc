@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -66,8 +67,14 @@ private:
 
 class MetaImpl: public Meta {
 public:
-    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
-        enable_memory_cache_(enable_memory_cache), enable_remote_cache_(enable_remote_cache), trace_id_(trace_id) {}
+    MetaImpl(bool                                      enable_memory_cache,
+             bool                                      enable_remote_cache,
+             std::string                               trace_id,
+             std::shared_ptr<CacheScheduleObservation> cache_schedule_observation):
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(std::move(trace_id)),
+        cache_schedule_observation_(std::move(cache_schedule_observation)) {}
     virtual ~MetaImpl() = default;
 
 public:
@@ -85,6 +92,16 @@ public:
     }
     const std::vector<int64_t>& tokens() const override {
         return tokens_;
+    }
+    void recordCacheDependency(CacheDependency dependency) override {
+        if (cache_schedule_observation_) {
+            cache_schedule_observation_->recordDependency(dependency);
+        }
+    }
+    void recordCacheRecovery() override {
+        if (cache_schedule_observation_) {
+            cache_schedule_observation_->markRecovered();
+        }
     }
 
     // P2P read extension field
@@ -116,11 +133,12 @@ public:
     std::optional<P2PRoutingContext> routing_ctx_;
 
 private:
-    bool                 enable_memory_cache_{false};
-    bool                 enable_remote_cache_{false};
-    std::string          trace_id_;
-    std::string          unique_id_ = "";
-    std::vector<int64_t> tokens_;  // TODO : get tokens (remote connector)
+    bool                                      enable_memory_cache_{false};
+    bool                                      enable_remote_cache_{false};
+    std::string                               trace_id_;
+    std::string                               unique_id_ = "";
+    std::vector<int64_t>                      tokens_;  // TODO : get tokens (remote connector)
+    std::shared_ptr<CacheScheduleObservation> cache_schedule_observation_;
 };
 
 // ----------------------------- P2P Side-Channel Apply -----------------------------
@@ -481,6 +499,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
+        stream_->recordCacheDependency(CacheDependency::NONE);
         return false;
     }
     // Memory/remote connectors require reuseCache(); P2P connector does not.
@@ -488,6 +507,7 @@ bool StreamCacheResource::asyncLoadCache() {
     const bool has_reuse_path = reuseCache() && (enableMemoryCache() || enableRemoteCache());
     const bool has_p2p_path   = resource_context_.cache_manager->hasP2PConnector();
     if (!has_reuse_path && !has_p2p_path) {
+        stream_->recordCacheDependency(CacheDependency::NONE);
         return false;
     }
     if (load_cache_context_) {
@@ -497,8 +517,10 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_once_.exchange(true)) {
         return true;
     }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+    auto meta = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache(),
+                                          reuseCache() && enableRemoteCache(),
+                                          stream_->traceId(),
+                                          stream_->cacheScheduleObservation());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
@@ -513,11 +535,16 @@ bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_->done()) {
         return false;  // coordinator 后台线程尚未处理完
     }
+    stream_->recordCacheLoadReady(load_cache_context_->readyTimeUs(), currentTimeUs());
     // 加载完成（无论成功失败），更新 reuse lengths
     waitLoadCacheDone(load_cache_context_);
     if (!load_cache_context_->success()) {
+        stream_->markCacheScheduleRecovered();
         // 区分匹配失败和传输失败
-        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        if (!read_context || !read_context->fusedMatchContext() || !read_context->fusedMatchContext()->success()) {
+            stream_->recordCacheDependency(CacheDependency::UNKNOWN);
+        }
         bool      should_retry = false;
         const int max_retry    = resource_context_.load_cache_retry_times;
         if (read_context && read_context->fusedMatchContext()) {
@@ -668,8 +695,10 @@ void StreamCacheResource::loadCacheSync() {
     if (load_cache_once_.exchange(true)) {
         return;
     }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+    auto meta = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache(),
+                                          reuseCache() && enableRemoteCache(),
+                                          stream_->traceId(),
+                                          stream_->cacheScheduleObservation());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
@@ -741,7 +770,7 @@ void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<Fu
 std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    auto meta = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId(), nullptr);
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {

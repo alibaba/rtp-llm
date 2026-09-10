@@ -32,6 +32,12 @@ from rtp_llm.distribute.distributed_server import (
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.frontend_request_metrics import (
+    FrontendRequestMetrics,
+    FrontendRequestMetricsMiddleware,
+    get_current_frontend_request_token,
+)
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -273,6 +279,11 @@ class FrontendApp(object):
             py_env_configs,
         )
         self.shutdown_manager = FrontendShutdownManager()
+        self.frontend_request_metrics = FrontendRequestMetrics(
+            kmonitor,
+            self.server_config.rank_id,
+            self.server_config.frontend_server_id,
+        )
         self.separated_frontend = separated_frontend
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
@@ -403,14 +414,27 @@ class FrontendApp(object):
             raise e
 
     def create_app(self):
+        request_metrics = getattr(self, "frontend_request_metrics", None)
+        if request_metrics is None:
+            request_metrics = FrontendRequestMetrics(
+                kmonitor,
+                getattr(self.frontend_server, "rank_id", 0),
+                getattr(self.frontend_server, "server_id", 0),
+            )
+            self.frontend_request_metrics = request_metrics
         middleware = [
+            Middleware(
+                FrontendRequestMetricsMiddleware,
+                request_metrics=request_metrics,
+                root_is_embedding=self.frontend_server.is_embedding,
+            ),
             Middleware(
                 CORSMiddleware,
                 allow_origins=["*"],
                 allow_credentials=True,
                 allow_methods=["*"],
                 allow_headers=["*"],
-            )
+            ),
         ]
         app = FastAPI(middleware=middleware)
 
@@ -424,6 +448,11 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
+            request_metrics.start()
+
+        @app.on_event("shutdown")
+        async def shutdown():
+            await request_metrics.stop()
 
         def draining_response():
             reason = (
@@ -443,6 +472,9 @@ class FrontendApp(object):
 
         async def track_business_request(call):
             if not self.shutdown_manager.try_begin_request():
+                token = get_current_frontend_request_token()
+                if token is not None:
+                    token.reject_unavailable()
                 return draining_response()
             should_finish = True
             try:
@@ -667,7 +699,13 @@ class FrontendApp(object):
         async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
             async def call():
                 if isinstance(req, str):
-                    parsed_req = json.loads(req)
+                    try:
+                        parsed_req = json.loads(req)
+                    except json.JSONDecodeError:
+                        token = get_current_frontend_request_token()
+                        if token is not None:
+                            token.reject_invalid()
+                        raise
                 else:
                     parsed_req = req
                 return await self.frontend_server.batch_infer(parsed_req, raw_request)
