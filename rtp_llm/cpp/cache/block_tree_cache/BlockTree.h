@@ -82,7 +82,6 @@ private:
 
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
-                                         bool                                              enable_hard_stop,
                                          bool                                              collect_path,
                                          bool                                              is_resident);
 
