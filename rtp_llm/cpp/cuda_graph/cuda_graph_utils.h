@@ -44,6 +44,11 @@ public:
         py_model_inputs_.attention_inputs.combo_position_ids      = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.input_ids                                = inputs.input_ids;
         py_model_inputs_.combo_position_ids                       = inputs.combo_position_ids;
+        py_model_inputs_.ktp_valid_row_mask                       = inputs.ktp_valid_row_mask;
+        py_model_inputs_.ktp_local_real_batch                     = inputs.ktp_local_real_batch;
+        py_model_inputs_.ktp_common_physical_batch                = inputs.ktp_common_physical_batch;
+        py_model_inputs_.ktp_use_cuda_graph                       = inputs.ktp_use_cuda_graph;
+        py_model_inputs_.ktp_all_idle                             = inputs.ktp_all_idle;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;

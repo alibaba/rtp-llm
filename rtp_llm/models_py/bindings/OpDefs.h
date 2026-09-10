@@ -272,6 +272,7 @@ struct PyModelInitResources {
     bool                   is_decode_role         = false;
     int64_t                max_context_batch_size = 1;
     int64_t                max_decode_graph_batch_size = 1;
+    std::vector<int>       decode_capture_batch_sizes;
 };
 
 // Optional per-forward incremental publication plan. The tensors are CPU
@@ -438,6 +439,11 @@ struct PyModelInputs {
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
     bool                force_disable_sp_run = false;
+    torch::Tensor       ktp_valid_row_mask;
+    int64_t             ktp_local_real_batch      = -1;
+    int64_t             ktp_common_physical_batch = -1;
+    bool                ktp_use_cuda_graph        = false;
+    bool                ktp_all_idle              = false;
 };
 
 struct PyModelOutputs {
