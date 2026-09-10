@@ -75,9 +75,6 @@ final class CacheHitFeedbackTracker {
         }
         WorkerStatus.TaskTelemetry telemetry = task.telemetry();
         CacheHitFeedback seed = prediction.seed;
-        if (task.inputLength() > 0 && task.inputLength() != seed.inputTokens()) {
-            return;
-        }
         String state = finished ? "FINISHED" : task.phase() == null ? "UNKNOWN" : task.phase().name();
         if (telemetry.prefixLengthValid() && (finished || task.phase() == TaskPhase.RUNNING)
                 && task.prefixLength() >= 0 && task.prefixLength() <= seed.inputTokens()) {
@@ -103,6 +100,8 @@ final class CacheHitFeedbackTracker {
             pv.put("engineIndex", seed.engineIndex());
             pv.put("state", state);
             pv.put("inputTokens", seed.inputTokens());
+            pv.put("engineInputTokens", positive(task.inputLength()));
+            pv.put("inputTokensDelta", task.inputLength() > 0 ? task.inputLength() - seed.inputTokens() : null);
             pv.put("batchId", task.batchId());
             pv.put("errorCode", task.errorCode());
             pv.put("prefixLengthValid", telemetry.prefixLengthValid());
