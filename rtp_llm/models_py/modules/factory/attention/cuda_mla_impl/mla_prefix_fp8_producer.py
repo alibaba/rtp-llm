@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_producers import store_group128
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "BATCH"])
 def _gather_quantized(
     C,
     R,
@@ -24,8 +24,8 @@ def _gather_quantized(
     Y,
     S,
     OR,
-    M: tl.constexpr,
-    BATCH: tl.constexpr,
+    M,
+    BATCH,
     PAGE: tl.constexpr,
     CP: tl.constexpr,
     CT: tl.constexpr,

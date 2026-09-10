@@ -67,7 +67,7 @@ def silu_and_mul(
     return output_tensor
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["elements"])
 def _situ_and_mul_kernel(
     gate,
     up,

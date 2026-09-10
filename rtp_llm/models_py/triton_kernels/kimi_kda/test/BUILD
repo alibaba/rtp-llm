@@ -106,3 +106,11 @@ py_binary(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     tags = ["manual", "B300"],
 )
+
+py_test(
+    name = "dynamic_length_fp8_test",
+    srcs = ["dynamic_length_fp8_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual", "B300"],
+    exec_properties = {"gpu": "B300"},
+)

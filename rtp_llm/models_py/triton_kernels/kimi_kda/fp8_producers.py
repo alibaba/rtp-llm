@@ -12,9 +12,9 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
 
 @triton.jit
 def store_group128(
-    values, out, scales, token, M: tl.constexpr, K: tl.constexpr, BLOCK: tl.constexpr
+    values, out, scales, token, M, K: tl.constexpr, BLOCK: tl.constexpr
 ):
-    """Preserve the old BF16 store before computing the activation scale."""
+    """Preserve BF16 rounding; keep the request-dependent scale pitch dynamic."""
     cols = tl.arange(0, BLOCK)
     values = values.to(tl.bfloat16).to(tl.float32)
     grouped = tl.reshape(tl.where(cols < K, values, 0.0), (BLOCK // 128, 128))
@@ -32,7 +32,7 @@ def store_group128(
     shifts = tl.arange(0, 4) * 8
     packed = tl.sum(exp4 << shifts[None, :], axis=1)
     pg = tl.arange(0, BLOCK // 512)
-    aligned_m: tl.constexpr = triton.cdiv(M, 4) * 4
+    aligned_m = tl.cdiv(M, 4) * 4
     tl.store(scales + pg * aligned_m + token, packed, pg < triton.cdiv(K, 512))
     if token == 0:
         padding = M + tl.arange(0, 4)
@@ -77,13 +77,13 @@ def rms_values(
     return (x * inv) * w
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _rmsnorm_fp8(
     X,
     W,
     Y,
     S,
-    M: tl.constexpr,
+    M,
     STRIDE: tl.constexpr,
     K: tl.constexpr,
     EPS: tl.constexpr,
@@ -94,14 +94,14 @@ def _rmsnorm_fp8(
     store_group128(v, Y, S, token, M, K, BLOCK)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _rmsnorm_bf16_fp8(
     X,
     W,
     Y,
     S,
     B,
-    M: tl.constexpr,
+    M,
     STRIDE: tl.constexpr,
     K: tl.constexpr,
     EPS: tl.constexpr,
@@ -128,13 +128,13 @@ def rmsnorm_fp8(x, weight, eps, *, retain_bf16=False):
     return out
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _sigmoid_gate_fp8(
     X,
     G,
     Y,
     S,
-    M: tl.constexpr,
+    M,
     K: tl.constexpr,
     XS: tl.constexpr,
     GS: tl.constexpr,
@@ -170,20 +170,20 @@ def sigmoid_gate_fp8(x, gate):
     return out
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "SEQ", "XB", "GB"])
 def _kda_output_prefill_fp8(
     X,
     G,
     W,
     Y,
     S,
-    M: tl.constexpr,
+    M,
     K: tl.constexpr,
-    SEQ: tl.constexpr,
-    XB: tl.constexpr,
+    SEQ,
+    XB,
     XT: tl.constexpr,
     XH: tl.constexpr,
-    GB: tl.constexpr,
+    GB,
     GT: tl.constexpr,
     GH: tl.constexpr,
     EPS: tl.constexpr,
@@ -211,20 +211,20 @@ def _kda_output_prefill_fp8(
     store_group128(v, Y, S, token, M, K, BLOCK)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "SEQ", "XB", "GB"])
 def _kda_output_decode_fp8(
     X,
     G,
     W,
     Y,
     S,
-    M: tl.constexpr,
+    M,
     K: tl.constexpr,
-    SEQ: tl.constexpr,
-    XB: tl.constexpr,
+    SEQ,
+    XB,
     XT: tl.constexpr,
     XH: tl.constexpr,
-    GB: tl.constexpr,
+    GB,
     GT: tl.constexpr,
     GH: tl.constexpr,
     EPS: tl.constexpr,

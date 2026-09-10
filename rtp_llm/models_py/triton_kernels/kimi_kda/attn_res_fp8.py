@@ -14,7 +14,7 @@ from .attn_res import is_kimi_k3_attn_res_supported
 from .fp8_producers import store_group128
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["token_count"])
 def _multi_block_attn_res_fp8_kernel(
     prefix,
     delta,
@@ -24,7 +24,7 @@ def _multi_block_attn_res_fp8_kernel(
     output_norm_weight,
     output,
     output_scales,
-    token_count: tl.constexpr,
+    token_count,
     stride_prefix_m: tl.constexpr,
     stride_delta_m: tl.constexpr,
     stride_block_m: tl.constexpr,

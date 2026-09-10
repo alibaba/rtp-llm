@@ -5,12 +5,12 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _quantize_forget_latent_fp8(
     x,
     output,
     scale,
-    M: tl.constexpr,
+    M,
     ROW_STRIDE: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK_M: tl.constexpr,

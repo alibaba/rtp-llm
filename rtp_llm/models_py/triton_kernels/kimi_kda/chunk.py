@@ -17,7 +17,7 @@ from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_fwd import chunk_kda_fwd
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["n_elements"])
 def _beta_sigmoid_fwd_kernel(
     x,
     y,

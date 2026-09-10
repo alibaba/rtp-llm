@@ -36,10 +36,10 @@ def observe_fp8_input(x: torch.Tensor, scale: float, name: str) -> None:
         scope="eager observation; graph replay is not sampled")))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N", "SHAPE", "STRIDES"])
 def _quantize(
-    X, Y, N: tl.constexpr, INV_SCALE: tl.constexpr, BLOCK: tl.constexpr,
-    SHAPE: tl.constexpr, STRIDES: tl.constexpr, CONTIGUOUS: tl.constexpr,
+    X, Y, N, INV_SCALE: tl.constexpr, BLOCK: tl.constexpr,
+    SHAPE, STRIDES, CONTIGUOUS: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     if CONTIGUOUS:
@@ -73,17 +73,20 @@ def quantize_fp8(
     if _FP8_DIAGNOSTICS:
         observe_fp8_input(x, scale, name)
     if x.numel():
+        # Runtime tuples avoid exact-shape specialization. Triton may still
+        # keep a bounded set of tuple alignment variants for strided layouts.
         _quantize[(triton.cdiv(x.numel(), 1024),)](
             x, out, x.numel(), 1.0 / scale, 1024,
-            tuple(x.shape), tuple(x.stride()), x.is_contiguous(),
+            () if x.is_contiguous() else tuple(x.shape),
+            () if x.is_contiguous() else tuple(x.stride()), x.is_contiguous(),
         )
     return out
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH"])
 def _gather_prefix(
     O_C, O_R, C, R, CACHE, PAGES, INFO, Q_IND,
-    BATCH: tl.constexpr, PAGE_SIZE: tl.constexpr,
+    BATCH, PAGE_SIZE: tl.constexpr,
     CACHE_PAGE_STRIDE: tl.constexpr, CACHE_TOKEN_STRIDE: tl.constexpr,
     C_STRIDE: tl.constexpr, R_STRIDE: tl.constexpr,
     LATENT: tl.constexpr, ROPE: tl.constexpr, SCALE: tl.constexpr,
