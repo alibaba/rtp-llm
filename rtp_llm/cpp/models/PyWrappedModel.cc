@@ -614,7 +614,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               bert_embedding_inputs});
     }
 
-    const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+    const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
     CacheStoreWriteCycleGuard cache_store_write_cycle(
         cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
@@ -707,6 +707,10 @@ torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptM
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
+    prepareAttentionInputs(inputs, false);
+}
+
+void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
@@ -734,8 +738,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(setup_kv_cache)");
         attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs, inputs);
     }
-    attention_inputs_      = std::move(attention_inputs);
-    bert_embedding_inputs_ = buildBertEmbeddingInputs(inputs);
+    attention_inputs_ = std::move(attention_inputs);
     prepared_attention_inputs_.store(true, std::memory_order_release);
 
     // CRITICAL ORDERING: flush queued H2D copies BEFORE graph_runner_->prepareAttentionInputs.
@@ -753,25 +756,25 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
 
     graph_state_                         = CudaGraphState();
     generation_prefill_cuda_graph_state_ = CudaGraphState();
-    auto  empty                          = torch::Tensor();
+    auto empty                           = torch::Tensor();
     // buildPyAttentionInputs() has already copied combo_position_ids to the
     // device.  Keep the top-level PyModelInputs field consistent with the
     // nested attention field: CudaGraphRunner validates and copies the
     // top-level tensor during replay preparation.
-    auto  py_model_inputs                = PyModelInputs({empty,
-                                                          empty,
-                                                          attention_inputs_.combo_position_ids,
-                                                          torch_ext::PyEmbeddingInputs(),
-                                                          torch_ext::PyMultimodalInputs(),
-                                                          attention_inputs_,
-                                                          attention_inputs_by_tag_,
-                                                          bert_embedding_inputs_});
-    auto* runner                         = selectGraphRunner(attention_inputs_);
-    auto& state                          = selectGraphState(attention_inputs_);
+    auto  py_model_inputs = PyModelInputs({empty,
+                                           empty,
+                                           attention_inputs_.combo_position_ids,
+                                           torch_ext::PyEmbeddingInputs(),
+                                           torch_ext::PyMultimodalInputs(),
+                                           attention_inputs_,
+                                           attention_inputs_by_tag_,
+                                           torch_ext::BertEmbeddingInputs()});
+    auto* runner          = selectGraphRunner(attention_inputs_);
+    auto& state           = selectGraphState(attention_inputs_);
     if (enable_cuda_graph_ && runner != nullptr
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
-        runner->prepareAttentionInputs(py_model_inputs, state);
+        runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
     }
 }
 
@@ -863,12 +866,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             }
         }
 
-        auto embedding_inputs  = buildPyEmbeddingInputs(inputs);
-        auto multimodal_inputs = buildPyMultimodalInputs(inputs);
+        auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
+        auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
-            prepareAttentionInputs(inputs);
+            prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
-        auto bert_embedding_inputs = bert_embedding_inputs_;
         if (device_props_.enable_prefill_cp && has_context_request) {
             attention_inputs_.context_parallel_info = cp_params;
             if (attention_inputs_.cache_store_inputs.has_value()) {
@@ -881,7 +884,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 }
             }
         }
-        const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+        const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(
             cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 

@@ -20,6 +20,7 @@ on the rest of the fleet.
 
 import math
 import unittest
+from itertools import accumulate
 from typing import List, Optional, Sequence
 from unittest.mock import patch
 
@@ -49,6 +50,7 @@ try:
         AiterPrefillImplPaged,
         AiterPrefillImplTriton,
         FMHAParams,
+        _PrefillGraphMetadata,
         _run_triton_paged_attention,
         validate_v_layout,
     )
@@ -730,7 +732,8 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         fmha_params = SimpleNamespace(
             cu_seqlens_q=torch.zeros(batch_size + 1, dtype=torch.int32),
             cu_seqlens_k=torch.zeros(batch_size + 1, dtype=torch.int32),
-            prefix_lengths=None,
+            prefix_lengths=torch.zeros(batch_size, dtype=torch.int32),
+            graph_metadata=_PrefillGraphMetadata(batch_size, torch.device("cpu")),
             max_seq_len=0,
             max_seqlen_q=0,
             max_seqlen_k=0,
@@ -784,6 +787,77 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         self.assertEqual(p.token_kv_num, 20)
         # prefill_seqlen_k_int32 must be synced from cu_seqlens_k
         self.assertEqual(p.prefill_seqlen_k_int32.tolist(), [5, 5, 5, 5])
+
+    def test_replay_reuses_staging_and_clears_inactive_slots(self):
+        from contextlib import ExitStack
+
+        stub = self._make_stub(batch_size=4)
+        params = stub.fmha_params
+        buffers = {
+            (owner_name, name): tensor
+            for owner_name, owner in (
+                ("device", params),
+                ("host", params.graph_metadata),
+            )
+            for name, tensor in vars(owner).items()
+            if isinstance(tensor, torch.Tensor)
+        }
+        pointers = {name: tensor.data_ptr() for name, tensor in buffers.items()}
+        for lengths, prefixes in (
+            ([2, 4, 0, 1], [5, 1, 8, 0]),
+            ([3], None),
+            ([], None),
+        ):
+            with self.subTest(lengths=lengths):
+                inputs = self._make_attn_inputs(
+                    lengths,
+                    prefix_lengths=(
+                        torch.tensor(prefixes, dtype=torch.int32)
+                        if prefixes is not None
+                        else None
+                    ),
+                    kv_block_id=torch.zeros(4, 4, dtype=torch.int32),
+                )
+                with ExitStack() as stack:
+                    for name in ("zeros", "empty", "tensor", "full"):
+                        stack.enter_context(
+                            patch.object(
+                                torch,
+                                name,
+                                side_effect=AssertionError("replay allocation"),
+                            )
+                        )
+                    for name in ("to", "cpu", "item", "tolist", "numpy", "sum", "max"):
+                        stack.enter_context(
+                            patch.object(
+                                torch.Tensor,
+                                name,
+                                side_effect=AssertionError(
+                                    "replay conversion/reduction"
+                                ),
+                            )
+                        )
+                    self._call_update(stub, inputs)
+                padded_q = lengths + [0] * (4 - len(lengths))
+                padded_prefix = (prefixes or [0] * len(lengths)) + [0] * (
+                    4 - len(lengths)
+                )
+                kv_lengths = [q + p for q, p in zip(padded_q, padded_prefix)]
+                self.assertEqual(params.prefix_lengths.tolist(), padded_prefix)
+                self.assertEqual(params.prefill_seqlen_k_int32.tolist(), kv_lengths)
+                self.assertEqual(params.token_q_num, sum(lengths))
+                self.assertEqual(params.token_kv_num, sum(kv_lengths))
+                self.assertEqual(params.max_seqlen_q, max(padded_q))
+                self.assertEqual(params.max_seqlen_k, max(kv_lengths))
+                for owner_name, owner in (
+                    ("device", params),
+                    ("host", params.graph_metadata),
+                ):
+                    for name, tensor in vars(owner).items():
+                        if isinstance(tensor, torch.Tensor):
+                            self.assertEqual(
+                                tensor.data_ptr(), pointers[(owner_name, name)]
+                            )
 
     def test_rebuild_with_prefix(self):
         """Rebuild cu_seqlens from input_lengths + prefix_lengths."""
@@ -1417,6 +1491,8 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
             token_q_num=6,
             max_seqlen_q=2,
             max_seqlen_k=9,
+            prefix_lengths=torch.zeros(3, dtype=torch.int32, device=device),
+            graph_metadata=_PrefillGraphMetadata(3, device),
         )
         prefill_ptr = fmha_params.prefill_seqlen_k_int32.data_ptr()
         block_ids = torch.zeros(3, 2, dtype=torch.int32, device=device)
@@ -1857,6 +1933,22 @@ class TestAiterGenerationPrefillCudaGraphNumerics(unittest.TestCase):
         )
         self.assertEqual(graph_impl.backend, "triton")
         self.assertTrue(graph_impl.supports_generation_prefill_cuda_graph())
+        self.assertIsNone(graph_impl.fmha_params)  # CK batch backend is not prepared.
+        params = graph_impl.triton_fmha_params
+        captured_tensors = {
+            name: getattr(params, name)
+            for name in (
+                "cu_seqlens_q",
+                "cu_seqlens_k",
+                "prefill_seqlen_k_int32",
+                "prefix_lengths",
+                "kv_cache_block_id_device",
+                "attention_output",
+            )
+        }
+        captured_pointers = {
+            name: tensor.data_ptr() for name, tensor in captured_tensors.items()
+        }
 
         warmup_stream = torch.cuda.Stream()
         warmup_stream.wait_stream(torch.cuda.current_stream())
@@ -1869,8 +1961,18 @@ class TestAiterGenerationPrefillCudaGraphNumerics(unittest.TestCase):
         with torch.cuda.graph(graph):
             graph_output = graph_impl.forward(static_qkv, graph_cache, layer_idx=0)
 
-        for real_lengths in self.REAL_LENGTH_CASES:
-            with self.subTest(real_lengths=real_lengths):
+        # Revisit the first request layout with different physical blocks. This
+        # also exercises consecutive replays in the single-layout long-bucket case.
+        replay_cases = (*self.REAL_LENGTH_CASES, self.REAL_LENGTH_CASES[0])
+        for replay_index, real_lengths in enumerate(replay_cases):
+            with self.subTest(replay_index=replay_index, real_lengths=real_lengths):
+                # Keep the captured shape and block-0 sentinel, but change every
+                # real row's physical block IDs before each replay.
+                replay_block_table = self.block_table.clone()
+                replay_block_table[: self.MAX_REQUESTS] = torch.roll(
+                    self.block_table[: self.MAX_REQUESTS].reshape(-1),
+                    shifts=replay_index + 1,
+                ).view(self.MAX_REQUESTS, self.blocks_per_row)
                 real_token_num = sum(real_lengths)
                 sentinel_len = self.BUCKET - real_token_num
                 replay_lengths = (
@@ -1879,13 +1981,13 @@ class TestAiterGenerationPrefillCudaGraphNumerics(unittest.TestCase):
                     + [sentinel_len]
                 )
                 replay_inputs = self._make_inputs(
-                    replay_lengths, self.block_table, is_cuda_graph=False
+                    replay_lengths, replay_block_table, is_cuda_graph=False
                 )
 
                 real_qkv = self._make_qkv(real_token_num)
                 eager_inputs = self._make_inputs(
                     list(real_lengths),
-                    self.block_table[: len(real_lengths)],
+                    replay_block_table[: len(real_lengths)],
                     is_cuda_graph=False,
                 )
                 eager_cache = self._make_cache(poison=True)
@@ -1909,8 +2011,25 @@ class TestAiterGenerationPrefillCudaGraphNumerics(unittest.TestCase):
                 graph_cache.kv_cache_base.fill_(self.poison)
                 self._copy_replay_metadata(capture_inputs, replay_inputs)
                 graph_impl.prepare_cuda_graph(capture_inputs)
+                for name, tensor in captured_tensors.items():
+                    self.assertIs(getattr(params, name), tensor)
+                    self.assertEqual(tensor.data_ptr(), captured_pointers[name], name)
                 graph.replay()
                 torch.cuda.synchronize()
+
+                torch.testing.assert_close(
+                    params.kv_cache_block_id_device, replay_block_table
+                )
+                self.assertEqual(
+                    params.cu_seqlens_q.cpu().tolist(),
+                    [0] + list(accumulate(replay_lengths)),
+                )
+                self.assertEqual(
+                    params.prefill_seqlen_k_int32.cpu().tolist(), replay_lengths
+                )
+                self.assertEqual(
+                    params.prefix_lengths.cpu().tolist(), [0] * len(replay_lengths)
+                )
 
                 torch.testing.assert_close(
                     graph_output[:real_token_num].reshape(real_token_num, -1),
@@ -1919,14 +2038,14 @@ class TestAiterGenerationPrefillCudaGraphNumerics(unittest.TestCase):
                     rtol=0.02,
                 )
                 real_used_blocks = {
-                    int(self.block_table[row, column].item())
+                    int(replay_block_table[row, column].item())
                     for row, length in enumerate(real_lengths)
                     for column in range(
                         (length + self.TOKENS_PER_BLOCK - 1) // self.TOKENS_PER_BLOCK
                     )
                 }
                 sentinel_used_blocks = {
-                    int(self.block_table[self.MAX_REQUESTS, column].item())
+                    int(replay_block_table[self.MAX_REQUESTS, column].item())
                     for column in range(
                         (sentinel_len + self.TOKENS_PER_BLOCK - 1)
                         // self.TOKENS_PER_BLOCK

@@ -162,7 +162,7 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRunnerOwnershipIsLimitedToNo
     config.enable_cuda_graph                        = true;
     config.generation_prefill_capture_token_buckets = {64, 128};
 
-    EXPECT_TRUE(isGenerationPrefillCudaGraphRequested(config));
+    EXPECT_TRUE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
     EXPECT_TRUE(supportsGenerationPrefillCudaGraphExecutionMode(SP_TYPE_NONE, false));
     EXPECT_FALSE(supportsGenerationPrefillCudaGraphExecutionMode(SP_TYPE_NONE, true));
     for (const auto speculative_type :
@@ -171,20 +171,25 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRunnerOwnershipIsLimitedToNo
         EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, speculative_type));
     }
     EXPECT_TRUE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
-    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PREFILL, SP_TYPE_NONE));
-    // This role gate precedes topology validation, so both single- and
-    // multi-device DECODE wrappers avoid secondary-runner creation.
-    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::DECODE, SP_TYPE_NONE));
+    // P/D roles ignore retained generation-prefill configuration regardless of
+    // speculative mode, both at engine validation and at runner creation.
+    for (const auto role_type : {RoleType::PREFILL, RoleType::DECODE}) {
+        EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, role_type));
+        for (const auto speculative_type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+            EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, role_type, speculative_type));
+            EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, true, role_type, speculative_type));
+        }
+    }
     // Speculative target/draft wrappers do not own the normal-generation
     // prefill runner in the first implementation.
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, true, RoleType::PDFUSION, SP_TYPE_NONE));
 
     config.enable_cuda_graph = false;
-    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config));
+    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
     config.enable_cuda_graph = true;
     config.generation_prefill_capture_token_buckets.clear();
-    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config));
+    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, false, false, RoleType::PDFUSION, SP_TYPE_NONE));
 }

@@ -31,6 +31,21 @@ cc_test(
     exec_properties = {'gpu':'A10'},
 )
 
+py_test(
+    name = "cuda_graph_copy_kernel_test_rocm",
+    main = "cuda_graph_copy_kernel_test.py",
+    srcs = ["cuda_graph_copy_kernel_test.py"],
+    data = ["//:th_transformer"],
+    deps = ["//rtp_llm/test/model_test/test_util:test_util"],
+    env = {
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "ROCM",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+    },
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
 cc_test(
     name = "generation_prefill_cuda_graph_replay_metadata_test",
     srcs = ["generation_prefill_cuda_graph_replay_metadata_test.cc"],

@@ -153,15 +153,15 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     // Reject an explicitly requested generation-prefill/speculative combination
-    // before warmup or runner creation. Do not gate this on secondary-runner
-    // ownership: speculative wrappers are excluded by that predicate, which
-    // would silently ignore the conflicting configuration. Python validates
-    // option syntax; this C++ boundary owns the execution-mode conflict check.
-    if (isGenerationPrefillCudaGraphRequested(params.hw_kernel_config)) {
+    // on PDFUSION before warmup or runner creation. The shared request predicate
+    // excludes roles that ignore this feature. Do not gate on full runner
+    // ownership, which also excludes speculative wrappers and would hide a
+    // PDFUSION conflict. Python defers this execution-mode check to C++.
+    if (isGenerationPrefillCudaGraphRequested(params.hw_kernel_config, parallelism_config.role_type)) {
         RTP_LLM_CHECK_WITH_INFO(
             supportsGenerationPrefillCudaGraphExecutionMode(sp_config.type, propose_params_ != nullptr),
             "GENERATION_PREFILL_CAPTURE_CONFIG does not support speculative execution in the first version; "
-            "remove the generation-prefill configuration when using speculative execution (type=%s)",
+            "remove the generation-prefill configuration when using speculative execution on PDFUSION (type=%s)",
             SpeculativeExecutionConfig::to_string(sp_config.type).c_str());
     }
     if (!model_config_.output_vocab_ids.empty()) {

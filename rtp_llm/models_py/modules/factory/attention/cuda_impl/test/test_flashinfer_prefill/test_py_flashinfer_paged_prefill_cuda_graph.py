@@ -151,7 +151,7 @@ class _PrefillPagedCudaGraphTestMixin:
         normal_op.prepare(normal_inp)
         normal_out = normal_op.forward(q, kv_cache)
 
-        # CUDA graph path: capture then replay.
+        # CUDA graph copy/plan contract (not an actual capture/replay).
         #
         # Scope, because this test has already been over-trusted once: it exercises
         # the *contract* the graph path depends on -- persistent buffers, plan()
@@ -166,7 +166,11 @@ class _PrefillPagedCudaGraphTestMixin:
         # 0/12 with the change -- so passing here is not evidence about the engine.
         # Adding a single-graph Python capture would not close that gap either; it
         # would just look like it had. Engine-level coverage belongs in the smoke
-        # cases, which is where that regression was actually caught.
+        # cases, which is where that regression was actually caught. In
+        # suites_h20_oss.bzl, eagle_mtp_cudagraph_concurrent disables competing
+        # TRT prefill backends to force this native paged implementation through
+        # the real C++ runner, its shared graph pool and concurrent metadata
+        # updates. Neither test enables generation-prefill graphs for MTP.
         capture_input_lengths = capture_input_lengths or input_lengths
         capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
         cg_init = self._make_inputs(

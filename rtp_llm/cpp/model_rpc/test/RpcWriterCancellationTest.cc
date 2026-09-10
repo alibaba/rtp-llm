@@ -218,10 +218,9 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
     //
     // Retry the scenario with a growing window and stop at the first attempt
     // that reaches the read path.
-    static constexpr const char* kReadFailureMarker = "read allocate request failed";
-    const std::chrono::milliseconds settle_windows[] = {std::chrono::milliseconds(500),
-                                                        std::chrono::milliseconds(1500),
-                                                        std::chrono::milliseconds(4000)};
+    static constexpr const char*    kReadFailureMarker = "read allocate request failed";
+    const std::chrono::milliseconds settle_windows[]   = {
+        std::chrono::milliseconds(500), std::chrono::milliseconds(1500), std::chrono::milliseconds(4000)};
     bool reached_read_path = false;
 
     for (const auto settle : settle_windows) {
@@ -237,7 +236,7 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
 
         auto channel =
             grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
-        auto stub = RpcService::NewStub(channel);
+        auto                stub = RpcService::NewStub(channel);
         grpc::ClientContext client_context;
         client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
         auto stream = stub->RemoteGenerate(&client_context);
@@ -269,9 +268,8 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
         }
     }
 
-    EXPECT_TRUE(reached_read_path)
-        << "cancel never landed while the handler was blocked in Read, so the "
-           "read-failure path was not exercised in any attempt";
+    EXPECT_TRUE(reached_read_path) << "cancel never landed while the handler was blocked in Read, so the "
+                                      "read-failure path was not exercised in any attempt";
 }
 
 TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
@@ -472,8 +470,8 @@ TEST(RpcWriterCancellationTest, PrefillStageSettlementIsIdempotent) {
 }
 
 TEST(RpcWriterCancellationTest, ContextCleanupPropagatesSpecificTerminalError) {
-    auto                              stream = std::make_shared<SingleOutputStream>();
-    auto                              meta   = std::make_shared<RpcServerRuntimeMeta>();
+    auto                         stream = std::make_shared<SingleOutputStream>();
+    auto                         meta   = std::make_shared<RpcServerRuntimeMeta>();
     kmonitor::MetricsReporterPtr metrics_reporter;
     {
         GenerateContext context(49, 0, nullptr, metrics_reporter, meta);
@@ -496,7 +494,7 @@ TEST(RpcWriterCancellationTest, ContextCleanupPreservesExistingStreamError) {
         kmonitor::MetricsReporterPtr metrics_reporter;
         auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
         GenerateContext              context(50, 0, nullptr, metrics_reporter, meta);
-        context.stream_     = stream;
+        context.stream_    = stream;
         context.error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "later context error");
     }
 

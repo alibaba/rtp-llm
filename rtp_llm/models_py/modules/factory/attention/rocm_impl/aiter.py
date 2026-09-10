@@ -107,6 +107,28 @@ def validate_v_layout(
     return True
 
 
+class _PrefillGraphMetadata:
+    """Capture-owned staging; the runner fences the previous replay before reuse."""
+
+    def __init__(self, batch_size: int, device: torch.device):
+        options = dict(
+            dtype=torch.int32, device="cpu", pin_memory=device.type == "cuda"
+        )
+        self.q_lengths = torch.zeros(batch_size, **options)
+        self.prefix_lengths = torch.zeros(batch_size, **options)
+        self.kv_lengths = torch.zeros(batch_size, **options)
+        self.cu_q = torch.zeros(batch_size + 1, **options)
+        self.cu_k = torch.zeros(batch_size + 1, **options)
+        self.cu_q_tail = self.cu_q[1:]
+        self.cu_k_tail = self.cu_k[1:]
+        # CPU-only views avoid allocating reduction tensors or extracting GPU
+        # scalars when refreshing the host launch parameters.
+        self.q_values = self.q_lengths.numpy()
+        self.kv_values = self.kv_lengths.numpy()
+        self.cu_q_values = self.cu_q.numpy()
+        self.cu_k_values = self.cu_k.numpy()
+
+
 # Pure Python implementation of FMHAParams
 class FMHAParams(ParamsBase):
     """Python implementation of FMHAParams for Aiter attention operations."""
@@ -181,6 +203,14 @@ class FMHAParams(ParamsBase):
             self.prefix_lengths = prefix_lengths
             self.token_q_num = input_lengths.sum().item()
             self.token_kv_num = kv_lengths.sum().item()
+
+            if getattr(attn_inputs, "is_cuda_graph", False):
+                self.graph_metadata = _PrefillGraphMetadata(batch_size, gpu_device)
+                self.prefix_lengths = torch.zeros(
+                    batch_size, dtype=torch.int32, device=gpu_device
+                )
+                if prefix_lengths is not None and prefix_lengths.numel() > 0:
+                    self.prefix_lengths.copy_(prefix_lengths, non_blocking=True)
 
             if alloc_scale:
                 self.kv_scale = torch.ones(1, dtype=torch.float32, device=gpu_device)
@@ -1880,22 +1910,6 @@ class AiterPrefillImplPaged(FMHAImplBase):
             and configs.is_causal
         )
 
-    def _copy_padded_int32(self, dst: torch.Tensor, src: torch.Tensor) -> None:
-        """Copy src into dst and pad the tail with the last copied value."""
-        src = src.to(device=dst.device, dtype=torch.int32)
-        if src.numel() > dst.numel():
-            raise ValueError(
-                f"source tensor is larger than destination: {src.numel()} > {dst.numel()}"
-            )
-        dst[: src.numel()].copy_(src, non_blocking=True)
-        if src.numel() < dst.numel():
-            pad_value = (
-                src[-1]
-                if src.numel() > 0
-                else torch.zeros((), dtype=torch.int32, device=dst.device)
-            )
-            dst[src.numel() :].fill_(int(pad_value.item()))
-
     def _refresh_prefill_fmha_params_for_cuda_graph(
         self, fmha_params: Any, attn_inputs: PyAttentionInputs
     ) -> None:
@@ -1916,40 +1930,33 @@ class AiterPrefillImplPaged(FMHAImplBase):
                 f"capture={expected_batch}, replay={input_lengths.numel()}"
             )
 
-        q_lens_host = torch.zeros(expected_batch, dtype=torch.int32)
-        if input_lengths.numel() > 0:
-            q_lens_host[: input_lengths.numel()].copy_(
-                input_lengths.to(dtype=torch.int32, device="cpu")
-            )
-
         prefix_src = getattr(attn_inputs, "prefix_lengths", None)
-        prefix_host = torch.zeros(expected_batch, dtype=torch.int32)
         if prefix_src is not None and prefix_src.numel() > 0:
             if prefix_src.numel() != input_lengths.numel():
                 raise ValueError(
                     "Aiter prefill CUDA graph replay prefix/input length mismatch: "
                     f"input={input_lengths.numel()}, prefix={prefix_src.numel()}"
                 )
-            if prefix_src.numel() > expected_batch:
-                raise ValueError(
-                    "Aiter prefill CUDA graph replay prefix length mismatch: "
-                    f"capture={expected_batch}, replay={prefix_src.numel()}"
-                )
-            prefix_host[: prefix_src.numel()].copy_(
-                prefix_src.to(dtype=torch.int32, device="cpu")
-            )
-        kv_lens_host = q_lens_host + prefix_host
+        if input_lengths.device.type != "cpu" or (
+            prefix_src is not None
+            and prefix_src.numel() > 0
+            and prefix_src.device.type != "cpu"
+        ):
+            raise ValueError("Aiter prefill CUDA graph replay requires host lengths")
 
-        cu_q_host = torch.zeros(expected_batch + 1, dtype=torch.int32)
-        cu_k_host = torch.zeros(expected_batch + 1, dtype=torch.int32)
-        if expected_batch > 0:
-            cu_q_host[1:] = torch.cumsum(q_lens_host, dim=0)
-            cu_k_host[1:] = torch.cumsum(kv_lens_host, dim=0)
+        metadata = fmha_params.graph_metadata
+        q_lens_host = metadata.q_lengths
+        prefix_host = metadata.prefix_lengths
+        kv_lens_host = metadata.kv_lengths
+        q_lens_host.zero_()
+        q_lens_host[: input_lengths.numel()].copy_(input_lengths)
+        prefix_host.zero_()
+        if prefix_src is not None and prefix_src.numel() > 0:
+            prefix_host[: prefix_src.numel()].copy_(prefix_src)
+        torch.add(q_lens_host, prefix_host, out=kv_lens_host)
+        torch.cumsum(q_lens_host, dim=0, out=metadata.cu_q_tail)
+        torch.cumsum(kv_lens_host, dim=0, out=metadata.cu_k_tail)
 
-        self._copy_padded_int32(fmha_params.cu_seqlens_q, cu_q_host)
-        self._copy_padded_int32(fmha_params.cu_seqlens_k, cu_k_host)
-
-        kv_lens = kv_lens_host.to(device=fmha_params.cu_seqlens_k.device)
         prefill_seqlen_k = getattr(fmha_params, "prefill_seqlen_k_int32", None)
         if (
             prefill_seqlen_k is None
@@ -1960,20 +1967,11 @@ class AiterPrefillImplPaged(FMHAImplBase):
                 "Aiter prefill CUDA graph params must own a stable "
                 "prefill_seqlen_k_int32 tensor"
             )
-        prefill_seqlen_k.copy_(kv_lens, non_blocking=True)
-        fmha_params.prefix_lengths = prefix_host.to(
-            device=fmha_params.cu_seqlens_q.device
-        )
-
-        fmha_params.max_seq_len = (
-            int(q_lens_host.max().item()) if expected_batch > 0 else 0
-        )
+        fmha_params.max_seq_len = int(metadata.q_values.max(initial=0))
         fmha_params.max_seqlen_q = fmha_params.max_seq_len
-        fmha_params.max_seqlen_k = (
-            int(kv_lens_host.max().item()) if expected_batch > 0 else 0
-        )
-        fmha_params.token_q_num = int(q_lens_host.sum().item())
-        fmha_params.token_kv_num = int(kv_lens_host.sum().item())
+        fmha_params.max_seqlen_k = int(metadata.kv_values.max(initial=0))
+        fmha_params.token_q_num = int(metadata.cu_q_values[-1])
+        fmha_params.token_kv_num = int(metadata.cu_k_values[-1])
 
         graph_query_length = getattr(fmha_params, "graph_query_length", None)
         if (
@@ -2021,6 +2019,10 @@ class AiterPrefillImplPaged(FMHAImplBase):
             raise ValueError(
                 "Aiter prefill CUDA graph block-table shape/device changed; recapture required"
             )
+        fmha_params.cu_seqlens_q.copy_(metadata.cu_q, non_blocking=True)
+        fmha_params.cu_seqlens_k.copy_(metadata.cu_k, non_blocking=True)
+        prefill_seqlen_k.copy_(kv_lens_host, non_blocking=True)
+        fmha_params.prefix_lengths.copy_(prefix_host, non_blocking=True)
         captured.copy_(kv_block_id, non_blocking=True)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):

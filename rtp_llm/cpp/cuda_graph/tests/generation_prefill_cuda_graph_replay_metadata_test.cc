@@ -75,6 +75,14 @@ TEST(GenerationPrefillCudaGraphReplayMetadataTest, RejectsInvalidMetadata) {
 
     input_lengths = {24, 0, -1};
     EXPECT_FALSE(prepare(2, 2, 24));
+
+    // Reject invalid lengths at the metadata owner, before copy kernels run.
+    input_lengths = {-1, 32, -1};
+    EXPECT_FALSE(prepare(2, 2, 31));
+    input_lengths = {65, 1, -1};
+    EXPECT_FALSE(prepare(2, 2, 64));
+    input_lengths = {40, 32, -1};
+    EXPECT_FALSE(prepare(2, 2, 64));
 }
 
 TEST(GenerationPrefillCudaGraphReplayMetadataTest, RejectsInsufficientCapacity) {

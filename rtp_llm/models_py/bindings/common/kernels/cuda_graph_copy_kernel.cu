@@ -54,22 +54,24 @@ __global__ void cudaGraphCopySmall2LargeKernel(T*            input_tensor,
                                                const int64_t max_batch_size,
                                                const int64_t max_seq_len,
                                                const int64_t hidden_size,
+                                               const int64_t compact_rows,
                                                const int*    cu_seq_len) {
 
     const int64_t tid           = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const int64_t total_threads = static_cast<int64_t>(blockDim.x) * gridDim.x;
 
-    // batch_size may live in graph-private device memory, so validate it in
-    // the kernel instead of dereferencing it on the host launcher.
+    // The caller owns length/prefix-sum consistency. Generation prefill
+    // validates and constructs this metadata once before replay; do not scan
+    // the whole batch again in every CTA of every attention layer.
     const int current_batch_size = *batch_size;
     if (current_batch_size <= 0 || current_batch_size > max_batch_size) {
         return;
     }
-
-    // Calculate total_valid_elements using cu_seq_len array
-    // cu_seq_len[i] contains cumulative length up to batch i
-    // cu_seq_len[batch_size] contains total elements
-    const int64_t total_valid_elements = static_cast<int64_t>(cu_seq_len[current_batch_size]) * hidden_size;
+    const int64_t valid_tokens = cu_seq_len[current_batch_size];
+    if (valid_tokens <= 0 || valid_tokens > compact_rows) {
+        return;
+    }
+    const int64_t total_valid_elements = valid_tokens * hidden_size;
 
     // Each thread processes multiple elements with stride = total_threads
     // This design handles cases where grid_size is limited to 65536
@@ -107,6 +109,7 @@ void invokeCudaGraphCopySmall2Large(T*            input_tensor,
                                     const int64_t max_seq_len,
                                     const int*    input_lengths,
                                     const int64_t hidden_size,
+                                    const int64_t compact_rows,
                                     const int*    cu_seq_len,
 #if USING_CUDA
                                     cudaStream_t stream) {
@@ -123,8 +126,15 @@ void invokeCudaGraphCopySmall2Large(T*            input_tensor,
     dim3 block(256);
     dim3 grid(1024);
 
-    cudaGraphCopySmall2LargeKernel<T><<<grid, block, 0, stream>>>(
-        input_tensor, output_tensor, input_lengths, batch_size, max_batch_size, max_seq_len, hidden_size, cu_seq_len);
+    cudaGraphCopySmall2LargeKernel<T><<<grid, block, 0, stream>>>(input_tensor,
+                                                                  output_tensor,
+                                                                  input_lengths,
+                                                                  batch_size,
+                                                                  max_batch_size,
+                                                                  max_seq_len,
+                                                                  hidden_size,
+                                                                  compact_rows,
+                                                                  cu_seq_len);
 }
 
 template<typename T>
@@ -135,21 +145,22 @@ __global__ void cudaGraphCopyLarge2SmallKernel(T*            input_tensor,
                                                const int64_t max_batch_size,
                                                const int64_t max_seq_len,
                                                const int64_t hidden_size,
+                                               const int64_t compact_rows,
                                                const int*    cu_seq_len) {
     const int64_t tid           = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const int64_t total_threads = static_cast<int64_t>(blockDim.x) * gridDim.x;
 
-    // batch_size may live in graph-private device memory, so validate it in
-    // the kernel instead of dereferencing it on the host launcher.
+    // As in small2large, only check the dynamic batch/token capacities here;
+    // the caller supplies consistent lengths and cumulative offsets.
     const int current_batch_size = *batch_size;
     if (current_batch_size <= 0 || current_batch_size > max_batch_size) {
         return;
     }
-
-    // Calculate total_valid_elements using cu_seq_len array
-    // cu_seq_len[i] contains cumulative length up to batch i
-    // cu_seq_len[batch_size] contains total elements
-    const int64_t total_valid_elements = static_cast<int64_t>(cu_seq_len[current_batch_size]) * hidden_size;
+    const int64_t valid_tokens = cu_seq_len[current_batch_size];
+    if (valid_tokens <= 0 || valid_tokens > compact_rows) {
+        return;
+    }
+    const int64_t total_valid_elements = valid_tokens * hidden_size;
 
     // Each thread processes multiple elements with stride = total_threads
     // This design handles cases where grid_size is limited to 65536
@@ -187,6 +198,7 @@ void invokeCudaGraphCopyLarge2Small(T*            input_tensor,
                                     const int64_t max_seq_len,
                                     const int*    input_lengths,
                                     const int64_t hidden_size,
+                                    const int64_t compact_rows,
                                     const int*    cu_seq_len,
 #if USING_CUDA
                                     cudaStream_t stream) {
@@ -202,8 +214,15 @@ void invokeCudaGraphCopyLarge2Small(T*            input_tensor,
     dim3 block(256);
     dim3 grid(1024);
 
-    cudaGraphCopyLarge2SmallKernel<T><<<grid, block, 0, stream>>>(
-        input_tensor, output_tensor, input_lengths, batch_size, max_batch_size, max_seq_len, hidden_size, cu_seq_len);
+    cudaGraphCopyLarge2SmallKernel<T><<<grid, block, 0, stream>>>(input_tensor,
+                                                                  output_tensor,
+                                                                  input_lengths,
+                                                                  batch_size,
+                                                                  max_batch_size,
+                                                                  max_seq_len,
+                                                                  hidden_size,
+                                                                  compact_rows,
+                                                                  cu_seq_len);
 }
 
 // Template instantiations
@@ -215,6 +234,7 @@ template void invokeCudaGraphCopySmall2Large<half>(half*         input_tensor,
                                                    const int64_t max_seq_len,
                                                    const int*    input_lengths,
                                                    const int64_t hidden_size,
+                                                   const int64_t compact_rows,
                                                    const int*    cu_seq_len,
                                                    cudaStream_t  stream);
 
@@ -225,6 +245,7 @@ template void invokeCudaGraphCopySmall2Large<float>(float*        input_tensor,
                                                     const int64_t max_seq_len,
                                                     const int*    input_lengths,
                                                     const int64_t hidden_size,
+                                                    const int64_t compact_rows,
                                                     const int*    cu_seq_len,
                                                     cudaStream_t  stream);
 
@@ -235,6 +256,7 @@ template void invokeCudaGraphCopyLarge2Small<half>(half*         input_tensor,
                                                    const int64_t max_seq_len,
                                                    const int*    input_lengths,
                                                    const int64_t hidden_size,
+                                                   const int64_t compact_rows,
                                                    const int*    cu_seq_len,
                                                    cudaStream_t  stream);
 
@@ -245,6 +267,7 @@ template void invokeCudaGraphCopyLarge2Small<float>(float*        input_tensor,
                                                     const int64_t max_seq_len,
                                                     const int*    input_lengths,
                                                     const int64_t hidden_size,
+                                                    const int64_t compact_rows,
                                                     const int*    cu_seq_len,
                                                     cudaStream_t  stream);
 
@@ -256,6 +279,7 @@ template void invokeCudaGraphCopySmall2Large<__nv_bfloat16>(__nv_bfloat16* input
                                                             const int64_t  max_seq_len,
                                                             const int*     input_lengths,
                                                             const int64_t  hidden_size,
+                                                            const int64_t  compact_rows,
                                                             const int*     cu_seq_len,
                                                             cudaStream_t   stream);
 
@@ -266,6 +290,7 @@ template void invokeCudaGraphCopyLarge2Small<__nv_bfloat16>(__nv_bfloat16* input
                                                             const int64_t  max_seq_len,
                                                             const int*     input_lengths,
                                                             const int64_t  hidden_size,
+                                                            const int64_t  compact_rows,
                                                             const int*     cu_seq_len,
                                                             cudaStream_t   stream);
 #endif
@@ -278,6 +303,7 @@ template void invokeCudaGraphCopySmall2Large<half>(half*         input_tensor,
                                                    const int64_t max_seq_len,
                                                    const int*    input_lengths,
                                                    const int64_t hidden_size,
+                                                   const int64_t compact_rows,
                                                    const int*    cu_seq_len,
                                                    hipStream_t   stream);
 
@@ -288,6 +314,7 @@ template void invokeCudaGraphCopySmall2Large<float>(float*        input_tensor,
                                                     const int64_t max_seq_len,
                                                     const int*    input_lengths,
                                                     const int64_t hidden_size,
+                                                    const int64_t compact_rows,
                                                     const int*    cu_seq_len,
                                                     hipStream_t   stream);
 
@@ -298,6 +325,7 @@ template void invokeCudaGraphCopyLarge2Small<half>(half*         input_tensor,
                                                    const int64_t max_seq_len,
                                                    const int*    input_lengths,
                                                    const int64_t hidden_size,
+                                                   const int64_t compact_rows,
                                                    const int*    cu_seq_len,
                                                    hipStream_t   stream);
 
@@ -308,6 +336,7 @@ template void invokeCudaGraphCopyLarge2Small<float>(float*        input_tensor,
                                                     const int64_t max_seq_len,
                                                     const int*    input_lengths,
                                                     const int64_t hidden_size,
+                                                    const int64_t compact_rows,
                                                     const int*    cu_seq_len,
                                                     hipStream_t   stream);
 
@@ -319,6 +348,7 @@ template void invokeCudaGraphCopySmall2Large<amd_bfloat16>(amd_bfloat16* input_t
                                                            const int64_t max_seq_len,
                                                            const int*    input_lengths,
                                                            const int64_t hidden_size,
+                                                           const int64_t compact_rows,
                                                            const int*    cu_seq_len,
                                                            hipStream_t   stream);
 
@@ -329,6 +359,7 @@ template void invokeCudaGraphCopyLarge2Small<amd_bfloat16>(amd_bfloat16* input_t
                                                            const int64_t max_seq_len,
                                                            const int*    input_lengths,
                                                            const int64_t hidden_size,
+                                                           const int64_t compact_rows,
                                                            const int*    cu_seq_len,
                                                            hipStream_t   stream);
 #endif

@@ -81,11 +81,11 @@ def validate_hw_kernel_group_args(
     if role_type != RoleType.PDFUSION or task_type != TaskType.LANGUAGE_MODEL:
         return
 
-    # NormalEngine rejects an explicitly enabled generation-prefill graph with
-    # speculative execution before warmup and runner creation. Leave that check
-    # to C++, which also knows whether a propose model exists. Returning here
-    # only defers validation; it does not permit the service to start or ignore
-    # the conflicting configuration.
+    # Within PDFUSION, NormalEngine rejects an explicitly enabled generation-
+    # prefill graph with speculative execution before warmup and runner creation.
+    # Leave that check to C++, which also knows whether a propose model exists.
+    # Returning here only defers validation; it does not permit the service to
+    # start or ignore the conflicting configuration.
     if speculative_type != SpeculativeType.NONE:
         return
 
@@ -157,8 +157,9 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help=(
             "Generation Prefill CUDA Graph capture token buckets. A non-empty value, "
             "together with ENABLE_CUDA_GRAPH=1, enables this graph role. "
-            "C++ engine initialization rejects combining it with speculative execution "
-            "(including MTP/DSpARK). Uses the same "
+            "Only PDFUSION uses this graph role; other roles ignore the configuration. "
+            "C++ engine initialization on PDFUSION rejects combining it with speculative "
+            "execution (including MTP/DSpARK). Uses the same "
             "file/list/range syntax as PREFILL_CAPTURE_CONFIG and is limited to "
             f"{GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_BUCKETS} buckets."
         ),
@@ -518,7 +519,7 @@ def _parse_prefill_capture_config(
         )
     except ValueError as e:
         # Convert ValueError to ArgumentTypeError for argparse
-        raise argparse.ArgumentTypeError(str(e))
+        raise argparse.ArgumentTypeError(str(e)) from e
 
 
 def _parse_generation_prefill_capture_config(config: str) -> List[int]:

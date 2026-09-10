@@ -206,11 +206,11 @@ struct KVCacheConfig {
     bool dsv4_fixed_pool_use_memory = false;
 
     // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
-    std::string kv_cache_event_publisher_type        = "none";  // none | kvcm
-    std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint
-    std::string kv_cache_event_instance_group        = "";
-    std::string kv_cache_event_instance_id           = "";
-    std::string kv_cache_event_host_ip_port          = "";
+    std::string kv_cache_event_publisher_type   = "none";  // none | kvcm
+    std::string kv_cache_event_manager_endpoint = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group   = "";
+    std::string kv_cache_event_instance_id      = "";
+    std::string kv_cache_event_host_ip_port     = "";
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;

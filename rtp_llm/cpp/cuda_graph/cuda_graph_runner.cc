@@ -57,6 +57,26 @@ private:
     std::string old_value_;
 };
 
+// The stream-async pipelines (RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_PREPARE
+// all set to 1 on the reference deployment) run the syncing prepare on a
+// dedicated worker (PyWrappedModel::prepareAttentionInputs with
+// skip_forward_event_sync=false) and keep every replay-prep mutation
+// stream-ordered, so skipping the forward-event wait there is safe. The
+// default host pipeline mutates pinned capture buffers directly from the CPU
+// (host memcpy / fill_params / fa2 replan staging), exactly like main, and
+// therefore must wait for the previous replay before touching them — main did
+// this unconditionally in prepareInputs().
+bool streamAsyncReplayPrepEnabled() {
+    static const bool enabled = []() {
+        auto is_on = [](const char* name) {
+            const char* value = std::getenv(name);
+            return value != nullptr && std::string(value) == "1";
+        };
+        return is_on("RTP_LLM_STREAM_ASYNC") || is_on("RTP_LLM_MTP_ASYNC_PREPARE");
+    }();
+    return enabled;
+}
+
 void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
         return;
@@ -201,7 +221,7 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
 void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs");
     prepareInputData(inputs, state);
-    prepareAttentionInputs(inputs, state);
+    prepareAttentionInputs(inputs, state, /*skip_forward_event_sync=*/true);
 }
 
 void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphState& state) {
@@ -217,7 +237,7 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
             .fill_(generation_prefill_cuda_graph_pad_token_id_);
     }
 
-    if (is_prefill_cuda_graph_mode_) {
+    if (isGenerationPrefillCudaGraph()) {
         const auto copy_dynamic_bert_ids = [&](const torch::Tensor& src, torch::Tensor& dst, const char* name) {
             if (!dst.defined() || dst.numel() == 0) {
                 return;
@@ -276,7 +296,9 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     }
 }
 
-void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs, CudaGraphState& state) {
+void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
+                                             CudaGraphState&      state,
+                                             bool                 skip_forward_event_sync) {
     // Captured buffers are created under InferenceMode in initCapture(). Keep
     // preparation self-contained so callers cannot accidentally mutate an
     // inference tensor from normal autograd mode (which PyTorch rejects).
@@ -293,42 +315,46 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs, CudaGr
     // 2.2.3 draft model do auto-agressive forward
     // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in prefill cuda graph.
 
-    // The staging event protects pinned host mirrors until the preceding
-    // async H2D/D2H copies have consumed them.
-    {
-        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_staging_event)");
-        prepare_staging_event_.synchronize();
-    }
-    // Some captured backends retain pinned-host metadata pointers (for
-    // example CUDA XQA sequence_lengths and ROCm fused RoPE lengths). A stream
-    // wait only orders GPU work; it cannot stop this CPU thread from
-    // overwriting those buffers while the previous graph is still reading
-    // them. Keep the host barrier used by the decode runner until every
-    // backend consumes graph-private device metadata.
-    {
-        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_forward_event_host_metadata)");
+    if (isGenerationPrefillCudaGraph()) {
+        // Generation-prefill owns its host metadata lifetime: wait for both
+        // staging copies and the preceding replay before CPU mutation. This
+        // role does not use the legacy asynchronous replay-preparation opt-out.
+        {
+            RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(generation_prefill_wait_staging_event)");
+            generation_prefill_prepare_event_.synchronize();
+        }
+        {
+            RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(generation_prefill_wait_forward_event)");
+            forward_event_.synchronize();
+        }
+    } else if (!skip_forward_event_sync || !streamAsyncReplayPrepEnabled()) {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_forward_event)");
         forward_event_.synchronize();
     }
     prepared_attention_inputs_.store(true, std::memory_order_release);
 
-    struct PrepareCompletionGuard {
+    struct GenerationPrefillPrepareCompletionGuard {
         std::atomic<bool>& prepared;
-        torch::Event&      staging_event;
+        torch::Event*      staging_event;
         bool               committed = false;
 
-        ~PrepareCompletionGuard() noexcept {
+        ~GenerationPrefillPrepareCompletionGuard() noexcept {
+            if (staging_event == nullptr) {
+                return;
+            }
             bool recorded = false;
             try {
-                staging_event.record(cuda_graph::graphGetCurrentStream());
+                staging_event->record(cuda_graph::graphGetCurrentStream());
                 recorded = true;
             } catch (...) {
-                RTP_LLM_LOG_ERROR("failed to record CUDA graph preparation staging event");
+                RTP_LLM_LOG_ERROR("failed to record generation-prefill CUDA graph preparation staging event");
             }
             if (!committed || !recorded) {
                 prepared.store(false, std::memory_order_release);
             }
         }
-    } completion_guard{prepared_attention_inputs_, prepare_staging_event_};
+    } completion_guard{prepared_attention_inputs_,
+                       isGenerationPrefillCudaGraph() ? &generation_prefill_prepare_event_ : nullptr};
 
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
@@ -543,6 +569,17 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs, CudaGr
         tryAddD2DCopy(inputs.attention_inputs.decode_cu_seqlens_device,
                       py_model_inputs_.attention_inputs.decode_cu_seqlens_device,
                       (state.current_batch_size + 1) * sizeof(int));
+    } else if (!isGenerationPrefillCudaGraph()) {
+        // Legacy embedding/MTP prefill keeps its BERT ID copies in attention
+        // preparation. Generation-prefill refreshes them in prepareInputData().
+        if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
+            tryAddD2DCopy(inputs.bert_embedding_inputs.combo_position_ids,
+                          py_model_inputs_.bert_embedding_inputs.combo_position_ids,
+                          state.current_seq_len * sizeof(int));
+            tryAddD2DCopy(inputs.bert_embedding_inputs.combo_tokens_type_ids,
+                          py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
+                          state.current_seq_len * sizeof(int));
+        }
     }
 
     // Multi-group cache: collect group-local block tables by stable topology tag.
@@ -1027,16 +1064,16 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
         return false;
     }
 
-    if (is_prefill_cuda_graph_mode_) {
+    if (isGenerationPrefillCudaGraph()) {
         const auto& captured_bert_inputs = graph_it->second.mem_hold_.py_model_inputs_.bert_embedding_inputs;
         const auto  dynamic_ids_match    = [mode, &state](const torch::Tensor& src, const torch::Tensor& dst) {
             if (!dst.defined() || dst.numel() == 0) {
                 return true;
             }
             if ((!src.defined() || src.numel() == 0) && mode == CudaGraphCheckMode::PREPARE) {
-                // PyWrappedModel's async preparation intentionally contains
-                // attention metadata only. prepareInputData() validates and
-                // refreshes request-owned embedding IDs immediately before replay.
+                // Preparation contains attention metadata only. The forward
+                // path supplies BERT IDs; prepareInputData() validates and
+                // refreshes them immediately before generation-prefill replay.
                 return true;
             }
             return src.defined() && src.is_cuda() && src.scalar_type() == torch::kInt32 && src.is_contiguous()
@@ -1462,19 +1499,21 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
     auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-    const int64_t token_capacity = isGenerationPrefillCudaGraph() ? static_cast<int64_t>(max_num_token) :
-                                                                    static_cast<int64_t>(max_seq_len_) * max_bs;
-
-    // BERT metadata is irrelevant for the normal decoder-only path. Leaving
-    // these tensors undefined avoids reserving two max-context device buffers
-    // for every generation-prefill runner. Generation-prefill is keyed by
-    // total token capacity, not max_context * batch capacity.
-    if (position_encoding_.defined() && position_encoding_.numel() > 0) {
-        inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({token_capacity}, options_cuda_int32);
-        inputs.bert_embedding_inputs.position_encoding  = position_encoding_;
-    }
-    if (token_type_embedding_.defined() && token_type_embedding_.numel() > 0) {
-        inputs.bert_embedding_inputs.combo_tokens_type_ids = torch::zeros({token_capacity}, options_cuda_int32);
+    if (isGenerationPrefillCudaGraph()) {
+        // Only generation-prefill uses optional, total-token-sized buffers.
+        // Keep the legacy embedding/decode allocation contract unchanged.
+        if (position_encoding_.defined() && position_encoding_.numel() > 0) {
+            inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({max_num_token}, options_cuda_int32);
+            inputs.bert_embedding_inputs.position_encoding  = position_encoding_;
+        }
+        if (token_type_embedding_.defined() && token_type_embedding_.numel() > 0) {
+            inputs.bert_embedding_inputs.combo_tokens_type_ids = torch::zeros({max_num_token}, options_cuda_int32);
+            inputs.bert_embedding_inputs.token_type_embedding  = token_type_embedding_;
+        }
+    } else {
+        inputs.bert_embedding_inputs.combo_position_ids    = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
+        inputs.bert_embedding_inputs.position_encoding     = position_encoding_;
+        inputs.bert_embedding_inputs.combo_tokens_type_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
         inputs.bert_embedding_inputs.token_type_embedding  = token_type_embedding_;
     }
 

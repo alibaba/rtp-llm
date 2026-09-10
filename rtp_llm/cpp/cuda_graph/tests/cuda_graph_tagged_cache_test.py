@@ -403,6 +403,88 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         expected_output = torch.full_like(output.hidden_states, expected)
         torch.testing.assert_close(output.hidden_states, expected_output)
 
+    def test_prepare_sync_policy_is_role_scoped(self) -> None:
+        # Run in a fresh process for each async environment: the production
+        # helper intentionally caches these startup switches. Observe the
+        # actual wait scopes, not elapsed time or unrelated copy synchronizations.
+        stream_async = any(
+            os.environ.get(name) == "1"
+            for name in ("RTP_LLM_STREAM_ASYNC", "RTP_LLM_MTP_ASYNC_PREPARE")
+        )
+        for role in ("decode", "target_verify", "embedding", "generation"):
+            runner = CudaGraphRunner()
+            if role in ("decode", "target_verify"):
+                runner.init_decode(
+                    TaggedBlockTableModel(),
+                    HIDDEN_SIZE,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    [2],
+                    GROUP_TAGS,
+                    role == "target_verify",
+                    2 if role == "target_verify" else 1,
+                )
+                inputs = (
+                    _build_target_verify_inputs(
+                        GROUP_TAGS,
+                        {"full": 1, "aux": 2},
+                        batch_size=2,
+                        query_len=2,
+                        prefix_len=1,
+                    )
+                    if role == "target_verify"
+                    else _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+                )
+            else:
+                if role == "generation":
+                    runner.init_generation_prefill(
+                        TextOnlyMultimodalCapableModel(),
+                        2,
+                        TOKENS_PER_BLOCK,
+                        TOKENS_PER_BLOCK,
+                        TOKENS_PER_BLOCK,
+                        [4],
+                        HIDDEN_SIZE,
+                        GROUP_TAGS,
+                        0,
+                    )
+                else:
+                    runner.init_prefill(
+                        TaggedBlockTableModel(),
+                        2,
+                        TOKENS_PER_BLOCK,
+                        TOKENS_PER_BLOCK,
+                        TOKENS_PER_BLOCK,
+                        [4],
+                        HIDDEN_SIZE,
+                        GROUP_TAGS,
+                    )
+                inputs = _build_prefill_inputs(
+                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=[2, 2]
+                )
+
+            for skip_sync in (False, True):
+                with self.subTest(role=role, skip_sync=skip_sync):
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CPU]
+                    ) as prof:
+                        self.assertTrue(
+                            runner.prepare(inputs, skip_forward_event_sync=skip_sync)
+                        )
+                    scopes = {event.key for event in prof.key_averages()}
+                    prefix = "cuda_graph.prepareAttentionInputs("
+                    self.assertEqual(
+                        prefix + "wait_forward_event)" in scopes,
+                        role != "generation" and (not skip_sync or not stream_async),
+                    )
+                    for event in (
+                        "generation_prefill_wait_staging_event)",
+                        "generation_prefill_wait_forward_event)",
+                    ):
+                        self.assertEqual(prefix + event in scopes, role == "generation")
+                    torch.cuda.synchronize()
+
     def test_decode_tag_validation_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
@@ -860,6 +942,87 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         runner.make_input_ids_scalar(scalar_input_ids)
         self.assertFalse(runner.canRun(scalar_input_ids))
+
+    def test_legacy_embedding_keeps_capture_buffers_and_eligibility(self) -> None:
+        weights = torch.ones((2, 1), dtype=torch.bfloat16, device="cuda")
+        for has_positions, has_token_types in (
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(positions=has_positions, token_types=has_token_types):
+                runner = CudaGraphRunner()
+                model = TextOnlyMultimodalCapableModel()
+                runner.init_prefill(
+                    model,
+                    2,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    [4],
+                    HIDDEN_SIZE,
+                    GROUP_TAGS,
+                    weights if has_positions else None,
+                    weights if has_token_types else None,
+                )
+                # Main always allocates both max_seq_len * max_batch buffers;
+                # both are sliced per bucket only when position weights exist.
+                full_capacity = 2 * TOKENS_PER_BLOCK
+                expected_shapes = {(full_capacity, full_capacity)}
+                if has_positions:
+                    expected_shapes.add((4, 4))
+                self.assertEqual(set(model.bert_buffer_shapes), expected_shapes)
+
+                inputs = _build_prefill_inputs(
+                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=[2, 2]
+                )
+                # Request-owned BERT IDs are not a legacy graph eligibility
+                # requirement. The generation-only validation must not leak in.
+                self.assertTrue(runner.canPrepare(inputs))
+                self.assertTrue(runner.canRun(inputs))
+
+    def test_legacy_embedding_refreshes_bert_ids_during_prepare(self) -> None:
+        runner = CudaGraphRunner()
+        position_encoding = torch.tensor(
+            [[3], [7]], dtype=torch.bfloat16, device="cuda"
+        )
+        token_type_embedding = torch.tensor(
+            [[5], [11]], dtype=torch.bfloat16, device="cuda"
+        )
+        runner.init_prefill(
+            BertWeightAwareModel(),
+            1,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [TOKENS_PER_BLOCK],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            position_encoding,
+            token_type_embedding,
+        )
+        for ids in ([0, 1, 0, 1], [1, 0, 1, 0]):
+            inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+            positions = torch.tensor(ids, dtype=torch.int32, device="cuda")
+            token_types = 1 - positions
+            inputs.bert_embedding_inputs = BertEmbeddingInputs(
+                positions, position_encoding, token_types, token_type_embedding, 1.0
+            )
+            self.assertTrue(runner.canRun(inputs))
+            # No separate metadata-only prepare: forward calls prepareInputs(),
+            # including the legacy attention-stage BERT ID copies.
+            output = runner.forward(inputs)
+            torch.cuda.synchronize()
+            expected = (
+                inputs.input_ids.to(torch.bfloat16).unsqueeze(1) * 10
+                + torch.arange(
+                    HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+                ).unsqueeze(0)
+                + position_encoding.index_select(0, positions.to(torch.int64))
+                + token_type_embedding.index_select(0, token_types.to(torch.int64))
+            )
+            torch.testing.assert_close(output.hidden_states, expected)
 
     def test_generation_prefill_installs_embedding_weights_before_capture(self) -> None:
         runner = CudaGraphRunner()

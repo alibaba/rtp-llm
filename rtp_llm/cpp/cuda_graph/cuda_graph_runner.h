@@ -131,7 +131,7 @@ public:
         if (capture_session_may_be_dirty_.load(std::memory_order_acquire)) {
             RTP_LLM_LOG_ERROR("Skip CUDA graph runner drain because capture/session cleanup did not complete; "
                               "the caller must fail model initialization instead of continuing eager execution");
-        } else {
+        } else if (isGenerationPrefillCudaGraph()) {
             try {
                 cuda_graph::GraphStreamGuard stream_guard(capture_stream_);
                 cuda_graph::graphDeviceSynchronize();
@@ -151,7 +151,9 @@ public:
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
     void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareAttentionInputs(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void           prepareAttentionInputs(const PyModelInputs& inputs,
+                                          CudaGraphState&      state,
+                                          bool                 skip_forward_event_sync = false) override;
     void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs,
                           CudaGraphState&      state,
@@ -269,11 +271,10 @@ private:
                                   generation_prefill_cuda_graph_fallback_log_counts_;
     mutable std::atomic<uint64_t> generation_prefill_cuda_graph_replay_log_count_{0};
 
-    // The preparation event protects asynchronous staging copies. The forward
-    // event additionally protects pinned-host metadata retained by captured
-    // backends until the preceding replay has finished reading it.
-    torch::Event forward_event_         = cuda_graph::makeGraphEvent();
-    torch::Event prepare_staging_event_ = cuda_graph::makeGraphEvent();
+    // event to record forward done
+    torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+    // Used only by generation-prefill to protect its asynchronous staging copies.
+    torch::Event generation_prefill_prepare_event_ = cuda_graph::makeGraphEvent();
 
     std::atomic<bool> prepared_attention_inputs_    = false;
     std::atomic<bool> capture_session_may_be_dirty_ = false;
