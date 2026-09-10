@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.model_loader.weight_memory_saver import suppress_weights_region
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -200,9 +201,7 @@ def _fp8_prefill_score_chunk_rows() -> int:
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     ws = _topk_v3_workspace_cache.get(device)
     if ws is None:
-        ws = torch.empty(
-            _TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device
-        )
+        ws = torch.empty(_TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
         _topk_v3_workspace_cache[device] = ws
     return ws
 
@@ -337,9 +336,16 @@ class IndexerFP8(PoolBackedModule):
         # do a single ``F.linear`` (cuBLAS GEMM) without a trailing elementwise
         # mul. New tensor — never mutate ``layer_weights`` in place.
         _wp_scale = self.softmax_scale * self.n_heads**-0.5
-        self.weights_proj = (
-            weights[W.v4_indexer_weights_proj_w] * _wp_scale
-        ).contiguous()
+        # This folded projection is a resident feature weight. Keep it in the
+        # same VMM-owned region as the FP8 scale repack above.
+        from rtp_llm.model_loader.weight_memory_saver import feature_weights_region
+
+        self._sleep_weights_proj_src = weights[W.v4_indexer_weights_proj_w]
+        self._sleep_weights_proj_scale = _wp_scale
+        with feature_weights_region():
+            self.weights_proj = (
+                weights[W.v4_indexer_weights_proj_w] * _wp_scale
+            ).contiguous()
 
         # Nested compressor: 132B layout (head_dim=128).
         inner_cmp_weights = {
@@ -371,6 +377,20 @@ class IndexerFP8(PoolBackedModule):
         # the nested compressor rebuilds its slot mappings post-gather
         # (CompressorFP8.forward handles that internally).
         self._cp_ctx: Optional[CPContext] = None
+
+    def reload_sleep_computed_weights(self, seen_cos_sin=None) -> None:
+        """Restore indexer-derived buffers after level-2 wake."""
+        if seen_cos_sin is None:
+            seen_cos_sin = set()
+        with suppress_weights_region():
+            rebuilt = (
+                self._sleep_weights_proj_src * self._sleep_weights_proj_scale
+            ).contiguous()
+        if rebuilt.shape != self.weights_proj.shape:
+            raise RuntimeError("DSV4 indexer weights_proj shape changed on wake")
+        self.weights_proj.copy_(rebuilt)
+        if self.compressor is not None:
+            self.compressor.reload_rope_cache(seen_cos_sin)
 
     # --------------------------------------------------------------
     # Pool propagation to nested compressor
@@ -776,9 +796,7 @@ class IndexerFP8(PoolBackedModule):
                 cu_kv_seqlens[1:] = torch.cumsum(T_per_req.to(torch.int64), dim=0).to(
                     torch.int32
                 )
-                host_input_lengths = getattr(
-                    cp_ctx, "input_lengths_global_host", None
-                )
+                host_input_lengths = getattr(cp_ctx, "input_lengths_global_host", None)
                 host_prefix_lengths = getattr(cp_ctx, "prefix_lengths_host", None)
                 if (
                     cp_active
@@ -795,9 +813,7 @@ class IndexerFP8(PoolBackedModule):
                     )
                     T = sum(total // ratio for total in host_seq_total_per_req)
                 else:
-                    T = int(
-                        cu_kv_seqlens[-1].item()
-                    )  # total compressed K across batch
+                    T = int(cu_kv_seqlens[-1].item())  # total compressed K across batch
                 M = int(position_ids.numel())  # T_total
 
                 positions_d = position_ids.to(
@@ -839,9 +855,7 @@ class IndexerFP8(PoolBackedModule):
             # sp:sp+S]`` for B == 1 contiguous range; per-token gather is
             # required when requests interleave on the flat axis.
             with record_function_range("dsv4.fp8.indexer.prepare.freqs"):
-                freqs_cis_slice = freqs_cis.index_select(
-                    0, positions_d.to(torch.long)
-                )
+                freqs_cis_slice = freqs_cis.index_select(0, positions_d.to(torch.long))
 
             if kv_block_table is not None and kv_eb > 0:
                 with record_function_range("dsv4.fp8.indexer.prepare.block_table"):

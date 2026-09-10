@@ -37,6 +37,11 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.model_loader.weight_memory_saver import (
+    current_model_scope,
+    feature_weights_region,
+    model_build_scope,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
@@ -312,6 +317,18 @@ class DeepSeekV4Model(GptModelBase):
             device_resource_config=device_resource_config,
         )
 
+        # When the decode forward is captured into a CUDA graph, the Mega MoE
+        # symm + output staging buffers get their device pointers baked into the
+        # graph, so they must stay resident across a sleep/wake cycle (a post-wake
+        # replay writes into them and Python's lazy re-create never runs during
+        # replay). Record it once so the sleep reclaim keeps them instead of
+        # freeing + unmapping their VA. See mega_buf._MEGA_BUFFERS_GRAPH_BAKED.
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+
+        mega_buf.set_mega_buffers_graph_baked(
+            bool(getattr(py_hw_kernel_config, "enable_cuda_graph", False))
+        )
+
         # Build V4Transformer with matching args.
         args = _args_from_model_config(model_config, max_generate_batch_size)
         self._max_generate_batch_size = int(max_generate_batch_size)
@@ -452,6 +469,25 @@ class DeepSeekV4Model(GptModelBase):
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
 
+        # Capture the level-2 sleep model-build scope while it is still open on
+        # this thread. base_model.py runs ``_create_python_model`` (hence this
+        # __init__) inside ``model_build_scope(id(base_model))`` on MainThread,
+        # so ``current_model_scope()`` reads the correct token here. But the
+        # actual MoE strategy / attention compressor construction is DEFERRED to
+        # ``_initialize_impl`` (V4Transformer build), which the C++ engine calls
+        # LATER on a worker thread — long after this scope has closed. Those
+        # modules self-register into DSV4's global WeakSet registries and stamp
+        # ``current_model_scope()`` at registration time; without re-opening the
+        # scope there, they stamp None while ``WeightManager._model_scope`` is
+        # ``id(base_model)`` (non-None), so the level-2 wake re-derive filter
+        # (``_owned``) drops every mega/compressor → blank kernel weights →
+        # garbage output after wake. Stash the token so ``_initialize_impl`` can
+        # re-establish the scope around the deferred construction. The MTP draft
+        # (DeepSeekV4MtpModel, num_layers=1, layer_id=0) captures ``id(draft)``
+        # via its own build scope, keeping it distinct from the main model's
+        # layer-0 strategy for the reload attribution.
+        self._build_scope_token: Any = current_model_scope()
+
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
         # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
         self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
@@ -558,7 +594,7 @@ class DeepSeekV4Model(GptModelBase):
         prev_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
         try:
-            with torch.device("meta"):
+            with model_build_scope(self._build_scope_token), torch.device("meta"):
                 self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
@@ -566,10 +602,14 @@ class DeepSeekV4Model(GptModelBase):
         # ``precompute_freqs_cis`` is intentionally zero/host-backed while the
         # module tree is built under ``meta``; bind the real device table just
         # as the full path does.  Commit projection uses this table directly.
-        for layer in self.v4.layers:
-            layer.attn.reset_rope_cache(device=device_str)
+        # RoPE tables and the shared compressor cos/sin cache are resident
+        # model data. Keep them in the same VMM-owned region as other
+        # feature-derived weights so level-2 sleep can unmap them.
+        with feature_weights_region():
+            for layer in self.v4.layers:
+                layer.attn.init_rope_cache(device=device_str)
 
-        self._load_extra_weights(self.weight)
+        self._load_scoped_extra_weights(self.weight)
         del self.weight
 
         # The commit model still participates in the framework's shared
@@ -710,8 +750,14 @@ class DeepSeekV4Model(GptModelBase):
         prev_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
         try:
-            with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+            # Re-open the model-build scope captured in __init__ so the MoE
+            # strategies / attention compressors constructed inside
+            # V4Transformer stamp the owning model's token when they
+            # self-register — this deferred build runs on a worker thread that
+            # never saw the original (MainThread) scope. See __init__ for why.
+            with model_build_scope(self._build_scope_token):
+                with torch.device("meta"):
+                    self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
         if self._captures_aux_hidden:
@@ -719,13 +765,14 @@ class DeepSeekV4Model(GptModelBase):
 
         # Recompute RoPE on the real device and prebuild the compressors'
         # shared cos_sin_cache before runtime memory allocation starts.
-        for layer in self.v4.layers:
-            layer.attn.init_rope_cache(device=device_str)
+        with feature_weights_region():
+            for layer in self.v4.layers:
+                layer.attn.init_rope_cache(device=device_str)
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
         # discard it.  Default impl is a no-op.
-        self._load_extra_weights(self.weight)
+        self._load_scoped_extra_weights(self.weight)
 
         # Drop the ModelWeights wrapper — per-tensor refs are now held
         # only by the V4Transformer modules (or were popped during
@@ -1087,6 +1134,13 @@ class DeepSeekV4Model(GptModelBase):
         post-verify multi-token batch arrives with ``is_prefill=True``
         but is functionally a multi-token decode."""
         return not (bool(attn.is_prefill) and not is_target_verify)
+
+    def _load_scoped_extra_weights(self, weights: ModelWeights) -> None:
+        # This hook runs on the deferred initialization thread, after the
+        # transformer's build scope has closed. Model-level MTP/DSpARK
+        # projections must carry the same owner token as their WeightManager.
+        with model_build_scope(self._build_scope_token), feature_weights_region():
+            self._load_extra_weights(weights)
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         """Subclass hook for loading model-level (non-Block) tensors off

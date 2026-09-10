@@ -1,12 +1,24 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
+import weakref
+
 import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.weight_memory_saver import (
+    current_model_scope,
+    feature_weights_region,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
+_FP8_LINEAR_REGISTRY = weakref.WeakSet()
+
+
+def iter_fp8_linears() -> list:
+    """Resident V4 projections, including model-level MTP e/h fusion."""
+    return list(_FP8_LINEAR_REGISTRY)
 
 
 def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
@@ -20,15 +32,22 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-    local = {"_w": w, "_s": s}
-    return LinearFactory.create_linear_from_weights(
-        local,
-        "_w",
-        "_s",
-        quant_config=_V4_FP8_BLOCK_CFG,
-    )
+    raw_scale = s
+    with feature_weights_region():
+        if s.dtype == torch.float8_e8m0fnu:
+            s = _repack_v4_fp8_scale_to_int32(s)
+        linear = LinearFactory.create_linear_from_weights(
+            {"_w": w, "_s": s}, "_w", "_s", quant_config=_V4_FP8_BLOCK_CFG
+        )
+    # The packed scale is not a checkpoint tensor. Retain its source and
+    # owner so level-2 wake can reconstruct it at the CUDA-graph-baked address.
+    linear._sleep_raw_weight_source = w
+    linear._sleep_raw_scale_source = raw_scale
+    linear._sleep_row_slice = None
+    linear._sleep_col_slice = None
+    linear._sleep_model_scope = current_model_scope()
+    _FP8_LINEAR_REGISTRY.add(linear)
+    return linear
 
 
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):

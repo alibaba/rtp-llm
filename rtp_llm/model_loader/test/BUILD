@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "per_expert_parallel_loader_test",
+    srcs = ["per_expert_parallel_loader_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,
@@ -16,6 +24,34 @@ py_test(
     name = "test_per_channel_fp8_helpers",
     srcs = ["test_per_channel_fp8_helpers.py"],
     deps = py_test_deps,
+)
+
+py_test(
+    name = "weight_memory_saver_test",
+    srcs = ["weight_memory_saver_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "weight_module_region_test",
+    srcs = ["weight_module_region_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "weight_manager_collectives_test",
+    srcs = ["weight_manager_collectives_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "weight_memory_saver_gpu_test",
+    srcs = ["weight_memory_saver_gpu_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
 )
 
 py_test(

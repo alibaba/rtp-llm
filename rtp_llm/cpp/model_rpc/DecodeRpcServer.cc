@@ -87,6 +87,10 @@ DecodeRpcServer::~DecodeRpcServer() {
     }
 }
 
+size_t DecodeRpcServer::activeCacheTransferCount() {
+    return RemoteRpcServer::activeCacheTransferCount() + onflight_load_cache_requests_.load(std::memory_order_relaxed);
+}
+
 void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     decode_context.time_info.updateRequestBegineTime();
@@ -264,22 +268,22 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         generate_stream->initSpeculativeHandoffPositions();
         if (!propose_tokens.empty()) {
             generate_stream->setContainProposeToken(true);
-        generate_stream->setProposeToken(propose_tokens);
+            generate_stream->setProposeToken(propose_tokens);
 
-        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->propose_step = propose_step;
-        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
-                                                torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->propose_step = propose_step;
+            sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                    torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
             memcpy(
                 sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-        auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
-        auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
+            auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+            auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
-        sp_output_buffer->tensors_holder.push_back(std::move(propose_probs_t));
-        sp_output_buffer->tensors_holder.push_back(std::move(propose_hidden_t));
-        generate_stream->setSPOutputBuffer(sp_output_buffer);
-    }
+            sp_output_buffer->tensors_holder.push_back(std::move(propose_probs_t));
+            sp_output_buffer->tensors_holder.push_back(std::move(propose_hidden_t));
+            generate_stream->setSPOutputBuffer(sp_output_buffer);
+        }
     }
 
     generate_stream->resetBeginTime(currentTimeUs());
@@ -298,8 +302,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
 }
 
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
-    const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
+BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
+                                                                   int                             index,
+                                                                   const std::vector<std::string>& peer_addrs) const {
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
@@ -322,9 +327,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
         int group_num = peer_addrs.size() / resource_.workers.size();
         request.add_peer_addrs(peer_addrs[index * group_num]);
     }
+
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
+    // Prefer per-group block ids if available (hybrid KV cache).
     if (!load_context.block_ids_by_group.empty()) {
         for (const auto& group_block : load_context.block_ids_by_group) {
             auto* row = request.add_group_block_ids();
@@ -338,9 +345,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     return request;
 }
 
-BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
-                                                                   int                             index,
-                                                                   const std::vector<std::string>& peer_addrs) const {
+BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
+    const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
@@ -376,11 +382,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             }
         }
     }
-
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    // Prefer per-group block ids if available (hybrid KV cache).
     if (!load_context.block_ids_by_group.empty()) {
         for (const auto& group_block : load_context.block_ids_by_group) {
             auto* row = request.add_group_block_ids();
@@ -483,9 +487,8 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         auto& worker         = resource_.grpc_workers[i];
         auto  connect_status = resource_.rpc_pool.getConnection(worker);
         if (!connect_status.ok()) {
-            const auto peer_addr = static_cast<size_t>(i) < decode_context.peer_addrs.size() ?
-                                       decode_context.peer_addrs[i] :
-                                       "<missing>";
+            const auto peer_addr =
+                static_cast<size_t>(i) < decode_context.peer_addrs.size() ? decode_context.peer_addrs[i] : "<missing>";
             string error_msg = "request [" + decode_context.request_key + "] get grpc connection failed: rank="
                                + std::to_string(i) + ", worker=" + worker + ", peer=" + peer_addr;
             RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
@@ -525,9 +528,9 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             return ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, error_msg);
         }
         if (load_context.server_context->IsCancelled()) {
-            string error_msg = "load cache cancelled: request=" + decode_context.request_key + ", finished="
-                               + std::to_string(finished_count) + "/" + std::to_string(worker_size) + ", cost_ms="
-                               + std::to_string(cost_time_ms);
+            string error_msg = "load cache cancelled: request=" + decode_context.request_key
+                               + ", finished=" + std::to_string(finished_count) + "/" + std::to_string(worker_size)
+                               + ", cost_ms=" + std::to_string(cost_time_ms);
             RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
             return ErrorInfo(ErrorCode::CANCELLED, error_msg);
         }
@@ -551,9 +554,8 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             each_finished_count[i]++;
             if (!ok) {
                 string error_msg = "grpc completion queue event failed: request=" + decode_context.request_key
-                                   + ", cq=" + std::to_string(i) + ", finished="
-                                   + std::to_string(finished_count) + "/" + std::to_string(worker_size) + ", cost_ms="
-                                   + std::to_string(cost_time_ms);
+                                   + ", cq=" + std::to_string(i) + ", finished=" + std::to_string(finished_count) + "/"
+                                   + std::to_string(worker_size) + ", cost_ms=" + std::to_string(cost_time_ms);
                 RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
                 return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
             }
@@ -566,23 +568,21 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             max_response_done_time_us    = std::max(max_response_done_time_us, response.done_time_us());
             RTP_LLM_LOG_DEBUG("request [%s] load cache for rank [%d] done", decode_context.request_key.c_str(), rank);
             if (!status.ok()) {
-                all_success = false;
-                error_code  = ErrorCode::LOAD_KV_CACHE_FAILED;
+                all_success             = false;
+                error_code              = ErrorCode::LOAD_KV_CACHE_FAILED;
                 const auto& worker_addr = resource_.grpc_workers.at(rank);
-                const auto  peer_addr   = rank < decode_context.peer_addrs.size() ?
-                                              decode_context.peer_addrs[rank] :
-                                              "<missing>";
-                error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
-                             + ", cq=" + std::to_string(i) + ", grpc_code="
-                             + std::to_string(static_cast<int>(status.error_code())) + ", grpc_message="
-                             + status.error_message() + ", grpc_details=" + status.error_details() + "; ";
+                const auto  peer_addr =
+                    rank < decode_context.peer_addrs.size() ? decode_context.peer_addrs[rank] : "<missing>";
+                error_msg +=
+                    "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr + ", cq="
+                    + std::to_string(i) + ", grpc_code=" + std::to_string(static_cast<int>(status.error_code()))
+                    + ", grpc_message=" + status.error_message() + ", grpc_details=" + status.error_details() + "; ";
             } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
-                all_success = false;
-                error_code  = transRPCErrorCode(pb_error_code);
+                all_success             = false;
+                error_code              = transRPCErrorCode(pb_error_code);
                 const auto& worker_addr = resource_.grpc_workers.at(rank);
-                const auto  peer_addr   = rank < decode_context.peer_addrs.size() ?
-                                              decode_context.peer_addrs[rank] :
-                                              "<missing>";
+                const auto  peer_addr =
+                    rank < decode_context.peer_addrs.size() ? decode_context.peer_addrs[rank] : "<missing>";
                 error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
                              + ", cq=" + std::to_string(i) + ", remote_code=" + std::to_string(pb_error_code)
                              + ", remote_message=" + pb_error_message + "; ";
@@ -993,7 +993,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             }
                             CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
                             auto           block_pos_list = blockPositionsForLoad(
-                                    block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
+                                block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
 
                             if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                                 continue;
@@ -1114,6 +1114,11 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
@@ -1180,11 +1185,17 @@ void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_contex
 
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
-    AtomicGuard      request_guard(onflight_requests_);
-    DecodeRpcContext rpc_context{grpc_stream};
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_lease = std::move(admission.lease);
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    DecodeRpcContext   rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
-    decode_context.onflight_requests      = &onflight_requests_;
+    decode_context.onflight_requests = &onflight_requests_;
     decode_context.loading_cache_requests = &loading_cache_requests_;
 
     auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;

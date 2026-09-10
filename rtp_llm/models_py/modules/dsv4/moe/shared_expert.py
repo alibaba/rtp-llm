@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+from rtp_llm.model_loader.weight_memory_saver import pausable_empty
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 from .warmup_sync import cuda_graph_warmup_forward_enabled
@@ -99,7 +100,9 @@ def _get_shared_expert_stream(
 
 
 def _find_module_cuda_device(module: nn.Module) -> torch.device | None:
-    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
+    for tensor in list(module.parameters(recurse=True)) + list(
+        module.buffers(recurse=True)
+    ):
         if tensor.is_cuda:
             return tensor.device
 
@@ -283,7 +286,7 @@ class FusedSharedExpertFastPath:
             max(capacity, 1),
             torch.empty((), dtype=torch.int32).element_size(),
         )
-        return torch.empty(
+        return pausable_empty(
             (num_packed_groups, aligned_capacity),
             dtype=torch.int32,
             device=device,
@@ -305,7 +308,9 @@ class FusedSharedExpertFastPath:
         if self.dim is None:
             self.dim = D
         if D != self.dim:
-            raise RuntimeError(f"shared expert dim mismatch: got {D}, expected {self.dim}")
+            raise RuntimeError(
+                f"shared expert dim mismatch: got {D}, expected {self.dim}"
+            )
         inter: int = self.inter_dim  # type: ignore[assignment]
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
         workspace = self._workspace
@@ -325,20 +330,18 @@ class FusedSharedExpertFastPath:
             self._workspace = workspace
             return workspace
 
-        x_fp8 = torch.empty(
+        x_fp8 = pausable_empty(
             (capacity, D),
             dtype=torch.float8_e4m3fn,
             device=x.device,
         )
-        x_scale_storage = self._scale_storage(
-            (D // 128 + 3) // 4, capacity, x.device
-        )
-        gate_up_bf16 = torch.empty(
+        x_scale_storage = self._scale_storage((D // 128 + 3) // 4, capacity, x.device)
+        gate_up_bf16 = pausable_empty(
             (capacity, 2 * inter),
             dtype=torch.bfloat16,
             device=x.device,
         )
-        hidden_fp8 = torch.empty(
+        hidden_fp8 = pausable_empty(
             (capacity, inter),
             dtype=torch.float8_e4m3fn,
             device=x.device,
@@ -348,7 +351,7 @@ class FusedSharedExpertFastPath:
             capacity,
             x.device,
         )
-        out_bf16 = torch.empty(
+        out_bf16 = pausable_empty(
             (capacity, D),
             dtype=torch.bfloat16,
             device=x.device,
@@ -405,9 +408,7 @@ class FusedSharedExpertFastPath:
             )
         return self._run_prepared(shared_experts, x)
 
-    def _run_prepared(
-        self, shared_experts: nn.Module, x: torch.Tensor
-    ) -> torch.Tensor:
+    def _run_prepared(self, shared_experts: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if self._prepared_shared_experts is not shared_experts:
             self.prepare(shared_experts)
         w13_parts: tuple[torch.Tensor, torch.Tensor] = (
@@ -429,9 +430,10 @@ class FusedSharedExpertFastPath:
         if T == 0:
             return out
 
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+
         from ._shared_expert_triton import quant_bf16_fp8_packed_ue8m0
         from ._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
 
         quant_bf16_fp8_packed_ue8m0(x, x_fp8, x_scale, group_size=128, eps=1.0e-4)
         fp8_gemm_nt(

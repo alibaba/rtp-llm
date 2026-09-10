@@ -6,16 +6,19 @@ import torch
 from fastsafetensors import ParallelLoader
 from fastsafetensors.parallel_loader import TimingContext
 
-_REQUIRED_FST_VERSION = "0.1.19"
+_SUPPORTED_FST_VERSIONS = ("0.1.19", "0.1.20")
 
 
 class PerExpertParallelLoader(ParallelLoader):
-    """ParallelLoader subclass that splits stacked MoE tensors before NCCL broadcast.
+    """Stream-safe loader with optional pre-broadcast MoE expert splitting.
 
     Instead of broadcasting the full stacked tensor [num_experts, ...] to every
     rank, this loader splits on the source rank and broadcasts individual expert
     tensors.  Peak GPU memory during broadcast drops from the full stacked tensor
     size to a single expert slice (stacked_size / num_experts).
+
+    An empty mapping keeps the ordinary broadcast path. Both paths protect
+    producer-owned shard tensors used on the consumer's CUDA stream.
 
     Args:
         stacked_key_config: Mapping from stacked checkpoint key to a per-expert
@@ -25,10 +28,10 @@ class PerExpertParallelLoader(ParallelLoader):
 
     def __init__(self, stacked_key_config: Dict[str, str], *args, **kwargs):
         fst_ver = getattr(fastsafetensors, "__version__", "unknown")
-        if not fst_ver.startswith(_REQUIRED_FST_VERSION):
+        if not fst_ver.startswith(_SUPPORTED_FST_VERSIONS):
             raise RuntimeError(
                 f"PerExpertParallelLoader is tested with fastsafetensors "
-                f"{_REQUIRED_FST_VERSION}*, current version: {fst_ver}. "
+                f"{_SUPPORTED_FST_VERSIONS}, current version: {fst_ver}. "
                 f"Internal API changes may cause breakage."
             )
         super().__init__(*args, **kwargs)
@@ -69,6 +72,7 @@ class PerExpertParallelLoader(ParallelLoader):
             ) as timer:
                 # --- BEGIN CUSTOM LOGIC (differs from ParallelLoader) ---
                 for key in batch.keys:
+                    self._record_source_stream(batch.fb, key)
                     if key in self.stacked_key_config:
                         yield from self._broadcast_per_expert(batch, key)
                     else:
@@ -93,6 +97,26 @@ class PerExpertParallelLoader(ParallelLoader):
         if self.queue_size < 0 and self.consumer_processed is not None:
             self.consumer_processed.set()
 
+    @staticmethod
+    def _record_source_stream(fb, key: str) -> None:
+        """Keep a shard alive until this stream finishes cloning/broadcasting it.
+
+        The producer allocates SHM-copied tensors on its default CUDA stream.
+        Level-2 wake consumes them on WeightManager's copy stream. The last key
+        of a shard makes FileBuffer free its source tensors, and the producer
+        can immediately reuse those allocations for the next shard. A clone on
+        another stream does not automatically register that read with PyTorch's
+        allocator: without record_stream, the clone can read the next shard's
+        bytes. Register BEFORE get_tensor (which may free the source internally),
+        not on the returned clone. This adds no device synchronization.
+        """
+        rank, lidx = fb._get_rank_lidx(key)
+        source = fb.rank_loaders[rank][lidx].tensors.get(key)
+        if source is not None:
+            tensor = source.get_raw()
+            if tensor.is_cuda:
+                tensor.record_stream(torch.cuda.current_stream(tensor.device))
+
     def _broadcast_per_expert(
         self, batch, key: str
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
@@ -105,7 +129,7 @@ class PerExpertParallelLoader(ParallelLoader):
         """
         template = self.stacked_key_config[key]
         fb = batch.fb
-        (rank, lidx) = fb._get_rank_lidx(key)
+        rank, lidx = fb._get_rank_lidx(key)
         factory = fb.rank_loaders[rank][lidx]
         frame = factory.metadata.tensors[key]
         pg = fb.pg

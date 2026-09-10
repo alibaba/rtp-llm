@@ -40,11 +40,50 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from rtp_llm.model_loader.weight_memory_saver import weights_region
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
+
+# Live CompressorFP8 instances. Each holds a computed ``_wkv_wgate_fused`` weight
+# (built by cat-ing the raw wkv/wgate) tagged under the ``weights`` region, so at
+# level-2 engine sleep it is blank-remapped and its content lost -- the raw
+# wkv/wgate stay in ModelWeights and are reloaded in place, but the derived fused
+# buffer is not. This registry lets the level-2 wake reload
+# (``WeightManager.reload_weights_from_loader``) reach every live compressor and
+# rebuild its fused weight from the reloaded raws. See ``reload_fused_weights``.
+_COMPRESSOR_REGISTRY: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def _register_compressor(compressor) -> None:
+    """Track a live CompressorFP8 so its fused weight can be rebuilt at level-2
+    wake. Best-effort; never raises.
+
+    Stamp the owning model's build scope (see ``_register_mega_strategy``) so the
+    level-2 wake reload rebuilds only its own model's compressors -- a
+    checkpoint-backed MTP draft coexisting with the main model registers its
+    compressors here too."""
+    try:
+        from rtp_llm.model_loader.weight_memory_saver import current_model_scope
+
+        compressor._sleep_model_scope = current_model_scope()
+    except Exception:
+        pass
+    try:
+        _COMPRESSOR_REGISTRY.add(compressor)
+    except Exception:
+        pass
+
+
+def iter_compressors() -> list:
+    """Snapshot of the live CompressorFP8 instances (outer + indexer per layer).
+
+    Used by the level-2 wake reload to rebuild each compressor's fused wkv/wgate
+    weight from the reloaded raws. Returns a plain list so callers do not hold the
+    weakset during iteration."""
+    return list(_COMPRESSOR_REGISTRY)
 
 
 def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -497,10 +536,20 @@ class CompressorFP8(PoolBackedModule):
             requires_grad=False,
         )
 
+        # Keep references to the raw wkv/wgate ModelWeights tensors so the fused
+        # weight can be rebuilt at level-2 wake. They stay tracked in ModelWeights
+        # (extracted by reference, not popped) and are reloaded in place -- so
+        # these refs still point at the reloaded storage after wake. The fused
+        # buffer below re-points wkv.weight/wgate.weight to views of itself, losing
+        # the raw refs, hence we snapshot them here. See ``reload_fused_weights``.
+        self._raw_wkv_src = compressor_weights["wkv"]
+        self._raw_wgate_src = compressor_weights["wgate"]
+
         # Fuse wkv + wgate into one bf16 weight matrix; saves one
         # GEMM launch per compressor decode call (~92/step at bs16).
         self._wkv_wgate_fused: Optional[torch.Tensor] = None
         self._fuse_wkv_wgate(coff)
+        _register_compressor(self)
 
         # Legacy attribute kept for attention.py's cmp_T fallback (line 1583).
         self._kv_cache_t: int = 0
@@ -526,18 +575,82 @@ class CompressorFP8(PoolBackedModule):
             label = f"{role}.ratio{self.compress_ratio}.hd{self.head_dim}"
         return f"dsv4.cp.all_gather.{label}.kv_score"
 
-    def _fuse_wkv_wgate(self, coff: int) -> None:
+    def _fuse_wkv_wgate(
+        self,
+        coff: int,
+        wkv_src: Optional[torch.Tensor] = None,
+        wgate_src: Optional[torch.Tensor] = None,
+    ) -> None:
         """Concat wkv + wgate along out-dim into one fused bf16 weight,
         then re-point ``wkv.weight`` / ``wgate.weight`` to views of the
-        fused storage (zero memory overhead)."""
-        with torch.no_grad():
-            fused = torch.cat(
-                [self.wkv.weight.data, self.wgate.weight.data], dim=0
-            ).contiguous()
+        fused storage (zero memory overhead).
+
+        Sleep-mode: ``fused`` is the resident compressor weight (wkv/wgate
+        re-point to views of it), built here in py-model init OUTSIDE the
+        loader's weights_region -> untagged -> ``tms.pause("weights")`` cannot
+        unmap it. Scope the cat into weights_region so engine sleep releases it
+        too (small, ~256MiB/rank, but same treatment as the mega weights).
+
+        ``wkv_src`` / ``wgate_src`` default to the current ``wkv.weight`` /
+        ``wgate.weight`` data (init path). The level-2 wake reload passes the
+        reloaded raw ModelWeights tensors explicitly (``reload_fused_weights``)
+        because by then the wkv/wgate params are stale views into the blank
+        fused buffer."""
+        if wkv_src is None:
+            wkv_src = self.wkv.weight.data
+        if wgate_src is None:
+            wgate_src = self.wgate.weight.data
+        with torch.no_grad(), weights_region():
+            fused = self._merge_wkv_wgate(wkv_src, wgate_src)
             self._wkv_wgate_fused = fused
             out_dim = coff * self.head_dim
             self.wkv.weight = nn.Parameter(fused[:out_dim], requires_grad=False)
             self.wgate.weight = nn.Parameter(fused[out_dim:], requires_grad=False)
+
+    @staticmethod
+    def _merge_wkv_wgate(wkv: torch.Tensor, wgate: torch.Tensor) -> torch.Tensor:
+        return torch.cat(
+            [wkv.to(torch.bfloat16), wgate.to(torch.bfloat16)], dim=0
+        ).contiguous()
+
+    def reload_fused_weights(self) -> None:
+        """Refresh the derived weight after a level-2 checkpoint reload.
+
+        CUDA graphs retain the fused weight's address, so refresh its contents
+        without replacing the storage or its Parameter views.
+        """
+        resident = self._wkv_wgate_fused
+        if resident is None:
+            raise RuntimeError("reload_fused_weights: fused weight is not initialized")
+
+        with torch.no_grad():
+            rebuilt = self._merge_wkv_wgate(self._raw_wkv_src, self._raw_wgate_src)
+            if rebuilt.shape != resident.shape or rebuilt.dtype != resident.dtype:
+                raise RuntimeError(
+                    "reload_fused_weights: rebuilt fused weight does not match "
+                    f"resident storage: rebuilt={tuple(rebuilt.shape)}/{rebuilt.dtype}, "
+                    f"resident={tuple(resident.shape)}/{resident.dtype}"
+                )
+            resident.copy_(rebuilt)
+
+    def reload_rope_cache(self, seen=None) -> None:
+        """Restore the feature-region cos/sin cache in place after level-2 wake."""
+        if seen is None:
+            seen = set()
+        resident = self._cos_sin_cache
+        if resident is None or id(resident) in seen:
+            return
+        if self.freqs_cis is None:
+            raise RuntimeError("reload_rope_cache: freqs_cis is not initialized")
+        rebuilt, _ = build_cos_sin_cache(self.freqs_cis)
+        if rebuilt.shape != resident.shape or rebuilt.dtype != resident.dtype:
+            raise RuntimeError(
+                "DSV4 compressor cos/sin reload shape/dtype mismatch: "
+                f"rebuilt={tuple(rebuilt.shape)}/{rebuilt.dtype}, "
+                f"resident={tuple(resident.shape)}/{resident.dtype}"
+            )
+        resident.copy_(rebuilt)
+        seen.add(id(resident))
 
     # ----------------------------------------------------------------------
     # Compatibility shims (kept to match the BF16 ``Compressor`` API surface
@@ -604,9 +717,7 @@ class CompressorFP8(PoolBackedModule):
             )
         pool_rows = 0
         if self._kv_pool_view is not None:
-            pool_rows = int(
-                self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
-            )
+            pool_rows = int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1])
         cp_ctx = self._cp_ctx if self._kv_cache_sharded else None
         cp_size = int(cp_ctx.cp_size) if cp_ctx is not None else 1
         cp_rank = int(cp_ctx.cp_rank) if cp_ctx is not None else 0
@@ -630,9 +741,7 @@ class CompressorFP8(PoolBackedModule):
             cp_size=cp_size,
             cp_rank=cp_rank,
             kv_owner_tokens_per_block=int(
-                getattr(
-                    self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block
-                )
+                getattr(self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block)
             ),
         )
         meta = CompressorMeta(
@@ -1240,9 +1349,7 @@ class CompressorFP8(PoolBackedModule):
                     b_idx,
                     has_prefix=True,
                     is_batched=q_len > 1,
-                    seq_start_per_req=position_ids_2d[:, 0]
-                    .to(torch.long)
-                    .contiguous(),
+                    seq_start_per_req=position_ids_2d[:, 0].to(torch.long).contiguous(),
                     cu_seq_per_req=cu_seq_per_req,
                 )
         self._launch(kv_flat, score_flat, meta)

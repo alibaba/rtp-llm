@@ -34,8 +34,10 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 
-from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
+from rtp_llm.model_loader.weight_memory_saver import feature_weights_region
+
 from ..._profiler import record_function_range
+from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
 from ..mega_fused_buf import (
     _get_or_create_mega_fused_buf,
@@ -63,8 +65,8 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         return cfg.ep_size > 1 and _mega_moe_fused_enabled()
 
     def setup_weights(self, layer_weights: Dict) -> None:
-        """Prepare routed + shared-expert kernel weights and symm/scratch
-        buffers for ``fp8_fp4_mega_moe_fused``.
+        """Prepare routed + shared-expert resident kernel weights for
+        ``fp8_fp4_mega_moe_fused``.
 
         Routed weights mirror :meth:`MegaMoEStrategy.setup_weights` but use the
         fused weight transform.  Shared-expert weights — popped here so the
@@ -74,7 +76,6 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         4x32 layout the kernel consumes.
         """
         import deep_gemm
-        import torch.distributed as dist
 
         from rtp_llm.utils.model_weight import W
 
@@ -108,23 +109,33 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
 
         st_w2_w = layer_weights.pop(W.v4_routed_w2_w)
         st_w2_s = layer_weights.pop(W.v4_routed_w2_s)
-        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
         s2_raw = torch.empty(
             (E, D, inter // FP4_BLOCK),
             dtype=torch.float8_e8m0fnu,
             device=device,
         )
-        w2.copy_(st_w2_w)
+        # Keep the raw L2 weight alive until the aliased resident input is
+        # allocated in the VMM region below.
         s2_raw.copy_(st_w2_s)
-        del st_w2_w, st_w2_s
+        del st_w2_s
         s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
         del s2_raw
         torch.cuda.empty_cache()
 
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe_fused(
-            (w13, s13_int),
-            (w2, s2_int),
-        )
+        # DeepGEMM aliases the L2 output to its input; both that input and the
+        # fresh resident transform outputs must therefore be tagged together.
+        with feature_weights_region():
+            w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
+            w2.copy_(st_w2_w)
+            # The raw L2 weight was popped above; copy it before dropping the
+            # reference while keeping all resident allocations in this scope.
+            (l1_w, l1_sf), (l2_w, l2_sf) = (
+                deep_gemm.transform_weights_for_mega_moe_fused(
+                    (w13, s13_int),
+                    (w2, s2_int),
+                )
+            )
+        del st_w2_w
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
 
@@ -138,7 +149,19 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         # path does not build ``W13SharedExpert``.
         self._setup_shared_expert_weights(layer_weights, deep_gemm, W, D, inter)
 
-        # --- Symmetric-memory dispatch buffer (fused variant). ---------------
+        # Dispatch/output/mid buffers and JIT warmup are runtime state; defer
+        # them until the resident-weight build has closed.
+        self._mega_runtime_device = device
+
+    def setup_runtime(self) -> None:
+        """Allocate fused-Mega runtime buffers outside the weight pool."""
+        import torch.distributed as dist
+
+        cfg = self.cfg
+        D = cfg.dim
+        inter = cfg.moe_inter_dim
+        device = self._mega_runtime_device
+
         group = dist.group.WORLD
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_fused_buf(
@@ -198,14 +221,17 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
 
         w13_sf_int = self._shared_expert_sf_to_int(deep_gemm, w13_s, 2 * inter, D)
         w2_sf_int = self._shared_expert_sf_to_int(deep_gemm, w2_s, D, inter)
+        w13_contiguous = w13_fp8.contiguous()
+        w2_contiguous = w2_fp8.contiguous()
         del w13_s, w2_s
 
-        (se_l1_fp8, se_l1_sf), (se_l2_fp8, se_l2_sf) = (
-            deep_gemm.transform_shared_expert_weights_for_mega_moe_fused(
-                (w13_fp8.contiguous(), w13_sf_int),
-                (w2_fp8.contiguous(), w2_sf_int),
+        with feature_weights_region():
+            (se_l1_fp8, se_l1_sf), (se_l2_fp8, se_l2_sf) = (
+                deep_gemm.transform_shared_expert_weights_for_mega_moe_fused(
+                    (w13_contiguous, w13_sf_int),
+                    (w2_contiguous, w2_sf_int),
+                )
             )
-        )
         self._se_l1_fp8 = se_l1_fp8
         self._se_l1_sf = se_l1_sf
         self._se_l2_fp8 = se_l2_fp8

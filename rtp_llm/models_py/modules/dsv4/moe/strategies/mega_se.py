@@ -15,12 +15,18 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.model_loader.weight_memory_saver import (
+    feature_weights_region,
+    suppress_weights_region,
+)
+
 from ..._profiler import record_function_range
-from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
+from ...quant_layouts import FP4_BLOCK
 from ..mega_se_buf import (
     _get_or_create_mega_se_buf,
     _get_or_create_mega_se_output,
     _mega_moe_se_enabled,
+    register_mega_se_strategy,
 )
 from ..mega_se_input_packer import get_mega_moe_se_input_packer
 from ..mega_se_jit_warmup import (
@@ -88,64 +94,38 @@ class MegaMoEStrategySE(MegaMoEStrategy):
 
     def setup_weights(self, layer_weights: Dict) -> None:
         import deep_gemm
-        import torch.distributed as dist
 
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
-        E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
 
-        # Routed FP4 L1 (gate + up), identical layout to ordinary Mega.
-        st_w1_w = layer_weights.pop(W.v4_routed_w1_w)
-        st_w1_s = layer_weights.pop(W.v4_routed_w1_s)
-        st_w3_w = layer_weights.pop(W.v4_routed_w3_w)
-        st_w3_s = layer_weights.pop(W.v4_routed_w3_s)
-        device = st_w1_w.device
-        w13 = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
-        s13_raw = torch.empty(
-            (E, 2 * inter, D // FP4_BLOCK),
-            dtype=torch.float8_e8m0fnu,
-            device=device,
-        )
-        w13[:, :inter].copy_(st_w1_w)
-        s13_raw[:, :inter].copy_(st_w1_s)
-        w13[:, inter:].copy_(st_w3_w)
-        s13_raw[:, inter:].copy_(st_w3_s)
-        del st_w1_w, st_w1_s, st_w3_w, st_w3_s
-        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
-        del s13_raw
-        torch.cuda.empty_cache()
+        # The routed layout and its level-2 reload path are shared with the
+        # ordinary Mega strategy.  In particular, _apply_routed_weight_transform
+        # allocates the aliased L2 input and all resident transform outputs inside
+        # feature_weights_region().  Keeping this in one implementation is important:
+        # the previous SE-local copy allocated ~37 GiB/rank in the default pool,
+        # so pause("weights") could not release it during sleep.
+        self._apply_routed_weight_transform(layer_weights)
 
-        # Routed FP4 L2; keep the same memory-serialised setup as ordinary Mega.
-        st_w2_w = layer_weights.pop(W.v4_routed_w2_w)
-        st_w2_s = layer_weights.pop(W.v4_routed_w2_s)
-        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
-        s2_raw = torch.empty(
-            (E, D, inter // FP4_BLOCK),
-            dtype=torch.float8_e8m0fnu,
-            device=device,
-        )
-        w2.copy_(st_w2_w)
-        s2_raw.copy_(st_w2_s)
-        del st_w2_w, st_w2_s
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
-        del s2_raw
-        torch.cuda.empty_cache()
-
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-            (w13, s13_int),
-            (w2, s2_int),
-        )
-        del w13, s13_int, w2, s2_int
-        torch.cuda.empty_cache()
-        self._mega_l1_w = l1_w
-        self._mega_l1_sf = l1_sf
-        self._mega_l2_w = l2_w
-        self._mega_l2_sf = l2_sf
+        device = self._mega_l1_w.device
 
         self._setup_shared_expert_weights(layer_weights, deep_gemm, W, D, inter)
+
+        # Dispatch/output buffers and JIT warmup are runtime state; defer them
+        # until the common feature-weight VMM region has closed.
+        self._mega_runtime_device = device
+        register_mega_se_strategy(self)
+
+    def setup_runtime(self) -> None:
+        """Allocate Mega-SE runtime buffers outside the resident-weight pool."""
+        import torch.distributed as dist
+
+        cfg = self.cfg
+        D = cfg.dim
+        inter = cfg.moe_inter_dim
+        device = self._mega_runtime_device
 
         assert dist.is_initialized(), (
             "Mega MoE SE requires torch.distributed initialised; "
@@ -171,7 +151,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._input_packer = get_mega_moe_se_input_packer()
         self._maybe_warmup_jit_once()
 
-    def _setup_shared_expert_weights(self, layer_weights, deep_gemm, W, D, inter):
+    def _setup_shared_expert_weights(
+        self, layer_weights, deep_gemm, W, D, inter, isolate_scratch=False
+    ):
         w13_fp8 = layer_weights.pop(W.v4_shared_w13_w)
         w13_scale = layer_weights.pop(W.v4_shared_w13_s)
         w2_fp8 = layer_weights.pop(W.v4_shared_w2_w)
@@ -197,19 +179,67 @@ class MegaMoEStrategySE(MegaMoEStrategy):
 
         w13_sf_int = self._shared_expert_sf_to_int(deep_gemm, w13_scale, 2 * inter, D)
         w2_sf_int = self._shared_expert_sf_to_int(deep_gemm, w2_scale, D, inter)
+        w13_contiguous = w13_fp8.contiguous()
         del w13_scale, w2_scale
-        (se_l1_w, se_l1_sf), (se_l2_w, se_l2_sf) = (
-            deep_gemm.transform_weights_for_mega_moe(
-                (w13_fp8.contiguous(), w13_sf_int),
-                (w2_fp8.contiguous(), w2_sf_int),
+        # ``transform_weights_for_mega_moe`` aliases its L2 weight output to the
+        # supplied L2 input.  Tag both the input and transform outputs together
+        # so the alias cannot escape the VMM weights pool.
+        region = suppress_weights_region if isolate_scratch else feature_weights_region
+        with region():
+            w2_tagged = torch.empty_like(w2_fp8)
+            w2_tagged.copy_(w2_fp8)
+            w2_sf_tagged = torch.empty_like(w2_sf_int)
+            w2_sf_tagged.copy_(w2_sf_int)
+            (se_l1_w, se_l1_sf), (se_l2_w, se_l2_sf) = (
+                deep_gemm.transform_weights_for_mega_moe(
+                    (w13_contiguous, w13_sf_int),
+                    (w2_tagged, w2_sf_tagged),
+                )
             )
-        )
         del w13_fp8, w13_sf_int, w2_fp8, w2_sf_int
+        del w2_tagged, w2_sf_tagged
+        for name, rebuilt in (
+            ("_se_l1_w", se_l1_w),
+            ("_se_l1_sf", se_l1_sf),
+            ("_se_l2_w", se_l2_w),
+            ("_se_l2_sf", se_l2_sf),
+        ):
+            if isolate_scratch:
+                resident = getattr(self, name)
+                if resident.shape != rebuilt.shape or resident.dtype != rebuilt.dtype:
+                    raise RuntimeError(f"MegaMoE-SE {name} layout changed on wake")
+                resident.copy_(rebuilt)
+            else:
+                setattr(self, name, rebuilt)
         torch.cuda.empty_cache()
-        self._se_l1_w = se_l1_w
-        self._se_l1_sf = se_l1_sf
-        self._se_l2_w = se_l2_w
-        self._se_l2_sf = se_l2_sf
+
+    @staticmethod
+    def sleep_reload_extra_weight_names() -> set:
+        from rtp_llm.utils.model_weight import W
+
+        return {
+            W.v4_shared_w13_w,
+            W.v4_shared_w13_s,
+            W.v4_shared_w2_w,
+            W.v4_shared_w2_s,
+        }
+
+    def reload_routed_weights(self, layer_weights: Dict) -> None:
+        """Restore both routed and fused shared weights at graph-stable addresses."""
+        import deep_gemm
+
+        from rtp_llm.utils.model_weight import W
+
+        with suppress_weights_region():
+            super().reload_routed_weights(layer_weights)
+            self._setup_shared_expert_weights(
+                layer_weights,
+                deep_gemm,
+                W,
+                self.cfg.dim,
+                self.cfg.moe_inter_dim,
+                isolate_scratch=True,
+            )
 
     @staticmethod
     def _shared_expert_sf_to_int(deep_gemm, scale, mn, k):

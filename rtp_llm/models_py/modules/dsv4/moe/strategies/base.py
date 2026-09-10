@@ -114,6 +114,16 @@ class RoutedExpertsStrategy(nn.Module):
         """
         raise NotImplementedError
 
+    def setup_runtime(self) -> None:
+        """Create non-weight state after :meth:`setup_weights` completes.
+
+        The MoE factory calls this hook after the resident-weight build.  It is
+        deliberately separate so strategies can keep symmetric-memory buffers,
+        output/workspace caches, input packers, and JIT warmups out of the VMM
+        weights pool; the default keeps ordinary strategies allocation-free.
+        """
+        return None
+
     def forward(  # type: ignore[override]
         self,
         x: torch.Tensor,  # [N, D] BF16

@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import weakref
 
 import torch
 
@@ -18,6 +19,21 @@ from .mega_buf import _mega_moe_unavailable_reason
 
 _MEGA_SE_BUF_CACHE: dict = {}
 _MEGA_SE_OUTPUT_CACHE: dict = {}
+# Separate from the routed-only runtime-buffer registry: SE has a different
+# buffer lifecycle, but its transformed weights also need level-2 reload.
+_MEGA_SE_STRATEGY_REGISTRY: weakref.WeakSet = weakref.WeakSet()
+
+
+def register_mega_se_strategy(strategy) -> None:
+    from rtp_llm.model_loader.weight_memory_saver import current_model_scope
+
+    strategy._sleep_model_scope = current_model_scope()
+    _MEGA_SE_STRATEGY_REGISTRY.add(strategy)
+
+
+def iter_mega_se_strategies() -> list:
+    return list(_MEGA_SE_STRATEGY_REGISTRY)
+
 
 _USE_MEGA_MOE_SE_ENV = "DSV4_USE_MEGA_MOE_SE"
 _NUM_SHARED_EXPERTS = 1

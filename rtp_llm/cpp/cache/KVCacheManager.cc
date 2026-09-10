@@ -163,8 +163,17 @@ bool KVCacheManager::init() {
         metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
     }
 
+    initKVMemoryController();
     initConnectorCoordinator();
     return true;
+}
+
+void KVCacheManager::initKVMemoryController() {
+    kv_memory_controller_ = std::make_shared<KVCachePhysicalMemoryController>(std::make_shared<VmmBackend>());
+    const auto [base_ptr, size_bytes] = allocator_->physicalMemoryBacking();
+    if (base_ptr != nullptr && size_bytes > 0) {
+        kv_memory_controller_->allocateOrAttach(base_ptr, size_bytes);
+    }
 }
 
 const CacheConfig& KVCacheManager::cacheConfig() const {
@@ -686,10 +695,63 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
     return info;
 }
 
+// Sleep/wake_up
+
+bool KVCacheManager::releaseKVCacheMemoryBacking() {
+    if (!kv_memory_controller_) {
+        RTP_LLM_LOG_ERROR("releaseKVCacheMemoryBacking failed: kv memory controller not initialized");
+        return false;
+    }
+    // Caller guarantees the engine is drained: no in-flight requests, schedulers stopped,
+    // connector transfers finished and MRs deregistered before physical pages are dropped.
+    return kv_memory_controller_->pausePhysicalMemory();
+}
+
+bool KVCacheManager::restoreKVCacheMemoryBackingAndResetMetadata() {
+    if (!kv_memory_controller_) {
+        RTP_LLM_LOG_ERROR("restoreKVCacheMemoryBackingAndResetMetadata failed: kv memory controller not initialized");
+        return false;
+    }
+    if (!kv_memory_controller_->resumePhysicalMemory()) {
+        // Physical memory is not back; keep metadata untouched and let the caller transition to ERROR.
+        return false;
+    }
+
+    // Physical pages are re-mapped at the same VA but the content is garbage (discard mode):
+    // wipe all KV metadata so the pool is indistinguishable from a freshly initialized one.
+    const auto block_pools = allocator_->getBlockPools();
+    for (const auto& block_pool : block_pools) {
+        block_pool->resetMetadata();
+        if (auto block_cache = block_pool->blockCache()) {
+            block_cache->clear();
+        }
+    }
+    RTP_LLM_LOG_INFO("restoreKVCacheMemoryBackingAndResetMetadata done: reset %zu block pools", block_pools.size());
+    return true;
+}
+
+bool KVCacheManager::releaseMemoryCacheBacking() {
+    if (!coordinator_) {
+        return true;  // no connector coordinator -> memory cache not enabled
+    }
+    return coordinator_->releaseMemoryCacheBacking();
+}
+
+bool KVCacheManager::restoreMemoryCacheBacking() {
+    if (!coordinator_) {
+        return true;
+    }
+    return coordinator_->restoreMemoryCacheBacking();
+}
+
 // 系统资源管理
 
 void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
     allocator_->regUserMr(model_id, std::move(cache_store));
+}
+
+void KVCacheManager::deregUserMr() {
+    allocator_->deregUserMr();
 }
 
 void KVCacheManager::setCacheStore(std::shared_ptr<CacheStore> cache_store) {

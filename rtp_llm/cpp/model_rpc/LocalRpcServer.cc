@@ -1,17 +1,40 @@
-#include <memory>
+#include <algorithm>
 #include <chrono>
+#include <exception>
+#include <cstdio>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 #include <unistd.h>
+#include <c10/core/InferenceMode.h>
+#if USING_CUDA
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <cuda_runtime_api.h>
+#elif USING_ROCM
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <hip/hip_runtime.h>
+#endif
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/SleepMemoryUtils.h"
+#include "rtp_llm/cpp/model_rpc/SleepRpcUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 
 using namespace std;
 
@@ -39,6 +62,39 @@ std::string formatRequestLogTag(const std::string& request_key, const RequestInf
     return tag;
 }
 
+// Best-effort instance identity for the M4 admission error body: scheduler
+// role when deployed (hippo), hostname otherwise.
+std::string resolveInstanceId() {
+    std::string instance_id = autil::EnvUtil::getEnv("HIPPO_ROLE", "");
+    if (instance_id.empty()) {
+        char hostname[256] = {0};
+        if (gethostname(hostname, sizeof(hostname) - 1) == 0) {
+            instance_id = hostname;
+        }
+    }
+    return instance_id;
+}
+
+class OptionalSleepDeviceGuard {
+public:
+    explicit OptionalSleepDeviceGuard(int64_t local_rank) {
+#if USING_CUDA
+        guard_.emplace(static_cast<int>(local_rank));
+#elif USING_ROCM
+        guard_.emplace(static_cast<int>(local_rank));
+#else
+        (void)local_rank;
+#endif
+    }
+
+private:
+#if USING_CUDA
+    std::optional<at::cuda::CUDAGuard> guard_;
+#elif USING_ROCM
+    std::optional<c10::hip::HIPGuardMasqueradingAsCUDA> guard_;
+#endif
+};
+
 }  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
@@ -65,6 +121,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
+    admission_gate_ = std::make_shared<AdmissionGate>(&engine_->sleepController(), resolveInstanceId());
+    installSleepHooks();
     if (!mm_process_engine.is_none()) {
         auto vit_separation = maga_init_params.vit_config.vit_separation;
         if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
@@ -81,6 +139,451 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     }
 
     return grpc::Status::OK;
+}
+
+void LocalRpcServer::logSleepMemorySnapshot(const std::string& phase, int64_t epoch) const {
+    sleep_memory::logSleepMemorySnapshotForRank(phase, maga_init_params_.parallelism_config, epoch);
+}
+
+bool LocalRpcServer::validateKvMemoryControllerForWake(const KVCachePhysicalMemoryControllerPtr& controller) {
+    if (!controller) {
+        return true;
+    }
+    if (controller->isPaused()) {
+        RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: kv memory controller is still paused");
+        return false;
+    }
+    if (controller->basePtr() == nullptr || controller->totalSizeBytes() == 0) {
+        RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: kv memory controller has no attached buffer");
+        return false;
+    }
+    return true;
+}
+
+void LocalRpcServer::installSleepHooks() {
+    // --- M3: drain counters. ---
+    drain_manager_ = std::make_shared<DrainManager>();
+    drain_manager_->registerCounter(
+        "admission_leases",
+        [this]() { return static_cast<size_t>(engine_->sleepController().activeAdmissionCount()); },
+        DrainManager::CounterKind::REQUEST);
+    auto engine = engine_;
+    drain_manager_->registerCounter(
+        "scheduler_onflight",
+        [engine]() { return static_cast<size_t>(std::max<int64_t>(0, engine->getScheduler().onflightStreams())); },
+        DrainManager::CounterKind::REQUEST);
+    drain_manager_->registerCounter(
+        "rpc_cache_transfer",
+        [this]() { return activeCacheTransferCount(); },
+        DrainManager::CounterKind::CACHE_TRANSFER);
+    if (auto cache_manager = engine_->getCacheManager()) {
+        if (auto coordinator = cache_manager->connectorCoordinator()) {
+            drain_manager_->registerCounter(
+                "connector_inflight",
+                [coordinator]() { return static_cast<size_t>(coordinator->inflightTransferCount()); },
+                DrainManager::CounterKind::CACHE_TRANSFER);
+        }
+    }
+    drain_manager_->setCancelCallback([this]() {
+        const auto cancelled = cancelAbortableStreams();
+        RTP_LLM_LOG_INFO("sleep abort callback cancelled %zu non-streaming active stream(s)", cancelled);
+    });
+
+    vmm_backend_                   = std::make_shared<VmmBackend>();
+    const auto& parallelism_config = maga_init_params_.parallelism_config;
+    const bool  runtime_supported  = vmm_backend_->isAvailable();
+    std::string disabled_reason;
+    if (!vmm_backend_->isAvailable()) {
+        disabled_reason =
+            "VMM backend is unavailable; start with torch_memory_saver LD_PRELOAD and ENABLE_SLEEP_MODE=1 to enable "
+            "sleep mode";
+    }
+    RTP_LLM_LOG_INFO("sleep hooks: VMM backend available=%d, dp_size=%ld, ep_size=%ld",
+                     static_cast<int>(vmm_backend_->isAvailable()),
+                     parallelism_config.dp_size,
+                     parallelism_config.ep_size);
+    engine_->sleepController().setRuntimeSupport(runtime_supported, disabled_reason);
+
+    SleepHooks hooks;
+    drain_manager_->installHooks(hooks);  // drain + activeRequestCount + activeCacheTransferCount
+    const auto local_rank  = maga_init_params_.parallelism_config.local_rank;
+    auto       vmm_backend = vmm_backend_;
+    hooks.armEngineQuiesce = [engine, local_rank](const SleepOptions&) {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        // Arm the collective sleep-quiesce consensus at DRAINING, before the rank-asymmetric
+        // drain, symmetrically on every rank. Multi-rank DP/EP only; single-rank no-op.
+        engine->armCollectiveSleepQuiesce();
+        return true;
+    };
+    hooks.quiesceEngine = [engine, local_rank](const SleepOptions& opt) {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        // Stall the engine at a TP/DP/EP-safe point before any rank drops GPU memory.
+        auto pause_status = engine->pauseAndWaitQuiesced(opt.timeout_ms);
+        if (!pause_status.ok()) {
+            RTP_LLM_LOG_ERROR("pauseAndWaitQuiesced failed before sleep: %s", pause_status.ToString().c_str());
+            return false;
+        }
+        return true;
+    };
+    hooks.synchronizeAndDeregisterMr = [this, engine, local_rank](const SleepOptions&) {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        // Baseline before any resource is dropped: MR-pinned (VmPin) + KV + weights all live.
+        logSleepMemorySnapshot("sleep/RUNNING", engine->sleepController().sleepEpoch());
+        if (!sleep_memory::synchronizeSleepDevice("before_dereg_mr")) {
+            return false;
+        }
+        if (auto cache_manager = engine->getCacheManager()) {
+            cache_manager->deregUserMr();
+        }
+        if (!sleep_memory::synchronizeSleepDevice("after_dereg_mr")) {
+            return false;
+        }
+        // MR deregistered: VmPin should have collapsed relative to the baseline above.
+        logSleepMemorySnapshot("sleep/after_dereg_mr", engine->sleepController().sleepEpoch());
+        return true;
+    };
+    hooks.releaseKvMemoryBacking = [this, engine, local_rank](const SleepOptions&) {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        auto                     cache_manager = engine->getCacheManager();
+        if (!cache_manager) {
+            return true;
+        }
+        // Host memory-cache tier (enable_memory_cache): a pinned host buffer that is NOT
+        // under any VMM tag and NOT MR-registered, so the VMM pause below cannot free it.
+        // Discard it explicitly here (no-op when the memory cache is disabled). Runs on
+        // every sleep level; in-flight H2D/D2H copies were already drained (connector_inflight).
+        if (!cache_manager->releaseMemoryCacheBacking()) {
+            RTP_LLM_LOG_WARNING("releaseKvMemoryBacking: releaseMemoryCacheBacking failed");
+            return false;
+        }
+        auto controller = cache_manager->kvMemoryController();
+        if (!controller || !controller->backendAvailable()) {
+            RTP_LLM_LOG_WARNING("releaseKvMemoryBacking skipped VMM pause: backend unavailable");
+            return true;
+        }
+        const bool success = cache_manager->releaseKVCacheMemoryBacking();
+        // Memory-cache pinned host buffer + GPU KV released here: watch sys MemAvailable
+        // (host pinned) rise and gpu_free rise.
+        logSleepMemorySnapshot("sleep/after_kv_release", engine->sleepController().sleepEpoch());
+        return success;
+    };
+    // M6: weights are tagged by rtp_llm/model_loader/weight_memory_saver.py under
+    // "weights" with cpu backup. CUDA graph runtime buffers are tagged under
+    // "cuda_graph" during graph capture with cpu backup too: after VMM pause
+    // the physical pages can be recycled by other processes, so graph-owned
+    // persistent buffers cannot rely on stale physical contents. Releasing an
+    // unknown tag is a harmless no-op.
+    hooks.releaseRestorableGpuMemory = [this, vmm_backend, local_rank](const SleepOptions& opt) {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        const auto               epoch         = engine_->sleepController().sleepEpoch();
+        const auto               world_rank    = maga_init_params_.parallelism_config.world_rank;
+        const bool               graph_enabled = maga_init_params_.hw_kernel_config.enable_cuda_graph
+                                   || maga_init_params_.hw_kernel_config.enable_native_cuda_graph;
+        if (!vmm_backend->isAvailable()) {
+            RTP_LLM_LOG_WARNING("releaseRestorableGpuMemory skipped: VMM backend unavailable");
+            sleep_memory::trimSleepAllocator(local_rank, epoch, world_rank, graph_enabled, "allocator_trim");
+            return true;
+        }
+        // Trim once before VMM unmaps pages, then again after every Python/NCCL
+        // reference has been dropped.  The second call is the authoritative
+        // sleep boundary; the first call removes stale free segments before the
+        // allocator sees paused private pools.
+        sleep_memory::trimSleepAllocator(local_rank, epoch, world_rank, graph_enabled, "allocator_trim_pre");
+        auto pause_tag = [vmm_backend](const std::string& tag) { return vmm_backend->pause(tag); };
+        // Level 2 (discard weights): the "weights" region was opened without host
+        // cpu_backup, so pause frees GPU with no host copy and nothing is written
+        // anywhere. Wake reloads the weights in place from the model loader
+        // (see restoreRestorableGpuMemory below), so sleep just pauses the region.
+        // These pauses are the ESSENTIAL GPU release; do them first so a failure in the
+        // best-effort allocator trim can never leave the regions mapped.
+        bool ok = pause_tag("cuda_graph");
+        ok      = pause_tag("weights") && ok;
+        // Python-side reclaim: drop long-lived Python-held device caches (e.g. the MegaMoE
+        // per-token output staging buffer) so segments they co-tenanted with freed
+        // per-forward workspaces become 100%-free, then empty_cache hands them back to the
+        // driver -- this is what actually frees physical GPU for other processes during
+        // sleep, and it logs a [SleepMem] segment breakdown attributing any residual.
+        // The C++ trim below remains the no-python-model fallback. GIL-guarded,
+        // best-effort: a throw here must NOT fail the sleep (regions already released above).
+        if (!weight_manager_.is_none()) {
+            try {
+                py::gil_scoped_acquire acquire;
+                weight_manager_.attr("release_runtime_gpu_caches")("sleep");
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_WARNING("releaseRestorableGpuMemory: python release_runtime_gpu_caches "
+                                    "failed (ignored): %s",
+                                    e.what());
+            }
+        }
+        // Hand back the NCCL communicator's GPU memory (enabled by default;
+        // disable with --sleep_release_collective_memory=0); see
+        // rtp_llm/utils/nccl_memory.py for the rules this call obeys.
+        //
+        // Its own step, not part of release_runtime_gpu_caches above, for two local reasons.
+        // Ordering: it must run after the engine is fully quiesced (suspend begins with a
+        // cudaDeviceSynchronize()) and before the best-effort allocator trim, whose per-role duration
+        // would otherwise add rank skew ahead of a collective. Failure semantics: unlike the
+        // best-effort reclaim above, a failure here leaves memory the wake path will dereference,
+        // so it must fail the sleep.
+        if (!weight_manager_.is_none()) {
+            try {
+                py::gil_scoped_acquire acquire;
+                weight_manager_.attr("suspend_collectives_for_sleep")("sleep");
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_ERROR("releaseRestorableGpuMemory: suspend_collectives_for_sleep failed: %s", e.what());
+                ok = false;
+            }
+        }
+        // The engine is only paused (not torn down): transient buffers can linger in
+        // the torch caching allocator as reserved-but-free blocks, which cudaMemGetInfo
+        // still counts as used.  Always attempt the final trim, including graph roles.
+        // emptyCache returns only fully-free segments; live Graph/TMS blocks remain
+        // resident, preserving pointer stability and avoiding recapture.  If a private
+        // paused pool rejects the operation, trimSleepAllocator clears the sticky CUDA
+        // error and the following [SleepMem] snapshot attributes the residual.
+        const bool allocator_trim_ok =
+            sleep_memory::trimSleepAllocator(local_rank, epoch, world_rank, graph_enabled, "allocator_trim");
+        if (!allocator_trim_ok) {
+            RTP_LLM_LOG_WARNING("[SleepMem] phase=allocator_trim status=best_effort_failure "
+                                "critical_release_ok=%d epoch=%ld world_rank=%ld",
+                                static_cast<int>(ok),
+                                epoch,
+                                world_rank);
+        }
+        // Terminal sleep state: weights + cuda_graph GPU memory released (level-2 keeps no backup).
+        logSleepMemorySnapshot("sleep/SLEEPING", engine_->sleepController().sleepEpoch());
+        return ok;
+    };
+    hooks.restoreKvMemoryBackingAndResetMetadata = [this, engine, local_rank]() {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        auto                     cache_manager = engine->getCacheManager();
+        if (!cache_manager) {
+            return true;
+        }
+        // Join the host memory-cache pinned rebuild that restoreRestorableGpuMemory launched
+        // asynchronously so it overlapped the GPU weight reload. Must complete before the GPU KV
+        // VMM resume below (mirrors the sleep-side release order). Fall back to a synchronous
+        // rebuild if the async launch was skipped (cache_manager briefly unavailable there).
+        const bool mem_cache_ok = memory_cache_restore_future_.valid() ? memory_cache_restore_future_.get() :
+                                                                         cache_manager->restoreMemoryCacheBacking();
+        if (!mem_cache_ok) {
+            RTP_LLM_LOG_WARNING("restoreKvMemoryBackingAndResetMetadata: restoreMemoryCacheBacking failed");
+            return false;
+        }
+        auto controller = cache_manager->kvMemoryController();
+        if (!controller || !controller->isPaused()) {
+            return true;  // pause was skipped (no shim); keep metadata untouched
+        }
+        // Re-maps pages at the same VA, then resets BlockPool metadata + BlockCache.
+        const bool success = cache_manager->restoreKVCacheMemoryBackingAndResetMetadata();
+        logSleepMemorySnapshot("wake/after_kv_restore", engine->sleepController().sleepEpoch());
+        return success;
+    };
+    hooks.restoreRestorableGpuMemory = [this, engine, vmm_backend, local_rank]() {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        // Remap the NCCL communicator FIRST, before anything else on the wake path. Not a
+        // preference but a requirement -- see rtp_llm/utils/nccl_memory.py rule (7).
+        //
+        // Ahead of the async memory-cache rebuild below on purpose, rather than concurrently with
+        // it: ncclCommResume restores from pinned host memory and restoreMemoryCacheBacking is a
+        // large cudaHostAlloc, so overlapping them would contend on exactly the pinned-allocation
+        // path that dominates resume's cost. Sequencing them keeps resume's few seconds
+        // predictable. No-op when nothing was suspended, so the default path pays nothing.
+        if (!weight_manager_.is_none()) {
+            try {
+                py::gil_scoped_acquire acquire;
+                weight_manager_.attr("resume_collectives_for_wake")("wake");
+            } catch (const py::error_already_set& e) {
+                // Bail out before the reload rather than letting it fault: the communicator's
+                // virtual addresses are unmapped and every collective from here on would fail.
+                //
+                // The bare `return false` is correct only because this block sits ABOVE the
+                // std::async below, so there is nothing yet to unwind. Keep it that way: if the
+                // memory_cache_restore_future_ launch is ever moved above this point, returning
+                // here would abandon a running background thread and this must become
+                // join-then-return.
+                RTP_LLM_LOG_ERROR("restoreRestorableGpuMemory: resume_collectives_for_wake failed: %s", e.what());
+                return false;
+            }
+        }
+        // Overlap the host memory-cache pinned rebuild with the GPU weight reload below.
+        // restoreMemoryCacheBacking is pure host work (torch pin_memory == cudaHostAlloc + memcpy),
+        // independent of the GPU weights/KV pages. At large memory_cache sizes it costs ~size/2GBps
+        // (tens of seconds), so we run it on a background thread to hide it behind the level-2
+        // reload_weights_from_loader disk reload. The future is joined in
+        // restoreKvMemoryBackingAndResetMetadata before the GPU KV VMM resume (which must stay
+        // ordered after the weight reload). No shared lock with the reload; own device guard.
+        if (auto cache_manager = engine->getCacheManager()) {
+            memory_cache_restore_future_ = std::async(std::launch::async, [cache_manager, local_rank]() {
+                OptionalSleepDeviceGuard bg_guard(local_rank);
+                return cache_manager->restoreMemoryCacheBacking();
+            });
+        }
+        if (!vmm_backend->isAvailable()) {
+            return true;
+        }
+        auto resume_tag = [vmm_backend](const std::string& tag) { return vmm_backend->resume(tag); };
+        // resume("weights") and resume("cuda_graph") remap physical pages at the same VA.
+        // For level 1 the tms host cpu_backup already restored the content; for level 2 the
+        // weights pages come back blank and are reloaded below.
+        //
+        // IMPORTANT (level 2): resume BOTH VMM regions BEFORE the loader reload. The reload
+        // allocates transient shard/dequant buffers via the torch caching allocator
+        // (at::empty_cuda). If the "cuda_graph" region is still paused at that point, the
+        // allocator's graph-private MemPool is left with unmapped VMM pages, and a fresh
+        // at::empty_cuda throws "CUDA error: invalid argument" (reproduced on decode DP2 +
+        // CUDA graph; same MemPool-under-TMS family as the sleep-side emptyCache failure).
+        // Resuming cuda_graph first re-maps that pool so the reload's allocations succeed.
+        bool ok = resume_tag("weights");
+        ok      = resume_tag("cuda_graph") && ok;
+        if (ok && engine->sleepController().activeSleepLevel() == 2) {
+            if (weight_manager_.is_none()) {
+                RTP_LLM_LOG_WARNING("level-2 wake: weight_manager unavailable, cannot reload weights");
+                ok = false;
+            } else {
+                try {
+                    py::gil_scoped_acquire acquire;
+                    weight_manager_.attr("reload_weights_from_loader")();
+                } catch (const py::error_already_set& e) {
+                    RTP_LLM_LOG_WARNING("level-2 wake: reload_weights_from_loader failed: %s", e.what());
+                    ok = false;
+                }
+            }
+        }
+        // Restore Python-owned runtime state explicitly discarded by the sleep
+        // hook (currently TP symmetric-memory state). DSV4 RoPE/cos-sin caches
+        // intentionally remain resident because decode CUDA graphs capture
+        // their device pointers; replacing them here would leave graph replay
+        // dereferencing a stale address.
+        if (ok && !weight_manager_.is_none()) {
+            try {
+                py::gil_scoped_acquire acquire;
+                weight_manager_.attr("restore_runtime_gpu_caches")("wake");
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_WARNING("wake: restore_runtime_gpu_caches failed: %s", e.what());
+                ok = false;
+            }
+        }
+        if (!ok && memory_cache_restore_future_.valid()) {
+            // Weight restore failed -> wake_up transitions to ERROR and
+            // restoreKvMemoryBackingAndResetMetadata (which normally joins this future) will not
+            // run. Join here so the background host memory-cache rebuild does not outlive this hook.
+            memory_cache_restore_future_.wait();
+        }
+        // Weights (level-1 host restore / level-2 loader reload) + cuda_graph GPU memory back.
+        logSleepMemorySnapshot("wake/after_weights_restore", engine->sleepController().sleepEpoch());
+        return ok;
+    };
+    hooks.registerMr = [this, engine, local_rank]() {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        if (!sleep_memory::synchronizeSleepDevice("before_reg_mr")) {
+            return false;
+        }
+        if (auto cache_manager = engine->getCacheManager()) {
+            cache_manager->regUserMr(maga_init_params_.model_id, cache_manager->getCacheStore());
+        }
+        // Internal RDMA backends must publish refreshed rkey/lkey/epoch here
+        // before the engine loop restarts. The open-source CacheStore path has
+        // no peer-visible MR epoch ABI; regUserMr() is the available boundary.
+        // Fully restored: MR re-registered, VmPin should be back at the baseline.
+        logSleepMemorySnapshot("wake/RUNNING", engine->sleepController().sleepEpoch());
+        return true;
+    };
+    hooks.restartEngine = [engine]() {
+        engine->restart();
+        return true;
+    };
+    hooks.cancelQuiesceAndRestartEngine = hooks.restartEngine;
+    hooks.warmupAndHealthCheck          = [this, engine, local_rank]() {
+        OptionalSleepDeviceGuard device_guard(local_rank);
+        if (!engine) {
+            RTP_LLM_LOG_ERROR("sleep warmup/self-check failed: engine is null");
+            return false;
+        }
+        if (!sleep_memory::synchronizeSleepDevice("before_warmup_health_check")) {
+            return false;
+        }
+        if (auto cache_manager = engine->getCacheManager()) {
+            if (!validateKvMemoryControllerForWake(cache_manager->kvMemoryController())) {
+                return false;
+            }
+        }
+        if (!sleep_memory::synchronizeSleepDevice("after_warmup_health_check")) {
+            return false;
+        }
+        RTP_LLM_LOG_INFO("sleep warmup/self-check passed");
+        return true;
+    };
+
+    // Keep the existing bool hook ABI, but enrich failures with the last
+    // NCCL adapter event. This is read-only and does not touch CUDA/NCCL; it
+    // makes GetSleepStatus/gRPC FAILED_PRECONDITION actionable without adding
+    // fields to the public protobuf.
+    hooks.hookFailureDetail = [this](const char* hook_name) -> std::string {
+        const std::string name = hook_name == nullptr ? "" : hook_name;
+        if (name != "releaseRestorableGpuMemory" && name != "restoreRestorableGpuMemory") {
+            return "";
+        }
+        if (weight_manager_.is_none()) {
+            return "weight manager unavailable; NCCL adapter status unavailable";
+        }
+        try {
+            py::gil_scoped_acquire acquire;
+            return py::cast<std::string>(weight_manager_.attr("nccl_memory_status")());
+        } catch (const py::error_already_set& e) {
+            return std::string("NCCL adapter status unavailable: ") + e.what();
+        } catch (const std::exception& e) {
+            return std::string("NCCL adapter status unavailable: ") + e.what();
+        }
+    };
+
+    engine_->sleepController().setHooks(hooks);
+}
+
+std::shared_ptr<void> LocalRpcServer::registerAbortableStreamForScope(const std::shared_ptr<GenerateStream>& stream) {
+    if (!stream || stream->isStreaming()) {
+        return nullptr;
+    }
+    const auto request_id = stream->streamId();
+    {
+        std::lock_guard<std::mutex> lock(abortable_streams_mutex_);
+        abortable_streams_[request_id] = stream;
+    }
+    RTP_LLM_LOG_DEBUG("sleep abort registry: registered non-streaming request [%ld]", request_id);
+    // Non-owning RAII token: the custom deleter only unregisters; it must not delete the stream.
+    return std::shared_ptr<void>(stream.get(), [this, request_id](void*) { unregisterAbortableStream(request_id); });
+}
+
+void LocalRpcServer::unregisterAbortableStream(int64_t request_id) {
+    std::lock_guard<std::mutex> lock(abortable_streams_mutex_);
+    abortable_streams_.erase(request_id);
+}
+
+size_t LocalRpcServer::cancelAbortableStreams() {
+    std::vector<std::pair<int64_t, std::shared_ptr<GenerateStream>>> streams;
+    {
+        std::lock_guard<std::mutex> lock(abortable_streams_mutex_);
+        for (auto iter = abortable_streams_.begin(); iter != abortable_streams_.end();) {
+            auto stream = iter->second.lock();
+            if (!stream) {
+                iter = abortable_streams_.erase(iter);
+                continue;
+            }
+            streams.emplace_back(iter->first, std::move(stream));
+            ++iter;
+        }
+    }
+
+    size_t cancelled = 0;
+    for (const auto& [request_id, stream] : streams) {
+        if (!stream || stream->isStreaming() || stream->isFinished() || stream->hasError()) {
+            continue;
+        }
+        stream->reportError(ErrorCode::CANCELLED, "request cancelled by sleep abort");
+        RTP_LLM_LOG_WARNING("sleep abort registry: cancelled non-streaming request [%ld]", request_id);
+        ++cancelled;
+    }
+    return cancelled;
 }
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {
@@ -156,14 +659,20 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
-    AtomicGuard request_guard(onflight_requests_);
-    auto        request_id = request->request_id();
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_lease = std::move(admission.lease);
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    auto               request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
-    auto input                    = QueryConverter::transQuery(request);
-    generate_context.request_info = input->request_info;
+    auto input                         = QueryConverter::transQuery(request);
+    generate_context.request_info      = input->request_info;
     if (applyTimelineGate(generate_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,
@@ -188,6 +697,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
         generate_context.setStream(engine_->enqueue(input));
     }
+    auto abort_registration = registerAbortableStreamForScope(generate_context.getStream());
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
@@ -211,6 +721,117 @@ bool LocalRpcServer::applyTimelineGate(const std::string& request_key,
         engine_->startTimelineProfiling(profile_trace_name, 0, profile_step);
     }
     return force_timeline;
+}
+
+ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
+    output = QueryConverter::transQuery(&input_pb);
+    if (mm_processor_ != nullptr && output->multimodal_inputs) {
+        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
+        auto mm_res = mm_processor_->updateMultimodalFeatures(output);
+        if (!mm_res.ok()) {
+            return mm_res;
+        }
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*                  context,
+                                              std::shared_ptr<GenerateStream>&      stream,
+                                              const std::shared_ptr<GenerateInput>& input,
+                                              GenerateOutputs&                      last_outputs) {
+    while (!stream->isFinished() || stream->hasOutput()) {
+        if (context->IsCancelled()) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
+        }
+        const auto output_result = stream->nextOutput();
+        if (!output_result.ok()) {
+            if (output_result.status().code() != ErrorCode::FINISHED) {
+                return output_result.status();
+            }
+            break;
+        }
+        last_outputs = output_result.value();
+    }
+    return ErrorInfo::OkStatus();
+}
+
+grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
+                                               const BatchGenerateInputPB* request,
+                                               BatchGenerateOutputsPB*     response) {
+    RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
+    // Whole-batch rejection: a non-RUNNING instance must not run any of them.
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_lease = std::move(admission.lease);
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    const int          batch_size = request->inputs_size();
+    RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
+
+    if (batch_size == 0) {
+        return grpc::Status::OK;
+    }
+
+    std::vector<std::shared_ptr<GenerateInput>> inputs;
+    inputs.reserve(batch_size);
+    for (int i = 0; i < batch_size; i++) {
+        std::shared_ptr<GenerateInput> input;
+        auto                           err = prepareInput(request->inputs(i), input);
+        if (!err.ok()) {
+            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
+            for (int j = 0; j < batch_size; j++) {
+                auto* result = response->add_results();
+                auto* err_pb = result->mutable_error_info();
+                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+                if (j == i) {
+                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
+                } else {
+                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+                }
+            }
+            return grpc::Status::OK;
+        }
+        inputs.push_back(input);
+    }
+
+    // enqueueMultiple contract: returned stream vector is 1:1 with `inputs` (same size, same order).
+    // Streams that failed checkInputLength carry an error reported via reportError() and surface
+    // it through collectStreamOutput → nextOutput → ErrorInfo path below.
+    auto                               streams = engine_->enqueueMultiple(inputs).second;
+    std::vector<std::shared_ptr<void>> abort_registrations;
+    abort_registrations.reserve(streams.size());
+    for (const auto& stream : streams) {
+        abort_registrations.push_back(registerAbortableStreamForScope(stream));
+    }
+
+    // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
+    // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
+    // mixed-length batches.
+    for (int i = 0; i < (int)streams.size(); i++) {
+        auto* result = response->add_results();
+
+        GenerateOutputs last_outputs;
+        auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
+        if (!err.ok()) {
+            auto* err_pb = result->mutable_error_info();
+            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
+                                                                        ErrorCodePB::UNKNOWN_ERROR);
+            err_pb->set_error_message(err.ToString());
+        } else {
+            auto* output_pb = result->mutable_final_output();
+            QueryConverter::transResponse(output_pb,
+                                          &last_outputs,
+                                          inputs[i]->generate_config->aux_info,
+                                          maga_init_params_.misc_config.aux_string,
+                                          streams[i]->specialTokens().eos_token_id);
+        }
+    }
+
+    RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
+    return grpc::Status::OK;
 }
 
 grpc::Status
@@ -321,8 +942,10 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
     status_info.dp_rank                 = maga_init_params_.parallelism_config.dp_rank;
     status_info.status_version          = currentTimeUs();
     status_info.latest_finished_version = status_info.engine_schedule_info.latest_finished_version;
-    status_info.alive                   = true;
-    auto quant_method                   = maga_init_params_.model_config_.quant_algo.getQuantMethod();
+    // Sleep takes the worker out of LB rotation. alive doubles as the
+    // schedulable signal in WorkerStatusPB; non-RUNNING -> not schedulable.
+    status_info.alive = engine_ ? engine_->sleepController().admit() : true;
+    auto quant_method = maga_init_params_.model_config_.quant_algo.getQuantMethod();
 
     switch (quant_method) {
         case QuantMethod::WeightOnlyPerCol:
@@ -371,6 +994,18 @@ KVCacheInfo LocalRpcServer::getCacheStatusInfo(int64_t latest_version, bool need
 
 size_t LocalRpcServer::onflightRequestNum() {
     return onflight_requests_;
+}
+
+size_t LocalRpcServer::activeCacheTransferCount() {
+    if (!engine_) {
+        return 0;
+    }
+    auto cache_manager = engine_->getCacheManager();
+    if (!cache_manager) {
+        return 0;
+    }
+    auto cache_store = cache_manager->getCacheStore();
+    return cache_store ? cache_store->activeTransferCount() : 0;
 }
 
 EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
@@ -544,6 +1179,12 @@ grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*    
 grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    // A sleeping or transitioning instance is not ready; report the sleep state and
+    // a retryable UNAVAILABLE so LB health checks take it out of rotation.
+    if (auto admission = checkAdmission(); !admission.ok()) {
+        response->set_health(sleepStateToString(engine_->sleepController().state()));
+        return admission;
+    }
     response->set_health("OK");
     return grpc::Status::OK;
 }
@@ -599,6 +1240,18 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("execute function failed, request is cancelled");
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
+
+    // Admission must gate GPU/KV access before anything else: executeFunction
+    // issues P2P KV D2H/H2D copies that touch cache backing. Without a lease a
+    // copy could start after sleep closed the gate and released the KV VA ->
+    // use-after-unmap. Hold the lease for the full RPC; the async transfer tail
+    // is tracked by the connector_inflight drain counter.
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_lease = std::move(admission.lease);
+
     if (!engine_) {
         RTP_LLM_LOG_WARNING("execute function failed, engine is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");
@@ -619,7 +1272,11 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
-    engine_->pause();
+    OptionalSleepDeviceGuard device_guard(maga_init_params_.parallelism_config.local_rank);
+    auto                     status = engine_->pauseAndWaitQuiesced(60000);
+    if (!status.ok()) {
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, status.ToString());
+    }
     return grpc::Status::OK;
 }
 
@@ -630,12 +1287,82 @@ grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const Empt
 }
 
 grpc::Status
+LocalRpcServer::SleepServing(grpc::ServerContext* context, const SleepRequestPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_INFO("receive SleepServing rpc request from client: %s, level: %d, mode: %s, reason: %s, "
+                     "prepare_only: %d, commit_only: %d",
+                     context->peer().c_str(),
+                     request->level(),
+                     request->mode().c_str(),
+                     request->reason().c_str(),
+                     request->prepare_only(),
+                     request->commit_only());
+    SleepOptions options;
+    options.level        = request->level();
+    options.mode         = request->mode().empty() ? "wait" : request->mode();
+    options.timeout_ms   = request->timeout_ms();
+    options.reason       = request->reason();
+    options.tags         = std::vector<std::string>(request->tags().begin(), request->tags().end());
+    options.prepare_only = request->prepare_only();
+    options.commit_only  = request->commit_only();
+    const auto result    = engine_->sleepController().sleep(options);
+    return sleep_rpc::resultToGrpcStatus(result);
+}
+
+grpc::Status
+LocalRpcServer::WakeUpServing(grpc::ServerContext* context, const WakeUpRequestPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_INFO("receive WakeUpServing rpc request from client: %s, prepare_only: %d, commit_only: %d",
+                     context->peer().c_str(),
+                     request->prepare_only(),
+                     request->commit_only());
+    WakeUpOptions options;
+    options.prepare_only = request->prepare_only();
+    options.commit_only  = request->commit_only();
+    const auto result    = engine_->sleepController().wakeUp(options);
+    return sleep_rpc::resultToGrpcStatus(result);
+}
+
+grpc::Status
+LocalRpcServer::IsSleeping(grpc::ServerContext* context, const EmptyPB* request, IsSleepingResponsePB* response) {
+    RTP_LLM_LOG_DEBUG("receive IsSleeping rpc request from client: %s", context->peer().c_str());
+    const auto status = engine_->sleepController().status();
+    response->set_is_sleeping(status.state == SleepState::SLEEPING);
+    response->set_sleep_mode_enabled(status.sleep_mode_enabled);
+    response->set_effective(status.effective);
+    response->set_state(sleepStateToString(status.state));
+    response->set_disabled_reason(status.disabled_reason);
+    for (const auto level : status.supported_levels) {
+        response->add_supported_levels(level);
+    }
+    for (const auto& mode : status.supported_modes) {
+        response->add_supported_modes(mode);
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status
+LocalRpcServer::GetSleepStatus(grpc::ServerContext* context, const EmptyPB* request, SleepStatusResponsePB* response) {
+    RTP_LLM_LOG_DEBUG("receive GetSleepStatus rpc request from client: %s", context->peer().c_str());
+    const auto status = engine_->sleepController().status();
+    sleep_rpc::fillStatusProto(status, response);
+    return grpc::Status::OK;
+}
+
+grpc::Status
 LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("Receive update weights request from: %s", context->peer().c_str());
     try {
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {
             throw std::runtime_error("Missing required field(s) in request");
         }
+        // Weight mutation must not race sleep's weight pause/discard: hold an
+        // admission lease so a RUNNING update blocks sleep drain until it
+        // completes, and an update arriving after the gate closed is rejected
+        // with a retryable status instead of writing to released weight VA.
+        auto admission = acquireAdmission();
+        if (!admission.detail.admitted) {
+            return AdmissionGate::toGrpcStatus(admission.detail);
+        }
+        auto admission_lease = std::move(admission.lease);
         {
             py::gil_scoped_acquire acquire;
             py::dict               req;
