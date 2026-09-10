@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.kimi_k3 import resolve_kimi_k3_moe_strategy
+from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.modules.kimi_k3.input_packer_se import (
     FusedKimiK3MegaMoeSeInputPacker,
     TorchKimiK3MegaMoeSeInputPacker,
@@ -64,6 +65,43 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "supports only"):
             resolve_kimi_k3_moe_strategy(SimpleNamespace(moe_strategy="fp4_no_dp"))
+
+    def test_valid_mask_only_neutralizes_router_entries(self) -> None:
+        module = KimiK3LatentMoE.__new__(KimiK3LatentMoE)
+        nn.Module.__init__(module)
+        module.attn_tp_size = 1
+        module.routed_norm = None
+        module.weights = {
+            K3W.MOE_ROUTED_DOWN: torch.eye(2),
+            K3W.MOE_ROUTED_UP: torch.eye(2),
+        }
+        hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        expert_ids = torch.tensor([[2], [3]], dtype=torch.int64)
+        routing_weights = torch.ones((2, 1), dtype=torch.float32)
+        captured = {}
+
+        def fake_expert_sum(routed_input, ids, weights, *, sequence_parallel):
+            captured["ids"] = ids.clone()
+            captured["weights"] = weights.clone()
+            return torch.zeros_like(routed_input)
+
+        with (
+            patch.object(module, "_route", return_value=(expert_ids, routing_weights)),
+            patch.object(module, "_mega_expert_sum", side_effect=fake_expert_sum),
+            patch.object(
+                module,
+                "_shared_expert_forward",
+                return_value=torch.ones_like(hidden_states),
+            ),
+        ):
+            output = module(
+                hidden_states,
+                valid_token_mask=torch.tensor([1, 0], dtype=torch.int32),
+            )
+
+        self.assertEqual(captured["ids"].tolist(), [[2], [0]])
+        self.assertEqual(captured["weights"].tolist(), [[1.0], [0.0]])
+        torch.testing.assert_close(output, torch.ones_like(hidden_states))
 
     def test_regular_mega_call_does_not_pass_shared_arguments(self) -> None:
         module = self._regular_module()

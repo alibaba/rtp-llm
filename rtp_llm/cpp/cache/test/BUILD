@@ -270,6 +270,24 @@ cc_test(
 )
 
 cc_test(
+    name = "linear_kv_cache_group_partition_test",
+    srcs = [
+        "LinearKVCacheGroupPartitionTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        ":cuda13_torch_nvshmem",
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:kv_cache_group",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {
+        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
+    },
+)
+
+cc_test(
     name = "hybrid_kv_cache_allocator_test",
     srcs = [
         "HybridTypeKVCacheAllocatorTest.cc",

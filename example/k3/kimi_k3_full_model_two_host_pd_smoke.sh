@@ -28,7 +28,6 @@
 #
 # 1. Start the Decode role:
 #    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
-#    SP_CHECKPOINT_PATH=/ssd/2/kimi-k3-eagle3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -38,7 +37,6 @@
 # 2. Start Prefill with the same endpoints and run ID (it waits for both the
 #    Decode model and Decode result listener to become ready):
 #    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
-#    SP_CHECKPOINT_PATH=/ssd/2/kimi-k3-eagle3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -59,9 +57,12 @@
 # process group.
 # The full-model profile enables the selected K3 draft mode on both roles. The
 # role-local draft checkpoint is mandatory; there is no non-MTP fallback.
+# The target model uses Projection-KTP while the Eagle3 draft remains KTP1.
+# Both ordinary Decode and Target Verify participate in synchronized graph waves.
 
 set -Eeuo pipefail
 ulimit -c 0
+export PYTHONFAULTHANDLER=1
 
 die() {
     echo "error: $*" >&2
@@ -90,6 +91,9 @@ The all suite also seeds a ~600k-token conversation, then appends a retrieval
 question. It checks the answer, PD metadata and a historical prefix larger than
 one expanded-KV budget. This correctness case runs by default without profiling;
 its request, token IDs and results are saved under prefill/long-prefix/.
+The Projection-KTP profile uses Prefill TP8/EP8 plus Decode DP8/KTP8/EP8.
+The target model uses KTP8; Eagle3 remains KTP1. KTP with MTP is rejected by
+the model topology validator, while the legacy KTP1 MTP path remains available.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -101,7 +105,7 @@ Important optional variables:
   SMOKE_REQUEST_TIMEOUT_S   defaults to 900
   SMOKE_RESULT_TIMEOUT_S    defaults to 18000
   SMOKE_RESULT_ENDPOINT     defaults to decode-host:(decode-port + 100)
-  SMOKE_MAX_TOKENS          defaults to 256 for ordinary cache cases
+  SMOKE_MAX_TOKENS          defaults to 128 for ordinary cache cases
   SMOKE_IDENTITY_MAX_TOKENS defaults to 256 for the reasoning identity case
   SMOKE_SINGLE_EXACT_MAX_TOKENS
                             defaults to 128 for exact-cache seed/hit answers
@@ -109,6 +113,8 @@ Important optional variables:
                             defaults to 128 for MTP chunk-Prefill coverage
   SMOKE_RDMA_PREWARM_ATTEMPTS
                             defaults to 3 bounded batch-sized prewarm attempts
+  SMOKE_RDMA_PREWARM_TIMEOUT_S
+                            defaults to 300 seconds per prewarm request
   SMOKE_RDMA_PREWARM_BACKOFF_S
                             defaults to 5 seconds between failed attempts
   SMOKE_RDMA_PREWARM_SETTLE_S
@@ -131,16 +137,32 @@ Important optional variables:
   SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
   SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
   SMOKE_CHUNK_TOKENS        whole-model chunk budget; defaults to 65536
+  SMOKE_DECODE_KV_CACHE_MEM_MB
+                            Decode hybrid-cache budget; defaults to 20000 MiB.
+                            Projection-KTP replicates DP-local KDA/O-proj
+                            weights, so the older 42000 MiB budget can OOM
+                            before CUDA Graph capture on a 93-layer model.
+  SMOKE_DECODE_KDA_POOL_BLOCKS
+                            Decode DP-local full-head KDA block count;
+                            defaults to 32. Projection-KTP owns full-head KDA
+                            state per DP rank, so capacity is sized per request
+                            owner rather than divided by KTP size. Thirty-two
+                            blocks cover a >64K request at 4096 tokens/block,
+                            an eight-request graph wave, and retained-prefix /
+                            decode reserve margin.
+  SMOKE_DECODE_ROLE_ADDRS   optional comma-separated ordered
+                            IP:HTTP_PORT:GRPC_PORT list. The DP8 default is
+                            derived from DECODE_ENDPOINT using the rank stride.
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
   KIMI_K3_ATTENTION_QUANTIZATION
                             fp8_per_block (default) or none for target weights
-  KIMI_K3_MLA_FP8           1 (default) or 0 for target FP8 cache and attention
+  KIMI_K3_MLA_FP8           1 (default) or 0 for target MLA FP8
   KIMI_K3_MLA_FP8_Q_SCALE   fixed Q scale; defaults to 1
   KIMI_K3_MLA_FP8_KV_SCALE  fixed cache scale; defaults to 1
-                            1 (default) enables FP8 AG/GEMM and GEMM/RS;
-                            0 selects explicit communication for comparison
+  KIMI_K3_FP8_COLLECTIVE_GEMM
+                            1 (default) enables FP8 collective GEMM
   KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES
                             defaults to 4294967296 (4 GiB) per rank;
                             0 disables historical KV expansion limits.
@@ -308,10 +330,15 @@ smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
 [[ "${smoke_proposal_tokens}" =~ ^[1-9][0-9]*$ ]] \
     || die "GEN_NUM_PER_CIRCLE must be positive"
 smoke_shared_expert_shard=$((smoke_tp_size % 2 == 0))
+smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-20000}"
+smoke_decode_kda_pool_blocks="${SMOKE_DECODE_KDA_POOL_BLOCKS:-32}"
+smoke_long_prefix_target_tokens="${SMOKE_LONG_PREFIX_TARGET_TOKENS:-100000}"
+smoke_long_prefix_tp_size="${SMOKE_LONG_PREFIX_TP_SIZE:-1}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_keep_cluster_on_success="${SMOKE_KEEP_CLUSTER_ON_SUCCESS:-0}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
+smoke_rdma_prewarm_timeout_s="${SMOKE_RDMA_PREWARM_TIMEOUT_S:-300}"
 smoke_rdma_prewarm_backoff_s="${SMOKE_RDMA_PREWARM_BACKOFF_S:-5}"
 smoke_rdma_prewarm_settle_s="${SMOKE_RDMA_PREWARM_SETTLE_S:-2}"
 smoke_accl_use_nics=""
@@ -320,10 +347,16 @@ for size_value in \
     "${smoke_block_size}" \
     "${smoke_kernel_block_size}" \
     "${smoke_chunk_tokens}" \
+    "${smoke_decode_kv_cache_mem_mb}" \
+    "${smoke_decode_kda_pool_blocks}" \
+    "${smoke_long_prefix_target_tokens}" \
+    "${smoke_long_prefix_tp_size}" \
     "${smoke_linear_step}"; do
     [[ "${size_value}" =~ ^[1-9][0-9]*$ ]] \
         || die "smoke block/chunk/linear settings must be positive integers"
 done
+[[ "${smoke_long_prefix_target_tokens}" -gt 65536 ]] \
+    || die "SMOKE_LONG_PREFIX_TARGET_TOKENS must exceed 65536"
 smoke_mega_tokens=$(( (smoke_chunk_tokens + smoke_tp_size - 1) / smoke_tp_size ))
 ((smoke_block_size % 64 == 0)) \
     || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
@@ -333,6 +366,8 @@ smoke_mega_tokens=$(( (smoke_chunk_tokens + smoke_tp_size - 1) / smoke_tp_size )
     || die "SMOKE_KEEP_CLUSTER_ON_SUCCESS must be 0 or 1"
 [[ "${smoke_rdma_prewarm_attempts}" =~ ^[0-9]+$ ]] \
     || die "SMOKE_RDMA_PREWARM_ATTEMPTS must be a non-negative integer"
+[[ "${smoke_rdma_prewarm_timeout_s}" =~ ^[1-9][0-9]*$ ]] \
+    || die "SMOKE_RDMA_PREWARM_TIMEOUT_S must be a positive integer"
 for seconds_value in \
     "${smoke_rdma_prewarm_backoff_s}" \
     "${smoke_rdma_prewarm_settle_s}"; do
@@ -529,6 +564,48 @@ pathlib.Path(output).write_text(
 PY
 }
 
+verify_projection_ktp_decode_log() {
+    [[ "${role}" == "decode" ]] || return 0
+    local engine_log="${role_dir}/runtime/work/${role}/logs/engine.log"
+    local rank_log_dir="${role_dir}/runtime/logs/${role}"
+    local evidence_file="${role_dir}/projection-ktp-evidence.txt"
+    local rank_logs=("${rank_log_dir}"/main_*.log)
+    if [[ ! -e "${rank_logs[0]}" ]]; then
+        rank_logs=()
+    fi
+    local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
+    : >"${evidence_file}"
+    for marker in \
+        K3_PROJECTION_KTP_LAYOUT \
+        K3_PROJECTION_KTP_STEP \
+        K3_PROJECTION_KTP_GRAPH_REPLAY \
+        K3_PD_FAN_IN; do
+        grep -Eh "${marker}" "${logs[@]}" | tail -20 >>"${evidence_file}" \
+            || die "Decode log has no ${marker} evidence"
+    done
+    for bucket in 1 2 4 8; do
+        grep -Eh "captured batch[ _]size ${bucket}([ :]|$)" "${logs[@]}" \
+            | tail -1 >>"${evidence_file}" \
+            || die "Decode log has no CUDA Graph capture evidence for bucket ${bucket}"
+    done
+}
+
+verify_fp8_log() {
+    local engine_log="${role_dir}/runtime/work/${role}/logs/engine.log"
+    local rank_log_dir="${role_dir}/runtime/logs/${role}"
+    local rank_logs=("${rank_log_dir}"/main_*.log)
+    if [[ ! -e "${rank_logs[0]}" ]]; then
+        rank_logs=()
+    fi
+    local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
+    local evidence_file="${role_dir}/fp8-runtime-evidence.log"
+    : >"${evidence_file}"
+    grep -Eh "K3_FP8_WEIGHT" "${logs[@]}" | sed -n '1,20p' >>"${evidence_file}" \
+        || die "${role} logs have no K3 FP8 weight execution evidence"
+    grep -Eh "K3 MLA FP8: dense_e4m3_v1" "${logs[@]}" | sed -n '1,5p' >>"${evidence_file}" \
+        || die "${role} logs have no MLA FP8 runtime evidence"
+}
+
 verify_role_environment() {
     local env_file="${role_dir}/service.env"
     # Never dump the full process environment: it can contain unrelated
@@ -540,6 +617,8 @@ verify_role_environment() {
         "${smoke_block_size}" \
         "${smoke_kernel_block_size}" \
         "${smoke_chunk_tokens}" \
+        "${smoke_decode_kv_cache_mem_mb}" \
+        "${smoke_decode_kda_pool_blocks}" \
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
         "${sp_checkpoint_real}" \
@@ -548,7 +627,8 @@ verify_role_environment() {
         "${smoke_sp_type}" \
         "${smoke_sp_model_type}" \
         "${smoke_tp_size}" \
-        "${smoke_proposal_tokens}" <<'PY'
+        "${smoke_proposal_tokens}" \
+        "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
 import os
 import pathlib
 import sys
@@ -560,6 +640,8 @@ import sys
     block_size,
     kernel_block_size,
     chunk_tokens,
+    decode_kv_cache_mem_mb,
+    decode_kda_pool_blocks,
     linear_step,
     chunkwise_rdma,
     sp_checkpoint_path,
@@ -569,6 +651,7 @@ import sys
     sp_model_type,
     tp_size,
     proposal_tokens,
+    core_dump_on_exception,
 ) = sys.argv[1:]
 entries = pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 env = {}
@@ -586,6 +669,7 @@ expected = {
     "LINEAR_STEP": linear_step,
     "CACHE_STORE_RDMA_MODE": "1",
     "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "30000",
+    "RDMA_CONNECT_RETRY_TIMES": "3",
     "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
@@ -593,7 +677,7 @@ expected = {
     "ENABLE_CUDA_GRAPH_DEBUG_MODE": "0",
     "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
     "DEEPGEMM_JIT_COMPILER": "auto",
-    "FT_CORE_DUMP_ON_EXCEPTION": "1",
+    "FT_CORE_DUMP_ON_EXCEPTION": core_dump_on_exception,
     "SP_TYPE": sp_type,
     "SP_MODEL_TYPE": sp_model_type,
     "SP_CHECKPOINT_PATH": sp_checkpoint_path,
@@ -631,13 +715,15 @@ else:
     expected.update({
         "MAX_SEQ_LEN": "1468006",
         "MAX_BATCH_TOKENS_SIZE": "1468006",
-        "KV_CACHE_MEM_MB": "42000",
+        "KV_CACHE_MEM_MB": decode_kv_cache_mem_mb,
         "REUSE_CACHE": "0",
-        "KIMI_K3_KDA_POOL_BLOCKS": "112",
+        "KIMI_K3_KDA_POOL_BLOCKS": decode_kda_pool_blocks,
         "RESERVER_RUNTIME_MEM_MB": "8000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "16",
         "ENABLE_CUDA_GRAPH": "1",
-        "DECODE_CAPTURE_CONFIG": "1,2,3,4",
+        "DECODE_CAPTURE_CONFIG": "1,2,4,8",
+        "KIMI_K3_DECODE_TOPOLOGY": "dp8_ktp8_ep8",
+        "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -670,9 +756,8 @@ pathlib.Path(output).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 }
 
-# Operator versions are supplied by the Bazel server target. Keep the exact
-# common runtime profile here. Precision defaults apply only to this smoke;
-# explicit overrides preserve BF16 and separate weight/MLA comparisons.
+# Operator versions are supplied by the Bazel server target. Precision defaults
+# apply only to this smoke; explicit overrides remain available for comparisons.
 apply_validated_common_profile() {
     local run_hash
     run_hash="$(printf '%s' "${SMOKE_RUN_ID}" | sha256sum)"
@@ -693,6 +778,7 @@ apply_validated_common_profile() {
     export LINEAR_STEP="${smoke_linear_step}"
     export CACHE_STORE_RDMA_MODE=1
     export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=30000
+    export RDMA_CONNECT_RETRY_TIMES=3
     if [[ -n "${smoke_accl_use_nics}" ]]; then
         export ACCL_USE_NICS="${smoke_accl_use_nics}"
     else
@@ -705,7 +791,9 @@ apply_validated_common_profile() {
     export ENABLE_CUDA_GRAPH_DEBUG_MODE=0
     export FLASHINFER_CUDA_ARCH_LIST=10.3a
     export DEEPGEMM_JIT_COMPILER=auto
-    export FT_CORE_DUMP_ON_EXCEPTION=1
+    export FT_CORE_DUMP_ON_EXCEPTION="${FT_CORE_DUMP_ON_EXCEPTION:-1}"
+    [[ "${FT_CORE_DUMP_ON_EXCEPTION}" =~ ^[01]$ ]] \
+        || die "FT_CORE_DUMP_ON_EXCEPTION must be 0 or 1"
     export SP_TYPE="${smoke_sp_type}"
     export SP_MODEL_TYPE="${smoke_sp_model_type}"
     export SP_CHECKPOINT_PATH="${sp_checkpoint_real}"
@@ -752,17 +840,19 @@ apply_validated_prefill_profile() {
 apply_validated_decode_profile() {
     export MAX_SEQ_LEN=1468006
     export MAX_BATCH_TOKENS_SIZE=1468006
-    export KV_CACHE_MEM_MB=42000
+    export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
     export REUSE_CACHE=0
-    export KIMI_K3_KDA_POOL_BLOCKS=112
+    export KIMI_K3_KDA_POOL_BLOCKS="${smoke_decode_kda_pool_blocks}"
     export RESERVER_RUNTIME_MEM_MB=8000
     export MEGA_MOE_MAX_TOKENS_PER_RANK=16
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
     unset ENABLE_MEMORY_CACHE MEMORY_CACHE_SIZE_MB
     export ENABLE_CUDA_GRAPH=1
-    # The smoke issues four concurrent requests. Capture every possible
-    # coalesced Decode batch size instead of aborting above batch size one.
-    export DECODE_CAPTURE_CONFIG=1,2,3,4
+    # Exercise several arbitrary public graph buckets; the coordinator chooses
+    # one common key from the DP-local maximum batch.
+    export DECODE_CAPTURE_CONFIG=1,2,4,8
+    export KIMI_K3_DECODE_TOPOLOGY=dp8_ktp8_ep8
+    export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1
@@ -779,6 +869,7 @@ fi
 echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
 echo "[${role}] draft_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
+echo "[${role}] projection_ktp=dp8_ktp8_ep8 target_ktp=8 draft_ktp=1"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
@@ -789,6 +880,7 @@ local_port="${prefill_port}"
 [[ "${role}" == "prefill" ]] || local_port="${decode_port}"
 wait_for_health 127.0.0.1 "${local_port}"
 verify_fastsafetensors_log
+verify_fp8_log
 verify_rdma_log
 verify_role_environment
 
@@ -854,6 +946,7 @@ PY
     verdict="$(tr -d '[:space:]' <"${result_file}")"
     [[ "${verdict}" == "PASS" ]] || die "Prefill reported ${verdict}"
     verify_rdma_selected_devices
+    verify_projection_ktp_decode_log
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
     keep_cluster_after_success
     exit 0
@@ -881,10 +974,36 @@ case "${smoke_suite}" in
     flow | all) ;;
     *) die "SMOKE_SUITE must be flow or all" ;;
 esac
+mtp_case_args=()
+if [[ "${smoke_suite}" == "all" ]]; then
+    mtp_case_args+=(--require-mtp)
+fi
+
+decode_role_addrs=()
+if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
+    IFS=',' read -r -a decode_role_addrs <<<"${SMOKE_DECODE_ROLE_ADDRS}"
+else
+    for ((rank = 0; rank < 8; ++rank)); do
+        rank_http_port="$((decode_port + rank * 9))"
+        rank_grpc_port="$((rank_http_port + 1))"
+        decode_role_addrs+=(
+            "${decode_host}:${rank_http_port}:${rank_grpc_port}"
+        )
+    done
+fi
+[[ "${#decode_role_addrs[@]}" -eq 8 ]] \
+    || die "DP8 formal smoke requires exactly 8 ordered Decode role addresses"
+decode_role_addr_args=()
+for addr in "${decode_role_addrs[@]}"; do
+    [[ "${addr}" =~ ^[^:]+:[1-9][0-9]*:[1-9][0-9]*$ ]] \
+        || die "invalid Decode role address: ${addr}"
+    decode_role_addr_args+=(--decode-role-addr "${addr}")
+done
 
 python3 -u "${case_runner}" \
     --base-url "http://127.0.0.1:${prefill_port}" \
     --decode-health-url "http://${decode_host}:${decode_port}/health" \
+    "${decode_role_addr_args[@]}" \
     --output "${accuracy_file}" \
     --suite "${smoke_suite}" \
     --namespace "${SMOKE_RUN_ID}" \
@@ -895,11 +1014,14 @@ python3 -u "${case_runner}" \
     --identity-max-tokens "${identity_max_tokens}" \
     --single-exact-max-tokens "${single_exact_max_tokens}" \
     --mtp-chunk-max-tokens "${mtp_chunk_max_tokens}" \
+    "${mtp_case_args[@]}" \
     --rdma-prewarm-attempts "${smoke_rdma_prewarm_attempts}" \
+    --rdma-prewarm-timeout "${smoke_rdma_prewarm_timeout_s}" \
     --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}" \
     --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}" \
     --long-prefix-checkpoint "${CHECKPOINT_PATH}" \
-    --long-prefix-tp-size "${smoke_tp_size}" \
+    --long-prefix-tp-size "${smoke_long_prefix_tp_size}" \
+    --long-prefix-target-tokens "${smoke_long_prefix_target_tokens}" \
     --long-prefix-kernel-page-size "${KERNEL_SEQ_SIZE_PER_BLOCK}" \
     --expanded-kv-budget-bytes "${KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES}" \
     --timeout "${request_timeout}"

@@ -404,6 +404,60 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
             torch.ones_like(outputs.hidden_states),
         )
 
+    def test_ktp_idle_rank_keeps_target_verify_physical_rows(self):
+        model = _MetadataProbeModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            hidden_size=16,
+            max_seq_len=384,
+            tokens_per_block=64,
+            kernel_tokens_per_block=64,
+            decode_capture_batch_sizes=[1],
+            num_tokens_per_bs=4,
+            is_target_verify=True,
+            max_context_batch_size=1,
+        )
+        replay_inputs = self._build_replay_inputs(batch_size=1, q_len=4)
+        replay_inputs.ktp_local_real_batch = 0
+        replay_inputs.ktp_common_physical_batch = 1
+        replay_inputs.ktp_use_cuda_graph = True
+        replay_inputs.ktp_valid_row_mask = torch.zeros(
+            4, dtype=torch.int32, device="cuda"
+        )
+
+        self.assertTrue(runner.canRun(replay_inputs))
+        outputs = runner.forward(replay_inputs)
+        torch.cuda.synchronize()
+
+        self.assertEqual(tuple(outputs.hidden_states.shape), (4, 16))
+
+    def test_ktp_ordinary_decode_still_trims_to_owner_local_rows(self):
+        model = _SequenceHostProbeModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            hidden_size=16,
+            max_seq_len=384,
+            tokens_per_block=64,
+            kernel_tokens_per_block=64,
+            decode_capture_batch_sizes=[2],
+            max_context_batch_size=2,
+        )
+        replay_inputs = self._build_decode_replay_inputs([126, 255])
+        replay_inputs.ktp_local_real_batch = 1
+        replay_inputs.ktp_common_physical_batch = 2
+        replay_inputs.ktp_use_cuda_graph = True
+        replay_inputs.ktp_valid_row_mask = torch.tensor(
+            [1, 0], dtype=torch.int32, device="cuda"
+        )
+
+        self.assertTrue(runner.canRun(replay_inputs))
+        outputs = runner.forward(replay_inputs)
+        torch.cuda.synchronize()
+
+        self.assertEqual(tuple(outputs.hidden_states.shape), (1, 16))
+
     def test_runner_falls_back_before_target_verify_metadata_overflow(self):
         model = _MetadataProbeModel()
         runner = CudaGraphRunner()
