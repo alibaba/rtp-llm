@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <initializer_list>
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -46,6 +47,12 @@ GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
     group.seq_size_per_block        = 8;
     group.kernel_seq_size_per_block = 8;
     return group;
+}
+
+std::shared_ptr<BlockIds> makeBlockIds(std::initializer_list<BlockIdxType> values) {
+    auto result = std::make_shared<BlockIds>();
+    result->assign(BlockIndicesType(values));
+    return result;
 }
 
 // Tokens per logical (cache-key sized) block, and the CP-scaled tokens per block
@@ -117,8 +124,8 @@ TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     const auto* broadcast = BroadcastLoadRequestPB::descriptor();
     ASSERT_NE(broadcast, nullptr);
-    EXPECT_TRUE(broadcast->IsReservedNumber(5));
-    EXPECT_TRUE(broadcast->IsReservedNumber(12));
+    EXPECT_EQ(broadcast->FindFieldByName("block_ids")->number(), 5);
+    EXPECT_EQ(broadcast->FindFieldByName("group_block_ids")->number(), 12);
     EXPECT_EQ(broadcast->FindFieldByName("block_num")->number(), 6);
     EXPECT_EQ(broadcast->FindFieldByName("reuse_block_size")->number(), 7);
     EXPECT_EQ(broadcast->FindFieldByName("timeout_ms")->number(), 8);
@@ -295,7 +302,84 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
               DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered->group("full").tag));
 }
 
-TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {
+TEST(DecodeRpcServerTest, GroupBlockRowsAreDualWrittenForRollingUpgrade) {
+    auto topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
+    BroadcastLoadRequestPB request;
+
+    DecodeRpcServer::encodeGroupBlockIds(request, {makeBlockIds({10, 11})}, *topology);
+
+    ASSERT_EQ(request.tagged_group_block_ids_size(), 1);
+    EXPECT_EQ(request.tagged_group_block_ids(0).tag(), "full");
+    EXPECT_EQ(request.tagged_group_block_ids(0).block_ids_size(), 2);
+    ASSERT_EQ(request.group_block_ids_size(), 1);
+    EXPECT_EQ(request.group_block_ids(0).values_size(), 2);
+    ASSERT_EQ(request.block_ids_size(), 2);
+    EXPECT_EQ(request.block_ids(0), 10);
+    EXPECT_EQ(request.block_ids(1), 11);
+}
+
+TEST(DecodeRpcServerTest, MultiGroupRowsDoNotWriteAmbiguousFlatLegacyBlocks) {
+    auto topology = CacheTopology::create({makeRpcGroup("full", {0}), makeRpcGroup("linear", {1})},
+                                          {{0, {"full"}}, {1, {"linear"}}});
+    BroadcastLoadRequestPB request;
+
+    DecodeRpcServer::encodeGroupBlockIds(request, {makeBlockIds({10}), makeBlockIds({20})}, *topology);
+
+    EXPECT_EQ(request.tagged_group_block_ids_size(), 2);
+    EXPECT_EQ(request.group_block_ids_size(), 2);
+    EXPECT_EQ(request.block_ids_size(), 0);
+}
+
+TEST(DecodeRpcServerTest, LegacyGroupedBlockRowsAreAccepted) {
+    auto topology = CacheTopology::create({makeRpcGroup("full", {0}), makeRpcGroup("linear", {1})},
+                                          {{0, {"full"}}, {1, {"linear"}}});
+    BroadcastLoadRequestPB request;
+    request.add_group_block_ids()->add_values(10);
+    request.add_group_block_ids()->add_values(20);
+
+    const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
+
+    ASSERT_EQ(blocks.size(), 2);
+    EXPECT_EQ(blocks[0]->blocks(), (BlockIndicesType{10}));
+    EXPECT_EQ(blocks[1]->blocks(), (BlockIndicesType{20}));
+}
+
+TEST(DecodeRpcServerTest, LegacyFlatBlockIdsAreAcceptedForSingleGroup) {
+    auto topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
+    BroadcastLoadRequestPB request;
+    request.add_block_ids(10);
+    request.add_block_ids(11);
+
+    const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
+
+    ASSERT_EQ(blocks.size(), 1);
+    EXPECT_EQ(blocks[0]->blocks(), (BlockIndicesType{10, 11}));
+}
+
+TEST(DecodeRpcServerTest, LegacyFlatBlockIdsAreRejectedForMultipleGroups) {
+    auto topology = CacheTopology::create({makeRpcGroup("full", {0}), makeRpcGroup("linear", {1})},
+                                          {{0, {"full"}}, {1, {"linear"}}});
+    BroadcastLoadRequestPB request;
+    request.add_block_ids(10);
+
+    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, *topology));
+}
+
+TEST(DecodeRpcServerTest, TaggedBlockRowsTakePrecedenceOverLegacyRows) {
+    auto topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
+    BroadcastLoadRequestPB request;
+    auto* tagged = request.add_tagged_group_block_ids();
+    tagged->set_tag("full");
+    tagged->add_block_ids(10);
+    request.add_group_block_ids()->add_values(20);
+    request.add_block_ids(30);
+
+    const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
+
+    EXPECT_EQ(blocks[0]->blocks(), (BlockIndicesType{10}));
+}
+
+TEST(DecodeRpcServerTest, EmptyBlockRowsAreRejected) {
     auto                   topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
     BroadcastLoadRequestPB request;
     EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, *topology));

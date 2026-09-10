@@ -644,15 +644,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     }
     if (!load_context.block_ids_by_group.empty()) {
         const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        for (size_t group_id = 0; group_id < load_context.block_ids_by_group.size(); ++group_id) {
-            const auto& group_block = load_context.block_ids_by_group[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(topology.groupById(group_id).tag);
-            for (const auto& block_id : group_block->blocks()) {
-                tagged_row->add_block_ids(block_id);
-            }
-        }
+        encodeGroupBlockIds(request, load_context.block_ids_by_group, topology);
     }
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
@@ -707,15 +699,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     // Prefer per-group block ids if available (hybrid KV cache).
     if (!load_context.block_ids_by_group.empty()) {
         const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        for (size_t group_id = 0; group_id < load_context.block_ids_by_group.size(); ++group_id) {
-            const auto& group_block = load_context.block_ids_by_group[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(topology.groupById(group_id).tag);
-            for (const auto& block_id : group_block->blocks()) {
-                tagged_row->add_block_ids(block_id);
-            }
-        }
+        encodeGroupBlockIds(request, load_context.block_ids_by_group, topology);
     }
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
@@ -1438,20 +1422,64 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     return grpc::Status::OK;
 }
 
+void DecodeRpcServer::encodeGroupBlockIds(BroadcastLoadRequestPB& request,
+                                          const GroupBlockIds&    block_ids_by_group,
+                                          const CacheTopology&    topology) {
+    RTP_LLM_CHECK_WITH_INFO(block_ids_by_group.size() == topology.groups().size(),
+                            "RPC cache group count mismatch: blocks=%zu topology=%zu",
+                            block_ids_by_group.size(),
+                            topology.groups().size());
+    for (size_t group_id = 0; group_id < block_ids_by_group.size(); ++group_id) {
+        const auto& group_block = block_ids_by_group[group_id];
+        RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
+
+        auto* tagged_row = request.add_tagged_group_block_ids();
+        tagged_row->set_tag(topology.groupById(group_id).tag);
+        auto* legacy_group_row = request.add_group_block_ids();
+        for (const auto block_id : group_block->blocks()) {
+            tagged_row->add_block_ids(block_id);
+            legacy_group_row->add_values(block_id);
+            if (block_ids_by_group.size() == 1) {
+                request.add_block_ids(block_id);
+            }
+        }
+    }
+}
+
 GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
                                                    const CacheTopology&          topology) {
     GroupBlockIds block_ids_by_group(topology.groups().size());
-    for (const auto& tagged_row : request.tagged_group_block_ids()) {
-        const auto group_id = topology.groupIdForTag(tagged_row.tag());
-        RTP_LLM_CHECK_WITH_INFO(
-            block_ids_by_group[group_id] == nullptr, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
+    if (request.tagged_group_block_ids_size() > 0) {
+        for (const auto& tagged_row : request.tagged_group_block_ids()) {
+            const auto group_id = topology.groupIdForTag(tagged_row.tag());
+            RTP_LLM_CHECK_WITH_INFO(
+                block_ids_by_group[group_id] == nullptr, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
+            auto holder = std::make_shared<BlockIds>();
+            holder->assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
+            block_ids_by_group[group_id] = std::move(holder);
+        }
+    } else if (request.group_block_ids_size() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(request.group_block_ids_size()) == topology.groups().size(),
+                                "legacy RPC cache group count mismatch: blocks=%d topology=%zu",
+                                request.group_block_ids_size(),
+                                topology.groups().size());
+        for (int group_id = 0; group_id < request.group_block_ids_size(); ++group_id) {
+            const auto& row = request.group_block_ids(group_id);
+            auto        holder = std::make_shared<BlockIds>();
+            holder->assign(BlockIndicesType(row.values().begin(), row.values().end()));
+            block_ids_by_group[static_cast<size_t>(group_id)] = std::move(holder);
+        }
+    } else if (request.block_ids_size() > 0) {
+        RTP_LLM_CHECK_WITH_INFO(topology.groups().size() == 1,
+                                "legacy flat RPC cache blocks require one topology group, got %zu",
+                                topology.groups().size());
         auto holder = std::make_shared<BlockIds>();
-        holder->assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
-        block_ids_by_group[group_id] = std::move(holder);
+        holder->assign(BlockIndicesType(request.block_ids().begin(), request.block_ids().end()));
+        block_ids_by_group.front() = std::move(holder);
     }
     RTP_LLM_CHECK_WITH_INFO(
         std::all_of(block_ids_by_group.begin(), block_ids_by_group.end(), [](const auto& value) { return value; }),
-        "RPC cache tag set does not match local topology");
+        "RPC cache block layout does not match local topology");
     return block_ids_by_group;
 }
 
