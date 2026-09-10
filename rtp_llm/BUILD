@@ -456,14 +456,22 @@ py_library(
 )
 
 py_library(
+    name = "frontend_request_metrics",
+    srcs = ["frontend/frontend_request_metrics.py"],
+    deps = ["//rtp_llm/metrics:metrics"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "frontend",
     srcs = glob([
         "frontend/*.py",
         "frontend/**/*.py",
-    ]),
+    ], exclude = ["frontend/frontend_request_metrics.py"]),
     deps = [
         ":openai_api",
         ":telemetry",
+        ":frontend_request_metrics",
     ]
 )
 

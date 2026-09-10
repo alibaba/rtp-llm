@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/engine_base/stream/CacheScheduleProbe.h"
+
 #include "absl/status/statusor.h"
 #include "autil/TimeUtility.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -275,10 +277,15 @@ public:
     int64_t getTimeoutMs() const;
     void    recordWaitLatency();
     void    recordSchedulerEnqueueTime(int64_t time_us);
-    void    recordCanRunTime();
+    void                recordCanRunTime(const SchedulerRoundContext* round = nullptr);
+    void                reportCanRun(const SchedulerRoundContext& round);
+    void                activateCacheScheduleProbe(uint64_t owner);
+    CacheScheduleProbe& cacheScheduleProbeWithoutLock() {
+        return cache_schedule_probe_;
+    }
     void    recordLoadingCacheStartTime();
     void    recordLoadingCacheDoneTime();
-    void    recordRunningTime();
+    void    recordRunningTime(const SchedulerRoundContext* round = nullptr);
 
     // 统一的事件上报接口，替代原先所有 reportXX 方法。
     // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
@@ -329,7 +336,7 @@ public:
     size_t reserveStep() const {
         return reserve_step_;
     }
-    StreamState moveToNext();
+    StreamState moveToNext(const SchedulerRoundContext* round = nullptr);
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
@@ -927,6 +934,7 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
+    CacheScheduleProbe cache_schedule_probe_;
     bool is_fake_stream_ = false;
 
     // prefill TP size queried from prefill server (used for asymmetric TP)

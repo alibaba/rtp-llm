@@ -17,7 +17,8 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
                                    uint64_t                                       context_id,
                                    const std::shared_ptr<LoadContextCoordinator>& coordinator,
                                    std::shared_ptr<StorageBackend>                storage_backend,
-                                   StorageRequest                                 storage_request):
+                                   StorageRequest                                 storage_request,
+                                   std::function<int64_t()>                       probe_clock):
     coordinator_(coordinator),
     context_id_(context_id),
     load_descs_(std::move(load_descs)),
@@ -28,11 +29,16 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     storage_request_(std::move(storage_request)),
     need_backend_match_(storage_backend_ && !storage_request_.empty()),
     backend_pending_(need_backend_match_),
+    probe_clock_(std::move(probe_clock)),
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
         return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
     })) {
     remaining_join_count_.store(static_cast<size_t>(std::count(joined_load_.begin(), joined_load_.end(), true)),
                                 std::memory_order_relaxed);
+    probe_snapshot_.evidence.all_sources_resolved = !need_backend_match_;
+    probe_snapshot_.evidence.has_data_dependency =
+        remaining_transfer_count_ > 0
+        || std::any_of(joined_load_.begin(), joined_load_.end(), [](bool joined) { return joined; });
     rebuildMatchedBlocksByTier();
 }
 
@@ -96,6 +102,10 @@ void LoadAsyncContext::setSettlementReadyCallback(SettlementReadyCallback callba
 void LoadAsyncContext::startBackendMatch() {
     RTP_LLM_CHECK(need_backend_match_ && match_callback_ && !backend_started_);
     backend_started_                     = true;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        probe_snapshot_.evidence.async_lookup_started = true;
+    }
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
     storage_backend_->match(
         storage_request_,
@@ -166,6 +176,15 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
                                              key_index, matched_blocks_num, handle.group_id);
                                      }),
                       handles.end());
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (state_.load() == State::PENDING) {
+            probe_snapshot_.evidence.all_sources_resolved = true;
+            for (const auto& handles : storage_request_.handles) {
+                probe_snapshot_.evidence.has_data_dependency |= !handles.empty();
+            }
+        }
     }
     const LoadMatchResult match_result = match_callback_(*this, matched_blocks_num);
     if (!match_result.success) {
@@ -246,7 +265,7 @@ void LoadAsyncContext::markAborted() {
         }
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
-        state_.store(State::FAILED);
+        publishTerminalLocked(State::FAILED);
     }
     notifyCompletion();
 }
@@ -310,7 +329,7 @@ bool LoadAsyncContext::settle(bool success) {
         if (state_.load() != State::PENDING || !settlement_ready_) {
             return false;
         }
-        state_.store(success && !has_failure_ ? State::SUCCEEDED : State::FAILED);
+        publishTerminalLocked(success && !has_failure_ ? State::SUCCEEDED : State::FAILED);
     }
     notifyCompletion();
     return true;
@@ -325,7 +344,7 @@ bool LoadAsyncContext::onTaskFail() {
         }
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
-        state_.store(State::FAILED);
+        publishTerminalLocked(State::FAILED);
     }
     notifyCompletion();
     return true;
@@ -344,8 +363,24 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback
         settlement_ready_callback = std::move(settlement_ready_callback_);
         return;
     }
-    state_.store(has_failure_ ? State::FAILED : State::SUCCEEDED);
+    publishTerminalLocked(has_failure_ ? State::FAILED : State::SUCCEEDED);
     notify = true;
+}
+
+void LoadAsyncContext::publishTerminalLocked(State state) {
+    if (state_.load(std::memory_order_acquire) != State::PENDING) {
+        return;
+    }
+    probe_snapshot_.terminal = true;
+    probe_snapshot_.success  = state == State::SUCCEEDED;
+    probe_snapshot_.evidence.had_error_or_fallback |= state == State::FAILED;
+    probe_snapshot_.terminal_time_us = probe_clock_ ? probe_clock_() : currentTimeUs();
+    state_.store(state, std::memory_order_release);
+}
+
+std::optional<CacheLoadTerminalSnapshot> LoadAsyncContext::cacheLoadProbeSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return probe_snapshot_;
 }
 
 void LoadAsyncContext::dispatchCompletion(bool notify, SettlementReadyCallback settlement_ready_callback) {

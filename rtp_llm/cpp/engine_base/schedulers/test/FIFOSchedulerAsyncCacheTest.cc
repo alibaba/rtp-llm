@@ -40,7 +40,8 @@ std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
                                                                    Tier::HOST,
                                                                    Tier::DEVICE,
                                                                    BlockIndicesType{1}}};
-    auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
+    auto                            context =
+        std::make_shared<LoadAsyncContext>(std::move(descriptors), std::vector<bool>{false}, 1, 1000, coordinator);
     EXPECT_TRUE(coordinator->registerContext(context));
     return context;
 }
@@ -193,6 +194,76 @@ protected:
     size_t                                                   free_calls_{0};
     size_t                                                   insert_calls_{0};
 };
+
+TEST_F(FIFOSchedulerAsyncCacheTest, CacheProbeDirectAndGroupUseActualScheduleRounds) {
+    for (bool grouped : {false, true}) {
+        auto scheduler = createScheduler();
+        auto stream    = createStream({1, 2, 3}, false);
+        scheduler->activateCacheScheduleProbe(stream);
+        if (grouped) {
+            EXPECT_TRUE(scheduler->enqueueGroup({stream}).first.front());
+        } else {
+            EXPECT_TRUE(scheduler->enqueue(stream).ok());
+        }
+        ASSERT_TRUE(scheduler->schedule().ok());
+        ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+        const auto sample = stream->cacheScheduleProbeWithoutLock().takeReport();
+        ASSERT_TRUE(sample);
+        EXPECT_EQ(sample->sample_status, CacheSampleStatus::SINGLE_PASS);
+        EXPECT_EQ(sample->dependency, CacheDependency::NONE);
+        EXPECT_EQ(sample->schedule_rounds, 1);
+        EXPECT_EQ(sample->loading_latency_us, 0);
+    }
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, CacheProbeLoadingClearCanRunAndGroupSecondAdvanceKeepFirstRound) {
+    for (bool grouped : {false, true}) {
+        auto scheduler = createScheduler();
+        auto stream    = createStream({1, 2, 3}, true);
+        auto context   = makeControlledAllocatorContext();
+        scheduler->activateCacheScheduleProbe(stream);
+        installReadinessAllocator([context](const MallocInfo&) { return context; });
+        if (grouped) {
+            ASSERT_TRUE(scheduler->enqueueGroup({stream}).first.front());
+        } else {
+            ASSERT_TRUE(scheduler->enqueue(stream).ok());
+        }
+        ASSERT_TRUE(scheduler->schedule().ok());
+        EXPECT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+        EXPECT_TRUE(context->completeTransfers(1, true));
+        ASSERT_TRUE(scheduler->schedule().ok());
+        ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+        EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+        const auto sample = stream->cacheScheduleProbeWithoutLock().takeReport();
+        ASSERT_TRUE(sample);
+        EXPECT_EQ(sample->sample_status, CacheSampleStatus::SINGLE_PASS);
+        EXPECT_EQ(sample->dependency, CacheDependency::DATA);
+        EXPECT_TRUE(sample->loading_entered);
+        EXPECT_EQ(sample->schedule_rounds, 2);
+        EXPECT_GE(sample->ready_wait_us, 0);
+        EXPECT_LE(sample->ready_wait_us, sample->loading_latency_us);
+        stream->releaseResource();
+        cache_manager_->allocator_ = real_allocator_;
+    }
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, CacheProbeCopyFakeAndResetCannotDuplicateOwner) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream();
+    scheduler->activateCacheScheduleProbe(stream);
+    NormalGenerateStream copy(*stream);
+    EXPECT_FALSE(copy.cacheScheduleProbeWithoutLock().active());
+    auto fake = createStream();
+    fake->setIsFakeStream(true);
+    scheduler->activateCacheScheduleProbe(fake);
+    EXPECT_FALSE(fake->cacheScheduleProbeWithoutLock().active());
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    stream->resetBeginTime(currentTimeUs());
+    ASSERT_TRUE(scheduler->schedule().ok());
+    auto sample = stream->cacheScheduleProbeWithoutLock().takeReport();
+    ASSERT_TRUE(sample);
+    EXPECT_EQ(sample->sample_status, CacheSampleStatus::EXCLUDED);
+}
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning) {
     auto scheduler = createScheduler();

@@ -37,7 +37,16 @@ bool KVCacheAllocator::init() {
 }
 
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
-    auto finalize_init_failure = [this, &malloc_info](MallocResult result) {
+    auto capture_evidence = [](MallocResult& result, const std::shared_ptr<AsyncContext>& context) {
+        if (context) {
+            if (auto snapshot = context->cacheLoadProbeSnapshot()) {
+                result.cache_dependency = snapshot->evidence;
+            }
+        }
+    };
+    auto finalize_init_failure = [this, &malloc_info, &capture_evidence](MallocResult result) {
+        capture_evidence(result, result.async_context);
+        result.cache_dependency.had_error_or_fallback = true;
         // Cache matching can satisfy part of a request from lower tiers, so
         // classify capacity only after materialization fails. Use the
         // failure-time snapshot before rollback; freeing first can make a
@@ -69,6 +78,8 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
         MallocResult                  incr_result           = incrMalloc(malloc_info);
         if (!incr_result.success) {
+            capture_evidence(init_result, pending_async_context);
+            incr_result.cache_dependency = init_result.cache_dependency;
             if (load_context != nullptr) {
                 load_context->abortPending();
             }
@@ -83,6 +94,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         if (pending_async_context != nullptr) {
             load_context = std::dynamic_pointer_cast<LoadAsyncContext>(pending_async_context);
             if (load_context == nullptr || !load_context->commit()) {
+                capture_evidence(init_result, pending_async_context);
                 load_context.reset();
                 pending_async_context.reset();
                 init_result.success        = false;
@@ -96,6 +108,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         }
     }
 
+    capture_evidence(init_result, init_result.async_context);
     return init_result;
 }
 

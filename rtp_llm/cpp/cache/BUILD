@@ -2,6 +2,12 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "cache_load_probe",
+    hdrs = ["CacheLoadProbe.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_async_context",
     srcs = ["AsyncContext.cc"],
     hdrs = [
@@ -10,6 +16,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":cache_load_probe",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:profiling_scope",
@@ -137,6 +144,7 @@ cc_library(
         ":cache_config",
         ":cache_group_type",
         ":cache_layout",
+        ":cache_load_probe",
         ":kv_cache_specs",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",

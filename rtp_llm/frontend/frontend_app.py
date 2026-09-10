@@ -15,6 +15,8 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi import status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -30,6 +32,12 @@ from rtp_llm.distribute.distributed_server import (
     get_world_info,
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+from rtp_llm.frontend.frontend_request_metrics import (
+    FrontendRequestMetricsMiddleware,
+    FrontendRequestRegistry,
+    reject_current_request,
+    report_concurrency_rejection,
+)
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.api_datatype import (
@@ -419,7 +427,25 @@ class FrontendApp(object):
                 allow_headers=["*"],
             )
         ]
+        registry = FrontendRequestRegistry(
+            self.frontend_server.rank_id,
+            self.frontend_server.server_id,
+            self.frontend_server.is_embedding,
+        )
+        middleware.insert(
+            0, Middleware(FrontendRequestMetricsMiddleware, registry=registry)
+        )
         app = FastAPI(middleware=middleware)
+        app.state.frontend_request_metrics = registry
+
+        @app.exception_handler(RequestValidationError)
+        async def validation_error(request, error):
+            reject_current_request("reject_invalid")
+            return await request_validation_exception_handler(request, error)
+
+        @app.on_event("shutdown")
+        async def stop_request_metrics():
+            registry.stop()
 
         @app.on_event("startup")
         async def startup():
@@ -431,6 +457,7 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
+            registry.start()
 
         def draining_response():
             reason = (
@@ -450,6 +477,7 @@ class FrontendApp(object):
 
         async def track_business_request(call):
             if not self.shutdown_manager.try_begin_request():
+                reject_current_request("reject_unavailable")
                 return draining_response()
             should_finish = True
             try:
@@ -460,7 +488,13 @@ class FrontendApp(object):
                     )
                     should_finish = False
                 return response
+            except json.JSONDecodeError:
+                reject_current_request("reject_invalid")
+                raise
             except ConcurrencyException as e:
+                report_concurrency_rejection(
+                    e, self.frontend_server.rank_id, self.frontend_server.server_id
+                )
                 # Safety net: never let concurrency-limit overflow surface as 500.
                 return ORJSONResponse(format_exception(e), status_code=429)
             finally:
@@ -677,6 +711,8 @@ class FrontendApp(object):
                     parsed_req = json.loads(req)
                 else:
                     parsed_req = req
+                if not isinstance(parsed_req, dict):
+                    reject_current_request("reject_invalid")
                 return await self.frontend_server.batch_infer(parsed_req, raw_request)
 
             return await track_business_request(call)

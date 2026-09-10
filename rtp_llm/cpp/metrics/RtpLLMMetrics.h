@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/engine_base/stream/CacheScheduleProbe.h"
+
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -203,6 +205,8 @@ public:
     int64_t total_latency_us         = 0;
     int64_t first_token_latency_us   = 0;
     int64_t wait_latency_us          = 0;
+    bool                                 cache_probe_target       = false;
+    std::optional<CacheScheduleSnapshot> cache_probe;
     int64_t enqueue_to_canrun_us     = 0;
     int64_t canrun_to_running_us     = 0;
     int64_t loading_cache_latency_us = 0;
@@ -239,6 +243,10 @@ public:
     kmonitor::MutableMetric* total_latency_us_metric         = nullptr;
     kmonitor::MutableMetric* first_token_latency_us_metric   = nullptr;
     kmonitor::MutableMetric* wait_latency_us_metric          = nullptr;
+    kmonitor::MutableMetric* cache_probe_qps_metric          = nullptr;
+    kmonitor::MutableMetric* schedule_rounds_metric          = nullptr;
+    kmonitor::MutableMetric* ready_wait_us_metric            = nullptr;
+    void reportCacheScheduleProbe(const kmonitor::MetricsTags* tags, const CacheScheduleSnapshot& snapshot);
     kmonitor::MutableMetric* enqueue_to_canrun_us_metric     = nullptr;
     kmonitor::MutableMetric* canrun_to_running_us_metric     = nullptr;
     kmonitor::MutableMetric* loading_cache_latency_us_metric = nullptr;

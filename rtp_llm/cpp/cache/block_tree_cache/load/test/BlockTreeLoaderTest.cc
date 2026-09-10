@@ -46,6 +46,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_EQ(result.cache_dependency.dependency(), CacheDependency::DATA);
     std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
     EXPECT_EQ(load_context->matchedBlocks(), 2u);

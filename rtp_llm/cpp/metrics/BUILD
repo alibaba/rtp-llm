@@ -14,6 +14,7 @@ cc_library(
         ],
     ),
     deps = [
+        "//rtp_llm/cpp/engine_base/stream:cache_schedule_probe",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
@@ -27,6 +28,17 @@ cc_test(
     srcs = [
         "RtpLLMTokenPSMetricsCollectorTest.cc",
     ],
+    deps = [
+        ":metrics",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "rtp_llm_cache_schedule_metrics_test",
+    srcs = ["RtpLLMCacheScheduleMetricsTest.cc"],
+    copts = copts(),
     deps = [
         ":metrics",
         "@com_google_googletest//:gtest",

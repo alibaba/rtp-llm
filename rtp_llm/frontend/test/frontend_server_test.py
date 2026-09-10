@@ -95,6 +95,60 @@ class FrontendServerTest(TestCase):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res
 
+    def test_admission_boundary_and_local_rejection_use_http_token(self):
+        from unittest.mock import Mock, patch
+
+        from rtp_llm.frontend.frontend_request_metrics import (
+            CURRENT_FRONTEND_REQUEST,
+            FrontendRequestRegistry,
+            FrontendRequestToken,
+        )
+        from rtp_llm.utils.concurrency_controller import ConcurrencyException
+
+        async def check():
+            reporter = Mock()
+            registry = FrontendRequestRegistry(0, 0, reporter=reporter)
+            token = FrontendRequestToken(registry, "inference")
+            marker = CURRENT_FRONTEND_REQUEST.set(token)
+            try:
+                await self.frontend_server.inference(
+                    {"prompt": "hello"}, FakeRawRequest()
+                )
+                self.assertEqual(token.outcome, "admitted")
+                self.assertFalse(token.closed)
+            finally:
+                token.close_once()
+                CURRENT_FRONTEND_REQUEST.reset(marker)
+            token = FrontendRequestToken(registry, "inference")
+            marker = CURRENT_FRONTEND_REQUEST.set(token)
+            try:
+                with patch.object(
+                    self.frontend_server._global_controller,
+                    "increment",
+                    side_effect=ConcurrencyException("full"),
+                ):
+                    await self.frontend_server.inference(
+                        {"prompt": "hello"}, FakeRawRequest()
+                    )
+                self.assertEqual(token.outcome, "reject_concurrency")
+            finally:
+                token.close_once()
+                CURRENT_FRONTEND_REQUEST.reset(marker)
+            token = FrontendRequestToken(registry, "inference")
+            marker = CURRENT_FRONTEND_REQUEST.set(token)
+            try:
+                # Preserve the existing conversion failure for direct malformed
+                # string input; the HTTP owner still records its rejection.
+                with self.assertRaises(AttributeError):
+                    await self.frontend_server.inference("{", FakeRawRequest())
+                self.assertEqual(token.outcome, "reject_invalid")
+            finally:
+                token.close_once()
+                CURRENT_FRONTEND_REQUEST.reset(marker)
+            self.assertEqual(sum(registry.snapshot().values()), 0)
+
+        asyncio.run(check())
+
     def test_simple(self):
         loop = asyncio.new_event_loop()
         res = loop.run_until_complete(

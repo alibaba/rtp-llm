@@ -48,7 +48,9 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_keys) {
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
-        return {};
+        BlockTreeMatchResult result;
+        result.cache_dependency.all_sources_resolved = true;
+        return result;
     }
 
     std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
@@ -141,6 +143,7 @@ std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeLoader::collectReus
 
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& path, const CacheKeysType& cache_keys) {
     BlockTreeMatchResult result;
+    result.cache_dependency.all_sources_resolved = true;
     std::vector<bool>    candidate_valid;
     if (!path.empty() && !validMatch(path, candidate_valid) && !storage_backend_) {
         return result;
@@ -207,6 +210,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                     evictor_.suspendCandidate(path[i], group_set_id, source_tier);
                 }
             }
+            result.cache_dependency.has_data_dependency |=
+                source_tier == Tier::HOST || source_tier == Tier::DISK || is_joined;
             pending_load_descs.emplace_back(std::move(desc));
             joined_loads.push_back(is_joined);
         }
@@ -218,6 +223,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         storage_request = makeStorageRequest(cache_keys, path.size());
     }
     const bool use_storage = !storage_request.empty();
+    result.cache_dependency.all_sources_resolved = !use_storage;
     if (!pending_load_descs.empty() || use_storage) {
         result.async_context = load_context_coordinator_->create(pending_load_descs,
                                                                  joined_loads,
@@ -225,6 +231,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                                                                  use_storage ? storage_backend_ : nullptr,
                                                                  std::move(storage_request));
         if (result.async_context == nullptr) {
+            result.cache_dependency.had_error_or_fallback = true;
             abortLoadLocked(pending_load_descs, joined_loads, 0, 0, /*release_transferred_refs=*/true);
         } else if (!load_join_registry_.join(result.async_context)
                    || !load_context_coordinator_->registerContext(result.async_context)) {
@@ -233,6 +240,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                             0,
                             result.async_context->contextId(),
                             /*release_transferred_refs=*/true);
+            result.cache_dependency.had_error_or_fallback = true;
             result.async_context = nullptr;
         } else {
             const size_t join_dependency_count = static_cast<size_t>(std::count(

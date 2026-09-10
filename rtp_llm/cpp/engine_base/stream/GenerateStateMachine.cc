@@ -20,7 +20,7 @@ bool asyncDebugEnabled() {
 // GenerateStateMachine method implementations
 // ============================================================================
 
-StreamState GenerateStateMachine::moveToNext() {
+StreamState GenerateStateMachine::moveToNext(const SchedulerRoundContext* round) {
     // Error 最高优先级，任何状态下直接终止
     if (events_.has(StreamEvents::Error)) {
         status.store(StreamState::FINISHED, std::memory_order_release);
@@ -30,7 +30,7 @@ StreamState GenerateStateMachine::moveToNext() {
 
     switch (status.load(std::memory_order_acquire)) {
         case StreamState::WAITING:
-            handleWaiting();
+            handleWaiting(round);
             break;
         case StreamState::LOADING_CACHE:
             handleLoading();
@@ -52,7 +52,7 @@ StreamState GenerateStateMachine::moveToNext() {
     return status.load(std::memory_order_acquire);
 }
 
-void GenerateStateMachine::handleWaiting() {
+void GenerateStateMachine::handleWaiting(const SchedulerRoundContext* round) {
     if (!events_.has(StreamEvents::CanRun)) {
         return;
     }
@@ -87,7 +87,7 @@ void GenerateStateMachine::handleWaiting() {
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
             // Loading cache 失败或不需要loading，直接触发重计算
             // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
-            transitionToRunning();
+            transitionToRunning(round);
         }
         return;
     }
@@ -99,7 +99,7 @@ void GenerateStateMachine::handleWaiting() {
     // exactly like a decode stream.
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
         && stream_cache_resource_->isContextStream()) {
-        transitionToRunning();
+        transitionToRunning(round);
         return;
     }
 
@@ -112,7 +112,7 @@ void GenerateStateMachine::handleWaiting() {
         releaseResource();
         return;
     }
-    transitionToRunning();
+    transitionToRunning(round);
 }
 
 void GenerateStateMachine::handleLoading() {
@@ -125,10 +125,10 @@ void GenerateStateMachine::handleLoading() {
     }
 }
 
-void GenerateStateMachine::transitionToRunning() {
+void GenerateStateMachine::transitionToRunning(const SchedulerRoundContext* round) {
     auto stream = stream_cache_resource_->stream();
     if (stream != nullptr) {
-        stream->recordRunningTime();
+        stream->recordRunningTime(round);
     }
     status.store(StreamState::RUNNING, std::memory_order_release);
 }

@@ -51,7 +51,16 @@ void StreamCacheResource::init(int batch_size) {
     resource_released_ = false;
 }
 
+void StreamCacheResource::captureCacheLoadEvidenceWithoutLock() {
+    if (allocator_load_context_ && stream_->cacheScheduleProbeWithoutLock().active()) {
+        if (auto snapshot = allocator_load_context_->cacheLoadProbeSnapshot()) {
+            stream_->cacheScheduleProbeWithoutLock().absorb(snapshot->evidence);
+        }
+    }
+}
+
 void StreamCacheResource::releaseResource() {
+    captureCacheLoadEvidenceWithoutLock();
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
         return;
@@ -199,6 +208,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_remove_skipped_blocks = false;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
+    stream_->cacheScheduleProbeWithoutLock().beginAttempt(result.cache_dependency, result.success);
     recordCacheReuseMallocResult(result);
     if (!result.success) {
         malloc_failed_times_++;
@@ -348,7 +358,9 @@ absl::Status StreamCacheResource::waitForAllocatorLoad() {
     if (!allocator_load_context_) {
         return absl::OkStatus();
     }
+    stream_->cacheScheduleProbeWithoutLock().invalidate();
     allocator_load_context_->waitDone();
+    captureCacheLoadEvidenceWithoutLock();
     if (!allocator_load_context_->done()) {
         return absl::InternalError("allocator load context is non-terminal after waitDone");
     }
@@ -401,6 +413,11 @@ bool StreamCacheResource::loadCacheDone() {
     if (allocator_load_context_) {
         if (!allocator_load_context_->done()) {
             return false;
+        }
+        if (stream_->cacheScheduleProbeWithoutLock().active()) {
+            const auto observed_us = currentTimeUs();
+            stream_->cacheScheduleProbeWithoutLock().observe(allocator_load_context_->cacheLoadProbeSnapshot(),
+                                                             observed_us);
         }
         const ErrorInfo error   = allocator_load_context_->errorInfo();
         const bool      success = allocator_load_context_->success();

@@ -10,6 +10,11 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.frontend.frontend_request_metrics import (
+    CURRENT_FRONTEND_REQUEST,
+    FrontendRequestRegistry,
+    FrontendRequestToken,
+)
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -174,6 +179,7 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
     def test_cache_key_block_size_tracks_routed_key_granularity(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.seq_size_per_block = 256
         visitor._page_rr_route_cache_keys = False
         visitor._page_rr_cp_size = 4
@@ -186,6 +192,7 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.seq_size_per_block = 16
         visitor.master_client = _FakeMasterClient()
         visitor._route_cache_keys = lambda keys: keys
@@ -218,6 +225,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = ["PREFILL"]
@@ -241,6 +249,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_falls_back_on_master_connection_failure(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = ["PREFILL"]
@@ -266,6 +275,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_records_master_success_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = ["PREFILL", "DECODE"]
@@ -298,6 +308,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_preserves_request_source_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = ["PREFILL", "DECODE"]
@@ -327,6 +338,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_failure_uses_stable_error_type_and_code(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = ["PREFILL"]
@@ -355,6 +367,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 class TestBackendRouteTrace(unittest.TestCase):
     def test_proactive_rejection_finishes_after_all_attributes(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.master_config = SimpleNamespace(master_queue_reject_threshold=-1)
         visitor.host_service = MagicMock()
         visitor.host_service.get_queue_length.return_value = 0
@@ -393,6 +406,7 @@ class TestBackendRouteTrace(unittest.TestCase):
 
     def test_route_cancellation_uses_stable_span_error_type(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.master_config = None
         visitor.host_service = MagicMock()
         visitor.host_service.get_master_addr.return_value = "master:9000"
@@ -523,6 +537,7 @@ class _CapacityThenBatchSloExpiredModelRpcClient:
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.metric_identity = {"rank_id": "2", "server_id": "3"}
         visitor.max_seq_len = 1024
         visitor.model_rpc_client = model_rpc_client
         visitor.host_service = _FakeHostService()
@@ -532,6 +547,93 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor.fill_request_info = lambda _input: None
         visitor.check_sp_supported = lambda _input: None
         return visitor
+
+    async def test_http_token_is_captured_before_generator_iteration_and_covers_retry(
+        self,
+    ):
+        reporter = Mock()
+        registry = FrontendRequestRegistry(2, 3, reporter=reporter)
+        token = FrontendRequestToken(registry, "inference")
+        token.outcome_once("admitted")
+        visitor = self._visitor(_RetryingModelRpcClient())
+        visitor.host_service = SimpleNamespace(service_available=True)
+        visitor.set_request_id_factory(lambda: 456)
+        routes = []
+
+        async def route(_input):
+            routes.append(registry.snapshot())
+            self.assertEqual(registry.snapshot()["inference", "route"], 1)
+
+        async def backoff(_delay):
+            self.assertEqual(registry.snapshot()["inference", "route"], 1)
+
+        visitor.route_ips = route
+        marker = CURRENT_FRONTEND_REQUEST.set(token)
+        try:
+            stream = await visitor.enqueue(_FakeInput())
+        finally:
+            CURRENT_FRONTEND_REQUEST.reset(marker)
+        with patch("rtp_llm.server.backend_rpc_server_visitor.asyncio.sleep", backoff):
+            self.assertEqual([x async for x in stream], ["successful-output"])
+        self.assertEqual(len(routes), 2)
+        self.assertEqual(registry.snapshot()["inference", "backend"], 1)
+        self.assertFalse(token.closed)
+        self.assertEqual(reporter.report.call_count, 2)
+        token.close_once()
+        self.assertEqual(sum(registry.snapshot().values()), 0)
+
+    async def test_direct_rpc_retry_stays_backend_without_route_service(self):
+        registry = FrontendRequestRegistry(2, 3, reporter=Mock())
+        token = FrontendRequestToken(registry, "inference")
+        visitor = self._visitor(_RetryingModelRpcClient())
+        visitor.set_request_id_factory(lambda: 456)
+
+        async def backoff(_delay):
+            self.assertEqual(registry.snapshot()["inference", "backend"], 1)
+            self.assertEqual(registry.snapshot()["inference", "route"], 0)
+
+        marker = CURRENT_FRONTEND_REQUEST.set(token)
+        try:
+            stream = await visitor.enqueue(_FakeInput())
+            with patch(
+                "rtp_llm.server.backend_rpc_server_visitor.asyncio.sleep", backoff
+            ):
+                self.assertEqual([x async for x in stream], ["successful-output"])
+        finally:
+            token.close_once()
+            CURRENT_FRONTEND_REQUEST.reset(marker)
+
+    async def test_batch_routes_all_items_before_backend_and_no_route_path_is_counted(
+        self,
+    ):
+        for routed in (False, True):
+            registry = FrontendRequestRegistry(2, 3, reporter=Mock())
+            token = FrontendRequestToken(registry, "batch")
+            token.outcome_once("admitted")
+            visitor = self._visitor(None)
+            visitor.host_service = SimpleNamespace(service_available=routed)
+            seen = []
+
+            async def route(_input):
+                seen.append(registry.snapshot())
+                self.assertEqual(registry.snapshot()["batch", "route"], 1)
+                self.assertEqual(sum(registry.snapshot().values()), 1)
+
+            async def batch(inputs):
+                self.assertEqual(len(seen), 3 if routed else 0)
+                self.assertEqual(registry.snapshot()["batch", "backend"], 1)
+                return inputs
+
+            visitor.route_ips = route
+            visitor.model_rpc_client = SimpleNamespace(batch_enqueue=batch)
+            marker = CURRENT_FRONTEND_REQUEST.set(token)
+            try:
+                await visitor.batch_enqueue([_FakeInput() for _ in range(3)])
+            finally:
+                CURRENT_FRONTEND_REQUEST.reset(marker)
+            self.assertFalse(token.closed)
+            token.close_once()
+            self.assertEqual(sum(registry.snapshot().values()), 0)
 
     async def test_prefill_cp_rejects_full_sequence_outputs_before_rpc(self):
         client = _SuccessfulModelRpcClient(["unexpected-output"])

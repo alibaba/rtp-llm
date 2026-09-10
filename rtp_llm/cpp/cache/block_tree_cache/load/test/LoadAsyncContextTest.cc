@@ -233,6 +233,121 @@ std::shared_ptr<LoadContextCoordinator> makeCoordinator(size_t& commits, size_t&
         [&](auto&) { ++aborts; });
 }
 
+TEST(LoadAsyncContextTest, ProbePublishesAfterSettlementWithImmutableTerminalTime) {
+    size_t             commits = 0, aborts = 0;
+    auto               coordinator = makeCoordinator(commits, aborts);
+    int64_t            now         = 100;
+    TransferDescriptor desc;
+    desc.source_tier = Tier::HOST;
+    auto context     = std::make_shared<LoadAsyncContext>(std::vector<TransferDescriptor>{desc, desc},
+                                                      std::vector<bool>{false, true},
+                                                      1,
+                                                      1000,
+                                                      coordinator,
+                                                      nullptr,
+                                                      StorageRequest{},
+                                                      [&] { return now; });
+    ASSERT_TRUE(coordinator->registerContext(context));
+    size_t ready = 0;
+    context->setSettlementReadyCallback([&](const auto&) { ++ready; });
+    ASSERT_TRUE(context->commit());
+    ASSERT_TRUE(context->cacheLoadProbeSnapshot());
+    EXPECT_EQ(context->cacheLoadProbeSnapshot()->evidence.dependency(), CacheDependency::DATA);
+    EXPECT_TRUE(context->completeTransfers(1, true));
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(context->cacheLoadProbeSnapshot()->terminal_time_us);
+    bool    joined_done  = false;
+    int64_t join_latency = 0;
+    context->startJoinWait(1);
+    EXPECT_TRUE(context->completeJoinedOne(true, joined_done, join_latency));
+    EXPECT_EQ(ready, 1u);
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(context->cacheLoadProbeSnapshot()->terminal_time_us);
+    now = 150;
+    EXPECT_TRUE(context->settle(true));
+    EXPECT_TRUE(context->done());
+    EXPECT_EQ(context->cacheLoadProbeSnapshot()->terminal_time_us, 150);
+    now = 200;
+    EXPECT_FALSE(context->settle(false));
+    EXPECT_FALSE(context->onTaskFail());
+    EXPECT_EQ(context->cacheLoadProbeSnapshot()->terminal_time_us, 150);
+    EXPECT_TRUE(context->cacheLoadProbeSnapshot()->success);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, ProbeDirectAbortAndTaskFailurePublishOnlyOnce) {
+    for (int mode = 0; mode < 3; ++mode) {
+        size_t             commits = 0, aborts = 0;
+        auto               coordinator = makeCoordinator(commits, aborts);
+        int64_t            now         = 0;
+        TransferDescriptor desc;
+        desc.source_tier = Tier::DEVICE;
+        auto context     = std::make_shared<LoadAsyncContext>(std::vector<TransferDescriptor>{desc},
+                                                          std::vector<bool>{false},
+                                                          1,
+                                                          1000,
+                                                          coordinator,
+                                                          nullptr,
+                                                          StorageRequest{},
+                                                          [&] { return now; });
+        ASSERT_TRUE(coordinator->registerContext(context));
+        if (mode == 0) {
+            EXPECT_TRUE(context->commit());
+        }
+        if (mode == 1) {
+            EXPECT_TRUE(context->abortPending());
+        }
+        if (mode == 2) {
+            EXPECT_TRUE(context->onTaskFail());
+        }
+        const auto snapshot = context->cacheLoadProbeSnapshot();
+        ASSERT_TRUE(snapshot);
+        EXPECT_TRUE(snapshot->terminal);
+        EXPECT_EQ(snapshot->terminal_time_us, 0);
+        EXPECT_EQ(snapshot->success, mode == 0);
+        EXPECT_EQ(snapshot->evidence.dependency(), CacheDependency::NONE);
+        EXPECT_EQ(snapshot->evidence.had_error_or_fallback, mode != 0);
+        now = 100;
+        context->onTaskFail();
+        EXPECT_EQ(context->cacheLoadProbeSnapshot()->terminal_time_us, 0);
+        coordinator->shutdown();
+    }
+}
+
+TEST(LoadAsyncContextTest, ProbeRemoteMissAndReadEvidencePrecedeMaterialization) {
+    for (bool remote_hit : {false, true}) {
+        size_t commits = 0, aborts = 0;
+        auto   coordinator = makeCoordinator(commits, aborts);
+        auto   backend     = std::make_shared<ManualBackend>();
+        auto   pool        = std::make_shared<TestBlockPool>();
+        initBackend(*backend, pool);
+        auto request                     = makeRequest(2);
+        request.local_matched_blocks_num = 1;
+        auto context                     = std::make_shared<LoadAsyncContext>(
+            std::vector<TransferDescriptor>{}, std::vector<bool>{}, 1, 1000, coordinator, backend, request, [] {
+                return 150;
+            });
+        ASSERT_TRUE(coordinator->registerContext(context));
+        const auto dependency = remote_hit ? CacheDependency::DATA : CacheDependency::LOOKUP_ONLY;
+        context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+            EXPECT_EQ(matched, remote_hit ? 2u : 1u);
+            EXPECT_EQ(current.cacheLoadProbeSnapshot()->evidence.dependency(), dependency);
+            // Materialization fails after evidence is published, with no read submission.
+            return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+        });
+        EXPECT_EQ(context->cacheLoadProbeSnapshot()->evidence.dependency(), CacheDependency::UNKNOWN);
+        context->startBackendMatch();
+        EXPECT_TRUE(context->cacheLoadProbeSnapshot()->evidence.async_lookup_started);
+        backend->completeMatch(remote_hit ? 2 : 1);
+        ASSERT_TRUE(context->done());
+        const auto snapshot = context->cacheLoadProbeSnapshot();
+        EXPECT_EQ(snapshot->evidence.dependency(), dependency);
+        EXPECT_TRUE(snapshot->evidence.had_error_or_fallback);
+        EXPECT_EQ(snapshot->terminal_time_us, 150);
+        coordinator->shutdown();
+    }
+}
+
 TEST(LoadAsyncContextTest, EmptyStorageMatchStillRunsDeferredAllocationAndCommit) {
     size_t commits     = 0;
     size_t aborts      = 0;

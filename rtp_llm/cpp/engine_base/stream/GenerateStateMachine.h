@@ -9,6 +9,7 @@
 #include <string>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/engine_base/stream/CacheScheduleProbe.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
@@ -51,7 +52,7 @@ public:
         events_.clearLoadInitiated();
     }
 
-    StreamState moveToNext();
+    StreamState moveToNext(const SchedulerRoundContext* round = nullptr);
 
     StreamState getStatus() const {
         return status.load(std::memory_order_acquire);
@@ -84,10 +85,10 @@ public:
     ErrorInfo                error_info;
 
 private:
-    void handleWaiting();
+    void handleWaiting(const SchedulerRoundContext* round);
     void handleLoading();
     void handleRunning();
-    void transitionToRunning();
+    void transitionToRunning(const SchedulerRoundContext* round);
     void releaseResource();
 
     StreamEvents events_;

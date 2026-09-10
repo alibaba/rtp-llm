@@ -26,6 +26,8 @@ class FakeController:
 class FakeFrontendServer:
     def __init__(self, is_embedding=False):
         self._global_controller = FakeController()
+        self.rank_id = 0
+        self.server_id = 0
         self.is_embedding = is_embedding
         self.close_called = False
 

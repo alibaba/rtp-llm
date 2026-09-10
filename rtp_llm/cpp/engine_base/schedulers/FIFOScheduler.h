@@ -24,6 +24,7 @@ public:
                            const int                              max_score_len    = 1);
 
     ~FIFOScheduler() override;
+    void activateCacheScheduleProbe(const GenerateStreamPtr& stream);
 
     // Group-aware enqueue: streams enter the dedicated group queues and are
     // co-scheduled at an isolated execution boundary. Falls back to individual
@@ -96,13 +97,14 @@ private:
     // finalized. FIFOSchedulerBase::evaluateWaitingStreams() is left untouched for the other
     // FIFOSchedulerBase subclasses.
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
-                             const std::list<GenerateStreamPtr>& already_admitted_streams);
+                             const std::list<GenerateStreamPtr>& already_admitted_streams,
+                             const SchedulerRoundContext&        round);
 
     void cancelGroups(StreamGroupQueue& group_queue);
-    void evaluateWaitingGroupQueue();
-    void evaluateLoadingCacheGroupQueue();
+    void evaluateWaitingGroupQueue(const SchedulerRoundContext& round);
+    void evaluateLoadingCacheGroupQueue(const SchedulerRoundContext& round);
     bool loadingGroupReady() const;
-    void advanceLoadingGroup(StreamGroup& group);
+    void advanceLoadingGroup(StreamGroup& group, const SchedulerRoundContext& round);
     void moveGroupToNewStreams(StreamGroup& group);
     void moveGroupToAllocatingGroup(StreamGroup& group);
     void dispatchPreparedGroup(StreamGroup& group);
@@ -128,6 +130,7 @@ private:
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;
+    uint64_t                     schedule_round_id_            = 0;
     AdmissionLane                active_admission_lane_        = AdmissionLane::NONE;
     bool                         prefer_group_next_            = false;
 

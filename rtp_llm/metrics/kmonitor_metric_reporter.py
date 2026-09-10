@@ -24,6 +24,7 @@ def qos_priority_tag(qos_level: Any) -> str:
 
 
 class AccMetrics(Enum):
+    FRONTEND_ADMISSION_QPS = "py_rtp_frontend_admission_qps"
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
     SUCCESS_QPS_METRIC = "py_rtp_success_qps_metric"
     QPS_METRIC = "py_rtp_framework_qps"
@@ -77,6 +78,7 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+    FRONTEND_INFLIGHT = "py_rtp_frontend_inflight"
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"
@@ -147,6 +149,10 @@ class GaugeMetrics(Enum):
         "py_rtp_tool_call_loop_current_span_tokens"
     )
     TOOL_CALL_LOOP_CHECK_RT_METRIC = "py_rtp_tool_call_loop_check_rt"
+
+
+def frontend_metric_identity(rank_id, server_id):
+    return {"rank_id": str(rank_id), "server_id": str(server_id)}
 
 
 class MetricReporter(object):

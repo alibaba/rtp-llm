@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/cache/CacheLoadProbe.h"
 
 namespace rtp_llm {
 
@@ -20,6 +21,9 @@ public:
     virtual void      onDone(DoneCallback callback) = 0;
     virtual bool      done() const    = 0;
     virtual bool      success() const = 0;
+    virtual std::optional<CacheLoadTerminalSnapshot> cacheLoadProbeSnapshot() const {
+        return std::nullopt;
+    }
     virtual ErrorInfo errorInfo() const {
         return ErrorInfo::OkStatus();
     }

@@ -584,6 +584,12 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserve_step_);
+    if (resource_context_.role_type == RoleType::PREFILL && parallelism_config.tp_rank == 0
+        && !ffn_disaggregate_config.is_ffn_service()) {
+        if (auto fifo = dynamic_cast<FIFOScheduler*>(scheduler_.get())) {
+            fifo->activateCacheScheduleProbe(stream);
+        }
+    }
     (void)scheduler_->enqueue(stream);
 }
 
@@ -591,6 +597,12 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<Gene
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
     stream->setReserveStep(reserve_step_);
+    if (resource_context_.role_type == RoleType::PREFILL && parallelism_config.tp_rank == 0
+        && !ffn_disaggregate_config.is_ffn_service()) {
+        if (auto fifo = dynamic_cast<FIFOScheduler*>(scheduler_.get())) {
+            fifo->activateCacheScheduleProbe(stream);
+        }
+    }
     (void)scheduler_->enqueue(stream);
     return stream;
 }
@@ -603,6 +615,12 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         auto stream = std::make_shared<NormalGenerateStream>(
             inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
         stream->setReserveStep(reserve_step_);
+        if (resource_context_.role_type == RoleType::PREFILL && parallelism_config.tp_rank == 0
+            && !ffn_disaggregate_config.is_ffn_service()) {
+            if (auto fifo = dynamic_cast<FIFOScheduler*>(scheduler_.get())) {
+                fifo->activateCacheScheduleProbe(stream);
+            }
+        }
         streams.push_back(stream);
     }
     return scheduler_->enqueueGroup(streams);

@@ -41,17 +41,27 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_schedule_probe",
+    hdrs = ["CacheScheduleProbe.h"],
+    srcs = ["CacheScheduleProbe.cc"],
+    deps = ["//rtp_llm/cpp/cache:cache_load_probe"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "stream",
     hdrs = glob([
         "*.h",
-    ], exclude = ["GenerateTypes.h", "CompleteTokenIds.h"]),
+    ], exclude = ["GenerateTypes.h", "CompleteTokenIds.h", "CacheScheduleProbe.h"]),
     srcs = glob([
         "*.cc",
-    ], exclude = ["CompleteTokenIds.cc"]),
+    ], exclude = ["CompleteTokenIds.cc", "CacheScheduleProbe.cc"]),
     deps = [
         ":generate_types",
         ":generate_config",
         ":complete_token_ids",
+        ":cache_schedule_probe",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",

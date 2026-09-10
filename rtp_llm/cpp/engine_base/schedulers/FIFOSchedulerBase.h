@@ -67,7 +67,8 @@ protected:
 
     bool   checkInputLength(const GenerateStreamPtr& stream);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
-    size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
+    size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams,
+                                    const SchedulerRoundContext*  round = nullptr);
     void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     size_t countInitedKVCacheStreams() const;

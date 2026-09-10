@@ -939,6 +939,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MergedCommonMallocFailureAbortsContextWit
         const auto result    = allocator_->malloc(MallocInfo{resource, token_ids});
 
         EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.cache_dependency.dependency(), CacheDependency::DATA);
+        EXPECT_TRUE(result.cache_dependency.had_error_or_fallback);
         EXPECT_EQ(result.async_context, nullptr);
         EXPECT_EQ(abort_count, 1u);
         EXPECT_EQ(free_blocks_during_abort, free_before);
@@ -997,6 +999,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         const auto result = allocator_->malloc(info);
 
         EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.cache_dependency.dependency(), CacheDependency::DATA);
+        EXPECT_TRUE(result.cache_dependency.had_error_or_fallback);
         EXPECT_EQ(result.async_context, nullptr);
         EXPECT_EQ(commit_count, 0u);
         EXPECT_EQ(abort_count, 1u);

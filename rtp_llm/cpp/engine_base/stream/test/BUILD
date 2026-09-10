@@ -101,3 +101,14 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "cache_schedule_probe_test",
+    srcs = ["CacheScheduleProbeTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base/stream:cache_schedule_probe",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

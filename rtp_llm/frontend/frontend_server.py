@@ -16,6 +16,11 @@ from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.frontend.frontend_request_metrics import (
+    admit_current_request,
+    reject_current_request,
+    report_concurrency_rejection,
+)
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
@@ -364,6 +369,8 @@ class FrontendServer(object):
         try:
             if isinstance(req, str):
                 req = json.loads(req)
+            if not isinstance(req, dict):
+                reject_current_request("reject_invalid")
             assert isinstance(req, dict)
             sequence = self._global_controller.increment() % 4096  # 12 bits
             req[request_id_field_name] = generate_request_id(
@@ -385,6 +392,7 @@ class FrontendServer(object):
             return self._frontend_worker.inference(**req)
 
         try:
+            admit_current_request()
             rep = await self._infer_wrap(req, raw_request, generate_call)
         except BaseException as e:
             self._global_controller.decrement()
@@ -473,6 +481,7 @@ class FrontendServer(object):
             return response
 
         try:
+            admit_current_request()
             if request.prompt_logprobs is not None:
                 request.stream = False
             elif request.extra_configs is not None and getattr(
@@ -514,6 +523,7 @@ class FrontendServer(object):
             sequence,
         )
         try:
+            admit_current_request()
             assert self._openai_endpoint is not None
             responses = await self._openai_endpoint.batch_chat_completion(
                 request_id, request
@@ -541,6 +551,7 @@ class FrontendServer(object):
             sequence,
         )
         try:
+            admit_current_request()
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
             generate_config = req.get("generate_config", {})
@@ -561,10 +572,12 @@ class FrontendServer(object):
             return ORJSONResponse(format_exception(e), status_code=500)
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
+        if isinstance(e, json.JSONDecodeError):
+            reject_current_request("reject_invalid")
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
-            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
+            report_concurrency_rejection(e, self.rank_id, self.server_id)
         elif isinstance(e, asyncio.CancelledError):
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
