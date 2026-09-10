@@ -11,11 +11,13 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
 #include <chrono>
 #include <utility>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -275,13 +277,7 @@ void P2PConnectorPrefill::waitAndFillResponse(const std::shared_ptr<P2PConnector
         response.set_error_message("side-channel wait cancelled or expired");
         return;
     }
-    {
-        std::lock_guard<std::mutex> lock(resource_entry->side_channel_mutex);
-        resource_entry->side_channel_data = std::move(data);
-        resource_entry->side_channel_ready = true;
-    }
-
-    grpc::Status fill_status = fillResponseWithStreamInfo(resource_entry, response);
+    grpc::Status fill_status = fillResponseWithStreamInfo(data, response);
     if (!fill_status.ok()) {
         RTP_LLM_LOG_WARNING("waitAndFillResponse failed, unique_key: %s, error: %s",
                             resource_entry->unique_key.c_str(),
@@ -418,71 +414,81 @@ grpc::Status P2PConnectorPrefill::waitForResourceEntry(
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource wait transfer deadline exceeded");
 }
 
-grpc::Status P2PConnectorPrefill::fillResponseWithStreamInfo(
-    const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-    P2PConnectorStartLoadResponsePB&                  response) {
-    // Read side-channel data from entry (filled by notifySideChannelReady)
-    P2PConnectorResourceEntry::SideChannelData data;
-    {
-        std::lock_guard<std::mutex> lock(resource_entry->side_channel_mutex);
-        if (!resource_entry->side_channel_ready) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "side-channel data not ready");
+grpc::Status P2PConnectorPrefill::fillResponseWithStreamInfo(const P2PConnectorResourceEntry::SideChannelData& data,
+                                                             P2PConnectorStartLoadResponsePB& response) {
+    try {
+        // Clear only the payload so each TensorPB is filled exactly once, including on reuse.
+        response.clear_payload();
+        // Fill response proto from side-channel data
+        auto* payload = response.mutable_payload();
+        payload->set_has_first_generate_token(data.has_first_token);
+        if (data.has_first_token) {
+            payload->set_first_generate_token_id(data.first_token_id);
         }
-        data = resource_entry->side_channel_data;
-    }
+        payload->set_total_reuse_len(data.total_reuse_len);
+        payload->set_local_reuse_len(data.local_reuse_len);
+        payload->set_remote_reuse_len(data.remote_reuse_len);
+        payload->set_memory_reuse_len(data.memory_reuse_len);
+        payload->set_disk_reuse_len(data.disk_reuse_len);
 
-    // Fill response proto from side-channel data
-    auto* payload = response.mutable_payload();
-    payload->set_has_first_generate_token(data.has_first_token);
-    if (data.has_first_token) {
-        payload->set_first_generate_token_id(data.first_token_id);
-    }
-    payload->set_total_reuse_len(data.total_reuse_len);
-    payload->set_local_reuse_len(data.local_reuse_len);
-    payload->set_remote_reuse_len(data.remote_reuse_len);
-    payload->set_memory_reuse_len(data.memory_reuse_len);
-    payload->set_disk_reuse_len(data.disk_reuse_len);
+        if (!data.propose_tokens.empty()) {
+            auto& propose_tensor = (*payload->mutable_tensors())["propose_tokens"];
+            auto* tokens_pb      = propose_tensor.mutable_tensor();
+            tokens_pb->set_data_type(TensorPB::INT32);
+            tokens_pb->add_shape(data.propose_tokens.size());
+            std::vector<int32_t> int32_tokens(data.propose_tokens.begin(), data.propose_tokens.end());
+            tokens_pb->set_int32_data(int32_tokens.data(), int32_tokens.size() * sizeof(int32_t));
+        }
+        const auto fill_tensor = [&](const char* name, const torch::Tensor& tensor) {
+            if (!tensor.defined()) {
+                // An absent SPOutputBuffer previously supplied a default FP32 PB with no shape.
+                (*payload->mutable_tensors())[name].mutable_tensor();
+                return;
+            }
+            if (!tensor.device().is_cpu()) {
+                throw std::runtime_error("side-channel tensor must be on CPU");
+            }
+            switch (tensor.scalar_type()) {
+                case torch::kFloat32:
+                    break;
+                case torch::kFloat16:
+                case torch::kBFloat16:
+                    if (tensor.numel() == 0) {
+                        return;
+                    }
+                    break;
+                case torch::kInt32:
+                    // Preserve the old filter, which omitted PBs with only int32_data.
+                    return;
+                default:
+                    throw std::runtime_error("unsupported side-channel tensor dtype");
+            }
+            TensorPbConvert::torchToPb((*payload->mutable_tensors())[name].mutable_tensor(), tensor);
+        };
+        fill_tensor("propose_probs", data.propose_probs);
+        fill_tensor("propose_hidden", data.propose_hidden);
+        if (!data.position_ids.empty()) {
+            auto& pos_tensor = (*payload->mutable_tensors())["position_ids"];
+            auto* pos_pb     = pos_tensor.mutable_tensor();
+            pos_pb->set_data_type(TensorPB::INT32);
+            pos_pb->add_shape(data.position_ids.size());
+            pos_pb->set_int32_data(data.position_ids.data(), data.position_ids.size() * sizeof(int32_t));
+        }
 
-    if (!data.propose_tokens.empty()) {
-        auto& propose_tensor = (*payload->mutable_tensors())["propose_tokens"];
-        auto* tokens_pb      = propose_tensor.mutable_tensor();
-        tokens_pb->set_data_type(TensorPB::INT32);
-        tokens_pb->add_shape(data.propose_tokens.size());
-        std::vector<int32_t> int32_tokens(data.propose_tokens.begin(), data.propose_tokens.end());
-        tokens_pb->set_int32_data(int32_tokens.data(), int32_tokens.size() * sizeof(int32_t));
-    }
-    if (data.propose_probs.data_type() != TensorPB::FP32 && data.propose_probs.fp16_data().empty()
-        && data.propose_probs.bf16_data().empty() && data.propose_probs.fp32_data().empty()) {
-        // propose_probs is empty but that's OK — skip
-    } else {
-        auto& probs_tensor = (*payload->mutable_tensors())["propose_probs"];
-        probs_tensor.mutable_tensor()->CopyFrom(data.propose_probs);
-    }
-    if (data.propose_hidden.data_type() != TensorPB::FP32 && data.propose_hidden.fp16_data().empty()
-        && data.propose_hidden.bf16_data().empty() && data.propose_hidden.fp32_data().empty()) {
-        // propose_hidden is empty but that's OK — skip
-    } else {
-        auto& hidden_tensor = (*payload->mutable_tensors())["propose_hidden"];
-        hidden_tensor.mutable_tensor()->CopyFrom(data.propose_hidden);
-    }
-    if (!data.position_ids.empty()) {
-        auto& pos_tensor = (*payload->mutable_tensors())["position_ids"];
-        auto* pos_pb     = pos_tensor.mutable_tensor();
-        pos_pb->set_data_type(TensorPB::INT32);
-        pos_pb->add_shape(data.position_ids.size());
-        pos_pb->set_int32_data(data.position_ids.data(), data.position_ids.size() * sizeof(int32_t));
-    }
+        RTP_LLM_LOG_DEBUG("fill response from entry: first_token: %ld, total_reuse: %d, local: %d, remote: %d, "
+                          "memory: %d, disk: %d",
+                          data.first_token_id,
+                          data.total_reuse_len,
+                          data.local_reuse_len,
+                          data.remote_reuse_len,
+                          data.memory_reuse_len,
+                          data.disk_reuse_len);
 
-    RTP_LLM_LOG_DEBUG("fill response from entry: first_token: %ld, total_reuse: %d, local: %d, remote: %d, "
-                      "memory: %d, disk: %d",
-                      data.first_token_id,
-                      data.total_reuse_len,
-                      data.local_reuse_len,
-                      data.remote_reuse_len,
-                      data.memory_reuse_len,
-                      data.disk_reuse_len);
-
-    return grpc::Status::OK;
+        return grpc::Status::OK;
+    } catch (const std::exception& error) {
+        response.clear_payload();
+        return grpc::Status(grpc::StatusCode::INTERNAL, error.what());
+    }
 }
 
 }  // namespace rtp_llm

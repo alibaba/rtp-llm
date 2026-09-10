@@ -133,9 +133,9 @@ public:
 
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
-    void notifySideChannelReady(const std::string&                                unique_key,
-                                int64_t                                           deadline_ms,
-                                const P2PConnectorResourceEntry::SideChannelData& data);
+    void              notifySideChannelReady(const std::string&                           unique_key,
+                                             int64_t                                      deadline_ms,
+                                             P2PConnectorResourceEntry::SideChannelData&& data);
     bool writeP2PLayer(size_t                                model_id,
                        int                                   local_layer_id,
                        const std::string&                    tag,

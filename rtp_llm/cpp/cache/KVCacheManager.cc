@@ -583,13 +583,13 @@ bool KVCacheManager::hasP2PConnector() const {
     return p2p_connector_ != nullptr;
 }
 
-void KVCacheManager::notifySideChannelReady(const std::string&                                unique_key,
-                                            int64_t                                           deadline_ms,
-                                            const P2PConnectorResourceEntry::SideChannelData& data) {
+void KVCacheManager::notifySideChannelReady(const std::string&                           unique_key,
+                                            int64_t                                      deadline_ms,
+                                            P2PConnectorResourceEntry::SideChannelData&& data) {
     if (p2p_connector_ && pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank == 0) {
         auto stream_store = p2p_connector_->streamStore();
         if (stream_store) {
-            stream_store->notifySideChannelReady(unique_key, deadline_ms, data);
+            stream_store->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
         }
     }
 }

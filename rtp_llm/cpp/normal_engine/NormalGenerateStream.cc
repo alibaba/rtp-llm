@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
-#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
 namespace rtp_llm {
 
@@ -222,8 +221,9 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                             (sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
                                                                          sp_output_buffer->hidden_states) :
                             torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
-                    TensorPbConvert::torchToPb(&side_data.propose_probs, propose_probs_cpu);
-                    TensorPbConvert::torchToPb(&side_data.propose_hidden, propose_hidden_cpu);
+                    // Keep D2H at publication time; the store must not retain GPU storage.
+                    side_data.propose_probs  = propose_probs_cpu.contiguous();
+                    side_data.propose_hidden = propose_hidden_cpu.contiguous();
                 }
                 auto pos_ids = getContextPositionIds();
                 if (pos_ids.defined() && pos_ids.numel() > 0) {
@@ -231,7 +231,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                     side_data.position_ids.assign(pos_cpu.data_ptr<int32_t>(),
                                                   pos_cpu.data_ptr<int32_t>() + pos_cpu.numel());
                 }
-                rc.cache_manager->notifySideChannelReady(uniqueKey(), deadlineMs(), side_data);
+                rc.cache_manager->notifySideChannelReady(uniqueKey(), deadlineMs(), std::move(side_data));
             }
             // DP inversion prefill has already produced the only token it is responsible for.
             // Mark it finished here so the state machine can release resources and persist

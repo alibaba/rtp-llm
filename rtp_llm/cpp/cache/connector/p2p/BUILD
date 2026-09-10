@@ -97,7 +97,7 @@ cc_library(
         "//rtp_llm/cpp/utils:grpc_address_util",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",
-    ],
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
 )
 
@@ -140,6 +140,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
+        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",

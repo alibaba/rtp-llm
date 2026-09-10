@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <torch/torch.h>
 
 namespace rtp_llm {
 
@@ -28,7 +28,7 @@ struct P2PConnectorResourceEntry {
     int64_t            request_deadline_ms;  // 原始请求截止时间，用于终态 tombstone
     int64_t            add_time_us;        // 添加时间
 
-    // Side-channel data (filled by prefill when first token / SP data is produced)
+    // Published CPU tensors are owned by this payload and must remain read-only.
     struct SideChannelData {
         bool                 has_first_token  = false;
         int64_t              first_token_id   = 0;
@@ -38,13 +38,10 @@ struct P2PConnectorResourceEntry {
         int32_t              memory_reuse_len = 0;
         int32_t              disk_reuse_len   = 0;
         std::vector<int>     propose_tokens;
-        TensorPB             propose_probs;
-        TensorPB             propose_hidden;
+        torch::Tensor        propose_probs;
+        torch::Tensor        propose_hidden;
         std::vector<int32_t> position_ids;
     };
-    SideChannelData         side_channel_data;
-    bool                    side_channel_ready = false;
-    mutable std::mutex      side_channel_mutex;
 };
 
 // Prefill rank 0 holds request KV resources until StartLoad takes ownership.
@@ -84,16 +81,16 @@ public:
                                                                     std::function<bool()> is_cancelled = nullptr);
 
     // Notify side-channel data ready (called by prefill when first token / SP data is produced)
-    void notifySideChannelReady(const std::string&                                unique_key,
-                                int64_t                                           deadline_ms,
-                                const P2PConnectorResourceEntry::SideChannelData& data);
+    void notifySideChannelReady(const std::string&                           unique_key,
+                                int64_t                                      deadline_ms,
+                                P2PConnectorResourceEntry::SideChannelData&& data);
 
     // Wait for side-channel data ready (called by P2PConnector when filling response)
     bool waitSideChannelReady(const std::string&    unique_key,
                               int64_t               deadline_ms,
                               std::function<bool()> is_cancelled = nullptr);
 
-    // Try to consume side-channel data from the request state (returns true if data was found and copied)
+    // Try to consume side-channel data from the request state (returns true if data was found and moved)
     bool consumeSideChannelData(const std::string& unique_key, P2PConnectorResourceEntry::SideChannelData& out_data);
     void clearSideChannelData(const std::string& unique_key);
 

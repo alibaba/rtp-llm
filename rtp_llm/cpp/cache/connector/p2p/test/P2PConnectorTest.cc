@@ -549,7 +549,7 @@ TEST_F(P2PConnectorTest, CancelBeforeHandleReadRejectsLateRequest) {
 // 1. asyncRead 注册 entry 到 stream_store
 // 2. notifySideChannelReady 设置 side-channel data
 // 3. handleRead -> waitAndStealResource -> waitAndFillResponse
-// 4. waitAndFillResponse 检查 side_channel_ready，发现已经是 true，立即返回
+// 4. waitAndFillResponse 消费已发布的 payload 并填充响应
 TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     // 1. 创建有效的 resource entry
     std::string unique_key  = "test_notify_side_channel_success";
@@ -567,9 +567,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     }
 
     // 3. 在调用 handleRead 之前，先调用 notifySideChannelReady
-    //    这会在 entry 上设置 side_channel_ready=true
-    //    然后 handleRead steal entry 时，entry 已经是 ready 状态
-    //    waitAndFillResponse 会立即返回
+    //    payload 保存在请求状态中，waitAndFillResponse 会直接消费。
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token  = true;
     data.first_token_id   = 12345;
@@ -580,12 +578,10 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     data.disk_reuse_len   = 3;
     data.propose_tokens   = {1001, 1002, 1003};
     data.position_ids     = {1, 2, 3, 4};
-    data.propose_probs.set_data_type(TensorPB::FP32);
-    data.propose_hidden.set_data_type(TensorPB::FP32);
+    data.propose_probs    = torch::tensor({0.25f, 0.75f});
+    data.propose_hidden   = torch::tensor({1.0f, 2.0f});
 
-    // 注意：notifySideChannelReady 需要在 handleRead steal entry 之前调用
-    // 这样 entry 的 side_channel_ready 才会被设置
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
 
     // 4. 创建 request 并调用 handleRead
     //    使用 num_workers = 1 简化测试
@@ -621,7 +617,7 @@ TEST_F(P2PConnectorTest, HandleRead_HoldsRank0RequestResourceUntilAllRanksReturn
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 12345;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
 
     tp_broadcast_servers_[0]->service()->setSleepMillis(0);
     tp_broadcast_servers_[1]->service()->setSleepMillis(300);
@@ -660,7 +656,7 @@ TEST_F(P2PConnectorTest, HandleRead_TimeoutReleasesPrefillResourceAfterCancelBro
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 12345;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
     for (auto& server : tp_broadcast_servers_) {
         server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::HANDLE_READ, 300);
         server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::CANCEL_HANDLE_READ, 0);
@@ -708,7 +704,7 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 34567;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
 
     for (auto& server : tp_broadcast_servers_) {
         server->service()->resetCallCounts();
@@ -769,7 +765,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenNotifySideChannelAfterSteal) {
     data.total_reuse_len  = 12;
     data.local_reuse_len  = 4;
     data.remote_reuse_len = 8;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
 
     auto status = handle_read_future.wait_for(std::chrono::seconds(2));
     ASSERT_EQ(status, std::future_status::ready);
@@ -798,7 +794,7 @@ TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
     data.first_token_id  = 0;
-    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, std::move(data));
 
     auto request = createValidStartLoadRequest(unique_key, deadline_ms, 1);
 

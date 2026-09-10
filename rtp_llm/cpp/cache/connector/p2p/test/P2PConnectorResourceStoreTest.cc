@@ -352,7 +352,7 @@ TEST_F(P2PConnectorResourceStoreTest, SideChannelTimeout_AutoRemoval) {
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 42;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
@@ -367,7 +367,7 @@ TEST_F(P2PConnectorResourceStoreTest, ClearSideChannelData_RemovesIndependentEnt
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 7;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
     stream_store_->clearSideChannelData(unique_key);
 
     P2PConnectorResourceEntry::SideChannelData consumed_data;
@@ -390,7 +390,7 @@ TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_SkipsWriteIfKeyAlre
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 42;
-    stream_store_->notifySideChannelReady(unique_key, currentTimeMs() + 5000, side_data);
+    stream_store_->notifySideChannelReady(unique_key, currentTimeMs() + 5000, std::move(side_data));
 
     P2PConnectorResourceEntry::SideChannelData consumed;
     EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed))
@@ -408,7 +408,7 @@ TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_WritesNormallyWhenN
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 99;
-    stream_store_->notifySideChannelReady(unique_key, currentTimeMs() + 5000, side_data);
+    stream_store_->notifySideChannelReady(unique_key, currentTimeMs() + 5000, std::move(side_data));
 
     P2PConnectorResourceEntry::SideChannelData consumed;
     ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed));
@@ -430,7 +430,7 @@ TEST_F(P2PConnectorResourceStoreTest, StolenEntry_SideChannelUsesTransferDeadlin
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 88;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
@@ -452,7 +452,7 @@ TEST_F(P2PConnectorResourceStoreTest, StolenEntry_TerminalRejectsLateSideChannel
     P2PConnectorResourceEntry::SideChannelData side_data;
     side_data.has_first_token = true;
     side_data.first_token_id  = 89;
-    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, std::move(side_data));
 
     P2PConnectorResourceEntry::SideChannelData consumed_data;
     EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
@@ -565,7 +565,7 @@ TEST_F(P2PConnectorResourceStoreTest, ExpiredLoadRejectsLateResourceAndSideChann
     auto meta = createMockMeta("late_load", 5002, request_deadline_ms);
     EXPECT_FALSE(stream_store_->addResource(meta, createMockKVCacheResource()));
     P2PConnectorResourceEntry::SideChannelData data;
-    stream_store_->notifySideChannelReady("late_load", request_deadline_ms, data);
+    stream_store_->notifySideChannelReady("late_load", request_deadline_ms, std::move(data));
     EXPECT_FALSE(stream_store_->consumeSideChannelData("late_load", data));
     EXPECT_EQ(stream_store_->waitAndStealResource("late_load", currentTimeMs() + 1000, request_deadline_ms), nullptr);
 }
@@ -579,7 +579,7 @@ TEST_F(P2PConnectorResourceStoreTest, DuplicateStartLoadCannotExtendSideChannelD
     EXPECT_EQ(stream_store_->waitAndStealResource("duplicate_load", request_deadline_ms, request_deadline_ms), nullptr);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     P2PConnectorResourceEntry::SideChannelData data;
-    stream_store_->notifySideChannelReady("duplicate_load", request_deadline_ms, data);
+    stream_store_->notifySideChannelReady("duplicate_load", request_deadline_ms, std::move(data));
     EXPECT_FALSE(stream_store_->consumeSideChannelData("duplicate_load", data));
 }
 

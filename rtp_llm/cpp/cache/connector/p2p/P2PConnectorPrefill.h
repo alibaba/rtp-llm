@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <c10/core/Event.h>
@@ -16,11 +17,9 @@ namespace rtp_llm {
 class KVCacheConnectorLayerContext;
 class Meta;
 class P2PBroadcastClient;
-class P2PConnectorResourceStore;
 class P2PConnectorSchedulerPrefill;
 class LayerBlockConverter;
 class P2PConnectorWorkerPrefill;
-struct P2PConnectorResourceEntry;
 
 class P2PConnectorPrefill {
 public:
@@ -81,7 +80,7 @@ private:
                              P2PConnectorStartLoadResponsePB&                  response,
                              std::function<bool()>                             is_cancelled = nullptr);
 
-    grpc::Status fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
+    grpc::Status fillResponseWithStreamInfo(const P2PConnectorResourceEntry::SideChannelData& data,
                                             P2PConnectorStartLoadResponsePB&                  response);
 
 private:
