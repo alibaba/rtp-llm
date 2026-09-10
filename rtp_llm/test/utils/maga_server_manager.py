@@ -115,6 +115,10 @@ class MagaServerManager(object):
         if not result:
             rc = self._server_process.poll() if self._server_process else None
             self._exit_code = rc
+            # Report through the None-safe property: the process may already be
+            # gone (or never started), and an AttributeError raised here would
+            # replace the real failure reason with a confusing NoneType error.
+            pid = self.server_pid
             if rc is not None:
                 if rc < 0:
                     sig = -rc
@@ -124,15 +128,15 @@ class MagaServerManager(object):
                         else f"signal {sig}"
                     )
                     logging.warning(
-                        f"Server process pid={self._server_process.pid} killed by {sig_name} (exit code {rc})"
+                        f"Server process pid={pid} killed by {sig_name} (exit code {rc})"
                     )
                 else:
                     logging.warning(
-                        f"Server process pid={self._server_process.pid} exited with code {rc}"
+                        f"Server process pid={pid} exited with code {rc}"
                     )
             else:
                 logging.warning(
-                    f"Server process pid={self._server_process.pid} still alive, health check timed out after {timeout}s"
+                    f"Server process pid={pid} still alive, health check timed out after {timeout}s"
                 )
             self.print_process_log()
         return result
