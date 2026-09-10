@@ -105,6 +105,7 @@ public:
 
     const BlockIds& blockIds(std::string_view tag) const;
     const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+    int             groupIdForLayerTag(int layer_id, std::string_view tag) const;
 
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
     const std::string&              soleGroupTagForLayer(int layer_id) const;
@@ -171,7 +172,6 @@ public:
 
 private:
     int  groupIdForTag(std::string_view tag) const;
-    int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
     bool hasOneGroupPerLayer() const;
 
     std::unordered_map<std::string, int>  tag_to_group_id_;

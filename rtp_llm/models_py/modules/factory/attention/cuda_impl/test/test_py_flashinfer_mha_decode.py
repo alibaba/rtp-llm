@@ -7,9 +7,9 @@ from typing import List
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest
-
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
+    _device_or,
 )
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import (
@@ -329,6 +329,15 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
         return attn_inputs
 
+    def test_empty_device_mirror_falls_back_to_base_tensor(self):
+        host = torch.tensor([7], dtype=torch.int32)
+        empty_device = torch.empty(0, dtype=torch.int32, device="cuda")
+        populated_device = torch.tensor([9], dtype=torch.int32, device="cuda")
+
+        self.assertIs(_device_or(empty_device, host), host)
+        self.assertIs(_device_or(None, host), host)
+        self.assertIs(_device_or(populated_device, host), populated_device)
+
     def test_capture_sets_fixed_batch_size(self):
         """prepare() with is_cuda_graph=True must set _fixed_batch_size."""
         config = self._create_config()
@@ -493,6 +502,64 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         logging.info(
             f"Replay OK: _fixed_batch_size={attn_op.decode_wrapper._fixed_batch_size}, "
             f"page_indptr={page_indptr.tolist()}"
+        )
+
+    def test_tensor_core_device_state_replay_refreshes_host_plan(self):
+        """Device-state tensor-core replay must rebuild its host-based plan."""
+        config = self._create_config()
+        capture_bs = 8
+        capture_seq_lens = [64, 128, 256, 512, 64, 128, 256, 512]
+        capture_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            capture_seq_lens,
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        self.assertTrue(attn_op.use_tensor_core)
+        fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(fmha_params)
+        attn_op.prepare(capture_inputs)
+
+        fixed_buffer_ptrs = (
+            fmha_params.decode_page_indptr_d.data_ptr(),
+            fmha_params.page_indice_d.data_ptr(),
+            fmha_params.paged_kv_last_page_len_d.data_ptr(),
+        )
+        plan_calls = []
+
+        def counted_plan(*args, **kwargs):
+            plan_calls.append((args, kwargs))
+
+        attn_op.decode_wrapper.plan = counted_plan
+
+        run_seq_lens = [100, 200, 300, 400, 64, 128, 256, 512]
+        run_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            run_seq_lens,
+            config.seq_size_per_block,
+        )
+        # Exercise the device-state entry while leaving the optional
+        # input-length mirror empty. _device_or must use the populated base
+        # tensor and the tensor-core path must still refresh host metadata.
+        run_inputs.sequence_lengths = run_inputs.sequence_lengths.cuda()
+        run_inputs.input_lengths = run_inputs.input_lengths.cuda()
+        run_inputs.prefix_lengths = run_inputs.prefix_lengths.cuda()
+        attn_op.prepare_for_cuda_graph_replay(run_inputs)
+
+        self.assertEqual(len(plan_calls), 1)
+        plan_args, plan_kwargs = plan_calls[0]
+        self.assertFalse(plan_args[0].is_cuda)
+        self.assertFalse(plan_args[1].is_cuda)
+        self.assertFalse(plan_args[2].is_cuda)
+        self.assertTrue(plan_kwargs["non_blocking"])
+        self.assertEqual(fmha_params.kvlen_h.tolist(), run_seq_lens)
+        self.assertEqual(
+            (
+                fmha_params.decode_page_indptr_d.data_ptr(),
+                fmha_params.page_indice_d.data_ptr(),
+                fmha_params.paged_kv_last_page_len_d.data_ptr(),
+            ),
+            fixed_buffer_ptrs,
         )
 
     def test_cuda_core_replay_does_not_replan(self):

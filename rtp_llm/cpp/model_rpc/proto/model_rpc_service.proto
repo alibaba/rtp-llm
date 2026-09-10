@@ -25,8 +25,12 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
-// Tagged cache identities replace process-local numeric group ids. Messages
-// that retain legacy counterparts document their own transition contract.
+// Tagged cache identities replace process-local numeric group ids. During the
+// rolling-upgrade window, senders populate both representations and readers
+// prefer the tagged representation while accepting the legacy fields. This
+// lets Prefill, Decode, P2P, remote-cache, and memory-cache peers upgrade or
+// roll back independently. Legacy fields can be removed only after the whole
+// deployment has crossed the tagged-protocol release.
 message TaggedBlockPB {
     string tag = 1;
     int32 block_id = 2;
@@ -630,7 +634,7 @@ service EmbeddingRpcService {
 message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
-        reserved 2;
+        repeated int32 gpu_blocks = 2 [deprecated = true];
         bool is_complete = 3;
         BackingType backing_type = 4;
         oneof disk_slot_presence {
@@ -678,7 +682,8 @@ message LayerCacheBlockPB {
     uint32 layer_id = 1;
     repeated int64 cache_keys = 2;
     repeated uint32 block_ids = 3;
-    string cache_tag = 4;
+    uint32 group_id = 4 [deprecated = true];
+    string cache_tag = 5;
 }
 
 enum P2PConnectorBroadcastType {
@@ -742,8 +747,7 @@ message P2PConnectorStartLoadResponsePB {
     reserved 1 to 8;
     reserved "first_generate_token_id", "total_reuse_len", "local_reuse_len", "remote_reuse_len", "propose_token_ids", "propose_probs", "propose_hidden", "position_ids";
 
-    // Keep error field numbers stable within this schema. This does not imply
-    // mixed-version support for grouped/independent-pool KV-cache deployments.
+    // Keep error field numbers stable for mixed-version peers.
     ErrorCodePB error_code = 9;
     string error_message = 10;
 
@@ -775,13 +779,11 @@ message FunctionRequestPB {
 }
 
 message RemoteOperationRequestPB {
-    // group_tags is the only valid group identity. Remote/memory connector
-    // peers must run the same build; the legacy numeric identity remains
-    // reserved without a fallback.
+    // Senders dual-write group_ids/group_tags. Readers prefer group_tags and
+    // use group_ids only for requests from a legacy peer.
     RemoteOpType op = 1;
     string trace_id = 2;
-    reserved 3;
-    reserved "group_ids";
+    repeated int32 group_ids = 3 [deprecated = true];
     repeated int32 block_ids = 4;
     repeated string uris = 5;
     repeated string group_tags = 6;

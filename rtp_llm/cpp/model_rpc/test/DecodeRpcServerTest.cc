@@ -141,11 +141,20 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
 
     const auto* remote = RemoteOperationRequestPB::descriptor();
     ASSERT_NE(remote, nullptr);
-    EXPECT_TRUE(remote->IsReservedNumber(3));
-    EXPECT_EQ(remote->FindFieldByName("group_ids"), nullptr);
+    EXPECT_EQ(remote->FindFieldByName("group_ids")->number(), 3);
     EXPECT_EQ(remote->FindFieldByName("block_ids")->number(), 4);
     EXPECT_EQ(remote->FindFieldByName("uris")->number(), 5);
     EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
+
+    const auto* copy_item = MemoryOperationRequestPB::CopyItem::descriptor();
+    ASSERT_NE(copy_item, nullptr);
+    EXPECT_EQ(copy_item->FindFieldByName("gpu_blocks")->number(), 2);
+    EXPECT_EQ(copy_item->FindFieldByName("tagged_gpu_blocks")->number(), 11);
+
+    const auto* layer_block = LayerCacheBlockPB::descriptor();
+    ASSERT_NE(layer_block, nullptr);
+    EXPECT_EQ(layer_block->FindFieldByName("group_id")->number(), 4);
+    EXPECT_EQ(layer_block->FindFieldByName("cache_tag")->number(), 5);
 }
 
 TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {

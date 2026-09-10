@@ -265,6 +265,20 @@ bool P2PConnector::executeHandleRead(int64_t                                 req
     return error_info.ok();
 }
 
+std::string P2PConnector::resolveCacheTag(const LayerCacheBlockPB& layer_block) const {
+    if (!layer_block.cache_tag().empty()) {
+        return layer_block.cache_tag();
+    }
+    const auto layer_id        = static_cast<int>(layer_block.layer_id());
+    const auto legacy_group_id = static_cast<int>(layer_block.group_id());
+    RTP_LLM_CHECK_WITH_INFO(legacy_group_id >= 0
+                                && static_cast<size_t>(legacy_group_id) < config_.cache_group_tags.size(),
+                            "P2P layer block has unknown legacy group_id=%d for layer=%d",
+                            legacy_group_id,
+                            layer_id);
+    return config_.cache_group_tags[static_cast<size_t>(legacy_group_id)];
+}
+
 bool P2PConnector::executeRead(int64_t                                 request_id,
                                const std::string&                      unique_key,
                                int64_t                                 deadline_ms,
@@ -272,10 +286,11 @@ bool P2PConnector::executeRead(int64_t                                 request_i
                                FunctionResponsePB&                     response) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (const auto& layer_block_pb : p2p_request.layer_blocks()) {
-        const auto  layer_id  = static_cast<int>(layer_block_pb.layer_id());
-        const auto& cache_tag = layer_block_pb.cache_tag();
+        const auto layer_id        = static_cast<int>(layer_block_pb.layer_id());
+        auto       cache_tag       = resolveCacheTag(layer_block_pb);
+        const auto legacy_group_id = static_cast<int>(layer_block_pb.group_id());
         RTP_LLM_CHECK_WITH_INFO(!cache_tag.empty(), "P2P layer block requires cache_tag for layer=%d", layer_id);
-        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag);
+        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag, legacy_group_id);
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
         RTP_LLM_CHECK_WITH_INFO(cache_keys.size() == block_ids.size(),
