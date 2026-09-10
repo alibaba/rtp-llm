@@ -20,6 +20,14 @@ def init_parallel_group_args(
         help="指定用于张量并行度。",
     )
     parallel_group.add_argument(
+        "--ktp_size",
+        env_name="KTP_SIZE",
+        bind_to=(parallelism_config, "ktp_size"),
+        type=int,
+        default=1,
+        help="Kimi K3 Decode projection-only KTP size. Supported values: 1, 8, 16.",
+    )
+    parallel_group.add_argument(
         "--ep_size",
         env_name="EP_SIZE",
         bind_to=(parallelism_config, "ep_size"),

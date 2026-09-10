@@ -58,6 +58,10 @@ struct FfnDisAggregateConfig {
 
 struct ParallelismConfig {
     int64_t tp_size          = 1;
+    // Projection-only tensor parallelism.  Unlike attention TP this group is
+    // used only around Kimi K3 Decode's KDA input projections; recurrent
+    // state, KV cache, output projection and residuals remain DP-local.
+    int64_t ktp_size         = 1;
     int64_t ep_size          = 1;
     int64_t dp_size          = 1;
     int64_t pp_size          = 1;
@@ -67,6 +71,7 @@ struct ParallelismConfig {
     int64_t local_rank       = 0;
     int64_t ffn_sp_size      = 1;
     int64_t tp_rank          = 0;
+    int64_t ktp_rank         = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
     int64_t ffn_tp_size      = 1;
@@ -90,6 +95,12 @@ struct ParallelismConfig {
     }
     int64_t get_attn_tp_rank() const {
         return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+    }
+    int64_t get_ktp_size() const {
+        return ktp_size;
+    }
+    int64_t get_ktp_rank() const {
+        return ktp_rank;
     }
     int64_t get_ffn_tp_size() const {
         return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
