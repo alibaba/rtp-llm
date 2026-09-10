@@ -781,10 +781,14 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     EXPECT_EQ(metrics.device_reuse_length, 2);
     EXPECT_EQ(metrics.host_reuse_length, 0);
     EXPECT_EQ(metrics.disk_reuse_length, 0);
-    EXPECT_FLOAT_EQ(metrics.kv_cache_hit_rate, 100.0f / 3.0f);
-    EXPECT_FLOAT_EQ(metrics.device_hit_rate, 100.0f / 3.0f);
-    EXPECT_FLOAT_EQ(metrics.host_hit_rate, 0.0f);
-    EXPECT_FLOAT_EQ(metrics.disk_hit_rate, 0.0f);
+    EXPECT_FALSE(metrics.report_hit_rates);
+    RtpLLMCacheReuseMetricsCollector hit_metrics;
+    ASSERT_TRUE(cache_manager_->collectCacheHitRates(cache_manager_->cache_hit_window_start_ + std::chrono::minutes(1),
+                                                     hit_metrics));
+    EXPECT_FLOAT_EQ(hit_metrics.kv_cache_hit_rate, 100.0f / 3.0f);
+    EXPECT_FLOAT_EQ(hit_metrics.device_hit_rate, 100.0f / 3.0f);
+    EXPECT_FLOAT_EQ(hit_metrics.host_hit_rate, 0.0f);
+    EXPECT_FLOAT_EQ(hit_metrics.disk_hit_rate, 0.0f);
     EXPECT_TRUE(metrics.report_reuse_metrics);
     EXPECT_TRUE(metrics.report_load_metrics);
     EXPECT_FALSE(metrics.load_success);
