@@ -187,9 +187,8 @@ class CacheStoreConfig:
     messager_worker_thread_count: int
     rdma_transfer_wait_timeout_ms: int
     rdma_max_block_pairs_per_connection: int
-    p2p_read_steal_before_deadline_ms: int
-    p2p_read_return_before_deadline_ms: int
     p2p_transfer_not_done_resource_hold_ms: int
+    p2p_lease_query_timeout_ms: int
     p2p_resource_store_timeout_check_interval_ms: int
     p2p_layer_cache_buffer_store_timeout_ms: int
     p2p_cancel_broadcast_timeout_ms: int

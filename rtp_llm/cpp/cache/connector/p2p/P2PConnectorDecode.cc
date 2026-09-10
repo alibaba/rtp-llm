@@ -29,6 +29,15 @@ P2PConnectorDecode::P2PConnectorDecode(P2PConnectorConfig                       
 P2PConnectorDecode::~P2PConnectorDecode() = default;
 
 bool P2PConnectorDecode::init() {
+    if (config_.worker_config.transfer_backend_config.cache_store_rdma_mode
+        && config_.scheduler_config.p2p_lease_query_timeout_ms
+               <= config_.worker_config.transfer_backend_config.rdma_disconnect_after_deadline_ms) {
+        RTP_LLM_LOG_ERROR("decode connector init failed: p2p_lease_query_timeout_ms (%ld) must be greater than "
+                          "rdma_disconnect_after_deadline_ms (%ld)",
+                          config_.scheduler_config.p2p_lease_query_timeout_ms,
+                          config_.worker_config.transfer_backend_config.rdma_disconnect_after_deadline_ms);
+        return false;
+    }
     if (config_.tp_rank == 0) {
         tp_broadcast_client_ = std::make_shared<P2PBroadcastClient>(
             config_.scheduler_config.worker_grpc_addrs, config_.scheduler_config.p2p_cancel_broadcast_timeout_ms);
@@ -77,7 +86,7 @@ std::shared_ptr<AsyncContext> P2PConnectorDecode::read(const KVCacheResourcePtr&
             resource,
             meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key,
             nullptr,
-            config_.scheduler_config.p2p_transfer_not_done_resource_hold_ms);
+            config_.scheduler_config.p2p_lease_query_timeout_ms);
         failed_context->markStartFailed(error_info);
         return failed_context;
     };

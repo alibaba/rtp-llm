@@ -86,8 +86,7 @@ private:
         std::string             error_msg;
     };
 
-    /// return_deadline_ms：须在此刻前结束 dispatch 与 send（与 decode recv_req.deadline_ms 对齐，均为 D -
-    /// p2p_read_return_before_deadline_ms）
+    /// transfer_deadline_ms：须在 D 前结束 dispatch 与 send，并与 decode recv task deadline 对齐。
     int dispatchPendingLayerTransfers(const std::shared_ptr<ComputedLayerCacheBuffer>& computed_buffer,
                                       const P2PWorkerRoutePlan&                       worker_plan,
                                       const std::string&                               unique_key,

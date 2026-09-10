@@ -114,28 +114,20 @@ def init_cache_store_group_args(parser, cache_store_config):
     )
 
     cache_store_group.add_argument(
-        "--p2p_read_steal_before_deadline_ms",
-        env_name="P2P_READ_STEAL_BEFORE_DEADLINE_MS",
-        bind_to=(cache_store_config, "p2p_read_steal_before_deadline_ms"),
-        type=int,
-        default=250,
-        help="Decode read：距 deadline 小于该毫秒数时从 recv store steal，阻止新 transfer 匹配。",
-    )
-    cache_store_group.add_argument(
-        "--p2p_read_return_before_deadline_ms",
-        env_name="P2P_READ_RETURN_BEFORE_DEADLINE_MS",
-        bind_to=(cache_store_config, "p2p_read_return_before_deadline_ms"),
-        type=int,
-        default=100,
-        help="Decode read 与 Prefill send：transfer 须在 deadline 前该毫秒数内完成（与对端对齐）。",
-    )
-    cache_store_group.add_argument(
         "--p2p_transfer_not_done_resource_hold_ms",
         env_name="P2P_TRANSFER_NOT_DONE_RESOURCE_HOLD_MS",
         bind_to=(cache_store_config, "p2p_transfer_not_done_resource_hold_ms"),
         type=int,
         default=10000,
-        help="Scheduler：TRANSFER_NOT_DONE 后延迟 done 以保留显存安全窗口（毫秒）。",
+        help="RDMA：到达 transfer deadline 后等待该时长，再 close 相关 connection（毫秒）。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_lease_query_timeout_ms",
+        env_name="P2P_LEASE_QUERY_TIMEOUT_MS",
+        bind_to=(cache_store_config, "p2p_lease_query_timeout_ms"),
+        type=int,
+        default=20000,
+        help="Decode：到达 transfer deadline 后查询 lease 的期限，超时由 rank 0 abort（毫秒）。",
     )
 
     cache_store_group.add_argument(

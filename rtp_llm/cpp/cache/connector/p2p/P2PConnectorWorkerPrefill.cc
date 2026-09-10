@@ -637,15 +637,11 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
         return ErrorInfo::OkStatus();
     }
 
-    // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
-    const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
-    const int64_t return_deadline_ms = deadline_ms - return_before_ms;
     RTP_LLM_LOG_DEBUG(
-        "sendKVCache [P2P]: start request_id=%ld, unique_key=%s, deadline_ms=%ld, return_deadline_ms=%ld, routes=%zu",
+        "sendKVCache [P2P]: start request_id=%ld, unique_key=%s, deadline_ms=%ld, routes=%zu",
         request_id,
         unique_key.c_str(),
         deadline_ms,
-        return_deadline_ms,
         worker_plan.routes.size());
     const int64_t start_time_us = currentTimeUs();
     auto          collector     = std::make_shared<PrefillWorkerSendMetricsCollector>();
@@ -712,7 +708,7 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
     const int sent_transfer_count = dispatchPendingLayerTransfers(computed_layer_cache_buffer,
                                                                   worker_plan,
                                                                   unique_key,
-                                                                  return_deadline_ms,
+                                                                  deadline_ms,
                                                                   cancel_flag,
                                                                   transfer_result,
                                                                   expected_buffer_keys,

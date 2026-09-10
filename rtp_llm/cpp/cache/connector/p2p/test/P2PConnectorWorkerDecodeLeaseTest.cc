@@ -238,9 +238,6 @@ protected:
         config_.tp_size                            = 1;
         config_.tp_rank                            = 0;
         config_.layer_all_num                      = 2;
-        config_.p2p_read_return_before_deadline_ms = 50;
-        config_.p2p_read_steal_before_deadline_ms  = 80;
-
         mock_converter_    = std::make_shared<LeaseTestMockLayerBlockConverter>();
         inflight_receiver_ = std::make_shared<InflightMockReceiver>();
 
@@ -572,8 +569,8 @@ TEST_F(DecodeLeaseRaceTest, A3_CancelMixedPendingAndTransferring_LeaseWaitsForIn
 TEST_F(DecodeLeaseRaceTest, B1_TransferNotDone_LeasePolledUntilAllComplete) {
     const std::string key     = "b1_transfer_not_done";
     auto              buffers = makeBuffers(2);
-    // Very short deadline so read() hits return_deadline quickly
-    int64_t deadline_ms = currentTimeMs() + 60;  // return_deadline = deadline - 50 = now+10ms
+    // Very short deadline so read() reaches D quickly.
+    int64_t deadline_ms = currentTimeMs() + 60;
 
     auto result      = std::make_shared<ReadResult>();
     auto read_thread = startReadThread(key, deadline_ms, buffers, result);
@@ -651,7 +648,7 @@ TEST_F(DecodeLeaseRaceTest, B2_TransferNotDone_StolenTasksStillComplete) {
     ASSERT_TRUE(result->done.load());
     EXPECT_EQ(result->error.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
 
-    // Verify steal was called (steal_before > return_before, so steal happens before return)
+    // D reached: recv tasks were stolen before the worker returned.
     EXPECT_GE(inflight_receiver_->stealCount(), 1);
 
     // Tasks complete with cancel_requested (simulating transport layer finishing)
@@ -673,12 +670,12 @@ TEST_F(DecodeLeaseRaceTest, B2_TransferNotDone_StolenTasksStillComplete) {
 }
 
 // =============================================================================
-// GROUP D: queryLeaseStatus driven finish counting
+// GROUP D: worker-local finish counting observed by queryLeaseStatus
 //
-// Verify the lazy counting mechanism works correctly.
+// Verify QUERY_LEASE_STATUS does not need to advance counters itself.
 // =============================================================================
 
-// D1: queryLeaseStatus correctly counts newly-done tasks incrementally.
+// D1: queryLeaseStatus observes locally-counted task completion incrementally.
 TEST_F(DecodeLeaseRaceTest, D1_QueryLeaseStatus_IncrementalFinishCounting) {
     const std::string key     = "d1_incremental";
     auto              buffers = makeBuffers(3);
@@ -713,18 +710,21 @@ TEST_F(DecodeLeaseRaceTest, D1_QueryLeaseStatus_IncrementalFinishCounting) {
 
     // Complete task 0
     inflight_receiver_->getInflightTask(task_keys[0])->notifyDone(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
     EXPECT_EQ(finished_ops, 1);
     EXPECT_FALSE(stopped);
 
     // Complete task 1
     inflight_receiver_->getInflightTask(task_keys[1])->notifyDone(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
     EXPECT_EQ(finished_ops, 2);
     EXPECT_FALSE(stopped);
 
     // Complete task 2 → all done → stopped
     inflight_receiver_->getInflightTask(task_keys[2])->notifyDone(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     bool found = decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
     EXPECT_EQ(finished_ops, 3);
     EXPECT_TRUE(stopped);
@@ -759,6 +759,7 @@ TEST_F(DecodeLeaseRaceTest, D2_QueryLeaseStatus_NoDoubleCount) {
     // Complete one task
     auto task_keys = inflight_receiver_->getTaskKeys();
     inflight_receiver_->getInflightTask(task_keys[0])->notifyDone(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     bool sealed, stopped;
     int  started_ops, finished_ops;
@@ -778,6 +779,7 @@ TEST_F(DecodeLeaseRaceTest, D2_QueryLeaseStatus_NoDoubleCount) {
 
     // Now complete second task
     inflight_receiver_->getInflightTask(task_keys[1])->notifyDone(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
     EXPECT_EQ(finished_ops, 2);
     EXPECT_TRUE(stopped);
@@ -960,6 +962,7 @@ TEST_F(DecodeLeaseRaceTest, E3_MultiLayerMultiPartition_StaggeredCompletion) {
 
     for (int i = 0; i < 4; ++i) {
         inflight_receiver_->getInflightTask(task_keys[i])->notifyDone(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
         bool found = decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
 
         if (i < 3) {

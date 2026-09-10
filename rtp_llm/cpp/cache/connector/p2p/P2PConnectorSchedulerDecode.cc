@@ -281,9 +281,10 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     auto async_context = std::make_shared<P2PConnectorAsyncReadContext>(resource,
                                                                         unique_key,
                                                                         collector,
-                                                                        config_.p2p_transfer_not_done_resource_hold_ms,
+                                                                        config_.p2p_lease_query_timeout_ms,
                                                                         no_transfer,
-                                                                        request_deadline_ms);
+                                                                        request_deadline_ms,
+                                                                        transfer_deadline_ms);
 
     auto submit_result = async_read_pool_->pushTask(
         [this,

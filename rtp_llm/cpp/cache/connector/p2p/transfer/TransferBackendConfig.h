@@ -21,6 +21,7 @@ struct TransferBackendConfig {
     // Each staging block is one concurrent transfer slot and must hold all CUDA sub-blocks in that transfer.
     int     p2p_rdma_staging_block_count        = 0;
     int64_t p2p_rdma_staging_block_size_bytes   = 0;
+    int64_t rdma_disconnect_after_deadline_ms   = 10 * 1000;
     /// 0: 关闭 TcpClient channel idle 淘汰；大于 0 为毫秒
     int64_t tcp_channel_idle_ttl_ms = 0;
     /// 0: 关闭每 N 次 getChannel 的全表清扫，仅 miss 时清扫；大于 0 为间隔

@@ -105,7 +105,7 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
                                       const std::string&             unique_key,
                                       int64_t                        deadline_ms) {
 
-    // gRPC 超时：在绝对 deadline_ms 前结束（worker 侧已按 D 提前返回，余量由 p2p_read_return_before_deadline_ms 承担）
+    // gRPC 超时与物理传输共用绝对 deadline_ms（D）。
     auto timeout_ms = deadline_ms - currentTimeMs();
     if (timeout_ms <= 0) {
         RTP_LLM_LOG_WARNING("broadcast timeout_ms: %ld <= 0, deadline_ms: %ld current_time_ms: %ld",

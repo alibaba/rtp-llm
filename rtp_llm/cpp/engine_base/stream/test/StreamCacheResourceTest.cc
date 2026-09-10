@@ -1017,7 +1017,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureWaitsForP2PCancelBeforeT
     resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false);
     auto matched_resource            = std::make_shared<KVCacheResource>();
     auto p2p_context = std::make_shared<P2PConnectorAsyncReadContext>(
-        matched_resource, "tree-load-failure", nullptr, /*transfer_not_done_hold_ms=*/1000);
+        matched_resource, "tree-load-failure", nullptr, /*lease_query_timeout_ms=*/1000);
     resource.p2p_load_context_ = p2p_context;
 
     EXPECT_FALSE(resource.loadCacheDone());
@@ -1048,7 +1048,7 @@ TEST_F(StreamCacheResourceTest, testP2PLoadFailureIsTerminalWithoutRetry) {
     const auto local_covered_blocks = resource.batch_kv_cache_resource_->cacheResource(0).deviceReuseBlockNum();
     matched_resource->cacheKeys().resize(local_covered_blocks + 1, 1);
     auto load_context = std::make_shared<P2PConnectorAsyncReadContext>(
-        matched_resource, "test-p2p-no-retry", nullptr, /*transfer_not_done_hold_ms=*/0);
+        matched_resource, "test-p2p-no-retry", nullptr, /*lease_query_timeout_ms=*/0);
     load_context->markStartFailed(
         ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED, "injected P2P transfer failure"));
     resource.p2p_load_context_ = load_context;
@@ -1067,7 +1067,7 @@ TEST_F(StreamCacheResourceTest, testP2PNoTransferFailureIsTerminal) {
     const auto local_covered_blocks = resource.batch_kv_cache_resource_->cacheResource(0).deviceReuseBlockNum();
     matched_resource->cacheKeys().resize(local_covered_blocks, 1);
     auto load_context = std::make_shared<P2PConnectorAsyncReadContext>(
-        matched_resource, "test-p2p-no-transfer-failure", nullptr, /*transfer_not_done_hold_ms=*/0);
+        matched_resource, "test-p2p-no-transfer-failure", nullptr, /*lease_query_timeout_ms=*/0);
     load_context->markStartFailed(
         ErrorInfo(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED, "injected no-transfer StartLoad failure"));
     resource.p2p_load_context_ = load_context;
@@ -1107,7 +1107,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
                                                                     broadcast_result,
                                                                     server_result,
                                                                     collector,
-                                                                    /*transfer_not_done_hold_ms=*/0,
+                                                                    /*lease_query_timeout_ms=*/0,
                                                                     /*no_transfer=*/true);
     context->checkDone();
     ASSERT_TRUE(context->success());
@@ -1142,7 +1142,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
                                                                     broadcast_result,
                                                                     server_result,
                                                                     collector,
-                                                                    /*transfer_not_done_hold_ms=*/0,
+                                                                    /*lease_query_timeout_ms=*/0,
                                                                     /*no_transfer=*/true);
     context->checkDone();
     ASSERT_TRUE(context->success());

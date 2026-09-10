@@ -20,9 +20,7 @@ struct P2PConnectorSchedulerConfig {
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
     std::vector<std::string> p2p_worker_addrs;
-    // Hard upper bound for Decode target retention after a transfer-not-done/cancelled outcome.
-    // A confirmed physical RDMA completion releases the resource earlier.
-    int64_t                  p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
+    int64_t                  p2p_lease_query_timeout_ms                   = 20 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                  p2p_prefill_resource_hold_ms                 = 300 * 1000;
@@ -50,7 +48,7 @@ struct P2PConnectorSchedulerConfig {
         config.worker_grpc_addrs                      = runtime_config.worker_grpc_addrs;
         config.worker_addrs                           = runtime_config.worker_addrs;
         config.p2p_worker_addrs                       = runtime_config.p2p_worker_addrs;
-        config.p2p_transfer_not_done_resource_hold_ms = cache_store_config.p2p_transfer_not_done_resource_hold_ms;
+        config.p2p_lease_query_timeout_ms = cache_store_config.p2p_lease_query_timeout_ms;
         config.p2p_resource_store_timeout_check_interval_ms =
             cache_store_config.p2p_resource_store_timeout_check_interval_ms;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
@@ -64,8 +62,6 @@ struct P2PConnectorSchedulerConfig {
 struct P2PConnectorWorkerConfig {
     transfer::TransferBackendConfig transfer_backend_config;
 
-    int64_t p2p_read_steal_before_deadline_ms       = 250;
-    int64_t p2p_read_return_before_deadline_ms      = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
     int64_t p2p_prefill_resource_hold_ms            = 300 * 1000;
     int64_t p2p_cancelled_keys_ttl_ms                = 3600 * 1000;
@@ -107,9 +103,9 @@ struct P2PConnectorWorkerConfig {
             cache_store_config.p2p_rdma_staging_block_count;
         config.transfer_backend_config.p2p_rdma_staging_block_size_bytes =
             cache_store_config.p2p_rdma_staging_block_size_bytes;
+        config.transfer_backend_config.rdma_disconnect_after_deadline_ms =
+            cache_store_config.p2p_transfer_not_done_resource_hold_ms;
         config.p2p_layer_cache_buffer_store_timeout_ms = cache_store_config.p2p_layer_cache_buffer_store_timeout_ms;
-        config.p2p_read_steal_before_deadline_ms       = cache_store_config.p2p_read_steal_before_deadline_ms;
-        config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;
         config.p2p_prefill_resource_hold_ms            = cache_store_config.p2p_prefill_resource_hold_ms;
         config.p2p_cancelled_keys_ttl_ms                = cache_store_config.p2p_cancelled_keys_ttl_ms;
         config.tp_size                                 = parallelism_config.tp_size;

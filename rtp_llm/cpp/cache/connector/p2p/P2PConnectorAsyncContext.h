@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/LoopThread.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -23,15 +24,17 @@ public:
     P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                               resource,
                                  std::string                                             unique_key,
                                  const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
-                                 int64_t                                                 transfer_not_done_hold_ms,
+                                 int64_t                                                 lease_query_timeout_ms,
                                  bool                                                    no_transfer = false,
-                                 int64_t                                                 request_deadline_ms = 0):
+                                 int64_t                                                 request_deadline_ms = 0,
+                                 int64_t                                                 transfer_deadline_ms = 0):
         resource_(resource),
         unique_key_(std::move(unique_key)),
         collector_(collector),
-        transfer_not_done_hold_ms_(transfer_not_done_hold_ms),
+        lease_query_timeout_ms_(std::max<int64_t>(1, lease_query_timeout_ms)),
         no_transfer_(no_transfer),
         request_deadline_ms_(request_deadline_ms),
+        transfer_deadline_ms_(transfer_deadline_ms),
         done_(false),
         success_(false),
         error_code_(ErrorCode::NONE_ERROR) {}
@@ -40,16 +43,18 @@ public:
                                  const std::shared_ptr<P2PBroadcastClient::Result>&      tp_sync_result,
                                  const std::shared_ptr<DecodeLoadHelper::Result>&       server_call_result,
                                  const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
-                                 int64_t                                                 transfer_not_done_hold_ms,
+                                 int64_t                                                 lease_query_timeout_ms,
                                  bool                                                    no_transfer = false,
-                                 int64_t                                                 request_deadline_ms = 0):
+                                 int64_t                                                 request_deadline_ms = 0,
+                                 int64_t                                                 transfer_deadline_ms = 0):
         resource_(resource),
         tp_sync_result_(tp_sync_result),
         server_call_result_(server_call_result),
         collector_(collector),
-        transfer_not_done_hold_ms_(transfer_not_done_hold_ms),
+        lease_query_timeout_ms_(std::max<int64_t>(1, lease_query_timeout_ms)),
         no_transfer_(no_transfer),
         request_deadline_ms_(request_deadline_ms),
+        transfer_deadline_ms_(transfer_deadline_ms),
         done_(false),
         success_(false),
         error_code_(ErrorCode::NONE_ERROR),
@@ -63,6 +68,8 @@ public:
     bool success() const override;
 
     void checkDone();
+    void checkCancelDone();
+    bool expireTransferDeadlineIfNeeded();
     bool needCancel() const;
     void cancel(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
@@ -81,17 +88,19 @@ public:
     }
 
     // Called periodically while Decode target resources are retained after the
-    // request has already completed with TRANSFER_NOT_DONE/CANCELLED.
+    // request has already completed with timeout/cancellation.
     // Broadcasts QUERY_LEASE_STATUS to all TP workers. The hold ends when all
-    // ranks stop or when the configured resource-hold deadline is reached.
+    // ranks stop. If no valid all-rank stopped result is available by D plus
+    // the configured query timeout, rank 0 fails fast instead of releasing KV.
     void pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
-    // Release an expired resource hold without issuing an RPC. The checker
-    // calls this for every context before selecting one lease to poll.
-    bool expireLeaseHoldIfNeeded();
+    void failStopIfLeaseUnconfirmed();
 
     bool needLeasePoll() const {
         if (!lease_hold_pending_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        if (!cancel_confirmed_.load(std::memory_order_acquire)) {
             return false;
         }
         const int64_t now_ms        = currentTimeMs();
@@ -142,6 +151,7 @@ private:
 
     MergedReadOutcome mergeReadResultsWhenBothDone() const;
     void              applyMergedReadOutcome(const MergedReadOutcome& outcome);
+    void              beginLeaseHold();
 
     const KVCacheResourcePtr                               resource_;
     const std::string                                      unique_key_;
@@ -149,9 +159,10 @@ private:
     std::shared_ptr<DecodeLoadHelper::Result>             server_call_result_;
     const std::shared_ptr<DecodeSchedulerMetricsCollector> collector_;
 
-    const int64_t transfer_not_done_hold_ms_;
+    const int64_t lease_query_timeout_ms_;
     const bool    no_transfer_;
     const int64_t request_deadline_ms_;
+    const int64_t transfer_deadline_ms_;
 
     mutable std::mutex      state_mutex_;
     std::condition_variable done_cv_;
@@ -161,7 +172,9 @@ private:
     std::string             error_message_;
     std::atomic<bool>       lease_hold_pending_{false};
     std::atomic<int64_t>    lease_hold_until_ms_{0};
-    std::atomic<bool>       tp_cancel_broadcast_triggered_{false};
+    std::atomic<bool>                            tp_cancel_broadcast_triggered_{false};
+    std::shared_ptr<P2PBroadcastClient::Result> cancel_result_;  // guarded by state_mutex_
+    std::atomic<bool>                            cancel_confirmed_{false};
 
     // Lease polling state (active while lease_hold_pending_ is true).
     std::atomic<bool>    lease_all_ranks_stopped_{false};  // set when poll confirms all ranks stopped

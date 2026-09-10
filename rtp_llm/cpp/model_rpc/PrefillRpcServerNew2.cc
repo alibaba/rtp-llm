@@ -346,10 +346,6 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     RTP_LLM_LOG_DEBUG("receive start load request from client: %s, request: [%s]",
                       context->peer().c_str(),
                       request->DebugString().c_str());
-    if (context->IsCancelled()) {
-        RTP_LLM_LOG_WARNING("start load failed, request is cancelled");
-        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
-    }
     if (!engine_) {
         RTP_LLM_LOG_WARNING("start load failed, engine is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "engine is null");

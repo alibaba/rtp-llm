@@ -199,11 +199,14 @@ class EngineConfigTest(TestCase):
     def test_cache_store_config_accepts_legacy_20_field_pickle_state(self):
         config = CacheStoreConfig()
         state = config.__getstate__()
-        self.assertEqual(len(state), 29)
+        self.assertEqual(len(state), 28)
 
-        # Legacy state before the three p2p deadline fields and three worker
+        # Recreate the former 29-field layout, including the two removed early
+        # deadline offsets and excluding the new lease query timeout.
+        old_state = state[:12] + (250, 100) + state[12:13] + state[14:]
+        # Legacy state before the three P2P horizon fields and three worker
         # queue fields were added: first 18 fields + TCP anet thread/queue.
-        legacy_state = state[:18] + state[21:23]
+        legacy_state = old_state[:18] + old_state[21:23]
         self.assertEqual(len(legacy_state), 20)
 
         restored = CacheStoreConfig()

@@ -535,7 +535,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
 
 // ==================== sendKVCache 测试 (Prefill 端) ====================
 
-TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithReturnBefore) {
+TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithTransferDeadline) {
     int64_t     request_id  = 2000;
     std::string unique_key  = "test_send_deadline_align";
     int64_t     deadline_ms = currentTimeMs() + 5000;
@@ -549,13 +549,13 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithReturn
     addComputedBuffer(request_id, 0, deadline_ms);
     addComputedBuffer(request_id, 1, deadline_ms);
 
-    const int64_t expected_transfer_deadline = deadline_ms - worker_config_.p2p_read_return_before_deadline_ms;
+    const int64_t expected_transfer_deadline = deadline_ms;
     ErrorInfo     result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers));
     EXPECT_TRUE(result.ok());
 
     for (const auto& c : mock_sender_->getTransferCalls()) {
         EXPECT_EQ(c.deadline_ms, expected_transfer_deadline)
-            << "SendRequest.deadline_ms should match decode recv_task_deadline (D - return_before)";
+            << "SendRequest.deadline_ms should match decode recv task deadline D";
     }
 }
 
@@ -696,7 +696,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_PartialLayersTransferFaile
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) {
     int64_t     request_id = 2003;
     std::string unique_key = "test_some_layers_missing";
-    // D 须足够大，使 return_deadline_ms=D-100 仍晚于 now，才能先发出已有 layer 再因缺层失败
+    // D 须足够大，使已有 layer 能先发出，再因缺层失败。
     int64_t deadline_ms = currentTimeMs() + 150;
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
@@ -797,7 +797,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AsymmetricTP_2P4D_Success) 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_TransferTimeout) {
     int64_t     request_id = 2005;
     std::string unique_key = "test_transfer_timeout";
-    // 足够长的 D，使 return_deadline 晚于 200ms 回调延迟，仍能等到 mock 回调
+    // 足够长的 D，使其晚于 200ms 回调延迟，仍能等到 mock 回调。
     int64_t deadline_ms = currentTimeMs() + 500;
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
@@ -904,7 +904,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_Timeout) {
 
     auto start_time_ms = currentTimeMs();
 
-    // 不调用 simulateTaskDone；return_deadline = D - return_before_ms 已过，尽快以 TRANSFER_NOT_DONE 返回
+    // 不调用 simulateTaskDone；到 D 后以 TRANSFER_NOT_DONE 返回。
     ErrorInfo error_info = decode_->read(request_id, unique_key, deadline_ms, makeReadPlan(layer_cache_buffers));
 
     EXPECT_TRUE(error_info.hasError());
@@ -934,7 +934,7 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_RdmaTransferWaitTimeout) {
 
     int64_t     request_id = 4001;
     std::string unique_key = "test_rdma_transfer_wait_timeout_handleread";
-    // 刻意让 return_deadline 远晚于 rdma cap，防止把 cap 错实现为反复轮询分片。
+    // 刻意让 D 远晚于 rdma cap，防止把 cap 错实现为反复轮询分片。
     int64_t deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
@@ -984,7 +984,6 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_RdmaTransferWaitTimeout) {
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
     std::string unique_key = "test_rdma_transfer_wait_timeout_read";
     int64_t     request_id = 4002;
-    // return_deadline = D - return_before_ms ≈ now + 100ms
     int64_t deadline_ms = currentTimeMs() + 200;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -993,7 +992,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
 
     auto start_time_ms = currentTimeMs();
 
-    // 不调用 simulateTaskDone：在 return 截止前退出，返回 TRANSFER_NOT_DONE，不 forceCancel
+    // 不调用 simulateTaskDone：到 D 时返回 TRANSFER_NOT_DONE。
     ErrorInfo error_info = decode_->read(request_id, unique_key, deadline_ms, makeReadPlan(layer_cache_buffers));
 
     auto elapsed_ms = currentTimeMs() - start_time_ms;
@@ -1001,8 +1000,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
     EXPECT_TRUE(error_info.hasError());
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
 
-    // 至少等到接近 return 截止（约 100ms），允许退避误差
-    EXPECT_GE(elapsed_ms, 85);
+    // 至少等到接近 D（约 200ms），允许退避误差
+    EXPECT_GE(elapsed_ms, 180);
     EXPECT_LE(elapsed_ms, 400);
     EXPECT_GE(mock_receiver_->stealTaskCount(), 1);
 }
@@ -1076,6 +1075,14 @@ TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnTrue_DuringRecvRegistrationWindo
     ASSERT_TRUE(mock_receiver_->waitUntilRecvEntered(std::chrono::seconds(1)));
     EXPECT_TRUE(decode_->cancelRead(unique_key));
 
+    bool sealed       = true;
+    int  started_ops  = 0;
+    int  finished_ops = 0;
+    bool stopped      = true;
+    EXPECT_TRUE(decode_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped));
+    EXPECT_FALSE(sealed);
+    EXPECT_FALSE(stopped);
+
     mock_receiver_->releaseBlockedRecv();
 
     int wait_count = 0;
@@ -1126,6 +1133,26 @@ TEST_F(P2PConnectorWorkerTest, CancelReadBeforeReadCancelsLateRead) {
     route.layer_buffers = layer_cache_buffers;
     plan.routes.push_back(route);
     auto result = decode_->read(3009, unique_key, currentTimeMs() + 5000, plan);
+
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+    EXPECT_EQ(mock_receiver_->taskCount(), 0);
+}
+
+TEST_F(P2PConnectorWorkerTest, CancelReadWithExpiredRequestDeadlineStillCancelsLateRead) {
+    std::string unique_key = "test_cancel_expired_request_deadline";
+
+    EXPECT_TRUE(decode_->cancelRead(unique_key, currentTimeMs() - 1));
+
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
+    P2PWorkerRoutePlan plan;
+    P2PWorkerRoute     route;
+    route.route_id      = 0;
+    route.cache_tag     = layer_cache_buffers[0]->cacheTag();
+    route.layer_buffers = layer_cache_buffers;
+    plan.routes.push_back(route);
+    auto result = decode_->read(3010, unique_key, currentTimeMs() + 5000, plan);
 
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);

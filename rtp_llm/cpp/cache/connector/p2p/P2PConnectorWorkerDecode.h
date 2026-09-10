@@ -72,8 +72,7 @@ private:
                              const std::shared_ptr<ReadTaskGroup>& task_group,
                              int&                                  total_block_count) const;
 
-    /// 等待 recv 完成、cancel，或到达 return_deadline_ms（D - return_before）；到达 steal 时刻时从 store steal 各
-    /// partition key。
+    /// 等待 recv 完成、cancel，或到达 D；到 D 时一次性 steal、seal 并取消未完成任务。
     ReadWaitOutcome waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
                                                         int64_t                               deadline_ms,
                                                         int64_t                               request_id,
@@ -99,20 +98,15 @@ private:
     std::unordered_map<std::string, int64_t>                         pending_cancel_keys_;
 
     // Leases kept after read() returns so QUERY_LEASE_STATUS can observe physical completion.
-    // Completed entries are removed by queries; all entries also have a periodic hard TTL.
+    // The local cleanup thread advances completion counters; queries only read them.
     struct LeaseMapEntry {
         std::shared_ptr<ReadTaskGroup> task_group;
         int                            finish_counted{0};  // how many tasks have been counted as finished so far
-        int64_t                        create_time_ms{0};
     };
 
-    // Hard metadata-retention bound. Active transport contexts hold their own
-    // task references, so this tracking entry has no value after its TTL.
-    static constexpr int64_t kLeaseMapTtlMs = 600000;  // 10 min
-
     // Requires lease_map_mutex_ to be held by caller.
-    void evictStaleLeases();
-    void cleanupStaleLeases();
+    static void advanceLeaseProgress(LeaseMapEntry& entry);
+    void updateLeaseProgress();
     mutable std::mutex                             lease_map_mutex_;
     std::unordered_map<std::string, LeaseMapEntry> lease_map_;
     autil::LoopThreadPtr                           lease_cleanup_thread_;

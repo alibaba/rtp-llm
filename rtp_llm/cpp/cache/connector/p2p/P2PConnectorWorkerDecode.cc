@@ -24,7 +24,7 @@ P2PConnectorWorkerDecode::P2PConnectorWorkerDecode(P2PConnectorWorkerConfig     
     metrics_reporter_(metrics_reporter),
     receiver_(receiver) {
     lease_cleanup_thread_ = autil::LoopThread::createLoopThread(
-        std::bind(&P2PConnectorWorkerDecode::cleanupStaleLeases, this), 1000000, "P2PDecodeLeaseCleanup");
+        std::bind(&P2PConnectorWorkerDecode::updateLeaseProgress, this), 10 * 1000, "P2PDecodeLeaseProgress");
     if (!lease_cleanup_thread_) {
         RTP_LLM_LOG_ERROR("P2PConnectorWorkerDecode failed to start lease cleanup thread");
     }
@@ -41,10 +41,6 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
                                                    int64_t                               deadline_ms,
                                                    const std::shared_ptr<ReadTaskGroup>& task_group,
                                                    int&                                  total_block_count) const {
-    // 与 return_deadline_ms（D - p2p_read_return_before_deadline_ms）对齐，TransferTask / TCP 侧 isTimeout 与 worker
-    // 必须结束 read 的时刻一致。
-    const int64_t recv_task_deadline_ms = deadline_ms - config_.p2p_read_return_before_deadline_ms;
-
     for (const auto& route : worker_plan.routes) {
         const size_t payload_bytes =
             config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0;
@@ -70,7 +66,7 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
             transfer::RecvRequest recv_req;
             recv_req.unique_key  = partition_layer_key;
             recv_req.block_info  = std::move(key_block_infos);
-            recv_req.deadline_ms = recv_task_deadline_ms;
+            recv_req.deadline_ms = deadline_ms;
 
             auto task = receiver_->recv(recv_req);
             if (!task) {
@@ -115,21 +111,9 @@ P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_
                                                               int64_t                               deadline_ms,
                                                               int64_t                               request_id,
                                                               const std::string&                    unique_key) const {
-    // deadline_ms：scheduler 下发的绝对时间戳（ms），与 currentTimeMs() 同单位。
-    // return_deadline_ms = D - return_before_ms：须在此刻前结束等待并向 scheduler 返回 RPC，为链路留出 return_before_ms
-    // 余量。 steal_deadline_ms：到达 D - steal_before_ms 时从 recv store steal 各 partition key，阻止后续 sender
-    // 再匹配到新传输； 与 return 线取 min，避免配置错误时 steal 时刻晚于必须返回时刻。
-    const int64_t steal_before_ms  = config_.p2p_read_steal_before_deadline_ms;
-    const int64_t return_before_ms = config_.p2p_read_return_before_deadline_ms;
+    int sleep_ms = kBackoffInitialMs;
 
-    const int64_t return_deadline_ms = deadline_ms - return_before_ms;
-    const int64_t steal_deadline_ms  = std::min(deadline_ms - steal_before_ms, return_deadline_ms);
-
-    bool store_stolen = false;
-    int  sleep_ms     = kBackoffInitialMs;
-
-    // 退避轮询：cancel / 全部 task done 则返回；否则先 steal（仅一次）再判断是否到达 return 截止；
-    // ReturnDeadlineIncomplete 时由 read() 返回 TRANSFER_NOT_DONE，不对未完成 task forceCancel。
+    // D 前只等待完成或显式取消。到 D 后一次性阻止新匹配、封口并取消未完成任务。
     while (true) {
         if (task_group->cancelled.load()) {
             return ReadWaitOutcome::Cancelled;
@@ -146,23 +130,21 @@ P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_
         }
 
         const int64_t now = currentTimeMs();
-        if (now >= steal_deadline_ms && !store_stolen) {
+        if (now >= deadline_ms) {
             for (const auto& key : task_group->partition_keys) {
                 receiver_->stealTask(key);
             }
-            store_stolen = true;
-            RTP_LLM_LOG_DEBUG(
-                "read: stole recv tasks from store at steal_deadline_ms=%ld, request_id=%ld, unique_key=%s",
-                steal_deadline_ms,
-                request_id,
-                unique_key.c_str());
-        }
-        if (now >= return_deadline_ms) {
-            RTP_LLM_LOG_WARNING(
-                "read: return deadline reached (D-%ld ms) with pending transfers, request_id=%ld, unique_key=%s",
-                return_before_ms,
-                request_id,
-                unique_key.c_str());
+            task_group->lease->seal();
+            for (const auto& task : task_group->tasks) {
+                if (task && !task->done()) {
+                    task->cancel();
+                }
+            }
+            RTP_LLM_LOG_WARNING("read: deadline reached with pending transfers; recv tasks stolen, lease sealed, "
+                                "and unfinished tasks cancelled, request_id=%ld, unique_key=%s, deadline_ms=%ld",
+                                request_id,
+                                unique_key.c_str(),
+                                deadline_ms);
             return ReadWaitOutcome::ReturnDeadlineIncomplete;
         }
 
@@ -221,17 +203,19 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
 
     ErrorInfo build_result = buildRecvTasks(worker_plan, unique_key, deadline_ms, task_group, total_block_count);
     if (build_result.hasError()) {
+        const bool has_inflight_task = std::any_of(
+            task_group->tasks.begin(), task_group->tasks.end(), [](const auto& task) { return task && !task->done(); });
         {
             std::lock_guard<std::mutex> lock(read_tasks_mutex_);
             building_read_keys_.erase(unique_key);
             pending_cancel_keys_.erase(unique_key);
+            if (has_inflight_task) {
+                task_group->lease->seal();
+                std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
+                lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
+            }
         }
-        const bool has_inflight_task = std::any_of(
-            task_group->tasks.begin(), task_group->tasks.end(), [](const auto& task) { return task && !task->done(); });
         if (has_inflight_task) {
-            task_group->lease->seal();
-            std::lock_guard<std::mutex> lock(lease_map_mutex_);
-            lease_map_[unique_key] = LeaseMapEntry{task_group, 0, currentTimeMs()};
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
                              build_result.ToString() + "; registered recv task is still stopping");
         }
@@ -244,10 +228,10 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
         building_read_keys_.erase(unique_key);
         read_tasks_[unique_key] = task_group;
         pending_cancel          = pending_cancel_keys_.erase(unique_key) > 0;
-    }
-    {
-        std::lock_guard<std::mutex> lock(lease_map_mutex_);
-        lease_map_[unique_key] = LeaseMapEntry{task_group, 0, currentTimeMs()};
+        // Publish the lease before registration stops being visible. A lease
+        // query after CANCEL_READ acknowledgement must always observe one of them.
+        std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
+        lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
     }
 
     if (pending_cancel) {
@@ -270,10 +254,6 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
     }
 
     if (outcome == ReadWaitOutcome::ReturnDeadlineIncomplete) {
-        // Seal the lease so no new ops can be added, but keep lease_map_ entry alive
-        // so rank 0 can poll via QUERY_LEASE_STATUS until all in-flight transfers finish.
-        task_group->lease->seal();
-
         int done_count = 0;
         for (const auto& task : task_group->tasks) {
             if (task->done()) {
@@ -281,8 +261,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
             }
         }
         reportReadMetrics(total_block_count, false, read_start_time_us);
-        const std::string msg = "read: transfers not all done before return deadline (D-"
-                                + std::to_string(config_.p2p_read_return_before_deadline_ms) + "ms)";
+        const std::string msg = "read: transfers not all done at transfer deadline";
         RTP_LLM_LOG_WARNING("read failed, request_id: %ld, unique_key: %s, %s, done_tasks=%d/%zu",
                             request_id,
                             unique_key.c_str(),
@@ -362,7 +341,7 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t
             const bool has_finite_request_deadline =
                 request_deadline_ms > 0 && request_deadline_ms != std::numeric_limits<int64_t>::max();
             pending_cancel_keys_[unique_key] = has_finite_request_deadline ?
-                                                   std::max(request_deadline_ms, now_ms) :
+                                                   std::max(request_deadline_ms, fallback_deadline) :
                                                    fallback_deadline;
             RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s, during_registration: %d",
                              unique_key.c_str(),
@@ -380,21 +359,7 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t
     return true;
 }
 
-void P2PConnectorWorkerDecode::evictStaleLeases() {
-    int64_t now_ms = currentTimeMs();
-    for (auto it = lease_map_.begin(); it != lease_map_.end();) {
-        if (now_ms - it->second.create_time_ms > kLeaseMapTtlMs) {
-            RTP_LLM_LOG_WARNING("evictStaleLeases: removing stale lease_map_ entry unique_key=%s, age_ms=%ld",
-                                it->first.c_str(),
-                                now_ms - it->second.create_time_ms);
-            it = lease_map_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void P2PConnectorWorkerDecode::cleanupStaleLeases() {
+void P2PConnectorWorkerDecode::updateLeaseProgress() {
     const int64_t now_ms = currentTimeMs();
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
@@ -408,14 +373,45 @@ void P2PConnectorWorkerDecode::cleanupStaleLeases() {
     }
     {
         std::lock_guard<std::mutex> lock(lease_map_mutex_);
-        evictStaleLeases();
+        for (auto it = lease_map_.begin(); it != lease_map_.end();) {
+            advanceLeaseProgress(it->second);
+            if (it->second.task_group->lease->isStopped()) {
+                it = lease_map_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
+}
+
+void P2PConnectorWorkerDecode::advanceLeaseProgress(LeaseMapEntry& entry) {
+    int done_now = 0;
+    for (const auto& task : entry.task_group->tasks) {
+        if (task && task->done()) {
+            ++done_now;
+        }
+    }
+    const int newly_done = done_now - entry.finish_counted;
+    for (int i = 0; i < newly_done; ++i) {
+        entry.task_group->lease->onTransferFinished();
+    }
+    entry.finish_counted = std::max(entry.finish_counted, done_now);
 }
 
 bool P2PConnectorWorkerDecode::queryLeaseStatus(
     const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
-    std::lock_guard<std::mutex> lock(lease_map_mutex_);
-    evictStaleLeases();
+    // Keep the registration state and lease-map transition in one observation.
+    // The read path acquires these locks in the same order when publishing a lease.
+    std::lock_guard<std::mutex> read_lock(read_tasks_mutex_);
+    if (building_read_keys_.count(unique_key) > 0) {
+        sealed       = false;
+        started_ops  = 0;
+        finished_ops = 0;
+        stopped      = false;
+        return true;
+    }
+
+    std::lock_guard<std::mutex> lease_lock(lease_map_mutex_);
     auto                        it = lease_map_.find(unique_key);
     if (it == lease_map_.end()) {
         // Lease not in map — either never created or already cleaned up after all ops finished.
@@ -427,24 +423,9 @@ bool P2PConnectorWorkerDecode::queryLeaseStatus(
         return false;
     }
 
-    LeaseMapEntry&                entry      = it->second;
+    const LeaseMapEntry&          entry      = it->second;
     const auto&                   task_group = entry.task_group;
     const DecodeTargetWriteLease& lease      = *task_group->lease;
-
-    // Count how many tasks have completed since last query and advance lease counters.
-    int done_now = 0;
-    for (const auto& task : task_group->tasks) {
-        if (task->done()) {
-            ++done_now;
-        }
-    }
-    const int newly_done = done_now - entry.finish_counted;
-    if (newly_done > 0) {
-        for (int i = 0; i < newly_done; ++i) {
-            task_group->lease->onTransferFinished();
-        }
-        entry.finish_counted = done_now;
-    }
 
     sealed       = lease.isSealed();
     started_ops  = lease.startedOps();
