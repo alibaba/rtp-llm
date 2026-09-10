@@ -105,8 +105,7 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
         return nullptr;
     }
 
-    auto layer_cache_buffer =
-        std::make_shared<LayerCacheBuffer>(layer_id, cache_tag, resource.groupIdForLayerTag(layer_id, cache_tag));
+    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag);
     for (size_t i = 0; i < window->count; ++i) {
         const size_t local_idx   = window->begin + i;
         const size_t logical_idx = window->cp_rank + local_idx * window->cp_size;

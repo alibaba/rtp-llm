@@ -644,6 +644,58 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
             torch.tensor([0.25, -0.5], dtype=torch.float32),
         )
 
+    def test_loaded_language_and_vision_weights_run_multimodal_forward(self):
+        language_path, language, _ = _load_language()
+        self.addCleanup(language_path.cleanup)
+        vision_config = _vision_config()
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_vl2.vision.timm.create_model",
+            side_effect=lambda *args, **kwargs: _FakeVision(),
+        ):
+            expected_vision = DeepSeekVLV2VisionModel(vision_config, torch.float32)
+        vision_weights = {
+            name: tensor.detach().clone()
+            for name, tensor in expected_vision.state_dict().items()
+        }
+        with tempfile.TemporaryDirectory() as vision_path:
+            save_file(vision_weights, f"{vision_path}/model.safetensors")
+            with mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_vl2.vision.timm.create_model",
+                side_effect=lambda *args, **kwargs: _FakeVision(),
+            ):
+                vision = load_deepseek_vl2_vision(
+                    vision_config=vision_config,
+                    model_path=vision_path,
+                    compute_dtype=torch.float32,
+                    device="cpu",
+                )
+
+        feature = vision(torch.ones(1, 3, 2, 2)).squeeze(0)
+        self.assertEqual(tuple(feature.shape), (1, 4))
+
+        class _ReferenceFmha:
+            def forward(self, qkv, kv_cache, layer_idx):
+                self.call = (qkv, kv_cache, layer_idx)
+                return qkv[..., :4]
+
+        inputs = types.SimpleNamespace(
+            input_ids=torch.tensor([1, 999, 2]),
+            attention_inputs=object(),
+            embedding_inputs=types.SimpleNamespace(
+                text_tokens_mask=torch.tensor([True, False, True])
+            ),
+            multimodal_inputs=types.SimpleNamespace(
+                multimodal_features=[feature],
+                mm_features_locs=torch.tensor([1]),
+            ),
+        )
+        fmha = _ReferenceFmha()
+        outputs = language(inputs, fmha)
+
+        self.assertEqual(tuple(outputs.hidden_states.shape), (3, 4))
+        self.assertTrue(torch.isfinite(outputs.hidden_states).all())
+        self.assertEqual(fmha.call[1:], (None, 0))
+
     def test_multimodal_embedding_masks_placeholder_ids_before_injection(self):
         model_path, model, _ = _load_language()
         self.addCleanup(model_path.cleanup)

@@ -180,6 +180,8 @@ class TestMoeConfigResolver(unittest.TestCase):
         self.assertEqual(quantized_capacity, 16)
         self.assertEqual(unquantized_capacity, 64)
         self.assertEqual(process_capacity, unquantized_capacity)
+        self.assertFalse(self.resolver.has_quantization(ignored_layer))
+        self.assertIsNone(ignored_layer.moe_quant_method)
 
     def test_non_moe_exclusion_keeps_quantized_deepep_capacity(self):
         quant_config = Fp8PerTensorQuantConfig(
@@ -200,6 +202,25 @@ class TestMoeConfigResolver(unittest.TestCase):
         )
 
         self.assertEqual(capacity, 16)
+
+    def test_kimi_block_sparse_exclusion_expands_deepep_capacity(self):
+        quant_config = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=["model.layers.0.block_sparse_moe.experts"],
+        )
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=quant_config,
+            use_deepep_low_latency=True,
+        )
+        config.model_config.model_type = "kimi_linear"
+
+        self.assertEqual(
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+                17, 2, quant_config, config.model_config
+            ),
+            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(17, 2, None),
+        )
 
     def test_fused_gate_up_exclusion_matches_both_logical_projections(self):
         prefix = "layers.0.mlp.experts"

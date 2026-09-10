@@ -158,7 +158,7 @@ def _select_deepseek_topk(
         dim=-1,
         sorted=False,
     )
-    if renormalize and top_k > 1:
+    if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
             1e-20
         )
@@ -222,7 +222,7 @@ def _select_deepseek_noaux_topk(
         sorted=False,
     ).indices
     topk_weights = scores.gather(1, topk_ids)
-    if renormalize and top_k > 1:
+    if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
             1e-20
         )
