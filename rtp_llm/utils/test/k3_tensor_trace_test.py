@@ -250,7 +250,7 @@ class TensorTraceTest(unittest.TestCase):
         self.assertEqual((self.root / "index.jsonl").read_text(), "")
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires pinned D2H")
-    def test_cuda_long_frame_spills_before_device_and_host_budget_is_exhausted(self):
+    def test_cuda_long_frame_spills_before_pending_budget_is_exhausted(self):
         trace = self.trace(max_pending_bytes=128)
         trace.begin({"case": "cuda-long-prefill"})
         value = torch.zeros(16, device="cuda")
@@ -260,10 +260,15 @@ class TensorTraceTest(unittest.TestCase):
         value.fill_(-1)
         trace.end()
         trace.close()
-        for layer in range(5):
-            torch.testing.assert_close(
-                self.read(layer)["tensors"][0]["value"], torch.full((16,), float(layer))
-            )
+        tensors = [
+            item
+            for path in sorted(self.root.glob("frame-*.pt"))
+            for item in torch.load(path, weights_only=True)["tensors"]
+        ]
+        self.assertEqual(len(tensors), 5)
+        for layer, item in enumerate(tensors):
+            self.assertEqual(item["name"], f"layer.{layer}")
+            torch.testing.assert_close(item["value"], torch.full((16,), float(layer)))
         self.assertEqual(trace._pending, 0)
 
     def test_writer_error_is_returned_to_runner(self):
