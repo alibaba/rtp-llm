@@ -144,7 +144,6 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
-    bool                    write_remote{true};
 };
 
 }  // namespace rtp_llm

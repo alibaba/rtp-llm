@@ -28,7 +28,7 @@ protected:
         for (size_t i = 0; i < keys.size(); ++i) {
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(dev_block + i)};
         }
-        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
+        cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/false);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;

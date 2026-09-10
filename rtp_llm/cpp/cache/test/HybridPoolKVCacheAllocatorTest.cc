@@ -1715,7 +1715,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
             host_sources.emplace_back(group_set, source_block);
         }
     }
-    cache->insert(cached_keys, slots, Tier::HOST, /*write_remote=*/true, /*is_resident=*/false);
+    cache->insert(cached_keys, slots, Tier::HOST, /*is_resident=*/false);
 
     const auto counters_before = snapshotPoolCounters(allocator);
     for (const auto& [group_set, source_block] : host_sources) {
