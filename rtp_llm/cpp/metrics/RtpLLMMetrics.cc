@@ -790,13 +790,15 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
         REPORT_MUTABLE_METRIC(host_reuse_length_metric, collector->host_reuse_length);
         REPORT_MUTABLE_METRIC(disk_reuse_length_metric, collector->disk_reuse_length);
         REPORT_MUTABLE_METRIC(remote_reuse_length_metric, collector->remote_reuse_length);
+        if (collector->report_match_latency) {
+            REPORT_MUTABLE_METRIC(match_latency_us_metric, collector->match_latency_us);
+        }
+    }
+    if (collector->report_hit_rates) {
         REPORT_MUTABLE_METRIC(kv_cache_hit_rate_metric, collector->kv_cache_hit_rate);
         REPORT_MUTABLE_METRIC(device_hit_rate_metric, collector->device_hit_rate);
         REPORT_MUTABLE_METRIC(host_hit_rate_metric, collector->host_hit_rate);
         REPORT_MUTABLE_METRIC(disk_hit_rate_metric, collector->disk_hit_rate);
-        if (collector->report_match_latency) {
-            REPORT_MUTABLE_METRIC(match_latency_us_metric, collector->match_latency_us);
-        }
     }
     if (collector->report_reuse_time_metrics) {
         REPORT_MUTABLE_METRIC(reuse_interval_avg_ms_metric, collector->reuse_interval_avg_ms);

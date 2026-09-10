@@ -1086,6 +1086,7 @@ public:
     bool    load_attempted                = false;
     bool    load_success                  = false;
     bool    report_reuse_metrics          = false;
+    bool    report_hit_rates              = false;
     bool    report_reuse_time_metrics     = false;
     bool    report_match_latency          = false;
     bool    report_match_to_ready_latency = false;

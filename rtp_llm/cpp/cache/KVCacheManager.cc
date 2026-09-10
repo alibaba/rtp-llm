@@ -723,6 +723,39 @@ void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
 
+void KVCacheManager::recordCacheHitTokens(int64_t input_length, const RtpLLMCacheReuseMetricsCollector& metrics) {
+    std::lock_guard<std::mutex> lock(cache_hit_mutex_);
+    cache_hit_input_tokens_ += input_length;
+    cache_hit_reuse_tokens_ += metrics.kv_cache_reuse_length;
+    cache_hit_device_tokens_ += metrics.device_reuse_length;
+    cache_hit_host_tokens_ += metrics.host_reuse_length;
+    cache_hit_disk_tokens_ += metrics.disk_reuse_length;
+}
+
+bool KVCacheManager::collectCacheHitRates(std::chrono::steady_clock::time_point now,
+                                          RtpLLMCacheReuseMetricsCollector&     metrics) {
+    std::lock_guard<std::mutex> lock(cache_hit_mutex_);
+    metrics.report_hit_rates = false;
+    if (now - cache_hit_window_start_ < std::chrono::minutes(1)) {
+        return false;
+    }
+    cache_hit_window_start_ = now;
+    if (cache_hit_input_tokens_ > 0) {
+        const double scale        = 100.0 / cache_hit_input_tokens_;
+        metrics.kv_cache_hit_rate = static_cast<float>(cache_hit_reuse_tokens_ * scale);
+        metrics.device_hit_rate   = static_cast<float>(cache_hit_device_tokens_ * scale);
+        metrics.host_hit_rate     = static_cast<float>(cache_hit_host_tokens_ * scale);
+        metrics.disk_hit_rate     = static_cast<float>(cache_hit_disk_tokens_ * scale);
+        metrics.report_hit_rates  = true;
+    }
+    cache_hit_input_tokens_  = 0;
+    cache_hit_reuse_tokens_  = 0;
+    cache_hit_device_tokens_ = 0;
+    cache_hit_host_tokens_   = 0;
+    cache_hit_disk_tokens_   = 0;
+    return metrics.report_hit_rates;
+}
+
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
@@ -736,6 +769,11 @@ void KVCacheManager::reportMetricsLoop() {
 
         RtpLLMCacheMetricsCollector global_metrics = collectGlobalCacheMetrics(allocator_);
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics);
+
+        RtpLLMCacheReuseMetricsCollector hit_metrics;
+        if (collectCacheHitRates(std::chrono::steady_clock::now(), hit_metrics)) {
+            metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &hit_metrics);
+        }
 
         const auto now        = std::chrono::steady_clock::now();
         const bool should_log = (now - last_log_time) >= kLogInterval;
