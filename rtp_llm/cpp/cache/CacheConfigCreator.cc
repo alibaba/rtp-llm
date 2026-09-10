@@ -278,6 +278,35 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
         propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle);
 
+#if USING_CUDA
+    if (is_mtp && sp_config.gen_num_per_cycle > 0) {
+        for (size_t gid = 0; gid < score_config.group_types.size(); ++gid) {
+            if (score_config.group_types[gid] == CacheGroupType::LINEAR) {
+                score_config.linear_replay_group_ids.push_back(static_cast<int>(gid));
+            }
+        }
+        if (!score_config.linear_replay_group_ids.empty()) {
+            score_config.linear_replay_max_steps        = sp_config.gen_num_per_cycle + 1;
+            score_config.linear_replay_slot_count       = std::max<int64_t>(1, runtime_config.max_generate_batch_size);
+            score_config.linear_replay_channelwise_gate = score_model_config.model_type == "kimi_k3";
+            size_t bytes_per_slot                       = 2 * sizeof(int64_t) + 2 * sizeof(int32_t);
+            for (int gid : score_config.linear_replay_group_ids) {
+                const auto spec = std::dynamic_pointer_cast<LinearKVCacheSpec>(score_config.cache_specs[gid]);
+                RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "Replay group %d needs a LINEAR cache spec", gid);
+                const size_t gate_dim   = score_config.linear_replay_channelwise_gate ? spec->head_k_dim : 1;
+                const size_t log_values = static_cast<size_t>(spec->local_num_k_heads) * spec->head_k_dim
+                                          + static_cast<size_t>(spec->local_num_v_heads) * spec->head_v_dim
+                                          + static_cast<size_t>(spec->local_num_v_heads) * gate_dim;
+                const size_t layer_bytes =
+                    score_config.linear_replay_max_steps
+                    * (log_values * sizeof(float) + spec->qkv_size() * getTypeSize(spec->conv_state_dtype));
+                bytes_per_slot += layer_bytes * score_config.global_layer_ids[gid].size();
+            }
+            score_config.linear_replay_reserve_bytes = bytes_per_slot * score_config.linear_replay_slot_count;
+        }
+    }
+#endif
+
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(score_model_config)) {
@@ -346,7 +375,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         total_block_size_bytes += propose_config.block_size_bytes;
     }
 
-    const size_t fixed_reserve = score_config.fixed_pool_reserve_bytes
+    const size_t fixed_reserve = score_config.fixed_pool_reserve_bytes + score_config.linear_replay_reserve_bytes
                                  + propose_config.fixed_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
 
     size_t block_num = 0;
@@ -418,8 +447,28 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     // as additional physical pools before wiring global layer ids below.
     const bool   independent_draft_pool =
         (is_eagle || sp_config.isKimiK3Mtp()) && config.use_independent_block_pools;
+    const bool   separate_draft_groups  = independent_draft_pool || !config.linear_replay_group_ids.empty();
     const size_t propose_group_offset   = config.group_types.size();
-    if (independent_draft_pool) {
+    if (separate_draft_groups) {
+        for (size_t gid = 0; gid < propose_group_offset; ++gid) {
+            if (config.group_seq_size_per_block.size() <= gid) {
+                config.group_seq_size_per_block.push_back(config.cache_specs[gid]->seq_size_per_block);
+            }
+            if (config.group_kv_block_stride_bytes.size() <= gid) {
+                config.group_kv_block_stride_bytes.push_back(config.cache_specs[gid]->block_size_bytes());
+            }
+            if (config.group_kv_scale_stride_bytes.size() <= gid) {
+                config.group_kv_scale_stride_bytes.push_back(config.cache_specs[gid]->scale_block_size_bytes());
+            }
+            if (config.group_block_size_bytes.size() <= gid) {
+                config.group_block_size_bytes.push_back(
+                    (config.group_kv_block_stride_bytes[gid] + config.group_kv_scale_stride_bytes[gid])
+                    * config.global_layer_ids[gid].size());
+            }
+            if (config.group_block_nums.size() <= gid) {
+                config.group_block_nums.push_back(0);
+            }
+        }
         for (size_t g = 0; g < propose_config.group_types.size(); ++g) {
             config.cache_specs.push_back(propose_config.cache_specs[g]);
             config.global_layer_ids.emplace_back();
@@ -439,9 +488,12 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 g < propose_config.group_kv_scale_stride_bytes.size()
                     ? propose_config.group_kv_scale_stride_bytes[g]
                     : propose_config.kv_scale_stride_bytes);
-            config.group_block_size_bytes.push_back(
-                g < propose_config.group_block_size_bytes.size() ? propose_config.group_block_size_bytes[g]
-                                                                 : propose_config.block_size_bytes);
+            config.group_block_size_bytes.push_back((g < propose_config.group_block_size_bytes.size() ?
+                                                         propose_config.group_block_size_bytes[g] :
+                                                         (propose_config.cache_specs[g]->block_size_bytes()
+                                                          + propose_config.cache_specs[g]->scale_block_size_bytes())
+                                                             * propose_config.global_layer_ids[g].size())
+                                                    * static_cast<size_t>(num_mtp_modules));
             config.group_block_nums.push_back(0);
             if (propose_config.group_types[g] == CacheGroupType::FULL) {
                 ++config.full_group_num;
@@ -519,10 +571,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 // Keep the propose model's group placement. DSV4 MTP is
                 // SWA-only and lives in the SWA typed pool, not the first FULL
                 // pool. Non-typed hybrid configs fall back to the full group.
-                const int target_gid = independent_draft_pool
-                                           ? static_cast<int>(propose_group_offset + g)
-                                           : ((g < config.global_layer_ids.size()) ? static_cast<int>(g)
-                                                                                  : static_cast<int>(full_gid));
+                const int target_gid =
+                    separate_draft_groups ?
+                        static_cast<int>(propose_group_offset + g) :
+                        ((g < config.global_layer_ids.size()) ? static_cast<int>(g) : static_cast<int>(full_gid));
                 config.layer_to_group_id[global_layer_id] = target_gid;
                 if (target_gid >= 0 && target_gid < static_cast<int>(config.global_layer_ids.size())) {
                     config.global_layer_ids[static_cast<size_t>(target_gid)].push_back(global_layer_id);
@@ -542,7 +594,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                         config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)][region] = target_gid;
                     }
                 }
-                if (!independent_draft_pool && target_gid >= 0
+                if (!separate_draft_groups && target_gid >= 0
                     && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
                     size_t stride_bytes = 0;
                     if (g < propose_config.group_kv_block_stride_bytes.size()) {

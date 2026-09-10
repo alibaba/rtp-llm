@@ -41,6 +41,7 @@ cc_library(
         "KVCacheSpecBase.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
+        "LinearReplayPool.h",
         "MLAKVCacheSpec.h",
         "Types.h",
         "WarmUpResult.h",

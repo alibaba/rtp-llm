@@ -255,6 +255,70 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testLinearReplayUsesPerGroupPhysicalBlockSize) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 128;
+    model_config.num_layers  = 6;
+    RuntimeConfig              runtime_config;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 3;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    auto                        cache_config = test::makeSimpleHybridMhaCacheConfig(6, 64, 16, DataType::TYPE_FP16, 2);
+    cache_config.kernel_seq_size_per_block   = 4;
+    cache_config.linear_replay_group_ids     = {0, 1};
+    cache_config.group_types[1]              = CacheGroupType::LINEAR;
+    auto first_spec                 = std::dynamic_pointer_cast<LinearKVCacheSpec>(cache_config.cache_specs[0]);
+    first_spec->seq_size_per_block  = 8;
+    auto second_spec                = std::make_shared<LinearKVCacheSpec>(*first_spec);
+    second_spec->seq_size_per_block = 4;
+    cache_config.cache_specs[1]     = second_spec;
+
+    ResourceContext resource_context;
+    // This test supplies a published lease and page snapshot; it only executes metadata gathering.
+    resource_context.cache_manager = std::make_shared<KVCacheManager>(
+        test::makeSimpleMhaCacheConfig(1, 64, 16, DataType::TYPE_FP16), /*warmup=*/true);
+    auto stream = createContextStream(model_config, runtime_config, resource_context, std::vector<int>(17, 1), 1);
+    stream->setIsContextStream(false);
+    auto lease                                                       = std::make_shared<LinearReplayLease>();
+    lease->slot_id                                                   = 0;
+    lease->generation                                                = 1;
+    stream->stream_cache_resource_->linear_replay_lease_             = lease;
+    stream->stream_cache_resource_->linear_replay_initial_block_ids_ = {12, 24, -1};
+
+    BatchKVCacheResource pages;
+    pages.resetBatchSize(1);
+    pages.initGroups(3, 3, {0, 1, 2}, cache_config.kernelBlocksPerKvBlock(), cache_config.group_types);
+    pages.setBatchBlocks(0, 0, {11, 12, 13});
+    pages.setBatchBlocks(0, 1, {21, 22, 23, 24, 25});
+    pages.setBatchBlocks(0, 2, {31, 32});
+    EXPECT_EQ(pages.kernelBlocks(0, 0), pages.blocks(0, 0));
+    EXPECT_EQ(pages.kernelBlocks(0, 1), pages.blocks(0, 1));
+    EXPECT_EQ(pages.kernelBlocks(0, 2).size(), 8u);
+    stream->setKVCache(pages);
+
+    GptModelInputs inputs;
+    inputs.kv_cache_kernel_block_id =
+        torch::full({3, 1, 8}, -1, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    for (int group = 0; group < 3; ++group) {
+        const auto& kernel_blocks = pages.kernelBlocks(0, group);
+        std::memcpy(inputs.kv_cache_kernel_block_id.data_ptr<int32_t>() + group * 8,
+                    kernel_blocks.data(),
+                    kernel_blocks.size() * sizeof(int32_t));
+    }
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    TensorHolder                                   host_holder;
+    std::vector<GenerateStream::LinearReplayRound> rounds;
+    ASSERT_TRUE(
+        processor.gatherLinearReplayInputs(StreamGroups({stream}), cache_config, inputs, host_holder, rounds).ok());
+    ASSERT_TRUE(inputs.linear_replay.has_value());
+    EXPECT_EQ(toVec<int32_t>(inputs.linear_replay->active_block_ids), (std::vector<int32_t>{13, 25, -1}));
+    EXPECT_EQ(toVec<int32_t>(inputs.linear_replay->state_read_block_ids), (std::vector<int32_t>{12, 24, -1}));
+    EXPECT_EQ(toVec<int32_t>(inputs.linear_replay->anchor_processed_lengths), (std::vector<int32_t>{16}));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

@@ -139,6 +139,7 @@ private:
 private:
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
+    void                           finalizeLinearReplay(const GptModelInputs& inputs);
     torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
@@ -307,6 +308,23 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         }
 
         kv_cache.layer_group_types  = layout.layer_group_types;
+        if (layout.linear_replay.has_value()) {
+            const auto& replay = *layout.linear_replay;
+            kv_cache.linear_replay_by_layer.resize(replay.keys.size());
+            for (size_t layer = 0; layer < replay.keys.size(); ++layer) {
+                if (replay.keys[layer].defined()) {
+                    kv_cache.linear_replay_by_layer[layer] =
+                        torch_ext::LinearReplayLayerCache{replay.keys[layer],
+                                                          replay.updates[layer],
+                                                          replay.log_gates[layer],
+                                                          replay.conv_inputs[layer],
+                                                          replay.slot_generations,
+                                                          replay.log_epochs,
+                                                          replay.valid_counts,
+                                                          replay.error_flags};
+                }
+            }
+        }
         kv_cache.group_region_names = layout.group_region_names;
         kv_cache.group_seq_size_per_block.clear();
         kv_cache.group_seq_size_per_block.reserve(layout.group_seq_size_per_block.size());
@@ -389,6 +407,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+        if (params.kv_cache_layer_layout && params.kv_cache_layer_layout->linear_replay) {
+            graph_params.linear_replay_group_num = params.kv_cache_group_num;
+        }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
         // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style

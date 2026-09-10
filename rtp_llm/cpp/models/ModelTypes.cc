@@ -81,6 +81,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::pdSeparation] = inputs.pd_separation;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::linearReplayBatch] =
+        inputs.linear_replay ? inputs.linear_replay->slot_ids.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::linearReplayGroups] =
+        inputs.linear_replay ? inputs.linear_replay->active_block_ids.size(0) : 0;
     {
         // encode root-side tensor device for fields that may live on
         // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
@@ -233,6 +237,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     bool is_non_root = parallelism_config.tp_rank != 0;
     if (is_non_root) {
+        const auto replay_batch = shape_hints_ptr[GptModelInputIndex::linearReplayBatch];
+        if (replay_batch > 0) {
+            inputs.linear_replay =
+                LinearReplayInputs::allocate(replay_batch, shape_hints_ptr[GptModelInputIndex::linearReplayGroups]);
+        } else {
+            inputs.linear_replay.reset();
+        }
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
         // Respect the root-side device bitmap so all ranks classify tensors the
@@ -397,6 +408,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.combo_tokens);
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
+    if (inputs.linear_replay) {
+        for (auto* tensor : inputs.linear_replay->tensors()) {
+            collect(*tensor);
+        }
+    }
     collect(inputs.prefix_lengths);
     collect(inputs.input_lengths_host_for_log);
     collect(inputs.sequence_lengths_host_for_log);

@@ -229,6 +229,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
+    py_attn_inputs.linear_replay               = inputs.linear_replay;
     auto                         to_device_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
         if (!tensor.defined()) {
             return tensor;
@@ -915,6 +916,17 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     }
 }
 
+void PyWrappedModel::finalizeLinearReplay(const GptModelInputs& inputs) {
+    if (!inputs.linear_replay) {
+        return;
+    }
+    const auto batch = inputs.linear_replay->slot_ids.numel();
+    RTP_LLM_CHECK_WITH_INFO(inputs.is_target_verify && batch > 0 && inputs.combo_tokens.numel() % batch == 0,
+                            "LINEAR replay metadata requires a uniform target verification batch");
+    py::gil_scoped_acquire gil;
+    py_model_.attr("finalize_linear_replay")(*inputs.linear_replay, inputs.combo_tokens.numel() / batch);
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
@@ -946,7 +958,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 "K3 whole-model Prefill does not support framework layer micro-batching: tokens=%ld chunk=%ld",
                 inputs.combo_tokens.size(0),
                 whole_chunk_tokens);
-            return forwardMicroBatched(inputs);
+            auto output = forwardMicroBatched(inputs);
+            finalizeLinearReplay(inputs);
+            return output;
         }
         RTP_LLM_CHECK_WITH_INFO(!will_run_whole_chunk || !inputs.need_all_logits,
                                 "K3 whole-model Prefill does not support all logits");
@@ -1047,6 +1061,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // avoid.
             recordHeldAttentionObjectCompletion();
         }
+
+        finalizeLinearReplay(inputs);
 
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
@@ -1457,6 +1473,9 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
+                if (inputs.linear_replay) {
+                    micro_model_inputs.linear_replay = inputs.linear_replay->slice(sliced_batch_idx, total_batch_size);
+                }
                 micro_model_inputs.attention_mask =
                     inputs.attention_mask.defined() ?
                         inputs.attention_mask.narrow(0, sliced_batch_idx, total_batch_size) :
@@ -1500,6 +1519,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
                 micro_model_inputs.combo_tokens  = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
+                if (inputs.linear_replay) {
+                    micro_model_inputs.linear_replay =
+                        inputs.linear_replay->slice(sliced_batch_idx, d_micro_batch_size);
+                }
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.sequence_lengths =
                     inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
@@ -1535,6 +1558,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
             } else {
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
+                if (inputs.linear_replay) {
+                    micro_model_inputs.linear_replay =
+                        inputs.linear_replay->slice(sliced_batch_idx, p_micro_batch_size);
+                }
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.kv_cache_block_id =
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, p_micro_batch_size);

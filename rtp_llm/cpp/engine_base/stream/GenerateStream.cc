@@ -971,6 +971,44 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     validateStatefulLogitsProcessorState();
 }
 
+absl::StatusOr<GenerateStream::LinearReplayRound> GenerateStream::prepareLinearReplayRound() {
+    std::lock_guard<std::mutex> stream_lock(*mutex_);
+    std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+    const auto&                 lease = stream_cache_resource_->linearReplayLease();
+    if (!lease || stream_cache_resource_->isResourceReleased() || hasError()) {
+        return absl::FailedPreconditionError("target LINEAR replay requires a live log lease");
+    }
+    LinearReplayRound round;
+    round.verify_epoch = ++linear_replay_epoch_counter_;
+    round.lease        = lease;
+    if (linear_replay_window_ && linear_replay_window_->lease == lease) {
+        round.previous_window = linear_replay_window_;
+    }
+    round.state_block_hold   = stream_cache_resource_->holdLinearReplayBlocks();
+    round.initial_block_ids  = stream_cache_resource_->linearReplayInitialBlockIds();
+    round.initial_state_hold = stream_cache_resource_->linearReplayInitialBlockHold();
+    return round;
+}
+
+void GenerateStream::publishLinearReplayWindow(std::shared_ptr<const LinearReplayWindow> window) {
+    std::lock_guard<std::mutex> stream_lock(*mutex_);
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    if (stream_cache_resource_->isResourceReleased() || isFinished() || hasError()) {
+        return;
+    }
+    if (window && window->lease == stream_cache_resource_->linearReplayLease()
+        && window->verify_epoch == linear_replay_epoch_counter_
+        && (!linear_replay_window_ || window->verify_epoch > linear_replay_window_->verify_epoch)) {
+        linear_replay_window_ = std::move(window);
+        stream_cache_resource_->clearLinearReplayInitialState();
+    }
+}
+
+void GenerateStream::clearLinearReplayWindow() {
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    linear_replay_window_.reset();
+}
+
 GenerateStream::KVCacheBlockSnapshot GenerateStream::snapshotKVCacheBlocks() {
     std::lock_guard<std::mutex> lock(*mutex_);
 

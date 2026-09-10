@@ -53,6 +53,7 @@ public:
         py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
         py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
+        py_model_inputs_.attention_inputs.linear_replay           = inputs.attention_inputs.linear_replay;
         py_model_inputs_.attention_inputs.is_mtp_draft_update     = inputs.attention_inputs.is_mtp_draft_update;
         py_model_inputs_.attention_inputs.is_cuda_graph           = inputs.attention_inputs.is_cuda_graph;
         py_model_inputs_.attention_inputs.total_tokens            = inputs.attention_inputs.total_tokens;

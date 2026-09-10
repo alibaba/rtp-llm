@@ -460,6 +460,114 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
     return model_input;
 }
 
+absl::Status
+MtpBatchStreamProcessor::gatherLinearReplayInputs(const StreamGroups&                             stream_groups,
+                                                  const CacheConfig&                              cache_config,
+                                                  GptModelInputs&                                 model_input,
+                                                  TensorHolder&                                   host_holder,
+                                                  std::vector<GenerateStream::LinearReplayRound>& rounds) const {
+    const auto streams = stream_groups.allStreams();
+    if (cache_config.linear_replay_group_ids.empty() || streams.empty()) {
+        return absl::OkStatus();
+    }
+    const int64_t batch  = streams.size();
+    const int64_t groups = cache_config.groupNums();
+    auto          host   = LinearReplayInputs::allocate(batch, groups, torch::kCPU);
+    for (auto* tensor : host.tensors()) {
+        *tensor = tensor->pin_memory();
+        tensor->zero_();
+    }
+    host.slot_ids.fill_(-1);
+    host.active_block_ids.fill_(-1);
+    host.state_read_block_ids.fill_(-1);
+
+    std::vector<int64_t>       history_rows;
+    std::vector<torch::Tensor> accepts;
+    std::vector<torch::Tensor> anchors;
+    std::vector<torch::Tensor> processed_lengths;
+    rounds.clear();
+    rounds.reserve(batch);
+    int64_t row = 0;
+    for (const auto& stream : streams) {
+        if (stream->isFakeStream()) {
+            rounds.emplace_back();
+            ++row;
+            continue;
+        }
+        if (stream->nextBatchSize() != 1) {
+            return absl::InvalidArgumentError(
+                "MTP LINEAR replay requires the existing single-sequence stream contract");
+        }
+        auto round_status = stream->prepareLinearReplayRound();
+        if (!round_status.ok()) {
+            return round_status.status();
+        }
+        auto round                                     = std::move(round_status.value());
+        host.slot_ids.data_ptr<int32_t>()[row]         = round.lease->slot_id;
+        host.slot_generations.data_ptr<int64_t>()[row] = round.lease->generation;
+        host.verify_epochs.data_ptr<int64_t>()[row]    = round.verify_epoch;
+        if (round.previous_window) {
+            const auto& previous = *round.previous_window;
+            if (previous.device_ready) {
+                previous.device_ready->block(cuda_graph::graphGetCurrentStream());
+            }
+            host.history_valid_lengths.data_ptr<int32_t>()[row] = previous.produced_steps;
+            host.history_epochs.data_ptr<int64_t>()[row]        = previous.verify_epoch;
+            history_rows.push_back(row);
+            accepts.push_back(previous.accept_len_gpu.reshape({1}));
+            anchors.push_back(previous.anchor_block_ids_gpu);
+            processed_lengths.push_back(previous.anchor_processed_len_gpu.reshape({1}));
+        } else {
+            const int32_t processed                                = std::max(0, stream->seqLength() - 1);
+            host.anchor_processed_lengths.data_ptr<int32_t>()[row] = processed;
+            host.init_kinds.data_ptr<int32_t>()[row]               = processed == 0 ? 2 : 1;
+            if (processed > 0) {
+                for (int group : cache_config.linear_replay_group_ids) {
+                    host.state_read_block_ids.data_ptr<int32_t>()[group * batch + row] =
+                        round.initial_block_ids.at(group);
+                }
+            }
+        }
+        rounds.push_back(std::move(round));
+        ++row;
+    }
+
+    auto replay = host;
+    for (auto* tensor : replay.tensors()) {
+        host_holder.hold_host(*tensor);
+        *tensor = tensor->to(torch::kCUDA, /*non_blocking=*/true);
+    }
+    if (!history_rows.empty()) {
+        auto rows_host = torch::tensor(history_rows, torch::TensorOptions().dtype(torch::kInt64)).pin_memory();
+        host_holder.hold_host(rows_host);
+        auto rows     = rows_host.to(torch::kCUDA, /*non_blocking=*/true);
+        auto accepted = torch::cat(accepts).to(torch::kInt32);
+        replay.prev_accept_lengths.index_copy_(0, rows, accepted);
+        replay.anchor_processed_lengths.index_copy_(0, rows, torch::cat(processed_lengths) + accepted);
+        replay.state_read_block_ids.index_copy_(1, rows, torch::cat(anchors, 1));
+    }
+
+    auto       block_ids   = toCudaInt32(model_input.kv_cache_kernel_block_id, host_holder);
+    const auto active_rows = replay.slot_ids >= 0;
+    for (int group : cache_config.linear_replay_group_ids) {
+        const auto& spec = cache_config.cache_specs.at(group);
+        RTP_LLM_CHECK_WITH_INFO(cache_config.group_types.at(group) == CacheGroupType::LINEAR
+                                    && spec->seq_size_per_block > 0,
+                                "LINEAR replay group %d has an invalid cache layout",
+                                group);
+        const auto logical_tail =
+            torch::floor_divide(replay.anchor_processed_lengths, static_cast<int64_t>(spec->seq_size_per_block))
+                .to(torch::kInt64);
+        // KVCacheResource keeps LINEAR kernel rows one-to-one with physical pages;
+        // only FULL rows expand when kernel_seq_size_per_block is smaller.
+        const auto destination = block_ids.select(0, group).gather(1, logical_tail.reshape({batch, 1})).squeeze(1);
+        replay.active_block_ids.select(0, group).copy_(
+            torch::where(active_rows, destination, torch::full_like(destination, -1)));
+    }
+    model_input.linear_replay = std::move(replay);
+    return absl::OkStatus();
+}
+
 absl::StatusOr<SamplerInputs>
 MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                 const GptModelInputs&                       model_inputs,

@@ -46,6 +46,7 @@ class GptModelBase(nn.Module):
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
+        self._linear_replay_cache = None
         self.device_type: DeviceType = get_device_type()
 
         ## (batch_size -> fmha_params)
@@ -55,6 +56,14 @@ class GptModelBase(nn.Module):
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
+            self._linear_replay_cache = next(
+                (
+                    cache
+                    for cache in self.kv_cache.linear_replay_by_layer
+                    if cache is not None
+                ),
+                None,
+            )
             num_layers = len(self.kv_cache.kv_cache_base_by_layer)
             layer0_shape = (
                 self.kv_cache.kv_cache_base_by_layer[0].shape
@@ -70,6 +79,16 @@ class GptModelBase(nn.Module):
                 f"num_scale_layers={num_scale_layers}, "
             )
         return True
+
+    def finalize_linear_replay(self, replay_inputs, steps: int) -> None:
+        from rtp_llm.models_py.triton_kernels.linear_replay import (
+            finalize_linear_replay,
+        )
+
+        if self._linear_replay_cache is None:
+            raise RuntimeError("target LINEAR replay has no initialized log pool")
+        # Called after all model layers and target hidden-state handoff, including graph replay.
+        finalize_linear_replay(self._linear_replay_cache, replay_inputs, steps)
 
     ## for cuda graph attn kernel params' fill
     def fill_params(

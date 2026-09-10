@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -23,6 +24,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -46,7 +48,8 @@ void validateK3CacheSpecs(const CacheConfig& config) {
             throw std::invalid_argument("Kimi K3 physical spec/group span mismatch");
         }
         const auto kind     = config.group_types[gid];
-        const bool matching = (kind == CacheGroupType::FULL && spec->type == KVCacheSpecType::MultiHeadLatentAttention
+        const bool matching = ((kind == CacheGroupType::FULL || kind == CacheGroupType::SWA)
+                               && spec->type == KVCacheSpecType::MultiHeadLatentAttention
                                && dynamic_cast<const MLAKVCacheSpec*>(spec))
                               || (kind == CacheGroupType::LINEAR && spec->type == KVCacheSpecType::LinearAttention
                                   && dynamic_cast<const LinearKVCacheSpec*>(spec));
@@ -186,6 +189,7 @@ bool KVCacheManager::init() {
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
+    initLinearReplayPool();
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -198,6 +202,166 @@ bool KVCacheManager::init() {
 
 const CacheConfig& KVCacheManager::cacheConfig() const {
     return config_;
+}
+
+void KVCacheManager::initLinearReplayPool() {
+    if (config_.linear_replay_group_ids.empty()) {
+        return;
+    }
+    RTP_LLM_CHECK(config_.linear_replay_slot_count > 0 && config_.linear_replay_max_steps > 0);
+    const auto              cache_layout = allocator_->allLayerCacheBase();
+    LinearReplayCacheLayout layout;
+    layout.keys.resize(config_.layer_num);
+    layout.updates.resize(config_.layer_num);
+    layout.log_gates.resize(config_.layer_num);
+    layout.conv_inputs.resize(config_.layer_num);
+    const int64_t slots          = config_.linear_replay_slot_count;
+    const int64_t steps          = config_.linear_replay_max_steps;
+    auto          header_options = torch::TensorOptions().dtype(torch::kInt64);
+    for (int gid : config_.linear_replay_group_ids) {
+        const auto spec = std::dynamic_pointer_cast<LinearKVCacheSpec>(config_.cache_specs[gid]);
+        RTP_LLM_CHECK(spec != nullptr);
+        const int64_t gate_dim = config_.linear_replay_channelwise_gate ? spec->head_k_dim : 1;
+        for (int layer : config_.global_layer_ids[gid]) {
+            RTP_LLM_CHECK(layer >= 0 && static_cast<uint32_t>(layer) < config_.layer_num);
+            const auto device       = cache_layout.layers_to_kv_buffer_ptrs[layer].device();
+            const auto options      = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+            layout.keys[layer]      = torch::empty({slots, steps, spec->local_num_k_heads, spec->head_k_dim}, options);
+            layout.updates[layer]   = torch::empty({slots, steps, spec->local_num_v_heads, spec->head_v_dim}, options);
+            layout.log_gates[layer] = torch::empty({slots, steps, spec->local_num_v_heads, gate_dim}, options);
+            layout.conv_inputs[layer] = torch::empty({slots, steps, static_cast<int64_t>(spec->qkv_size())},
+                                                     options.dtype(dataTypeToTorchType(spec->conv_state_dtype)));
+            header_options            = header_options.device(device);
+        }
+    }
+    layout.slot_generations   = torch::zeros({slots}, header_options);
+    layout.log_epochs         = torch::zeros({slots}, header_options);
+    layout.valid_counts       = torch::zeros({slots}, header_options.dtype(torch::kInt32));
+    layout.error_flags        = torch::zeros({slots}, header_options.dtype(torch::kInt32));
+    linear_replay_layout_     = std::move(layout);
+    linear_replay_slots_      = std::make_shared<LinearReplaySlotPool>(slots);
+    linear_replay_retirement_ = std::make_shared<LinearReplayRetirementQueue>();
+}
+
+std::shared_ptr<LinearReplayLease> KVCacheManager::acquireLinearReplaySlot(bool fake) {
+    if (fake || !linear_replay_slots_) {
+        return nullptr;
+    }
+    linear_replay_retirement_->reap();
+    return linear_replay_slots_->acquire();
+}
+
+std::shared_ptr<LinearReplayBlockHold> KVCacheManager::holdLinearReplayBlocks(const BatchKVCacheResourcePtr& resource,
+                                                                              int min_processed_length) {
+    if (!resource || config_.linear_replay_group_ids.empty()) {
+        return nullptr;
+    }
+    const auto independent = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(allocator_);
+    std::vector<std::pair<BlockPoolPtr, BlockIndicesType>> held;
+    for (int gid : config_.linear_replay_group_ids) {
+        const auto pool = independent ? independent->groupBlockPools()[gid] : allocator_->getBlockPool();
+        std::unordered_set<BlockIdxType> unique;
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            const auto& blocks = resource->blocks(batch, gid);
+            size_t      begin  = resource->cacheResource(batch).linearReplayActiveBegin(gid, blocks.size());
+            if (min_processed_length >= 0) {
+                begin = std::min(
+                    begin, static_cast<size_t>(min_processed_length) / config_.cache_specs[gid]->seq_size_per_block);
+            }
+            for (size_t position = begin; position < blocks.size(); ++position) {
+                const auto block = blocks[position];
+                if (block > 0) {
+                    unique.insert(block);
+                }
+            }
+        }
+        BlockIndicesType blocks(unique.begin(), unique.end());
+        if (!blocks.empty()) {
+            pool->replayReference(blocks);
+            held.emplace_back(pool, std::move(blocks));
+        }
+    }
+    return std::shared_ptr<LinearReplayBlockHold>(
+        new LinearReplayBlockHold,
+        [retirement = linear_replay_retirement_, held = std::move(held)](LinearReplayBlockHold* value) mutable {
+            const auto event = value->lastUse();
+            delete value;
+            retirement->retire(event, [held = std::move(held)] {
+                for (const auto& [pool, blocks] : held) {
+                    pool->replayFree(blocks);
+                }
+            });
+        });
+}
+
+bool KVCacheManager::makeLinearReplayTailsPrivate(const BatchKVCacheResourcePtr& resource, int min_processed_length) {
+    if (!resource || config_.linear_replay_group_ids.empty()) {
+        return true;
+    }
+    linear_replay_retirement_->reap();
+    const auto independent = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(allocator_);
+    struct Replacement {
+        int          batch;
+        int          group;
+        size_t       position;
+        BlockIdxType source;
+        BlockIdxType destination;
+        BlockPoolPtr pool;
+    };
+    std::vector<Replacement>                  replacements;
+    std::vector<std::tuple<int, int, size_t>> active_begins;
+    for (int gid : config_.linear_replay_group_ids) {
+        const auto pool = independent ? independent->groupBlockPools()[gid] : allocator_->getBlockPool();
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            const auto& blocks = resource->blocks(batch, gid);
+            size_t      begin  = blocks.size() > 2 ? blocks.size() - 2 : 0;
+            if (min_processed_length >= 0) {
+                begin = std::min(
+                    begin, static_cast<size_t>(min_processed_length) / config_.cache_specs[gid]->seq_size_per_block);
+            }
+            active_begins.emplace_back(batch, gid, begin);
+            for (size_t pos = begin; pos < blocks.size(); ++pos) {
+                if (blocks[pos] > 0 && !pool->needsReplayCopyOnWrite(blocks[pos])) {
+                    continue;
+                }
+                const auto allocated = pool->malloc(1);
+                if (allocated.empty()) {
+                    for (const auto& entry : replacements) {
+                        entry.pool->requestFree(entry.destination);
+                    }
+                    return false;
+                }
+                replacements.push_back({batch, gid, pos, blocks[pos], allocated[0], pool});
+            }
+        }
+    }
+    for (const auto& entry : replacements) {
+        // The round pins the old source before COW. Replay reconstructs directly
+        // into this private destination on every TP rank, without a state copy.
+        resource->mutableBlockIds(entry.batch, entry.group).setAt(entry.position, entry.destination);
+        resource->cacheResource(entry.batch).restrictLinearReplayPrefix(entry.group, entry.position);
+        if (entry.source > 0) {
+            entry.pool->requestFree(entry.source);
+        }
+    }
+    for (const auto& [batch, group, begin] : active_begins) {
+        resource->cacheResource(batch).setLinearReplayActiveBegin(group, begin);
+        resource->cacheResource(batch).restrictLinearReplayPrefix(group, begin);
+    }
+    return true;
+}
+
+void KVCacheManager::markLinearReplayStarted(const BatchKVCacheResourcePtr& resource, int processed_length) {
+    if (!resource) {
+        return;
+    }
+    for (int gid : config_.linear_replay_group_ids) {
+        const size_t block_size = config_.cache_specs[gid]->seq_size_per_block;
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            resource->cacheResource(batch).restrictLinearReplayPrefix(
+                gid, static_cast<size_t>(std::max(0, processed_length)) / block_size);
+        }
+    }
 }
 
 const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
@@ -435,6 +599,7 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     layout.linear_step = config_.linear_step;
     validateK3CacheSpecs(config_);
     layout.local_shard_count = parallelism_config_.local_kv_page_rr_shard_count();
+    layout.linear_replay = linear_replay_layout_;
 
     auto  all_layout        = allocator_->allLayerCacheBase();
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
@@ -538,6 +703,13 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     layout.group_region_names       = mtp_sub_config->group_region_names;
     layout.group_types              = mtp_sub_config->group_types;
     layout.group_seq_size_per_block = mtp_sub_config->group_seq_size_per_block;
+    if (!config_.linear_replay_group_ids.empty()) {
+        // Layer mappings contain physical group IDs, including dedicated draft groups.
+        layout.group_region_names       = config_.group_region_names;
+        layout.group_types              = config_.group_types;
+        layout.group_seq_size_per_block = config_.group_seq_size_per_block;
+        layout.layer_to_group_ids.resize(mtp_layer_num);
+    }
     // Typed-pool views are indexed by LOCAL layer id from the MTP model's
     // attention modules (self.layer_id ∈ [0, mtp_layer_num)).  The full
     // layout's by_attn arrays are indexed by GLOBAL layer id (main + MTP
@@ -557,6 +729,9 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
             if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
                 layout.layer_to_groups[local_layer_id]          = all_layout.layer_to_groups[global_layer_id];
                 layout.layers_to_kv_buffer_ptrs[local_layer_id] = all_layer_tensors[global_layer_id];
+                if (!config_.linear_replay_group_ids.empty()) {
+                    layout.layer_to_group_ids[local_layer_id] = {all_layout.layer_to_groups[global_layer_id]};
+                }
             } else {
                 RTP_LLM_CHECK(false);
             }

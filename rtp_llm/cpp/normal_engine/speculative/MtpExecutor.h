@@ -127,8 +127,10 @@ protected:
                                       const torch::Tensor&                         linear_block_ids,
                                       const torch::Tensor&                         linear_group_types,
                                       const torch::Tensor&                         linear_valid_block_counts,
-                                      std::shared_ptr<torch::Event>                rejection_event,
-                                      std::shared_ptr<torch::Event>                draft_event);
+                                      const std::optional<LinearReplayInputs>&     linear_replay,
+                                      const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
+                                      std::shared_ptr<torch::Event>                         rejection_event,
+                                      std::shared_ptr<torch::Event>                         draft_event);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -183,20 +185,30 @@ protected:
     // Attach next-step device state, then fork a worker that waits on caller-
     // recorded rejection/draft events and runs D2H/specUpdate/KV release off
     // the main thread.
-    absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
-                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                     MergedOutput                                 draft_prefill_output,
-                                     const torch::Tensor&                         linear_block_ids,
-                                     const torch::Tensor&                         linear_group_types,
-                                     const torch::Tensor&                         linear_valid_block_counts,
-                                     std::shared_ptr<torch::Event>                rejection_event,
-                                     std::shared_ptr<torch::Event>                draft_event);
+    absl::Status dispatchDecodeAsync(const StreamGroups&                                   stream_groups,
+                                     const speculative::SpeculativeSamplerOutput&          spec_decode_output,
+                                     MergedOutput                                          draft_prefill_output,
+                                     const torch::Tensor&                                  linear_block_ids,
+                                     const torch::Tensor&                                  linear_group_types,
+                                     const torch::Tensor&                                  linear_valid_block_counts,
+                                     const std::optional<LinearReplayInputs>&              linear_replay,
+                                     const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
+                                     std::shared_ptr<torch::Event>                         rejection_event,
+                                     std::shared_ptr<torch::Event>                         draft_event);
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
-    void publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,
-                                   const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                   const MergedOutput&                          draft_prefill_output);
+    void publishSyncMtpDeviceState(const StreamGroups&                                   stream_groups,
+                                   const speculative::SpeculativeSamplerOutput&          spec_decode_output,
+                                   const MergedOutput&                                   draft_prefill_output,
+                                   const std::optional<LinearReplayInputs>&              linear_replay,
+                                   const std::vector<GenerateStream::LinearReplayRound>& replay_rounds);
+
+    static void recordLinearReplayLastUse(const std::vector<GenerateStream::LinearReplayRound>& rounds);
+    void        publishLinearReplayWindows(const StreamGroups&                                   stream_groups,
+                                           const LinearReplayInputs&                             replay,
+                                           const std::vector<GenerateStream::LinearReplayRound>& rounds,
+                                           const torch::Tensor&                                  accept_lengths);
 
     void releaseAllModelBuffers();
 

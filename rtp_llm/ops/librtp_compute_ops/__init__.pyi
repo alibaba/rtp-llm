@@ -12,6 +12,8 @@ __all__: list[str] = [
     "CacheGroupType",
     "KVCacheRegionName",
     "LayerKVCache",
+    "LinearReplayInputs",
+    "LinearReplayLayerCache",
     "KVCache",
     "ParamsBase",
     "PyAttentionInputs",
@@ -155,8 +157,35 @@ class KVCacheRegionName:
     @property
     def value(self) -> int: ...
 
+class LinearReplayInputs:
+    slot_ids: torch.Tensor
+    slot_generations: torch.Tensor
+    active_block_ids: torch.Tensor
+    prev_accept_lengths: torch.Tensor
+    history_valid_lengths: torch.Tensor
+    history_epochs: torch.Tensor
+    verify_epochs: torch.Tensor
+    init_kinds: torch.Tensor
+    state_read_block_ids: torch.Tensor
+    anchor_processed_lengths: torch.Tensor
+    def __init__(self) -> None: ...
+    def slice(self, start: int, count: int) -> LinearReplayInputs: ...
+
+class LinearReplayLayerCache:
+    k: torch.Tensor
+    u: torch.Tensor
+    g: torch.Tensor
+    conv_inputs: torch.Tensor
+    slot_generations: torch.Tensor
+    log_epochs: torch.Tensor
+    valid_counts: torch.Tensor
+    error_flags: torch.Tensor
+    def __init__(self) -> None: ...
+
 class LayerKVCache:
     """Per-layer KV cache view. Returned by KVCache.get_layer_cache()."""
+
+    linear_replay: LinearReplayLayerCache | None
 
     def __init__(self) -> None: ...
     @property
@@ -205,6 +234,7 @@ class LayerKVCache:
         """
 
 class KVCache:
+    linear_replay_by_layer: list[LinearReplayLayerCache | None]
     """Whole-model KV cache holding tensors for all layers."""
 
     @property
@@ -251,6 +281,7 @@ class ParamsBase:
         """
 
 class PyAttentionInputs:
+    linear_replay: LinearReplayInputs | None
     cache_store_inputs: PyCacheStoreInputs | None
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None

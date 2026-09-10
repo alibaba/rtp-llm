@@ -671,6 +671,45 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonic
     coordinator.reset();
 }
 
+TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPRemapDoesNotPublishReplayAnchors) {
+    CacheConfig config             = cache_config_;
+    config.layer_num               = 2;
+    config.layer_all_num           = 2;
+    config.layer_to_group_id       = {0, 1};
+    config.group_types             = {CacheGroupType::FULL, CacheGroupType::LINEAR};
+    config.linear_replay_group_ids = {1};
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    auto coordinator                               = std::make_shared<KVCacheConnectorCoordinator>(
+        config, kv_cache_config_, runtime_config_, parallelism, SpeculativeExecutionConfig{}, allocator_);
+    coordinator->connectors_.clear();
+    KVCacheResource resource;
+    resource.initGroups(2, 2, config.layer_to_group_id, 1, config.group_types);
+    resource.cacheKeys() = {10, 11, 12, 13};
+    resource.setLastBlockAligned(false);
+    resource.mutableBlockIds(0).assign({100, 101});
+    resource.mutableBlockIds(1).assign({200, 201, 202, 203});
+    resource.restrictLinearReplayPrefix(1, 2);
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, true))
+        .WillOnce(testing::Invoke([](const KVCacheResource& selected, const CacheKeysType& keys, bool) {
+            EXPECT_THAT(keys, testing::ElementsAre(11, 13));
+            EXPECT_THAT(selected.blocks(0), testing::ElementsAre(100, 101));
+            EXPECT_THAT(selected.blocks(1), testing::ElementsAre(201, NULL_BLOCK_IDX));
+            return std::make_shared<KVCacheResource>();
+        }));
+    auto context = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    ON_CALL(*context, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+    std::shared_ptr<Meta> meta = std::make_shared<TestMeta>(true, false, "");
+    ON_CALL(*context, meta()).WillByDefault(testing::ReturnRef(meta));
+    auto result = coordinator->asyncWrite(context);
+    ASSERT_NE(result, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(coordinator->update_mutex_);
+        coordinator->fused_async_write_context_list_.clear();
+    }
+}
+
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGroupsInCanonicalCoordinates) {
     CacheConfig cp_cache_config                    = cache_config_;
     cp_cache_config.layer_num                      = 2;

@@ -174,6 +174,75 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateTracksRealAndUpperBoundSeqLen)
     ASSERT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, stream->seqLength() + 2);
 }
 
+TEST_F(GenerateStreamTest, testLinearReplayWindowSurvivesMtpStateClearAndRejectsStalePublish) {
+    auto stream                                          = GenerateStreamBuilder().createContextStream({1, 2, 3, 4});
+    auto first                                           = std::make_shared<GenerateStream::LinearReplayWindow>();
+    first->verify_epoch                                  = 3;
+    first->lease                                         = std::make_shared<LinearReplayLease>();
+    first->lease->slot_id                                = 1;
+    first->lease->generation                             = 2;
+    stream->stream_cache_resource_->linear_replay_lease_ = first->lease;
+    stream->linear_replay_epoch_counter_                 = first->verify_epoch;
+    first->accept_len_gpu                                = torch::tensor({3}, torch::kInt32);
+    std::weak_ptr<const GenerateStream::LinearReplayWindow> first_weak = first;
+    stream->publishLinearReplayWindow(std::move(first));
+
+    GenerateStream::MtpAsyncDeviceState state;
+    state.linear_replay_epoch = 3;
+    const auto mtp_epoch      = stream->setMtpAsyncDeviceState(std::move(state));
+    ASSERT_TRUE(stream->clearMtpAsyncDeviceState(mtp_epoch));
+    stream->clearSpecDecodeDeviceState();
+    ASSERT_FALSE(first_weak.expired());
+
+    auto next                            = std::make_shared<GenerateStream::LinearReplayWindow>();
+    next->verify_epoch                   = 4;
+    next->lease                          = stream->stream_cache_resource_->linear_replay_lease_;
+    stream->linear_replay_epoch_counter_ = next->verify_epoch;
+    std::weak_ptr<const GenerateStream::LinearReplayWindow> next_weak = next;
+    stream->publishLinearReplayWindow(std::move(next));
+    ASSERT_TRUE(first_weak.expired());
+
+    auto stale          = std::make_shared<GenerateStream::LinearReplayWindow>();
+    stale->verify_epoch = 3;
+    stale->lease        = stream->stream_cache_resource_->linear_replay_lease_;
+    std::weak_ptr<const GenerateStream::LinearReplayWindow> stale_weak = stale;
+    stream->publishLinearReplayWindow(std::move(stale));
+    ASSERT_TRUE(stale_weak.expired());
+    ASSERT_FALSE(next_weak.expired());
+
+    stream->clearLinearReplayWindow();
+    ASSERT_TRUE(next_weak.expired());
+
+    auto old_lease_window                                = std::make_shared<GenerateStream::LinearReplayWindow>();
+    old_lease_window->verify_epoch                       = 5;
+    old_lease_window->lease                              = stream->stream_cache_resource_->linear_replay_lease_;
+    stream->stream_cache_resource_->linear_replay_lease_ = std::make_shared<LinearReplayLease>();
+    stream->linear_replay_epoch_counter_                 = 5;
+    std::weak_ptr<const GenerateStream::LinearReplayWindow> old_lease_weak = old_lease_window;
+    stream->publishLinearReplayWindow(std::move(old_lease_window));
+    ASSERT_TRUE(old_lease_weak.expired());
+}
+
+TEST_F(GenerateStreamTest, testLinearReplayPublicationIgnoresFinishedOrReleasedStream) {
+    for (bool resources_released : {false, true}) {
+        auto stream       = GenerateStreamBuilder().createContextStream({1, 2, 3, 4});
+        auto lease        = std::make_shared<LinearReplayLease>();
+        lease->slot_id    = 1;
+        lease->generation = 2;
+        stream->stream_cache_resource_->linear_replay_lease_ = lease;
+        stream->linear_replay_epoch_counter_                 = 3;
+        stream->generate_status_->status = resources_released ? StreamState::RUNNING : StreamState::FINISHED;
+        stream->stream_cache_resource_->resource_released_ = resources_released;
+
+        auto window          = std::make_shared<GenerateStream::LinearReplayWindow>();
+        window->verify_epoch = 3;
+        window->lease        = std::move(lease);
+        std::weak_ptr<const GenerateStream::LinearReplayWindow> weak_window = window;
+        EXPECT_NO_THROW(stream->publishLinearReplayWindow(std::move(window)));
+        EXPECT_TRUE(weak_window.expired());
+    }
+}
+
 // setSpecDecodeDeviceState / clearSpecDecodeDeviceState
 // continue to work as wrappers around the new struct API.
 TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateBackCompatWrappers) {

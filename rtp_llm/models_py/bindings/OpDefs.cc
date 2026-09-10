@@ -20,10 +20,36 @@ void registerPyOpDefs(pybind11::module& m) {
         .value("SWA_KV", rtp_llm::KVCacheRegionName::SWA_KV)
         .export_values();
 
+    pybind11::class_<rtp_llm::LinearReplayInputs>(m, "LinearReplayInputs")
+        .def(pybind11::init<>())
+        .def_readwrite("slot_ids", &rtp_llm::LinearReplayInputs::slot_ids)
+        .def_readwrite("slot_generations", &rtp_llm::LinearReplayInputs::slot_generations)
+        .def_readwrite("active_block_ids", &rtp_llm::LinearReplayInputs::active_block_ids)
+        .def_readwrite("prev_accept_lengths", &rtp_llm::LinearReplayInputs::prev_accept_lengths)
+        .def_readwrite("history_valid_lengths", &rtp_llm::LinearReplayInputs::history_valid_lengths)
+        .def_readwrite("history_epochs", &rtp_llm::LinearReplayInputs::history_epochs)
+        .def_readwrite("verify_epochs", &rtp_llm::LinearReplayInputs::verify_epochs)
+        .def_readwrite("init_kinds", &rtp_llm::LinearReplayInputs::init_kinds)
+        .def_readwrite("state_read_block_ids", &rtp_llm::LinearReplayInputs::state_read_block_ids)
+        .def_readwrite("anchor_processed_lengths", &rtp_llm::LinearReplayInputs::anchor_processed_lengths)
+        .def("slice", &rtp_llm::LinearReplayInputs::slice);
+
+    pybind11::class_<LinearReplayLayerCache>(m, "LinearReplayLayerCache")
+        .def(pybind11::init<>())
+        .def_readwrite("k", &LinearReplayLayerCache::k)
+        .def_readwrite("u", &LinearReplayLayerCache::u)
+        .def_readwrite("g", &LinearReplayLayerCache::g)
+        .def_readwrite("conv_inputs", &LinearReplayLayerCache::conv_inputs)
+        .def_readwrite("slot_generations", &LinearReplayLayerCache::slot_generations)
+        .def_readwrite("log_epochs", &LinearReplayLayerCache::log_epochs)
+        .def_readwrite("valid_counts", &LinearReplayLayerCache::valid_counts)
+        .def_readwrite("error_flags", &LinearReplayLayerCache::error_flags);
+
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
+        .def_readwrite("linear_replay", &LayerKVCache::linear_replay)
         .def_readwrite("cache_store_segment_sizes",
                        &LayerKVCache::cache_store_segment_sizes,
                        "Contiguous source segment sizes for asymmetric-TP cache-store transfer")
@@ -38,6 +64,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("local_shard_count", &KVCache::local_shard_count, "Allocator cache shard count")
         .def_readwrite("kv_cache_base_by_layer", &KVCache::kv_cache_base_by_layer, "Per-layer KV cache tensors")
         .def_readwrite("kv_scale_base_by_layer", &KVCache::kv_scale_base_by_layer, "Per-layer KV scale tensors")
+        .def_readwrite("linear_replay_by_layer", &KVCache::linear_replay_by_layer)
         .def_readwrite("seq_size_per_block", &KVCache::seq_size_per_block, "Physical (logical) block size in tokens")
         .def_readwrite("kernel_seq_size_per_block",
                        &KVCache::kernel_seq_size_per_block,
@@ -160,6 +187,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
+        .def_readwrite("linear_replay", &PyAttentionInputs::linear_replay)
         .def_readwrite("cuda_graph_fmha_workspace", &PyAttentionInputs::cuda_graph_fmha_workspace)
         .def_readwrite("is_mtp_draft_update", &PyAttentionInputs::is_mtp_draft_update)
         .def_readwrite("is_prefill_chunk", &PyAttentionInputs::is_prefill_chunk)

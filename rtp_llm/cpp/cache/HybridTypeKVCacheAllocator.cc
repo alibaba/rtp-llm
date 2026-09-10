@@ -55,6 +55,16 @@ bool HybridTypeKVCacheAllocator::doInit() {
             full_group_ids_.push_back(gid);
         }
 
+        if (!config_.linear_replay_group_ids.empty()) {
+            std::vector<int> physical_slots;
+            physical_slots.reserve(ids.size());
+            for (size_t index = 0; index < ids.size(); ++index) {
+                physical_slots.push_back(ids[index] < static_cast<int>(config_.layer_num) ?
+                                             static_cast<int>(index) :
+                                             config_.group_layer_num + ids[index] - config_.layer_num);
+            }
+            group->setPhysicalLayerSlots(std::move(physical_slots));
+        }
         RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid %d", gid);
         kv_cache_groups_.push_back(group);
     }
@@ -64,7 +74,11 @@ bool HybridTypeKVCacheAllocator::doInit() {
         for (size_t local_layer_idx = 0; local_layer_idx < cur_group_layers.size(); ++local_layer_idx) {
             const int global_layer_idx = cur_group_layers[local_layer_idx];
             if (global_layer_idx >= 0 && static_cast<size_t>(global_layer_idx) < global_layer_to_local_id_.size()) {
-                global_layer_to_local_id_[static_cast<size_t>(global_layer_idx)] = static_cast<int>(local_layer_idx);
+                global_layer_to_local_id_[static_cast<size_t>(global_layer_idx)] =
+                    !config_.linear_replay_group_ids.empty()
+                            && global_layer_idx >= static_cast<int>(config_.layer_num) ?
+                        config_.group_layer_num + global_layer_idx - config_.layer_num :
+                        static_cast<int>(local_layer_idx);
             }
         }
     }
@@ -99,10 +113,16 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     const auto       scale_tensors = block_pool_->allLayerScaleCacheBase();
 
     layout.layer_to_groups = layer_to_group_id_;
+    layout.layer_to_group_ids.resize(config_.layer_all_num);
+    layout.layer_region_to_group_id.assign(config_.layer_all_num,
+                                           std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
 
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
+        const int group_id                  = layer_to_group_id_[layer_id];
+        layout.layer_to_group_ids[layer_id] = {group_id};
+        layout.layer_region_to_group_id[layer_id][static_cast<size_t>(KVCacheRegionName::DEFAULT)] = group_id;
         int32_t      local     = global_layer_to_local_id_[layer_id];
         const size_t local_idx = static_cast<size_t>(local);
 

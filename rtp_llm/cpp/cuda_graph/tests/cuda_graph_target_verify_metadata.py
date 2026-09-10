@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
+import triton
+import triton.language as tl
 
 try:
     from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
@@ -31,11 +33,78 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_im
 )
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import (
+    LinearReplayInputs,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
     rtp_llm_ops,
 )
+
+
+_LINEAR_REPLAY_FIELDS = (
+    "slot_ids",
+    "slot_generations",
+    "active_block_ids",
+    "prev_accept_lengths",
+    "history_valid_lengths",
+    "history_epochs",
+    "verify_epochs",
+    "init_kinds",
+    "state_read_block_ids",
+    "anchor_processed_lengths",
+)
+
+
+@triton.jit
+def _visit_live_replay_slots(Slots, Visits):
+    slot = tl.load(Slots + tl.program_id(0))
+    if slot >= 0:
+        tl.atomic_add(Visits + slot, 1)
+
+
+class _LinearReplayProbeModel:
+    def __init__(self, steps, groups):
+        self.steps = steps
+        self.groups = groups
+        self.live_slot_visits = torch.zeros(32, dtype=torch.int32, device="cuda")
+        self.outputs_by_batch = {}
+        self.capture_dtypes = []
+        self.prepared_snapshots = []
+
+    @staticmethod
+    def pack(replay):
+        columns = []
+        for name in _LINEAR_REPLAY_FIELDS:
+            value = getattr(replay, name)
+            columns.append(value.T if value.ndim == 2 else value.unsqueeze(1))
+        return torch.cat([value.to(torch.int64) for value in columns], dim=1)
+
+    def prepare_fmha_impl(self, inputs, _is_cuda_graph):
+        replay = inputs.attention_inputs.linear_replay
+        self.capture_dtypes.append(
+            tuple(getattr(replay, name).dtype for name in _LINEAR_REPLAY_FIELDS)
+        )
+
+        def prepare_cuda_graph(attention):
+            self.prepared_snapshots.append(self.pack(attention.linear_replay))
+
+        return SimpleNamespace(prepare_cuda_graph=prepare_cuda_graph)
+
+    def forward(self, inputs, _fmha_impl=None):
+        replay = inputs.attention_inputs.linear_replay
+        batch = replay.slot_ids.numel()
+        _visit_live_replay_slots[(batch,)](replay.slot_ids, self.live_slot_visits)
+        metadata = self.pack(replay)
+        padding = torch.zeros(
+            (batch, 16 - metadata.shape[1]), dtype=torch.int64, device="cuda"
+        )
+        output = torch.cat((metadata, padding), dim=1).repeat_interleave(
+            self.steps, dim=0
+        )
+        self.outputs_by_batch[batch] = output
+        # Runner output storage follows the model's FP16 dtype. Retain the
+        # complete int64 probe separately and emit exactly representable bits.
+        return PyModelOutputs(output.remainder(1024).to(inputs.input_hiddens.dtype))
 
 
 class _MetadataProbeModel:
@@ -160,6 +229,98 @@ class _SequenceHostProbeModel:
 
 
 class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
+    def test_linear_replay_metadata_survives_padding_and_batch_changes(self):
+        steps, groups = 4, 3
+        model = _LinearReplayProbeModel(steps, groups)
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            hidden_size=16,
+            max_seq_len=384,
+            tokens_per_block=64,
+            kernel_tokens_per_block=64,
+            decode_capture_batch_sizes=[8],
+            num_tokens_per_bs=steps,
+            is_target_verify=True,
+            max_context_batch_size=8,
+            linear_replay_group_num=groups,
+        )
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            model.live_slot_visits, torch.zeros_like(model.live_slot_visits)
+        )
+        expected_dtypes = tuple(
+            (
+                torch.int64
+                if name in ("slot_generations", "history_epochs", "verify_epochs")
+                else torch.int32
+            )
+            for name in _LINEAR_REPLAY_FIELDS
+        )
+        self.assertTrue(model.capture_dtypes)
+        self.assertTrue(
+            all(dtypes == expected_dtypes for dtypes in model.capture_dtypes)
+        )
+        visits = torch.zeros(32, dtype=torch.int32)
+        for round_id, slots in enumerate(([3, 7], [9], [11, 3]), start=1):
+            batch = len(slots)
+            inputs = self._build_replay_inputs(batch, steps)
+            replay = LinearReplayInputs()
+            for field, dtype in zip(_LINEAR_REPLAY_FIELDS, expected_dtypes):
+                if field in ("active_block_ids", "state_read_block_ids"):
+                    backing = torch.full(
+                        (groups, batch + 4), -77, dtype=dtype, device="cuda"
+                    )
+                    tensor = backing[:, 1 : batch + 1]
+                    tensor.copy_(
+                        torch.arange(groups * batch, dtype=dtype, device="cuda")
+                        .reshape(groups, batch)
+                        .add_(
+                            1000 * round_id
+                            + (100 if field == "active_block_ids" else 200)
+                        )
+                    )
+                    self.assertFalse(tensor.is_contiguous())
+                else:
+                    offset = 100 * round_id + _LINEAR_REPLAY_FIELDS.index(field)
+                    if dtype == torch.int64:
+                        offset += 1 << 42
+                    tensor = torch.arange(batch, dtype=dtype, device="cuda") + offset
+                setattr(replay, field, tensor)
+            replay.slot_ids.copy_(torch.tensor(slots, dtype=torch.int32, device="cuda"))
+            replay.prev_accept_lengths.fill_(3)
+            replay.history_valid_lengths.fill_(steps)
+            replay.init_kinds.zero_()
+            inputs.attention_inputs.linear_replay = replay
+            expected = model.pack(replay).clone()
+            self.assertTrue(runner.canRun(inputs))
+            self.assertEqual(runner.getCurrentRealGraphSize(), 8)
+            output = runner.forward(inputs).hidden_states
+            torch.cuda.synchronize()
+            torch.testing.assert_close(
+                output.reshape(batch, steps, 16)[:, 0, : expected.shape[1]],
+                expected.remainder(1024).to(output.dtype),
+                rtol=0,
+                atol=0,
+            )
+            prepared = model.prepared_snapshots[-1]
+            torch.testing.assert_close(prepared[:batch], expected, rtol=0, atol=0)
+            captured_output = model.outputs_by_batch[8].reshape(8, steps, 16)[:, 0]
+            torch.testing.assert_close(
+                captured_output[:batch, : expected.shape[1]], expected, rtol=0, atol=0
+            )
+            padded = captured_output[batch:]
+            # Slot -1 masks padding even when ignored group/epoch fields retain
+            # their previous backing values. No stale request may visit a slot.
+            self.assertTrue(torch.all(padded[:, 0] == -1).item())
+            self.assertTrue(torch.all(padded[:, 5:7] == 0).item())
+            self.assertTrue(torch.all(padded[:, 9] == 0).item())
+            for slot in slots:
+                visits[slot] += 1
+            torch.testing.assert_close(
+                model.live_slot_visits.cpu(), visits, rtol=0, atol=0
+            )
+
     @staticmethod
     def _build_replay_inputs(batch_size: int, q_len: int) -> PyModelInputs:
         inputs = PyModelInputs()

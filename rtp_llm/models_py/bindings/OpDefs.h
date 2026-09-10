@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 // Forward declare for opaque pointers in PyCacheStoreInputs
@@ -28,6 +29,7 @@ namespace torch_ext {
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
+    std::optional<LinearReplayLayerCache> linear_replay;
     // Optional contiguous source segments used by normal CacheStore for
     // asymmetric-TP linear-state transfer. The destination allocator exposes
     // matching non-contiguous segments through MemoryLayoutStrategy.
@@ -49,6 +51,7 @@ struct KVCache {
     // Per-layer views
     std::vector<torch::Tensor> kv_cache_base_by_layer;
     std::vector<torch::Tensor> kv_scale_base_by_layer;
+    std::vector<std::optional<LinearReplayLayerCache>> linear_replay_by_layer;
     int                        seq_size_per_block        = 0;
     int                        kernel_seq_size_per_block = 0;
     int                        linear_step               = 1;
@@ -85,6 +88,9 @@ struct KVCache {
             layer_cache.group_id = layer_region_to_group_id[layer][region];
         } else {
             layer_cache.group_id = 0;
+        }
+        if (static_cast<size_t>(idx) < linear_replay_by_layer.size()) {
+            layer_cache.linear_replay = linear_replay_by_layer[idx];
         }
         auto          base = kv_cache_base_by_layer[idx];
         torch::Tensor scale;
@@ -345,6 +351,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool is_prefill{false};
     bool is_target_verify{false};
+    std::optional<rtp_llm::LinearReplayInputs> linear_replay;
     // Model-scoped fixed-address backing storage used while constructing
     // TokenSpeed MLA implementations for CUDA graph capture/replay.
     torch::Tensor cuda_graph_fmha_workspace;

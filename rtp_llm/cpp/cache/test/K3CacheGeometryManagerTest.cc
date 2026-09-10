@@ -14,6 +14,8 @@ namespace {
 
 ModelConfig makeK3ModelConfig(int physical_page_tokens, bool draft) {
     ModelConfig model;
+    // A synthetic LINEAR draft exercises physical-group isolation from target KDA.
+    model.model_type                                               = draft ? "test_k3_linear_mtp" : "kimi_k3";
     model.num_layers                                                = draft ? 2 : 4;
     model.max_seq_len                                               = physical_page_tokens;
     model.data_type                                                 = DataType::TYPE_BF16;
@@ -43,11 +45,60 @@ ModelConfig makeK3ModelConfig(int physical_page_tokens, bool draft) {
     return model;
 }
 
-void expectGeometry(const CacheLayerLayout& layout, int page_tokens, int shards, bool decode) {
+void expectGeometry(
+    const CacheLayerLayout& layout, const CacheConfig& physical_config, int page_tokens, int shards, bool decode) {
     EXPECT_EQ(layout.local_shard_count, decode ? 1 : shards);
-    EXPECT_EQ(layout.group_seq_size_per_block,
-              (std::vector<size_t>{static_cast<size_t>(page_tokens), static_cast<size_t>(page_tokens * shards)}));
-    EXPECT_EQ(layout.group_types, (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR}));
+    EXPECT_EQ(layout.linear_step, physical_config.linear_step);
+    EXPECT_EQ(layout.group_types, physical_config.group_types);
+    EXPECT_EQ(layout.group_region_names, physical_config.group_region_names);
+    EXPECT_EQ(layout.group_seq_size_per_block, physical_config.group_seq_size_per_block);
+    ASSERT_EQ(layout.group_seq_size_per_block.size(), layout.group_types.size());
+    for (size_t group = 0; group < layout.group_types.size(); ++group) {
+        SCOPED_TRACE(group);
+        const auto kind = layout.group_types[group];
+        ASSERT_TRUE(kind == CacheGroupType::FULL || kind == CacheGroupType::LINEAR || kind == CacheGroupType::SWA);
+        EXPECT_EQ(layout.group_seq_size_per_block[group],
+                  static_cast<size_t>(kind == CacheGroupType::LINEAR ? page_tokens * shards : page_tokens));
+    }
+    ASSERT_EQ(layout.layer_group_types.size(), layout.layer_to_groups.size());
+    for (size_t layer = 0; layer < layout.layer_to_groups.size(); ++layer) {
+        const int group = layout.layer_to_groups[layer];
+        ASSERT_GE(group, 0);
+        ASSERT_LT(static_cast<size_t>(group), layout.group_types.size());
+        EXPECT_EQ(layout.layer_group_types[layer], layout.group_types[group]);
+        EXPECT_EQ(layout.resolvePhysicalGroupId(layer, KVCacheRegionName::DEFAULT), std::optional<int>(group));
+    }
+}
+
+void expectReplayMetadata(const CacheLayerLayout& layout, int64_t slots, int64_t steps, int64_t heads) {
+    ASSERT_TRUE(layout.linear_replay.has_value());
+    const auto& replay = *layout.linear_replay;
+    for (const auto* tensors : {&replay.keys, &replay.updates, &replay.log_gates, &replay.conv_inputs}) {
+        ASSERT_EQ(tensors->size(), layout.layer_to_groups.size());
+        for (size_t layer = 0; layer < tensors->size(); ++layer) {
+            const auto& tensor = (*tensors)[layer];
+            const bool linear = layout.layer_group_types[layer] == CacheGroupType::LINEAR;
+            EXPECT_EQ(tensor.defined(), linear);
+            if (!linear) {
+                continue;
+            }
+            ASSERT_TRUE(tensor.defined());
+            EXPECT_TRUE(tensor.is_cuda());
+            EXPECT_EQ(tensor.device(), layout.layers_to_kv_buffer_ptrs[layer].device());
+            const bool conv = tensors == &replay.conv_inputs;
+            EXPECT_EQ(tensor.scalar_type(), conv ? torch::kBFloat16 : torch::kFloat32);
+            EXPECT_EQ(tensor.sizes().vec(),
+                      conv ? std::vector<int64_t>({slots, steps, 3 * heads * 128}) :
+                             std::vector<int64_t>({slots, steps, heads, 128}));
+        }
+    }
+    for (const auto* header : {&replay.slot_generations, &replay.log_epochs, &replay.valid_counts, &replay.error_flags}) {
+        ASSERT_TRUE(header->defined());
+        EXPECT_TRUE(header->is_cuda());
+        EXPECT_EQ(header->sizes().vec(), std::vector<int64_t>({slots}));
+        const bool wide = header == &replay.slot_generations || header == &replay.log_epochs;
+        EXPECT_EQ(header->scalar_type(), wide ? torch::kInt64 : torch::kInt32);
+    }
 }
 
 class K3CacheGeometryManagerTest: public ::testing::Test {
@@ -118,10 +169,12 @@ TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstr
                 SpeculativeExecutionConfig speculative;
                 speculative.type              = SP_TYPE_MTP;
                 speculative.gen_num_per_cycle = 2;
+                RuntimeConfig runtime;
+                runtime.max_generate_batch_size = 2;
                 auto config = CacheConfigCreator::createSpConfig(makeK3ModelConfig(page_tokens, false),
                                                                  makeK3ModelConfig(page_tokens, true),
                                                                  parallelism,
-                                                                 RuntimeConfig{},
+                                                                 runtime,
                                                                  kv_config,
                                                                  speculative,
                                                                  std::nullopt,
@@ -133,8 +186,11 @@ TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstr
                 KVCacheManager manager(config, true, nullptr, kv_config, parallelism);
                 ASSERT_TRUE(manager.init());
                 const auto main = manager.getMainModelCacheLayerLayout();
-                expectGeometry(main, page_tokens, shards, decode);
+                expectGeometry(main, config, page_tokens, shards, decode);
+                expectReplayMetadata(main, 2, 3, 96 / shards);
                 EXPECT_EQ(main.layer_to_groups, (std::vector<int>{1, 0, 1, 0}));
+                ASSERT_EQ(config.linear_replay_group_ids, std::vector<int>({main.layer_to_groups[0]}));
+                EXPECT_TRUE(config.linear_replay_channelwise_gate);
                 ASSERT_EQ(main.layers_to_kv_buffer_ptrs.size(), 4);
                 const auto all = manager.allLayerCacheBase();
                 ASSERT_EQ(all.layers_to_kv_buffer_ptrs.size(), 8);
@@ -154,11 +210,25 @@ TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstr
                 }
                 for (int module = 0; module < 2; ++module) {
                     const auto mtp = manager.getMTPModuleCacheLayerLayout(module);
-                    expectGeometry(mtp, page_tokens, shards, decode);
-                    EXPECT_EQ(mtp.layer_to_groups, (std::vector<int>{1, 0}));
+                    expectGeometry(mtp, config, page_tokens, shards, decode);
+                    EXPECT_FALSE(mtp.linear_replay.has_value());
+                    ASSERT_EQ(mtp.layer_to_groups.size(), 2);
+                    ASSERT_EQ(mtp.layer_to_group_ids.size(), 2);
+                    ASSERT_EQ(mtp.layer_region_to_group_id.size(), 2);
+                    EXPECT_NE(mtp.layer_to_groups[0], main.layer_to_groups[0]);
+                    EXPECT_FALSE(config.isLinearReplayGroup(mtp.layer_to_groups[0]));
                     ASSERT_EQ(mtp.layers_to_kv_buffer_ptrs.size(), 2);
                     for (int local_layer = 0; local_layer < 2; ++local_layer) {
                         const int global_layer = 4 + 2 * module + local_layer;
+                        const int physical_group = config.layer_to_group_id[global_layer];
+                        EXPECT_EQ(mtp.layer_to_groups[local_layer], physical_group);
+                        EXPECT_EQ(mtp.layer_to_group_ids[local_layer], std::vector<int>({physical_group}));
+                        ASSERT_GT(mtp.layer_region_to_group_id[local_layer].size(),
+                                  static_cast<size_t>(KVCacheRegionName::DEFAULT));
+                        EXPECT_EQ(mtp.layer_region_to_group_id[local_layer][static_cast<size_t>(KVCacheRegionName::DEFAULT)],
+                                  physical_group);
+                        EXPECT_EQ(mtp.layer_group_types[local_layer],
+                                  local_layer == 0 ? CacheGroupType::LINEAR : CacheGroupType::FULL);
                         ASSERT_TRUE(mtp.layers_to_kv_buffer_ptrs[local_layer].is_cuda());
                         EXPECT_EQ(mtp.layers_to_kv_buffer_ptrs[local_layer].data_ptr(),
                                   all.layers_to_kv_buffer_ptrs[global_layer].data_ptr());
@@ -169,6 +239,97 @@ TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstr
                     }
                 }
             }
+        }
+    }
+}
+
+TEST_F(K3CacheGeometryManagerTest, Eagle3SwaDraftRetainsPhysicalGeometryAndTargetReplay) {
+    constexpr int page_tokens = 128;
+    constexpr int shards      = 8;
+    for (const bool decode : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "decode=" << decode);
+        ParallelismConfig parallelism;
+        parallelism.role_type                         = decode ? RoleType::DECODE : RoleType::PREFILL;
+        parallelism.tp_size                           = shards;
+        parallelism.tp_rank                           = shards - 1;
+        parallelism.prefill_cp_config.kv_cache_sharded = !decode;
+        parallelism.prefill_cp_config.prefill_cp_size  = shards;
+        auto draft = makeK3ModelConfig(page_tokens, true);
+        draft.model_type = "kimi_k3_mla_swa_eagle3";
+        draft.num_layers = 1;
+        draft.attn_config.sliding_window = 4096;
+        draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::SLIDING_WINDOW};
+        KVCacheConfig kv_config;
+        kv_config.test_block_num            = 2;
+        kv_config.seq_size_per_block        = page_tokens;
+        kv_config.kernel_seq_size_per_block = page_tokens;
+        kv_config.linear_step               = 1;
+        RuntimeConfig runtime;
+        runtime.max_generate_batch_size = 2;
+        SpeculativeExecutionConfig speculative;
+        speculative.type              = SP_TYPE_EAGLE3;
+        speculative.model_type        = draft.model_type;
+        speculative.gen_num_per_cycle = 2;
+        const auto config = CacheConfigCreator::createSpConfig(makeK3ModelConfig(page_tokens, false),
+                                                               draft,
+                                                               parallelism,
+                                                               runtime,
+                                                               kv_config,
+                                                               speculative,
+                                                               std::nullopt,
+                                                               true,
+                                                               true);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+        ASSERT_EQ(config.group_types,
+                  (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}));
+        ASSERT_EQ(config.cache_specs.size(), 3u);
+        ASSERT_NE(dynamic_cast<const MLAKVCacheSpec*>(config.cache_specs[2].get()), nullptr);
+        EXPECT_EQ(config.cache_specs[2]->type, KVCacheSpecType::MultiHeadLatentAttention);
+        EXPECT_EQ(config.cache_specs[2]->seq_size_per_block, page_tokens);
+        EXPECT_TRUE(config.mtp_sub_configs[0]->linear_replay_group_ids.empty());
+
+        // Allowing an MLA-backed SWA group must still reject bad spans and forged spec types.
+        for (int invalid = 0; invalid < 3; ++invalid) {
+            SCOPED_TRACE(invalid);
+            auto malformed = config;
+            if (invalid == 0) {
+                malformed.group_seq_size_per_block[2] = page_tokens * shards;
+            } else {
+                auto wrong_spec = std::make_shared<LinearKVCacheSpec>();
+                wrong_spec->seq_size_per_block = page_tokens;
+                wrong_spec->type = invalid == 1 ? KVCacheSpecType::LinearAttention :
+                                                  KVCacheSpecType::MultiHeadLatentAttention;
+                malformed.cache_specs[2] = wrong_spec;
+            }
+            KVCacheManager invalid_manager(malformed, true, nullptr, kv_config, parallelism);
+            EXPECT_THROW(invalid_manager.getMainModelCacheLayerLayout(), std::invalid_argument);
+        }
+
+        KVCacheManager manager(config, true, nullptr, kv_config, parallelism);
+        ASSERT_TRUE(manager.init());
+        const auto main = manager.getMainModelCacheLayerLayout();
+        expectGeometry(main, config, page_tokens, shards, decode);
+        expectReplayMetadata(main, 2, 3, 96 / shards);
+        ASSERT_EQ(main.layer_to_groups, (std::vector<int>{1, 0, 1, 0}));
+        EXPECT_EQ(config.linear_replay_group_ids, std::vector<int>({1}));
+        const auto mtp = manager.getMTPModuleCacheLayerLayout(0);
+        expectGeometry(mtp, config, page_tokens, shards, decode);
+        EXPECT_FALSE(mtp.linear_replay.has_value());
+        ASSERT_EQ(mtp.layer_to_groups, std::vector<int>({2}));
+        EXPECT_EQ(mtp.layer_group_types, std::vector<CacheGroupType>({CacheGroupType::SWA}));
+        EXPECT_EQ(mtp.layer_to_group_ids, std::vector<std::vector<int>>({{2}}));
+        ASSERT_EQ(mtp.layer_region_to_group_id.size(), 1u);
+        ASSERT_GT(mtp.layer_region_to_group_id[0].size(), static_cast<size_t>(KVCacheRegionName::DEFAULT));
+        EXPECT_EQ(mtp.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::DEFAULT)], 2);
+        EXPECT_FALSE(config.isLinearReplayGroup(2));
+        ASSERT_EQ(mtp.layers_to_kv_buffer_ptrs.size(), 1u);
+        const auto& buffer = mtp.layers_to_kv_buffer_ptrs[0];
+        ASSERT_TRUE(buffer.is_cuda());
+        EXPECT_EQ(buffer.stride(0) * buffer.element_size(), page_tokens * (512 + 64) * sizeof(uint16_t));
+        EXPECT_EQ(buffer.data_ptr(), manager.convertIndexToAddr(0, 4).kv_addr);
+        EXPECT_EQ(buffer.data_ptr(), manager.allLayerCacheBase().layers_to_kv_buffer_ptrs[4].data_ptr());
+        for (const auto& target_buffer : main.layers_to_kv_buffer_ptrs) {
+            EXPECT_NE(buffer.data_ptr(), target_buffer.data_ptr());
         }
     }
 }

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
 
 #include <algorithm>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -103,6 +104,23 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
 bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
     return static_cast<size_t>(gid) < config_.group_region_names.size()
            && skipReuseCacheRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+}
+
+bool HybridKVCacheAllocator::isMutableLinearReplayGroup(const KVCacheResource& resource, int gid) const {
+    return config_.isLinearReplayGroup(gid)
+           && resource.linearReplayPrefixLimit(gid) != std::numeric_limits<size_t>::max();
+}
+
+int HybridKVCacheAllocator::linearReplayTailNeedBlocks(const KVCacheResource& resource, int gid, int seq_len) const {
+    const auto& blocks = resource.blocks(gid);
+    const int   slots  = kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(seq_len, 0, 0);
+    int         need   = 0;
+    for (int pos = std::max(0, slots - 2); pos < slots; ++pos) {
+        if (static_cast<size_t>(pos) >= blocks.size() || isNullBlockIdx(blocks[static_cast<size_t>(pos)])) {
+            ++need;
+        }
+    }
+    return need;
 }
 
 bool HybridKVCacheAllocator::groupUsesVirtualBlockCacheLayout(int                                  gid,
@@ -330,8 +348,10 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
                                            config_.group_types[static_cast<size_t>(gid)] :
                                            CacheGroupType::FULL;
             const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
+            const bool reuse_periodic_blocks =
+                malloc_info.reuse_cache && !isMutableLinearReplayGroup(kv_resource->cacheResource(b), gid);
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step)) {
+                    block_ids, group_seq_len, reuse_periodic_blocks, config_.effectiveReserveStep(gid, reserve_step))) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;
@@ -350,7 +370,30 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
         for (int b = 0; b < batch_size; ++b) {
             for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
                 kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                    kv_resource->mutableBlockIds(b, gid), malloc_info.reuse_cache, reserve_step);
+                    kv_resource->mutableBlockIds(b, gid),
+                    malloc_info.reuse_cache,
+                    config_.effectiveReserveStep(gid, reserve_step));
+                const auto& resource = kv_resource->cacheResource(b);
+                if (!isMutableLinearReplayGroup(resource, gid)) {
+                    continue;
+                }
+                auto&               block_ids  = kv_resource->mutableBlockIds(b, gid);
+                const auto&         blocks     = block_ids.blocks();
+                const size_t        tail_begin = blocks.size() > 2 ? blocks.size() - 2 : 0;
+                BlockIndicesType    expired_blocks;
+                std::vector<size_t> expired_positions;
+                // Replay never publishes new periodic checkpoints. Retain the prefill prefix and two tails;
+                // in-flight source pages stay alive through their separate Replay references.
+                for (size_t pos = resource.linearReplayPrefixLimit(gid); pos < tail_begin; ++pos) {
+                    if (!isNullBlockIdx(blocks[pos])) {
+                        expired_blocks.push_back(blocks[pos]);
+                        expired_positions.push_back(pos);
+                    }
+                }
+                if (!expired_blocks.empty()) {
+                    freeBlocksInGroup(gid, expired_blocks);
+                    block_ids.remove(expired_positions);
+                }
             }
         }
         return {true, 0};
@@ -437,7 +480,8 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
                 bool                      has_valid = false;
                 for (int gid = 0; gid < group_nums; ++gid) {
-                    if (skipReuseCacheGroup(gid)) {
+                    if (skipReuseCacheGroup(gid)
+                        || !kv_cache_resource->cacheResource(batch_id).canPublishLinearReplayBlock(gid, i)) {
                         continue;
                     }
                     const auto& blocks = kv_cache_resource->blocks(batch_id, gid);
@@ -530,7 +574,8 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             // Reverse iterate so prefix-base keys land at MRU end (matches non-CP path).
             for (size_t pos = loop_end; pos > 0; --pos) {
                 const size_t i = pos - 1;
-                if (isNullBlockIdx(blocks[i])) {
+                if (isNullBlockIdx(blocks[i])
+                    || !kv_cache_resource->cacheResource(batch_id).canPublishLinearReplayBlock(gid, i)) {
                     continue;
                 }
                 const size_t              key_index = (i + 1) * key_stride - 1;
@@ -597,7 +642,9 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
         std::vector<BlockIdxType> blocks_for_key(static_cast<size_t>(kvcache_resource.groupNums()), NULL_BLOCK_IDX);
         for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
             const auto& src_blocks                   = kvcache_resource.blocks(gid);
-            const auto  block                        = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
+            const auto  block = pos < src_blocks.size() && kvcache_resource.canPublishLinearReplayBlock(gid, pos) ?
+                                    src_blocks[pos] :
+                                    NULL_BLOCK_IDX;
             blocks_for_key[static_cast<size_t>(gid)] = block;
             any_valid_block                          = any_valid_block || (!isNullBlockIdx(block) && block > 0);
         }
@@ -741,18 +788,30 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
 
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
+    int replay_blocks_total = 0;
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         const auto group_type       = static_cast<size_t>(gid) < config_.group_types.size() ?
                                           config_.group_types[static_cast<size_t>(gid)] :
                                           CacheGroupType::FULL;
         const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
-        const auto need             = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        if (isMutableLinearReplayGroup(malloc_info.batch_kv_cache_resource->cacheResource(0), gid)) {
+            for (int b = 0; b < batch_size; ++b) {
+                replay_blocks_total += linearReplayTailNeedBlocks(
+                    malloc_info.batch_kv_cache_resource->cacheResource(b), gid, group_seq_len);
+            }
+            continue;
+        }
+        const auto need =
+            kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(group_common_seq,
+                                                                      group_seq_len,
+                                                                      config_.effectiveReserveStep(gid, reserve_step),
+                                                                      reuse_blocks_len,
+                                                                      reuse_enabled);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }
-    return common_blocks_total + batch_size * extra_blocks_total;
+    return common_blocks_total + batch_size * extra_blocks_total + replay_blocks_total;
 }
 
 int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -762,8 +821,12 @@ int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr&
     for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
         const int cur_blocks    = batch_kv_cache_resource->blocksNum(0, gid);
         const int group_seq_len = cpEffectiveSeqLenForAlloc(static_cast<size_t>(gid), seq_len);
-        need_blocks +=
-            kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(group_seq_len, cur_blocks, reserve_step);
+        if (isMutableLinearReplayGroup(batch_kv_cache_resource->cacheResource(0), gid)) {
+            need_blocks += linearReplayTailNeedBlocks(batch_kv_cache_resource->cacheResource(0), gid, group_seq_len);
+            continue;
+        }
+        need_blocks += kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(
+            group_seq_len, cur_blocks, config_.effectiveReserveStep(gid, reserve_step));
     }
     return need_blocks;
 }

@@ -96,6 +96,21 @@ struct CacheConfig {
     int swa_group_num    = 0;  // Number of sliding-window attention groups
     int full_group_num   = 0;  // Number of full attention groups
 
+    std::vector<int> linear_replay_group_ids;
+    uint32_t         linear_replay_slot_count       = 0;
+    uint32_t         linear_replay_max_steps        = 0;
+    bool             linear_replay_channelwise_gate = false;
+    size_t           linear_replay_reserve_bytes    = 0;
+
+    bool isLinearReplayGroup(size_t group_id) const {
+        return std::find(linear_replay_group_ids.begin(), linear_replay_group_ids.end(), static_cast<int>(group_id))
+               != linear_replay_group_ids.end();
+    }
+
+    int effectiveReserveStep(size_t group_id, int reserve_step) const {
+        return isLinearReplayGroup(group_id) ? 0 : reserve_step;
+    }
+
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 

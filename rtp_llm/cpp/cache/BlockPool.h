@@ -57,6 +57,9 @@ public:
     void   blockCacheReference(const BlockIndicesType& block_indices);
     void   connectorReference(BlockIdxType block_idx);
     void   connectorReference(const BlockIndicesType& block_indices);
+    void   replayReference(const BlockIndicesType& block_indices);
+    void   replayFree(const BlockIndicesType& block_indices);
+    bool   needsReplayCopyOnWrite(BlockIdxType block_idx) const;
 
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
@@ -128,6 +131,7 @@ private:
     BlockRefCounter        req_con_ref_counter_;
     BlockRefCounter        block_cache_ref_counter_;
     BlockRefCounter        req_cache_ref_counter_;
+    std::unordered_map<BlockIdxType, int> replay_ref_counts_;
 
     AllocationType allocation_type_;
     bool           use_pinned_cpu_backing_;

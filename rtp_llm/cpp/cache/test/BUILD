@@ -287,6 +287,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/models_py/bindings:op_defs",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

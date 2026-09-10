@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/LinearReplayPool.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -85,6 +86,12 @@ public:
     // for mtp module
     CacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
+    std::shared_ptr<LinearReplayLease>     acquireLinearReplaySlot(bool fake = false);
+    std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks(const BatchKVCacheResourcePtr& resource,
+                                                                  int min_processed_length = -1);
+    bool makeLinearReplayTailsPrivate(const BatchKVCacheResourcePtr& resource, int min_processed_length = -1);
+    void markLinearReplayStarted(const BatchKVCacheResourcePtr& resource, int processed_length);
+
     // 资源统计和信息查询
     size_t                  freeBlocksNum() const;
     size_t                  availableBlocksNum() const;
@@ -141,6 +148,7 @@ public:
 
 private:
     void initConnectorCoordinator();
+    void        initLinearReplayPool();
     void allocateAndSync();
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
@@ -149,6 +157,9 @@ private:
     // 成员变量
     CacheConfig         config_;
     KVCacheAllocatorPtr allocator_;
+    std::optional<LinearReplayCacheLayout>       linear_replay_layout_;
+    std::shared_ptr<LinearReplaySlotPool>        linear_replay_slots_;
+    std::shared_ptr<LinearReplayRetirementQueue> linear_replay_retirement_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

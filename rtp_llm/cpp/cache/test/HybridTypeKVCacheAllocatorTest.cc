@@ -9,10 +9,13 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/LinearReplayPool.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {
 namespace test {
@@ -746,6 +749,307 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
 
     // Cleanup.
     block_pool->requestFree(keep);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, ReplayRemovesTargetReserveAndKeepsTwoTails) {
+    auto config                    = makeTinyHybridConfig();
+    config.block_num               = 32;
+    config.group_types             = {CacheGroupType::LINEAR, CacheGroupType::FULL};
+    config.linear_replay_group_ids = {0};
+    auto allocator                 = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    ASSERT_TRUE(allocator->init());
+    auto tokens = makeCompleteTokenIds(1, 12, 4);
+    tokens->setReserveStep(4);
+    auto       resource = makeBatchResource(1, 2, config.layer_all_num, config.layer_to_group_id, {100, 101, 102});
+    MallocInfo info{resource, tokens};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    EXPECT_EQ(allocator->getNeedBlocks(info), 6);
+    ASSERT_TRUE(allocator->malloc(info).success);
+    ASSERT_EQ(resource->blocksNum(0, 0), 3);
+    EXPECT_EQ(resource->blocks(0, 0)[0], NULL_BLOCK_IDX);
+    EXPECT_GT(resource->blocks(0, 0)[1], 0);
+    EXPECT_GT(resource->blocks(0, 0)[2], 0);
+    EXPECT_EQ(resource->blocksNum(0, 1), 4);
+    allocator->free({resource, tokens});
+}
+
+TEST(LinearReplayCacheTest, SlotOwnershipAndGeneration) {
+    auto pool  = std::make_shared<LinearReplaySlotPool>(1);
+    auto first = pool->acquire();
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->slot_id, 0);
+    EXPECT_EQ(first->generation, 1);
+    auto window = first;
+    first.reset();
+    EXPECT_EQ(pool->acquire(), nullptr);
+    window.reset();
+    auto second = pool->acquire();
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second->slot_id, 0);
+    EXPECT_EQ(second->generation, 2);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, ReplayReuseKeepsPrefillSnapshotsWithoutAccumulatingDecodeStates) {
+    auto config                    = makeTinyHybridConfig();
+    config.block_num               = 48;
+    config.linear_step             = 1;
+    config.group_types             = {CacheGroupType::LINEAR, CacheGroupType::FULL};
+    config.linear_replay_group_ids = {0};
+    auto allocator                 = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    ASSERT_TRUE(allocator->init());
+    auto       pool     = allocator->getBlockPool();
+    auto       tokens   = makeCompleteTokenIds(1, 20, 4);
+    auto       resource = makeBatchResource(1, 2, config.layer_all_num, config.layer_to_group_id, {});
+    MallocInfo initial{resource, tokens};
+    initial.enable_device_cache = false;
+    initial.reuse_cache         = true;
+    ASSERT_TRUE(allocator->malloc(initial).success);
+    const auto prefill_blocks = resource->blocks(0, 0);
+    ASSERT_EQ(prefill_blocks.size(), 5u);
+    resource->cacheResource().restrictLinearReplayPrefix(0, 3);
+
+    for (int slots = 6; slots <= 14; ++slots) {
+        const auto&            previous = resource->blocks(0, 0);
+        const BlockIndicesType in_flight{previous[previous.size() - 2], previous.back()};
+        pool->replayReference(in_flight);
+        ASSERT_GT(pool->freeBlocksNum(), 2u);
+        const auto pressure = pool->malloc(static_cast<int>(pool->freeBlocksNum()) - 2);
+        ASSERT_EQ(pool->freeBlocksNum(), 2u);
+
+        tokens = makeCompleteTokenIds(1, slots * 4, 4);
+        MallocInfo decode{resource, tokens};
+        decode.enable_device_cache = false;
+        decode.reuse_cache         = true;
+        EXPECT_EQ(allocator->singleBatchNeedBlocks(resource, slots * 4, 0), 2);
+        EXPECT_EQ(allocator->getNeedBlocks(decode), 2);
+        ASSERT_TRUE(allocator->malloc(decode).success);
+        const auto& blocks = resource->blocks(0, 0);
+        ASSERT_EQ(blocks.size(), static_cast<size_t>(slots));
+        for (size_t pos = 0; pos < 3; ++pos) {
+            EXPECT_EQ(blocks[pos], prefill_blocks[pos]);
+            EXPECT_TRUE(resource->cacheResource().canPublishLinearReplayBlock(0, pos));
+        }
+        for (int pos = 3; pos < slots - 2; ++pos) {
+            EXPECT_EQ(blocks[static_cast<size_t>(pos)], NULL_BLOCK_IDX);
+        }
+        EXPECT_GT(blocks[blocks.size() - 2], 0);
+        EXPECT_GT(blocks.back(), 0);
+        EXPECT_EQ(pool->freeBlocksNum(), 0u);
+        pool->replayFree(in_flight);
+        EXPECT_EQ(pool->freeBlocksNum(), 1u);
+        pool->requestFree(pressure);
+    }
+    allocator->free({resource, tokens});
+    EXPECT_EQ(pool->freeBlocksNum(), config.block_num - 1);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, ReplaySmallBlocksMaterializeReachablePagesAndRollbackFailure) {
+    auto config                      = makeTinyHybridConfig();
+    config.block_num                 = 16;
+    config.seq_size_per_block        = 1;
+    config.kernel_seq_size_per_block = 1;
+    config.group_types               = {CacheGroupType::LINEAR, CacheGroupType::FULL};
+    config.linear_replay_group_ids   = {0};
+    config.linear_replay_slot_count  = 1;
+    config.linear_replay_max_steps   = 4;
+    for (auto& spec : config.cache_specs) {
+        spec->seq_size_per_block = 1;
+    }
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    auto       pool     = manager->allocator_->getBlockPool();
+    auto       resource = makeBatchResource(1, 2, config.layer_all_num, config.layer_to_group_id, {});
+    const auto tails    = pool->malloc(2);
+    ASSERT_EQ(tails.size(), 2u);
+    resource->mutableBlockIds(0, 0).assign(
+        {NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, tails[0], tails[1]});
+    const auto original = resource->blocks(0, 0);
+    const auto pressure = pool->malloc(static_cast<int>(pool->freeBlocksNum()) - 1);
+    EXPECT_FALSE(manager->makeLinearReplayTailsPrivate(resource, 2));
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+    EXPECT_EQ(resource->blocks(0, 0), original);
+    pool->requestFree(pressure);
+    ASSERT_TRUE(manager->makeLinearReplayTailsPrivate(resource, 2));
+    const auto& blocks = resource->blocks(0, 0);
+    EXPECT_EQ(blocks[0], NULL_BLOCK_IDX);
+    EXPECT_EQ(blocks[1], NULL_BLOCK_IDX);
+    for (size_t pos = 2; pos < 6; ++pos) {
+        EXPECT_GT(blocks[pos], 0);
+    }
+    EXPECT_EQ(blocks[4], tails[0]);
+    EXPECT_EQ(blocks[5], tails[1]);
+    EXPECT_FALSE(resource->cacheResource().canPublishLinearReplayBlock(0, 2));
+    auto       hold                = manager->holdLinearReplayBlocks(resource);
+    const auto free_before_release = pool->freeBlocksNum();
+    manager->free({resource, makeCompleteTokenIds(1, 6, 1)});
+    EXPECT_EQ(pool->freeBlocksNum(), free_before_release);
+    hold.reset();
+    EXPECT_EQ(pool->freeBlocksNum(), free_before_release + 4);
+}
+
+TEST(LinearReplayCacheTest, DraftGroupsKeepTheirOwnReserve) {
+    CacheConfig config;
+    config.group_types             = {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR};
+    config.linear_replay_group_ids = {1};
+    EXPECT_EQ(config.effectiveReserveStep(0, 4), 4);
+    EXPECT_EQ(config.effectiveReserveStep(1, 4), 0);
+    EXPECT_EQ(config.effectiveReserveStep(2, 4), 4);
+}
+
+#if USING_CUDA
+static CacheConfig makeReplayConfig(bool                independent_pools    = false,
+                                    SpeculativeType     speculative_type     = SP_TYPE_MTP,
+                                    HybridAttentionType draft_attention_type = HybridAttentionType::LINEAR,
+                                    const std::string&  target_model_type    = "qwen3_next") {
+    auto target                                                      = makeTinyModelConfig(4);
+    target.model_type                                                = target_model_type;
+    target.hybrid_attention_config.enable_hybrid_attention           = true;
+    target.hybrid_attention_config.enable_independent_kv_cache_pools = independent_pools;
+    target.hybrid_attention_config.hybrid_attention_types            = {
+        HybridAttentionType::LINEAR, HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::NONE};
+    target.linear_attention_config.linear_conv_kernel_dim = 4;
+    target.linear_attention_config.linear_key_head_dim    = 8;
+    target.linear_attention_config.linear_value_head_dim  = 8;
+    target.linear_attention_config.linear_num_key_heads   = 2;
+    target.linear_attention_config.linear_num_value_heads = 4;
+    auto draft                                            = target;
+    draft.num_layers                                      = 1;
+    draft.model_type                                      = draft_attention_type == HybridAttentionType::LINEAR ?
+                                                                "test_linear_mtp" :
+                                                                (target_model_type == "kimi_k3" ? "kimi_k3_mla_swa_eagle3" : target_model_type + "_mtp");
+    draft.hybrid_attention_config.hybrid_attention_types  = {draft_attention_type};
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 5;
+    KVCacheConfig cache;
+    cache.test_block_num = 32;
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = speculative_type;
+    speculative.model_type        = draft.model_type;
+    speculative.gen_num_per_cycle = 3;
+    const bool is_eagle           = speculative_type == SP_TYPE_EAGLE || speculative_type == SP_TYPE_EAGLE3;
+    return CacheConfigCreator::createSpConfig(
+        target, draft, ParallelismConfig{}, runtime, cache, speculative, std::nullopt, true, is_eagle);
+}
+
+TEST(LinearReplayCacheTest, ConfigReservesCompactLogsOnlyForTargetLayers) {
+    const auto config = makeReplayConfig();
+    ASSERT_EQ(config.linear_replay_group_ids, std::vector<int>({1}));
+    ASSERT_EQ(config.group_types.size(), 3u);
+    EXPECT_EQ(config.group_types[2], CacheGroupType::LINEAR);
+    EXPECT_EQ(config.global_layer_ids[1], std::vector<int>({0, 1}));
+    EXPECT_EQ(config.global_layer_ids[2], std::vector<int>({4, 5, 6}));
+    EXPECT_EQ(config.linear_replay_slot_count, 5u);
+    EXPECT_EQ(config.linear_replay_max_steps, 4u);
+    EXPECT_FALSE(config.linear_replay_channelwise_gate);
+    EXPECT_EQ(config.linear_replay_reserve_bytes, 13560u);
+    for (const auto& draft_config : config.mtp_sub_configs) {
+        EXPECT_TRUE(draft_config->linear_replay_group_ids.empty());
+        EXPECT_EQ(draft_config->linear_replay_reserve_bytes, 0u);
+    }
+    for (size_t group = 2; group < config.group_types.size(); ++group) {
+        EXPECT_EQ(config.effectiveReserveStep(group, 4), 4);
+    }
+}
+
+TEST(LinearReplayCacheTest, IndependentLinearDraftPoolIncludesEveryMtpModule) {
+    const auto config = makeReplayConfig(true);
+    ASSERT_TRUE(config.use_independent_block_pools);
+    ASSERT_EQ(config.group_types.size(), 3u);
+    ASSERT_EQ(config.global_layer_ids[2], std::vector<int>({4, 5, 6}));
+    EXPECT_EQ(config.group_block_size_bytes[2], 3 * config.cache_specs[2]->block_size_bytes());
+    EXPECT_EQ(config.effectiveReserveStep(2, 4), 4);
+}
+
+TEST(LinearReplayCacheTest, QwenEagleFullDraftEnablesTargetReplay) {
+    const auto config = makeReplayConfig(false, SP_TYPE_EAGLE, HybridAttentionType::NONE, "qwen35_moe");
+    ASSERT_EQ(config.linear_replay_group_ids, std::vector<int>({1}));
+    ASSERT_EQ(config.group_types.size(), 3u);
+    EXPECT_EQ(config.group_types[2], CacheGroupType::FULL);
+    EXPECT_EQ(config.global_layer_ids[2], std::vector<int>({4}));
+    EXPECT_EQ(config.linear_replay_max_steps, 4u);
+    EXPECT_FALSE(config.linear_replay_channelwise_gate);
+    EXPECT_EQ(config.linear_replay_reserve_bytes, 13560u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_TRUE(config.mtp_sub_configs[0]->linear_replay_group_ids.empty());
+    EXPECT_EQ(config.effectiveReserveStep(1, 4), 0);
+    EXPECT_EQ(config.effectiveReserveStep(2, 4), 4);
+}
+
+TEST(LinearReplayCacheTest, KimiEagle3FullDraftUsesTargetChannelwiseGates) {
+    const auto config = makeReplayConfig(true, SP_TYPE_EAGLE3, HybridAttentionType::NONE, "kimi_k3");
+    ASSERT_EQ(config.linear_replay_group_ids, std::vector<int>({1}));
+    ASSERT_EQ(config.group_types.size(), 3u);
+    EXPECT_EQ(config.group_types[2], CacheGroupType::FULL);
+    EXPECT_EQ(config.global_layer_ids[2], std::vector<int>({4}));
+    EXPECT_TRUE(config.linear_replay_channelwise_gate);
+    EXPECT_EQ(config.linear_replay_reserve_bytes, 18040u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_TRUE(config.mtp_sub_configs[0]->linear_replay_group_ids.empty());
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, TargetReplayAndLinearDraftUseTheirOwnPhysicalLayouts) {
+    auto manager = std::make_shared<KVCacheManager>(makeReplayConfig());
+    ASSERT_TRUE(manager->init());
+    const auto main = manager->getMainModelCacheLayerLayout();
+    ASSERT_TRUE(main.linear_replay.has_value());
+    ASSERT_EQ(main.linear_replay->keys.size(), 4u);
+    EXPECT_TRUE(main.linear_replay->keys[0].defined());
+    EXPECT_FALSE(main.linear_replay->keys[2].defined());
+    std::vector<void*> draft_addresses;
+    for (int module = 0; module < 3; ++module) {
+        const auto draft = manager->getMTPModuleCacheLayerLayout(module);
+        EXPECT_FALSE(draft.linear_replay.has_value());
+        ASSERT_EQ(draft.layers_to_kv_buffer_ptrs.size(), 1u);
+        const auto address = draft.layers_to_kv_buffer_ptrs[0].data_ptr();
+        EXPECT_NE(address, main.layers_to_kv_buffer_ptrs[0].data_ptr());
+        EXPECT_EQ(draft.layer_to_groups[0], 2);
+        ASSERT_EQ(draft.layer_region_to_group_id.size(), 1u);
+        EXPECT_EQ(draft.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::DEFAULT)], 2);
+        ASSERT_EQ(draft.group_types.size(), 3u);
+        EXPECT_EQ(draft.group_types[2], CacheGroupType::LINEAR);
+        for (auto previous : draft_addresses) {
+            EXPECT_NE(address, previous);
+        }
+        draft_addresses.push_back(address);
+    }
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, QwenEagleDraftDefaultRegionUsesPhysicalGroup) {
+    const auto config  = makeReplayConfig(false, SP_TYPE_EAGLE, HybridAttentionType::NONE, "qwen35_moe");
+    auto       manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    const auto layout = manager->getMTPModuleCacheLayerLayout(0);
+    ASSERT_EQ(layout.layer_to_groups, std::vector<int>({2}));
+    ASSERT_EQ(layout.layer_region_to_group_id.size(), 1u);
+    EXPECT_EQ(layout.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::DEFAULT)], 2);
+
+    torch_ext::KVCache python_cache;
+    python_cache.seq_size_per_block       = config.seq_size_per_block;
+    python_cache.kv_cache_base_by_layer   = layout.layers_to_kv_buffer_ptrs;
+    python_cache.layer_group_types        = layout.layer_group_types;
+    python_cache.layer_region_to_group_id = layout.layer_region_to_group_id;
+    const auto layer                      = python_cache.getLayerCache(0, KVCacheRegionName::DEFAULT);
+    EXPECT_EQ(layer.group_id, 2);
+    EXPECT_EQ(layer.kv_cache_base.data_ptr(), layout.layers_to_kv_buffer_ptrs[0].data_ptr());
+}
+#endif
+
+TEST(LinearReplayCacheTest, MutableAnchorsCannotPublishPrefixSnapshots) {
+    KVCacheResource resource;
+    resource.initGroups(2, 2, {0, 1});
+    resource.restrictLinearReplayPrefix(1, 3);
+    EXPECT_TRUE(resource.canPublishLinearReplayBlock(0, 100));
+    EXPECT_TRUE(resource.canPublishLinearReplayBlock(1, 2));
+    EXPECT_FALSE(resource.canPublishLinearReplayBlock(1, 3));
+    resource.restrictLinearReplayPrefix(1, 8);
+    EXPECT_FALSE(resource.canPublishLinearReplayBlock(1, 3));
+    resource.restrictLinearReplayPrefix(1, 2);
+    EXPECT_FALSE(resource.canPublishLinearReplayBlock(1, 2));
+    resource.initGroups(2, 2, {0, 1});
+    EXPECT_TRUE(resource.canPublishLinearReplayBlock(1, 3));
 }
 
 }  // namespace test

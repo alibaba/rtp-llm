@@ -14,9 +14,21 @@ struct BlockBufferPtrInfo {
     torch::Tensor kv_scale_addr;
 };
 
+struct LinearReplayCacheLayout {
+    std::vector<torch::Tensor> keys;
+    std::vector<torch::Tensor> updates;
+    std::vector<torch::Tensor> log_gates;
+    std::vector<torch::Tensor> conv_inputs;
+    torch::Tensor              slot_generations;
+    torch::Tensor              log_epochs;
+    torch::Tensor              valid_counts;
+    torch::Tensor              error_flags;
+};
+
 struct CacheLayerLayout {
     size_t local_shard_count = 1;
     int    linear_step = 1;
+    std::optional<LinearReplayCacheLayout>  linear_replay;
     std::vector<int>              layer_to_groups;
     std::vector<std::vector<int>> layer_to_group_ids;
     std::vector<std::vector<int>> layer_region_to_group_id;

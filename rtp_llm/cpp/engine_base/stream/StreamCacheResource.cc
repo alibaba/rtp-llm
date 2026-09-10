@@ -306,6 +306,9 @@ void StreamCacheResource::releaseResource() {
                       pd_kvcache_ref_.get());
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
+    stream_->clearLinearReplayWindow();
+    linear_replay_lease_.reset();
+    clearLinearReplayInitialState();
     resource_released_ = true;
     load_cache_once_.store(false, std::memory_order_release);
 }
@@ -409,7 +412,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
-    return absl::OkStatus();
+    return prepareLinearReplayResources();
 }
 
 absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_override) {
@@ -417,6 +420,13 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
+    }
+    // Preserve the prefill endpoint before allocator cleanup advances the logical tail.
+    if (batch_kv_cache_resource_->curBlocksNum() > 0) {
+        const auto replay_status = prepareLinearReplayResources(/*prepare_tails=*/false);
+        if (!replay_status.ok()) {
+            return replay_status;
+        }
     }
 
     MallocInfo malloc_info;
@@ -443,7 +453,53 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
         stream_->setLocalReuseLength(result.reuse_len);
     }
 
+    return prepareLinearReplayResources();
+}
+
+absl::Status StreamCacheResource::prepareLinearReplayResources(bool prepare_tails) {
+    auto& manager = resource_context_.cache_manager;
+    if (!manager || manager->cacheConfig().linear_replay_group_ids.empty() || isContextStream() || fake_inited_
+        || stream_->forceDisableSpRun()) {
+        return absl::OkStatus();
+    }
+    if (!linear_replay_lease_) {
+        linear_replay_lease_ = manager->acquireLinearReplaySlot();
+        if (!linear_replay_lease_) {
+            return absl::ResourceExhaustedError("LINEAR replay log slots exhausted");
+        }
+        const int   processed = std::max(0, stream_->seqLength() - 1);
+        const auto& config    = manager->cacheConfig();
+        linear_replay_initial_block_ids_.assign(config.groupNums(), -1);
+        linear_replay_initial_block_hold_ =
+            manager->holdLinearReplayBlocks(batch_kv_cache_resource_, std::max(0, processed - 1));
+        if (processed > 0) {
+            for (int group : config.linear_replay_group_ids) {
+                const auto& spec = config.cache_specs.at(group);
+                RTP_LLM_CHECK_WITH_INFO(
+                    spec->seq_size_per_block > 0, "LINEAR replay group %d has an invalid block size", group);
+                const size_t source_position = (processed - 1) / spec->seq_size_per_block;
+                const auto&  blocks          = batch_kv_cache_resource_->blocks(0, group);
+                if (source_position >= blocks.size() || blocks[source_position] <= 0) {
+                    linear_replay_lease_.reset();
+                    clearLinearReplayInitialState();
+                    return absl::FailedPreconditionError("LINEAR replay canonical state is missing");
+                }
+                linear_replay_initial_block_ids_[group] = blocks[source_position];
+            }
+        }
+        manager->markLinearReplayStarted(batch_kv_cache_resource_, processed);
+    }
+    if (!prepare_tails) {
+        return absl::OkStatus();
+    }
+    if (!manager->makeLinearReplayTailsPrivate(batch_kv_cache_resource_, std::max(0, stream_->seqLength() - 1))) {
+        return absl::ResourceExhaustedError("LINEAR replay tail copy-on-write allocation failed");
+    }
     return absl::OkStatus();
+}
+
+std::shared_ptr<LinearReplayBlockHold> StreamCacheResource::holdLinearReplayBlocks() {
+    return resource_context_.cache_manager->holdLinearReplayBlocks(batch_kv_cache_resource_);
 }
 
 bool StreamCacheResource::asyncLoadCache() {
@@ -580,6 +636,7 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
+    stream_->setIsFakeStream(true);
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
     int                           group_nums                 = 1;
     int                           layer_all_num              = 0;
@@ -772,7 +829,8 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
     auto type_list = resource_context_.cache_manager->cacheConfig().group_types;
 
     for (size_t i = 0; i < type_list.size(); i++) {
-        if (type_list[i] == CacheGroupType::LINEAR) {
+        if (type_list[i] == CacheGroupType::LINEAR
+            && !resource_context_.cache_manager->cacheConfig().isLinearReplayGroup(i)) {
             batch_kv_cache_resource_->swapBlocks(batch_id, i, rhs, lhs);
         }
     }

@@ -567,6 +567,25 @@ public:
     }
 };
 
+TEST_F(MtpExecutorTest, testAsyncPolicyAllowsMissingWarmupCacheManager) {
+    auto       components    = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto&      executor      = *components.executor;
+    const bool async_prepare = executor.useAsyncPrepare();
+    auto       cache_manager = executor.cache_manager_;
+    executor.cache_manager_.reset();
+    EXPECT_EQ(executor.useAsyncPrepare(), async_prepare);
+
+    executor.is_linear_attention_model_ = false;
+    EXPECT_FALSE(executor.useAsyncLinearBlockSwap());
+    executor.is_linear_attention_model_ = true;
+#if USING_CUDA
+    EXPECT_EQ(executor.useAsyncLinearBlockSwap(), executor.useStreamAsync() && executor.useDropBroadSync());
+#else
+    EXPECT_FALSE(executor.useAsyncLinearBlockSwap());
+#endif
+    executor.cache_manager_ = std::move(cache_manager);
+}
+
 TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     auto identity_map = torch::arange(4, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
     spec::FastTopKSampler sampler(identity_map);

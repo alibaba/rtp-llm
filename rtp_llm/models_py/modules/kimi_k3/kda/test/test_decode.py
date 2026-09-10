@@ -72,7 +72,7 @@ class KimiK3KDATargetVerifyTest(TestCase):
         self.assertEqual(tuple(projected.shape), (2, 2))
         all_reduce.assert_called_once()
 
-    def test_target_verify_dispatches_one_fused_conv_and_recurrence(self) -> None:
+    def test_target_verify_dispatches_shared_replay_with_device_metadata(self) -> None:
         batch = 2
         steps = 2
         projection_size = 2
@@ -81,7 +81,10 @@ class KimiK3KDATargetVerifyTest(TestCase):
         sequence_lengths = torch.tensor([3, 5], dtype=torch.int32)
 
         decoder = KimiK3KDADecode(
-            weights={},
+            weights={
+                W.linear_attn_alog: torch.zeros(1),
+                W.linear_attn_dt_b_kda: torch.zeros(projection_size),
+            },
             cache=None,
             local_heads=1,
             head_dim=projection_size,
@@ -117,52 +120,13 @@ class KimiK3KDATargetVerifyTest(TestCase):
             page_size=page_size,
         )
 
-        def fake_target_conv(
-            q_sequence: torch.Tensor,
-            k_sequence: torch.Tensor,
-            v_sequence: torch.Tensor,
-            _fused_conv: torch.Tensor,
-            _conv_cache: torch.Tensor,
-            fused_block_map: torch.Tensor,
-            fused_lengths: torch.Tensor,
-            _page_size: int,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            self.assertEqual(tuple(q_sequence.shape), (batch, steps, projection_size))
-            torch.testing.assert_close(fused_block_map, block_map)
-            torch.testing.assert_close(fused_lengths, sequence_lengths)
-            return q_sequence, k_sequence, v_sequence
-
-        recurrent_calls: list[
-            tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]
-        ] = []
-
-        def fake_recurrent(
-            fused_q: torch.Tensor,
-            fused_k: torch.Tensor,
-            fused_v: torch.Tensor,
-            fused_gate: torch.Tensor,
-            fused_beta: torch.Tensor,
-            _cu_seqlens: torch.Tensor,
-            _ssm_cache: torch.Tensor,
-            fused_block_map: torch.Tensor,
-            fused_lengths: torch.Tensor,
-            _page_size: int,
-        ) -> torch.Tensor:
-            tensors = (fused_q, fused_k, fused_v, fused_gate, fused_beta)
-            recurrent_calls.append(
-                (
-                    tuple(t.clone() for t in tensors),
-                    fused_block_map.clone(),
-                    fused_lengths.clone(),
-                )
-            )
-            return fused_q.reshape(1, batch * steps, 1, projection_size)
-
+        replay_cache = object()
+        replay_inputs = object()
         with patch.object(
             kda_decode,
-            "kimi_kda_short_conv_paged_target_verify",
-            side_effect=fake_target_conv,
-        ), patch.object(decoder, "_recurrent", side_effect=fake_recurrent):
+            "linear_serial_replay",
+            return_value=q.reshape(batch * steps, 1, projection_size),
+        ) as replay, patch.object(decoder, "_recurrent") as old_recurrent:
             output = decoder._target_verify(
                 q,
                 k,
@@ -171,16 +135,17 @@ class KimiK3KDATargetVerifyTest(TestCase):
                 beta,
                 torch.tensor([0, steps, batch * steps], dtype=torch.int32),
                 cache,
+                SimpleNamespace(linear_replay=replay_cache, group_id=2),
+                SimpleNamespace(linear_replay=replay_inputs),
             )
-
-        sources = (q, k, v, gate, beta)
-        self.assertEqual(len(recurrent_calls), 1)
-        tensors, call_map, call_lengths = recurrent_calls[0]
-        for actual, source in zip(tensors, sources):
-            torch.testing.assert_close(actual, source)
-        torch.testing.assert_close(call_map, block_map)
-        torch.testing.assert_close(call_lengths, sequence_lengths)
-
+        replay.assert_called_once()
+        old_recurrent.assert_not_called()
+        self.assertIs(replay.call_args.args[-2], replay_cache)
+        self.assertIs(replay.call_args.args[-1], replay_inputs)
+        self.assertIs(replay.call_args.args[-4], ssm)
+        self.assertIs(replay.call_args.args[-3], conv)
+        self.assertTrue(replay.call_args.kwargs["vector_gate"])
+        self.assertEqual(replay.call_args.kwargs["group_id"], 2)
         torch.testing.assert_close(output.reshape(batch * steps, -1), q)
 
 

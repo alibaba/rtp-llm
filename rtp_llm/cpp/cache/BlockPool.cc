@@ -520,6 +520,38 @@ void BlockPool::connectorReference(const BlockIndicesType& block_indices) {
     }
 }
 
+void BlockPool::replayReference(const BlockIndicesType& block_indices) {
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    connector_ref_counter_.incrementRefCounter(block_indices);
+    req_con_ref_counter_.incrementRefCounter(block_indices);
+    for (auto block : block_indices) {
+        ++replay_ref_counts_[block];
+        free_block_ids_.erase(block);
+    }
+}
+
+void BlockPool::replayFree(const BlockIndicesType& block_indices) {
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    connector_ref_counter_.decrementRefCounter(block_indices);
+    req_con_ref_counter_.decrementRefCounter(block_indices);
+    for (auto block : block_indices) {
+        auto it = replay_ref_counts_.find(block);
+        RTP_LLM_CHECK(it != replay_ref_counts_.end() && it->second > 0);
+        if (--it->second == 0) {
+            replay_ref_counts_.erase(it);
+        }
+    }
+    tryFreeBlocks(block_indices);
+}
+
+bool BlockPool::needsReplayCopyOnWrite(BlockIdxType block_idx) const {
+    std::lock_guard<std::mutex> lock(ref_mu_);
+    auto                        it          = replay_ref_counts_.find(block_idx);
+    const int                   replay_refs = it == replay_ref_counts_.end() ? 0 : it->second;
+    return request_ref_counter_.getRefCounter(block_idx) > 1 || block_cache_ref_counter_.getRefCounter(block_idx) > 0
+           || connector_ref_counter_.getRefCounter(block_idx) > replay_refs;
+}
+
 void BlockPool::blockCacheReference(BlockIdxType block_idx) {
     BlockIndicesType block_ids = {block_idx};
     blockCacheReference(block_ids);

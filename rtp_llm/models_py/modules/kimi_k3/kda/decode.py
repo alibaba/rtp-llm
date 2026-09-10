@@ -13,8 +13,8 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     fused_recurrent_kda,
     is_kimi_kda_short_conv_paged_decode_supported,
     kimi_kda_short_conv_paged_decode,
-    kimi_kda_short_conv_paged_target_verify,
 )
+from rtp_llm.models_py.triton_kernels.linear_replay import linear_serial_replay
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
@@ -206,46 +206,29 @@ class KimiK3KDADecode(nn.Module):
         raw_beta: torch.Tensor,
         cu_seqlens: torch.Tensor,
         cache: _PagedDecodeCache,
+        kv_cache: LayerKVCache,
+        attention_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
-        """Replay speculative positions through the exact paged Decode kernels."""
+        """Advance the accepted anchor and record one speculative window."""
 
-        token_count = q_projected.shape[0]
-        batch = cache.block_map.shape[0]
-        if token_count % batch != 0:
-            raise ValueError(
-                f"KDA target token count {token_count} is not divisible by "
-                f"batch {batch}"
-            )
-        sequence_length = token_count // batch
-        q_steps = q_projected.reshape(batch, sequence_length, -1)
-        k_steps = k_projected.reshape(batch, sequence_length, -1)
-        v_steps = v_projected.reshape(batch, sequence_length, -1)
-        q, k, v = kimi_kda_short_conv_paged_target_verify(
-            q_steps,
-            k_steps,
-            v_steps,
-            self.fused_conv,
-            cache.conv,
-            cache.block_map,
-            cache.sequence_lengths_plus_one,
-            cache.page_size,
-        )
-        # Both target-verify kernels consume the original request block map.
-        # They derive read/write pages in-kernel and publish every speculative
-        # checkpoint directly, so no layer-local page-index tensors, cloned
-        # block maps, cache copies, or per-step packing launches are required.
-        return self._recurrent(
-            q.reshape(token_count, self.projection_size),
-            k.reshape(token_count, self.projection_size),
-            v.reshape(token_count, self.projection_size),
+        output = linear_serial_replay(
+            q_projected,
+            k_projected,
+            v_projected,
             raw_gate,
             raw_beta,
-            cu_seqlens,
+            self.fused_conv,
+            self.weights[W.linear_attn_alog],
+            self.weights[W.linear_attn_dt_b_kda],
             cache.ssm,
-            cache.block_map,
-            cache.sequence_lengths_plus_one,
-            cache.page_size,
+            cache.conv,
+            getattr(kv_cache, "linear_replay", None),
+            getattr(attention_inputs, "linear_replay", None),
+            group_id=kv_cache.group_id,
+            vector_gate=True,
+            lower_bound=self.gate_lower_bound,
         )
+        return output.unsqueeze(0)
 
     def forward(
         self,
@@ -270,6 +253,8 @@ class KimiK3KDADecode(nn.Module):
                 raw_beta,
                 cu_seqlens,
                 cache,
+                kv_cache,
+                attention_inputs,
             )
         q, k, v = self._short_conv(q_projected, k_projected, v_projected, cache)
         return self._recurrent(

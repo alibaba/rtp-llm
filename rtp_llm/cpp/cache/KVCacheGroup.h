@@ -41,6 +41,9 @@ public:
     virtual ~KVCacheGroup() = default;
 
     bool init();
+    void setPhysicalLayerSlots(std::vector<int> slots) {
+        physical_layer_slots_ = std::move(slots);
+    }
     // Allocate blocks for `seq_len` tokens; appends new IDs to `block_ids` via BlockIds::add().
     virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
@@ -77,6 +80,7 @@ protected:
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;
     std::unordered_map<int, int>           global_layer_to_local_layer;
+    std::vector<int>                       physical_layer_slots_;
 };
 
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
