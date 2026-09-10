@@ -708,10 +708,9 @@ __global__ void gather_selected_glm53_fp8_mla_kv_kernel(const uint8_t* __restric
     __nv_bfloat16* dst_ptr      = dst_fused + selected_idx * dst_stride;
     const int      base         = lane * 16;
     if (physical_idx < 0 || physical_idx >= num_cache_entries) {
-#pragma unroll
-        for (int i = 0; i < 16; ++i) {
-            dst_ptr[base + i] = __float2bfloat16(0.0f);
-        }
+        uint4* dst_u4     = reinterpret_cast<uint4*>(dst_ptr);
+        dst_u4[lane]      = make_uint4(0, 0, 0, 0);
+        dst_u4[lane + 32] = make_uint4(0, 0, 0, 0);
         return;
     }
 

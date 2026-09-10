@@ -1007,6 +1007,7 @@ class Glm5Mtp(DeepSeekV2):
                 _configure_glm53_mtp_attention_layout(
                     config, text_config, num_mtp_layers
                 )
+                config.enable_fp32_lm_head = False
         # Layout A: standalone extracted MTP checkpoint (single layer only).
         # Layout B: full checkpoint where MTP layer is at index num_hidden_layers.
         if num_main_layers <= 1:

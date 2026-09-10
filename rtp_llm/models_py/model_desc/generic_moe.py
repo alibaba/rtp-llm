@@ -136,7 +136,10 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        if config.model_type == "glm5_3_flash":
+        if config.model_type == "glm5_3_flash" or (
+            config.model_type == "glm_5_mtp"
+            and weights[W.moe_gate].dtype == torch.float32
+        ):
             from rtp_llm.models_py.modules.glm53_router import Glm53FP32Router
 
             self.gate = Glm53FP32Router(weights[W.moe_gate])
