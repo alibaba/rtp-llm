@@ -893,7 +893,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedStoreCo
         ASSERT_EQ(request_blocks.front().size(), 1u);
         std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
         resources[0][0].device_blocks = request_blocks.front();
-        cache->insert({100}, resources, Tier::HOST, /*write_remote=*/true, /*is_resident=*/false);
+        cache->insert({100}, resources, Tier::HOST, /*is_resident=*/false);
         ASSERT_TRUE(manual_transfer_engine->waitUntilSubmitted(1, kRaceWaitTimeout));
         waitForCacheTasksToDrain(*cache);
         EXPECT_EQ(cache->task_pool_->pending_tasks_.load(), 0);

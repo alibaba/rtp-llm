@@ -38,7 +38,6 @@ public:
     StorageWriteTask storeLocked(const CacheKeysType&                              cache_keys,
                                  const std::vector<std::vector<GroupSetResource>>& resources,
                                  Tier                                              target_tier,
-                                 bool                                              write_remote,
                                  bool                                              is_resident);
     void             stopAdmissionLocked();
 

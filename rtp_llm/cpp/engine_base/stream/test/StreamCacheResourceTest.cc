@@ -148,6 +148,15 @@ public:
         cv_.wait(lock, [&] { return read_calls_ >= count; });
     }
 
+    size_t writeCalls() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return write_calls_;
+    }
+    size_t writtenKeys() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return written_keys_;
+    }
+
     size_t matchCalls() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return match_calls_;
@@ -172,7 +181,11 @@ protected:
         cv_.wait(lock, [&] { return release_reads_; });
     }
 
-    void writeImpl(const StorageRequest&) override {}
+    void writeImpl(const StorageRequest& request) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++write_calls_;
+        written_keys_ += request.handles.size();
+    }
 
 private:
     mutable std::mutex      mutex_;
@@ -181,6 +194,8 @@ private:
     bool                    release_reads_{true};
     size_t                  match_calls_{0};
     size_t                  read_calls_{0};
+    size_t                  write_calls_{0};
+    size_t                  written_keys_{0};
 };
 
 class StreamCacheResourceTest: public DeviceTestBase {
@@ -359,27 +374,59 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
 }
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
-    prepareResource();
+    for (const bool with_backend : {false, true}) {
+        for (const bool ignore_request_switches : {false, true}) {
+            for (const bool request_reuse : {false, true}) {
+                for (const auto status : {StreamState::RUNNING, StreamState::FINISHED}) {
+                    SCOPED_TRACE("backend=" + std::to_string(with_backend) + " ignore="
+                                 + std::to_string(ignore_request_switches) + " reuse=" + std::to_string(request_reuse)
+                                 + " status=" + StreamStateToString(status));
+                    std::shared_ptr<StreamReadStorageBackend> backend;
+                    if (with_backend) {
+                        backend = prepareStorageBackendResource(/*block_matches=*/false);
+                    } else {
+                        prepareResource(/*reuse_cache=*/true);
+                    }
 
-    auto& resource = stream_->streamCacheResource();
+                    auto& resource = stream_->streamCacheResource();
 
-    ASSERT_TRUE(resource.initKVBlock().ok());
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
-    ASSERT_EQ(resource.curBlocksNum(), 3);
-    auto& blocks = resource.kvCacheMutable();
-    CHECK_BLOCK(blocks, 2, 3);
+                    auto& request               = *stream_->generate_input_->generate_config;
+                    request.enable_remote_cache = false;
+                    // Allocate fresh blocks so the fake backend's match result does not seed the test.
+                    resource.resource_context_.reuse_cache = false;
+                    ASSERT_TRUE(resource.initKVBlock().ok());
+                    ASSERT_EQ(cache_manager_->freeBlocksNum(), 5);
+                    ASSERT_EQ(resource.curBlocksNum(), 3);
+                    auto& blocks = resource.kvCacheMutable();
+                    CHECK_BLOCK(blocks, 2, 3);
 
-    stream_->setSeqLength(7);
-    stream_->setIsContextStream(false);
-    ASSERT_TRUE(resource.incrKVBlock().ok());
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
+                    stream_->setSeqLength(7);
+                    stream_->setIsContextStream(false);
+                    ASSERT_TRUE(resource.incrKVBlock().ok());
+                    ASSERT_EQ(cache_manager_->freeBlocksNum(), 3);
 
-    CHECK_BLOCK(blocks, 2, 4);
+                    CHECK_BLOCK(blocks, 2, 4);
 
-    stream_->releaseResource();
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+                    resource.resource_context_.reuse_cache                   = true;
+                    resource.resource_context_.ignore_request_cache_switches = ignore_request_switches;
+                    request.reuse_cache                                      = request_reuse;
+                    stream_->generate_status_->status                        = status;
+                    stream_->releaseResource();
+                    if (backend) {
+                        backend->shutdown();
+                    }
+                    const bool stored = status == StreamState::FINISHED && (request_reuse || ignore_request_switches);
+                    EXPECT_EQ(cache_manager_->freeBlocksNum(), stored ? 5 : 8);
+                    if (backend) {
+                        EXPECT_EQ(backend->writeCalls(), stored ? 1u : 0u);
+                        EXPECT_EQ(backend->writtenKeys(), stored ? 3u : 0u);
+                    }
 
-    CHECK_BLOCK(blocks, 2, 0);
+                    CHECK_BLOCK(blocks, 2, 0);
+                }
+            }
+        }
+    }
 }
 
 // TEST_F(StreamCacheResourceTest, testFallbackWithFastGen) {
@@ -559,29 +606,33 @@ TEST_F(StreamCacheResourceTest, testStoreTargetUsesDeploymentLocalTiers) {
                                     {true, false, true, Tier::DEVICE},
                                     {true, true, false, Tier::DEVICE},
                                     {true, true, true, Tier::DEVICE}};
-    deployment.enable_remote_cache = false;
     deployment.reuse_cache         = true;
-    for (const auto& test_case : cases) {
-        deployment.enable_device_cache = test_case.device;
-        deployment.enable_host_cache   = test_case.host;
-        deployment.enable_disk_cache   = test_case.disk;
-        for (unsigned request_mask = 0; request_mask < 8; ++request_mask) {
-            request.enable_device_cache = (request_mask & 1) != 0;
-            request.enable_host_cache   = (request_mask & 2) != 0;
-            request.enable_disk_cache   = (request_mask & 4) != 0;
-            for (const bool ignore_request_switches : {false, true}) {
-                SCOPED_TRACE("request_mask=" + std::to_string(request_mask)
-                             + " ignore=" + std::to_string(ignore_request_switches)
-                             + " target=" + std::to_string(static_cast<int>(test_case.target)));
-                deployment.ignore_request_cache_switches = ignore_request_switches;
-                request.reuse_cache                      = true;
-                EXPECT_EQ(resource.storeTarget(), test_case.target);
-                EXPECT_EQ(resource.enableDeviceCache(), test_case.device);
-                EXPECT_EQ(resource.enableHostCache(), test_case.host);
-                EXPECT_EQ(resource.enableDiskCache(), test_case.disk);
+    for (const bool remote_on : {false, true}) {
+        deployment.enable_remote_cache = remote_on;
+        SCOPED_TRACE(remote_on);
+        for (const auto& test_case : cases) {
+            deployment.enable_device_cache = test_case.device;
+            deployment.enable_host_cache   = test_case.host;
+            deployment.enable_disk_cache   = test_case.disk;
+            for (unsigned request_mask = 0; request_mask < 16; ++request_mask) {
+                request.enable_device_cache = (request_mask & 1) != 0;
+                request.enable_host_cache   = (request_mask & 2) != 0;
+                request.enable_disk_cache   = (request_mask & 4) != 0;
+                request.enable_remote_cache = (request_mask & 8) != 0;
+                for (const bool ignore_request_switches : {false, true}) {
+                    SCOPED_TRACE("request_mask=" + std::to_string(request_mask)
+                                 + " ignore=" + std::to_string(ignore_request_switches)
+                                 + " target=" + std::to_string(static_cast<int>(test_case.target)));
+                    deployment.ignore_request_cache_switches = ignore_request_switches;
+                    request.reuse_cache                      = true;
+                    EXPECT_EQ(resource.storeTarget(), test_case.target);
+                    EXPECT_EQ(resource.enableDeviceCache(), test_case.device);
+                    EXPECT_EQ(resource.enableHostCache(), test_case.host);
+                    EXPECT_EQ(resource.enableDiskCache(), test_case.disk);
 
-                request.reuse_cache = false;
-                EXPECT_EQ(resource.storeTarget(), ignore_request_switches ? test_case.target : Tier::NONE);
+                    request.reuse_cache = false;
+                    EXPECT_EQ(resource.storeTarget(), ignore_request_switches ? test_case.target : Tier::NONE);
+                }
             }
         }
     }
@@ -611,7 +662,7 @@ TEST_F(StreamCacheResourceTest, testStoreTargetPreservesReuseCacheOverride) {
 
     deployment.enable_disk_cache   = false;
     deployment.enable_remote_cache = true;
-    EXPECT_EQ(resource.storeTarget(), Tier::REMOTE);
+    EXPECT_EQ(resource.storeTarget(), Tier::NONE);
 
     deployment.enable_remote_cache = false;
     EXPECT_EQ(resource.storeTarget(), Tier::NONE);

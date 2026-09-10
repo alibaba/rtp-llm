@@ -30,7 +30,7 @@ protected:
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(linear_block + i)};
         }
-        cache_->insert(keys, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
+        cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/false);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -82,7 +82,7 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     resources[0][0].device_blocks = {30};
     resources[1][0].device_blocks = {31};
     resources[2][0].device_blocks = {32};
-    lin_cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
+    lin_cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
 
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 3u);
 

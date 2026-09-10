@@ -106,6 +106,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             tasks_.push_back(std::move(task));
+            ++submitted_count_;
         }
         cv_.notify_all();
         return true;
@@ -123,6 +124,10 @@ public:
             task();
         }
     }
+    size_t submittedCount() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return submitted_count_;
+    }
     bool waitForPendingCount(size_t expected) {
         std::unique_lock<std::mutex> lock(mutex_);
         return cv_.wait_for(lock, std::chrono::seconds(5), [&] { return tasks_.size() >= expected; });
@@ -132,6 +137,7 @@ private:
     std::mutex              mutex_;
     std::condition_variable cv_;
     std::deque<Task>        tasks_;
+    size_t                  submitted_count_{0};
 };
 
 class PendingWriteBackend: public StorageBackend {
@@ -145,6 +151,13 @@ public:
     }
     void finishWrite() {
         executor_->runAll();
+    }
+    size_t submittedCount() const {
+        return executor_->submittedCount();
+    }
+    CacheKeysType keys() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return keys_;
     }
     bool waitForPendingWrite() {
         return executor_->waitForPendingCount(1);
@@ -183,6 +196,7 @@ protected:
             cache_->mutex_.unlock();
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        keys_.insert(keys_.end(), request.keys->begin(), request.keys->end());
         for (const auto& key_handles : request.handles) {
             key_handle_counts_.push_back(key_handles.size());
             for (const auto& handle : key_handles) {
@@ -202,6 +216,7 @@ private:
     std::shared_ptr<PendingWriteExecutor> executor_;
     BlockTreeCache*                       cache_{nullptr};
     mutable std::mutex                    mutex_;
+    CacheKeysType                         keys_;
     std::vector<BlockIdxType>             blocks_;
     std::vector<std::string>              group_tags_;
     std::vector<size_t>                   key_handle_counts_;
@@ -265,7 +280,7 @@ protected:
         ASSERT_EQ(sources.size(), keys_.size());
         engine_ = installStoreTransferEngine(*env_, TransferCopyAction::Succeed, nullptr);
         ASSERT_NE(engine_, nullptr);
-        env_->cache->insert(keys_, resources_, GetParam(), /*write_remote=*/false, /*is_resident=*/false);
+        env_->cache->insert(keys_, resources_, GetParam(), /*is_resident=*/false);
         ASSERT_TRUE(waitForIdle());
         const std::vector<TreeNode*> path = env_->cache->tree()->findNode(keys_);
         ASSERT_EQ(path.size(), keys_.size());
@@ -347,7 +362,7 @@ protected:
         ASSERT_TRUE(context->commit());
         ASSERT_TRUE(barrier->waitUntilEnteredFor(1, std::chrono::seconds(5)));
 
-        env_->cache->insert(keys_, resources_, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
+        env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
         const std::vector<TreeNode*> busy_path = env_->cache->tree()->findNode(keys_);
         ASSERT_EQ(busy_path.size(), keys_.size());
         for (const TreeNode* node : busy_path) {
@@ -370,7 +385,7 @@ protected:
             EXPECT_EQ(node->group_set_resources[0].getTopTier(), succeeded ? Tier::DEVICE : GetParam());
         }
 
-        env_->cache->insert(keys_, resources_, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
+        env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
         if (succeeded) {
             expectResidentPrefix(target_blocks);
             EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
@@ -403,7 +418,7 @@ protected:
 
 TEST_P(ResidentTieredCacheTest, ResidentInsertDoesNotDuplicateExistingLowerTier) {
     EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
-    env_->cache->insert(keys_, resources_, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
+    env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
     const auto path = env_->cache->tree()->findNode(keys_);
     ASSERT_EQ(path.size(), keys_.size());
     for (const TreeNode* node : path) {
@@ -448,7 +463,7 @@ TEST_P(ResidentTieredCacheTest, CancelPendingLoadThenRetryBeforeRegisteringResid
     BlockTreeMatchResult                    result  = env_->cache->match(keys_);
     const std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
-    env_->cache->insert(keys_, resources_, Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/true);
+    env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
     const std::vector<TreeNode*> path = env_->cache->tree()->findNode(keys_);
     ASSERT_EQ(path.size(), keys_.size());
     for (const TreeNode* node : path) {
@@ -486,7 +501,6 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
         env.cache->insert({100},
                           deviceSourceResources({request_holder[0]}),
                           target_tier,
-                          /*write_remote=*/true,
                           /*is_resident=*/false);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
@@ -526,21 +540,46 @@ TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUnti
     resources[0][0].device_blocks = holder[0];
     resources[1][0].device_blocks = holder[1];
 
-    env.cache->insert({100, 101}, resources, Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 3u);
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 3u);
+    CacheKeysType             expected_keys;
+    size_t                    expected_submissions = 0;
+    std::vector<BlockIdxType> expected_blocks;
+    std::vector<size_t>       expected_counts;
+    int64_t                   version = -1;
+    for (const bool is_resident : {false, false, true, true}) {
+        SCOPED_TRACE(is_resident);
+        env.cache->insert({100, 101}, resources, Tier::DEVICE, is_resident);
+        EXPECT_EQ(backend->submittedCount(), ++expected_submissions);
+        const auto snapshot = env.cache->getKeySnapshot();
+        if (version >= 0) {
+            EXPECT_EQ(snapshot.version, version) << "duplicate inserts and resident promotion do not change tree data";
+        }
+        version = snapshot.version;
+        EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 3u);
+        EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 3u);
+        backend->finishWrite();
+        expected_keys.insert(expected_keys.end(), {100, 101});
+        EXPECT_EQ(backend->keys(), expected_keys);
+        expected_counts.insert(expected_counts.end(), {1, 1});
+        expected_blocks.insert(expected_blocks.end(), {holder[0][0], holder[1][0]});
+        EXPECT_TRUE(backend->submittedOutsideTreeLock());
+        EXPECT_EQ(backend->keyHandleCounts(), expected_counts);
+        EXPECT_EQ(backend->blocks(), expected_blocks);
+        EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 2u);
+        EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 2u);
+        if (is_resident) {
+            EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 0u);
+        }
+    }
+    env.cache->insert({}, {}, Tier::DEVICE, /*is_resident=*/false);
+    EXPECT_EQ(backend->submittedCount(), expected_submissions);
     backend->finishWrite();
-    EXPECT_TRUE(backend->submittedOutsideTreeLock());
-    EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{1, 1}));
-    EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[1][0]}));
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 2u);
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 2u);
+    EXPECT_EQ(backend->blocks(), expected_blocks);
 
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
-TEST(BlockTreeStorerTest, RemoteOnlyInsertWritesWithoutPublishingDeviceResidency) {
+TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinning) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -559,29 +598,32 @@ TEST(BlockTreeStorerTest, RemoteOnlyInsertWritesWithoutPublishingDeviceResidency
     resources[0][0].device_blocks = holder[0];
     resources[1][0].device_blocks = holder[1];
 
-    env.cache->insert({100, 101}, resources, Tier::REMOTE, /*write_remote=*/true, /*is_resident=*/false);
-    EXPECT_TRUE(env.cache->tree()->findNode({100, 101}).empty());
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 2u);
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 2u);
-
-    backend->finishWrite();
-    EXPECT_TRUE(backend->submittedOutsideTreeLock());
-    EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{1, 1}));
-    EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[1][0]}));
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 1u);
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 1u);
+    CoreDumpGuard guard;
+    const auto    version = env.cache->getKeySnapshot().version;
+    for (const Tier target : {Tier::REMOTE, Tier::NONE}) {
+        SCOPED_TRACE(tierName(target));
+        EXPECT_ANY_THROW(env.cache->insert({100, 101}, resources, target, /*is_resident=*/false));
+        EXPECT_TRUE(env.cache->tree()->findNode({100, 101}).empty());
+        EXPECT_EQ(env.cache->getKeySnapshot().version, version);
+        EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 1u);
+        EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 1u);
+        backend->finishWrite();
+        EXPECT_TRUE(backend->blocks().empty());
+        EXPECT_TRUE(backend->keyHandleCounts().empty());
+        EXPECT_EQ(backend->submittedCount(), 0u);
+    }
 
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
-TEST(BlockTreeStorerTest, RemoteOnlyInsertDoesNotWaitForBackendWriteOrLocalTaskPool) {
+TEST(BlockTreeStorerTest, DeviceInsertDoesNotWaitForBackendWriteOrLocalTaskPool) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
     auto backend = std::make_shared<PendingWriteBackend>();
-    auto env     = std::make_shared<StoreEnvironment>(makeStoreEnvironment("storage_remote_only_async",
-                                                                       /*device_cache_on=*/false,
+    auto env     = std::make_shared<StoreEnvironment>(makeStoreEnvironment("storage_device_async",
+                                                                       /*device_cache_on=*/true,
                                                                        /*host_cache_on=*/false,
                                                                        /*disk_cache_on=*/false,
                                                                        /*lower_tier_blocks=*/{2},
@@ -607,9 +649,8 @@ TEST(BlockTreeStorerTest, RemoteOnlyInsertDoesNotWaitForBackendWriteOrLocalTaskP
     }
 
     const auto          resources = deviceSourceResources({holder[0]});
-    BoundedThread<void> insert([env, resources] {
-        env->cache->insert({100}, resources, Tier::REMOTE, /*write_remote=*/true, /*is_resident=*/false);
-    });
+    BoundedThread<void> insert(
+        [env, resources] { env->cache->insert({100}, resources, Tier::DEVICE, /*is_resident=*/false); });
     if (!backend->waitForPendingWrite()) {
         backend->finishWrite();
         release_local_task->set_value();
@@ -626,17 +667,17 @@ TEST(BlockTreeStorerTest, RemoteOnlyInsertDoesNotWaitForBackendWriteOrLocalTaskP
                                    before_local_release :
                                    insert.waitFor(std::chrono::seconds(5));
     if (after_cleanup != std::future_status::ready) {
-        FAIL() << "REMOTE-only insert did not finish after releasing every controlled dependency";
+        FAIL() << "DEVICE insert did not finish after releasing every controlled dependency";
     }
     insert.get();
     EXPECT_EQ(before_backend_completion, std::future_status::ready);
     EXPECT_EQ(before_local_release, std::future_status::ready)
-        << "REMOTE-only insert must not wait for unrelated BlockTree tasks";
+        << "DEVICE insert must not wait for unrelated BlockTree tasks";
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env->cache);
 
-    EXPECT_TRUE(env->cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(env->cache->tree()->findNode({100}).size(), 1u);
     EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0]}));
-    EXPECT_EQ(env->device_pools[0]->refCount(holder[0][0]), 1u);
+    EXPECT_EQ(env->device_pools[0]->refCount(holder[0][0]), 2u);
     releaseDeviceBlocks(*env->cache, env->device_pools[0], holder[0]);
 }
 
@@ -646,14 +687,16 @@ TEST(BlockTreeStorerTest, HostAndDiskInsertReturnBeforeTransferSettlement) {
     }
     for (const Tier target_tier : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(std::string(tierName(target_tier)));
-        auto env     = std::make_shared<StoreEnvironment>(makeStoreEnvironment(
-            "store_settlement_" + std::string(tierName(target_tier)) + "_async",
-            /*device_cache_on=*/false,
-            /*host_cache_on=*/target_tier == Tier::HOST,
-            /*disk_cache_on=*/target_tier == Tier::DISK,
-            /*lower_tier_blocks=*/{2},
-            /*task_pool_size=*/2,
-            /*storage_backend=*/nullptr));
+        auto backend = std::make_shared<PendingWriteBackend>();
+        auto env     = std::make_shared<StoreEnvironment>(
+            makeStoreEnvironment("store_settlement_" + std::string(tierName(target_tier)) + "_async",
+                                 /*device_cache_on=*/false,
+                                 /*host_cache_on=*/target_tier == Tier::HOST,
+                                 /*disk_cache_on=*/target_tier == Tier::DISK,
+                                 /*lower_tier_blocks=*/{2},
+                                 /*task_pool_size=*/2,
+                                 backend));
+        backend->setCache(env->cache.get());
         auto barrier = std::make_shared<CallbackBarrier>();
         installStoreTransferEngine(*env, TransferCopyAction::Succeed, barrier);
         MultiNodeBlocks holder = allocateDeviceBlocksForTest(*env->groups[0], 1);
@@ -661,7 +704,7 @@ TEST(BlockTreeStorerTest, HostAndDiskInsertReturnBeforeTransferSettlement) {
 
         const auto          resources = deviceSourceResources({holder[0]});
         BoundedThread<void> insert([env, resources, target_tier] {
-            env->cache->insert({100}, resources, target_tier, /*write_remote=*/true, /*is_resident=*/false);
+            env->cache->insert({100}, resources, target_tier, /*is_resident=*/false);
         });
         if (!barrier->waitUntilEnteredFor(1, std::chrono::seconds(5))) {
             barrier->release();
@@ -690,58 +733,34 @@ TEST(BlockTreeStorerTest, HostAndDiskInsertReturnBeforeTransferSettlement) {
         const BlockIdxType target_block = resource.getBlocks(target_tier).front();
         EXPECT_EQ(env->poolFor(target_tier).treeRefCount(target_block), 1u);
         EXPECT_EQ(env->storeRefCount(), 0u);
+        backend->finishWrite();
+        EXPECT_TRUE(backend->blocks().empty());
+        EXPECT_TRUE(backend->keyHandleCounts().empty());
+        EXPECT_EQ(backend->submittedCount(), 0u);
+        EXPECT_EQ(env->device_pools[0]->refCount(holder[0][0]), 1u);
         releaseDeviceBlocks(*env->cache, env->device_pools[0], holder[0]);
     }
 }
 
-TEST(BlockTreeStorerTest, DeviceInsertSkipsRemoteWriteWhenRequestDisablesIt) {
+TEST(BlockTreeStorerTest, DeviceInsertWithoutBackendOnlyPublishesLocalCache) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
-    auto             backend = std::make_shared<PendingWriteBackend>();
-    StoreEnvironment env     = makeStoreEnvironment("storage_remote_disabled",
+    StoreEnvironment env    = makeStoreEnvironment("storage_local_only",
                                                 /*device_cache_on=*/true,
                                                 /*host_cache_on=*/false,
                                                 /*disk_cache_on=*/false,
                                                 /*lower_tier_blocks=*/{2},
                                                 /*task_pool_size=*/4,
-                                                backend);
-    backend->setCache(env.cache.get());
+                                                nullptr);
     MultiNodeBlocks holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
     ASSERT_EQ(holder.size(), 1u);
 
-    env.cache->insert(
-        {100}, deviceSourceResources({holder[0]}), Tier::DEVICE, /*write_remote=*/false, /*is_resident=*/false);
+    env.cache->insert({100}, deviceSourceResources({holder[0]}), Tier::DEVICE, /*is_resident=*/false);
 
-    EXPECT_TRUE(backend->blocks().empty());
-    EXPECT_FALSE(backend->submittedOutsideTreeLock());
+    EXPECT_EQ(env.cache->storageBackend(), nullptr);
+    EXPECT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
     EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 2u) << "only request and tree references remain";
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
-}
-
-TEST(BlockTreeStorerTest, RemoteOnlyInsertRejectsDisabledRemoteWriteWithoutPinning) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-    auto             backend = std::make_shared<PendingWriteBackend>();
-    StoreEnvironment env     = makeStoreEnvironment("storage_invalid_remote_only",
-                                                /*device_cache_on=*/false,
-                                                /*host_cache_on=*/false,
-                                                /*disk_cache_on=*/false,
-                                                /*lower_tier_blocks=*/{2},
-                                                /*task_pool_size=*/4,
-                                                backend);
-    MultiNodeBlocks  holder  = allocateDeviceBlocksForTest(*env.groups[0], 1);
-    ASSERT_EQ(holder.size(), 1u);
-    const size_t ref_count_before = env.device_pools[0]->refCount(holder[0][0]);
-
-    CoreDumpGuard guard;
-    EXPECT_ANY_THROW(env.cache->insert(
-        {100}, deviceSourceResources({holder[0]}), Tier::REMOTE, /*write_remote=*/false, /*is_resident=*/false));
-    EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
-    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), ref_count_before);
-    EXPECT_TRUE(backend->blocks().empty());
-
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
 }
 
@@ -774,8 +793,7 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
 
     MultiNodeBlocks holder = allocateDeviceBlocksForTest(*group_set, 1);
     ASSERT_EQ(holder.size(), 1u);
-    cache->insert(
-        {100}, deviceSourceResources({holder.front()}), Tier::DEVICE, /*write_remote=*/true, /*is_resident=*/false);
+    cache->insert({100}, deviceSourceResources({holder.front()}), Tier::DEVICE, /*is_resident=*/false);
     backend->finishWrite();
     EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{2}));
     EXPECT_EQ(backend->groupTags(), (std::vector<std::string>{"z_group", "a_group"}));
@@ -800,8 +818,7 @@ TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) 
     MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
     ASSERT_EQ(request_holder.size(), 1u);
 
-    env.cache->insert(
-        {100}, deviceSourceResources({request_holder[0]}), Tier::DISK, /*write_remote=*/true, /*is_resident=*/false);
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DISK, /*is_resident=*/false);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
     auto find = env.cache->tree()->findNode({100});
@@ -851,13 +868,11 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
             env.cache->insert({100},
                               deviceSourceResources({request_holder[0]}),
                               Tier::DEVICE,
-                              /*write_remote=*/true,
                               /*is_resident=*/false);
         }
         env.cache->insert({100},
                           deviceSourceResources({request_holder[0]}),
                           Tier::HOST,
-                          /*write_remote=*/true,
                           /*is_resident=*/false);
         barrier->waitUntilEntered();
         EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockTreeRefType::STORE), 1u);
@@ -920,7 +935,6 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             env.cache->insert({100},
                               deviceSourceResources({request_holder[0]}),
                               target_tier,
-                              /*write_remote=*/true,
                               /*is_resident=*/false);
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
@@ -979,8 +993,7 @@ TEST(BlockTreeStorerTest, StoreRejectionRollsBackEveryTemporaryHolderExactlyOnce
             device_free_before.push_back(kStoreDeviceBlocks);
         }
 
-        env.cache->insert(
-            {100}, deviceSourceResources(sources), Tier::HOST, /*write_remote=*/true, /*is_resident=*/false);
+        env.cache->insert({100}, deviceSourceResources(sources), Tier::HOST, /*is_resident=*/false);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
         EXPECT_EQ(engine->submittedBatchCount(), 0u) << "a rejected store must never copy";
@@ -1017,10 +1030,8 @@ TEST(BlockTreeStorerTest, DuplicateStoreForSameKeyReleasesLoserBlock) {
     auto barrier = std::make_shared<CallbackBarrier>();
     auto engine  = installStoreTransferEngine(env, TransferCopyAction::Succeed, barrier);
 
-    env.cache->insert(
-        {100}, deviceSourceResources({first_holder[0]}), Tier::HOST, /*write_remote=*/true, /*is_resident=*/false);
-    env.cache->insert(
-        {100}, deviceSourceResources({second_holder[0]}), Tier::HOST, /*write_remote=*/true, /*is_resident=*/false);
+    env.cache->insert({100}, deviceSourceResources({first_holder[0]}), Tier::HOST, /*is_resident=*/false);
+    env.cache->insert({100}, deviceSourceResources({second_holder[0]}), Tier::HOST, /*is_resident=*/false);
     barrier->waitUntilEntered(2);
     EXPECT_EQ(engine->submittedBatchCount(), 2u);
     barrier->release();

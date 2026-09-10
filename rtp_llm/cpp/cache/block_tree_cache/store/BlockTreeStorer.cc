@@ -42,25 +42,19 @@ void BlockTreeStorer::stopAdmissionLocked() {
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
-                                              bool                                              write_remote,
                                               bool                                              is_resident) {
     assert(!is_resident || target_tier == Tier::DEVICE);
-    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK
-                                || target_tier == Tier::REMOTE,
+    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
                             "unsupported store target tier: %s",
                             tierName(target_tier));
-    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || storage_backend_ != nullptr,
-                            "remote store target requires a storage backend");
-    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || write_remote,
-                            "remote store target requires remote write to be enabled");
     if (target_tier == Tier::DEVICE) {
         publishDeviceLocked(cache_keys, resources, is_resident);
-    } else if (target_tier == Tier::HOST || target_tier == Tier::DISK) {
+    } else {
         submitLowerTierLocked(cache_keys, resources, target_tier);
+        return {};
     }
-    return write_remote && storage_backend_ ?
-               storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
-               StorageWriteTask{};
+    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
+                              StorageWriteTask{};
 }
 
 void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
