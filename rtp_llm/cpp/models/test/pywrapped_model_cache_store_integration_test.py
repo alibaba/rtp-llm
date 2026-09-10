@@ -87,6 +87,33 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_cacheless_multigroup_warmup_exposes_single_input(self):
+        class WarmupModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs):
+                assert self.kv_cache is None
+                attention_inputs = inputs.attention_inputs
+                assert not isinstance(attention_inputs, dict)
+                assert attention_inputs.is_prefill
+                assert not attention_inputs.is_target_verify
+                assert attention_inputs.kv_cache_block_id is None
+                assert attention_inputs.kv_cache_block_id_device is None
+                assert attention_inputs.kv_cache_kernel_block_id is None
+                assert attention_inputs.kv_cache_kernel_block_id_device is None
+                assert attention_inputs.cache_store_inputs is None
+                return PyModelOutputs(
+                    torch.zeros(
+                        (inputs.input_ids.numel(), 1),
+                        dtype=torch.float16,
+                        device=inputs.input_ids.device,
+                    )
+                )
+
+        model = WarmupModel()
+        result = run_scenario(model, "cacheless_warmup")
+
+        self.assertEqual(model.forward_calls, 1)
+        self.assertEqual(result["records"], [])
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")
@@ -180,15 +207,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             [72, 96, 120, 144, 168, 192],
         )
         self.assertEqual({block["length"] for block in full_blocks.values()}, {16})
-        self.assertEqual(
-            {block["length"] for block in linear_blocks.values()}, {24}
-        )
+        self.assertEqual({block["length"] for block in linear_blocks.values()}, {24})
         for token_key in range(3101, 3107):
             self.assertTrue(
-                any(
-                    f"_token_id_str_{token_key}_" in key
-                    for key in linear_blocks
-                )
+                any(f"_token_id_str_{token_key}_" in key for key in linear_blocks)
             )
         for token_key in (3102, 3104, 3106):
             self.assertTrue(

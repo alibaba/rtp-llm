@@ -384,6 +384,51 @@ TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderControlsFirstSeenGroupOrder) {
     EXPECT_EQ(config.groupIdForLayerTag(0, "swa_kv"), config.groupIdForTag("swa_kv"));
 }
 
+TEST(HybridPoolConfigCreatorTest, SparseIndexerUsesIndependentNaturalStridePool) {
+    ModelConfig model_config;
+    model_config.num_layers                          = 2;
+    model_config.attn_config.use_mla                 = true;
+    model_config.attn_config.kv_lora_rank            = 512;
+    model_config.attn_config.rope_head_dim           = 64;
+    model_config.attn_config.tokens_per_block        = 512;
+    model_config.attn_config.kernel_tokens_per_block = 64;
+
+    KVCacheSpecDesc default_desc;
+    default_desc.tag        = "default";
+    default_desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
+
+    KVCacheSpecDesc indexer_desc;
+    indexer_desc.tag               = "indexer_kv";
+    indexer_desc.cache_type        = KVCacheSpecType::OpaqueKV;
+    indexer_desc.entry_dtype       = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems       = 132;
+    indexer_desc.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    indexer_desc.compression_ratio = 1;
+    model_config.kv_cache_spec_descs.assign(2, {default_desc, indexer_desc});
+
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.kernel_seq_size_per_block = 64;
+    kv_cache_config.test_block_num            = 4;
+    const auto config =
+        CacheConfigCreator::createConfig(model_config, parallelism_config, runtime_config, kv_cache_config);
+
+    ASSERT_TRUE(config.use_independent_block_pools);
+    ASSERT_EQ(config.groupNums(), 2);
+    EXPECT_EQ(config.groupTagsSnapshot(), (std::vector<std::string>{"default", "indexer_kv"}));
+    const auto default_gid = static_cast<size_t>(config.groupIdForTag("default"));
+    const auto indexer_gid = static_cast<size_t>(config.groupIdForTag("indexer_kv"));
+    EXPECT_EQ(config.layerIdsForGroup(default_gid), (std::vector<int>{0, 1}));
+    EXPECT_EQ(config.layerIdsForGroup(indexer_gid), (std::vector<int>{0, 1}));
+    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(default_gid), 64u);
+    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(indexer_gid), 64u);
+    EXPECT_EQ(config.kvScaleStrideBytesForGroup(default_gid), 0u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(indexer_gid), 512u * 132u);
+    EXPECT_EQ(config.kvScaleStrideBytesForGroup(indexer_gid), 0u);
+    EXPECT_EQ(config.blockSizeBytesForGroup(indexer_gid), 2u * 512u * 132u);
+}
+
 static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, std::vector<int> layer_ids) {
     GroupBase group;
     group.tag       = spec->tag;
