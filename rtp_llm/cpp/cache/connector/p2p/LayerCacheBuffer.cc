@@ -9,8 +9,8 @@ namespace rtp_llm {
 
 // ==================== LayerCacheBuffer ====================
 
-LayerCacheBuffer::LayerCacheBuffer(int layer_id, std::string cache_tag, int legacy_group_id):
-    layer_id_(layer_id), cache_tag_(std::move(cache_tag)), legacy_group_id_(legacy_group_id) {
+LayerCacheBuffer::LayerCacheBuffer(int layer_id, std::string cache_tag):
+    layer_id_(layer_id), cache_tag_(std::move(cache_tag)) {
     RTP_LLM_CHECK_WITH_INFO(!cache_tag_.empty(), "LayerCacheBuffer requires a non-empty cache tag");
 }
 

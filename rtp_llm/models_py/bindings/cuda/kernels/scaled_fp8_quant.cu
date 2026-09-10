@@ -265,13 +265,14 @@ __global__ void per_token_quant_fp8_kernel(const T* __restrict__ input,
 
     float warp_max = warpReduceMax(max_value);
 
-    __shared__ float scale;
-    scale = warp_max / tensorrt_llm::common::FP8_E4M3_MAX;
-    // Broadcast scale
+    // warpReduceMax broadcasts the result within this warp. Keep the scale in
+    // a register: a CTA contains eight independent token warps, so a single
+    // shared value would race and quantize rows with another token's scale.
+    const float scale = warp_max / tensorrt_llm::common::FP8_E4M3_MAX;
     if (lane_id == 0) {
         token_scale[0] = scale;
     }
-    float scale_inv = (scale == 0.f) ? 0.f : 1.0f / scale;
+    const float scale_inv = (scale == 0.f) ? 0.f : 1.0f / scale;
 
     //
     // Pass-2: quantize and write back
@@ -343,7 +344,7 @@ __global__ void per_token_quant_fp8_small_batch_kernel(const T* __restrict__ inp
     }
     __syncthreads();
 
-    const float scale_inv = 1.0f / scale;
+    const float scale_inv = (scale == 0.f) ? 0.f : 1.0f / scale;
 
     // Quantize using vectorized loads
     for (int32_t i = tid; i < num_vec_elems; i += block_dim) {

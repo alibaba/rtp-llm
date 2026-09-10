@@ -237,6 +237,23 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         model.model_config.use_new_loader = False
         self.assertFalse(model._use_new_loader())
 
+    def test_non_divisible_vocab_routes_to_legacy_or_fails_early(self):
+        config = _model_config()
+        config.vocab_size = 9
+        config.use_new_loader = None
+        model = _base_model(config)
+        model.parallelism_config.tp_size = 2
+        model.parallelism_config.get_attn_tp_size = lambda: 2
+        model.parallelism_config.get_ffn_tp_size = lambda: 2
+
+        self.assertIn("not divisible", model._new_loader_unsupported_reason())
+        self.assertFalse(model._use_new_loader())
+
+        config.use_new_loader = True
+        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "not divisible"):
+            model._load_with_new_loader()
+
     def test_registry_default_falls_back_but_explicit_newloader_stays_strict(self):
         model = object.__new__(BaseModel)
         model.model_config = types.SimpleNamespace(
@@ -331,8 +348,11 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
 
     def test_compressed_w8a8_preserves_all_exclusion_aliases(self):
         ignored_by_name = "model.layers.0.self_attn.o_proj"
+        ignored_by_pattern = "model.layers.0.self_attn.q_proj"
+        ignored_by_legacy_alias = "model.layers.0.self_attn.k_proj"
         ignored_by_compat_name = ["model.layers.0.mlp.down_proj"]
         excluded = "lm_head"
+        excluded_by_name = "model.embed_tokens"
 
         with tempfile.TemporaryDirectory() as path:
             with open(f"{path}/config.json", "w") as output:
@@ -358,8 +378,11 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                                     },
                                 }
                             },
-                            "ignore": ignored_by_name,
+                            "ignored_layers": [ignored_by_name],
+                            "ignore_patterns": [ignored_by_pattern],
+                            "ignore": [ignored_by_legacy_alias],
                             "modules_to_not_convert": ignored_by_compat_name,
+                            "exclude_modules": [excluded_by_name],
                             "exclude": excluded,
                         }
                     },
@@ -371,11 +394,23 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertIsInstance(source_config, CompressedW8A8Int8PerChannelQuantConfig)
         self.assertEqual(
             source_config.ignored_layers,
-            [ignored_by_name, *ignored_by_compat_name],
+            [
+                ignored_by_name,
+                ignored_by_pattern,
+                ignored_by_legacy_alias,
+                *ignored_by_compat_name,
+            ],
         )
         self.assertEqual(
             source_config.exclude_modules,
-            {ignored_by_name, *ignored_by_compat_name, excluded},
+            {
+                ignored_by_name,
+                ignored_by_pattern,
+                ignored_by_legacy_alias,
+                *ignored_by_compat_name,
+                excluded,
+                excluded_by_name,
+            },
         )
 
     def test_explicit_legacy_route_still_checks_checkpoint_compatibility(self):

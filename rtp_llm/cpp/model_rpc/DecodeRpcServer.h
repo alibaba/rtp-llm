@@ -98,9 +98,6 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static void            encodeGroupBlockIds(BroadcastLoadRequestPB& request,
-                                               const GroupBlockIds&    block_ids_by_group,
-                                               const CacheTopology&    topology);
     static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
     static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string

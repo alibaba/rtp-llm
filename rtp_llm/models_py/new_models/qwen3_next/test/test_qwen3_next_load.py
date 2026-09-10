@@ -6,6 +6,8 @@ import unittest
 from unittest import mock
 
 import torch
+from safetensors.torch import save_file
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_next.language import (
@@ -24,7 +26,6 @@ from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.models_py.registry import get_model_class
 from rtp_llm.ops import DataType, HybridAttentionType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
-from safetensors.torch import save_file
 
 
 def _parallelism(
@@ -527,6 +528,7 @@ class Qwen3NextLoadTest(unittest.TestCase):
     def test_moe_router_gates_stay_unquantized_for_fp8_model(self):
         source_quant = types.SimpleNamespace(
             get_runtime_method_key=lambda: "FP8_PER_BLOCK",
+            get_moe_runtime_method_key=lambda: "FP8_PER_BLOCK",
             get_method=lambda: "FP8_PER_BLOCK",
             weight_block_size=[128, 128],
             modules_to_not_convert=[],

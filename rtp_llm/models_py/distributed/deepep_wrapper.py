@@ -294,8 +294,10 @@ class DeepepWrapperConfig:
             moe_layer_indices = list(getattr(model_config, "moe_layer_index", ()))
             if not moe_layer_indices and model_config.expert_num > 0:
                 moe_layer_indices = list(range(model_config.num_layers))
+            model_type = str(model_config.model_type)
+            moe_path = "block_sparse_moe" if model_type == "kimi_linear" else "mlp"
             for layer_idx in moe_layer_indices:
-                prefix = f"layers.{layer_idx}.mlp.experts"
+                prefix = f"layers.{layer_idx}.{moe_path}.experts"
                 root_ignored = is_module_ignored(prefix, exclusion_patterns)
                 projection_ignored = moe_projection_exclusion_states(
                     prefix,

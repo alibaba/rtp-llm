@@ -111,12 +111,9 @@ class MoEConfigAdapter:
         # Generic execution is not chunked, so JIT warmup only needs the
         # request-visible bucket representatives rather than the capacity cap.
         self.warmup_include_capacity = False
-        effective_quant_config = (
-            quant_config if quant_config is not None else model_config.quant_config
-        )
         self.moe_quant_method = (
-            effective_quant_config.get_method()
-            if effective_quant_config is not None
+            quant_config.get_moe_runtime_method_key()
+            if quant_config is not None
             else None
         )
         self.data_type = model_config.data_type
