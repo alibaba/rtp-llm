@@ -1607,8 +1607,6 @@ def warmup_batched_fp8_einsum_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
-    if torch.cuda.get_device_capability(device)[0] == 12:
-        return
     _assert_not_capturing()
 
     num_sms = _get_deep_gemm_num_sms(device)

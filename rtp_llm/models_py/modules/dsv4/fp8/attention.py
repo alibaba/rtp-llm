@@ -2115,52 +2115,10 @@ class AttentionFP8(nn.Module):
         [M, G, K/512])`` in the exact layout ``deep_gemm.fp8_einsum``
         consumes, so the wo_a projection is a single einsum launch.
         Matches vLLM ``deepseek_v4_attention.py:325`` (same
-        ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
-        M, G, _K = o_fp8.shape
+        ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)``) on SM100 and SM12x.
+        """
+        M, G, _ = o_fp8.shape
         R = self.o_lora_rank
-        if torch.cuda.get_device_capability(o_fp8.device)[0] == 12:
-            from flashinfer.gemm import gemm_fp8_nt_groupwise
-            def _ue8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
-                scale_bytes = scale.contiguous().view(torch.uint8).reshape(
-                    *scale.shape[:-1], -1
-                )
-                return (scale_bytes.to(torch.int32) - 127).float().exp2()
-            padded_m = (M + 3) & ~3
-            # P1a: pad rows are computed per-row and discarded by the [:, :M]
-            # consumer — init only the <=3-row pad tail, not the full buffer.
-            a = torch.empty((G, padded_m, _K), dtype=o_fp8.dtype, device=o_fp8.device)
-            a[:, :M].copy_(o_fp8.transpose(0, 1))
-            a_scale = torch.empty(
-                (G, padded_m, _K // 128), dtype=torch.float32, device=o_fp8.device
-            )
-            a_scale[:, :M].copy_(_ue8m0_to_fp32(o_scale).transpose(0, 1))
-            if padded_m != M:
-                a[:, M:].zero_()
-                a_scale[:, M:].fill_(1.0)
-            # P1a: weight-derived — compute once, reuse (was per-call
-            # .float().contiguous() on every layer every forward).
-            w_scale = getattr(self, "_wo_a_s_f32", None)
-            if w_scale is None:
-                w_scale = self.wo_a_s.float().view(
-                    G, R // 128, _K // 128
-                ).contiguous()
-                self._wo_a_s_f32 = w_scale
-            projected = torch.stack(
-                [
-                    gemm_fp8_nt_groupwise(
-                        a[g],
-                        self._wo_a_stk_w[g],
-                        a_scale[g],
-                        w_scale[g],
-                        scale_granularity_mnk=(1, 128, 128),
-                        scale_major_mode="K",
-                        out_dtype=torch.bfloat16,
-                    )
-                    for g in range(G)
-                ],
-                dim=0,
-            )
-            return projected[:, :M].transpose(0, 1).contiguous().view(B, S, G, R)
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",
