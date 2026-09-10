@@ -407,11 +407,11 @@ bool KVCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContext>& conte
     return allocator_ != nullptr && allocator_->abortPendingLoad(context);
 }
 
-void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
+void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     RTP_LLM_PROFILE_FUNCTION();
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
-    allocator_->insertIntoCache(insert_info);
+    allocator_->insertIntoCache(insert_info, resident_prefix_length);
     reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::INSERT, begin_time_us);
 }
 

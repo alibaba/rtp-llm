@@ -411,7 +411,8 @@ void HybridKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
-void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
+void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
+    resident_prefix_length  = 0;
     auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
     RTP_LLM_CHECK(kv_cache_resource != nullptr);
     if (!block_tree_cache_) {
@@ -507,7 +508,13 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
-        block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, insert_info.is_resident);
+        if (insert_info.is_resident) {
+            const size_t batch_resident_prefix_length =
+                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true);
+            resident_prefix_length += batch_resident_prefix_length;
+        } else {
+            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
+        }
     }
 }
 

@@ -50,7 +50,8 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
-    void         insertIntoCache(const InsertInfo& insert_info);
+    // Outputs the resident key-prefix count; ordinary inserts report zero.
+    void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;

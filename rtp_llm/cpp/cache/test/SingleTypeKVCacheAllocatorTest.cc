@@ -547,7 +547,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
         ASSERT_EQ(seed_resource->curBlocksNum(), 4);
 
         InsertInfo seed_insert_info{seed_resource, seed_token_ids, /*is_resident=*/true};
-        allocator_->insertIntoCache(seed_insert_info);
+        {
+            size_t resident_prefix_length = 0;
+            allocator_->insertIntoCache(seed_insert_info, resident_prefix_length);
+        }
     }
 
     // reuse 4 block, allocate 1 new block
@@ -698,7 +701,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCache) {
     allocator_->malloc(malloc_info);
 
     InsertInfo insert_info{batch_resource, complete_token_ids, false};
-    allocator_->insertIntoCache(insert_info);
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(insert_info, resident_prefix_length);
+    }
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, ResidentPrefixRemainsMatchableUnderAllocationPressure) {
@@ -713,7 +719,25 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ResidentPrefixRemainsMatchableUnderAlloca
     seed_malloc.enable_cache_lookup = false;
     ASSERT_TRUE(allocator_->malloc(seed_malloc).success);
     const BlockIdxType seed_block = seed->blocks(0, 0).front();
-    allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/true});
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
+    const std::vector<TreeNode*> seeded_path = allocator_->blockTreeCacheOwner()->tree()->findNode({100});
+    ASSERT_EQ(seeded_path.size(), 1u);
+    seeded_path.front()->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/true}, resident_prefix_length);
+        EXPECT_EQ(resident_prefix_length, 0u);
+    }
+    EXPECT_FALSE(seeded_path.front()->is_resident);
+    seeded_path.front()->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/true}, resident_prefix_length);
+        EXPECT_EQ(resident_prefix_length, 1u);
+    }
     allocator_->free(FreeInfo{seed, seed_tokens});
 
     const BlockTreeCachePtr&     cache = allocator_->blockTreeCacheOwner();
@@ -750,7 +774,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsTreeEntryWhileReq
     ASSERT_TRUE(allocator_->malloc(seed_malloc).success);
     ASSERT_EQ(seed->blocksNum(0, 0), 1);
     const BlockIdxType seed_block = seed->blocks(0, 0).front();
-    allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(InsertInfo{seed, seed_tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
 
     const auto& device_pool = allocator_->blockTreeCacheOwner()->groupSets().front()->devicePools().front();
     ASSERT_NE(device_pool, nullptr);
@@ -793,7 +820,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     resource->setBatchBlocks(1, 0, BlockIndicesType{blocks[1]});
     resource->setBatchCacheKeys(0, CacheKeysType{100});
     resource->setBatchCacheKeys(1, CacheKeysType{200});
-    allocator_->insertIntoCache(InsertInfo{resource, nullptr, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(InsertInfo{resource, nullptr, /*is_resident=*/false}, resident_prefix_length);
+    }
 
     auto batch_zero_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100});
     ASSERT_EQ(batch_zero_match.matched_device_blocks, 1u);
@@ -826,7 +856,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheStopsAtFirstNullBlock) {
     auto resource = createBatchKVCacheResource(/*batch_size=*/1, config);
     resource->setBatchBlocks(0, 0, BlockIndicesType{blocks[0], NULL_BLOCK_IDX, blocks[1]});
     resource->setBatchCacheKeys(0, CacheKeysType{100, 200, 300});
-    allocator_->insertIntoCache(InsertInfo{resource, nullptr, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(InsertInfo{resource, nullptr, /*is_resident=*/false}, resident_prefix_length);
+    }
 
     const auto path = allocator_->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 200, 300});
     ASSERT_EQ(path.size(), 1u);
@@ -851,7 +884,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     auto seed = createBatchKVCacheResource(/*batch_size=*/1, config);
     seed->setBatchBlocks(0, 0, seed_blocks);
     seed->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
-    allocator_->insertIntoCache(InsertInfo{seed, nullptr, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(InsertInfo{seed, nullptr, /*is_resident=*/false}, resident_prefix_length);
+    }
 
     auto noncanonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100, 102});
     EXPECT_EQ(noncanonical_match.matched_device_blocks, 0u);
@@ -1175,7 +1211,11 @@ TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
 
     MallocInfo insert_malloc_info{insert_resource, insert_tokens};
     ASSERT_TRUE(allocator_->malloc(insert_malloc_info).success);
-    allocator_->insertIntoCache(InsertInfo{insert_resource, insert_tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        allocator_->insertIntoCache(InsertInfo{insert_resource, insert_tokens, /*is_resident=*/false},
+                                    resident_prefix_length);
+    }
     EXPECT_TRUE(allocator_->blockTreeCacheOwner()->getKeySnapshot().keys.empty());
 }
 

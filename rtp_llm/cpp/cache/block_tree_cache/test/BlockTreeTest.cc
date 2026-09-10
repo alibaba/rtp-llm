@@ -89,6 +89,7 @@ TEST_F(ResidentBlockTreeTest, NewResidentPrefixIsContinuousAndOrdinaryInsertCann
     ASSERT_EQ(resident.path.size(), 2u);
     EXPECT_EQ(resident.newly_resident_nodes, resident.path);
     EXPECT_EQ(resident.accepted_resource_count, 6u);
+    EXPECT_EQ(resident.resident_prefix_length, 2u);
     for (TreeNode* node : resident.path) {
         EXPECT_TRUE(node->is_resident);
         EXPECT_FALSE(tree_->isRemovable(node));
@@ -102,6 +103,14 @@ TEST_F(ResidentBlockTreeTest, NewResidentPrefixIsContinuousAndOrdinaryInsertCann
     EXPECT_TRUE(ordinary.path[1]->is_resident);
     EXPECT_FALSE(ordinary.path[2]->is_resident);
     EXPECT_EQ(ordinary.path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{10}));
+}
+
+TEST_F(ResidentBlockTreeTest, RepeatedResidentInsertCountsAlreadyResidentPrefix) {
+    const BlockTreeInsertResult first = tree_->insertNode({100, 200}, make2DResources(3, 2, 10), false, true);
+    ASSERT_EQ(first.resident_prefix_length, 2u);
+    const BlockTreeInsertResult repeated = tree_->insertNode({100, 200}, make2DResources(3, 2, 20), false, true);
+    EXPECT_EQ(repeated.resident_prefix_length, 2u);
+    EXPECT_TRUE(repeated.newly_resident_nodes.empty());
 }
 
 TEST_F(ResidentBlockTreeTest, BusyGroupStopsResidentRegistrationBeforeThatNode) {
@@ -121,6 +130,7 @@ TEST_F(ResidentBlockTreeTest, BusyGroupStopsResidentRegistrationBeforeThatNode) 
             const BlockTreeInsertResult resident =
                 tree_->insertNode(keys, make2DResources(3, 3, 20), /*collect_path=*/true, /*is_resident=*/true);
             EXPECT_EQ(resident.newly_resident_nodes.size(), 1u);
+            EXPECT_EQ(resident.resident_prefix_length, 1u);
             EXPECT_EQ(resident.path.size(), 1u);
             EXPECT_TRUE(seed.path[0]->is_resident);
             EXPECT_FALSE(seed.path[1]->is_resident);
@@ -139,6 +149,7 @@ TEST_F(ResidentBlockTreeTest, DetachedPrefixCannotBecomeResident) {
     const BlockTreeInsertResult            resident =
         tree_->insertNode({100, 200}, make2DResources(3, 2, 20), /*collect_path=*/false, /*is_resident=*/true);
     EXPECT_TRUE(resident.newly_resident_nodes.empty());
+    EXPECT_EQ(resident.resident_prefix_length, 0u);
     EXPECT_FALSE(seed.path[0]->is_resident);
     EXPECT_FALSE(seed.path[1]->is_resident);
 }

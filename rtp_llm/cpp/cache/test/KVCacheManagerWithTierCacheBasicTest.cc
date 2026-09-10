@@ -362,11 +362,17 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DuplicateInsertIsIdempotent) {
 
     // The first insert may legitimately publish the request's longer prefix.
     // Idempotence is the second insertion of that exact resource/key mapping.
-    manager_->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        manager_->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
     const auto after_first_stats  = cache->getStats();
     const auto after_first_device = snapshotDevicePools(manager_);
     const auto after_first_lower  = snapshotLowerPools(*cache, GetParam());
-    manager_->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    {
+        size_t resident_prefix_length = 0;
+        manager_->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false}, resident_prefix_length);
+    }
     const auto after_second_stats = cache->getStats();
     EXPECT_EQ(after_second_stats.tree_node_count, after_first_stats.tree_node_count);
     EXPECT_EQ(after_second_stats.device_heap_total_size, after_first_stats.device_heap_total_size);

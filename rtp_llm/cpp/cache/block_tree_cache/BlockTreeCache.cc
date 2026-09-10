@@ -156,16 +156,24 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
-                            Tier                                              target_tier,
-                            bool                                              is_resident) {
+                            Tier                                              target_tier) {
+    (void)insert(cache_keys, resources, target_tier, false);
+}
+
+size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
+                              const std::vector<std::vector<GroupSetResource>>& resources,
+                              Tier                                              target_tier,
+                              bool                                              is_resident) {
+    size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident);
+        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
     }
+    return resident_prefix_length;
 }
 
 int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {

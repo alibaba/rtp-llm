@@ -58,7 +58,7 @@ public:
 
     bool                           init();
     virtual void                   free(const FreeInfo& free_info)                        = 0;
-    virtual void                   insertIntoCache(const InsertInfo& insert_info)         = 0;
+    virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) = 0;
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const   = 0;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>

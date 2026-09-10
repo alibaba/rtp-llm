@@ -127,6 +127,30 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     ASSERT_EQ(item2.prompt_tokens, prompt_2);
 }
 
+TEST_F(SystemPromptConstructorTest, testResidentInsertFailureFailsWarmupAndReleasesRequestOwnership) {
+    const std::shared_ptr<NormalEngine>   engine         = createFocusedEngine<NormalEngine>();
+    const std::shared_ptr<KVCacheManager> engine_manager = engine->resourceContext().cache_manager;
+    const DeviceBlockPoolPtr pool = engine_manager->blockTreeCache()->groupSets().front()->devicePools().front();
+    const size_t             request_blocks_before = pool->referencedBlocksNum();
+    auto                     insert_manager = std::make_shared<KVCacheManager>(engine_manager->cacheConfig(), true);
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(insert_manager->cacheConfig());
+    insert_manager->allocator_ = allocator;
+    EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
+        .WillOnce(testing::Invoke([](const InsertInfo& info, size_t& resident_prefix_length) {
+            EXPECT_TRUE(info.is_resident);
+            resident_prefix_length = 0;
+        }));
+    KVCacheConfig config;
+    config.multi_task_prompt_tokens = {{"blocked_prompt", {1, 2, 3}}};
+    SystemPromptConstructor                                                   constructor;
+    const absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> result =
+        constructor.construct(config, engine.get(), insert_manager.get(), true);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), absl::StatusCode::kFailedPrecondition);
+    EXPECT_NE(result.status().message().find("blocked_prompt"), std::string::npos);
+    EXPECT_EQ(pool->referencedBlocksNum(), request_blocks_before);
+}
+
 TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestOwnership) {
     auto engine  = createFocusedEngine<FailSecondPreRunEngine>();
     auto manager = engine->resourceContext().cache_manager;

@@ -355,7 +355,8 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
-void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
+void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
+    resident_prefix_length = 0;
     if (!full_kv_cache_group_->prefixReuseEnabled()) {
         return;
     }
@@ -397,7 +398,13 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         if (publish_prefix > 0) {
             insert_keys.resize(publish_prefix);
             resources.resize(publish_prefix);
-            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, insert_info.is_resident);
+            if (insert_info.is_resident) {
+                const size_t batch_resident_prefix_length =
+                    block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true);
+                resident_prefix_length += batch_resident_prefix_length;
+            } else {
+                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
+            }
         }
     }
 }

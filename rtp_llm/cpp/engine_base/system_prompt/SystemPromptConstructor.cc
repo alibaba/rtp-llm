@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -38,7 +39,22 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
                                             stream->completeTokenIdsPtr(),
                                             /*is_resident=*/true,
                                             /*target_tier=*/rtp_llm::Tier::DEVICE};
-            cache_manager->insertIntoCache(insert_info);
+            size_t              resident_prefix_length = 0;
+            cache_manager->insertIntoCache(insert_info, resident_prefix_length);
+            size_t                              expected_prefix_length = kv_cache.cacheKeys(0).size();
+            const std::shared_ptr<CPSlotMapper> mapper                 = cache_manager->cpSlotMapper();
+            const CacheConfig&                  config                 = cache_manager->cacheConfig();
+            if (mapper && mapper->isSharded()
+                && (config.use_independent_block_pools || config.groupNums() > 1
+                    || mapper->usesCpCanonicalKeys(config, 0))) {
+                expected_prefix_length /= static_cast<size_t>(mapper->cpSize());
+            }
+            if (resident_prefix_length != expected_prefix_length) {
+                return absl::FailedPreconditionError(
+                    "system prompt resident cache insertion incomplete: task_id=" + task_id
+                    + " resident_prefix_length=" + std::to_string(resident_prefix_length)
+                    + " expected_prefix_length=" + std::to_string(expected_prefix_length));
+            }
             multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);
         }
         prepared_streams.push_back(std::move(stream));

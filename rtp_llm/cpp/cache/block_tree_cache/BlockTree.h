@@ -30,6 +30,7 @@ struct BlockTreeInsertResult {
     std::vector<TreeNode*> newly_resident_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
     size_t accepted_resource_count{0};
+    size_t resident_prefix_length{0};
 };
 
 struct BlockTreeNodeRangeResult {

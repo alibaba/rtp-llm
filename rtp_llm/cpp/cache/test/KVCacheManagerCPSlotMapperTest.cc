@@ -290,7 +290,10 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     // Insert into cache using the allocator-level cp_slot_mapper.
     // This should not crash and should use sharded insert logic.
     InsertInfo insert_info{resource, token_ids, /*is_resident=*/false};
-    EXPECT_NO_THROW(mgr->insertIntoCache(insert_info));
+    {
+        size_t resident_prefix_length = 0;
+        EXPECT_NO_THROW(mgr->insertIntoCache(insert_info, resident_prefix_length));
+    }
 
     // Now try to malloc again with the same token_ids -- should get reuse hit.
     auto       resource2 = makeResource(1, config.layer_num);

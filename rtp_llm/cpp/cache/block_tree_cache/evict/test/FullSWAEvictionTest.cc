@@ -34,7 +34,7 @@ protected:
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(swa_block + i)};
         }
-        cache_->insert(keys, resources, Tier::DEVICE, /*is_resident=*/false);
+        cache_->insert(keys, resources, Tier::DEVICE);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -88,7 +88,7 @@ TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
     resources[0][0].device_blocks = {20};
     resources[1][0].device_blocks = {21};
     resources[2][0].device_blocks = {22};
-    swa_cache->insert({100, 200, 300}, resources, Tier::DEVICE, /*is_resident=*/false);
+    swa_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 3u);
 

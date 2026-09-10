@@ -146,10 +146,10 @@ protected:
             ++free_calls_;
             real_allocator_->free(info);
         }));
-        ON_CALL(*mock_allocator_, insertIntoCache(testing::_))
-            .WillByDefault(testing::Invoke([this](const InsertInfo& info) {
+        ON_CALL(*mock_allocator_, insertIntoCache(testing::_, testing::_))
+            .WillByDefault(testing::Invoke([this](const InsertInfo& info, size_t& resident_prefix_length) {
                 ++insert_calls_;
-                real_allocator_->insertIntoCache(info);
+                real_allocator_->insertIntoCache(info, resident_prefix_length);
             }));
         ON_CALL(*mock_allocator_, singleBatchNeedBlocks(testing::_, testing::_, testing::_))
             .WillByDefault(
