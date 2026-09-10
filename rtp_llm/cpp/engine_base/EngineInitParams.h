@@ -122,10 +122,12 @@ public:
         // Show debug info for all configs
         RTP_LLM_LOG_INFO(
             "ModelConfig: max_seq_len=%ld, vocab_size=%ld", model_config_.max_seq_len, model_config_.vocab_size);
-        RTP_LLM_LOG_INFO("ParallelismConfig: tp_size=%ld, ep_size=%ld, dp_size=%ld",
+        RTP_LLM_LOG_INFO("ParallelismConfig: tp_size=%ld, dp_size=%ld, ktp_size=%ld, ep_size=%ld, world_size=%ld",
                          parallelism_config.tp_size,
+                         parallelism_config.dp_size,
+                         parallelism_config.ktp_size,
                          parallelism_config.ep_size,
-                         parallelism_config.dp_size);
+                         parallelism_config.world_size);
         RTP_LLM_LOG_INFO("RuntimeConfig: %s", runtime_config.to_string().c_str());
     }
 };
