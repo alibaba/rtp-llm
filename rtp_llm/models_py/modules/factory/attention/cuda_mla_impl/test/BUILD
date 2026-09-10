@@ -29,6 +29,17 @@ py_test(
 )
 
 py_test(
+    name = "trtllm_pinned_indices_test",
+    srcs = ["trtllm_pinned_indices_test.py", "trtllm_sparse_decode_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:flashinfer-cubin",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
     name = "trtllm_sparse_cmp_test",
     srcs = [
         "trtllm_sparse_cmp_test.py",

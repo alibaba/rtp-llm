@@ -30,6 +30,8 @@ def _compact_indices(
     PAGE: tl.constexpr,
     PAGES: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
+    Physical=None,
+    HAS_PHYSICAL: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, BLOCK_K)
@@ -46,13 +48,20 @@ def _compact_indices(
         & (logical_page >= 0)
         & (logical_page < TABLE_COLS)
     )
-    page = tl.load(Table + req * TABLE_STRIDE + logical_page, valid, other=0).to(
-        tl.int64
-    )
-    valid &= (page > 0) & (page < PAGES)
+    if HAS_PHYSICAL:
+        # Pinned MLA has already mapped backing-store IDs into its resident
+        # working set. These are token offsets, not logical pages; slot zero
+        # is valid here, unlike reserved page zero in the ordinary KV cache.
+        physical = tl.load(Physical + row * K + col, valid, other=-1).to(tl.int64)
+        valid &= (physical >= 0) & (physical < PAGES * PAGE)
+    else:
+        page = tl.load(Table + req * TABLE_STRIDE + logical_page, valid, other=0).to(
+            tl.int64
+        )
+        valid &= (page > 0) & (page < PAGES)
+        physical = page * PAGE + logical % PAGE
     position = tl.cumsum(valid.to(tl.int32), axis=0) - 1
     count = tl.sum(valid.to(tl.int32), axis=0)
-    physical = page * PAGE + logical % PAGE
     # Disjoint stores: valid entries occupy [0,count), the other store clears
     # [count,K). No initialization/scatter race or inter-CTA barrier is needed.
     tl.store(Sources + row * K + position, physical, valid)
@@ -159,6 +168,7 @@ def convert_selected_kv(
     indices_out,
     counts_out,
     lengths_out,
+    physical_indices=None,
 ):
     """Write caller-owned selected FP8 cache, query and metadata, without allocation.
 
@@ -169,6 +179,12 @@ def convert_selected_kv(
     block_table: [requests,max_pages] int32, contiguous within each row.
     kv_out: [T,K,576] FP8, with K a multiple of 64. source_indices: [T,K]
     int64; indices_out: [T,K] int32; counts_out/lengths_out: [T] int32.
+
+    Optional physical_indices: [T,K] int32 token offsets in resident KV,
+    aligned with the original topk entries. Bypass block-table translation
+    but retain logical causal filtering; resident slot zero is valid. The
+    caller must join the working set's prefetch/write before this call.
+    This input mapping is distinct from indices_out into temporary kv_out.
 
     Compaction is stable and preserves duplicates. Each row owns K scratch
     slots. Only valid slots (or slot zero for an empty row) are overwritten;
@@ -218,6 +234,10 @@ def convert_selected_kv(
         device,
         contiguous=False,
     )
+    if physical_indices is not None:
+        _require_tensor(
+            "physical_indices", physical_indices, (rows, k), torch.int32, device
+        )
     if rows == 0:
         return
     _compact_indices[(rows,)](
@@ -236,6 +256,8 @@ def convert_selected_kv(
         PAGE=kv.shape[1],
         PAGES=kv.shape[0],
         TABLE_STRIDE=block_table.stride(0),
+        Physical=physical_indices,
+        HAS_PHYSICAL=physical_indices is not None,
     )
     _convert_kv[(rows, k)](
         kv, source_indices, counts_out, kv_out, K=k, enable_fp_fusion=False

@@ -168,7 +168,9 @@ class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
         self._seq_lens = lengths
         self._reserve(tokens, req_ids.device)
 
-    def forward(self, q, kv, topk_indices, kv_scale=None, layer_id=0):
+    def forward(
+        self, q, kv, topk_indices, kv_scale=None, layer_id=0, physical_indices=None
+    ):
         """Consume already-rotated absorbed Q; return BF16 latent attention.
 
         All work stays on the caller's CUDA stream, including when called by
@@ -189,6 +191,22 @@ class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
         topk = _topk_2d(topk_indices)
         if topk.shape != (self._capacity, self.top_k):
             raise ValueError("TRT sparse TopK does not match the prepared shape")
+        if physical_indices is not None:
+            if physical_indices.ndim not in (2, 3) or (
+                physical_indices.ndim == 3 and physical_indices.shape[1] != 1
+            ):
+                raise ValueError("TRT sparse physical_indices must be [T,K] or [T,1,K]")
+            physical_indices = _topk_2d(physical_indices)
+            if (
+                physical_indices.shape != topk.shape
+                or physical_indices.dtype != torch.int32
+                or physical_indices.device != self._device
+                or not physical_indices.is_contiguous()
+            ):
+                raise ValueError(
+                    "TRT sparse physical_indices must be contiguous device int32 "
+                    "matching TopK"
+                )
         if self._capacity == 0:
             return self.output
         if kv.dtype not in (torch.uint8, torch.float8_e4m3fn):
@@ -216,6 +234,7 @@ class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
             indices_out=self.physical_indices,
             counts_out=self.valid_counts,
             lengths_out=self.trt_seq_lens,
+            physical_indices=physical_indices,
         )
         self._decode(
             query=self._query_view,

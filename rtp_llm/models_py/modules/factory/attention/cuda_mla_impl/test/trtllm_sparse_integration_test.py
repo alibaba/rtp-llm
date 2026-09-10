@@ -676,6 +676,49 @@ class ForwardCallContractTest(CpuOnlyTest):
         self.assertIs(op.forward(query, cache, topk), op.output)
         self.assertEqual(calls.mock_calls, [])
 
+    def test_resident_physical_indices_reach_converter_without_replacing_topk(self):
+        for expanded in (False, True):
+            with self.subTest(expanded=expanded):
+                op, calls, query, cache, topk = self.make_forward_state()
+                physical = torch.full_like(topk, 129)
+                supplied = physical.unsqueeze(1) if expanded else physical
+                self.assertIs(
+                    op.forward(query, cache, topk, physical_indices=supplied), op.output
+                )
+                args, kwargs = calls.convert.call_args
+                self.assertIs(args[2], topk)
+                self.assertEqual(
+                    kwargs["physical_indices"].data_ptr(), physical.data_ptr()
+                )
+                self.assertEqual(kwargs["physical_indices"].shape, topk.shape)
+                self.assertIs(kwargs["indices_out"], op.physical_indices)
+                self.assertIsNot(kwargs["physical_indices"], kwargs["indices_out"])
+                self.assertEqual(
+                    [call[0] for call in calls.mock_calls],
+                    ["convert", "decode", "mask"],
+                )
+
+    def test_invalid_resident_indices_fail_before_any_launch(self):
+        for tokens in (0, 2):
+            op, calls, query, cache, topk = self.make_forward_state(tokens=tokens)
+            bad_inputs = [
+                topk.long(),
+                topk[:, :1024],
+                torch.empty((tokens, 2, 2048), dtype=torch.int32),
+                torch.empty((tokens, 2048), dtype=torch.int32, device="meta"),
+            ]
+            if tokens:
+                bad_inputs.append(
+                    torch.empty((tokens, 4096), dtype=torch.int32)[:, ::2]
+                )
+            for physical in bad_inputs:
+                with self.subTest(
+                    tokens=tokens, shape=physical.shape, dtype=physical.dtype
+                ):
+                    with self.assertRaisesRegex(ValueError, "physical_indices"):
+                        op.forward(query, cache, topk, physical_indices=physical)
+            self.assertEqual(calls.mock_calls, [])
+
     def test_invalid_query_or_topk_shape_is_rejected_before_launch(self):
         op, calls, query, cache, topk = self.make_forward_state()
         for bad_query, bad_topk in (
