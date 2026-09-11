@@ -18,6 +18,8 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -4585,18 +4587,32 @@ public final class JavaMockEngineCluster {
 
         private EngineRpcService.GenerateOutputsPB buildOutput(MockPerformanceModel.RequestShape shape,
                                                                boolean finished) {
+            int outputLen = whaleRemote && !finished ? Math.min(1, shape.outputLen()) : shape.outputLen();
+            var flatten = EngineRpcService.FlattenOutputPB.newBuilder()
+                    .addFinished(finished)
+                    .addAuxInfo(EngineRpcService.AuxInfoPB.newBuilder()
+                            .setInputLen(shape.inputLen())
+                            .setPrefixLen((int) shape.hitTokens())
+                            .setOutputLen(outputLen)
+                            .setIterCount(1)
+                            .setStepOutputLen(outputLen)
+                            .build());
+            if (whaleRemote) {
+                // QueryConverter / Python trans_output require [outputs, beams, tokens]
+                // and little-endian INT32 bytes. Repeat an input token, not model inference.
+                int tokenCount = shape.input().getTokenIdsCount();
+                int token = tokenCount == 0 ? 0 : shape.input().getTokenIds(tokenCount - 1);
+                ByteBuffer ids = ByteBuffer.allocate(Math.multiplyExact(outputLen, Integer.BYTES))
+                        .order(ByteOrder.LITTLE_ENDIAN);
+                for (int i = 0; i < outputLen; i++) ids.putInt(token);
+                flatten.setOutputIds(EngineRpcService.TensorPB.newBuilder()
+                        .setDataType(EngineRpcService.TensorPB.DataType.INT32)
+                        .addShape(1).addShape(1).addShape(outputLen)
+                        .setInt32Data(com.google.protobuf.ByteString.copyFrom(ids.array())));
+            }
             return EngineRpcService.GenerateOutputsPB.newBuilder()
                     .setRequestId(shape.input().getRequestId())
-                    .setFlattenOutput(EngineRpcService.FlattenOutputPB.newBuilder()
-                            .addFinished(finished)
-                            .addAuxInfo(EngineRpcService.AuxInfoPB.newBuilder()
-                                    .setInputLen(shape.inputLen())
-                                    .setPrefixLen((int) shape.hitTokens())
-                                    .setOutputLen(shape.outputLen())
-                                    .setIterCount(1)
-                                    .setStepOutputLen(shape.outputLen())
-                                    .build())
-                            .build())
+                    .setFlattenOutput(flatten)
                     .build();
         }
 

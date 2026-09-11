@@ -69,7 +69,21 @@ class WhaleRemotePrefillTest {
                 "fetch_response must deliver BOTH frames, got " + stream.frames.size());
         assertFalseFrame(stream.frames.get(0), "frame 0 must be the prefill first-token frame");
         assertTrueFrame(stream.frames.get(1), "frame 1 must be the decode terminal frame");
+        assertFrontendTensor(stream.frames.get(0), 1, 9);
+        assertFrontendTensor(stream.frames.get(1), 8, 9);
         assertTtftStrictlyBeforeE2e(stream);
+    }
+
+    private static void assertFrontendTensor(EngineRpcService.GenerateOutputsPB frame, int tokens, int token) {
+        var output = frame.getFlattenOutput();
+        assertTrue(output.hasOutputIds(), "normal frontend must receive output_ids");
+        var tensor = output.getOutputIds();
+        assertEquals(EngineRpcService.TensorPB.DataType.INT32, tensor.getDataType());
+        assertEquals(List.of(1L, 1L, (long) tokens), tensor.getShapeList());
+        assertEquals(tokens * Integer.BYTES, tensor.getInt32Data().size());
+        var bytes = tensor.getInt32Data().asReadOnlyByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        while (bytes.hasRemaining()) assertEquals(token, bytes.getInt());
+        assertEquals(tokens, output.getAuxInfo(0).getOutputLen());
     }
 
     @Test
