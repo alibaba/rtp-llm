@@ -1,7 +1,9 @@
 import unittest
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
+from rtp_llm.config.engine_config import update_worker_addrs
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
@@ -49,6 +51,66 @@ class GenerateConfigTest(TestCase):
         pc.world_size = 16
         with self.assertRaisesRegex(AssertionError, "DP=EP=KTP=world_size"):
             set_parallelism_config(pc)
+
+    def test_worker_addresses_are_canonicalized_by_tp_rank(self):
+        members = [
+            SimpleNamespace(
+                world_rank=rank,
+                ip=f"10.0.0.{rank}",
+                cache_store_listen_port=1000 + rank,
+                cache_store_rdma_listen_port=2000 + rank,
+                rpc_server_port=3000 + rank,
+            )
+            for rank in (3, 0, 2, 1)
+        ]
+        runtime = SimpleNamespace(worker_addrs=[], worker_grpc_addrs=[])
+        parallelism = SimpleNamespace(
+            tp_size=4,
+            dp_size=1,
+            dp_rank=0,
+            local_rank=0,
+        )
+
+        update_worker_addrs(
+            runtime,
+            parallelism,
+            SimpleNamespace(members=members),
+        )
+
+        self.assertEqual(
+            runtime.worker_addrs,
+            [f"10.0.0.{rank}:{1000 + rank}:{2000 + rank}" for rank in range(4)],
+        )
+        self.assertEqual(
+            runtime.worker_grpc_addrs,
+            [f"10.0.0.{rank}:{3000 + rank}" for rank in range(4)],
+        )
+
+    def test_complete_tp_group_rejects_duplicate_tp_ranks(self):
+        members = [
+            SimpleNamespace(
+                world_rank=rank,
+                ip=f"10.0.0.{index}",
+                cache_store_listen_port=1000 + index,
+                cache_store_rdma_listen_port=2000 + index,
+                rpc_server_port=3000 + index,
+            )
+            for index, rank in enumerate((0, 1, 2, 4))
+        ]
+        runtime = SimpleNamespace(worker_addrs=[], worker_grpc_addrs=[])
+        parallelism = SimpleNamespace(
+            tp_size=4,
+            dp_size=1,
+            dp_rank=0,
+            local_rank=0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "TP ranks.*0, 1, 2, 3"):
+            update_worker_addrs(
+                runtime,
+                parallelism,
+                SimpleNamespace(members=members),
+            )
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).
