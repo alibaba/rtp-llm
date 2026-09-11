@@ -6,25 +6,30 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 
 /**
- * Ordered waiters for exact endpoints and overlapping selector domains.
+ * Ordered endpoint waiters and request-local selector retry chains.
  *
  * <p>Each endpoint allows one waiting request to retry at a time:
  * a capacity notification wakes the first waiter; removing that request wakes
- * its successor; parking it on the same endpoint stops retries until the next
- * capacity notification. Waking a request does not reserve capacity.</p>
+ * its successor unless that exact successor must still wait. Parking on the
+ * same endpoint stops retries until the next capacity notification. Waking a
+ * request does not reserve capacity.</p>
  */
 final class BlockedRequestIndex {
 
     /** Exact endpoint and capacity key used when a request must wait. */
     record WaitTarget(WorkerEndpoint endpoint, PlacementKey key) {
+    }
+
+    /** Snapshot of the ordered successor whose capacity may be checked outside the queue lock. */
+    record RetryContinuation(GlobalQueueEntry active, WaitTarget source, GlobalQueueEntry next) {
     }
 
     private final Map<WorkerEndpoint, EndpointWaiters> waitersByEndpoint =
@@ -33,17 +38,24 @@ final class BlockedRequestIndex {
             new IdentityHashMap<>();
     private final Map<String, Set<WorkerEndpoint>> endpointsByAddress =
             new java.util.HashMap<>();
+    private final boolean priorityOrdering;
     private final Comparator<GlobalQueueEntry> order;
-    private final NavigableSet<GlobalQueueEntry> selectorWaiters;
-    private final Map<String, NavigableSet<GlobalQueueEntry>> selectorsByGroup = new HashMap<>();
+    private final Consumer<GlobalQueueEntry> onWake;
+    private final Map<GlobalQueueEntry, SelectorWait> selectorWaiters = new IdentityHashMap<>();
+    private final Map<PlacementKey, SelectorDomain> selectorDomains = new HashMap<>();
 
     BlockedRequestIndex(boolean priorityOrdering) {
+        this(priorityOrdering, ignored -> { });
+    }
+
+    BlockedRequestIndex(boolean priorityOrdering, Consumer<GlobalQueueEntry> onWake) {
+        this.priorityOrdering = priorityOrdering;
+        this.onWake = Objects.requireNonNull(onWake, "onWake");
         Comparator<GlobalQueueEntry> fifo = Comparator.comparingLong(entry -> entry.sequence);
         order = priorityOrdering
                 ? Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed()
                         .thenComparing(fifo)
                 : fifo;
-        selectorWaiters = new TreeSet<>(order);
     }
 
     boolean isBlocked(GlobalQueueEntry entry) {
@@ -51,16 +63,8 @@ final class BlockedRequestIndex {
     }
 
     boolean isSelectorBlocked(GlobalQueueEntry entry) {
-        // Unbound requests can select any group. Explicit groups may bypass
-        // only other explicit groups; wildcard blockers remain fleet-wide.
-        return entry.routingGroup == null ? precedes(selectorWaiters, entry)
-                : precedes(selectorsByGroup.get(null), entry)
-                        || precedes(selectorsByGroup.get(entry.routingGroup), entry);
-    }
-
-    private boolean precedes(NavigableSet<GlobalQueueEntry> waiters, GlobalQueueEntry entry) {
-        return waiters != null && !waiters.isEmpty()
-                && order.compare(waiters.first(), entry) <= 0;
+        SelectorWait waiter = selectorWaiters.get(entry);
+        return waiter != null && !waiter.batch().ready;
     }
 
     WaitTarget findBlockingEndpoint(
@@ -81,6 +85,27 @@ final class BlockedRequestIndex {
         return new WaitTarget(waiters.endpoint, waiters.blocker);
     }
 
+    RetryContinuation retryContinuation(GlobalQueueEntry entry) {
+        EndpointWaiters waiters = waitersByRequest.get(entry);
+        if (waiters == null || waiters.activeRetry != entry) {
+            return null;
+        }
+        GlobalQueueEntry next = firstLiveSuccessor(waiters, entry);
+        return next == null ? null : new RetryContinuation(
+                entry, new WaitTarget(waiters.endpoint, waiters.blocker), next);
+    }
+
+    void pauseContinuation(RetryContinuation candidate) {
+        Objects.requireNonNull(candidate, "candidate");
+        EndpointWaiters waiters = waitersByRequest.get(candidate.active());
+        if (waiters != null && waiters.activeRetry == candidate.active()
+                && waiters.endpoint == candidate.source().endpoint()
+                && Objects.equals(waiters.blocker, candidate.source().key())
+                && firstLiveSuccessor(waiters, candidate.active()) == candidate.next()) {
+            waiters.pausedSuccessor = candidate.next();
+        }
+    }
+
     void parkExact(
             GlobalQueueEntry entry,
             PlacementKey blocker,
@@ -93,12 +118,14 @@ final class BlockedRequestIndex {
                     "exact blocker does not identify its endpoint");
         }
 
+        clearSelector(entry);
         EndpointWaiters current = waitersByRequest.get(entry);
         if (current != null && current.endpoint == exactEndpoint) {
             current.blocker = exactBlocker;
             if (current.activeRetry == entry) {
                 // Still full: put this request back to sleep without waking its successor.
                 current.activeRetry = null;
+                current.pausedSuccessor = null;
             }
             entry.blockedKey = exactBlocker;
             entry.blockedEndpoint = exactEndpoint;
@@ -120,12 +147,11 @@ final class BlockedRequestIndex {
     void parkSelector(GlobalQueueEntry entry, PlacementKey blocker) {
         removeAndWakeNext(entry);
         entry.blockedKey = Objects.requireNonNull(blocker, "blocker");
-        selectorWaiters.add(entry);
-        selectorsByGroup.computeIfAbsent(entry.routingGroup,
-                ignored -> new TreeSet<>(order)).add(entry);
+        SelectorDomain domain = selectorDomains.computeIfAbsent(blocker, ignored -> new SelectorDomain());
+        selectorWaiters.put(entry, new SelectorWait(domain, domain.add(entry)));
     }
 
-    /** Remove a waiter and wake its successor only if it was the active retry. */
+    /** Remove a waiter and preserve progress when the active retry or paused successor leaves. */
     void removeAndWakeNext(GlobalQueueEntry entry) {
         removeEndpointWaiterAndWakeNext(entry);
         clearSelector(entry);
@@ -134,24 +160,30 @@ final class BlockedRequestIndex {
     }
 
     private void clearSelector(GlobalQueueEntry entry) {
-        if (!selectorWaiters.remove(entry)) {
+        SelectorWait waiter = selectorWaiters.remove(entry);
+        if (waiter == null) {
             return;
         }
-        NavigableSet<GlobalQueueEntry> group = selectorsByGroup.get(entry.routingGroup);
-        group.remove(entry);
-        if (group.isEmpty()) {
-            selectorsByGroup.remove(entry.routingGroup);
+        waiter.domain().remove(entry, waiter.batch());
+        if (waiter.domain().size == 0) {
+            selectorDomains.remove(entry.blockedKey, waiter.domain());
         }
     }
 
     /**
      * Start one ordered retry chain. Multiple releases may share one notification;
-     * successful admission advances the chain until a successor confirms it is full.
+     * successful admission advances the chain until the next waiter must wait for capacity.
      * Repeated notifications do not wake a second request while a retry is active.
      */
     void capacityChanged(PlacementKey event) {
         releaseSelectors(event);
-        forEachExactEndpoint(event, this::wakeNextWaiter);
+        forEachExactEndpoint(event, endpoint -> {
+            EndpointWaiters waiters = waitersByEndpoint.get(endpoint);
+            if (waiters != null) {
+                waiters.pausedSuccessor = null;
+                wakeNextWaiter(endpoint);
+            }
+        });
     }
 
     /** A generation change invalidates every route pinned to that address. */
@@ -164,29 +196,29 @@ final class BlockedRequestIndex {
         if (event == null) {
             return;
         }
-        releaseSelectors(selectorsByGroup.get(null), event);
+        if (event.endpoint() != null) {
+            releaseSelectorDomain(event);
+        }
+        releaseSelectorDomain(PlacementKey.anyGroup(event.role()));
         if (event.group() != null) {
-            releaseSelectors(selectorsByGroup.get(event.group()), event);
+            releaseSelectorDomain(new PlacementKey(event.role(), event.group()));
         }
     }
 
-    private void releaseSelectors(NavigableSet<GlobalQueueEntry> entries, PlacementKey event) {
-        if (entries == null) {
-            return;
-        }
-        for (GlobalQueueEntry entry : List.copyOf(entries)) {
-            if (isRelevant(entry.blockedKey, event)) {
-                removeAndWakeNext(entry);
-            }
+    /** Release one ordered retry chain per waiting priority without walking its requests. */
+    private void releaseSelectorDomain(PlacementKey key) {
+        SelectorDomain domain = selectorDomains.get(key);
+        if (domain != null) {
+            domain.releaseWaitingBatches();
         }
     }
 
     void clear() {
-        for (GlobalQueueEntry entry : selectorWaiters) {
+        for (GlobalQueueEntry entry : selectorWaiters.keySet()) {
             entry.blockedKey = null;
         }
         selectorWaiters.clear();
-        selectorsByGroup.clear();
+        selectorDomains.clear();
         for (EndpointWaiters waiters : waitersByEndpoint.values()) {
             for (GlobalQueueEntry entry : waiters.entries) {
                 entry.blockedKey = null;
@@ -224,15 +256,31 @@ final class BlockedRequestIndex {
             return;
         }
         boolean wasActiveRetry = waiters.activeRetry == entry;
+        boolean wasPausedSuccessor = waiters.pausedSuccessor == entry;
         if (wasActiveRetry) {
             waiters.activeRetry = null;
         }
         waiters.entries.remove(entry);
+        if (wasPausedSuccessor) {
+            waiters.pausedSuccessor = null;
+        }
         if (waiters.entries.isEmpty()) {
             unregister(waiters);
-        } else if (wasActiveRetry) {
+        } else if ((wasActiveRetry
+                && (waiters.pausedSuccessor == null
+                    || firstLiveSuccessor(waiters, null) != waiters.pausedSuccessor))
+                || (wasPausedSuccessor && waiters.activeRetry == null)) {
             wakeNextWaiter(waiters.endpoint);
         }
+    }
+
+    private GlobalQueueEntry firstLiveSuccessor(EndpointWaiters waiters, GlobalQueueEntry active) {
+        for (GlobalQueueEntry candidate : waiters.entries) {
+            if (candidate != active && !candidate.removed && !candidate.future.isDone()) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private void wakeNextWaiter(WorkerEndpoint endpoint) {
@@ -248,8 +296,10 @@ final class BlockedRequestIndex {
                 continue;
             }
             waiters.activeRetry = next;
+            waiters.pausedSuccessor = null;
             next.blockedKey = null;
             next.blockedEndpoint = null;
+            onWake.accept(next);
             return;
         }
         unregister(waiters);
@@ -264,9 +314,11 @@ final class BlockedRequestIndex {
             waitersByRequest.remove(entry);
             entry.blockedKey = null;
             entry.blockedEndpoint = null;
+            onWake.accept(entry);
         }
         waiters.entries.clear();
         waiters.activeRetry = null;
+        waiters.pausedSuccessor = null;
         unregister(waiters);
     }
 
@@ -298,18 +350,45 @@ final class BlockedRequestIndex {
         }
     }
 
-    private static boolean isRelevant(
-            PlacementKey blocker,
-            PlacementKey event) {
-        if (blocker == null || event == null
-                || blocker.role() != event.role()) {
-            return false;
+    private final class SelectorDomain {
+        private final Map<Integer, SelectorBatch> waitingBatches = new HashMap<>();
+        private int size;
+
+        SelectorBatch add(GlobalQueueEntry entry) {
+            SelectorBatch batch = waitingBatches.computeIfAbsent(
+                    priorityOrdering ? entry.priority : 0, ignored -> new SelectorBatch());
+            batch.entries.add(entry);
+            size++;
+            return batch;
         }
-        if (blocker.endpoint() != null) {
-            return Objects.equals(blocker.endpoint(), event.endpoint());
+
+        void remove(GlobalQueueEntry entry, SelectorBatch batch) {
+            boolean wasFirst = batch.entries.first() == entry;
+            batch.entries.remove(entry);
+            size--;
+            if (batch.entries.isEmpty()) {
+                waitingBatches.remove(priorityOrdering ? entry.priority : 0, batch);
+            } else if (batch.ready && wasFirst) {
+                onWake.accept(batch.entries.first());
+            }
         }
-        return Objects.equals(blocker.group(), event.group())
-                || blocker.group() == null;
+
+        void releaseWaitingBatches() {
+            for (SelectorBatch batch : waitingBatches.values()) {
+                batch.ready = true;
+                onWake.accept(batch.entries.first());
+            }
+            waitingBatches.clear();
+        }
+    }
+
+    /** Requests parked at one priority since the last capacity notification. */
+    private final class SelectorBatch {
+        private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);
+        private boolean ready;
+    }
+
+    private record SelectorWait(SelectorDomain domain, SelectorBatch batch) {
     }
 
     private final class EndpointWaiters {
@@ -317,6 +396,7 @@ final class BlockedRequestIndex {
         private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);
         private PlacementKey blocker;
         private GlobalQueueEntry activeRetry;
+        private GlobalQueueEntry pausedSuccessor;
 
         private EndpointWaiters(
                 WorkerEndpoint endpoint,
