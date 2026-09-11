@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <memory>
@@ -223,6 +224,61 @@ TEST_F(QueryConverterTest, testTransOutput) {
     std::memcpy(all_hidden_states_vector.data(), all_hidden_states_string.data(), all_hidden_states_string.size());
     for (int i = 0; i < 8; ++i) {
         ASSERT_FLOAT_EQ(all_hidden_states_vector[i], i + 10);
+    }
+}
+
+TEST_F(QueryConverterTest, TransOutputPreservesFixedLengthBeamTokenOrder) {
+    for (int64_t beam_count : {1, 30, 2000}) {
+        SCOPED_TRACE(beam_count);
+        // Non-contiguous per-beam views also exercise transResponse's input normalization.
+        auto            storage  = torch::arange(beam_count * 6, torch::kInt32).reshape({beam_count, 6});
+        auto            expected = storage.slice(1, 0, 6, 2).unsqueeze(1).contiguous();
+        GenerateOutputs outputs;
+        outputs.request_id = 123;
+        for (int64_t i = 0; i < beam_count; ++i) {
+            GenerateOutput output;
+            output.output_ids = storage.slice(0, i, i + 1).slice(1, 0, 6, 2);
+            output.finished   = true;
+            outputs.generate_outputs.push_back(std::move(output));
+        }
+
+        GenerateOutputsPB result;
+        QueryConverter::transResponse(&result, &outputs, false, "", 6);
+        EXPECT_EQ(result.request_id(), 123);
+        EXPECT_EQ(result.flatten_output().finished_size(), beam_count);
+        TensorPB expected_pb;
+        QueryConverter::transTensorPB(&expected_pb, expected);
+        EXPECT_EQ(result.flatten_output().output_ids().SerializeAsString(), expected_pb.SerializeAsString());
+    }
+}
+
+TEST_F(QueryConverterTest, TransOutputPreservesPaddingAndEmptyTokenSequences) {
+    const std::vector<std::vector<int64_t>> cases = {{3, 1, 0, 3}, {0, 0}, {3, 3}};
+    for (const auto& lengths : cases) {
+        for (bool mixed_dtype : {false, true}) {
+            SCOPED_TRACE(mixed_dtype);
+            const auto max_len  = *std::max_element(lengths.begin(), lengths.end());
+            auto       expected = torch::full({static_cast<int64_t>(lengths.size()), 1, max_len}, 99, torch::kInt32);
+            GenerateOutputs outputs;
+            for (size_t i = 0; i < lengths.size(); ++i) {
+                GenerateOutput output;
+                const auto     dtype = mixed_dtype && i > 0 ? torch::kInt64 : torch::kInt32;
+                output.output_ids    = torch::arange(lengths[i], dtype).reshape({1, lengths[i]}) + i * 10;
+                output.finished      = true;
+                for (int64_t j = 0; j < lengths[i]; ++j) {
+                    expected.data_ptr<int32_t>()[i * max_len + j] = i * 10 + j;
+                }
+                outputs.generate_outputs.push_back(std::move(output));
+            }
+
+            GenerateOutputsPB result;
+            QueryConverter::transResponse(&result, &outputs, false, "", 99);
+            TensorPB expected_pb;
+            QueryConverter::transTensorPB(&expected_pb, expected);
+            // Mixed input dtypes must retain the original first-tensor dtype,
+            // rather than torch::cat's type promotion.
+            EXPECT_EQ(result.flatten_output().output_ids().SerializeAsString(), expected_pb.SerializeAsString());
+        }
     }
 }
 
@@ -838,6 +894,8 @@ TEST_F(QueryConverterTest, PrefillRpcServerRejectsInputEmbeddingsWithTpGreaterTh
     auto                         meta            = std::make_shared<RpcServerRuntimeMeta>();
     auto                         prefill_context = PrefillGenerateContext(
         &server.resource(), rpc_context, input.generate_config().timeout_ms(), &server_context, metrics_reporter, meta);
+    // Exercise runtime support validation without requiring an inference engine.
+    prefill_context.generate_input = QueryConverter::transQuery(&input);
 
     server.getRpcConnection(prefill_context);
 

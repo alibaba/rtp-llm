@@ -382,12 +382,22 @@ void QueryConverter::mergeAndPadTensorsToTensorPB(TensorPB*                     
         return;
     }
 
-    int64_t max_len = 0;
+    int64_t max_len    = 0;
+    bool    can_concat = tensors.front().device().is_cpu() && tensors.front().scalar_type() == torch::kInt32;
     for (const auto& t : tensors) {
         RTP_LLM_CHECK(t.dim() == 2 && t.size(0) == 1);
+        can_concat = can_concat && t.size(1) == tensors.front().size(1) && t.device() == tensors.front().device()
+                     && t.scalar_type() == tensors.front().scalar_type();
         if (t.size(1) > max_len) {
             max_len = t.size(1);
         }
+    }
+
+    // Fixed-length CPU token outputs need no padding. Avoid one slice/copy
+    // sequence per beam, while preserving [batch_size, 1, output_length].
+    if (can_concat) {
+        transTensorPB(target_pb, torch::cat(tensors, 0).unsqueeze(1));
+        return;
     }
 
     const int64_t batch_size = tensors.size();
