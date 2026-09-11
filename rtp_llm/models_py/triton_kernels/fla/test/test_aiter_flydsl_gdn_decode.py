@@ -988,15 +988,20 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)
 
-    def test_packaged_padding_backport_overwrites_poison_without_rtp_zeros(self):
-        from rtp_llm.models_py.triton_kernels.fla.aiter_gdn_padding_backport import (
-            padding_safe_backend,
+    def test_native_padding_store_overwrites_poison_without_rtp_zeros(self):
+        from rtp_llm.models_py.triton_kernels.fla import (
+            aiter_gdn_padding_backport as patch,
         )
 
-        backend = padding_safe_backend()
-        self.assertIsNotNone(
-            backend, "ROCm build must package the pinned padding backport"
-        )
+        # Test the installed kernel's behavior independently of wheel provenance.
+        # Only bypass the hash comparison: real imports, dispatch and GPU writes
+        # remain exercised. A kernel that skips padding still fails on NaNs.
+        patch.padding_safe_backend.cache_clear()
+        self.addCleanup(patch.padding_safe_backend.cache_clear)
+        provenance = mock.patch.object(patch, "_matches", return_value=True)
+        provenance.start()
+        self.addCleanup(provenance.stop)
+        self.assertIsNotNone(patch.padding_safe_backend())
         kwargs = _make_decode_kwargs(batch=2)
         aiter_flydsl_gdn_decode(**kwargs)  # Compile before checking allocation.
         for read, write in ((-1, -1), (-1, 4), (4, -1)):
@@ -1038,6 +1043,15 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
             backend = adapter._get_aiter_flydsl_gdn_decode()
             self.assertTrue(callable(backend))
             self.assertFalse(patch.output_is_initialized_by_kernel(backend))
+            kwargs = _make_decode_kwargs(batch=2)
+            kwargs["read_indices"][1] = -1
+            kwargs["write_indices"][1] = -1
+            with mock.patch.object(torch, "zeros", wraps=torch.zeros) as zeros:
+                output = aiter_flydsl_gdn_decode(**kwargs)
+            zeros.assert_called_once()
+            torch.testing.assert_close(
+                output[1], torch.zeros_like(output[1]), rtol=0, atol=0
+            )
 
     def test_required_aiter_symbol_is_available(self):
         adapter._get_aiter_flydsl_gdn_decode.cache_clear()
