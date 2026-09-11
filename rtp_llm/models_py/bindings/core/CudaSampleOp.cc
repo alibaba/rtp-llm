@@ -329,6 +329,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
+    const bool all_top_k_one = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
     const bool need_renorm_probs  = sampling_probs_t.defined() && !params.return_original_all_probs;
     const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
     const bool all_top_p_one =
