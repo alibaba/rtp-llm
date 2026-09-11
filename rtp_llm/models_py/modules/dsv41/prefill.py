@@ -8,6 +8,7 @@ Snapshots stay in memory and retain every required region together.
 from dataclasses import dataclass, fields, replace
 
 import torch
+
 from rtp_llm.models_py.modules.dsv41.attention import (
     V41AttentionCache,
     V41AttentionContext,
@@ -348,7 +349,7 @@ class V41LocalSnapshot:
                     pages, ids, spec, page_count, device
                 )
                 payload_ranges.extend(ranges)
-                metadata_ranges.append(_tensor_range(ids))
+                metadata_ranges.append(_tensor_range(table))
                 sources.append((pages.data, selected))
             source_owners[layer] = sources
         _snapshot_disjoint(payload_ranges, metadata_ranges)
@@ -498,6 +499,7 @@ class V41LocalSnapshot:
                     raise ValueError(
                         "snapshot owner compression ratio differs from layout"
                     )
+                retained_ranges.append(_tensor_range(table))
                 prepare_copy(data, pages, table[0, :page_count], slot, page_count)
         _snapshot_disjoint(writable_ranges, retained_ranges)
         try:
