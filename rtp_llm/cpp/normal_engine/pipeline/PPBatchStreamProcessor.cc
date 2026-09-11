@@ -4,6 +4,13 @@
 #include <cstring>
 #include <utility>
 
+#include <ATen/Generator.h>
+#if defined(USING_CUDA) || defined(USING_ROCM)
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#else
+#include <ATen/CPUGeneratorImpl.h>
+#endif
+
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
@@ -12,6 +19,10 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
+#if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
+#include "ATen/cuda/CUDAContext.h"
+#endif
 
 namespace rtp_llm {
 
