@@ -159,5 +159,29 @@ class FrontendServerTest(TestCase):
         self.assertNotIn("[DONE]", "".join(chunks))
         self.assertIn("error_code", json.loads(chunks[1][6:]))
 
+    def test_failed_response_aggregation_has_no_success_marker(self):
+        async def collect(openai):
+            async def generate():
+                yield FakePipelinResponse(res="partial")
+
+            async def fail_aggregation(_):
+                raise RuntimeError("response aggregation failed")
+
+            response = CompleteResponseAsyncGenerator(generate(), fail_aggregation)
+            self.frontend_server._global_controller.increment()
+            return [
+                chunk
+                async for chunk in self.frontend_server.stream_response(
+                    {"stream": openai, request_id_field_name: 3}, response
+                )
+            ]
+
+        for openai in (True, False):
+            with self.subTest(openai=openai):
+                chunks = asyncio.run(collect(openai))
+                self.assertEqual(len(chunks), 2)
+                self.assertNotIn("[done]", "".join(chunks).lower())
+                self.assertIn("error_code", json.loads(chunks[1].split(":", 1)[1]))
+
 
 main()
