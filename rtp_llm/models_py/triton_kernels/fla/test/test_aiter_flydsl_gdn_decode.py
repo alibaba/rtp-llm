@@ -988,14 +988,14 @@ class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)
 
-    def test_packaged_padding_backport_overwrites_poison_without_rtp_zeros(self):
+    def test_pinned_native_padding_store_overwrites_poison_without_rtp_zeros(self):
         from rtp_llm.models_py.triton_kernels.fla.aiter_gdn_padding_backport import (
             padding_safe_backend,
         )
 
         backend = padding_safe_backend()
         self.assertIsNotNone(
-            backend, "ROCm build must package the pinned padding backport"
+            backend, "ROCm build must verify the pinned native padding-store kernel"
         )
         kwargs = _make_decode_kwargs(batch=2)
         aiter_flydsl_gdn_decode(**kwargs)  # Compile before checking allocation.

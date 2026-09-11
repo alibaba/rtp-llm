@@ -81,11 +81,9 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        patches = ["@rtp_llm//patches/aiter:0001-gdr-decode-zero-padding.patch"],
-        patch_args = ["-p1"],
-        sha256 = "b6bce60a81cbc2de6eda78c3f75506337cec921e62224d0d2a5e0475a2aba9a1",
+        sha256 = "61ff3f6e1fb0cdd3f8731e34908f195b6fe68db648aa38b9a53b7add322328a7",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.21.dev80%2Bg987203ba5.d20260825-cp310-cp310-linux_x86_64.whl",
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.22.dev59%2Bgc6677e075.d20260909-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.aiter"),

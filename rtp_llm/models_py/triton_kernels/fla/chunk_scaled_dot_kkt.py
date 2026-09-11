@@ -1,8 +1,6 @@
 # Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/common/chunk_scaled_dot_kkt.py
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -60,29 +58,30 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         bos, eos = i_b * T, i_b * T + T
     o_t = tl.arange(0, BT)
 
-    p_beta = tl.make_block_ptr(
-        beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
-    )
-    b_beta = tl.load(p_beta, boundary_check=(0,))
+    p_beta_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_beta_m0 = (p_beta_i0 >= 0) & (p_beta_i0 < (T))
+    p_beta = (beta + bos * H + i_h) + p_beta_i0 * (H)
+    b_beta = tl.load(p_beta, mask=p_beta_m0, other=0)
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(
-            k + (bos * Hg + i_h // (H // Hg)) * K,
-            (T, K),
-            (Hg * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_k_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_k_m0 = (p_k_i0 >= 0) & (p_k_i0 < (T))
+        p_k_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_k_m1 = (p_k_i1 >= 0) & (p_k_i1 < (K))
+        p_k = (
+            (k + (bos * Hg + i_h // (H // Hg)) * K)
+            + p_k_i0[:, None] * (Hg * K)
+            + p_k_i1[None, :] * (1)
         )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=p_k_m0[:, None] & p_k_m1[None, :], other=0)
         b_A += tl.dot(b_k, tl.trans(b_k))
 
     if USE_G:
-        p_g = tl.make_block_ptr(
-            g_cumsum + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
-        )
-        b_g = tl.load(p_g, boundary_check=(0,))
+        p_g_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_g_m0 = (p_g_i0 >= 0) & (p_g_i0 < (T))
+        p_g = (g_cumsum + bos * H + i_h) + p_g_i0 * (H)
+        b_g = tl.load(p_g, mask=p_g_m0, other=0)
         b_g_diff = b_g[:, None] - b_g[None, :]
         if IS_LOG2:
             # AMD path: g is in log2 domain (scaled by RCP_LN2 in
@@ -96,17 +95,21 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 
     b_A *= b_beta[:, None]
     b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
-    p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0)
+    p_A_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_A_m0 = (p_A_i0 >= 0) & (p_A_i0 < (T))
+    p_A_i1 = tl.arange(0, BT).to(tl.int64) + (0)
+    p_A_m1 = (p_A_i1 >= 0) & (p_A_i1 < (BT))
+    p_A = (
+        (A + (bos * H + i_h) * BT) + p_A_i0[:, None] * (BT * H) + p_A_i1[None, :] * (1)
     )
-    tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=p_A_m0[:, None] & p_A_m1[None, :])
 
 
 def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
     beta: torch.Tensor,
-    g_cumsum: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g_cumsum: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:

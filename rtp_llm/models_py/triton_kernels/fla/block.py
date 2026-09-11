@@ -37,31 +37,35 @@ def load_initial_state_from_block_map_kernel(
         is_zero, 0, tl.load(block_map + i_b * block_map_stride_b + block_offset)
     ).to(tl.int64)
 
-    p_out = tl.make_block_ptr(
-        initial_states + i_b * SSM_PER_BATCH + i_h * SSM_PER_HEAD,
-        (V, K),
-        (K, 1),
-        (v_offset, 0),
-        (BLOCK_V, K),
-        (1, 0),
+    p_out_i0 = tl.arange(0, BLOCK_V).to(tl.int64) + (v_offset)
+    p_out_m0 = (p_out_i0 >= 0) & (p_out_i0 < (V))
+    p_out_i1 = tl.arange(0, K).to(tl.int64) + (0)
+    p_out_m1 = (p_out_i1 >= 0) & (p_out_i1 < (K))
+    p_out = (
+        (initial_states + i_b * SSM_PER_BATCH + i_h * SSM_PER_HEAD)
+        + p_out_i0[:, None] * (K)
+        + p_out_i1[None, :] * (1)
     )
 
-    p_in = tl.make_block_ptr(
-        conv_states + block_idx * CONV_STRIDE_TOKEN + i_h * SSM_PER_HEAD,
-        (V, K),
-        (K, 1),
-        (v_offset, 0),
-        (BLOCK_V, K),
-        (1, 0),
+    p_in_i0 = tl.arange(0, BLOCK_V).to(tl.int64) + (v_offset)
+    p_in_m0 = (p_in_i0 >= 0) & (p_in_i0 < (V))
+    p_in_i1 = tl.arange(0, K).to(tl.int64) + (0)
+    p_in_m1 = (p_in_i1 >= 0) & (p_in_i1 < (K))
+    p_in = (
+        (conv_states + block_idx * CONV_STRIDE_TOKEN + i_h * SSM_PER_HEAD)
+        + p_in_i0[:, None] * (K)
+        + p_in_i1[None, :] * (1)
     )
 
     b_in = tl.where(
         is_zero,
         tl.zeros([BLOCK_V, K], dtype=initial_states.dtype.element_ty),
-        tl.load(p_in, boundary_check=(0, 1)).to(initial_states.dtype.element_ty),
+        tl.load(p_in, mask=p_in_m0[:, None] & p_in_m1[None, :], other=0).to(
+            initial_states.dtype.element_ty
+        ),
     )
 
-    tl.store(p_out, b_in, boundary_check=(0, 1))
+    tl.store(p_out, b_in, mask=p_out_m0[:, None] & p_out_m1[None, :])
 
 
 def load_initial_state_from_block_map(
@@ -122,27 +126,23 @@ def _store_ssm_state_block(
             + linear_offset_64(i_h, SSM_PER_HEAD)
         )
 
-        p_in = tl.make_block_ptr(
-            source_ptr,
-            (V, K),
-            (K, 1),
-            (v_offset, 0),
-            (BLOCK_V, K),
-            (1, 0),
-        )
-        p_out = tl.make_block_ptr(
-            dest_ptr,
-            (V, K),
-            (K, 1),
-            (v_offset, 0),
-            (BLOCK_V, K),
-            (1, 0),
-        )
+        p_in_i0 = tl.arange(0, BLOCK_V).to(tl.int64) + (v_offset)
+        p_in_m0 = (p_in_i0 >= 0) & (p_in_i0 < (V))
+        p_in_i1 = tl.arange(0, K).to(tl.int64) + (0)
+        p_in_m1 = (p_in_i1 >= 0) & (p_in_i1 < (K))
+        p_in = (source_ptr) + p_in_i0[:, None] * (K) + p_in_i1[None, :] * (1)
+        p_out_i0 = tl.arange(0, BLOCK_V).to(tl.int64) + (v_offset)
+        p_out_m0 = (p_out_i0 >= 0) & (p_out_i0 < (V))
+        p_out_i1 = tl.arange(0, K).to(tl.int64) + (0)
+        p_out_m1 = (p_out_i1 >= 0) & (p_out_i1 < (K))
+        p_out = (dest_ptr) + p_out_i0[:, None] * (K) + p_out_i1[None, :] * (1)
 
         tl.store(
             p_out,
-            tl.load(p_in, boundary_check=(0, 1)).to(ssm_states.dtype.element_ty),
-            boundary_check=(0, 1),
+            tl.load(p_in, mask=p_in_m0[:, None] & p_in_m1[None, :], other=0).to(
+                ssm_states.dtype.element_ty
+            ),
+            mask=p_out_m0[:, None] & p_out_m1[None, :],
         )
 
 
