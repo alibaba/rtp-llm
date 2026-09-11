@@ -228,6 +228,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_RDMA_PREWARM_SETTLE_S",
         "SMOKE_ACCL_USE_NICS",
         "SMOKE_EXPECTED_LAYERS",
+        "SMOKE_PAGE_RR",
         "SMOKE_BLOCK_SIZE",
         "SMOKE_KERNEL_BLOCK_SIZE",
         "SMOKE_CHUNK_TOKENS",
@@ -548,9 +549,7 @@ def stop_detached_role(args: argparse.Namespace, role: str) -> None:
         pass
 
 
-def start_remote_roles(
-    args: argparse.Namespace, roles: dict[str, RemoteRole]
-) -> None:
+def start_remote_roles(args: argparse.Namespace, roles: dict[str, RemoteRole]) -> None:
     """Launch both PD peers without creating a cache-store readiness cycle."""
 
     roles["decode"].start()

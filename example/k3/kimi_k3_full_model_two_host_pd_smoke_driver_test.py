@@ -1,12 +1,15 @@
 import argparse
 import os
+import pathlib
 import shlex
+import subprocess
 import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
 from example.k3 import kimi_k3_full_model_two_host_pd_smoke_driver as driver
+
 
 class ForwardedOptionalEnvironmentTest(unittest.TestCase):
     def test_draft_mode_defaults_and_explicit_overrides(self) -> None:
@@ -31,6 +34,14 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                 for role in ("prefill", "decode"):
                     with self.assertRaises(ValueError):
                         driver.forwarded_optional_environment(role)
+
+    def test_forwards_page_rr_profile_to_both_roles(self) -> None:
+        with mock.patch.dict(os.environ, {"SMOKE_PAGE_RR": "1"}, clear=True):
+            for role in ("prefill", "decode"):
+                self.assertEqual(
+                    driver.forwarded_optional_environment(role)["SMOKE_PAGE_RR"],
+                    "1",
+                )
 
     def test_precision_modes_and_prefix_budget_reach_both_role_commands(self) -> None:
         args = argparse.Namespace(
@@ -141,6 +152,31 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
 
 
 class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
+    def test_role_script_rejects_page_rr_tp16_before_host_validation(self):
+        role_script = pathlib.Path(driver.__file__).with_name(
+            "kimi_k3_full_model_two_host_pd_smoke.sh"
+        )
+        env = {
+            **os.environ,
+            "SMOKE_PAGE_RR": "1",
+            "TP_SIZE": "16",
+            "EP_SIZE": "16",
+        }
+
+        result = subprocess.run(
+            [role_script, "decode"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "two-host SMOKE_PAGE_RR profile validates only Prefill TP8 -> Decode DP8",
+            result.stderr,
+        )
+
     def test_parse_args_requires_both_draft_checkpoints(self):
         argv = [
             "driver",
@@ -167,7 +203,9 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "--run-id",
             "projection-ktp",
         ]
-        with mock.patch.object(sys, "argv", argv), mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.object(sys, "argv", argv), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
             args = driver.parse_args()
         self.assertEqual(args.prefill_sp_checkpoint_path, "/prefill/eagle3")
         self.assertEqual(args.decode_sp_checkpoint_path, "/decode/eagle3")
@@ -196,7 +234,9 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "--run-id",
             "projection-ktp",
         ]
-        with mock.patch.object(sys, "argv", argv), mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.object(sys, "argv", argv), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
             with self.assertRaises(SystemExit):
                 driver.parse_args()
 
@@ -300,7 +340,9 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             "prefill": FakeRole("prefill"),
         }
         with mock.patch.object(
-            driver.time, "sleep", side_effect=lambda seconds: events.append(f"sleep:{seconds}")
+            driver.time,
+            "sleep",
+            side_effect=lambda seconds: events.append(f"sleep:{seconds}"),
         ):
             driver.start_remote_roles(args, roles)
 
@@ -367,7 +409,9 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             container_user="luohaocheng.lhc",
         )
 
-        self.assertEqual(driver.role_launch_parts(args, "prefill")[2], "lhc_GPU_prefill")
+        self.assertEqual(
+            driver.role_launch_parts(args, "prefill")[2], "lhc_GPU_prefill"
+        )
         self.assertEqual(driver.role_launch_parts(args, "decode")[2], "lhc_GPU_decode")
 
 

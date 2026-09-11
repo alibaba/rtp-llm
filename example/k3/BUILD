@@ -36,6 +36,7 @@ py_library(
 py_test(
     name = "kimi_k3_full_model_two_host_pd_smoke_driver_test",
     srcs = ["kimi_k3_full_model_two_host_pd_smoke_driver_test.py"],
+    data = ["kimi_k3_full_model_two_host_pd_smoke.sh"],
     deps = [":kimi_k3_full_model_two_host_pd_smoke_driver_lib"],
 )
 
