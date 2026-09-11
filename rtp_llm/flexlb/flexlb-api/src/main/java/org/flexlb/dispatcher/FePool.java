@@ -1,153 +1,217 @@
 package org.flexlb.dispatcher;
 
+import com.google.common.util.concurrent.RateLimiter;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ClientResponse;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Predicate;
-import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 
-/**
- * Round-robin pool of FE base URLs. Addresses come through a {@link Supplier} so the upstream
- * (service discovery) owns the freshness story — every {@link #next()} reads a fresh snapshot,
- * no internal cache.
- *
- * <p>{@code isAlive} is the liveness predicate consulted on every pick. Dead hosts are skipped;
- * if every host in the snapshot is dead the pool falls back to plain round-robin instead of
- * refusing service — stale probe data is a worse failure mode than gambling on a possibly-
- * recovered host (and a real outage will be obvious from request errors).
- *
- * <p>The predicate is required: production wires it to {@link FeHealthChecker#isAlive(String)},
- * and tests that don't exercise health filtering pass {@code url -> true} to explicitly declare
- * "all hosts are alive in this test". Leaving the door open to "no health check" would let a
- * call site accidentally regress to the pre-health-check behavior where ~1/N requests land on a
- * dead host until ops intervenes.
- */
+/** Owns FE membership, HTTP health and round-robin selection over immutable snapshots. */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class FePool {
+    private final ServiceDiscovery discovery;
+    private final WebClient probeClient;
+    private final DispatchConfig cfg;
+    private final DispatcherMetricsReporter metrics;
+    private final LongSupplier clock;
+    private final long lookupTimeoutMs;
+    private final long graceNanos;
+    private final AtomicReference<List<String>> urls = new AtomicReference<>(List.of());
+    private final ConcurrentHashMap<String, AtomicInteger> failures = new ConcurrentHashMap<>();
+    private final AtomicLong cursor = new AtomicLong();
+    private final AtomicBoolean allDeadReported = new AtomicBoolean();
+    private final AtomicBoolean probing = new AtomicBoolean();
+    private final RateLimiter emptyWarn = RateLimiter.create(1);
+    private volatile long lastNonEmpty;
+    // No queue: two interrupt-resistant lookups exhaust capacity without blocking Spring's timers.
+    private final ExecutorService lookups = new ThreadPoolExecutor(0, 2, 60, TimeUnit.SECONDS,
+            new SynchronousQueue<>(), Thread.ofPlatform().daemon().name("dispatcher-fe-discovery-", 0).factory());
 
-    private final Supplier<List<String>> source;
-    private final Predicate<String> isAlive;
-    /**
-     * Rotation cursor. A {@code long} (not {@code int}) so it never wraps at any realistic QPS
-     * (2^63 picks); the earlier {@code int} cursor wrapped every ~2^32 picks, and because 2^32 is
-     * not a multiple of the pool size that produced a one-off RR discontinuity at the wrap point.
-     */
-    private final AtomicLong cursor = new AtomicLong(0);
-    /**
-     * Latch so the "all FE dead, falling back to RR" diagnostic fires once per outage event,
-     * not on every {@link #next()} call during a sustained outage (which would be N×QPS).
-     * Resets the instant any subsequent pick finds an alive host.
-     */
-    private final AtomicBoolean allDeadReported = new AtomicBoolean(false);
-
-    public FePool(DispatcherFePoolRefresher refresher, FeHealthChecker healthChecker) {
-        this.source = refresher.source();
-        this.isAlive = healthChecker::isAlive;
+    @Autowired
+    public FePool(ServiceDiscovery discovery, @Qualifier("dispatcherProbeWebClient") WebClient probeClient,
+                  DispatchConfig cfg, DispatcherMetricsReporter metrics) {
+        this(discovery, probeClient, cfg, metrics, System::nanoTime, 3000);
     }
 
-    /**
-     * Returns the next FE base URL in round-robin order, skipping hosts the predicate marks dead.
-     * When every host is dead, falls back to plain round-robin rather than throwing — see class
-     * javadoc.
-     *
-     * @throws IllegalStateException if the current snapshot has no endpoints at all.
-     */
+    FePool(ServiceDiscovery discovery, WebClient probeClient, DispatchConfig cfg,
+           DispatcherMetricsReporter metrics, LongSupplier clock, long lookupTimeoutMs) {
+        this.discovery = discovery;
+        this.probeClient = probeClient;
+        this.cfg = cfg;
+        this.metrics = metrics;
+        this.clock = clock;
+        this.lookupTimeoutMs = lookupTimeoutMs;
+        this.graceNanos = TimeUnit.MILLISECONDS.toNanos(
+                cfg.getDiscoveryFailureGraceMs() > 0 ? cfg.getDiscoveryFailureGraceMs() : 300_000);
+        this.lastNonEmpty = clock.getAsLong();
+    }
+
+    @PostConstruct
+    public void start() {
+        refresh();
+        try {
+            discovery.listen(cfg.getFePoolServiceId(), this::update);
+        } catch (Exception error) {
+            Logger.warn("FE discovery listener unavailable; polling continues: {}", error.toString());
+        }
+    }
+
+    @Scheduled(fixedDelay = 30_000, initialDelay = 5_000)
+    public void refresh() {
+        Future<List<WorkerHost>> lookup = null;
+        try {
+            lookup = lookups.submit(() -> discovery.getHosts(cfg.getFePoolServiceId()));
+            update(lookup.get(lookupTimeoutMs, TimeUnit.MILLISECONDS));
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        } catch (Exception error) {
+            Logger.warn("FE discovery refresh failed: {}", error.toString());
+        } finally {
+            if (lookup != null) {
+                lookup.cancel(true);
+            }
+        }
+    }
+
+    void update(List<WorkerHost> hosts) {
+        try {
+            List<String> next = hosts.stream().map(host -> "http://" + host.getIpPort()).toList();
+            if (!next.isEmpty()) {
+                lastNonEmpty = clock.getAsLong();
+                List<String> previous = urls.getAndSet(next);
+                if (!previous.equals(next)) {
+                    Logger.warn("FE pool updated: serviceId={}, size={} (was {})",
+                            cfg.getFePoolServiceId(), next.size(), previous.size());
+                }
+            } else {
+                List<String> previous = urls.get();
+                if (!previous.isEmpty() && clock.getAsLong() - lastNonEmpty > graceNanos) {
+                    if (urls.compareAndSet(previous, List.of())) {
+                        Logger.warn("FE discovery remained empty beyond grace; dropping {} hosts", previous.size());
+                    }
+                } else if (!previous.isEmpty()) {
+                    if (emptyWarn.tryAcquire()) {
+                        Logger.warn("FE discovery empty within grace; retaining {} hosts", previous.size());
+                    }
+                }
+            }
+        } catch (RuntimeException error) {
+            Logger.warn("Invalid FE discovery update; retaining previous snapshot: {}", error.toString());
+        }
+    }
+
+    public int currentSize() {
+        return urls.get().size();
+    }
+
+    boolean isAlive(String url) {
+        AtomicInteger count = failures.get(url);
+        return count == null || count.get() < 2;
+    }
+
+    @Scheduled(fixedRate = 1000)
+    public void probeTick() {
+        if (probing.compareAndSet(false, true)) {
+            Mono.defer(this::probeOnce).doFinally(signal -> probing.set(false))
+                    .subscribe(ignored -> { }, error -> Logger.warn("FE health round failed: {}", error.toString()));
+        }
+    }
+
+    Mono<Void> probeOnce() {
+        List<String> snapshot = urls.get();
+        failures.keySet().retainAll(Set.copyOf(snapshot));
+        metrics.reportFePool(snapshot.size(), (int) snapshot.stream().filter(this::isAlive).count());
+        return Flux.fromIterable(snapshot).flatMap(url -> probeClient.get().uri(url + cfg.getProbePath())
+                .retrieve().onStatus(status -> !status.is2xxSuccessful(), ClientResponse::createException)
+                .toBodilessEntity().timeout(Duration.ofMillis(500))
+                .doOnSuccess(response -> {
+                    int previous = failures.computeIfAbsent(url, key -> new AtomicInteger()).getAndSet(0);
+                    if (previous >= 2) {
+                        Logger.warn("FE recovered: url={}, previousFailures={}", url, previous);
+                    }
+                })
+                .onErrorResume(error -> {
+                    int count = failures.computeIfAbsent(url, key -> new AtomicInteger()).incrementAndGet();
+                    if (count == 2) {
+                        Logger.warn("FE marked dead: url={}, err={}", url, error.getClass().getSimpleName());
+                    }
+                    return Mono.empty();
+                })).then();
+    }
+
     public String next() {
         List<String> pool = livePool();
         return pool.get(Math.floorMod(cursor.getAndIncrement(), pool.size()));
     }
 
-    /**
-     * Returns {@code count} FE base URLs for a single batch, advancing the shared cursor by exactly
-     * {@code count}. Resolves the liveness-filtered pool <em>once</em> for the whole batch instead
-     * of once per pick as repeated {@link #next()} would: the batch coordinator calls this once
-     * per batch-schedule request with {@code count == targets.size()}, so a 500-target request that
-     * would otherwise rebuild and re-filter the FE snapshot 500 times (once per {@code next()}) now
-     * does it once. Per-pick semantics are identical to {@link #next()}: round-robin over the alive
-     * subset, or over the full snapshot when all dead. The returned list has exactly {@code count}
-     * elements (empty when {@code count <= 0}), so the caller can zip it 1:1 with its targets.
-     *
-     * <p>The cursor block is reserved atomically, so two concurrent batches never overlap picks.
-     * But each call resolves its own {@link #livePool()} snapshot, so when the alive set changes
-     * between two concurrent calls the global "cursor sequence -> host" round-robin is only
-     * approximate across that change point; each individual batch is still internally consistent.
-     *
-     * @throws IllegalStateException if the current snapshot has no endpoints at all — thrown before
-     *     any pick, so an empty snapshot yields no partial assignment (all-or-nothing per batch).
-     */
     public List<String> nextBatch(int count) {
         if (count <= 0) {
-            return new ArrayList<>();
+            return List.of();
         }
         List<String> pool = livePool();
-        // Reserve a contiguous cursor block so concurrent batches interleave into disjoint ranges
-        // rather than contending pick-by-pick. The cursor is a long, so at any realistic QPS it
-        // never wraps (2^63 picks); floorMod still keeps every index valid if it ever did.
-        long base = cursor.getAndAdd(count);
-        int n = pool.size();
+        long start = cursor.getAndAdd(count);
         List<String> picks = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            picks.add(pool.get(Math.floorMod(base + i, n)));
+            picks.add(pool.get(Math.floorMod(start + i, pool.size())));
         }
         return picks;
     }
 
-    /**
-     * The non-empty pool to round-robin over for this call: the alive subset, or — when every host
-     * is dead — the full snapshot (see class javadoc). Resolved from a fresh supplier snapshot on
-     * every call so upstream discovery owns freshness.
-     *
-     * @throws IllegalStateException if the snapshot has no endpoints at all.
-     */
     private List<String> livePool() {
-        List<String> snapshot = source.get();
-        if (snapshot == null || snapshot.isEmpty()) {
+        List<String> snapshot = urls.get();
+        if (snapshot.isEmpty()) {
             throw new IllegalStateException("no FE endpoints available");
         }
-        // Round-robin over the alive subset so a dead host's share spreads across the whole pool
-        // instead of funneling onto its successor. The steady state is "no dead host", so scan
-        // without allocating and only materialize the filtered subset once a dead host actually
-        // has to be dropped — an all-alive snapshot is then round-robined in place, no per-call
-        // copy of the whole pool.
+        // Keep the common all-alive path allocation-free; copy only after the first dead host.
         List<String> alive = null;
         for (int i = 0; i < snapshot.size(); i++) {
-            String candidate = snapshot.get(i);
-            if (isAlive.test(candidate)) {
+            if (isAlive(snapshot.get(i))) {
                 if (alive != null) {
-                    alive.add(candidate);
+                    alive.add(snapshot.get(i));
                 }
             } else if (alive == null) {
-                // First dead host: seed the filtered list with the all-alive prefix scanned so far.
-                alive = new ArrayList<>(snapshot.size());
-                for (int j = 0; j < i; j++) {
-                    alive.add(snapshot.get(j));
-                }
+                alive = new ArrayList<>(snapshot.subList(0, i));
             }
         }
-        if (alive == null) {
-            // No dead host in this snapshot — round-robin over it directly, skipping the copy.
-            // Safe to hand back by reference: the supplier publishes an unmodifiable list and swaps
-            // it wholesale on refresh (never mutates in place), and both pick paths only read it.
+        if (alive == null || !alive.isEmpty()) {
             allDeadReported.set(false);
-            return snapshot;
+            return alive == null ? snapshot : alive;
         }
-        if (!alive.isEmpty()) {
-            allDeadReported.set(false);
-            return alive;
-        }
-        // All dead — fall through to plain round-robin over the full snapshot. Log once per
-        // outage so the operator knows the dispatcher is gambling rather than refusing,
-        // without flooding the log at request rate.
         if (allDeadReported.compareAndSet(false, true)) {
-            Logger.warn("FE pool all-dead fallback: pool size={}, returning RR pick anyway "
-                    + "(stale probe data is preferred over refusing service)", snapshot.size());
+            Logger.warn("FE pool all-dead fallback: size={}", snapshot.size());
         }
         return snapshot;
+    }
+
+    @PreDestroy
+    void close() {
+        lookups.shutdownNow();
     }
 }

@@ -1,15 +1,11 @@
 # Dispatcher batch fanout
 
-The dispatcher splits an HTTP batch into chunks, assigns frontends (FEs), and merges their
-responses in input order. `/rtp_llm/batch_schedule` can also assign backend (BE) addresses for
-callers that already split batches, including the BE-side `WhaleBertScoreOp` path.
+Dispatcher splits HTTP batches and merges FE responses in input order. BE callers that already
+split batches can use `POST /rtp_llm/batch_schedule` without enabling dispatcher routes.
 
-## Configuration
+## BE configuration
 
-FlexLB uses the mainline **schema version 2** configuration. Batch selection is round-robin;
-there is no separate strategy factory or `BATCH_LOAD_BALANCE_STRATEGY` setting.
-
-For an embedding worker fleet:
+Keep the deployment's `MODEL_SERVICE_CONFIG` and `HIPPO_ROLE`; use mainline schema version 2:
 
 ```sh
 export FLEXLB_CONFIG='{
@@ -19,112 +15,43 @@ export FLEXLB_CONFIG='{
 }'
 ```
 
-`workerRegistry.engineType` defaults to `LLM`. LLM workers must have a published, alive endpoint
-from the normal gRPC status synchronization. Embedding workers expose ARPC instead of that gRPC
-API, so their availability comes from service discovery. Discovery returning no workers makes
-embedding batch selection unavailable. In `/rtp_llm/master/info`, embedding `alive` reflects
-the discovery snapshot and equals `discovered`; it does not represent an independent health probe.
-Register the HTTP base port in an `http` endpoint;
-embedding targets return `arpc_port = http_port + 1`, while LLM targets return `grpc_port`.
-The existing `MODEL_SERVICE_CONFIG` supplies the model, role and discovery address.
-Startup also requires the deployment's `HIPPO_ROLE`, as on main, even when consistency is disabled.
+`LLM` (default) selects alive published gRPC endpoints. `EMBEDDING` selects discovered workers
+and returns `arpc_port = http_port + 1`; register the HTTP base port. Embedding master-info
+`alive` means discovered, not independently probed. Legacy engine/count environment flags are rejected.
+Send `{"batch_count":5,"assign_be":true,"assign_fe":false}` for BE-only placement.
+Both flags default to true; at least one is required. Success has exactly `batch_count` targets.
+Count must be 1–`batchScheduleMaxCount` (default 1000). BE assignment requires one configured role
+without active group routing; FE-only allocation is independent of BE topology and readiness.
 
-`router.batchScheduleMaxCount` defaults to 1000 and must be positive. Legacy top-level JSON fields
-and the old `ENGINE_TYPE`, `BATCH_SCHEDULE_MAX_COUNT`, and `BATCH_LOAD_BALANCE_STRATEGY` environment
-variables are rejected at startup; move the first two into the document above and remove the
-strategy setting.
-
-To enable HTTP dispatcher routes, configure an FE pool:
+## HTTP dispatcher configuration
 
 ```sh
-export DISPATCH_CONFIG='{
-  "fePoolServiceId": "your-fe-discovery-service",
-  "subBatch": "count:5",
-  "feAllocation": "master",
-  "preAssignBe": false
-}'
+export DISPATCH_FE_POOL_SERVICE_ID=your-fe-discovery-service
+export DISPATCH_SUB_BATCH=count:5
+export DISPATCH_FE_ALLOCATION=master
 ```
 
-`subBatch` accepts `count:N` (N chunks) or `size:N` (at most N items per chunk). FE allocation is
-`master` by default; `local` assigns from each dispatcher's own healthy FE pool. Spring
-`dispatch.*` properties and `DISPATCH_*` environment overrides take precedence over the JSON
-(e.g. `DISPATCH_FE_ALLOCATION=local`). Invalid overrides fail at startup instead of being ignored.
-`DISPATCH_CONFIG.discoveryFailureGraceMs` controls how long an empty FE discovery result may
-retain the previous pool; the default is 300000 ms. FE health probes still filter that pool.
-
-Incoming JSON bodies use the existing `MAX_IN_MEMORY_SIZE` limit (default `5MB`, bound to
-`spring.codec.max-in-memory-size`). It is independent of `maxAggregateRequestBytes` and
-`maxAggregateResponseBytes` (each defaults to 128 MiB), and `maxDryRunResponseBytes` (64 MiB).
-The aggregate request limit also counts the envelope repeated across chunks. A request over
-the inbound limit returns 413 even when its aggregate budget is larger.
-
-BE pre-assignment is optional and defaults to false. To enable it, set `preAssignBe=true` and
-supply the same nonempty `DISPATCH_ROUTING_TOKEN` to the dispatcher and receiving RTP FEs. The
-FE validates that token before accepting HTTP `role_addrs`. Keep the token outside JSON config
-and obtain its value through the deployment's secret configuration.
-
-For callers that split batches in BE and only need backend addresses, `DISPATCH_CONFIG` is
-unnecessary; send `assign_fe=false` to `/rtp_llm/batch_schedule`.
+Use native Spring `dispatch.*` properties / `DISPATCH_*` environment variables. The FE discovery
+name enables `/dispatcher` on the existing listener. `count:N` balances at most N nonempty chunks;
+`size:N` caps items per chunk. `master` shares master FE allocation; `local` uses the local cursor.
+Empty discovery retains the old pool for `discoveryFailureGraceMs` (default 300000); probes filter it.
+Limits: input `MAX_IN_MEMORY_SIZE` defaults to 5MB, aggregate requests/responses to 128 MiB each,
+and each FE response to 16 MiB. Request accounting includes repeated envelopes. Excess returns 413.
+Invalid allocation returns 400; unavailable master assignments return 503 without local fallback.
+BE preassignment defaults off; enabling it requires `DISPATCH_PRE_ASSIGN_BE=true` and a matching nonempty `DISPATCH_ROUTING_TOKEN`
+on dispatcher and receiving FEs. Group routing disables it. This placement reserves no LLM capacity;
+keep it off when master admission/accounting is required. Unassigned LLM items use mainline scheduling.
+Atomic batch RPC requires a shared PDFUSION target or static local PDFUSION; item deadlines and order
+are preserved, and failed RPCs are not replayed.
 
 ## Leader election
 
-Leader election uses mainline `LBStatusConsistencyService` unchanged. It is disabled by default.
-A deployment that needs one shared allocation cursor must explicitly supply its existing
-ZooKeeper configuration, for example:
+Mainline election remains disabled by default. For a shared cursor, explicitly configure ZooKeeper:
 
 ```sh
-export FLEXLB_SYNC_CONSISTENCY_CONFIG='{
-  "needConsistency": true,
-  "masterElectType": "ZOOKEEPER",
-  "zookeeperConfig": {"zkHost": "your-zookeeper:2181", "zkTimeoutMs": 10000}
-}'
+export FLEXLB_SYNC_CONSISTENCY_CONFIG='{"needConsistency":true,"masterElectType":"ZOOKEEPER","zookeeperConfig":{"zkHost":"your-zookeeper:2181","zkTimeoutMs":10000}}'
 ```
 
-With consistency enabled, followers forward batch scheduling to the elected master. The HTTP
-path rejects self-forwarding and a second forwarding hop, matching the mainline gRPC guard.
-An unknown leader, failed forwarding request or missing batch endpoint fails the request; a
-follower does not allocate locally in these cases. Without consistency, each instance allocates
-locally and the cursors are independent. Upgrade every potential master to a build providing
-`/rtp_llm/batch_schedule` before enabling master FE allocation; mixed versions with an older
-master return an explicit allocation failure.
-
-## Allocation contract
-
-```json
-{"batch_count": 5, "assign_be": true, "assign_fe": false}
-```
-
-Both assignment flags default to true. `batch_count` must be between 1 and the configured maximum;
-a request with both flags false is invalid. Successful responses contain exactly that many
-`server_status` entries, each with its requested BE fields and/or `fe_url`.
-
-| FE mode | BE pre-assignment used | Master request | FE source |
-| --- | --- | --- | --- |
-| `master` | yes | `assign_be=true, assign_fe=true` | master response |
-| `master` | no | `assign_be=false, assign_fe=true` | master response |
-| `local` | yes | `assign_be=true, assign_fe=false` | local FE pool |
-| `local` | no | no scheduling call | local FE pool |
-
-BE assignment supports a single configured role. It rejects active `router.groupSelector`
-rules or default targets because batch-count-only requests lack per-item routing information.
-The dispatcher automatically defers BE placement to the FEs when group routing is active.
-FE-only assignment works with multi-role deployments and during BE warm-up. Missing requested
-assignments fail the allocation before fanout. Dispatcher returns 400 for invalid allocation
-requests and 503 for unavailable workers or master transport failures. Master mode does not
-fall back to a local FE cursor.
-Direct `/rtp_llm/batch_schedule` callers receive 400 for invalid requests and 500 for allocation
-or master transport failures, with the reason in the structured response.
-
-## LLM execution follows mainline scheduling
-
-Unassigned LLM items use the normal per-request master scheduler, including its existing batching,
-admission and completion handling. The dispatcher does not add aggregate-demand protobuf fields,
-synthetic batch reservations or a second request lifecycle.
-
-A chunk whose items all have the same preassigned PDFUSION backend can use `BatchGenerateCall`.
-A local/static PDFUSION deployment can also use it without master routing. Other topologies use
-per-item inference. Direct batch RPC validation rejects mixed destinations and non-PDFUSION
-assignments, preserves result order and item deadlines, and does not replay a failed RPC.
-
-This BE pre-assignment path is stateless placement: it does not reserve LLM capacity. Keep
-`preAssignBe=false` when master-side LLM admission and accounting are required.
+Followers forward once; unknown leaders, self-forwarding, repeated hops and transport failures fail
+without local allocation. Disabled consistency gives independent cursors. Upgrade every potential
+master to support `/rtp_llm/batch_schedule` before enabling master FE allocation.

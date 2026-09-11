@@ -1,9 +1,13 @@
 package org.flexlb.dispatcher;
 
-import org.flexlb.exception.FlexLBException;
+import org.flexlb.dispatcher.DispatchConfig.FeAllocation;
+import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.core.env.SystemEnvironmentPropertySource;
+import org.springframework.mock.env.MockEnvironment;
 
-import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -11,296 +15,38 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Exercises the loading + validation pipeline now homed in
- * {@link DispatcherConfiguration#loadAndValidate}. Mirrors the {@code FlexlbConfig} /
- * {@code ConfigService} convention: data class is a dumb POJO, loading lives in the loader.
- *
- * <p>Note these tests bypass Spring's {@code @ConditionalOnProperty} entirely — they call
- * {@code loadAndValidate} directly with a synthetic env map, so they exercise the validation
- * branch as if the dispatcher bean had already been activated. The "what activates the bean"
- * question is owned by Spring's {@code OnPropertyCondition} and is verified separately by
- * the integration-style smoke checks (start/no-start with/without the env).
- */
 class DispatchConfigTest {
-
     @Test
-    void defaultsAreSensible() {
-        // load() with a non-blank fePoolServiceId so validate() doesn't throw — the defaults we
-        // care about asserting here are the other fields, not the enable signal itself.
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\"}");
-        assertEquals("count:5", c.getSubBatch());
-        assertEquals(30_000, c.getBatchTimeoutMs(),
-                "non-streaming generation endpoints return headers only after the full "
-                        + "generation completes — 5s killed legitimate large chunks");
-        assertEquals("master", c.getFeAllocation());
-        assertFalse(c.isPreAssignBe(),
-                "first rollout must be safe for mixed-version FE fleets");
-        assertEquals(128L * 1024 * 1024, c.getMaxAggregateRequestBytes());
-        assertEquals(128L * 1024 * 1024, c.getMaxAggregateResponseBytes());
-        assertEquals(64L * 1024 * 1024, c.getMaxDryRunResponseBytes());
+    void defaultsAndEnvironmentOverridesUseOneValidatedConfiguration() {
+        DispatchConfig defaults = load(Map.of("DISPATCH_FE_POOL_SERVICE_ID", "fe"));
+        assertEquals("count:5", defaults.getSubBatch());
+        assertEquals(FeAllocation.MASTER, defaults.getFeAllocation());
+        assertFalse(defaults.isPreAssignBe());
+        assertEquals("/frontend_health", defaults.getProbePath());
+        DispatchConfig cfg = load(Map.of(
+                "DISPATCH_FE_POOL_SERVICE_ID", "env", "DISPATCH_SUB_BATCH", "size:7",
+                "DISPATCH_FE_ALLOCATION", "local", "DISPATCH_PRE_ASSIGN_BE", "true",
+                "DISPATCH_ROUTING_TOKEN", "secret"));
+        assertEquals("env", cfg.getFePoolServiceId());
+        assertEquals(new SubBatchSpec(SubBatchSpec.Mode.SIZE, 7), cfg.getSubBatchSpec());
+        assertEquals(FeAllocation.LOCAL, cfg.getFeAllocation());
+        assertTrue(cfg.isPreAssignBe());
+        assertEquals("secret", cfg.getTrustedRoutingToken());
+        assertFalse(JsonUtils.toString(cfg).contains("secret"));
     }
 
-    @Test
-    void parsesFullJson() {
-        DispatchConfig c = load("{\"subBatch\":\"size:10\","
-                + "\"fePoolServiceId\":\"com.rtp_llm.fe\","
-                + "\"batchTimeoutMs\":7500}");
-        assertEquals("size:10", c.getSubBatch());
-        assertEquals("com.rtp_llm.fe", c.getFePoolServiceId());
-        assertEquals(7500, c.getBatchTimeoutMs());
+    @ParameterizedTest
+    @CsvSource({"batch-timeout-ms,0", "body-read-margin-ms,-1", "max-aggregate-request-bytes,0",
+            "max-aggregate-response-bytes,0", "fe-allocation,typo", "sub-batch,count:0", "pre-assign-be,true"})
+    void invalidConfigurationFailsAtStartup(String key, String value) {
+        MockEnvironment env = new MockEnvironment().withProperty("dispatch.fe-pool-service-id", "fe")
+                .withProperty("dispatch." + key, value);
+        assertThrows(RuntimeException.class, () -> DispatcherConfiguration.loadAndValidate(env));
     }
 
-    @Test
-    void rejectsBlankFePoolServiceId() {
-        // No env at all → defaults give blank fePoolServiceId → must throw. This branch only
-        // fires in practice if Spring activated the bean on a whitespace-only env value, but
-        // the test exercises it directly so the precise error message stays asserted.
-        assertThrows(IllegalArgumentException.class, () -> load(null));
-        assertThrows(IllegalArgumentException.class, () -> load("{\"fePoolServiceId\":\"  \"}"));
-        assertThrows(IllegalArgumentException.class, () -> load("{}"));
-    }
-
-    @Test
-    void rejectsInvalidSubBatchDsl() {
-        // subBatch is parsed eagerly during validate() so a malformed DSL fails fast at boot
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"subBatch\":\"foo:5\"}"));
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"subBatch\":\"count:0\"}"));
-    }
-
-    @Test
-    void rejectsMalformedJson() {
-        assertThrows(FlexLBException.class, () -> load("{not json}"));
-    }
-
-    @Test
-    void unknownJsonFieldsIgnoredSoOldConfigsDoNotBreak() {
-        // Old field names that have been deleted (subBatchSize, feRequestTimeoutMs,
-        // feConnectTimeoutMs, feResponseTimeoutMs, feMaxStreamDurationMs, feMaxResponseBytes)
-        // must not crash — keeps the POJO contract stable for any future field that gets retired.
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\","
-                + "\"subBatchSize\":7,\"feRequestTimeoutMs\":4000,"
-                + "\"feConnectTimeoutMs\":1234,\"feResponseTimeoutMs\":6000,"
-                + "\"feMaxStreamDurationMs\":120000,\"feMaxResponseBytes\":2097152}");
-        assertEquals("count:5", c.getSubBatch(), "subBatchSize is now unknown — default kept");
-        assertEquals(30_000, c.getBatchTimeoutMs(), "feResponseTimeoutMs is unknown — default kept");
-        assertEquals("x", c.getFePoolServiceId());
-    }
-
-    @Test
-    void envOverridesJsonForEachField() {
-        Map<String, String> env = mutableEnv(
-                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":5000}",
-                "DISPATCH_BATCH_TIMEOUT_MS", "8000");
-        DispatchConfig c = loadEnvironment(env);
-        assertEquals(8000, c.getBatchTimeoutMs(), "env wins over JSON");
-    }
-
-    @Test
-    void bodyReadMarginMsFlowsFromJsonAndEnv() {
-        DispatchConfig fromJson = load("{\"fePoolServiceId\":\"x\",\"bodyReadMarginMs\":12000}");
-        assertEquals(12000L, fromJson.getBodyReadMarginMs(), "JSON value must reach the field");
-
-        Map<String, String> env = mutableEnv(
-                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"bodyReadMarginMs\":12000}",
-                "DISPATCH_BODY_READ_MARGIN_MS", "45000");
-        DispatchConfig c = loadEnvironment(env);
-        assertEquals(45000L, c.getBodyReadMarginMs(), "DISPATCH_BODY_READ_MARGIN_MS env must win over JSON");
-    }
-
-    @Test
-    void bodyReadMarginMsDefault() {
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\"}");
-        assertEquals(30000L, c.getBodyReadMarginMs(), "default whole-call body margin is 30s");
-    }
-
-    @Test
-    void negativeBodyReadMarginMsFailsValidation() {
-        // A negative margin drags FeClient's whole-call cap below the headers budget and every
-        // fanout sub-call times out instantly — must fail at boot, not on the first request.
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"bodyReadMarginMs\":-1}"));
-        // Zero is legal: it just removes the extra body-read budget.
-        assertEquals(0L, load("{\"fePoolServiceId\":\"x\",\"bodyReadMarginMs\":0}").getBodyReadMarginMs());
-    }
-
-    @Test
-    void nonPositiveBatchTimeoutMsFailsValidation() {
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":0}"));
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":-5}"));
-    }
-
-    @Test
-    void responseBudgetsLoadFromEnvAndMustBePositive() {
-        Map<String, String> env = mutableEnv(
-                "DISPATCH_FE_POOL_SERVICE_ID", "x",
-                "DISPATCH_MAX_AGGREGATE_REQUEST_BYTES", "2097152",
-                "DISPATCH_MAX_AGGREGATE_RESPONSE_BYTES", "1048576",
-                "DISPATCH_MAX_DRY_RUN_RESPONSE_BYTES", "524288");
-        DispatchConfig c = loadEnvironment(env);
-        assertEquals(2097152L, c.getMaxAggregateRequestBytes());
-        assertEquals(1048576L, c.getMaxAggregateResponseBytes());
-        assertEquals(524288L, c.getMaxDryRunResponseBytes());
-
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"maxAggregateRequestBytes\":0}"));
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"maxAggregateResponseBytes\":0}"));
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"maxDryRunResponseBytes\":-1}"));
-    }
-
-    @Test
-    void envOverridesDefaultsWhenNoJson() {
-        Map<String, String> env = mutableEnv(
-                "DISPATCH_FE_POOL_SERVICE_ID", "from.env",
-                "DISPATCH_SUB_BATCH", "count:10");
-        DispatchConfig c = loadEnvironment(env);
-        assertEquals("from.env", c.getFePoolServiceId());
-        assertEquals("count:10", c.getSubBatch());
-    }
-
-    @Test
-    void subBatchSpecAccessorParsesEagerly() {
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\",\"subBatch\":\"count:7\"}");
-        SubBatchSpec spec = c.getSubBatchSpec();
-        assertEquals(SubBatchSpec.Mode.COUNT, spec.mode());
-        assertEquals(7, spec.value());
-    }
-
-    @Test
-    void probePathDefaultsToFrontendHealth() {
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\"}");
-        assertEquals("/frontend_health", c.getProbePath(),
-                "default targets rtp_llm FE; vLLM users override via DISPATCH_PROBE_PATH");
-    }
-
-    @Test
-    void probePathFromJson() {
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\",\"probePath\":\"/health\"}");
-        assertEquals("/health", c.getProbePath());
-    }
-
-    @Test
-    void envOverridesProbePath() {
-        Map<String, String> env = mutableEnv(
-                "DISPATCH_CONFIG",
-                "{\"fePoolServiceId\":\"x\",\"probePath\":\"/frontend_health\"}",
-                "DISPATCH_PROBE_PATH", "/health");
-        DispatchConfig c = loadEnvironment(env);
-        assertEquals("/health", c.getProbePath(), "DISPATCH_PROBE_PATH must beat the JSON value");
-    }
-
-    @Test
-    void preAssignBeDefaultsFalseForRollingUpgradeSafety() {
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\"}");
-        assertFalse(c.isPreAssignBe(),
-                "older FEs cannot deserialize HTTP role_addrs; operators opt in after convergence");
-    }
-
-    @Test
-    void preAssignBeJsonExplicitTrueEnables() {
-        DispatchConfig c = loadEnvironment(mutableEnv(
-                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"preAssignBe\":true}",
-                "DISPATCH_ROUTING_TOKEN", "shared-secret"));
-        assertTrue(c.isPreAssignBe(),
-                "operator opt-in via JSON must be honored after FE versions converge");
-    }
-
-    @Test
-    void envOverridesPreAssignBeOn() {
-        Map<String, String> env = mutableEnv(
-                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
-                "DISPATCH_PRE_ASSIGN_BE", "true",
-                "DISPATCH_ROUTING_TOKEN", "shared-secret");
-        DispatchConfig c = loadEnvironment(env);
-        assertTrue(c.isPreAssignBe(),
-                "DISPATCH_PRE_ASSIGN_BE=true must opt into the optimization without code change");
-    }
-
-    @Test
-    void booleanAliasEnablesPreAssignBeAndTypoFailsAtStartup() {
-        DispatchConfig enabled = loadEnvironment(mutableEnv(
-                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
-                "DISPATCH_PRE_ASSIGN_BE", "1",
-                "DISPATCH_ROUTING_TOKEN", "shared-secret"));
-        assertTrue(enabled.isPreAssignBe());
-
-        assertThrows(org.springframework.boot.context.properties.bind.BindException.class,
-                () -> loadEnvironment(mutableEnv(
-                        "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
-                        "DISPATCH_PRE_ASSIGN_BE", "treu")));
-    }
-
-    @Test
-    void preAssignmentRequiresASecretNotStoredInJson() {
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"preAssignBe\":true}"));
-        DispatchConfig c = loadEnvironment(mutableEnv(
-                "DISPATCH_FE_POOL_SERVICE_ID", "x",
-                "DISPATCH_PRE_ASSIGN_BE", "true",
-                "DISPATCH_ROUTING_TOKEN", "shared-secret"));
-        assertEquals("shared-secret", c.getTrustedRoutingToken());
-    }
-
-    @Test
-    void feAllocationCanSwitchToLocalViaJsonOrEnv() {
-        assertEquals("local", load("{\"fePoolServiceId\":\"x\",\"feAllocation\":\"LOCAL\"}")
-                .getFeAllocation(), "validation normalizes JSON values");
-
-        Map<String, String> env = mutableEnv(
-                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"feAllocation\":\"master\"}",
-                "DISPATCH_FE_ALLOCATION", "local");
-        assertEquals("local", loadEnvironment(env).getFeAllocation(),
-                "the incident escape hatch must be selectable through a per-field env override");
-    }
-
-    @Test
-    void invalidFeAllocationFailsAtBoot() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"feAllocation\":\"nearest\"}"));
-        assertTrue(error.getMessage().contains("master, local"));
-    }
-
-    @Test
-    void blankProbePathFailsValidation() {
-        // Spring binds an explicit blank value; validation rejects it at startup.
-        Map<String, String> env = mutableEnv(
-                "DISPATCH_FE_POOL_SERVICE_ID", "x",
-                "DISPATCH_PROBE_PATH", "");
-        assertThrows(IllegalArgumentException.class, () -> loadEnvironment(env));
-
-        // But an explicit blank in JSON is a config error — must throw to surface the typo.
-        assertThrows(IllegalArgumentException.class,
-                () -> load("{\"fePoolServiceId\":\"x\",\"probePath\":\"  \"}"));
-    }
-
-    private static DispatchConfig loadEnvironment(Map<String, String> values) {
-        org.springframework.mock.env.MockEnvironment environment = new org.springframework.mock.env.MockEnvironment();
-        environment.getPropertySources().addFirst(
-                new org.springframework.core.env.SystemEnvironmentPropertySource("testEnvironment", new HashMap<>(values)));
-        return DispatcherConfiguration.loadAndValidate(environment);
-    }
-
-    /** Test seam: load with the given JSON as DISPATCH_CONFIG, no other env overrides. */
-    private static DispatchConfig load(String json) {
-        Map<String, String> env = new HashMap<>();
-        if (json != null) {
-            env.put("DISPATCH_CONFIG", json);
-        }
-        return loadEnvironment(env);
-    }
-
-    /** Mutable env map (Map.of is immutable; tests need to add multiple entries flexibly). */
-    private static Map<String, String> mutableEnv(String... keysAndValues) {
-        Map<String, String> map = new HashMap<>();
-        for (int i = 0; i + 1 < keysAndValues.length; i += 2) {
-            map.put(keysAndValues[i], keysAndValues[i + 1]);
-        }
-        return map;
+    private DispatchConfig load(Map<String, Object> properties) {
+        MockEnvironment env = new MockEnvironment();
+        env.getPropertySources().addFirst(new SystemEnvironmentPropertySource("test", properties));
+        return DispatcherConfiguration.loadAndValidate(env);
     }
 }

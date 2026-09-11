@@ -9,7 +9,6 @@ import org.flexlb.dao.master.WorkerHost;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -32,32 +31,15 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
         return INSTANCE;
     }
 
-    /**
-     * Resolve hosts for the given address from the {@code DOMAIN_ADDRESS:<address>} environment variable.
-     *
-     * <p>Contract: a missing (or blank) env value means an empty fleet, which is legal — logs a WARN
-     * and returns an empty list. A malformed env value is a lookup failure, not an empty fleet, and
-     * throws {@link IllegalArgumentException} so it cannot be swallowed as "no hosts".
-     */
     @Override
     public List<WorkerHost> getHosts(String address) {
-        return getHosts(address, System.getenv());
-    }
-
-    /**
-     * Resolve against an explicit environment rather than the process environment.
-     *
-     * @param address Service address to resolve
-     * @param env     Environment to read {@code DOMAIN_ADDRESS:<address>} from
-     */
-    List<WorkerHost> getHosts(String address, Map<String, String> env) {
         if (StringUtils.isBlank(address)) {
             log.warn("Service address is blank, returning empty host list");
             return Collections.emptyList();
         }
         // Convert address to environment variable key (replace special characters)
         String envKey = ENV_DOMAIN_ADDRESS + address;
-        String hostsConfig = env.get(envKey);
+        String hostsConfig = System.getenv(envKey);
         if (StringUtils.isBlank(hostsConfig)) {
             log.warn("No hosts configuration found for address: {}, expected env var: {}", address, envKey);
             return Collections.emptyList();
@@ -69,38 +51,22 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
                     .map(this::parseHost)
                     .collect(Collectors.toList());
         } catch (Exception e) {
-            // Propagate instead of returning an empty list: callers treat "empty" as a genuinely
-            // empty fleet (embedding liveness mass-kills on it), while a malformed DOMAIN_ADDRESS
-            // is a lookup failure that callers can distinguish from an empty result.
-            throw new IllegalArgumentException(
-                    "malformed hosts configuration for address " + address + ": " + hostsConfig, e);
+            // A malformed configuration is a lookup failure, not an empty fleet.
+            throw new IllegalArgumentException("malformed hosts configuration for address " + address, e);
         }
     }
 
-    /**
-     * Registration, not a lookup: a caller wiring up a listener is not asking for hosts, so a
-     * failed initial resolve is logged rather than thrown. The "malformed config throws" contract
-     * belongs to {@link #getHosts(String)} and stays there.
-     */
     @Override
     public void listen(String address, ServiceHostListener listener) {
-        listen(address, listener, System.getenv());
-    }
-
-    /**
-     * Test-seam variant taking an explicit env map, symmetric with {@link #getHosts(String, Map)}.
-     */
-    void listen(String address, ServiceHostListener listener, Map<String, String> env) {
         log.info("NoOpServiceDiscovery does not support dynamic listening for address: {}", address);
         // Default empty implementation does not support dynamic listening, could consider periodic polling implementation
         // Simply trigger initialization once here
-        if (listener == null) {
-            return;
-        }
-        try {
-            listener.onHostsChanged(getHosts(address, env));
-        } catch (Exception e) {
-            log.error("NoOpServiceDiscovery initial host push failed for address: {}", address, e);
+        if (listener != null) {
+            try {
+                listener.onHostsChanged(getHosts(address));
+            } catch (Exception e) {
+                log.error("Initial host lookup failed for address: {}", address, e);
+            }
         }
     }
 

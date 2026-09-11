@@ -16,14 +16,14 @@ final class AtomicByteBudget {
     }
 
     Reservation newReservation() {
-        return new Reservation(this);
+        return new Reservation();
     }
 
     long limit() {
         return limit;
     }
 
-    private boolean tryReserve(long bytes) {
+    boolean tryReserve(long bytes) {
         if (bytes < 0) {
             throw new IllegalArgumentException("bytes must be >= 0, got " + bytes);
         }
@@ -38,36 +38,20 @@ final class AtomicByteBudget {
         }
     }
 
-    private void release(long bytes) {
-        if (bytes > 0) {
-            reserved.addAndGet(-bytes);
-        }
-    }
-
     /** Tracks one sub-call's share so failed/cancelled reads can release exactly once. */
-    static final class Reservation {
-        private final AtomicByteBudget owner;
+    final class Reservation {
         private long bytes;
         private boolean released;
-
-        private Reservation(AtomicByteBudget owner) {
-            this.owner = owner;
-        }
 
         synchronized boolean tryReserve(long additionalBytes) {
             if (released) {
                 return false;
             }
-            if (!owner.tryReserve(additionalBytes)) {
+            if (!AtomicByteBudget.this.tryReserve(additionalBytes)) {
                 return false;
             }
             bytes += additionalBytes;
             return true;
-        }
-
-        synchronized boolean ensureTotal(long totalBytes) {
-            long additional = totalBytes - bytes;
-            return additional <= 0 || tryReserve(additional);
         }
 
         synchronized long bytes() {
@@ -81,11 +65,11 @@ final class AtomicByteBudget {
             released = true;
             long held = bytes;
             bytes = 0;
-            owner.release(held);
+            reserved.addAndGet(-held);
         }
 
         long limit() {
-            return owner.limit();
+            return limit;
         }
     }
 }

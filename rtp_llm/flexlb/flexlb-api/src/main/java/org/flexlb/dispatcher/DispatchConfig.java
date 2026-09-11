@@ -1,22 +1,19 @@
 package org.flexlb.dispatcher;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Defaults, DISPATCH_CONFIG JSON, then Spring dispatch.* overrides; validated at startup. */
+/** Spring dispatch.* properties, including DISPATCH_* environment variables; validated at startup. */
 @Getter
 @Setter
-@JsonIgnoreProperties(ignoreUnknown = true)
 public class DispatchConfig {
+    public enum FeAllocation { MASTER, LOCAL }
+
     /** Empty discovery may retain the previous pool for this long. */
     private long discoveryFailureGraceMs = 300_000;
 
-    /** count:N chunks (capped by item count), size:N items per chunk, or a bare size. */
     private String subBatch = "count:5";
-
-    /** Supplying an FE discovery name enables dispatcher routes. Whitespace-only names fail startup. */
     private String fePoolServiceId = "";
 
     /** Passed to Reactor Netty responseTimeout for each FE sub-call. */
@@ -25,16 +22,9 @@ public class DispatchConfig {
     /** The whole sub-call, including response body, is capped at batchTimeoutMs + bodyReadMarginMs. */
     private long bodyReadMarginMs = 30_000;
 
-    /** FE application health endpoint, independent of BE availability. */
     private String probePath = "/frontend_health";
 
-    /** master shares the elected master's FE cursor; local uses this dispatcher's FE pool. */
-    private String feAllocation = FeAllocationMode.MASTER.configValue();
-
-    /**
-     * Stateless BE placement for supported single-role deployments without traffic policies.
-     * Default false retains FE request-aware LLM scheduling and admission. FE allocation is independent.
-     */
+    private FeAllocation feAllocation = FeAllocation.MASTER;
     private boolean preAssignBe = false;
 
     /** Required on dispatcher and receiving FEs for BE preassignment; loaded only from DISPATCH_ROUTING_TOKEN. */
@@ -46,9 +36,6 @@ public class DispatchConfig {
 
     /** Aggregate outbound bytes, including the envelope repeated across chunks. */
     private long maxAggregateRequestBytes = 128L * 1024 * 1024;
-
-    /** Serialized dry-run response limit, checked before allocating repeated envelopes. */
-    private long maxDryRunResponseBytes = 64L * 1024 * 1024;
 
     /** Derived at startup; excluded from JSON binding despite Lombok's generated accessors. */
     @JsonIgnore

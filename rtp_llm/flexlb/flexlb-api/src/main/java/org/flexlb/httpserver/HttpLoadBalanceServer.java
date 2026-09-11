@@ -8,7 +8,6 @@ import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
@@ -18,13 +17,11 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.pv.BatchPvLogData;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -118,58 +115,28 @@ public class HttpLoadBalanceServer {
     }
 
     public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
-        BatchScheduleContext context = new BatchScheduleContext();
+        long start = System.currentTimeMillis();
         return request.bodyToMono(BatchScheduleRequest.class)
                 .switchIfEmpty(Mono.error(new ServerWebInputException("empty request body")))
-                .flatMap(batchRequest -> {
-                    context.setBatchRequest(batchRequest);
-                    return processBatchScheduleRequest(context);
-                })
+                .flatMap(batch -> batchScheduleCoordinator.schedule(batch)
+                        .onErrorResume(error -> {
+                            Logger.error("Batch scheduling failed", error);
+                            return Mono.just(BatchScheduleResponse.error(
+                                    StrategyErrorType.NO_AVAILABLE_WORKER, "batch scheduling failed"));
+                        })
+                        .doOnNext(response -> engineHealthReporter.reportBatchSchedule(batch, response, start)))
                 .onErrorResume(error -> {
-                    Logger.error("Batch schedule request processing error", error);
-                    return batchError(context, errorTypeOf(context), error);
+                    Logger.error("Batch schedule request failed", error);
+                    boolean invalid = error instanceof ServerWebInputException;
+                    return Mono.just(BatchScheduleResponse.error(invalid
+                            ? StrategyErrorType.INVALID_REQUEST : StrategyErrorType.NO_AVAILABLE_WORKER,
+                            invalid ? "invalid batch schedule request" : "batch scheduling failed"));
                 })
-                .doFinally(signal -> finalizeBatchContext(context));
-    }
-
-    private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleContext context) {
-        return batchScheduleCoordinator.schedule(context.getBatchRequest())
                 .flatMap(response -> {
-                    context.setBatchResponse(response);
-                    if (!response.isSuccess()) {
-                        Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
-                    }
-                    return json(statusOf(response), response);
-                })
-                .onErrorResume(
-                        BatchScheduleTransportException.class,
-                        error -> batchError(
-                                context, StrategyErrorType.NO_AVAILABLE_WORKER, error));
-    }
-
-    private static int statusOf(BatchScheduleResponse response) {
-        if (response.isSuccess()) {
-            return 200;
-        }
-        return response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode()
-                ? 400
-                : 500;
-    }
-
-    private static StrategyErrorType errorTypeOf(BatchScheduleContext context) {
-        return context.getBatchRequest() == null
-                ? StrategyErrorType.INVALID_REQUEST
-                : StrategyErrorType.NO_AVAILABLE_WORKER;
-    }
-
-    private Mono<ServerResponse> batchError(
-            BatchScheduleContext context, StrategyErrorType type, Throwable error) {
-        String publicMessage = type == StrategyErrorType.INVALID_REQUEST
-                ? "invalid batch schedule request"
-                : "batch scheduling failed";
-        BatchScheduleResponse response = BatchScheduleResponse.error(type, publicMessage);
-        context.setBatchResponse(response);
-        return json(statusOf(response), response);
+                    int status = response.isSuccess() ? 200
+                            : response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode() ? 400 : 500;
+                    return json(status, response);
+                });
     }
 
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
@@ -403,8 +370,4 @@ public class HttpLoadBalanceServer {
                 .bodyValue(body);
     }
 
-    private void finalizeBatchContext(BatchScheduleContext context) {
-        engineHealthReporter.reportBatchSchedule(context);
-        new BatchPvLogData(context).emit();
-    }
 }

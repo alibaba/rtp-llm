@@ -112,10 +112,7 @@ public enum BatchEndpointSpec {
         if (requestsStreaming(body)) {
             return true;
         }
-        // FE promotes recognized top-level config fields after reading nested config, so an
-        // explicitly present top-level value wins even when it is JSON null. Preserve that exact
-        // precedence: splitting a list would misalign it, while splitting a scalar could turn an
-        // invalid multi-prompt request into several valid single-prompt requests.
+        // FE gives an explicit top-level adapter_name precedence, including JSON null.
         return effectiveAdapterName(body) != null;
     }
 
@@ -136,43 +133,24 @@ public enum BatchEndpointSpec {
         return false;
     }
 
-    private static JSONObject effectiveGenerateConfig(JSONObject body) {
-        if (body.get("generate_config") instanceof JSONObject gc) {
-            return gc;
-        }
-        return body.get("generation_config") instanceof JSONObject gc ? gc : null;
-    }
-
-    /** Mirrors FE's top-level-over-nested config precedence for {@code adapter_name}. */
     private static Object effectiveAdapterName(JSONObject body) {
         if (body.containsKey("adapter_name")) {
             return body.get("adapter_name");
         }
-        JSONObject gc = effectiveGenerateConfig(body);
-        return gc == null ? null : gc.get("adapter_name");
+        Object config = body.containsKey("generate_config") ? body.get("generate_config") : body.get("generation_config");
+        return config instanceof JSONObject gc ? gc.get("adapter_name") : null;
     }
 
     /** JSON values use the same truthiness rules as FE's Python request checks. */
     private static boolean jsonTruthy(Object value) {
-        if (value == null) {
-            return false;
-        }
-        if (value instanceof Boolean bool) {
-            return bool;
-        }
-        if (value instanceof Number number) {
-            return number.doubleValue() != 0.0;
-        }
-        if (value instanceof CharSequence chars) {
-            return !chars.isEmpty();
-        }
-        if (value instanceof Collection<?> collection) {
-            return !collection.isEmpty();
-        }
-        if (value instanceof Map<?, ?> map) {
-            return !map.isEmpty();
-        }
-        return true;
+        return switch (value) {
+            case null -> false;
+            case Boolean bool -> bool;
+            case Number number -> number.doubleValue() != 0.0;
+            case CharSequence chars -> !chars.isEmpty();
+            case Collection<?> collection -> !collection.isEmpty();
+            case Map<?, ?> map -> !map.isEmpty();
+            default -> true;
+        };
     }
-
 }

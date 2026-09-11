@@ -8,7 +8,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -454,18 +453,10 @@ public class EngineHealthReporter {
         monitor.report(FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
     }
 
-    public void reportBatchSchedule(BatchScheduleContext bctx) {
-        if (bctx == null) {
-            return;
-        }
-        BatchScheduleResponse response = bctx.getBatchResponse();
-        int code = response != null ? response.getCode() : 0;
-        BatchScheduleRequest request = bctx.getBatchRequest();
-        FlexMetricTags metricTags = FlexMetricTags.of(
-                "code", String.valueOf(code),
-                "assign_be", String.valueOf(request != null && request.isAssignBe()),
-                "assign_fe", String.valueOf(request != null && request.isAssignFe()));
-        monitor.report(ENGINE_BALANCING_MASTER_BATCH_QPS, metricTags, 1.0);
-        monitor.report(ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT, metricTags, System.currentTimeMillis() - bctx.getStartTime());
+    public void reportBatchSchedule(BatchScheduleRequest request, BatchScheduleResponse response, long start) {
+        FlexMetricTags tags = FlexMetricTags.of("code", String.valueOf(response.getCode()),
+                "assign_be", String.valueOf(request.isAssignBe()), "assign_fe", String.valueOf(request.isAssignFe()));
+        monitor.report(ENGINE_BALANCING_MASTER_BATCH_QPS, tags, 1.0);
+        monitor.report(ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT, tags, System.currentTimeMillis() - start);
     }
 }

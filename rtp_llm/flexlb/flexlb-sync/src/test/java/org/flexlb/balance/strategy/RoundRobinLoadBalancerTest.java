@@ -19,11 +19,11 @@ import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import reactor.core.publisher.Flux;
 
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -154,9 +154,9 @@ class RoundRobinLoadBalancerTest {
         publish("10.0.0.1", true);
         publish("10.0.0.2", true);
         publish("10.0.0.3", true);
-        List<BatchScheduleTarget> targets = Flux.range(0, 100)
-                .flatMap(i -> scheduler.schedule(request(3)), 16)
-                .flatMapIterable(BatchScheduleResponse::getServerStatus).collectList().block();
+        List<BatchScheduleTarget> targets = IntStream.range(0, 100).parallel()
+                .mapToObj(i -> scheduler.schedule(request(3)).block())
+                .flatMap(response -> response.getServerStatus().stream()).toList();
         Map<String, Long> counts = targets.stream().collect(Collectors.groupingBy(
                 BatchScheduleTarget::getServerIp, Collectors.counting()));
         assertEquals(Map.of("10.0.0.1", 100L, "10.0.0.2", 100L, "10.0.0.3", 100L), counts);

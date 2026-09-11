@@ -4,115 +4,62 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 
-/**
- * Generic merger for every batch endpoint on the dispatcher batch path. Picks the first
- * well-formed sub-batch's body as the response envelope template, replaces its
- * {@code spec.responseArrayField} with the stitched array, then optionally invokes
- * {@link BatchEndpointSpec#finishMerge} for cross-chunk aggregation. Failed sub-batches are padded
- * item-by-item via {@link BatchEndpointSpec#failedItem}, and an {@code _partial_failure} object
- * is appended when any items failed.
- */
+/** Merges the ordered results emitted by FanoutService, padding failures at their input indices. */
 public final class ResponseMerger {
-
     private ResponseMerger() {}
 
-    /**
-     * Merge outcome: the client-facing {@code body}, success/total counts, the absolute item
-     * indices that failed, one reason string per failed chunk (in chunk order), and the HTTP
-     * status to use when {@link #allFailed()} — the shared FE 4xx when every sub-batch failed
-     * with the same client error, otherwise 500. The handler returns 200 on any success.
-     */
     public record MergedResponse(JSONObject body,
-                                 int succeededChunks,
+                                 boolean allFailed,
                                  int totalChunks,
                                  int totalItems,
                                  List<Integer> failedIndices,
                                  List<String> failedReasons,
                                  int errorStatus) {
-        public boolean allFailed() {
-            return totalChunks > 0 && succeededChunks == 0;
-        }
-
-        public boolean hasFailures() {
-            return !failedIndices.isEmpty();
-        }
-    }
-
-    public static MergedResponse merge(List<SubBatchResult> subs, BatchEndpointSpec spec) {
-        return merge(subs, spec, null);
     }
 
     public static MergedResponse merge(List<SubBatchResult> subs, BatchEndpointSpec spec,
                                        JSONObject originalRequest) {
-        List<SubBatchResult> ordered = subs;
-        for (int i = 1; i < subs.size(); i++) {
-            if (subs.get(i - 1).startIndex() > subs.get(i).startIndex()) {
-                ordered = new ArrayList<>(subs);
-                ordered.sort(Comparator.comparingInt(SubBatchResult::startIndex));
-                break;
-            }
-        }
         JSONObject envelope = null;
-        int totalItems = 0;
-        for (SubBatchResult s : ordered) {
-            totalItems += s.chunkSize();
-            if (envelope == null && wellFormed(s, spec)) {
-                // Top-level copy only: the template's fields (including the array slot we
-                // overwrite next) land on a private map, while nested values stay shared with
-                // the sub-body — which is dead after merge, so no isolation is lost and the
-                // largest object on the merge path is never serialized+reparsed.
-                envelope = new JSONObject(s.body());
-                envelope.put(spec.getResponseArrayField(), new JSONArray());
-            }
-        }
-        if (envelope == null) {
-            List<String> reasons = new ArrayList<>(ordered.size());
-            for (SubBatchResult s : ordered) {
-                reasons.add(reasonFor(s));
-            }
-            return new MergedResponse(new JSONObject(), 0, ordered.size(), totalItems,
-                    allIndices(totalItems), reasons, commonErrorStatus(ordered));
-        }
-        JSONArray merged = envelope.getJSONArray(spec.getResponseArrayField());
+        JSONArray merged = new JSONArray();
         List<Integer> failedIndices = new ArrayList<>();
         List<String> failedReasons = new ArrayList<>();
-        int succeededChunks = 0;
-        for (SubBatchResult s : ordered) {
-            if (wellFormed(s, spec)) {
-                JSONArray sourceArr = s.body().getJSONArray(spec.getResponseArrayField());
-                merged.addAll(sourceArr);
-                succeededChunks++;
+        int totalItems = 0;
+        for (SubBatchResult sub : subs) {
+            totalItems += sub.chunkSize();
+            if (wellFormed(sub, spec)) {
+                if (envelope == null) {
+                    envelope = new JSONObject(sub.body());
+                }
+                merged.addAll(sub.body().getJSONArray(spec.getResponseArrayField()));
             } else {
-                String reason = reasonFor(s);
+                String reason = reasonFor(sub);
                 failedReasons.add(reason);
-                for (int i = 0; i < s.chunkSize(); i++) {
-                    int abs = s.startIndex() + i;
-                    merged.add(spec.failedItem(abs, reason));
-                    failedIndices.add(abs);
+                for (int i = 0; i < sub.chunkSize(); i++) {
+                    int index = sub.startIndex() + i;
+                    merged.add(spec.failedItem(index, reason));
+                    failedIndices.add(index);
                 }
             }
         }
-        if (!failedIndices.isEmpty()) {
-            JSONObject pf = new JSONObject();
-            pf.put("failed_count", failedIndices.size());
-            pf.put("total_count", totalItems);
-            JSONArray fi = new JSONArray(failedIndices.size());
-            fi.addAll(failedIndices);
-            pf.put("failed_indices", fi);
-            envelope.put("_partial_failure", pf);
+        if (envelope == null) {
+            return new MergedResponse(new JSONObject(), !subs.isEmpty(), subs.size(), totalItems,
+                    failedIndices, failedReasons, commonErrorStatus(subs));
         }
-        spec.finishMerge(envelope, ordered, failedIndices, originalRequest);
-        return new MergedResponse(envelope, succeededChunks, ordered.size(), totalItems,
+        envelope.put(spec.getResponseArrayField(), merged);
+        if (!failedIndices.isEmpty()) {
+            envelope.put("_partial_failure", JSONObject.of("failed_count", failedIndices.size(),
+                    "total_count", totalItems, "failed_indices", new JSONArray(failedIndices)));
+        }
+        spec.finishMerge(envelope, subs, failedIndices, originalRequest);
+        return new MergedResponse(envelope, false, subs.size(), totalItems,
                 failedIndices, failedReasons, 500);
     }
 
     /**
      * HTTP status for the all-failed case: the shared FE 4xx when every sub-batch that reached an FE
-     * failed with that same client error, otherwise 500. Transport/pick failures carry no HTTP status
-     * (feStatus 0) and don't vote, so they can't mask a 4xx the FE-reachable chunks agreed on.
+     * failed with that same client error, otherwise 500.
      */
     private static int commonErrorStatus(List<SubBatchResult> subs) {
         int common = -1;
@@ -133,14 +80,7 @@ public final class ResponseMerger {
         return common == -1 ? 500 : common;
     }
 
-    /**
-     * Client-facing failure reason: a stable, bounded code — never the raw exception text.
-     * {@code SubBatchResult#reason} carries the underlying {@code SimpleName: message}, which for a
-     * transport failure embeds the FE address reactor-netty was talking to; echoing it would hand
-     * an external caller the internal FE topology and would drift with the HTTP client library.
-     * Operators get the full detail from the rate-limited WARN in {@link FanoutService}, keyed by
-     * the same chunk.
-     */
+    /** Client-facing failure reason: a stable, bounded code — never the raw exception text. */
     private static String reasonFor(SubBatchResult s) {
         if (s.success()) {
             return "malformed_sub_batch";
@@ -161,13 +101,5 @@ public final class ResponseMerger {
         }
         JSONArray arr = s.body().getJSONArray(spec.getResponseArrayField());
         return arr != null && arr.size() == s.chunkSize();
-    }
-
-    private static List<Integer> allIndices(int n) {
-        List<Integer> out = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            out.add(i);
-        }
-        return out;
     }
 }

@@ -8,14 +8,8 @@ import java.math.BigInteger;
 import java.util.List;
 
 /**
- * Chunk preparation and merging for Voyage-style {@code /v1/reranker} requests.
- *
- * <p>FE applies {@code sorted} and {@code top_k} inside each request. Those operations are not
- * distributive across chunks: concatenating each shard's top-k cannot recover the global top-k.
- * Every child request therefore asks FE for its complete, input-ordered scores
- * ({@code sorted=false}, no {@code top_k}); after the generic merger has verified that every
- * successful child returned one result per document, this class rebases local result indices,
- * performs one stable global sort, applies the caller's top-k once, and sums total tokens.
+ * Request full unsorted child results, then apply global sorting and top_k once. Partial failures fail
+ * the request.
  */
 public final class RerankerMerger {
 
@@ -51,15 +45,9 @@ public final class RerankerMerger {
         }
 
         JSONArray results = mergedBody.getJSONArray(spec.getResponseArrayField());
-        if (results == null) {
-            throw new IllegalStateException("reranker response is missing results");
-        }
 
         long totalTokens = 0;
         for (SubBatchResult sub : subs) {
-            if (!ResponseMerger.wellFormed(sub, spec)) {
-                throw new IllegalStateException("reranker sub-batch is not well formed");
-            }
             Object tokenValue = sub.body().get("total_tokens");
             if (!(tokenValue instanceof Number tokenNumber)) {
                 throw new IllegalStateException("reranker response is missing total_tokens");
@@ -98,8 +86,7 @@ public final class RerankerMerger {
         }
         mergedBody.put("total_tokens", totalTokens);
 
-        boolean sorted = originalRequest == null
-                || !originalRequest.containsKey("sorted")
+        boolean sorted = !originalRequest.containsKey("sorted")
                 || originalRequest.getBooleanValue("sorted");
         if (sorted && results.size() > 1) {
             // List.sort is stable, so equal scores retain original document order just like
@@ -107,12 +94,8 @@ public final class RerankerMerger {
             results.sort((left, right) -> compareScores((JSONObject) left, (JSONObject) right));
         }
 
-        if (originalRequest != null && originalRequest.get("top_k") != null) {
+        if (originalRequest.get("top_k") != null) {
             BigInteger topK = integralValue(originalRequest.get("top_k"));
-            if (topK == null) {
-                // validate() runs before fanout; retain a defensive guard for direct unit callers.
-                throw new IllegalArgumentException("top_k must be an integer or null");
-            }
             truncateLikePython(results, topK);
         }
     }
@@ -149,35 +132,24 @@ public final class RerankerMerger {
                 end = BigInteger.ZERO;
             }
         }
-        int keep = end.intValueExact();
-        while (values.size() > keep) {
-            values.remove(values.size() - 1);
-        }
+        values.subList(end.intValueExact(), values.size()).clear();
     }
 
     /** Returns null for non-integral JSON values. */
     private static BigInteger integralValue(Object value) {
-        if (value instanceof BigInteger integer) {
-            return integer;
+        if (!(value instanceof Number number)) {
+            return null;
         }
-        if (value instanceof BigDecimal decimal) {
-            try {
-                return decimal.toBigIntegerExact();
-            } catch (ArithmeticException ignored) {
-                return null;
-            }
+        try {
+            return switch (number) {
+                case BigInteger integer -> integer;
+                case BigDecimal decimal -> decimal.toBigIntegerExact();
+                case Float f -> BigDecimal.valueOf(f.doubleValue()).toBigIntegerExact();
+                case Double d -> BigDecimal.valueOf(d).toBigIntegerExact();
+                default -> BigInteger.valueOf(number.longValue());
+            };
+        } catch (ArithmeticException | NumberFormatException ignored) {
+            return null;
         }
-        if (value instanceof Byte || value instanceof Short
-                || value instanceof Integer || value instanceof Long) {
-            return BigInteger.valueOf(((Number) value).longValue());
-        }
-        if (value instanceof Float || value instanceof Double) {
-            double number = ((Number) value).doubleValue();
-            if (!Double.isFinite(number) || number != Math.rint(number)) {
-                return null;
-            }
-            return BigDecimal.valueOf(number).toBigIntegerExact();
-        }
-        return null;
     }
 }

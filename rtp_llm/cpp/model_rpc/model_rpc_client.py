@@ -1293,27 +1293,12 @@ class ModelRpcClient(object):
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )
 
-        # Build and target selection are local validation. Open the CLIENT span only after both
-        # succeed so malformed batches do not leave a phantom network hop in the trace.
-        client_span, trace_metadata = start_client_span(
-            "rtp_llm.batch_generate_call", target_address
-        )
-        if client_span is not None:
-            client_span.set_attribute(trace_attrs.REQUEST_ID, str(inputs[0].request_id))
-            client_span.set_attribute(
-                trace_attrs.RTP_LLM_REQUEST_ID, inputs[0].request_id
-            )
-            client_span.set_attribute("rtp_llm.batch_size", len(inputs))
-        rpc_completed = False
-
         try:
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
-            grpc_kwargs = {"timeout": grpc_timeout_seconds}
-            if trace_metadata:
-                grpc_kwargs["metadata"] = trace_metadata
-            response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
-            rpc_completed = True
+            response = await stub.BatchGenerateCall(
+                batch_input_pb, timeout=grpc_timeout_seconds
+            )
 
             if len(response.results) != len(inputs):
                 # C++ BatchGenerateCall is contractually 1:1 (one result per input). A shorter
@@ -1332,20 +1317,12 @@ class ModelRpcClient(object):
                     result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
                     or result_pb.error_info.error_message
                 ):
-                    error_message = result_pb.error_info.error_message
-                    if not error_message:
-                        try:
-                            error_name = ErrorCodePB.Name(
-                                result_pb.error_info.error_code
-                            )
-                        except ValueError:
-                            error_name = "UNKNOWN_MODEL_RPC_ERROR"
-                        error_message = f"model RPC error: {error_name}"
+                    error_type = self._exception_type_from_rpc_error_code(
+                        result_pb.error_info.error_code
+                    )
+                    message = result_pb.error_info.error_message or error_type.name
                     raise FtRuntimeException(
-                        self._exception_type_from_rpc_error_code(
-                            result_pb.error_info.error_code
-                        ),
-                        f"batch item {i} failed: {error_message}",
+                        error_type, f"batch item {i} failed: {message}"
                     )
                 if not result_pb.HasField("final_output"):
                     raise FtRuntimeException(
@@ -1355,19 +1332,7 @@ class ModelRpcClient(object):
                 stream_state = StreamState()
                 output = trans_output(inputs[i], result_pb.final_output, stream_state)
                 results.append(output)
-            if client_span is not None:
-                _record_client_rpc_status(client_span, StatusCode.OK)
-                client_span.finish()
             return results
 
         except grpc.RpcError as e:
-            if client_span is not None:
-                _record_client_rpc_status(client_span, e.code())
-                client_span.finish(error=e, error_type="RpcError")
             self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
-        except BaseException as e:
-            if client_span is not None:
-                if rpc_completed:
-                    _record_client_rpc_status(client_span, StatusCode.OK)
-                client_span.finish(error=e, error_type=type(e).__name__)
-            raise

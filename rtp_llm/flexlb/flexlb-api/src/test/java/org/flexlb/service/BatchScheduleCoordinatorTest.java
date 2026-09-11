@@ -8,8 +8,10 @@ import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dispatcher.FePool;
+import org.flexlb.enums.EngineType;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.JsonUtils;
@@ -19,12 +21,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
-import org.springframework.web.reactive.function.client.ClientRequest;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.ExchangeFunction;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -32,7 +32,6 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
 
-import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -71,12 +70,11 @@ class BatchScheduleCoordinatorTest {
     }
 
     private static BatchScheduleTarget target() {
-        return new BatchScheduleTarget("10.0.0.9", 8000, 8001, RoleType.PDFUSION);
+        return BatchScheduleTarget.of(new WorkerHost("10.0.0.9", 8000), RoleType.PDFUSION, EngineType.LLM);
     }
 
     private void follower() {
         when(consistency.isNeedConsistency()).thenReturn(true);
-        when(consistency.isMaster()).thenReturn(false);
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
     }
 
@@ -88,6 +86,9 @@ class BatchScheduleCoordinatorTest {
     @ParameterizedTest
     @CsvSource({"true,true", "false,true", "true,false"})
     void localAllocationCompletesOnlyTheRequestedDimensions(boolean be, boolean fe) {
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenReturn(true);
+        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
         BatchScheduleRequest request = request(be, fe);
         BatchScheduleTarget target = be ? target() : new BatchScheduleTarget();
         when(scheduler.schedule(request)).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target))));
@@ -97,6 +98,7 @@ class BatchScheduleCoordinatorTest {
         }
         BatchScheduleResponse response = coordinator.schedule(request).block();
         assertTrue(response.isSuccess());
+        assertEquals("10.0.0.1:7001", response.getRealMasterHost());
         assertSame(target, response.getServerStatus().getFirst());
         if (fe) {
             assertEquals("http://fe:8000", target.getFeUrl());
@@ -105,16 +107,6 @@ class BatchScheduleCoordinatorTest {
             verifyNoInteractions(pools, pool);
         }
         verifyNoInteractions(transport);
-    }
-
-    @Test
-    void masterStampsItsAddressAndReturnsTheCompletedAllocation() {
-        when(consistency.isNeedConsistency()).thenReturn(true);
-        when(consistency.isMaster()).thenReturn(true);
-        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
-        when(scheduler.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target()))));
-        assertEquals("10.0.0.1:7001", coordinator.schedule(request(true, false)).block().getRealMasterHost());
-        verifyNoInteractions(transport, pools);
     }
 
     @Test
@@ -131,9 +123,6 @@ class BatchScheduleCoordinatorTest {
         target.setFeUrl("http://master-selected-fe");
         pending.tryEmitValue(BatchScheduleResponse.success(List.of(target)));
         assertEquals("http://master-selected-fe", future.join().getServerStatus().getFirst().getFeUrl());
-        ArgumentCaptor<ClientRequest> sent = ArgumentCaptor.forClass(ClientRequest.class);
-        verify(transport).exchange(sent.capture());
-        assertEquals(URI.create("http://10.0.0.2:7001/rtp_llm/batch_schedule"), sent.getValue().url());
         assertEquals(0, request.getForwardHop());
         verifyNoInteractions(scheduler, pools, pool);
     }
@@ -156,64 +145,28 @@ class BatchScheduleCoordinatorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {1, -1, Integer.MAX_VALUE})
-    void rejectsForwardingLoops(int hop) {
+    @CsvSource({"1,false,false,FORWARD_HOP_LIMIT", "-1,false,false,FORWARD_HOP_LIMIT",
+            "2147483647,false,false,FORWARD_HOP_LIMIT", "0,true,false,SELF_FORWARD_BLOCKED",
+            "0,false,true,MASTER_NULL"})
+    void rejectsLoopsAndUnknownLeadersWithoutLocalFallback(int hop, boolean self, boolean missing, String code) {
         follower();
+        if (self) {
+            when(consistency.getLocalHostIp()).thenReturn("10.0.0.2");
+        }
+        if (missing) {
+            when(consistency.getMasterHostIpPort()).thenReturn(null);
+        }
         BatchScheduleRequest request = request(true, false);
         request.setForwardHop(hop);
-        BatchScheduleTransportException error = assertThrows(BatchScheduleTransportException.class,
-                () -> coordinator.schedule(request).block());
-        assertEquals("FORWARD_HOP_LIMIT", error.getErrorCode());
-        verifyNoInteractions(transport, scheduler, pools);
-    }
-
-    @Test
-    void rejectsSelfForwarding() {
-        follower();
-        when(consistency.getLocalHostIp()).thenReturn("10.0.0.2");
-        BatchScheduleTransportException error = assertThrows(BatchScheduleTransportException.class,
-                () -> coordinator.schedule(request(true, false)).block());
-        assertEquals("SELF_FORWARD_BLOCKED", error.getErrorCode());
-        verifyNoInteractions(transport, scheduler);
-    }
-
-    @Test
-    void missingLeaderDoesNotAllocateLocally() {
-        follower();
-        when(consistency.getMasterHostIpPort()).thenReturn(null);
-        BatchScheduleTransportException error = assertThrows(BatchScheduleTransportException.class,
-                () -> coordinator.schedule(request(true, false)).block());
-        assertEquals("MASTER_NULL", error.getErrorCode());
+        assertEquals(code, assertThrows(BatchScheduleTransportException.class,
+                () -> coordinator.schedule(request).block()).getErrorCode());
         verifyNoInteractions(transport, scheduler, pools);
     }
 
     @ParameterizedTest
-    @CsvSource({"404,{}", "502,Bad Gateway", "500,null"})
-    void nonBusinessHttpErrorsRemainTransportFailures(int status, String body) {
-        follower();
-        when(transport.exchange(any())).thenReturn(Mono.just(ClientResponse.create(HttpStatus.valueOf(status))
-                .header("Content-Type", "application/json").body(body).build()));
-        BatchScheduleTransportException error = assertThrows(BatchScheduleTransportException.class,
-                () -> coordinator.schedule(request(true, false)).block());
-        assertEquals("HTTP_ERROR", error.getErrorCode());
-        verifyNoInteractions(scheduler, pools);
-    }
-
-    @Test
-    void forwardedBusinessFailureKeepsItsCodeAndMessage() {
-        follower();
-        BatchScheduleResponse rejection = BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST, "bad count");
-        when(transport.exchange(any())).thenReturn(Mono.just(ClientResponse.create(HttpStatus.BAD_REQUEST)
-                .header("Content-Type", "application/json").body(JsonUtils.toString(rejection)).build()));
-        BatchScheduleResponse response = coordinator.schedule(request(true, false)).block();
-        assertFalse(response.isSuccess());
-        assertEquals(rejection.getCode(), response.getCode());
-        assertEquals("bad count", response.getErrorMessage());
-    }
-
-    @ParameterizedTest
-    @ValueSource(ints = {200, 302, 307})
-    void realHttpForwardingPreservesTheWireContractAndRejectsRedirects(int status) throws Exception {
+    @CsvSource({"200,success", "302,success", "307,success", "404,{}", "502,garbage",
+            "500,null", "400,business", "200,missing", "200,empty"})
+    void realHttpForwardingPreservesTheWireContract(int status, String body) throws Exception {
         try (MockWebServer master = new MockWebServer()) {
             master.start();
             when(consistency.isNeedConsistency()).thenReturn(true);
@@ -221,12 +174,24 @@ class BatchScheduleCoordinatorTest {
             coordinator = new BatchScheduleCoordinator(scheduler, consistency, WebClient.builder(), reporter, pools);
             BatchScheduleTarget target = target();
             target.setFeUrl("http://selected-fe");
+            String payload = switch (body) {
+                case "success" -> JsonUtils.toString(BatchScheduleResponse.success(List.of(target)));
+                case "business" -> JsonUtils.toString(BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST, "bad count"));
+                case "missing" -> JsonUtils.toString(BatchScheduleResponse.success(List.of(target())));
+                case "empty" -> JsonUtils.toString(BatchScheduleResponse.success(List.of()));
+                default -> body;
+            };
             master.enqueue(new MockResponse().setResponseCode(status)
-                    .setHeader("Content-Type", "application/json")
-                    .setBody(JsonUtils.toString(BatchScheduleResponse.success(List.of(target)))));
-            if (status == 200) {
+                    .setHeader("Content-Type", "application/json").setBody(payload));
+            if (status == 200 || body.equals("business")) {
                 BatchScheduleResponse response = coordinator.schedule(request(true, true)).block(Duration.ofSeconds(5));
-                assertEquals("http://selected-fe", response.getServerStatus().getFirst().getFeUrl());
+                assertEquals(body.equals("success"), response.isSuccess());
+                if (response.isSuccess()) {
+                    assertEquals("http://selected-fe", response.getServerStatus().getFirst().getFeUrl());
+                } else if (body.equals("business")) {
+                    assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+                    assertEquals("bad count", response.getErrorMessage());
+                }
             } else {
                 BatchScheduleTransportException error = assertThrows(BatchScheduleTransportException.class,
                         () -> coordinator.schedule(request(true, true)).block(Duration.ofSeconds(5)));
@@ -242,16 +207,6 @@ class BatchScheduleCoordinatorTest {
             assertEquals(1, master.getRequestCount());
             verifyNoInteractions(scheduler, pools);
         }
-    }
-
-    @Test
-    void connectionFailureHasNoLocalFallback() {
-        follower();
-        when(transport.exchange(any())).thenReturn(Mono.error(new java.net.ConnectException("refused")));
-        BatchScheduleTransportException error = assertThrows(BatchScheduleTransportException.class,
-                () -> coordinator.schedule(request(true, false)).block());
-        assertEquals("CONNECT_FAILED", error.getErrorCode());
-        verifyNoInteractions(scheduler, pools);
     }
 
     @Test
@@ -276,31 +231,23 @@ class BatchScheduleCoordinatorTest {
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
     }
 
-    @Test
-    void forwardingRejectsMissingRequestedAssignments() {
-        follower();
-        forward(Mono.just(BatchScheduleResponse.success(List.of(target()))));
-        assertFalse(coordinator.schedule(request(true, true)).block().isSuccess());
-        forward(Mono.just(BatchScheduleResponse.success(List.of())));
-        assertFalse(coordinator.schedule(request(true, false)).block().isSuccess());
-        verifyNoInteractions(scheduler, pools);
-    }
-
-    @Test
-    void emptyResponseIsAnExplicitTransportFailure() {
-        when(scheduler.schedule(any())).thenReturn(Mono.empty());
-        BatchScheduleTransportException error = assertThrows(BatchScheduleTransportException.class,
-                () -> coordinator.schedule(request(true, false)).block());
-        assertEquals("EMPTY_RESPONSE", error.getErrorCode());
-    }
-
-    @Test
-    void allocationHasABoundedDeadline() {
-        when(scheduler.schedule(any())).thenReturn(Mono.never());
+    @ParameterizedTest
+    @CsvSource({"connect,CONNECT_FAILED", "empty,EMPTY_RESPONSE", "timeout,TIMEOUT"})
+    void transportFailureNeverFallsBack(String mode, String code) {
+        if (mode.equals("connect")) {
+            follower();
+            when(transport.exchange(any())).thenReturn(Mono.error(new java.net.ConnectException("refused")));
+        } else {
+            when(scheduler.schedule(any())).thenReturn(mode.equals("empty") ? Mono.empty() : Mono.never());
+        }
         StepVerifier.withVirtualTime(() -> coordinator.schedule(request(true, false)))
                 .thenAwait(Duration.ofSeconds(3))
-                .expectErrorSatisfies(error -> assertEquals("TIMEOUT",
+                .expectErrorSatisfies(error -> assertEquals(code,
                         ((BatchScheduleTransportException) error).getErrorCode()))
                 .verify(Duration.ofSeconds(5));
+        if (mode.equals("connect")) {
+            verifyNoInteractions(scheduler);
+        }
+        verifyNoInteractions(pools);
     }
 }

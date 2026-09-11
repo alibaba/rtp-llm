@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import com.google.common.util.concurrent.RateLimiter;
 import org.flexlb.balance.strategy.RoundRobinLoadBalancer;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
@@ -10,7 +11,6 @@ import org.flexlb.dispatcher.FePool;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.Logger;
-import org.flexlb.util.RateLimitedWarn;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -21,17 +21,11 @@ import reactor.core.publisher.Mono;
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Resolves a {@code /batch_schedule} request against the master node, regardless
- * of whether the caller runs on the master itself or on a slave that must
- * forward to the elected master.
- *
- * <p>Transport failures (master address unknown, network error talking to master) are
- * signalled as {@link BatchScheduleTransportException}; business failures from the master
- * are returned as a normal response with {@code success=false}.
+ * Allocate locally on the elected master or forward once to it. Failed forwarding never falls back to
+ * local allocation.
  */
 @Component
 public class BatchScheduleCoordinator {
@@ -46,7 +40,7 @@ public class BatchScheduleCoordinator {
     private final WebClient webClient;
     private final EngineHealthReporter engineHealthReporter;
     /** A dead/unknown master fails every forwarded batch request; cap the ERROR stream at 1/s. */
-    private final RateLimitedWarn masterUnreachableWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
+    private final RateLimiter masterUnreachableWarn = RateLimiter.create(1);
 
     public BatchScheduleCoordinator(RoundRobinLoadBalancer batchScheduler,
                                     LBStatusConsistencyService consistency,
@@ -105,7 +99,9 @@ public class BatchScheduleCoordinator {
     private Mono<BatchScheduleResponse> forwardToMaster(BatchScheduleRequest request) {
         String master = consistency.getMasterHostIpPort();
         if (master == null) {
-            masterUnreachableWarn.warn("[BatchSchedule] Master unreachable: no elected master");
+            if (masterUnreachableWarn.tryAcquire()) {
+                Logger.warn("[BatchSchedule] Master unreachable: no elected master");
+            }
             engineHealthReporter.reportForwardToMasterResult("LOCAL", "MASTER_NULL");
             return Mono.error(new BatchScheduleTransportException(
                     "master unreachable", "MASTER_NULL"));
@@ -119,8 +115,10 @@ public class BatchScheduleCoordinator {
                         ? "SELF_FORWARD_BLOCKED"
                         : null;
         if (blockedReason != null) {
-            masterUnreachableWarn.warn("[BatchSchedule] Forward blocked: reason={}, master={}, hop={}",
-                    blockedReason, master, incomingHop);
+            if (masterUnreachableWarn.tryAcquire()) {
+                Logger.warn("[BatchSchedule] Forward blocked: reason={}, master={}, hop={}",
+                        blockedReason, master, incomingHop);
+            }
             engineHealthReporter.reportForwardToMasterResult(uri.getHost(), blockedReason);
             return Mono.error(new BatchScheduleTransportException(
                     "batch schedule forward blocked: " + blockedReason, blockedReason));
@@ -141,8 +139,10 @@ public class BatchScheduleCoordinator {
                 .doOnNext(response -> engineHealthReporter.reportForwardToMasterResult(
                         uri.getHost(), String.valueOf(response.getCode())))
                 .doOnError(BatchScheduleTransportException.class, error -> {
-                    masterUnreachableWarn.warn("[BatchSchedule] Forward failed: master={}, errorCode={}",
-                            master, error.getErrorCode());
+                    if (masterUnreachableWarn.tryAcquire()) {
+                        Logger.warn("[BatchSchedule] Forward failed: master={}, errorCode={}",
+                                master, error.getErrorCode());
+                    }
                     engineHealthReporter.reportForwardToMasterResult(uri.getHost(), error.getErrorCode());
                 });
     }

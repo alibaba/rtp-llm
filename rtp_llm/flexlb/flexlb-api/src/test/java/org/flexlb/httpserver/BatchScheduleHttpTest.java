@@ -4,7 +4,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
@@ -59,28 +58,19 @@ class BatchScheduleHttpTest {
         ArgumentCaptor<BatchScheduleRequest> request = ArgumentCaptor.forClass(BatchScheduleRequest.class);
         verify(coordinator).schedule(request.capture());
         assertEquals(1, request.getValue().getBatchCount());
-        ArgumentCaptor<BatchScheduleContext> context = ArgumentCaptor.forClass(BatchScheduleContext.class);
-        verify(reporter).reportBatchSchedule(context.capture());
-        assertEquals(target.getFeUrl(), context.getValue().getBatchResponse().getServerStatus().getFirst().getFeUrl());
+
     }
 
     @ParameterizedTest
-    @CsvSource({"INVALID_REQUEST,400", "NO_AVAILABLE_WORKER,500"})
-    void businessFailurePreservesHttpStatus(StrategyErrorType type, int status) {
-        when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.error(type, "rejected")));
+    @CsvSource({"400,INVALID_REQUEST,rejected", "500,NO_AVAILABLE_WORKER,rejected", "500,,batch scheduling failed"})
+    void failuresRemainStructuredAndTransportDetailsStayPrivate(int status, StrategyErrorType type, String message) {
+        when(coordinator.schedule(any())).thenReturn(type == null
+                ? Mono.error(new BatchScheduleTransportException("private-master:7001", "CONNECT_FAILED"))
+                : Mono.just(BatchScheduleResponse.error(type, message)));
         client.post().uri("/rtp_llm/batch_schedule").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("{\"batch_count\":1}").exchange().expectStatus().isEqualTo(status)
                 .expectBody().jsonPath("$.success").isEqualTo(false)
-                .jsonPath("$.error_message").isEqualTo("rejected");
-    }
-
-    @Test
-    void transportFailureDoesNotExposeInternalAddresses() {
-        when(coordinator.schedule(any())).thenReturn(Mono.error(
-                new BatchScheduleTransportException("failed to dial private-master:7001", "CONNECT_FAILED")));
-        client.post().uri("/rtp_llm/batch_schedule").contentType(MediaType.APPLICATION_JSON)
-                .bodyValue("{\"batch_count\":1}").exchange().expectStatus().is5xxServerError()
-                .expectBody().jsonPath("$.error_message").isEqualTo("batch scheduling failed");
+                .jsonPath("$.error_message").isEqualTo(message);
     }
 
     @ParameterizedTest

@@ -63,6 +63,8 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateOutputsPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     GenerateConfigPB,
     GenerateInputPB,
@@ -1720,10 +1722,6 @@ class DispatcherBatchRpcTest(TestCase):
     def invoke(self, inputs, response=None, error=None):
         from unittest.mock import AsyncMock
 
-        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-            BatchGenerateOutputsPB,
-        )
-
         stub = SimpleNamespace(
             BatchGenerateCall=AsyncMock(
                 return_value=response or BatchGenerateOutputsPB(), side_effect=error
@@ -1737,9 +1735,6 @@ class DispatcherBatchRpcTest(TestCase):
         ), patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
             side_effect=lambda inp, *_: inp.request_id,
-        ), patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
-            return_value=(None, None),
         ):
             result = asyncio.run(self.client.batch_enqueue(inputs))
         return result, stub
@@ -1766,10 +1761,6 @@ class DispatcherBatchRpcTest(TestCase):
             )
 
     def test_response_order_and_item_deadlines_are_preserved(self):
-        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-            BatchGenerateOutputsPB,
-        )
-
         response = BatchGenerateOutputsPB()
         response.results.add().final_output.SetInParent()
         response.results.add().final_output.SetInParent()
@@ -1786,10 +1777,6 @@ class DispatcherBatchRpcTest(TestCase):
         )
 
     def test_response_must_contain_exactly_one_result_per_item(self):
-        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-            BatchGenerateOutputsPB,
-        )
-
         for count in (0, 2):
             response = BatchGenerateOutputsPB()
             for _ in range(count):
@@ -1798,11 +1785,6 @@ class DispatcherBatchRpcTest(TestCase):
                 self.invoke([self.input(1)], response)
 
     def test_engine_error_code_without_message_still_fails_chunk(self):
-        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-            BatchGenerateOutputsPB,
-            ErrorCodePB,
-        )
-
         response = BatchGenerateOutputsPB()
         response.results.add().error_info.error_code = ErrorCodePB.CANCELLED
         with self.assertRaises(FtRuntimeException) as error:
@@ -1816,4 +1798,5 @@ class DispatcherBatchRpcTest(TestCase):
 
 
 if __name__ == "__main__":
+    setup_logging()
     main()

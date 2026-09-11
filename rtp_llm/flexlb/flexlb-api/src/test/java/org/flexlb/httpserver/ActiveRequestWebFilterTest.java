@@ -21,12 +21,12 @@ class ActiveRequestWebFilterTest {
 
     @ParameterizedTest
     @CsvSource({"/rtp_llm/batch_schedule,1", "/dispatcher,1", "/dispatcher/batch_infer,1",
-            "/dispatcher/v1/models,1", "/dispatcher/_snapshot,0", "/dispatcher/_dryrun/batch_infer,0",
+            "/dispatcher/v1/models,1", "/dispatcher/other,1",
             "/rtp_llm/master/info,0", "/health,0"})
     void countsOnlyServingRequestsUntilCompletion(String path, long expected) {
         MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get(path));
         Sinks.Empty<Void> completed = Sinks.empty();
-        Mono<Void> processing = filter.filter(exchange, ignored -> completed.asMono());
+        Mono<Void> processing = filter.filter(exchange, current -> current.getResponse().writeWith(completed.asMono().thenMany(Flux.empty())));
         assertEquals(0, counter.getCount(), "assembly must not acquire a token");
         StepVerifier.create(processing)
                 .then(() -> assertEquals(expected, counter.getCount()))
@@ -42,19 +42,6 @@ class ActiveRequestWebFilterTest {
         StepVerifier.create(filter.filter(exchange, current -> current.getRequest().getBody().then()))
                 .then(() -> assertEquals(1, counter.getCount()))
                 .thenCancel().verify(Duration.ofSeconds(5));
-        assertEquals(0, counter.getCount());
-    }
-
-    @Test
-    void retainsTokenUntilResponseBodyWriteCompletes() {
-        MockServerWebExchange exchange = MockServerWebExchange.from(
-                MockServerHttpRequest.post("/rtp_llm/batch_schedule"));
-        Sinks.Empty<Void> bodyCompleted = Sinks.empty();
-        StepVerifier.create(filter.filter(exchange,
-                        current -> current.getResponse().writeWith(bodyCompleted.asMono().thenMany(Flux.empty()))))
-                .then(() -> assertEquals(1, counter.getCount()))
-                .then(bodyCompleted::tryEmitEmpty)
-                .verifyComplete();
         assertEquals(0, counter.getCount());
     }
 

@@ -5,16 +5,7 @@ import com.alibaba.fastjson2.JSONObject;
 
 import java.util.List;
 
-/**
- * Cross-chunk aggregation for OpenAI embedding-shaped responses on the dispatcher
- * path. After {@link ResponseMerger} has stitched the {@code data} array (including
- * any {@link BatchEndpointSpec#failedItem} placeholders at absolute
- * failed indices), this post-merger renumbers each item's {@code index} to its absolute offset
- * in the merged array and sums {@code usage.prompt_tokens} / {@code usage.total_tokens} across
- * all well-formed sub-bodies — the same ones whose items {@link ResponseMerger} stitched into the
- * array. Failed or malformed sub-batches contribute zero to {@code usage}; their absolute indices
- * are preserved as failure placeholders.
- */
+/** Rebase embedding indices and add per-chunk usage after the ordered merge. */
 public final class EmbeddingMerger {
 
     private EmbeddingMerger() {}

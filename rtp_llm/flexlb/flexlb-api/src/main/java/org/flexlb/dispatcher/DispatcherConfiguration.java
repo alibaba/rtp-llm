@@ -12,6 +12,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.util.Assert;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerResponse;
@@ -22,54 +23,17 @@ import reactor.netty.resources.ConnectionProvider;
 
 import java.time.Duration;
 
-/**
- * Dispatcher infrastructure beans (config, connection provider, shared WebClient, route table).
- * Domain beans (FePool, FeHealthChecker, FeClient, …) are individually annotated
- * {@code @Component @ConditionalOnProperty} so the entire dispatcher subsystem is gated on
- * {@code dispatch.fe-pool-service-id} being a non-blank value. Two configuration styles set it:
- * the {@code DISPATCH_FE_POOL_SERVICE_ID} env (Spring relaxed-binds it to this property), or a
- * {@code fePoolServiceId} inside the {@code DISPATCH_CONFIG} JSON, which
- * {@link DispatchConfigEnvironmentPostProcessor} expands into the same property at startup. No
- * second "enabled" flag — presence-of-FE-pool-name IS the enable signal: a deployment that
- * names a FE pool obviously means to run the dispatcher, and one that doesn't has nothing
- * for the dispatcher to call anyway.
- */
+/** Dispatcher configuration and isolated HTTP connection pools; enabled by the FE discovery name. */
 @Configuration
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class DispatcherConfiguration {
 
-    /**
-     * TCP three-way-handshake timeout for every dispatcher → FE connection (passthrough and
-     * batch fanout — {@link FeClient} reads it too). Aligned with the codebase's
-     * {@code HttpNettyConfig.syncNettyClient}'s value — same deployment class
-     * (same-cluster HTTP). Hardcoded rather than exposed as config because connect timeout is
-     * almost never an operator-tuned knob; if a deployment ever needs different here it's a
-     * deployment-topology change, not a runtime config.
-     */
     static final int FE_CONNECT_TIMEOUT_MS = 1000;
 
-    /**
-     * How long a request waits for an available connection from the FE pool before failing. Fires
-     * when {@link #FE_MAX_CONNECTIONS_PER_HOST} is exhausted AND {@link #FE_MAX_PENDING_ACQUIRE_PER_HOST}
-     * queue has room. Hardcoded because operators tune capacity, not patience — the right
-     * pendingAcquire timeout follows mechanically from capacity sizing.
-     */
     private static final int FE_PENDING_ACQUIRE_TIMEOUT_MS = 3000;
 
-    /**
-     * Max concurrent TCP connections <strong>per FE host</strong> (not total across the pool).
-     * Reactor-netty's {@code ConnectionProvider} pools per remote address, so with N FE hosts the
-     * effective ceiling is {@code FE_MAX_CONNECTIONS_PER_HOST × N}. Sized for the workloads we run
-     * today (target QPS × avg request time / FE count, with safety margin); change here if the
-     * deployment topology shifts.
-     */
     private static final int FE_MAX_CONNECTIONS_PER_HOST = 200;
 
-    /**
-     * Max pending acquires <strong>per FE host</strong> when the connection pool is exhausted.
-     * Acts as a backpressure ring buffer; exceeding it makes the dispatcher fail fast instead of
-     * piling up an unbounded queue under overload.
-     */
     private static final int FE_MAX_PENDING_ACQUIRE_PER_HOST = 1000;
 
     @Bean
@@ -77,19 +41,14 @@ public class DispatcherConfiguration {
         return loadAndValidate(environment);
     }
 
-    /** Fixed CPU pool for request-controlled JSON parsing, projection and merging. */
     @Bean(name = "dispatcherCpuScheduler", destroyMethod = "dispose")
     public Scheduler dispatcherCpuScheduler() {
         int threads = Math.max(2, Math.min(Runtime.getRuntime().availableProcessors(), 8));
         return Schedulers.newParallel("dispatcher-cpu", threads);
     }
 
-    /** JSON supplies defaults; Spring property sources supply explicit dispatch.* overrides. */
     static DispatchConfig loadAndValidate(ConfigurableEnvironment environment) {
-        String json = environment.getProperty("DISPATCH_CONFIG");
-        DispatchConfig config = json == null || json.isBlank()
-                ? new DispatchConfig()
-                : JsonUtils.toObject(json, DispatchConfig.class);
+        DispatchConfig config = new DispatchConfig();
         Binder.get(environment).bind("dispatch", Bindable.ofInstance(config));
         config.setTrustedRoutingToken(environment.getProperty("DISPATCH_ROUTING_TOKEN", "").trim());
         validate(config);
@@ -97,58 +56,19 @@ public class DispatcherConfiguration {
     }
 
     private static void validate(DispatchConfig c) {
-        // Spring's @ConditionalOnProperty has already filtered "env unset" / literal "false" by the
-        // time this @Bean is wired. This defensive check catches the edge where the env is set to
-        // pure whitespace — OnPropertyCondition treats that as "not false" and activates the bean,
-        // but downstream lookups against ServiceDiscovery would silently return zero hosts.
-        if (c.getFePoolServiceId() == null || c.getFePoolServiceId().isBlank()) {
-            throw new IllegalArgumentException(
-                    "DISPATCH_FE_POOL_SERVICE_ID (or DISPATCH_CONFIG.fePoolServiceId) must be a "
-                            + "non-blank vipserver/discovery name when the dispatcher is loaded");
-        }
-        if (c.getBatchTimeoutMs() <= 0) {
-            throw new IllegalArgumentException("batchTimeoutMs must be > 0, got " + c.getBatchTimeoutMs());
-        }
-        // A negative margin would make FeClient's whole-call cap (batchTimeoutMs + margin) fall
-        // below the headers budget — every fanout sub-call would time out instantly with no
-        // boot-time signal. Zero is legal: it just removes the extra body-read budget.
-        if (c.getBodyReadMarginMs() < 0) {
-            throw new IllegalArgumentException("bodyReadMarginMs must be >= 0, got " + c.getBodyReadMarginMs());
-        }
-        if (c.getMaxAggregateResponseBytes() <= 0) {
-            throw new IllegalArgumentException("maxAggregateResponseBytes must be > 0, got "
-                    + c.getMaxAggregateResponseBytes());
-        }
-        if (c.getMaxAggregateRequestBytes() <= 0) {
-            throw new IllegalArgumentException("maxAggregateRequestBytes must be > 0, got "
-                    + c.getMaxAggregateRequestBytes());
-        }
-        if (c.getMaxDryRunResponseBytes() <= 0) {
-            throw new IllegalArgumentException("maxDryRunResponseBytes must be > 0, got "
-                    + c.getMaxDryRunResponseBytes());
-        }
-        if (c.getProbePath() == null || c.getProbePath().isBlank()) {
-            throw new IllegalArgumentException(
-                    "probePath must not be blank — set DISPATCH_PROBE_PATH=/frontend_health (rtp_llm) "
-                            + "or /health (vLLM) etc.; got '" + c.getProbePath() + "'");
-        }
-        if (c.isPreAssignBe() && c.getTrustedRoutingToken().isBlank()) {
-            throw new IllegalArgumentException(
-                    "DISPATCH_ROUTING_TOKEN must be non-blank when preAssignBe is enabled");
-        }
-        FeAllocationMode allocationMode = FeAllocationMode.parse(c.getFeAllocation());
-        // Normalize once so logs, metrics, and JSON-loaded vs env-loaded configs expose one value.
-        c.setFeAllocation(allocationMode.configValue());
-        // SubBatchSpec.parse throws IllegalArgumentException with a precise message on bad DSL.
+        Assert.hasText(c.getFePoolServiceId(), "DISPATCH_FE_POOL_SERVICE_ID must name the FE discovery service");
+        Assert.hasText(c.getProbePath(), "dispatch.probe-path must not be blank");
+        Assert.notNull(c.getFeAllocation(), "dispatch.fe-allocation must be master or local");
+        Assert.isTrue(c.getBatchTimeoutMs() > 0, "dispatch.batch-timeout-ms must be > 0");
+        Assert.isTrue(c.getBodyReadMarginMs() >= 0, "dispatch.body-read-margin-ms must be >= 0");
+        Assert.isTrue(c.getMaxAggregateResponseBytes() > 0, "dispatch.max-aggregate-response-bytes must be > 0");
+        Assert.isTrue(c.getMaxAggregateRequestBytes() > 0, "dispatch.max-aggregate-request-bytes must be > 0");
+        Assert.isTrue(!c.isPreAssignBe() || !c.getTrustedRoutingToken().isBlank(),
+                "DISPATCH_ROUTING_TOKEN must be non-blank when preAssignBe is enabled");
         c.setSubBatchSpec(SubBatchSpec.parse(c.getSubBatch()));
     }
 
-    /**
-     * Dedicated named connection provider so dispatcher fanout cannot starve
-     * master forwarding connections. Reactor-netty pools per remote
-     * address, so the effective ceiling is {@code FE_MAX_CONNECTIONS_PER_HOST × N FE hosts}.
-     */
-    @Bean("dispatcherFeConnectionProvider")
+    @Bean(name = "dispatcherFeConnectionProvider", destroyMethod = "dispose")
     public ConnectionProvider dispatcherFeConnectionProvider() {
         return ConnectionProvider.builder("dispatcher-fe")
                 .maxConnections(FE_MAX_CONNECTIONS_PER_HOST)
@@ -157,11 +77,6 @@ public class DispatcherConfiguration {
                 .build();
     }
 
-    /**
-     * Shared WebClient for passthrough and health-probe traffic. No {@code responseTimeout} —
-     * mid-stream silence is normal for SSE, and {@link PassthroughClient} caps the body Flux
-     * with its own {@code STREAM_TIMEOUT_MS} as a safety net.
-     */
     @Bean("dispatcherPassthroughWebClient")
     public WebClient dispatcherPassthroughWebClient(WebClient.Builder builder,
             @Qualifier("dispatcherFeConnectionProvider") ConnectionProvider provider) {
@@ -172,19 +87,18 @@ public class DispatcherConfiguration {
                 .build();
     }
 
-    /**
-     * Health probes get their own tiny connection pool, isolated from the fanout/passthrough
-     * data plane: when {@link #FE_MAX_CONNECTIONS_PER_HOST} is saturated under load, a probe
-     * queued behind data traffic exceeds its 500ms budget and marks a healthy FE dead —
-     * exactly when accurate liveness matters most. Two connections per host cover the
-     * one-probe-per-interval cadence with headroom.
-     */
-    @Bean("dispatcherProbeWebClient")
-    public WebClient dispatcherProbeWebClient(WebClient.Builder builder) {
-        ConnectionProvider probeProvider = ConnectionProvider.builder("dispatcher-fe-probe")
+    // Probe traffic must not queue behind inference requests and falsely mark busy FEs dead.
+    @Bean(name = "dispatcherProbeConnectionProvider", destroyMethod = "dispose")
+    public ConnectionProvider dispatcherProbeConnectionProvider() {
+        return ConnectionProvider.builder("dispatcher-fe-probe")
                 .maxConnections(2)
                 .pendingAcquireTimeout(Duration.ofMillis(FE_PENDING_ACQUIRE_TIMEOUT_MS))
                 .build();
+    }
+
+    @Bean("dispatcherProbeWebClient")
+    public WebClient dispatcherProbeWebClient(WebClient.Builder builder,
+            @Qualifier("dispatcherProbeConnectionProvider") ConnectionProvider probeProvider) {
         HttpClient probeHttp = HttpClient.create(probeProvider)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, FE_CONNECT_TIMEOUT_MS);
         return builder.clone()
@@ -192,33 +106,13 @@ public class DispatcherConfiguration {
                 .build();
     }
 
-    /**
-     * Dispatcher routes on the SHARED 7001 listener. All dispatcher routes are anchored under
-     * {@code /dispatcher/**}, disjoint from the Master's {@code /rtp_llm/*}, so no relative
-     * ordering between the RouterFunction beans is needed.
-     */
     @Bean
     public RouterFunction<ServerResponse> dispatcherRoutes(DispatchRouter router) {
         return router.routes();
     }
 
-    /**
-     * Emits the boot WARN line surfacing dispatcher footprint. WARN so the line survives default
-     * {@code LOG_LEVEL=null} gating — operators need this exact line to verify which FE pool,
-     * batchSpecs count, and timeouts the dispatcher came up with.
-     */
     @Bean
-    SmartInitializingSingleton dispatcherBootLog(DispatchConfig cfg, DispatcherFePoolRefresher refresher) {
-        return () -> Logger.warn(
-                "dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
-                        + "batchTimeoutMs={}, probePath={}, feAllocation={}, preAssignBe={}, "
-                        + "maxAggregateRequestBytes={}, maxAggregateResponseBytes={}, "
-                        + "maxDryRunResponseBytes={}",
-                cfg.getFePoolServiceId(), refresher.currentSize(), cfg.getSubBatch(),
-                BatchEndpointSpec.SPECS.size(),
-                cfg.getBatchTimeoutMs(), cfg.getProbePath(), cfg.getFeAllocation(),
-                cfg.isPreAssignBe(), cfg.getMaxAggregateRequestBytes(),
-                cfg.getMaxAggregateResponseBytes(),
-                cfg.getMaxDryRunResponseBytes());
+    SmartInitializingSingleton dispatcherBootLog(DispatchConfig cfg) {
+        return () -> Logger.warn("dispatcher enabled: {}", JsonUtils.toString(cfg));
     }
 }

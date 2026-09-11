@@ -9,9 +9,8 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Which inbound headers the dispatcher relays to FE, shared by the passthrough and fanout paths so
- * the two cannot drift: a caller must not lose its {@code Authorization}, tenant or tracing headers
- * merely because its request happened to be batch-shaped and took the split path.
+ * Relay end-to-end headers, excluding framing, Connection-nominated fields and caller routing
+ * credentials.
  */
 final class DispatcherHeaders {
 
@@ -20,47 +19,22 @@ final class DispatcherHeaders {
     private DispatcherHeaders() {
     }
 
-    /**
-     * Hop-by-hop headers from RFC 7230 §6.1 plus framing headers WebClient must compute itself for
-     * the outbound connection. Forwarding any of these from the inbound request — or back on the
-     * response — corrupts the new connection: an inbound {@code Transfer-Encoding: chunked}
-     * double-frames the body WebClient is already about to chunk-encode; an inbound {@code Host}
-     * routes to whatever the original client put there; {@code Proxy-Authorization} would be
-     * relayed downstream against the original intent. Comparison is case-insensitive.
-     */
-    static final Set<String> HOP_BY_HOP = caseInsensitiveSet(
-            "connection",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "te",
-            "trailer",
-            "transfer-encoding",
-            "upgrade",
-            "host",
-            "content-length");
+    /** RFC 7230 hop-by-hop headers and framing computed by the outbound connection. */
+    static final Set<String> HOP_BY_HOP = caseInsensitiveSet(Set.of(),
+            "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+            "transfer-encoding", "upgrade", "host", "content-length");
 
     /** Caller-controlled copies of the internal trust header must never cross into FE. */
     static final Set<String> TO_FE_SKIP = caseInsensitiveSet(
             HOP_BY_HOP, TRUSTED_ROUTING_HEADER);
 
-    /**
-     * Fanout drops everything hop-by-hop plus two more, because unlike passthrough it does not
-     * stream bytes through — it parses each FE response and re-serializes a merged one:
-     * <ul>
-     *   <li>{@code accept-encoding} — the dispatcher reads the FE body as raw bytes and hands them
-     *       to {@code JSON.parseObject}; letting FE gzip the response would break that parse.</li>
-     *   <li>{@code content-length} / {@code content-type} — each chunk body is re-serialized here,
-     *       so the inbound values describe the wrong entity ({@code content-type} is set explicitly
-     *       by {@link FeClient}; {@code content-length} is already hop-by-hop).</li>
-     * </ul>
-     */
+    /** Fanout rebuilds JSON bodies; raw response bytes must not be compressed by the FE. */
     static final Set<String> FANOUT_SKIP = caseInsensitiveSet(
             TO_FE_SKIP, "content-type", "accept-encoding");
 
     /**
-     * Copy end-to-end headers while also honoring fields dynamically nominated by
-     * {@code Connection}, which are hop-by-hop even when absent from the fixed standard list.
+     * Copy end-to-end headers while also honoring fields dynamically nominated by {@code Connection},
+     * which are hop-by-hop even when absent from the fixed standard list.
      */
     static void copyEndToEnd(HttpHeaders source, HttpHeaders sink, Set<String> skip) {
         Set<String> effectiveSkip = skip;
@@ -86,14 +60,7 @@ final class DispatcherHeaders {
         });
     }
 
-    /** Case-insensitive membership without the per-header {@code toLowerCase} allocation. */
-    private static Set<String> caseInsensitiveSet(String... names) {
-        Set<String> set = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        set.addAll(Arrays.asList(names));
-        return Collections.unmodifiableSet(set);
-    }
-
-    /** Same as above but seeded from {@code base}, so a derived set cannot drift from its parent. */
+    /** Case-insensitive membership avoids per-header string allocation. */
     private static Set<String> caseInsensitiveSet(Set<String> base, String... extra) {
         Set<String> set = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         set.addAll(base);

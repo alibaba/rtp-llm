@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -532,6 +532,57 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor.fill_request_info = lambda _input: None
         visitor.check_sp_supported = lambda _input: None
         return visitor
+
+    async def test_batch_requires_preassignment_when_master_scheduling_is_enabled(self):
+        for available, assigned in (
+            (True, (True, True)),
+            (True, (False, False)),
+            (True, (True, False)),
+            (False, (False, False)),
+        ):
+            with self.subTest(available=available, assigned=assigned):
+                client = SimpleNamespace(batch_enqueue=AsyncMock(return_value=[]))
+                visitor = self._visitor(client)
+                visitor.host_service.service_available = available
+                visitor.route_ips = AsyncMock()
+                inputs = [_FakeInput(request_id=i) for i in range(2)]
+                for item, has_target in zip(inputs, assigned):
+                    item.generate_config.role_addrs = (
+                        [
+                            RoleAddr(
+                                role=RoleType.PDFUSION,
+                                ip="be",
+                                http_port=80,
+                                grpc_port=81,
+                            )
+                        ]
+                        if has_target
+                        else []
+                    )
+                if available and not all(assigned):
+                    with self.assertRaises(FtRuntimeException) as error:
+                        await visitor.batch_enqueue(inputs)
+                    self.assertEqual(
+                        ExceptionType.INVALID_PARAMS, error.exception.exception_type
+                    )
+                    client.batch_enqueue.assert_not_awaited()
+                else:
+                    await visitor.batch_enqueue(inputs)
+                    client.batch_enqueue.assert_awaited_once_with(inputs)
+                visitor.route_ips.assert_not_awaited()
+
+    async def test_batch_validates_input_and_never_replays_rpc_failure(self):
+        client = SimpleNamespace(
+            batch_enqueue=AsyncMock(side_effect=RuntimeError("connection lost"))
+        )
+        visitor = self._visitor(client)
+        self.assertEqual([], await visitor.batch_enqueue([]))
+        with self.assertRaises(FtRuntimeException):
+            await visitor.batch_enqueue([_FakeInput(prompt_length=0)])
+        client.batch_enqueue.assert_not_awaited()
+        with self.assertRaisesRegex(RuntimeError, "connection lost"):
+            await visitor.batch_enqueue([_FakeInput()])
+        client.batch_enqueue.assert_awaited_once()
 
     async def test_prefill_cp_rejects_full_sequence_outputs_before_rpc(self):
         client = _SuccessfulModelRpcClient(["unexpected-output"])

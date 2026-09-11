@@ -1,9 +1,12 @@
 package org.flexlb.dispatcher;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -24,12 +27,10 @@ public final class BatchChunkAssembler {
         this.count = chunkCount(items.size(), split);
         template = new JSONObject(body);
         template.put(endpoint.getRequestArrayField(), new JSONArray());
-        template.remove("role_addrs");
         String key = body.containsKey("generate_config") ? "generate_config" : "generation_config";
         JSONObject originalConfig = body.getJSONObject(key);
         if (originalConfig != null || endpoint.isPreAssignable()) {
             JSONObject config = originalConfig == null ? new JSONObject() : new JSONObject(originalConfig);
-            config.remove("role_addrs");
             if (endpoint.isPreAssignable()) {
                 template.remove("generation_config");
                 if (!atomicBatchAllowed) {
@@ -51,18 +52,12 @@ public final class BatchChunkAssembler {
     }
 
     public int chunkSize(int index) {
-        if (count == 0) {
-            return 0;
-        }
         return split.mode() == SubBatchSpec.Mode.SIZE
                 ? Math.min(split.value(), items.size() - index * split.value())
                 : items.size() / count + (index < items.size() % count ? 1 : 0);
     }
 
     static int chunkCount(int total, SubBatchSpec split) {
-        if (total < 0 || split == null || split.value() < 1) {
-            throw new IllegalArgumentException("total must be non-negative and subBatch value must be positive");
-        }
         if (total == 0) {
             return 0;
         }
@@ -71,21 +66,14 @@ public final class BatchChunkAssembler {
     }
 
     /** Exact wire bytes without allocating repeated envelopes; JSON byte arrays have int lengths. */
-    public long projectedBytes(List<BatchScheduleTarget> targets) {
+    public long projectedBytes() {
         if (count == 0) {
             return 0;
         }
         long templateBytes = BatchBodyParser.serialize(template).length;
-        long arrayBytes = BatchBodyParser.serialize(items).length;
+        long arrayBytes = JSON.writeTo(OutputStream.nullOutputStream(), items, JSONWriter.Feature.WriteNulls);
         // The product of two positive int lengths plus their framing fits in a signed long.
-        long bytes = (templateBytes - 2) * count + arrayBytes + count - 1L;
-        for (int i = 0; i < Math.min(count, targets.size()); i++) {
-            if (isPreAssignable(targets.get(i))) {
-                long extra = 14L + BatchBodyParser.serialize(roleAddrs(targets.get(i))).length;
-                bytes = bytes > Long.MAX_VALUE - extra ? Long.MAX_VALUE : bytes + extra;
-            }
-        }
-        return bytes;
+        return (templateBytes - 2) * count + arrayBytes + count - 1L;
     }
 
     /** Each chunk owns its array, envelope and mutable config; large read-only fields stay shared. */
@@ -99,22 +87,14 @@ public final class BatchChunkAssembler {
             if (configKey != null) {
                 chunk.put(configKey, new JSONObject(template.getJSONObject(configKey)));
             }
-            if (i < targets.size() && isPreAssignable(targets.get(i))) {
+            if (i < targets.size() && targets.get(i).getGrpcPort() != null) {
                 JSONObject config = chunk.getJSONObject("generate_config");
-                if (config == null) {
-                    config = new JSONObject();
-                    chunk.put("generate_config", config);
-                }
                 config.put("role_addrs", roleAddrs(targets.get(i)));
             }
             chunks.add(chunk);
             offset += size;
         }
         return chunks;
-    }
-
-    static boolean isPreAssignable(BatchScheduleTarget target) {
-        return target.getGrpcPort() != null && target.getRole() != null;
     }
 
     private static JSONArray roleAddrs(BatchScheduleTarget target) {

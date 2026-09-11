@@ -34,7 +34,16 @@ class HttpLoadBalanceServerTest {
         when(scheduler.getQueuedRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
 
-        HttpLoadBalanceServer server = new HttpLoadBalanceServer(consistency, configService, scheduler, endpointRegistry, mock(WorkerDirectory.class), synchronizer, new ServerScheduleLatencyRecorder(), mock(org.flexlb.service.BatchScheduleCoordinator.class), mock(org.flexlb.service.monitor.EngineHealthReporter.class));
+        HttpLoadBalanceServer server = new HttpLoadBalanceServer(
+                consistency,
+                configService,
+                scheduler,
+                endpointRegistry,
+                mock(WorkerDirectory.class),
+                synchronizer,
+                new ServerScheduleLatencyRecorder(),
+                mock(org.flexlb.service.BatchScheduleCoordinator.class),
+                mock(org.flexlb.service.monitor.EngineHealthReporter.class));
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
@@ -75,7 +84,16 @@ class HttpLoadBalanceServerTest {
                 .thenReturn(Map.of("127.0.0.1:8080", endpoint));
         when(endpointRegistry.snapshotDecodeEndpoints()).thenReturn(Map.of());
 
-        HttpLoadBalanceServer server = new HttpLoadBalanceServer(mock(LBStatusConsistencyService.class), configService, scheduler, endpointRegistry, mock(WorkerDirectory.class), mock(MasterEngineSynchronizer.class), new ServerScheduleLatencyRecorder(), mock(org.flexlb.service.BatchScheduleCoordinator.class), mock(org.flexlb.service.monitor.EngineHealthReporter.class));
+        HttpLoadBalanceServer server = new HttpLoadBalanceServer(
+                mock(LBStatusConsistencyService.class),
+                configService,
+                scheduler,
+                endpointRegistry,
+                mock(WorkerDirectory.class),
+                mock(MasterEngineSynchronizer.class),
+                new ServerScheduleLatencyRecorder(),
+                mock(org.flexlb.service.BatchScheduleCoordinator.class),
+                mock(org.flexlb.service.monitor.EngineHealthReporter.class));
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
@@ -102,7 +120,16 @@ class HttpLoadBalanceServerTest {
         response.setMsg("refreshed");
         when(consistency.handleMasterChange(org.mockito.ArgumentMatchers.any()))
                 .thenReturn(response);
-        HttpLoadBalanceServer server = new HttpLoadBalanceServer(consistency, mock(ConfigService.class), mock(RequestScheduler.class), mock(EndpointRegistry.class), mock(WorkerDirectory.class), mock(MasterEngineSynchronizer.class), new ServerScheduleLatencyRecorder(), mock(org.flexlb.service.BatchScheduleCoordinator.class), mock(org.flexlb.service.monitor.EngineHealthReporter.class));
+        HttpLoadBalanceServer server = new HttpLoadBalanceServer(
+                consistency,
+                mock(ConfigService.class),
+                mock(RequestScheduler.class),
+                mock(EndpointRegistry.class),
+                mock(WorkerDirectory.class),
+                mock(MasterEngineSynchronizer.class),
+                new ServerScheduleLatencyRecorder(),
+                mock(org.flexlb.service.BatchScheduleCoordinator.class),
+                mock(org.flexlb.service.monitor.EngineHealthReporter.class));
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
