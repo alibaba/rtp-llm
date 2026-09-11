@@ -14,6 +14,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wr
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
 )
+from rtp_llm.models_py.triton_kernels.mla_decode_metadata import (
+    prepare_mla_decode_metadata,
+)
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -46,6 +49,9 @@ class _TokenSpeedDecodeMetadata:
         self.batch_size = 0
         self.padded_blocks = 0
         self.max_seq_len = 0
+        self.positions_d: Optional[torch.Tensor] = None
+        self.batch_indice_d: Optional[torch.Tensor] = None
+        self.slot_mapping: Optional[torch.Tensor] = None
 
         if use_cuda_graph and max_bs > 0:
             max_blocks = max(
@@ -82,6 +88,70 @@ class _TokenSpeedDecodeMetadata:
                     "TokenSpeed MLA decode column metadata cannot grow under CUDA graph"
                 )
             self.column_indices = torch.arange(padded_blocks, device=self.device)
+
+    def plan_device(
+        self,
+        prefix: torch.Tensor,
+        block_table: torch.Tensor,
+        query_length: int,
+        forbid_realloc: bool = False,
+    ) -> None:
+        """Use live device lengths; allocation depends only on tensor shapes."""
+        if (
+            not prefix.is_cuda
+            or prefix.dtype != torch.int32
+            or prefix.ndim != 1
+            or not block_table.is_cuda
+            or block_table.device != prefix.device
+            or block_table.dtype != torch.int32
+            or block_table.ndim != 2
+            or block_table.size(0) != prefix.numel()
+            or block_table.size(1) <= 0
+            or query_length <= 0
+        ):
+            raise ValueError("TokenSpeed MLA requires CUDA int32 lengths and block tables")
+        batch_size, width = block_table.shape
+        if batch_size <= 0:
+            raise ValueError("TokenSpeed MLA requires a nonempty batch")
+        max_seq_len = width * self.token_per_block
+        if self.use_cuda_graph:
+            max_seq_len = min(max_seq_len, self.max_context_len)
+        # Capture tables include speculative reserve beyond the configured
+        # context limit. Attention only needs pages within that limit.
+        needed_blocks = (max_seq_len + self.token_per_block - 1) // self.token_per_block
+        if forbid_realloc and (
+            self.block_tables is None
+            or self.block_tables.size(0) < batch_size
+            or self.block_tables.size(1) < needed_blocks
+        ):
+            raise ValueError("TokenSpeed MLA device metadata exceeds captured capacity")
+        self.ensure_capacity(batch_size, needed_blocks)
+        num_tokens = batch_size * query_length
+        if self.positions_d is None or self.positions_d.numel() != num_tokens:
+            if forbid_realloc:
+                raise ValueError("TokenSpeed MLA query shape changed after capture")
+            self.positions_d = torch.empty(
+                num_tokens, dtype=torch.int32, device=self.device
+            )
+            self.batch_indice_d = torch.empty_like(self.positions_d)
+            self.slot_mapping = torch.empty(
+                num_tokens, dtype=torch.int64, device=self.device
+            )
+        prepare_mla_decode_metadata(
+            prefix,
+            block_table,
+            self.seq_lens,
+            self.block_tables,
+            self.positions_d,
+            self.batch_indice_d,
+            self.slot_mapping,
+            self.token_per_block,
+            query_length,
+            max_seq_len,
+        )
+        self.batch_size = batch_size
+        self.padded_blocks = self.block_tables.size(1)
+        self.max_seq_len = max_seq_len
 
     def plan(self, fmha_params: Any) -> None:
         """Materialize TokenSpeed's dense tables from RTP's compact MLA metadata."""
@@ -613,6 +683,19 @@ class TokenSpeedMlaDecodeOp:
 
     def plan(self, fmha_params: Any) -> None:
         self._metadata.plan(fmha_params)
+        self._update_metadata_views()
+
+    def plan_device(
+        self,
+        prefix: torch.Tensor,
+        block_table: torch.Tensor,
+        query_length: int,
+        forbid_realloc: bool = False,
+    ) -> None:
+        self._metadata.plan_device(prefix, block_table, query_length, forbid_realloc)
+        self._update_metadata_views()
+
+    def _update_metadata_views(self) -> None:
         self._sync_metadata_views()
         self._batch_size = self._metadata.batch_size
         self._padded_blocks = self._metadata.padded_blocks
@@ -718,7 +801,7 @@ class TokenSpeedMlaDecodeOp:
 class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
     """RTP attention-framework adapter for TokenSpeed MLA decode.
 
-    The shared base supplies the host planner, RoPE, and KV-write pipeline.
+    Length-dependent planning stays on the device, including during MTP verify.
     """
 
     def __init__(
@@ -785,6 +868,30 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
             is_cuda_graph=is_cuda_graph,
             parallelism_config=parallelism_config,
             warmup_flashinfer=False,
+        )
+
+    def create_params(self, attn_inputs: PyAttentionInputs) -> None:
+        self.fmha_params = self.fmha_impl._metadata
+        self.rope_params = self.fmha_params
+        self.prepare(attn_inputs)
+
+    def prepare(
+        self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
+    ) -> None:
+        self.attn_inputs = attn_inputs
+        query_length = decode_query_length(attn_inputs)
+        is_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
+        prefix = (
+            attn_inputs.prefix_lengths
+            if is_verify or is_draft_update
+            else attn_inputs.sequence_lengths
+        )
+        self.fmha_impl.plan_device(
+            prefix,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            query_length,
+            forbid_realloc,
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:

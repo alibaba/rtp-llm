@@ -418,6 +418,12 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
         run_multi_query_case(self, self.geo, [384, 513], q_len=5, is_cuda_graph=True)
 
     def test_target_verify_graph_writes_all_tokens_before_attention(self):
+        self._check_target_verify_cache_write(False)
+
+    def test_device_target_verify_graph_writes_all_tokens_before_attention(self):
+        self._check_target_verify_cache_write(True)
+
+    def _check_target_verify_cache_write(self, device_metadata):
         geo = self.geo
         geo.page_size = 128
         batch_size = 2
@@ -476,10 +482,18 @@ class TokenSpeedMlaDecodeOpTest(TestCase):
             max_context_len=384,
             is_cuda_graph=True,
         )
-        op.plan(params)
+        prefix_d = prefix_lengths.cuda()
+        table_d = block_table_host.cuda()
+        if device_metadata:
+            op.plan_device(prefix_d, table_d, q_len)
+            params = op._metadata
+        else:
+            op.plan(params)
         write_op = MlaKVCacheWriteOp(KvCacheDataType.BASE, clear_page_on_boundary=True)
 
         def graph_forward():
+            if device_metadata:
+                op.plan_device(prefix_d, table_d, q_len, forbid_realloc=True)
             write_op.forward(
                 compressed_kv,
                 k_pe,

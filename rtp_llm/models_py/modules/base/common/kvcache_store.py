@@ -102,7 +102,11 @@ def create_write_cache_store_impl(
     attn_inputs: PyAttentionInputs,
     kv_cache: Optional[KVCache] = None,
 ) -> Optional[WriteCacheStoreOp]:
-    if not (attn_inputs.is_prefill and attn_inputs.cache_store_inputs):
+    if (
+        not (attn_inputs.is_prefill and attn_inputs.cache_store_inputs)
+        or getattr(attn_inputs, "is_target_verify", False)
+        or getattr(attn_inputs, "is_mtp_draft_update", False)
+    ):
         return None
 
     cache_store_inputs = attn_inputs.cache_store_inputs

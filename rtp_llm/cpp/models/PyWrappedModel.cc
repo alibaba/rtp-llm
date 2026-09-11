@@ -578,7 +578,9 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
     std::optional<PyCacheStoreInputs> params;
-    if (!inputs.warmup && inputs.pd_separation) {
+    // Verify and draft-update are decode work despite their prefill-shaped inputs.
+    // Decode cache return needs a separate committed-state publication contract.
+    if (!inputs.warmup && inputs.pd_separation && !inputs.is_target_verify && !inputs.is_mtp_draft_update) {
         const size_t         decoder_batch_size = inputs.sequence_lengths.size(0);
         const size_t         context_batch_size = inputs.input_lengths.size(0) - decoder_batch_size;
         std::vector<int64_t> cache_keys_vec;

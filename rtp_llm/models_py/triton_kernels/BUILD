@@ -36,6 +36,13 @@ py_library(
 )
 
 py_library(
+    name = "mla_decode_metadata",
+    srcs = ["mla_decode_metadata.py"],
+    deps = ["//rtp_llm:triton"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
     visibility = ["//visibility:public"]
@@ -74,6 +81,7 @@ py_library(
         ":autotune_cache",
         ":kimi_kda",
         ":linear_replay",
+        ":mla_decode_metadata",
         ":zigzag_permute",
     ],
     visibility = ["//visibility:public"]

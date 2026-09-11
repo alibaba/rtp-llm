@@ -13,7 +13,6 @@
 #include <limits>
 #include <numeric>
 #include <string>
-#include <unordered_set>
 #include <vector>
 #include <cstring>
 
@@ -205,18 +204,18 @@ void setVerifyPairInputs(GptModelInputs& model_input,
                          size_t          score_len,
                          TensorHolder&   host_holder) {
     // Target-verify reinterprets decode sequence lengths as prefix lengths.
-    // Preserve the matching CPU mirror before clearing the decode-only fields.
+    // Preserve an existing legacy CPU mirror; device-state callers clear it.
     const auto prefix_lengths_host = model_input.sequence_lengths_host_for_log;
-    model_input.combo_tokens       = std::move(combo_tokens);
-    model_input.sequence_lengths   = emptyInt32OnCuda({0});
-    model_input.last_hidden_states = torch::Tensor();
-    model_input.prefix_lengths     = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
-    model_input.input_lengths      = fullInt32OnCuda({static_cast<int64_t>(batch_size)}, score_len);
-    model_input.lm_output_indexes  = makeCudaInt32Range(static_cast<int64_t>(batch_size * score_len));
+    model_input.combo_tokens           = std::move(combo_tokens);
+    model_input.sequence_lengths       = emptyInt32OnCuda({0});
+    model_input.sequence_lengths_plus_1 = torch::Tensor();
+    model_input.last_hidden_states     = torch::Tensor();
+    model_input.prefix_lengths         = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
+    model_input.input_lengths          = fullInt32OnCuda({static_cast<int64_t>(batch_size)}, score_len);
+    model_input.lm_output_indexes      = makeCudaInt32Range(static_cast<int64_t>(batch_size * score_len));
 
     // One-step MTP packs `score_len` target-verify tokens per request.
-    // Keep host lengths aligned with the rewritten device tensors so Kimi K3
-    // can build cu_seqlens without a device-to-host copy.
+    // Query widths are static host metadata, independent of device acceptance.
     const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
     model_input.input_lengths_host_for_log = torch::full(
         {static_cast<int64_t>(batch_size)}, static_cast<int64_t>(score_len), pinned_i32);
@@ -284,40 +283,6 @@ void logMtpStateFallback(const GenerateStreamPtr& stream, const char* reason) {
                      g_mtp_device_state_success_count.load(std::memory_order_relaxed),
                      sp_output_buffer ? sp_output_buffer->tensors_holder.size() : 0,
                      stream->seqLength());
-}
-
-torch::Tensor collectMtpStatePrefixLengthsHost(const std::list<GenerateStreamPtr>& streams) {
-    const auto pinned_i32 =
-        torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
-    auto prefix_lengths_host = torch::empty({static_cast<int64_t>(streams.size())}, pinned_i32);
-    auto* prefix_ptr         = prefix_lengths_host.data_ptr<int32_t>();
-
-    std::unordered_set<const torch::Event*> synchronized_events;
-    size_t                                  index = 0;
-    for (const auto& stream : streams) {
-        const auto& state = stream->getMtpAsyncDeviceState();
-        const auto& host  = state.next_seq_len_host;
-        if (!host.defined() || host.is_cuda() || host.scalar_type() != torch::kInt32 || !host.is_contiguous()
-            || host.numel() < 1) {
-            logMtpStateFallback(stream, "next_seq_len_host_invalid");
-            return torch::Tensor();
-        }
-
-        const auto& ready_event = state.next_seq_len_host_ready_event;
-        if (ready_event && synchronized_events.insert(ready_event.get()).second) {
-            RTP_LLM_PROFILE_SCOPE("mtp.wait_next_seq_len_host");
-            ready_event->synchronize();
-        }
-
-        const int32_t next_seq_len = host.data_ptr<int32_t>()[0];
-        if (next_seq_len <= 0) {
-            logMtpStateFallback(stream, "next_seq_len_host_non_positive");
-            return torch::Tensor();
-        }
-        prefix_ptr[index++] = next_seq_len - 1;
-    }
-
-    return prefix_lengths_host;
 }
 
 bool collectMtpStateProposeSlices(const std::list<GenerateStreamPtr>& streams,
@@ -697,12 +662,14 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                                                            TensorHolder&       host_holder) {
     const size_t batch_size = stream_groups.size();
     if (batch_size == 0) {
-        model_input.combo_tokens      = emptyInt32OnCuda({0});
-        model_input.input_lengths     = emptyInt32OnCuda({0});
-        model_input.sequence_lengths  = emptyInt32OnCuda({0});
-        model_input.sequence_lengths_plus_1 = torch::Tensor();
-        model_input.prefix_lengths           = emptyInt32OnCuda({0});
-        model_input.lm_output_indexes = emptyInt32OnCuda({0});
+        model_input.combo_tokens                  = emptyInt32OnCuda({0});
+        model_input.input_lengths                 = emptyInt32OnCuda({0});
+        model_input.sequence_lengths              = emptyInt32OnCuda({0});
+        model_input.sequence_lengths_plus_1       = torch::Tensor();
+        model_input.prefix_lengths                = emptyInt32OnCuda({0});
+        model_input.sequence_lengths_host_for_log = torch::Tensor();
+        model_input.prefix_lengths_host_for_log   = torch::Tensor();
+        model_input.lm_output_indexes             = emptyInt32OnCuda({0});
         return;
     }
 
@@ -714,33 +681,21 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         propose_slices_gpu.reserve(batch_size);
         sequence_lengths_gpu.reserve(batch_size);
         if (!all_streams.empty()
-            && collectMtpStateProposeSlices(all_streams, propose_slices_gpu, &sequence_lengths_gpu)) {
-            auto target_prefix_lengths_host = collectMtpStatePrefixLengthsHost(all_streams);
-            if (target_prefix_lengths_host.defined()) {
-                auto combo_tokens_gpu         = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
-                model_input.combo_tokens      = std::move(combo_tokens_gpu);
-                model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
-                if (sequence_lengths_gpu.size() == batch_size) {
-                    // next_seq_len includes the target token carried by the stream.
-                    // Draft decode consumes the following position, while target
-                    // verification must first write that carried token.
-                    auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
-                    model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
-                    model_input.prefix_lengths   = (model_input.sequence_lengths - 1).to(torch::kInt32);
-                } else if (model_input.sequence_lengths.defined()) {
-                    auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
-                    model_input.prefix_lengths   = target_prefix_lengths;
-                    model_input.sequence_lengths =
-                        normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
-                }
-                model_input.sequence_lengths_host_for_log = std::move(target_prefix_lengths_host);
-                separateDraftDecodeHostPositions(model_input, batch_size);
-                // The multi-step draft path mutates sequence_lengths between
-                // forwards. Do not reuse the normal-decode next-length snapshot.
-                model_input.sequence_lengths_plus_1       = torch::Tensor();
-                model_input.input_lengths                 = toCudaInt32(model_input.input_lengths, host_holder);
-                return;
-            }
+            && collectMtpStateProposeSlices(all_streams, propose_slices_gpu, &sequence_lengths_gpu)
+            && sequence_lengths_gpu.size() == batch_size) {
+            model_input.combo_tokens      = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
+            model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
+            // next_seq_len includes the target token carried by the stream.
+            // Draft consumes position N; target verification starts at N - 1.
+            auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
+            model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
+            model_input.prefix_lengths   = (model_input.sequence_lengths - 1).to(torch::kInt32);
+            // Host bookkeeping may still describe the preceding round.
+            model_input.sequence_lengths_host_for_log = torch::Tensor();
+            model_input.prefix_lengths_host_for_log   = torch::Tensor();
+            model_input.sequence_lengths_plus_1       = torch::Tensor();
+            model_input.input_lengths                 = toCudaInt32(model_input.input_lengths, host_holder);
+            return;
         }
     }
 
@@ -821,13 +776,10 @@ bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const Str
     auto pair_gpu                = interleaveTokenPairs(target_last_gpu, propose_gpu);
     auto next_seq_len_gpu_concat = torch::cat(next_seq_len_slices_gpu, 0);
 
-    // Publish only on success: the caller falls back to the legacy path on false and
-    // still needs the gatherer's mirror there.
-    auto exact_prefix_lengths_host = collectMtpStatePrefixLengthsHost(all_streams);
-    if (!exact_prefix_lengths_host.defined()) {
-        return false;
-    }
-    model_input.sequence_lengths_host_for_log = std::move(exact_prefix_lengths_host);
+    // Acceptance updates next_seq_len on device before host bookkeeping finishes.
+    // Do not republish the gatherer's potentially stale host lengths.
+    model_input.sequence_lengths_host_for_log = torch::Tensor();
+    model_input.prefix_lengths_host_for_log   = torch::Tensor();
     g_mtp_device_state_success_count.fetch_add(1, std::memory_order_relaxed);
 
     model_input.prefix_lengths = (next_seq_len_gpu_concat - 1).to(torch::kInt32);
