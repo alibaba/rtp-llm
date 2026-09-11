@@ -61,6 +61,7 @@ class Pipeline(object):
         master_config=None,
         parallelism_config=None,
         prefill_cp_config=None,
+        dsv4_image_token_id: Optional[int] = None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -83,6 +84,7 @@ class Pipeline(object):
             master_config=master_config,
             parallelism_config=parallelism_config,
             prefill_cp_config=prefill_cp_config,
+            dsv4_image_token_id=dsv4_image_token_id,
         )
 
     async def close(self):

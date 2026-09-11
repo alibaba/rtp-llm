@@ -221,6 +221,23 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 self._active -= 1
 
 
+def _create_rpc_server(service, concurrency):
+    service.max_requests = concurrency
+    # Embedding admission is capped separately; status/cache/release RPCs need room at saturation.
+    rpc_concurrency = concurrency + 2
+    executor = futures.ThreadPoolExecutor(max_workers=rpc_concurrency)
+    server = grpc.server(
+        executor,
+        maximum_concurrent_rpcs=rpc_concurrency,
+        options=[
+            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+        ],
+    )
+    add_MultimodalRpcServiceServicer_to_server(service, server)
+    return server, executor
+
+
 def vit_start_server(py_env_configs=None):
     if py_env_configs is None:
         py_env_configs = setup_args()
@@ -282,18 +299,7 @@ def vit_start_server(py_env_configs=None):
         engine.stop()
         raise ValueError("vit_max_concurrent_requests must be positive")
     service = MultimodalRpcServer(engine)
-    # A full embedding queue must leave room for releasing registered slots.
-    rpc_concurrency = concurrency + (2 if service.rdma_encoder is not None else 0)
-    executor = futures.ThreadPoolExecutor(max_workers=rpc_concurrency)
-    server = grpc.server(
-        executor,
-        maximum_concurrent_rpcs=rpc_concurrency,
-        options=[
-            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-        ],
-    )
-    add_MultimodalRpcServiceServicer_to_server(service, server)
+    server, executor = _create_rpc_server(service, concurrency)
     logging.info(f"rpc_server_port: {py_env_configs.server_config.rpc_server_port}")
     server.add_insecure_port(f"0.0.0.0:{py_env_configs.server_config.rpc_server_port}")
     server.start()

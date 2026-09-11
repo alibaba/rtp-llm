@@ -809,6 +809,14 @@ class BackendRPCServerVisitor:
         return True
 
 
+def get_dsv4_image_token_id(model_config) -> Optional[int]:
+    if getattr(model_config, "model_type", None) == "deepseek_v4":
+        mm_params = model_config.mm_related_params
+        if mm_params.config.get("vision_n_layers", 0) > 0:
+            return mm_params.special_token_ids["image_token_id"]
+    return None
+
+
 def create_backend_rpc_server_visitor(
     py_env_configs: "PyEnvConfigs",
     model_config,
@@ -816,10 +824,9 @@ def create_backend_rpc_server_visitor(
 ) -> "BackendRPCServerVisitor":
     """Build a `BackendRPCServerVisitor` from `PyEnvConfigs` + a lightweight `ModelConfig`.
 
-    Used by both `FrontendWorker` (historically inline) and `DashScApp` (independent
-    process) so they open equivalent channels to the backend without dragging in the
-    tokenizer/pipeline machinery. `model_config` only needs `max_seq_len` and
-    `attn_config.tokens_per_block`; produce it via `ModelFactory.create_model_config`.
+    Used by `DashScApp` without tokenizer/pipeline initialization. `FrontendWorker`
+    constructs its visitor through `Pipeline`; both paths share the image-token
+    configuration helper. Produce `model_config` via `ModelFactory.create_model_config`.
     """
     from rtp_llm.config.engine_config import EngineConfig
     from rtp_llm.distribute.distributed_server import (
@@ -841,12 +848,6 @@ def create_backend_rpc_server_visitor(
     if py_env_configs.vit_config:
         vit_separation = py_env_configs.vit_config.vit_separation
 
-    dsv4_image_token_id = None
-    if getattr(model_config, "model_type", None) == "deepseek_v4":
-        mm_params = model_config.mm_related_params
-        if mm_params.config.get("vision_n_layers", 0) > 0:
-            dsv4_image_token_id = mm_params.special_token_ids["image_token_id"]
-
     return BackendRPCServerVisitor(
         max_seq_len=model_config.max_seq_len,
         seq_size_per_block=model_config.attn_config.tokens_per_block,
@@ -860,5 +861,5 @@ def create_backend_rpc_server_visitor(
         parallelism_config=engine_config.parallelism_config,
         prefill_cp_config=py_env_configs.prefill_cp_config,
         source_role=source_role,
-        dsv4_image_token_id=dsv4_image_token_id,
+        dsv4_image_token_id=get_dsv4_image_token_id(model_config),
     )

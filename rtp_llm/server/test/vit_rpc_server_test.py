@@ -1,3 +1,4 @@
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -6,13 +7,22 @@ import grpc
 import torch
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CacheVersionPB,
     MMRdmaDescPB,
     MultimodalInputPB,
     MultimodalInputsPB,
     ReleaseEmbeddingPB,
+    StatusVersionPB,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
 )
 from rtp_llm.ops import get_multimodal_feature_hash
-from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, trans_output
+from rtp_llm.server.vit_rpc_server import (
+    MultimodalRpcServer,
+    _create_rpc_server,
+    trans_output,
+)
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 
 
@@ -89,6 +99,62 @@ class VitRpcServerTest(unittest.TestCase):
         self.assertEqual(first.max_seq_len, 8192)
         self.assertGreater(first.status_version, 0)
         self.assertGreater(second.status_version, first.status_version)
+
+    def test_status_and_cache_rpc_remain_available_at_embedding_limit(self):
+        entered = threading.Event()
+        release = threading.Event()
+        result = MMEmbeddingRes([torch.ones((2, 4))])
+        service = self.server(result)
+        self.assertIsNone(service.rdma_encoder)
+
+        def blocked_submit(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("test did not release the embedding request")
+            return result
+
+        service.engine.submit = mock.Mock(side_effect=blocked_submit)
+        # Legacy engines remain serial even if their configured RPC limit was larger.
+        service.max_requests = 32
+        server, executor = _create_rpc_server(service, concurrency=1)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        try:
+            with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+                stub = MultimodalRpcServiceStub(channel)
+                embedding = stub.RemoteMultimodalEmbedding.future(
+                    self.request(), timeout=10
+                )
+                self.assertTrue(entered.wait(5))
+                status = stub.GetWorkerStatus(StatusVersionPB(), timeout=2)
+                self.assertTrue(status.alive)
+                self.assertGreater(status.status_version, 0)
+                self.assertEqual(status.running_query_len, 1)
+                cache = stub.GetCacheStatus(CacheVersionPB(), timeout=2)
+                self.assertFalse(cache.cache_keys)
+                # The reserved RPC slots do not increase embedding admission.
+                with self.assertRaises(grpc.RpcError) as error:
+                    stub.RemoteMultimodalEmbedding(self.request(), timeout=2)
+                self.assertEqual(
+                    error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED
+                )
+                self.assertEqual(service.engine.submit.call_count, 1)
+                release.set()
+                output = embedding.result(timeout=5)
+                self.assertEqual(
+                    list(output.multimodal_outputs[0].multimodal_embedding.shape),
+                    [2, 4],
+                )
+                self.assertEqual(
+                    stub.GetWorkerStatus(
+                        StatusVersionPB(), timeout=2
+                    ).running_query_len,
+                    0,
+                )
+        finally:
+            release.set()
+            server.stop(0).wait()
+            executor.shutdown(wait=True)
 
     def test_returns_batch_metrics_without_proto_changes(self):
         server = self.server(

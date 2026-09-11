@@ -18,6 +18,7 @@ py_test(
     deps = [
         "//rtp_llm:config_ops",
         "//rtp_llm:pydantic",
+        "//rtp_llm:frontend",
         "//rtp_llm:testlib",
         "//rtp_llm:torch",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",

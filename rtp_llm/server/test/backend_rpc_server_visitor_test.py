@@ -16,7 +16,9 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
     MultimodalOutputsPB,
 )
+from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
+from rtp_llm.ops import PDSepConfig, SpecialTokens, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -721,6 +723,62 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
 
 
 class DeepSeekVisionMasterRoutingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_frontend_pipeline_enables_two_stage_routing(self):
+        env = SimpleNamespace(
+            server_config=None,
+            distribute_config=None,
+            parallelism_config=None,
+            sp_config=None,
+            grpc_config=None,
+            master_config=None,
+            prefill_cp_config=None,
+            generate_env_config=None,
+            vit_config=SimpleNamespace(
+                vit_separation=VitSeparation.VIT_SEPARATION_REMOTE
+            ),
+        )
+        config = SimpleNamespace(
+            ckpt_path="unused",
+            tokenizer_path="unused",
+            model_type="deepseek_v4",
+            max_seq_len=100,
+            attn_config=SimpleNamespace(tokens_per_block=4),
+            mm_related_params=SimpleNamespace(
+                config={"vision_n_layers": 1},
+                special_token_ids={"image_token_id": 99},
+            ),
+        )
+        with patch("rtp_llm.frontend.frontend_worker.TokenizerFactory.create"), patch(
+            "rtp_llm.frontend.frontend_worker.EngineConfig.create",
+            return_value=SimpleNamespace(
+                pd_sep_config=PDSepConfig(), parallelism_config=None
+            ),
+        ), patch("rtp_llm.frontend.frontend_worker.get_world_info"), patch(
+            "rtp_llm.frontend.frontend_worker.get_dp_addrs_from_world_info",
+            return_value=[],
+        ):
+            worker = FrontendWorker(env, config, SpecialTokens())
+        visitor = worker.backend_rpc_server_visitor
+        try:
+            self.assertEqual(visitor.dsv4_image_token_id, 99)
+            control = self.make_visitor()
+            visitor.master_client.get_backend_role_addrs = (
+                control.master_client.get_backend_role_addrs
+            )
+            visitor._get_vit_token_ids = control._get_vit_token_ids
+            request = self.make_input()
+            with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor.report"):
+                self.assertIsNone(await visitor.get_master_route_addrs(request))
+            calls = visitor.master_client.get_backend_role_addrs.await_args_list
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(calls[0].kwargs["vit_only"])
+            self.assertEqual(
+                list(calls[1].kwargs["input_pb"].token_ids), request.token_ids.tolist()
+            )
+            self.assertEqual(request.generate_config.role_addrs[0], self.vit)
+        finally:
+            await worker.close()
+
     def make_visitor(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.dsv4_image_token_id = 99
