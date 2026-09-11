@@ -70,7 +70,11 @@ class WhaleRemotePrefillTest {
         assertFalseFrame(stream.frames.get(0), "frame 0 must be the prefill first-token frame");
         assertTrueFrame(stream.frames.get(1), "frame 1 must be the decode terminal frame");
         assertFrontendTensor(stream.frames.get(0), 1, 9);
-        assertFrontendTensor(stream.frames.get(1), 8, 9);
+        assertFrontendTensor(stream.frames.get(1), 7, 9);
+        assertEquals(8, stream.frames.get(1).getFlattenOutput().getAuxInfo(0).getOutputLen());
+        assertEquals(8, stream.frames.stream().mapToLong(frame ->
+                frame.getFlattenOutput().getOutputIds().getShape(2)).sum(),
+                "frontend concatenation must produce exactly max_new_tokens");
         assertTtftStrictlyBeforeE2e(stream);
     }
 
@@ -83,7 +87,24 @@ class WhaleRemotePrefillTest {
         assertEquals(tokens * Integer.BYTES, tensor.getInt32Data().size());
         var bytes = tensor.getInt32Data().asReadOnlyByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
         while (bytes.hasRemaining()) assertEquals(token, bytes.getInt());
-        assertEquals(tokens, output.getAuxInfo(0).getOutputLen());
+        assertEquals(tokens, output.getAuxInfo(0).getStepOutputLen());
+    }
+
+    @Test
+    @Timeout(30)
+    void singleTokenRequestDoesNotRepeatPrefillTokenInDecodeTerminal() throws Exception {
+        startCluster("10", 5.0);
+        var input = inputWithDecode(77, 10, decode.getGrpcPort()).toBuilder();
+        input.setGenerateConfig(input.getGenerateConfig().toBuilder().setMaxNewTokens(1));
+        var ack = enqueue(prefill, batch(7077, slot(0, input.build())));
+        assertEquals(1, ack.getSuccessesCount());
+        var stream = fetch(prefill, 77, 10_000);
+        assertNull(stream.error.get());
+        assertEquals(2, stream.frames.size());
+        assertFrontendTensor(stream.frames.get(0), 1, 9);
+        assertFrontendTensor(stream.frames.get(1), 0, 9);
+        assertTrueFrame(stream.frames.get(1), "empty decode delta must still finish the stream");
+        assertEquals(1, stream.frames.get(1).getFlattenOutput().getAuxInfo(0).getOutputLen());
     }
 
     @Test
