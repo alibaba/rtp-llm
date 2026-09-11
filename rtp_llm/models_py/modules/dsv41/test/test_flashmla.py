@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import torch
 from official_flashmla import SOURCE_HASHES, load_reference
-from test_compact_reader import _fixture, _ints
+from test_compact_reader import _fixture, _ints, _probe_attention_output_buffers
 
 from rtp_llm.models_py.modules.dsv41.cache_layout import CacheRegion
 from rtp_llm.models_py.modules.dsv41.compact_reader import (
@@ -92,6 +92,9 @@ class FlashMLAGpuTest(unittest.TestCase):
             ),
             flush=True,
         )
+
+    def test_output_aliases_rejected_and_disjoint_graph_buffers_reused(self):
+        _probe_attention_output_buffers(self, flashmla_attention, planar=True)
 
     def test_byte_conversion_and_official_dequantization_are_exact(self):
         for region, entries in ((CacheRegion.SWA, 128), (CacheRegion.GLOBAL, 53)):

@@ -5,6 +5,7 @@ bytes. Attention uses a dense float64 formula over only the selected <=640 rows.
 No CPU fallback or GPU skip is permitted in this target.
 """
 
+import json
 import math
 import os
 import unittest
@@ -136,6 +137,122 @@ def _attention_oracle(
     return output.float(), lse.float()
 
 
+def _probe_attention_output_buffers(test, reader, *, planar=False):
+    swa_pages, _ = _fixture(CacheRegion.SWA, pages=3, entries=136)
+    global_pages, _ = _fixture(CacheRegion.GLOBAL, pages=3)
+    swa = SwaBinding(swa_pages, _ints([1]), _ints([0]), _ints([16]))
+    global_kv = GlobalBinding(global_pages, _ints([[1, 2]]), 1)
+    if planar:
+        from rtp_llm.models_py.modules.dsv41.flashmla import (
+            PlanarGlobalBinding,
+            PlanarSwaBinding,
+        )
+
+        swa = PlanarSwaBinding.from_compact(swa)
+        global_kv = PlanarGlobalBinding.from_compact(global_kv)
+    query = torch.zeros((1, 64, 512), dtype=torch.bfloat16, device="cuda")
+    request_storage = torch.zeros(64, dtype=torch.int32, device="cuda")
+    request = request_storage[:1]
+    position, floor = _ints([7]), _ints([7])
+    indices = _ints([[0] + [-1] * 63])
+    sinks = torch.linspace(-2, 2, 64, device="cuda")
+    shared_lse = torch.empty((1, 64), device="cuda")
+    aliases = {
+        "query-output": {"output": query},
+        "cache-output": {
+            "output": swa.pages.data[1, : query.numel() * 2]
+            .view(torch.bfloat16)
+            .view_as(query)
+        },
+        "sink-lse": {"lse": sinks[None, :]},
+        "request-status": {"status": request_storage[None, :]},
+        "indices-status": {"status": indices},
+        "lse-status": {"lse": shared_lse, "status": shared_lse.view(torch.int32)},
+    }
+    inputs = (
+        query,
+        swa.pages.data,
+        global_kv.pages.data,
+        request_storage,
+        indices,
+        sinks,
+    )
+    original = [tensor.clone() for tensor in inputs]
+
+    def run(q=query, **outputs):
+        return reader(
+            q,
+            request,
+            position,
+            floor,
+            swa,
+            sinks,
+            global_kv=global_kv,
+            global_indices=indices,
+            **outputs,
+        )
+
+    for name, buffers in aliases.items():
+        with test.subTest(alias=name):
+            with test.assertRaisesRegex(ValueError, "output buffers must not alias"):
+                run(**buffers)
+            for value, before in zip(inputs, original):
+                torch.testing.assert_close(value, before, rtol=0, atol=0)
+
+    query_bytes = query.numel() * 2
+    vector_bytes = 64 * 4
+    backing = torch.empty(
+        2 * query_bytes + 2 * vector_bytes, dtype=torch.uint8, device="cuda"
+    )
+    q = backing[:query_bytes].view(torch.bfloat16).view_as(query)
+    output = backing[query_bytes : 2 * query_bytes].view(torch.bfloat16).view_as(query)
+    lse = backing[2 * query_bytes : 2 * query_bytes + vector_bytes].view(torch.float32)
+    lse = lse[None]
+    status = backing[-vector_bytes:].view(torch.int32)[None]
+    q.copy_(query)
+    buffers = {"output": output, "lse": lse, "status": status}
+    pointers = tuple(tensor.data_ptr() for tensor in buffers.values())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run(q, **buffers)
+        run(q, **buffers)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = run(q, **buffers)
+    for step in range(3):
+        position.fill_(7 + step)
+        floor.copy_(position)
+        q.add_(0.001953125)
+        graph.replay()
+        torch.cuda.synchronize()
+        captured.check()
+        direct = run(q)
+        direct.check()
+        for actual, expected in (
+            (captured.output, direct.output),
+            (captured.lse, direct.lse),
+            (captured.status, direct.status),
+        ):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        test.assertEqual(
+            pointers, tuple(tensor.data_ptr() for tensor in buffers.values())
+        )
+    print(
+        json.dumps(
+            {
+                "test": test.id(),
+                "rejected_before_write": list(aliases),
+                "shared_allocation_disjoint_buffers": True,
+                "captures": 1,
+                "replays": 3,
+            }
+        ),
+        flush=True,
+    )
+
+
 class CompactReaderGpuTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -147,6 +264,47 @@ class CompactReaderGpuTest(unittest.TestCase):
             raise RuntimeError(
                 "set DSV41_NATIVE_COMPACT_READER=1 for this explicit candidate probe"
             )
+
+    def test_attention_output_aliases_rejected_and_disjoint_graph_buffers_reused(self):
+        _probe_attention_output_buffers(self, compact_attention)
+
+    def test_gather_rejects_output_aliases_without_overwriting_pages_or_metadata(self):
+        pages, _ = _fixture(CacheRegion.INDEX_K)
+        table, requests, positions, lengths = (
+            _ints([[1, 2]]),
+            _ints([0]),
+            _ints([[0, 1]]),
+            _ints([256]),
+        )
+        shared = torch.empty((1, 2, 128), dtype=torch.float32, device="cuda")
+        aliases = {
+            "page-output": {
+                "output": pages.data[1, :1024].view(torch.float32).view(1, 2, 128)
+            },
+            "positions-status": {"status": positions},
+            "table-status": {"status": table},
+            "output-status": {
+                "output": shared,
+                "status": shared.view(torch.int32).view(-1)[:2].view(1, 2),
+            },
+        }
+        before = [tensor.clone() for tensor in (pages.data, table, positions)]
+        for name, outputs in aliases.items():
+            with self.subTest(alias=name):
+                with self.assertRaisesRegex(
+                    ValueError, "output buffers must not alias"
+                ):
+                    gather_compact(
+                        pages,
+                        table,
+                        requests,
+                        positions,
+                        lengths,
+                        output_dtype=torch.float32,
+                        **outputs,
+                    )
+                for value, original in zip((pages.data, table, positions), before):
+                    torch.testing.assert_close(value, original, rtol=0, atol=0)
 
     def test_all_three_formats_decode_exactly_from_padded_pages(self):
         for region in (CacheRegion.SWA, CacheRegion.GLOBAL, CacheRegion.INDEX_K):
@@ -531,7 +689,7 @@ class CompactReaderGpuTest(unittest.TestCase):
             global_kv=global_kv,
             global_indices=indices,
             output_dtype=torch.float32,
-            **options
+            **options,
         )
         result.check()
         expected, expected_lse = _attention_oracle(

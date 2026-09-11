@@ -510,6 +510,211 @@ class PrefillGpuTest(unittest.TestCase):
         self.assertTrue(all(owner.pair is None for owner in cache.owners.values()))
 
     @torch.inference_mode()
+    def test_snapshot_protect_rejects_unmapped_and_aliased_source_pages(self):
+        rejected = []
+        for mode in (ReplayMode.FULL, ReplayMode.BOUNDED):
+            source, snapshot = self.snapshot_payload_fixture(mode)
+            for region in ("swa", "global", "index"):
+                if region == "swa":
+                    pages, ids = source.swa[42].pages, source.swa[42].page_ids
+                elif region == "global":
+                    owner = source.owners[20]
+                    pages, ids = owner.global_kv.pages, owner.global_kv.page_table[0]
+                else:
+                    owner = source.owners[20]
+                    pages, ids = owner.index_pages, owner.index_table[0]
+                original = ids.clone()
+                original_payload = pages.data.clone()
+                for problem in ("missing", "negative", "out-of-range", "duplicate"):
+                    if region == "swa" and problem == "duplicate":
+                        continue
+                    with self.subTest(mode=mode.value, region=region, problem=problem):
+                        if problem == "missing":
+                            ids[0] = 0
+                        elif problem == "negative":
+                            ids[0] = -1
+                        elif problem == "out-of-range":
+                            ids[0] = pages.data.shape[0]
+                        else:
+                            ids[1] = ids[0]
+                        with mock.patch.object(
+                            torch.Tensor,
+                            "index_select",
+                            side_effect=AssertionError(
+                                "copied before complete validation"
+                            ),
+                        ):
+                            with self.assertRaisesRegex(
+                                ValueError, "missing or aliased pages"
+                            ):
+                                V41LocalSnapshot.protect(
+                                    source,
+                                    end=snapshot.checkpoint.materialized_end,
+                                    replay_floor=snapshot.checkpoint.replay_floor,
+                                    history_rows=snapshot.history_rows,
+                                )
+                        self.equal(pages.data, original_payload)
+                        self.assertFalse(source.poisoned)
+                        rejected.append(f"{mode.value}/{region}/{problem}")
+                        ids.copy_(original)
+        self.records.append({"test": self.id(), "rejected_before_copy": rejected})
+
+    @torch.inference_mode()
+    def test_snapshot_requires_complete_nonpadding_canonical_tail_history(self):
+        source, snapshot = self.snapshot_payload_fixture()
+        for count in (0, 1, 2, 3):
+            rows = V41ModelRows(
+                *(
+                    getattr(snapshot.history_rows, field.name)[:count].clone()
+                    for field in dataclasses.fields(V41ModelRows)
+                )
+            )
+            if count == 3:
+                rows.valid[-1] = False
+                rows.history_valid[-1].zero_()
+            with self.subTest(history_rows=count):
+                with self.assertRaisesRegex(ValueError, "canonical tail history"):
+                    V41LocalSnapshot.protect(
+                        source,
+                        end=snapshot.checkpoint.materialized_end,
+                        replay_floor=snapshot.checkpoint.replay_floor,
+                        history_rows=rows,
+                    )
+                destination = self.cache(source.max_tokens, request="receiver")
+                with self.assertRaisesRegex(ValueError, "canonical tail history"):
+                    dataclasses.replace(snapshot, history_rows=rows).restore(
+                        destination
+                    )
+                self.assert_unpublished_restore(destination)
+                self.assertFalse(destination.poisoned)
+
+    def shifted_swa_alias(self, cache):
+        first, second = cache.swa[0], cache.swa[42]
+        width = first.pages.data.shape[1]
+        backing = torch.zeros((4, width), dtype=torch.uint8, device="cuda")
+        backing[2].copy_(first.pages.data[1])
+        cache.swa[0] = dataclasses.replace(
+            first,
+            pages=dataclasses.replace(first.pages, data=backing[:3]),
+            page_ids=torch.full_like(first.page_ids, 2),
+        )
+        cache.swa[42] = dataclasses.replace(
+            second, pages=dataclasses.replace(second.pages, data=backing[1:])
+        )
+        self.assertNotEqual(
+            cache.swa[0].pages.data.data_ptr(), cache.swa[42].pages.data.data_ptr()
+        )
+
+    @torch.inference_mode()
+    def test_snapshot_protect_rejects_shifted_cross_region_physical_aliases(self):
+        source, snapshot = self.snapshot_payload_fixture()
+        self.shifted_swa_alias(source)
+        with self.assertRaisesRegex(ValueError, "aliases.*cache region"):
+            V41LocalSnapshot.protect(
+                source,
+                end=snapshot.checkpoint.materialized_end,
+                replay_floor=snapshot.checkpoint.replay_floor,
+                history_rows=snapshot.history_rows,
+            )
+        self.assertFalse(source.poisoned)
+
+    @torch.inference_mode()
+    def test_snapshot_restore_rejects_cross_region_payload_and_metadata_aliases(self):
+        source, snapshot = self.snapshot_payload_fixture()
+        problems = (
+            "target-draft-page",
+            "shifted-target-draft-page",
+            "mutable-bounds",
+            "bound-page-map",
+            "retained-swa",
+            "retained-history",
+        )
+        for problem in problems:
+            with self.subTest(problem=problem):
+                destination = self.cache(source.max_tokens, request="receiver")
+                first, last = destination.swa[0], destination.swa[42]
+                candidate = snapshot
+                if problem == "target-draft-page":
+                    destination.swa[42] = dataclasses.replace(last, pages=first.pages)
+                elif problem == "shifted-target-draft-page":
+                    self.shifted_swa_alias(destination)
+                elif problem == "mutable-bounds":
+                    destination.swa[42] = dataclasses.replace(
+                        last, valid_ends=first.valid_ends
+                    )
+                elif problem == "bound-page-map":
+                    destination.swa[42] = dataclasses.replace(
+                        last, valid_ends=first.page_ids
+                    )
+                elif problem == "retained-swa":
+                    _, start, end = snapshot.swa[0]
+                    candidate = dataclasses.replace(
+                        snapshot,
+                        swa={**snapshot.swa, 0: (last.pages.data[1:2], start, end)},
+                    )
+                else:
+                    candidate = dataclasses.replace(
+                        snapshot,
+                        history_rows=dataclasses.replace(
+                            snapshot.history_rows,
+                            token_ids=last.pages.data[1, :12].view(torch.int32),
+                        ),
+                    )
+                with mock.patch.object(
+                    torch.Tensor,
+                    "index_copy_",
+                    side_effect=AssertionError("wrote before complete validation"),
+                ):
+                    with self.assertRaisesRegex(ValueError, "snapshot copy aliases"):
+                        candidate.restore(destination)
+                self.assert_unpublished_restore(destination)
+                self.assertFalse(destination.poisoned)
+                for binding in destination.swa.values():
+                    self.assertEqual(int(torch.count_nonzero(binding.pages.data)), 0)
+        self.records.append({"test": self.id(), "rejected_before_copy": list(problems)})
+
+    @torch.inference_mode()
+    def test_snapshot_accepts_disjoint_regions_in_one_allocation(self):
+        source, snapshot = self.snapshot_payload_fixture()
+
+        def pack(cache):
+            first, last = cache.swa[0], cache.swa[42]
+            joined = torch.cat((first.pages.data, last.pages.data), dim=0)
+            cache.swa[0] = dataclasses.replace(
+                first, pages=dataclasses.replace(first.pages, data=joined[:2])
+            )
+            cache.swa[42] = dataclasses.replace(
+                last, pages=dataclasses.replace(last.pages, data=joined[2:])
+            )
+            self.assertEqual(
+                cache.swa[0].pages.data.untyped_storage().data_ptr(),
+                cache.swa[42].pages.data.untyped_storage().data_ptr(),
+            )
+
+        pack(source)
+        protected = V41LocalSnapshot.protect(
+            source,
+            end=snapshot.checkpoint.materialized_end,
+            replay_floor=snapshot.checkpoint.replay_floor,
+            history_rows=snapshot.history_rows,
+        )
+        destination = self.cache(source.max_tokens, request="receiver")
+        pack(destination)
+        protected.restore(destination)
+        for layer in (0, 42):
+            self.equal(destination.swa[layer].pages.data[1:2], snapshot.swa[layer][0])
+            source.swa[layer].pages.data.zero_()
+            destination.swa[layer].pages.data.zero_()
+            self.equal(protected.swa[layer][0], snapshot.swa[layer][0])
+        self.records.append(
+            {
+                "test": self.id(),
+                "same_allocation_disjoint_pages": True,
+                "protected_snapshot_survives_source_and_restored_writes": True,
+            }
+        )
+
+    @torch.inference_mode()
     def test_snapshot_rejects_missing_actual_payload_before_any_copy(self):
         for mode in (ReplayMode.FULL, ReplayMode.BOUNDED):
             source, snapshot = self.snapshot_payload_fixture(mode)

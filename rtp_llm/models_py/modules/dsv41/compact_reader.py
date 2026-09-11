@@ -72,6 +72,28 @@ def _output_tensor(
     return tensor
 
 
+def _separate_outputs(outputs, inputs):
+    def bounds(tensor):
+        first = tensor.data_ptr()
+        span = 1 + sum(
+            (size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())
+        )
+        return first, first + span * tensor.element_size()
+
+    retained = [tensor for tensor in inputs if tensor is not None and tensor.numel()]
+    for output in outputs:
+        if not output.numel():
+            continue
+        first, last = bounds(output)
+        for tensor in retained:
+            begin, end = bounds(tensor)
+            if first < end and begin < last:
+                raise ValueError(
+                    "reader output buffers must not alias inputs or each other"
+                )
+        retained.append(output)
+
+
 @dataclass(frozen=True)
 class CompactPages:
     data: torch.Tensor
@@ -200,6 +222,10 @@ def gather_compact(
         raise ValueError("gather exceeds 64 MiB workspace; tile the query rows")
     output = _output_tensor(output, (rows, slots, dim), output_dtype, device)
     status = _output_tensor(status, (rows, slots), torch.int32, device)
+    _separate_outputs(
+        (output, status),
+        (pages.data, page_table, request_ids, positions, visible_lengths),
+    )
     if rows and slots:
         gather_compact_kernel[(rows, slots)](
             pages.data,
@@ -304,6 +330,23 @@ def compact_attention(
     output = _output_tensor(output, tuple(query.shape), output_dtype, device)
     lse = _output_tensor(lse, (rows, heads), torch.float32, device)
     status = _output_tensor(status, (rows, heads), torch.int32, device)
+    _separate_outputs(
+        (output, lse, status),
+        (
+            query,
+            request_ids,
+            query_positions,
+            replay_floors,
+            swa.pages.data,
+            swa.page_ids,
+            swa.valid_starts,
+            swa.valid_ends,
+            sinks,
+            global_pool,
+            global_table,
+            indices,
+        ),
+    )
     if rows:
         compact_attention_kernel[(rows, heads)](
             query,

@@ -40,6 +40,55 @@ def _copy_rows(rows, selection):
     )
 
 
+def _tensor_range(tensor):
+    first = tensor.data_ptr()
+    return first, first + tensor.numel() * tensor.element_size()
+
+
+def _snapshot_page_map(pages, ids, spec, count, device):
+    pages.validate(device)
+    if (
+        pages.region != spec.slot.region
+        or pages.entries_per_page != spec.entries
+        or pages.data.shape[1] != spec.page_stride_bytes
+    ):
+        raise ValueError("snapshot page pool differs from the declared layout")
+    if (
+        ids.ndim != 1
+        or ids.numel() != count
+        or ids.dtype not in (torch.int32, torch.int64)
+        or ids.device != device
+        or not ids.is_contiguous()
+    ):
+        raise ValueError("snapshot is missing its complete page map")
+    physical = ids.tolist()
+    if len(set(physical)) != count or any(
+        page <= 0 or page >= pages.data.shape[0] for page in physical
+    ):
+        raise ValueError("snapshot page map contains missing or aliased pages")
+    base, stride = pages.data.data_ptr(), pages.data.stride(0)
+    ranges = [
+        (base + page * stride, base + page * stride + spec.page_stride_bytes)
+        for page in physical
+    ]
+    return ids.long(), ranges
+
+
+def _snapshot_disjoint(writable, retained=()):
+    # Compare actual page intervals, so disjoint views of one allocation remain
+    # valid while shifted views cannot hide an overlapping physical page.
+    latest_write, latest_read = 0, 0
+    ranges = [(first, last, True) for first, last in writable if first < last]
+    ranges += [(first, last, False) for first, last in retained if first < last]
+    for first, last, write in sorted(ranges):
+        if first < latest_write or (write and first < latest_read):
+            raise ValueError("snapshot copy aliases a retained payload or cache region")
+        if write:
+            latest_write = max(latest_write, last)
+        else:
+            latest_read = max(latest_read, last)
+
+
 @dataclass(frozen=True)
 class V41L20Tail:
     request_id: str
@@ -210,7 +259,13 @@ class V41LocalSnapshot:
     @torch.inference_mode()
     def protect(cls, cache, *, end, replay_floor, history_rows):
         """Finish a real joint in-memory copy before any suffix can wrap SWA."""
-        if cache.poisoned or end <= 0 or end % cache.layout.reuse_unit:
+        if (
+            cache.poisoned
+            or type(end) is not int
+            or not 0 < end <= min(cache.max_tokens, 1048576)
+            or end % cache.layout.reuse_unit
+            or cache.identity.layout_fingerprint != cache.layout.fingerprint
+        ):
             raise ValueError("local snapshot requires a healthy aligned checkpoint")
         expected_layers = set(range(43 if cache.layout.draft_enabled else 40))
         if set(cache.swa) != expected_layers or set(cache.owners) != {2, 8, 14, 20}:
@@ -224,13 +279,35 @@ class V41LocalSnapshot:
         if any(owner.materialized_end != end for owner in cache.owners.values()):
             raise ValueError("local checkpoint is missing complete global/index KV")
         history_rows.validate()
-        if not 0 < history_rows.token_ids.numel() <= SWA_WINDOW:
+        device = next(iter(cache.swa.values())).pages.data.device
+        if (
+            history_rows.token_ids.device != device
+            or not min(3, end) <= history_rows.token_ids.numel() <= SWA_WINDOW
+            or not bool(history_rows.valid.all())
+        ):
             raise ValueError("checkpoint must retain actual canonical tail history")
-        torch._assert_async(
-            history_rows.valid.all(), "checkpoint history cannot be padding"
-        )
-        saved_swa, saved_owners, starts = {}, {}, {}
+        specs = {page.slot: page for page in cache.layout.pages}
+        source_swa, source_owners, starts = {}, {}, {}
+        payload_ranges, metadata_ranges = [], []
         for layer, binding in cache.swa.items():
+            if binding.validate(device) != 1:
+                raise ValueError("local snapshot requires one complete request ring")
+            ids, ranges = _snapshot_page_map(
+                binding.pages,
+                binding.page_ids,
+                specs[RegionSlot(CacheRegion.SWA, layer)],
+                1,
+                device,
+            )
+            payload_ranges.extend(ranges)
+            metadata_ranges.extend(
+                _tensor_range(tensor)
+                for tensor in (
+                    binding.page_ids,
+                    binding.valid_starts,
+                    binding.valid_ends,
+                )
+            )
             first, last = int(binding.valid_starts[0]), int(binding.valid_ends[0])
             if (
                 not max(0, end - binding.pages.entries_per_page)
@@ -241,11 +318,7 @@ class V41LocalSnapshot:
                 raise ValueError(
                     "checkpoint SWA valid range does not cover its required window"
                 )
-            saved_swa[layer] = (
-                binding.pages.data.index_select(0, binding.page_ids.long()).clone(),
-                first,
-                last,
-            )
+            source_swa[layer] = (binding.pages.data, ids, first, last)
             starts[layer] = first
         for layer, owner in cache.owners.items():
             if owner.pair is not None:
@@ -254,16 +327,39 @@ class V41LocalSnapshot:
                     cache.request_id,
                     cache.identity,
                     end,
-                    owner.global_kv.pages.data.device,
+                    device,
                 )
             page_count = end // cache.layout.token_block_size
-            saved_owners[layer] = tuple(
-                pages.data.index_select(0, table[0, :page_count].long()).clone()
-                for pages, table in (
-                    (owner.global_kv.pages, owner.global_kv.page_table),
-                    (owner.index_pages, owner.index_table),
+            owner.global_kv.validate(1, device)
+            sources = []
+            for pages, table, region in (
+                (owner.global_kv.pages, owner.global_kv.page_table, CacheRegion.GLOBAL),
+                (owner.index_pages, owner.index_table, CacheRegion.INDEX_K),
+            ):
+                spec = specs[RegionSlot(region, layer)]
+                if table.ndim != 2 or table.shape[0] != 1:
+                    raise ValueError("local snapshot requires one request page table")
+                if owner.global_kv.compress_ratio != spec.ratio:
+                    raise ValueError(
+                        "snapshot owner compression ratio differs from layout"
+                    )
+                ids = table[0, :page_count]
+                selected, ranges = _snapshot_page_map(
+                    pages, ids, spec, page_count, device
                 )
-            )
+                payload_ranges.extend(ranges)
+                metadata_ranges.append(_tensor_range(ids))
+                sources.append((pages.data, selected))
+            source_owners[layer] = sources
+        _snapshot_disjoint(payload_ranges, metadata_ranges)
+        saved_swa = {
+            layer: (data.index_select(0, ids).clone(), first, last)
+            for layer, (data, ids, first, last) in source_swa.items()
+        }
+        saved_owners = {
+            layer: tuple(data.index_select(0, ids).clone() for data, ids in sources)
+            for layer, sources in source_owners.items()
+        }
         history = _copy_rows(history_rows, slice(-3, None))
         event = torch.cuda.Event()
         event.record(torch.cuda.current_stream(history.token_ids.device))
@@ -326,20 +422,22 @@ class V41LocalSnapshot:
         ):
             raise ValueError("local snapshot restore cannot cross devices")
         self.history_rows.validate()
-        if not 0 < self.history_rows.token_ids.numel() <= 3:
+        if self.history_rows.token_ids.numel() != min(
+            3, c.materialized_end
+        ) or not bool(self.history_rows.valid.all()):
             raise ValueError("snapshot is missing its canonical tail history")
         device = self.history_rows.token_ids.device
         specs = {page.slot: page for page in cache.layout.pages}
         copies, starts = [], {}
+        writable_ranges, retained_ranges = [], [
+            _tensor_range(getattr(self.history_rows, field.name))
+            for field in fields(V41ModelRows)
+        ]
 
         def prepare_copy(data, pages, ids, slot, count):
             spec = specs[slot]
-            pages.validate(device)
             if (
-                pages.region != slot.region
-                or pages.entries_per_page != spec.entries
-                or pages.data.shape[1] != spec.page_stride_bytes
-                or tuple(data.shape) != (count, spec.page_stride_bytes)
+                tuple(data.shape) != (count, spec.page_stride_bytes)
                 or data.dtype != torch.uint8
                 or data.device != device
                 or not data.is_contiguous()
@@ -347,24 +445,10 @@ class V41LocalSnapshot:
                 raise ValueError(
                     "snapshot payload does not contain every declared page"
                 )
-            if (
-                ids.ndim != 1
-                or ids.numel() != count
-                or ids.dtype not in (torch.int32, torch.int64)
-                or ids.device != device
-                or not ids.is_contiguous()
-            ):
-                raise ValueError(
-                    "snapshot destination is missing its complete page map"
-                )
-            physical = ids.tolist()
-            if len(set(physical)) != count or any(
-                page <= 0 or page >= pages.data.shape[0] for page in physical
-            ):
-                raise ValueError(
-                    "snapshot destination contains missing or aliased pages"
-                )
-            copies.append((pages.data, ids.long(), data))
+            selected, ranges = _snapshot_page_map(pages, ids, spec, count, device)
+            writable_ranges.extend(ranges)
+            retained_ranges.extend((_tensor_range(ids), _tensor_range(data)))
+            copies.append((pages.data, selected, data))
 
         # Validate every payload before writing: a complete descriptor alone cannot
         # prove that all global/index pages and target/draft rings were received.
@@ -377,6 +461,9 @@ class V41LocalSnapshot:
             ) <= first <= max(0, end - SWA_WINDOW):
                 raise ValueError("snapshot SWA payload does not cover its checkpoint")
             starts[layer] = first
+            writable_ranges.extend(
+                (_tensor_range(binding.valid_starts), _tensor_range(binding.valid_ends))
+            )
             prepare_copy(
                 data,
                 binding.pages,
@@ -412,6 +499,7 @@ class V41LocalSnapshot:
                         "snapshot owner compression ratio differs from layout"
                     )
                 prepare_copy(data, pages, table[0, :page_count], slot, page_count)
+        _snapshot_disjoint(writable_ranges, retained_ranges)
         try:
             for destination, ids, data in copies:
                 destination.index_copy_(0, ids, data)

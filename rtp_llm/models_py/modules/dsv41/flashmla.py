@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.dsv41.compact_reader import (
     SwaBinding,
     _integer_tensor,
     _output_tensor,
+    _separate_outputs,
 )
 from rtp_llm.models_py.modules.dsv41.native_aot import native_identity
 
@@ -382,6 +383,23 @@ def flashmla_attention(
     output = _output_tensor(output, tuple(query.shape), torch.bfloat16, device)
     lse = _output_tensor(lse, (rows, heads), torch.float32, device)
     status = _output_tensor(status, (rows, heads), torch.int32, device)
+    _separate_outputs(
+        (output, lse, status),
+        (
+            query,
+            request_ids,
+            query_positions,
+            replay_floors,
+            swa.pages.data,
+            swa.page_ids,
+            swa.valid_starts,
+            swa.valid_ends,
+            sinks,
+            None if global_kv is None else global_kv.pages.data,
+            None if global_kv is None else global_kv.page_table,
+            global_indices,
+        ),
+    )
     if rows:
         from flash_mla.flash_mla_interface import (
             FlashMLASchedMeta,

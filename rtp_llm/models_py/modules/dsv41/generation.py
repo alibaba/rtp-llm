@@ -4,7 +4,10 @@ The scheduler owns sampling and EP coordination. This component preserves the
 canonical materialized boundary; it does not implement PD or DSpark acceptance.
 """
 
+from dataclasses import dataclass
+
 import torch
+import torch.distributed as dist
 from rtp_llm.models_py.modules.dsv41.engram import committed_history
 from rtp_llm.models_py.modules.dsv41.inputs import V41ModelRows
 
@@ -135,4 +138,90 @@ class V41TargetContinuation:
             return output, context
         except Exception:
             self.cache.poisoned = True
+            raise
+
+
+@dataclass(frozen=True)
+class V41GenerationStep:
+    token_id: int | None
+    finish_reason: str | None
+    active_ranks: int
+    context: object | None
+
+
+class V41TargetGeneration:
+    """Greedy target generation for one independent request per EP rank.
+
+    All ranks call step in the same order until globally_complete. A locally
+    finished or cancelled request keeps participating with zero target rows.
+    PD admission, DSpark and batched request scheduling are separate owners.
+    """
+
+    def __init__(self, continuation, *, max_output_tokens: int, process_group=None):
+        continuation._validate_boundary()
+        if (
+            type(max_output_tokens) is not int
+            or max_output_tokens <= 0
+            or continuation.materialized_end + max_output_tokens
+            > min(continuation.cache.max_tokens, 1048576)
+        ):
+            raise ValueError("generation requires an admitted positive output budget")
+        if not dist.is_initialized():
+            raise RuntimeError("target generation requires its initialized EP group")
+        if process_group is not None and process_group is not dist.group.WORLD:
+            raise ValueError("target generation must use the model's WORLD EP group")
+        self.continuation = continuation
+        self.max_output_tokens = max_output_tokens
+        self.process_group = process_group
+        self.generated_token_ids: list[int] = []
+        self.finish_reason: str | None = None
+        self.globally_complete = False
+        self.failed = False
+        self._active = torch.zeros(
+            (), dtype=torch.int32, device=continuation.history_ids.device
+        )
+
+    def cancel(self):
+        """Stop local sampling; the caller must continue collective steps."""
+        if self.failed:
+            raise RuntimeError("target generation has failed")
+        if self.finish_reason is None:
+            self.finish_reason = "cancelled"
+
+    @torch.inference_mode()
+    def step(self) -> V41GenerationStep:
+        if self.failed or self.globally_complete:
+            raise RuntimeError("target generation is no longer runnable")
+        token = None
+        try:
+            self.continuation._validate_boundary()
+            if self.finish_reason is None:
+                logits = self.continuation.logits()
+                if logits.shape != (1, 129280) or not bool(
+                    torch.isfinite(logits).all()
+                ):
+                    raise RuntimeError(
+                        "target sampling requires finite full-vocab logits"
+                    )
+                token = int(logits.argmax(-1).item())
+                self.generated_token_ids.append(token)
+                if token == self.continuation.target.config.eos_token_id:
+                    self.finish_reason = "stop"
+                elif len(self.generated_token_ids) == self.max_output_tokens:
+                    self.finish_reason = "length"
+            self._active.fill_(int(self.finish_reason is None))
+            dist.all_reduce(
+                self._active, op=dist.ReduceOp.SUM, group=self.process_group
+            )
+            active = int(self._active.item())
+            self.globally_complete = active == 0
+            context = None
+            if active:
+                _, context = self.continuation.advance(
+                    token if self.finish_reason is None else None
+                )
+            return V41GenerationStep(token, self.finish_reason, active, context)
+        except Exception:
+            self.failed = True
+            self.continuation.cache.poisoned = True
             raise
