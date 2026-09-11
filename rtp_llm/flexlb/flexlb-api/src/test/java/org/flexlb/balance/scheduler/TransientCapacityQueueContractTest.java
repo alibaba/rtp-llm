@@ -473,7 +473,7 @@ class TransientCapacityQueueContractTest {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering("FIFO".equals(ordering)
                 ? new QueueOrderingConfig() : QueueOrderingConfig.priority());
-        ((QueueOrderingConfig) config.queueScheduler().getOrdering()).setPreemption(null);
+        config.queueScheduler().getOrdering().setPreemption(null);
         config.getDispatcher().setType(delivery);
         assertEquals(DecodeMode.WAIT_AT_DISPATCH, DecodeMode.from(config));
 
