@@ -1,0 +1,23 @@
+# Interface example only. No calibrated model, parameter grid or golden point is implied.
+kind: sweep
+title: Capacity and TTFT budget trade-off
+vary:
+- /environment/prefill_cache_blocks
+- /environment/config_overrides/router/roles/prefill/cacheAffinity/maxExtraTtftMs
+window:
+  start: {stage: formal, edge: end}
+  end: {stage: formal_drain, edge: end}
+metrics:
+  # Supply the canonical observed hit-ratio series for the intended scenario.
+  observed_hit_ratio: {series: scenario/observed_hit_ratio, reducer: mean}
+  ttft_p95_ms: {requests: ttft_ms, reducer: p95, cohort: sent, outcomes: success}
+  completed_qps: {requests: count, reducer: rate, cohort: completed, outcomes: success}
+  error_rate: {requests: errors, reducer: fraction, cohort: sent, outcomes: all}
+x: observed_hit_ratio
+y: ttft_p95_ms
+color: /environment/config_overrides/router/roles/prefill/cacheAffinity/maxExtraTtftMs
+facet: /environment/prefill_cache_blocks
+size: completed_qps
+# Bounds are intentionally not supplied: empty constraints yield UNCONSTRAINED,
+# never FEASIBLE. Add scenario-approved latency/error/throughput/cost constraints.
+constraints: []

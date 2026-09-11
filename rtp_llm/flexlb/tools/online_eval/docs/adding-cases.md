@@ -187,3 +187,30 @@ PRIORITY 省略 preemption 会启用默认抢占，不能用省略字段构造�
 场景客户端必须显式配置 `REPLAY_UNIQUE_PREFIX: 'false'`、`FETCH_OUTPUT_STREAM: 'true'`、正的 `DURATION_S` 和 `MAX_CONCURRENCY`。未知环境变量名会被拒绝，例如响应收尾预算的正式名称是 `RESPONSE_TIMEOUT`。正常停发不使用 `ClientOps.stop_async` 的终止进程路径。
 
 `flow-input.json` 与 trace manifest 保留配置和摘要；`client_lifecycle.jsonl` 支持运行中定位，`client_events.jsonl` 是自然退出的完整请求产物。根据 run/group/rid 和实际时间选择请求集合，保留失败原因与未完成请求；同一请求跨阶段存在时不要重复算入全场分母。
+
+### 配置流量来源与专用报告
+
+新流量组使用 `source: {kind: synthetic, model: prefix_families, version: "1", parameters: ...}`，`parameters` 即原 trace 的种子、family、数量和节奏。已有完整示例是 `scenarios/workload/trace_scale_out.yaml`。
+
+回放已有规范化 Trace 时使用：
+
+```yaml
+source:
+  kind: trace
+  model: recorded
+  version: "1"
+  parameters:
+    path: input.jsonl        # 相对于 scenario YAML
+    sha256: <文件的 SHA256>
+    identity: namespace
+```
+
+Trace 每行必须提供 `rid/ts/il/ol/input_ids/priority/cache_key_block_size`；不能只有无法核对的长度或虚构 key。联合分布直接编码为每行相关字段，不要求模板拆成独立随机分布。新合成器只需在受信任的 `SOURCES` 注册一个版本化生成函数，继续使用公共计划校验和 manifest；先证明模型真实性，再将其标为真实场景模型。
+
+报告无需改变 case 的执行过程。从 online_eval 目录运行：
+
+```bash
+python3 -m flexlb_test_framework.workload.views --view report_views/scale_out.yaml --reports /path/to/workload-report.json --out /path/to/view
+```
+
+同一个 timeline 配置可传入多个报告，版本对比要求同实例、同配置与同运行参数。参数扫描改用 `report_views/parameter_sweep.example.yaml`，填写真实配置轴、已有命中率序列和场景认可的约束；示例没有虚构阈值或网格结果，缺指标将显示缺失。窗口 TTFT p95 可配置为 `{requests: ttft_ms, reducer: p95, cohort: sent, outcomes: success}`，完成吞吐为 `{requests: count, reducer: rate, cohort: completed, outcomes: success}`。输出 `view.json` 保存完整来源与裁决，`view.html` 提供离线时间轴、散点和约束网格视图。

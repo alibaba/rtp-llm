@@ -315,6 +315,8 @@ def write_report(directory, result, evidence):
         )
     payload = dict(
         schema_version=1,
+        configuration=result.get("implementation", {}).get("configuration"),
+        implementation=result.get("implementation", {}),
         id=result["id"],
         status=result["status"],
         workload=result["workload"],
@@ -324,6 +326,18 @@ def write_report(directory, result, evidence):
         phases=evidence["phases"],
         series=series,
         statistic_sources=statistic_sources,
+        request_sources=[
+            dict(
+                path=str(Path(a["path"]).parent / "client_events.jsonl"),
+                sha256=hashlib.sha256(
+                    (Path(a["path"]).parent / "client_events.jsonl").read_bytes()
+                ).hexdigest(),
+                env_epoch=a["env_epoch"],
+            )
+            for a in result["workload"].get("stress_aggregates", [])
+            if a["status"] == "GENERATED"
+            and (Path(a["path"]).parent / "client_events.jsonl").is_file()
+        ],
         configuration_sha256=result.get("implementation", {}).get(
             "configuration_sha256"
         ),

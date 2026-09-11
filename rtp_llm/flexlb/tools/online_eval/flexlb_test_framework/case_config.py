@@ -248,6 +248,7 @@ def configure_program(config, source):
         document["variants"].append(variant)
     program_path = Path(module.__file__).resolve()
     document.implementation = {
+        "configuration": copy.deepcopy(config),
         "language": "python",
         "program": name,
         "path": str(program_path),

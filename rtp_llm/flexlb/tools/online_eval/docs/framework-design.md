@@ -291,3 +291,15 @@ child 写每个实例的 `result.json` 与证据，并汇总到 `scenarios.json`
 关于 P/D 预留、Fetch、计算槽与 KV 引用的区别，以及省网络压测开关，见 [Mock P/D 与 Fetch 生命周期](mock-pd-fetch-lifecycle.md)。
 
 摘机与瞬时失联的阶段边界、配置推导和各家族改造方案见 [摘机 case 契约](engine-removal-contract.md)。
+
+## 场景报告视图与流量源扩展
+
+报告公共层拥有原始证据、统计口径、时间窗口、单位、配置哈希和图形能力。`workload.views` 读取已有 `workload-report.json`，由独立 YAML 选择指标、事件和布局，不重新采集。当前提供 timeline 与 sweep 两类视图，分别服务版本对比与参数实验。
+
+- timeline 按真实记录的阶段边界平移时间轴，保留准备阶段的负时间与不同长度的恢复过程；所有运行共享横轴范围，不拉伸阶段。缺失事件、缺失对齐点和无效证据明确展示。
+- sweep 只允许 `vary` 中列出的配置叶子发生变化，其余配置必须一致。每点保留一次独立运行的身份、配置、窗口与指标来源；重复参数点不会合并。横纵轴是观测指标，颜色和分面是声明参数，点大小可使用完成吞吐。约束网格保留未跑、缺失、不可行及可行状态。未声明约束不会产生可行候选，更不会自动选唯一最优点。
+- `series` 指标只归约已有序列。`requests` 指标读取哈希校验后的同一份聚合输入，支持发送/完成时间的半开窗口、真实完成吞吐、错误比例和全窗口请求分位数。分位数复用 `stress.compare_twin.percentile_nr`；它与“每秒分位值的均值”是不同统计，不可混称。未知来源或缺时间戳不会补零。
+
+流量来源定义为 `kind + model + version + parameters`。`online_eval.traffic_source.SOURCES` 是受信任代码注册表，YAML 不允许任意导入 Python。当前仅注册已有的 `synthetic/prefix_families/1` 和规范化 Trace 的 `trace/recorded/1`。生成器先离线产出可回放计划，公共校验器检查请求形态与时序，Java 再校验 token/key 一致性并自主发送。
+
+输入 Trace 必须提供内容哈希；显式 `identity: namespace` 保留 `original_rid` 并为当前流量组隔离请求身份，不修改到达时间、长度、优先级或 token。manifest 记录来源版本、原始参数、种子所在规格、内容摘要和请求数。`DETERMINISTIC_INPUT` 只证明可复现，`realism: NOT_VALIDATED` 明确表示尚未证明贴近线上。本轮没有恢复实验 stash、引入典型流量模板或设置默认真实分布。旧 `trace:` 配置保留兼容入口，内部映射到已有 prefix_families v1。

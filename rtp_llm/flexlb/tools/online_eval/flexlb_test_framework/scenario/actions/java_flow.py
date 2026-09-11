@@ -4,10 +4,11 @@ import json
 import math
 import re
 import time
+from pathlib import Path
 
 from online_eval.java_flow import JavaFlowGroup
 from online_eval.load_client import LOAD_CLIENT_ENV_VARS
-from online_eval.synthetic_trace import write_trace
+from online_eval.traffic_source import materialize
 
 from ...harness import ClientOps
 from ..contracts import CheckResult, StageHandler, StageOutput
@@ -15,8 +16,26 @@ from .elastic import _snapshot, _validate
 
 
 def _start_validate(params, plan):
-    fields = {"group_id", "phase_id", "poll_s", "trace", "client", "jvm_xms", "jvm_xmx"}
-    p = _validate(params, plan, fields, fields)
+    fields = {
+        "group_id",
+        "phase_id",
+        "poll_s",
+        "source",
+        "trace",
+        "client",
+        "jvm_xms",
+        "jvm_xmx",
+    }
+    p = _validate(params, plan, fields, fields - {"source", "trace"})
+    if ("source" in p) == ("trace" in p):
+        raise ValueError("specify exactly one traffic source")
+    if "trace" in p:
+        p["source"] = dict(
+            kind="synthetic",
+            model="prefix_families",
+            version="1",
+            parameters=p.pop("trace"),
+        )
     if not all(
         isinstance(p[k], str) and p[k]
         for k in ("group_id", "phase_id", "jvm_xms", "jvm_xmx")
@@ -65,10 +84,11 @@ def _start_validate(params, plan):
 def _start(ctx, p, deadline):
     directory = ctx.artifact_dir / "flows" / p["group_id"]
     directory.parent.mkdir(exist_ok=True)
-    trace = write_trace(
+    trace = materialize(
         directory.parent / (p["group_id"] + ".jsonl"),
-        p["trace"],
+        p["source"],
         ctx.instance["id"] + ":" + p["group_id"],
+        Path(ctx.instance["source_path"]).parent,
     )
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
     flow = JavaFlowGroup(

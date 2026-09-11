@@ -24,18 +24,22 @@ parameters:
     poll_s: 0.1
     jvm_xms: 1g
     jvm_xmx: 1g
-    trace:
-      seed: 91001
-      count: 16
-      interval_ms: 125
-      block_size: 1024
-      families:
-      - name: occupied_decode
-        prefix_tokens: []
-        suffix_length: 1024
-        token_max: 10000
-        output_len: 64
-        priority: 50
+    source:
+      kind: synthetic
+      model: prefix_families
+      version: "1"
+      parameters:
+        seed: 91001
+        count: 16
+        interval_ms: 125
+        block_size: 1024
+        families:
+        - name: occupied_decode
+          prefix_tokens: []
+          suffix_length: 1024
+          token_max: 10000
+          output_len: 64
+          priority: 50
     client:
       SEND_MODE: uniform
       SEND_MODE_QPS: '8'
@@ -61,18 +65,22 @@ parameters:
     poll_s: 0.1
     jvm_xms: 1g
     jvm_xmx: 1g
-    trace:
-      seed: 91002
-      count: 240
-      interval_ms: 100
-      block_size: 1024
-      families:
-      - name: short
-        prefix_tokens: []
-        suffix_length: 1024
-        token_max: 10000
-        output_len: 8
-        priority: 50
+    source:
+      kind: synthetic
+      model: prefix_families
+      version: "1"
+      parameters:
+        seed: 91002
+        count: 240
+        interval_ms: 100
+        block_size: 1024
+        families:
+        - name: short
+          prefix_tokens: []
+          suffix_length: 1024
+          token_max: 10000
+          output_len: 8
+          priority: 50
     client:
       SEND_MODE: replay
       DURATION_S: '30'
