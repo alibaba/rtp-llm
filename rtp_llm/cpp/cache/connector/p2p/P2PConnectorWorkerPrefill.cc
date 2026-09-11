@@ -806,7 +806,7 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
 
     const int64_t wait_cb_start_us = currentTimeUs();
     const bool    all_callbacks_received =
-        waitSendCallbacksWithTimeout(transfer_result, sent_transfer_count, return_deadline_ms, cancel_flag);
+        waitSendCallbacksWithTimeout(transfer_result, sent_transfer_count, request_deadline_ms, cancel_flag);
     const int64_t wait_cb_cost_us = currentTimeUs() - wait_cb_start_us;
     const bool    timeout_cancelled_pending_tasks =
         !all_callbacks_received && !cancel_flag->load(std::memory_order_relaxed);

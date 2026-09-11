@@ -78,6 +78,17 @@ public:
         return stream_ptr;
     };
 
+    GenerateStreamPtr createMockStream(std::vector<int> input_ids, int64_t /*batch_padding*/) {
+        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
+        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
+        ResourceContext                 resource_context;
+        generate_input->generate_config = generate_config;
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
+        return std::make_shared<NormalGenerateStream>(
+            generate_input, model_config_, runtime_config_, resource_context, nullptr);
+    }
+
 private:
     ModelConfig   model_config_;
     RuntimeConfig runtime_config_;
@@ -110,7 +121,8 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
 }
 
 TEST_F(GenerateStreamTest, P2PRequestDeadlineDoesNotRestartWithStreamBeginTime) {
-    auto stream = createMockStream({1, 2, 3}, 1001);
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createMockStream({1, 2, 3}, 1001);
     const int64_t deadline_ms = autil::TimeUtility::currentTimeInMicroSeconds() / 1000 + 1000;
     stream->generate_input_->request_deadline_ms = deadline_ms;
     stream->resetBeginTime((deadline_ms + 5000) * 1000);

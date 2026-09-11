@@ -430,7 +430,6 @@ TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_SkipsWriteIfKeyAlre
 // Counter-check: when the key was never cancelled, notifySideChannelReady
 // still writes normally (otherwise the cancellation check has overshot).
 TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_WritesNormallyWhenNotCancelled) {
-    const int64_t deadline_ms = currentTimeMs() + 5000;
     const std::string unique_key = "test_notify_without_cancel_writes_normally";
 
     P2PConnectorResourceEntry::SideChannelData side_data;
