@@ -77,6 +77,19 @@ config_setting(
     },
 )
 
+# Dedicated SM120 CUDA 13 build.  Keep this stricter than the generic x86
+# CUDA13 setting so the consumer-Blackwell FP8 blockwise kernel is compiled
+# only for the explicit SM120 image/job.
+config_setting(
+    name = "using_cuda13_sm120",
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13_x86": "true",
+        "using_cuda13_sm120": "true",
+    },
+)
+
 config_setting(
     name = "using_cuda12_x86",
     values = {"define": "using_cuda12_x86=true"},

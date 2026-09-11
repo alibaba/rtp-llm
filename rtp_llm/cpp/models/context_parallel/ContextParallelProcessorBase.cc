@@ -303,21 +303,36 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     const int64_t global_token_num        = total_input_tokens.numel();
     const int64_t local_token_num         = cp_split_input_tokens.numel();
 
+    // A text-only PD prefix-reuse transfer can carry stale one-axis position
+    // ids for the original context.  When the tensor has exactly one value per
+    // uncached token, discard it and synthesize cache-aware absolute positions
+    // below.  Multi-axis position ids carry model semantics that cannot be
+    // reconstructed from prefix lengths, so retain and CP-remap them.  A stale
+    // multi-axis tensor with the wrong token count then fails closed in
+    // remapPositionIds instead of silently degrading to one axis.
+    bool has_explicit_position_ids =
+        model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0;
+    const bool has_single_axis_position_ids =
+        has_explicit_position_ids && model_input.combo_position_ids.numel() == global_token_num;
+    if (!has_multimodal_input && has_prefix_reuse && has_single_axis_position_ids) {
+        model_input.combo_position_ids = torch::Tensor();
+        has_explicit_position_ids      = false;
+    }
+
     // Per-local-token remap: for each token this rank keeps after the CP split,
     // record its global source index + validity. Reused to CP-split every per-token
     // side input the same way as combo_tokens: text_tokens_mask and combo_tokens_type_ids.
     // Without splitting the mask/type_ids, the embedding
     // op would read a global-length mask misaligned with this rank's token chunk
     // (multimodal placeholder ids stay -1 but get unmasked -> out-of-bounds).
-    const bool has_explicit_position_ids =
-        model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0;
     const bool need_token_remap = model_input.text_tokens_mask.defined() || model_input.combo_tokens_type_ids.defined()
                                   || has_explicit_position_ids || has_multimodal_input;
     const bool           need_source_map = need_token_remap || has_prefix_reuse;
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
-    RTP_LLM_CHECK_WITH_INFO(!need_source_map || num_decode_stream == 0,
-                            "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
+    RTP_LLM_CHECK_WITH_INFO(
+        !need_source_map || num_decode_stream == 0,
+        "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
     if (need_source_map) {
         cp_select_indices.reserve(cp_split_input_tokens.numel());
         cp_valid_mask.reserve(cp_split_input_tokens.numel());

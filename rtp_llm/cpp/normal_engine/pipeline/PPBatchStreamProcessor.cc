@@ -4,23 +4,14 @@
 #include <cstring>
 #include <utility>
 
-#include <ATen/Generator.h>
-#if defined(USING_CUDA) || defined(USING_ROCM)
-#include <ATen/cuda/CUDAGeneratorImpl.h>
-#else
-#include <ATen/CPUGeneratorImpl.h>
-#endif
-
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
-#if USING_CUDA
-#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
-#include "ATen/cuda/CUDAContext.h"
-#endif
 
 namespace rtp_llm {
 
@@ -534,18 +525,24 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
     return result;
 }
 
-absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups& stream_groups,
-                                                             const PPExecutionResult& result) const {
+absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&                       stream_groups,
+                                                             const PPExecutionResult&                  result,
+                                                             const std::vector<PPStreamRoundSnapshot>& round_snapshot) const {
     if (mtp_enabled_) {
-        return dispatchMtpExecutionResult(stream_groups, result);
+        return dispatchMtpExecutionResult(stream_groups, result, round_snapshot);
     }
-    return dispatchNormalExecutionResult(stream_groups, result);
+    return dispatchNormalExecutionResult(stream_groups, result, round_snapshot);
 }
 
 PPBatchStreamProcessor::ExecutionResultLayout
-PPBatchStreamProcessor::validateExecutionResult(const std::list<GenerateStreamPtr>& all_streams,
-                                                const PPExecutionResult& result) const {
+PPBatchStreamProcessor::validateExecutionResult(const std::list<GenerateStreamPtr>&       all_streams,
+                                                const PPExecutionResult&                  result,
+                                                const std::vector<PPStreamRoundSnapshot>& round_snapshot) const {
     const auto stream_count = static_cast<int64_t>(all_streams.size());
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(round_snapshot.size()) == stream_count,
+                            "PP round snapshot count %ld does not match the inflight stream count %ld",
+                            static_cast<long>(round_snapshot.size()),
+                            static_cast<long>(stream_count));
     RTP_LLM_CHECK_WITH_INFO(result.request_ids.defined() && result.request_ids.device().is_cpu()
                                 && result.request_ids.scalar_type() == torch::kInt64
                                 && result.request_ids.dim() == 1 && result.request_ids.size(0) == stream_count,
@@ -557,12 +554,17 @@ PPBatchStreamProcessor::validateExecutionResult(const std::list<GenerateStreamPt
     const auto* request_ids = result.request_ids.data_ptr<int64_t>();
     int64_t stream_idx = 0;
     for (const auto& stream : all_streams) {
-        const auto batch_size = static_cast<int64_t>(stream->currentBatchSize());
-        const auto token_size = static_cast<int64_t>(stream->currentExecuteTokenSize());
-        RTP_LLM_CHECK(batch_size > 0);
-        layout.batch_size += batch_size;
+        // Geometry comes from the dispatch-time snapshot. Reading it off the live
+        // stream here is the bug fde9471b2 fixed: under fastgen chunk overlap the
+        // result for this round is consumed up to pp_size rounds later, by which
+        // time the cursors describe a later chunk.
+        const auto& round             = round_snapshot[static_cast<size_t>(stream_idx)];
+        const auto  stream_batch_size = round.batch_size;
+        const auto  token_size        = round.execute_token_size;
+        RTP_LLM_CHECK(stream_batch_size > 0);
+        layout.batch_size += stream_batch_size;
         layout.token_size += token_size;
-        layout.loss_size += std::max<int64_t>(token_size / batch_size - 1, 0);
+        layout.loss_size += std::max<int64_t>(token_size / stream_batch_size - 1, 0);
         RTP_LLM_CHECK_WITH_INFO(request_ids[stream_idx] == stream->streamId(),
                                 "PP execution result request order does not match the inflight stream order");
         ++stream_idx;
@@ -605,27 +607,47 @@ void PPBatchStreamProcessor::validateRequestedOutputs(const PPOutputConfig& outp
                             "PP execution result is missing a requested tensor or has invalid tensor shapes");
 }
 
-absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamGroups& stream_groups,
-                                                                   const PPExecutionResult& result) const {
+absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamGroups&                       stream_groups,
+                                                                   const PPExecutionResult&                  result,
+                                                                   const std::vector<PPStreamRoundSnapshot>& round_snapshot) const {
     const auto all_streams = stream_groups.allStreams();
-    const auto layout = validateExecutionResult(all_streams, result);
+    const auto layout = validateExecutionResult(all_streams, result, round_snapshot);
     RTP_LLM_CHECK_WITH_INFO(result.new_token_ids.size(1) == 1
                                 && !result.accept_len.defined() && !result.propose_token_ids.defined(),
                             "ordinary PP execution result must not contain speculative fields");
     validateRequestedOutputs(gatherOutputConfig(stream_groups), result, layout);
+
+    // Bring-up diagnostic: which round's token reaches the stream, and whether
+    // that round was an intermediate chunk. RTP_LLM_LOG_FASTGEN=1 to enable.
+    static const bool fastgen_log = autil::EnvUtil::getEnv("RTP_LLM_LOG_FASTGEN", false);
 
     int64_t batch_idx = 0;
     int64_t stream_idx = 0;
     int64_t token_offset = 0;
     int64_t loss_offset = 0;
     for (const auto& stream : all_streams) {
-        const auto stream_batch_size = static_cast<int64_t>(stream->currentBatchSize());
-        const auto token_size = static_cast<int64_t>(stream->currentExecuteTokenSize());
-        const auto loss_size = std::max<int64_t>(token_size / stream_batch_size - 1, 0);
-        auto error_info =
+        const auto& round             = round_snapshot[static_cast<size_t>(stream_idx)];
+        const auto  stream_batch_size = round.batch_size;
+        const auto  token_size        = round.execute_token_size;
+        const auto  loss_size         = std::max<int64_t>(token_size / stream_batch_size - 1, 0);
+        auto        error_info =
             collectStreamSamplerError(result.processor_errors, result.sample_success, batch_idx, stream_batch_size);
+        if (fastgen_log) {
+            const auto token_row = result.new_token_ids.narrow(0, batch_idx, stream_batch_size);
+            const auto token0    = token_row.numel() ? token_row.flatten()[0].to(torch::kLong).item<int64_t>() : -1;
+            RTP_LLM_LOG_INFO("[FASTGEN] result stream=%ld intermediate=%d tokens=%ld batch=%ld token0=%ld ctx=%d",
+                             static_cast<long>(stream->streamId()),
+                             round.intermediate_chunk ? 1 : 0,
+                             static_cast<long>(token_size),
+                             static_cast<long>(stream_batch_size),
+                             static_cast<long>(token0),
+                             stream->isContextStream() ? 1 : 0);
+        }
         dispatchNormalSingleStream(
-            stream, result, stream_idx, batch_idx, stream_batch_size, token_offset, loss_offset, std::move(error_info));
+            stream, result, round, stream_idx, batch_idx, token_offset, loss_offset, std::move(error_info));
+        if (stream->enableFastGen() && stream->isContextStream()) {
+            stream->ppResultReturned();
+        }
         stream->clearPPInflight();
         ++stream_idx;
         batch_idx += stream_batch_size;
@@ -635,16 +657,17 @@ absl::Status PPBatchStreamProcessor::dispatchNormalExecutionResult(const StreamG
     return absl::OkStatus();
 }
 
-void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr& stream,
-                                                        const PPExecutionResult& result,
-                                                        int64_t stream_idx,
-                                                        int64_t batch_idx,
-                                                        int64_t stream_batch_size,
-                                                        int64_t token_offset,
-                                                        int64_t loss_offset,
-                                                        std::optional<ErrorInfo> error_info) const {
-    const auto token_size = static_cast<int64_t>(stream->currentExecuteTokenSize());
-    const auto loss_size = std::max<int64_t>(token_size / stream_batch_size - 1, 0);
+void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&     stream,
+                                                        const PPExecutionResult&     result,
+                                                        const PPStreamRoundSnapshot& round,
+                                                        int64_t                      stream_idx,
+                                                        int64_t                      batch_idx,
+                                                        int64_t                      token_offset,
+                                                        int64_t                      loss_offset,
+                                                        std::optional<ErrorInfo>     error_info) const {
+    const auto stream_batch_size = round.batch_size;
+    const auto token_size        = round.execute_token_size;
+    const auto loss_size         = std::max<int64_t>(token_size / stream_batch_size - 1, 0);
     torch::Tensor hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
         hidden_states = result.hidden_states.narrow(0, batch_idx, stream_batch_size).clone();
@@ -687,7 +710,8 @@ void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&
                           true,
                           false,
                           std::move(prompt_logits),
-                          std::move(error_info)});
+                          std::move(error_info),
+                          round.intermediate_chunk});
 }
 
 torch::Tensor PPBatchStreamProcessor::gatherDraftNextPositionIds(const StreamGroups&   stream_groups,
@@ -787,10 +811,11 @@ void PPBatchStreamProcessor::validateMtpExecutionResult(const std::list<Generate
     }
 }
 
-absl::Status PPBatchStreamProcessor::dispatchMtpExecutionResult(const StreamGroups& stream_groups,
-                                                                const PPExecutionResult& result) const {
+absl::Status PPBatchStreamProcessor::dispatchMtpExecutionResult(const StreamGroups&                       stream_groups,
+                                                                const PPExecutionResult&                  result,
+                                                                const std::vector<PPStreamRoundSnapshot>& round_snapshot) const {
     const auto all_streams = stream_groups.allStreams();
-    const auto layout = validateExecutionResult(all_streams, result);
+    const auto layout = validateExecutionResult(all_streams, result, round_snapshot);
     validateMtpExecutionResult(all_streams, result, layout);
 
     int64_t row = 0;

@@ -7,6 +7,7 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -86,7 +87,32 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # Pipeline parallelism.  ``pp_layer_ids`` lists the GLOBAL layer ids this
+    # stage owns; ``None`` means every layer (the pp_size=1 case).  ``n_layers``
+    # and ``compress_ratios`` above deliberately stay GLOBAL: block-type
+    # selection (``compress_ratios[layer_id]``) and weight lookup
+    # (``ModelWeights.weights[layer_id]``) are both indexed by global id.  Only
+    # the constructed ModuleList and the KV-cache index are stage-local — the
+    # C++ cache layout is projected to this stage and numbered 0..len-1, so
+    # each Block carries a separate model-local ``cache_layer_id``.
+    pp_size: int = 1
+    pp_rank: int = 0
+    pp_layer_ids: Optional[List[int]] = None
+    pp_has_embedding: bool = True
+    pp_has_lm_head: bool = True
+    # Physical topology used by the routed MoE.  Under prefill CP the
+    # attention-facing ``tp_size`` above is deliberately set to 1, while the
+    # MoE still needs to address the physical TP/CP group.
+    moe_tp_size: int = 1
+    moe_tp_rank: int = 0
+    moe_cp_size: int = 1
+    moe_cp_enabled: bool = False
     is_decode_role: bool = False
+    # Dedicated DSpARK prefill workers execute only the commit side: target
+    # features are projected into the draft SWA pools and no query/FFN/mHC
+    # forward is run.  Keeping this as an explicit construction flag lets the
+    # same model class retain the full graph for decode and PDFUSION.
+    commit_only: bool = False
     # KV-cache dtype switch.  True selects ``AttentionFP8`` (paged 584B
     # SWA/CSA/HCA pools, FlashMLA dual-pool decode); False keeps the BF16
     # ``Attention`` path. Resolved from
@@ -101,14 +127,20 @@ def _block_kwargs(
     layer_id: int,
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]],
+    commit_only: bool = False,
+    cache_layer_id: Optional[int] = None,
 ) -> Dict:
     """Kwargs common to Block construction.
 
     ``compress_ratios`` is sized ``n_layers + n_mtp_layers`` (44 for
-    V4-Flash default) so ``compress_ratios[layer_id]`` works directly.
+    V4-Flash default) so ``compress_ratios[layer_id]`` works directly —
+    ``layer_id`` is therefore always the GLOBAL id.  ``cache_layer_id`` is
+    the model-local id the stage-projected KV cache is indexed by, and is
+    only different from ``layer_id`` when ``pp_size > 1``.
     """
     return dict(
         layer_id=layer_id,
+        cache_layer_id=cache_layer_id,
         dim=args.dim,
         n_heads=args.n_heads,
         q_lora_rank=args.q_lora_rank,
@@ -149,7 +181,12 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
+        moe_tp_size=args.moe_tp_size,
+        moe_tp_rank=args.moe_tp_rank,
+        cp_size=args.moe_cp_size,
+        cp_enabled=args.moe_cp_enabled,
         fp8_kv_cache=args.fp8_kv_cache,
+        commit_only=commit_only,
     )
 
 
@@ -157,8 +194,18 @@ def _build_block(
     layer_id: int,
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+    commit_only: bool = False,
+    cache_layer_id: Optional[int] = None,
 ) -> Block:
-    return Block(**_block_kwargs(layer_id, args, layer_weights))
+    return Block(
+        **_block_kwargs(
+            layer_id,
+            args,
+            layer_weights,
+            commit_only=commit_only,
+            cache_layer_id=cache_layer_id,
+        )
+    )
 
 
 class V4Transformer(nn.Module):
@@ -174,6 +221,7 @@ class V4Transformer(nn.Module):
         self.args = args
         self.max_seq_len = args.max_seq_len
         self.hc_mult = args.hc_mult
+        self.commit_only = bool(getattr(args, "commit_only", False))
         # Surface ``fp8_kv_cache`` as a top-level attr so
         # ``prefill/forward.py`` and ``DeepSeekV4Model.prepare_fmha_impl``
         # can dispatch via ``v4.fp8_kv_cache`` without reading args.
@@ -182,17 +230,53 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
-        # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
-        # ``nn.Parameter``); the framework dict supplies the real tensor.
-        self.embed = EmbeddingTorch(gw[W.embedding])
-
+        # Under PP this stage owns only ``args.pp_layer_ids``.  Those are GLOBAL
+        # layer ids: they index ``mw.weights`` and select ``compress_ratios``
+        # (hence the block type).  The ModuleList position is the MODEL-LOCAL id
+        # the stage-projected KV cache is numbered by, so each block gets both.
+        # At pp_size=1 the list is every layer and local == global.
+        self.pp_global_layer_ids: List[int] = (
+            [int(i) for i in args.pp_layer_ids]
+            if args.pp_layer_ids
+            else list(range(args.n_layers))
+        )
         self.layers = nn.ModuleList(
             [
-                _build_block(i, args, layer_weights=mw.weights[i])
-                for i in range(args.n_layers)
+                _build_block(
+                    global_id,
+                    args,
+                    layer_weights=mw.weights[global_id],
+                    commit_only=self.commit_only,
+                    cache_layer_id=local_id,
+                )
+                for local_id, global_id in enumerate(self.pp_global_layer_ids)
             ]
         )
-        self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
+
+        self.pp_has_embedding = bool(getattr(args, "pp_has_embedding", True))
+        self.pp_has_lm_head = bool(getattr(args, "pp_has_lm_head", True))
+        self._owns_embedding = (not self.commit_only) and self.pp_has_embedding
+        self._owns_lm_head = (not self.commit_only) and self.pp_has_lm_head
+
+        if not self._owns_embedding:
+            # A commit worker never embeds tokens.  A non-first PP stage does
+            # not own the embedding and never loads it, so it resumes upstream
+            # activations from ``pp_intermediates`` instead.  Deliberately leave
+            # the member ``None`` rather than materializing a dummy tensor:
+            # accidental use then fails loudly at the call site.
+            self.embed = None
+        else:
+            # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
+            # ``nn.Parameter``); the framework dict supplies the real tensor.
+            self.embed = EmbeddingTorch(gw[W.embedding])
+        if not self._owns_lm_head:
+            # Same reasoning: the mHC head reduce, final norm and LM head belong
+            # to the last stage only, and only that stage loads their weights.
+            self.norm = None
+            self.head_weight = None
+            self.head_hc = None
+        else:
+            self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
         # MTP draft is a separate model (``DeepSeekV4MtpModel``) that
         # holds its own V4Transformer — no MTP layers live on the main
@@ -211,20 +295,21 @@ class V4Transformer(nn.Module):
         # path and the standalone ``forward`` (B==1) path below call
         # ``F.linear`` / ``torch.mm`` with the input cast to
         # ``self.head_weight.dtype`` so both dtypes work there too.
-        self.head_weight = gw[W.lm_head]
-        if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
-            raise TypeError(
-                f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
+        if self._owns_lm_head:
+            self.head_weight = gw[W.lm_head]
+            if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
+                raise TypeError(
+                    f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
+                )
+            self.head_hc = build_hc_head(
+                gw[W.v4_hc_head_fn],
+                gw[W.v4_hc_head_base],
+                gw[W.v4_hc_head_scale],
+                dim=args.dim,
+                hc_mult=args.hc_mult,
+                norm_eps=args.norm_eps,
+                hc_eps=args.hc_eps,
             )
-        self.head_hc = build_hc_head(
-            gw[W.v4_hc_head_fn],
-            gw[W.v4_hc_head_base],
-            gw[W.v4_hc_head_scale],
-            dim=args.dim,
-            hc_mult=args.hc_mult,
-            norm_eps=args.norm_eps,
-            hc_eps=args.hc_eps,
-        )
 
         self._dbg_step = 0
         self.register_buffer("_mtp_hidden_buffer", None, persistent=False)
@@ -248,6 +333,27 @@ class V4Transformer(nn.Module):
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
 
+    def embed_full(self, input_ids: torch.Tensor) -> torch.Tensor:
+        h = self.embed(input_ids)
+        if h.size(-1) == self.args.dim:
+            return h
+        if self.args.dim % h.size(-1) != 0:
+            raise ValueError(
+                "DSV4 TP embedding shard has incompatible hidden size: "
+                f"local={h.size(-1)} dim={self.args.dim}"
+            )
+        shard_count = self.args.dim // h.size(-1)
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+        leading = h.shape[:-1]
+        local_dim = h.size(-1)
+        flat = h.reshape(-1, local_dim).contiguous()
+        gathered = all_gather(flat, group=Group.TP)
+        return (
+            gathered.view(shard_count, flat.size(0), local_dim)
+            .transpose(0, 1)
+            .contiguous()
+            .view(*leading, self.args.dim)
+        )
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
 
@@ -264,15 +370,26 @@ class V4Transformer(nn.Module):
         invalid_ids = [
             layer_id
             for layer_id in capture_ids
-            if layer_id < 0 or layer_id >= len(self.layers)
+            if layer_id < 0 or layer_id >= self.args.n_layers
         ]
         if invalid_ids:
             raise ValueError(
                 "DSpARK auxiliary hidden capture layer ids are out of range: "
-                f"invalid={invalid_ids}, num_layers={len(self.layers)}"
+                f"invalid={invalid_ids}, num_layers={self.args.n_layers}"
             )
         self.capture_aux_hidden_layer_ids = capture_ids
 
+    def _ensure_mtp_hidden_capacity(self, rows: int) -> None:
+        buf = self._mtp_hidden_buffer
+        if buf is None or int(rows) <= int(buf.size(0)):
+            return
+        if os.environ.get("DSV4_SM120_DYNAMIC_PREFILL_WORKSPACE", "0") != "1":
+            return
+        grown = torch.empty(
+            int(rows), int(buf.size(1)), dtype=buf.dtype, device=buf.device
+        )
+        grown[: buf.size(0)].copy_(buf)
+        self.register_buffer("_mtp_hidden_buffer", grown, persistent=False)
     def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
         """Write one selected layer's mean-pooled hidden into the shared
         runtime buffer.
@@ -300,6 +417,8 @@ class V4Transformer(nn.Module):
         pooled = hidden.mean(dim=-2)
         flat = pooled.reshape(-1, pooled.size(-1))
         rows, dim = flat.shape
+        self._ensure_mtp_hidden_capacity(rows)
+        buf = self._mtp_hidden_buffer
         assert (segment + 1) * dim <= buf.size(1), (
             f"aux segment overflow: segment={segment} dim={dim} "
             f"row_width={buf.size(1)}"
@@ -455,7 +574,7 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids.view(B, q_len)
         else:
             input_ids_2d = input_ids
-        h = self.embed(input_ids_2d)  # [B, q_len, dim]
+        h = self.embed_full(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         for layer in self.layers:
             h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
@@ -544,7 +663,7 @@ class V4Transformer(nn.Module):
             # begin() may suppress this forward (MOEDBG_MAX_SEQ); honour it.
             if _rt._get_buf() is None:
                 _rt_on = False
-        h = self.embed(input_ids)  # [B, S, d]
+        h = self.embed_full(input_ids)  # [B, S, d]
         if _rt_on:
             _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]

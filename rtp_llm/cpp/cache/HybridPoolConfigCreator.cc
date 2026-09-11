@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 
 #include <algorithm>
+#include <functional>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <set>
@@ -270,6 +272,58 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
 }
 
+bool isDsv4LegacyFixedPoolTag(const std::string& tag) {
+    static const std::set<std::string> kTags = {"indexer_state", "csa_state", "hca_state", "swa_kv"};
+    return kTags.count(tag) != 0;
+}
+
+void applyDsv4PoolCapacity(LayerKVCacheSpecDescs&                         layer_descs,
+                           const std::function<bool(const std::string&)>& matches,
+                           int64_t                                        block_num) {
+    if (block_num < 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(block_num <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max()),
+                            "DSV4 pool block override=%ld exceeds uint32 capacity",
+                            block_num);
+    for (auto& descs : layer_descs) {
+        for (auto& desc : descs) {
+            if (!matches(desc.tag)) {
+                continue;
+            }
+            auto capacity               = desc.capacity.value_or(CacheCapacityPolicyDesc{});
+            capacity.explicit_block_num = static_cast<uint32_t>(block_num);
+            // Explicit sizing is independent from residency.  Host-pinned
+            // state must not consume the device paged-cache budget.  An
+            // explicit zero removes descriptor-level fixed sizing.
+            const bool charge_to_paged_budget = !desc.memory.has_value() || !desc.memory->placement.has_value()
+                                                || *desc.memory->placement == CacheMemoryPlacement::DEVICE;
+            capacity.charge_to_paged_budget = block_num > 0 && charge_to_paged_budget;
+            desc.capacity                   = capacity;
+        }
+    }
+}
+
+void applyDsv4LegacyFixedPoolCapacity(LayerKVCacheSpecDescs& layer_descs, uint32_t block_num) {
+    if (block_num == 0) {
+        return;
+    }
+    applyDsv4PoolCapacity(layer_descs, isDsv4LegacyFixedPoolTag, static_cast<int64_t>(block_num));
+}
+
+void applyDsv4HcaStatePoolCapacity(LayerKVCacheSpecDescs& layer_descs, int64_t block_num, bool clear) {
+    RTP_LLM_CHECK_WITH_INFO(
+        block_num >= -1, "dsv4_hca_state_pool_blocks must be -1, 0, or a positive value, got %ld", block_num);
+    RTP_LLM_CHECK_WITH_INFO(!(clear && block_num > 0),
+                            "dsv4_hca_state_pool_clear cannot be enabled together with "
+                            "dsv4_hca_state_pool_blocks=%ld",
+                            block_num);
+    applyDsv4PoolCapacity(
+        layer_descs,
+        [](const std::string& tag) { return tag == DSV4_HCA_STATE_TAG; },
+        clear ? 0 : (block_num > 0 ? block_num : -1));
+}
+
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
                                             const ParallelismConfig& parallelism_config,
                                             const KVCacheConfig&     kv_cache_config,
@@ -311,6 +365,13 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
 
     if (!stage_model_config.kv_cache_spec_descs.empty()) {
         validateHybridPoolDescs(stage_model_config, kernel_tokens_per_block, gen_num_per_cycle);
+        // Copy so HCA sizing does not mutate the stage-scoped descs in place.
+        auto layer_descs = stage_model_config.kv_cache_spec_descs;
+        // Preserve the legacy all-fixed-pool knob first, then let the new
+        // HCA-only three-state override take precedence when explicitly set.
+        applyDsv4LegacyFixedPoolCapacity(layer_descs, kv_cache_config.dsv4_fixed_pool_blocks);
+        applyDsv4HcaStatePoolCapacity(
+            layer_descs, kv_cache_config.dsv4_hca_state_pool_blocks, kv_cache_config.dsv4_hca_state_pool_clear);
         SpecBuildContext ctx;
         ctx.dtype                   = dtype;
         ctx.seq_size_per_block      = physical_tokens_per_block;
@@ -320,9 +381,9 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         ctx.kernel_tokens_per_block = kernel_tokens_per_block;
         ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
         auto refreshed_specs        = CacheConfigCreator::buildLayerSpecsFromDescs(
-            stage_model_config.kv_cache_spec_descs, ctx, stage_model_config.num_layers);
+            layer_descs, ctx, stage_model_config.num_layers);
         populateGroupsFromLayerSpecs(
-            config, stage_model_config.kv_cache_spec_descs, refreshed_specs, stage_model_config, parallelism_config);
+            config, layer_descs, refreshed_specs, stage_model_config, parallelism_config);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec               = config.specForGroup(gid);
             config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
@@ -331,8 +392,11 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                                || spec->type == KVCacheSpecType::OpaqueKV
                                                || spec->type == KVCacheSpecType::OpaqueState;
         }
-        for (const auto& layer_descs : stage_model_config.kv_cache_spec_descs) {
-            for (const auto& desc : layer_descs) {
+        // Use the injected descriptor copy consistently below.  In particular,
+        // do not accidentally inspect the model's original descriptors after
+        // HCA_STATE capacity has been applied above.
+        for (const auto& per_layer_descs : layer_descs) {
+            for (const auto& desc : per_layer_descs) {
                 config.is_sparse = config.is_sparse || desc.cache_type == KVCacheSpecType::OpaqueKV;
             }
         }

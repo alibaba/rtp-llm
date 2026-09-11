@@ -95,6 +95,7 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -115,7 +116,10 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     build_block_tables_batched,
     primary_attention_inputs,
 )
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    resolve_prefill_workspace_rows,
+)
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -142,6 +146,276 @@ _PrefillFastLayerCall = Callable[..., torch.Tensor]
 
 def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in _TRUE_ENV_VALUES
+
+
+# ---------------------------------------------------------------------------
+# Env-gated per-forward CPU-wall accounting (``DSV4_FWD_STATS=1``).
+#
+# Step 15's ``t_stage(C) = 799 + C*26.0`` fit leaves ~15 ms/round unexplained:
+# the timed CP gathers are only ~7-10 ms/round and the removed D2H syncs ~0.6.
+# The remainder has to be host-side work the layer loop cannot overlap — D2H
+# ``.item()`` syncs, the per-forward ``PrefillWorkspace`` union allocation, and
+# the meta build. All three are CPU costs, so they show up as CPU wall time, and
+# a real cudaMalloc/cudaFree shows up in the allocator counters. Neither needs a
+# profiler or a rebuild. Free when the flag is off (one bool read per forward).
+# ---------------------------------------------------------------------------
+_FWD_STATS = _env_flag("DSV4_FWD_STATS")
+_FWD_STATS_MAX = int(os.environ.get("DSV4_FWD_STATS_MAX", "0") or 0)
+_FWD_STATS_ROWS: list = []
+_FWD_STATS_N = [0]
+
+# GPU wall time per forward, bracketed by a CUDA event pair and drained lazily
+# with the non-blocking Event.query() on later forwards (the same trick the CP
+# gather stats use) so measuring does not serialise the thing being measured.
+#
+# Needed because pH2/pH3/pH4 showed that removing BOTH per-round host barriers in
+# PPExecutor changes nothing, which leaves one question CPU wall cannot answer and
+# CUPTI perturbs: is the ~126 ms/round stage cost inside forward_layers, or
+# outside it in the PP activation transfer (67.1 MB/round) and tpSync?
+_FWD_GPU = _env_flag("DSV4_FWD_GPU")
+if _FWD_GPU:
+    _FWD_STATS = True
+_FWD_GPU_PENDING: list = []
+_FWD_GPU_ROWS: list = []
+
+# Allocator counters that only move on a real driver call. A per-forward union
+# buffer that the caching allocator recycles leaves all three at zero; one that
+# does not is paying cudaMalloc/cudaFree (a cudaFree is a device sync).
+_FWD_STATS_MEM_KEYS = (
+    "num_device_alloc",
+    "num_device_free",
+    "num_alloc_retries",
+)
+
+
+def _fwd_stats_snap() -> Optional[tuple]:
+    if not _FWD_STATS:
+        return None
+    ms = torch.cuda.memory_stats()
+    return tuple(int(ms.get(k, 0)) for k in _FWD_STATS_MEM_KEYS)
+
+
+def _fwd_gpu_drain(force: bool = False) -> None:
+    """Pop completed event pairs and report their GPU wall time.
+
+    ``Event.query()`` is non-blocking, so this never waits on the GPU; pairs
+    still in flight stay queued for a later forward. ``force`` synchronises the
+    tail event first and is only for the atexit flush.
+    """
+    while _FWD_GPU_PENDING:
+        n_tokens, cp_size, _ev0, ev1 = _FWD_GPU_PENDING[0]
+        if force:
+            ev1.synchronize()
+        elif not ev1.query():
+            return
+        _FWD_GPU_PENDING.pop(0)
+        gpu_ms = None
+        try:
+            gpu_ms = float(_ev0.elapsed_time(ev1))
+        except RuntimeError:
+            gpu_ms = None
+        if gpu_ms is None:
+            continue
+        _FWD_GPU_ROWS.append((n_tokens, cp_size, gpu_ms))
+        import sys
+
+        print(
+            "[FWDTG] rank=%d T=%d cp=%d gpu_ms=%.2f"
+            % (
+                torch.distributed.get_rank()
+                if torch.distributed.is_initialized()
+                else -1,
+                n_tokens,
+                cp_size,
+                gpu_ms,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _fwd_stats_report_row(
+    *,
+    n_tokens: int,
+    cp_size: int,
+    marks: Dict[str, float],
+    mem_before: Optional[tuple],
+    mem_after: Optional[tuple],
+    ev0=None,
+) -> None:
+    """Emit one ``[FWDT]`` line of per-phase CPU wall times (ms)."""
+    _FWD_STATS_N[0] += 1
+    if _FWD_STATS_MAX and _FWD_STATS_N[0] > _FWD_STATS_MAX:
+        return
+    if _FWD_GPU and ev0 is not None:
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev1.record()
+        _FWD_GPU_PENDING.append((n_tokens, cp_size, ev0, ev1))
+        _fwd_gpu_drain()
+    order = ("cpctx", "pos", "embed", "meta", "loop", "tail")
+    parts = []
+    prev = marks.get("entry")
+    for name in order:
+        cur = marks.get(name)
+        if prev is None or cur is None:
+            parts.append("%s=NA" % name)
+            prev = cur if cur is not None else prev
+            continue
+        parts.append("%s=%.2f" % (name, (cur - prev) * 1e3))
+        prev = cur
+    total = 0.0
+    if marks.get("entry") is not None and marks.get("tail") is not None:
+        total = (marks["tail"] - marks["entry"]) * 1e3
+    deltas = ""
+    if mem_before is not None and mem_after is not None:
+        deltas = " " + " ".join(
+            "d_%s=%d" % (k, a - b)
+            for k, b, a in zip(_FWD_STATS_MEM_KEYS, mem_before, mem_after)
+        )
+    import sys
+
+    print(
+        "[FWDT] rank=%d n=%d T=%d cp=%d total=%.2f %s%s"
+        % (
+            torch.distributed.get_rank()
+            if torch.distributed.is_initialized()
+            else -1,
+            _FWD_STATS_N[0],
+            n_tokens,
+            cp_size,
+            total,
+            " ".join(parts),
+            deltas,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    _FWD_STATS_ROWS.append((n_tokens, cp_size, total, tuple(parts)))
+
+
+def _fwd_stats_flush() -> None:
+    if _FWD_GPU:
+        _fwd_gpu_drain(force=True)
+    if not _FWD_STATS or not _FWD_STATS_ROWS:
+        return
+    import sys
+
+    by_shape: Dict[tuple, list] = {}
+    for n_tokens, cp_size, total, _parts in _FWD_STATS_ROWS:
+        by_shape.setdefault((n_tokens, cp_size), []).append(total)
+    print("[FWDT] ---- summary over %d forwards ----" % len(_FWD_STATS_ROWS),
+          file=sys.stderr, flush=True)
+    for (n_tokens, cp_size), totals in sorted(by_shape.items()):
+        print(
+            "[FWDT] T=%d cp=%d calls=%d mean_total=%.2f ms sum_total=%.1f ms"
+            % (
+                n_tokens,
+                cp_size,
+                len(totals),
+                sum(totals) / len(totals),
+                sum(totals),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+    if _FWD_GPU_ROWS:
+        gpu_by_shape: Dict[tuple, list] = {}
+        for n_tokens, cp_size, gpu_ms in _FWD_GPU_ROWS:
+            gpu_by_shape.setdefault((n_tokens, cp_size), []).append(gpu_ms)
+        for (n_tokens, cp_size), vals in sorted(gpu_by_shape.items()):
+            print(
+                "[FWDTG] T=%d cp=%d calls=%d mean_gpu=%.2f ms sum_gpu=%.1f ms"
+                % (n_tokens, cp_size, len(vals), sum(vals) / len(vals), sum(vals)),
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+if _FWD_STATS:
+    import atexit
+
+    atexit.register(_fwd_stats_flush)
+
+
+# ---------------------------------------------------------------------------
+# Env-gated single-forward GPU kernel breakdown (``DSV4_FWD_PROFILE=1``).
+#
+# pH0's CPU-wall accounting put a whole forward at ~65 ms of host time while the
+# fitted stage cost is ~126 ms per round, so the per-round term ``o`` is GPU-side
+# and host timings cannot localise it further. This captures ONE forward per rank
+# with CUPTI and prints self-CUDA time per kernel — one profiled forward inflates
+# that request's TTFT, so a profiling leg's mean is not a result.
+# ---------------------------------------------------------------------------
+_FWD_PROFILE = _env_flag("DSV4_FWD_PROFILE")
+_FWD_PROFILE_IDX = int(os.environ.get("DSV4_FWD_PROFILE_IDX", "20") or 20)
+_FWD_PROFILE_ROWS = int(os.environ.get("DSV4_FWD_PROFILE_ROWS", "35") or 35)
+# -1 = every rank profiles. CUPTI on all 8 ranks at once perturbs the pipeline
+# and the CP collectives, so measurement legs normally pin one world rank.
+_FWD_PROFILE_RANK = int(os.environ.get("DSV4_FWD_PROFILE_RANK", "-1") or -1)
+_FWD_PROFILE_CT = [0]
+
+
+def _fwd_profile_rank_ok() -> bool:
+    if _FWD_PROFILE_RANK < 0:
+        return True
+    if not torch.distributed.is_initialized():
+        return _FWD_PROFILE_RANK == 0
+    return torch.distributed.get_rank() == _FWD_PROFILE_RANK
+
+
+def _fwd_profile_start():
+    prof = torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    )
+    prof.__enter__()
+    return prof
+
+
+def _fwd_profile_dump(prof, fwd_idx: int = 0) -> None:
+    import sys
+
+    rank = (
+        torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
+    )
+    # The C++ StepWindowProfiler's chrome traces come out with zero-timestamped
+    # kernel events on this build; the python profiler's export carries real
+    # per-kernel GPU times, so also dump one when DSV4_FWD_TRACE_DIR is set.
+    trace_dir = os.environ.get("DSV4_FWD_TRACE_DIR", "")
+    if trace_dir:
+        try:
+            path = os.path.join(trace_dir, f"fwd_rank{rank}_idx{fwd_idx}.json")
+            prof.export_chrome_trace(path)
+            print(
+                "[FWDP] rank=%d chrome trace exported: %s" % (rank, path),
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                "[FWDP] rank=%d chrome trace export failed: %r" % (rank, e),
+                file=sys.stderr,
+                flush=True,
+            )
+    ka = prof.key_averages()
+    total_us = sum(float(e.self_device_time_total) for e in ka)
+    print(
+        "[FWDP] rank=%d ---- one forward: total self GPU %.2f ms ----"
+        % (rank, total_us / 1e3),
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        ka.table(
+            sort_by="self_device_time_total",
+            row_limit=_FWD_PROFILE_ROWS,
+            max_name_column_width=78,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _prefill_fast_path_layer_calls(
@@ -270,7 +544,17 @@ def set_cp_info(
     cp_enabled = (
         parallelism_config is not None
         and getattr(parallelism_config, "prefill_cp_config", None) is not None
-        and parallelism_config.prefill_cp_config.is_enabled()
+        # is_enabled() deliberately EXCLUDES CPRotateMethod.PREFILL_CP, which has
+        # its own is_prefill_enabled() predicate. Gating on is_enabled() alone
+        # means DSV4 can never build a CPContext in PREFILL_CP mode: the C++
+        # ContextParallelProcessor splits the batch to rank-local tokens while
+        # this side still assumes the full sequence, which trips a device-side
+        # assert in the SWA Triton kernel. The python config layer already treats
+        # the two as alternatives (backend_rpc_server_visitor.py:131).
+        and (
+            parallelism_config.prefill_cp_config.is_enabled()
+            or parallelism_config.prefill_cp_config.is_prefill_enabled()
+        )
         and is_prefill
         and attn is not None
         and getattr(attn, "context_parallel_info", None) is not None
@@ -305,7 +589,9 @@ def forward_layers(
       * ``positions``   ``[T_total]``    — per-token global absolute position (RoPE)
       * ``cu_seqlens``  ``[B+1]``        — per-request cumulative-token prefix sum
       * ``hidden``      ``[T_total, hc, dim]`` — internal, flat in the token axis
-      * returns         ``[T_total, dim]`` — pre-lm-head, engine applies lm_head
+      * returns         ``[T_total, dim]`` — pre-lm-head, engine applies lm_head.
+        On a non-last PP stage (``v4.norm is None``) it instead returns the
+        pre-reduce ``[T_total, hc, dim]`` boundary tensor for the next stage.
 
     The ``B`` axis is collapsed out of ``input_ids`` / ``hidden`` entirely,
     matching vLLM's ``DeepseekV4`` (``deepseek_v4.py:1310-1317``). Per-request
@@ -325,6 +611,21 @@ def forward_layers(
     owned KV regions are registered with the PD-disagg cache_store immediately
     after that layer's forward.
     """
+    _fs_marks: Optional[Dict[str, float]] = None
+    _fs_mem0 = None
+    _fs_ev0 = None
+    if _FWD_STATS:
+        _fs_marks = {"entry": time.perf_counter()}
+        _fs_mem0 = _fwd_stats_snap()
+    if _FWD_GPU:
+        _fs_ev0 = torch.cuda.Event(enable_timing=True)
+        _fs_ev0.record()
+    _fs_prof = None
+    if _FWD_PROFILE and _fwd_profile_rank_ok() and int(input_ids.size(0)) >= 1024:
+        _FWD_PROFILE_CT[0] += 1
+        if _FWD_PROFILE_CT[0] == _FWD_PROFILE_IDX:
+            _fs_prof = _fwd_profile_start()
+
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
@@ -345,6 +646,40 @@ def forward_layers(
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)
+    if _fs_marks is not None:
+        _fs_marks["cpctx"] = time.perf_counter()
+    if os.environ.get("DSV4_CP_PROBE"):
+        # Report the first few DISTINCT large token counts. A one-shot probe is
+        # useless here: the 5-token warm-up request legitimately has CP cleared
+        # (set_cp_info falls through to (None, 1, 0) when
+        # attn.context_parallel_info is None), so it says nothing about whether
+        # CP splits a real 32K chunk.
+        _seen = getattr(forward_layers, "_cp_probe_seen", None)
+        if _seen is None:
+            _seen = forward_layers._cp_probe_seen = set()
+        _T = int(input_ids.size(0))
+        if _T >= 1024 and len(_seen) < 4 and _T not in _seen:
+            _seen.add(_T)
+            import sys as _sys
+
+            _il = getattr(attn_inputs, "input_lengths", None)
+            _pl = getattr(attn_inputs, "prefix_lengths", None)
+            print(
+                "[CPPROBE] T={T} cp_info={ci} cp_size={cs} cp_rank={cr} cp_ctx={cc} "
+                "chunk_len={cl} seq_len_full={sf} input_lengths={il} prefix_lengths={pl}".format(
+                    T=_T,
+                    ci=cp_info is not None,
+                    cs=cp_size,
+                    cr=cp_rank,
+                    cc="None(CP CLEARED)" if cp_ctx is None else "set",
+                    cl=getattr(cp_ctx, "chunk_length", None),
+                    sf=getattr(cp_ctx, "seq_len_full", None),
+                    il=_il.flatten()[:4].tolist() if _il is not None else None,
+                    pl=_pl.flatten()[:4].tolist() if _pl is not None else None,
+                ),
+                file=_sys.stderr,
+                flush=True,
+            )
     if cp_ctx is not None:
         # The framework's fallback position_ids are rank-local contiguous
         # after ZigZagProcessor rewrites input_lengths to CP chunk lengths.
@@ -356,6 +691,8 @@ def forward_layers(
     positions = positions.reshape(-1).contiguous()
     if cu_seqlens is not None:
         cu_seqlens = cu_seqlens.reshape(-1).contiguous()
+    if _fs_marks is not None:
+        _fs_marks["pos"] = time.perf_counter()
 
     # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
     # smoke / production prefill path produces the same per-layer dump
@@ -375,7 +712,7 @@ def forward_layers(
         write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids)  # [T_total, dim]
+        h = v4.embed_full(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
@@ -386,6 +723,8 @@ def forward_layers(
 
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     capture_aux = bool(capture_ids)
+    if _fs_marks is not None:
+        _fs_marks["embed"] = time.perf_counter()
 
     prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
     use_prefill_fast_path = _prefill_fast_path_enabled(
@@ -474,12 +813,22 @@ def forward_layers(
             # once for the whole prefill forward. The bound ``_prefill_ws_full_rows>0``
             # is the canonical signal that CP is active at workspace bind time.
             reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
+            q_rows, full_rows = resolve_prefill_workspace_rows(
+                v4._prefill_ws_q_rows,
+                v4._prefill_ws_full_rows,
+                int(input_ids.numel()),
+                int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+                allow_dynamic_growth=os.environ.get(
+                    "DSV4_SM120_DYNAMIC_PREFILL_WORKSPACE", "0"
+                )
+                == "1",
+            )
             ws = PrefillWorkspace(
                 input_ids.device,
-                q_rows=v4._prefill_ws_q_rows,
+                q_rows=q_rows,
                 q_dim=v4._prefill_ws_q_dim,
                 reserve_cp=reserve_cp,
-                cp_rows=v4._prefill_ws_full_rows,
+                cp_rows=full_rows,
                 main_w=v4._prefill_ws_main_w,
                 idx_w=v4._prefill_ws_idx_w,
             )
@@ -499,6 +848,9 @@ def forward_layers(
                 max_seqlen_q=max_seqlen_q,
                 workspace=ws,
             )
+
+    if _fs_marks is not None:
+        _fs_marks["meta"] = time.perf_counter()
 
     try:
         with record_range_ctx():
@@ -521,11 +873,17 @@ def forward_layers(
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                 )  # [T, hc, dim]
-                if layer_idx in capture_ids:
-                    v4.capture_aux_hidden(layer_idx, h)
+                # ``capture_ids`` are GLOBAL layer ids while ``layer_idx`` is
+                # this stage's local position, so translate before matching.
+                if capture_aux:
+                    global_layer_id = v4.pp_global_layer_ids[layer_idx]
+                    if global_layer_id in capture_ids:
+                        v4.capture_aux_hidden(global_layer_id, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                 if write_cache_store_impl is not None:
+                    # Cache surfaces stay LOCAL on purpose: the C++ layout is
+                    # projected to this stage and numbered 0..len(layers)-1.
                     write_cache_store_impl(kv_cache.get_layer_cache_groups(layer_idx))
                 if _rt_on:
                     _rt.record(f"layer{layer_idx:02d}_out", h)
@@ -569,6 +927,15 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+        if _fs_prof is not None:
+            # __exit__ synchronises, so every kernel the loop launched is
+            # captured even though the launches themselves are async.
+            _fs_prof.__exit__(None, None, None)
+            _fwd_profile_dump(_fs_prof, _FWD_PROFILE_CT[0])
+            _fs_prof = None
+
+    if _fs_marks is not None:
+        _fs_marks["loop"] = time.perf_counter()
 
     if v4._mtp_hidden_buffer is not None:
         if capture_aux:
@@ -581,6 +948,25 @@ def forward_layers(
             if v4._mtp_last_hidden_buffer is not None:
                 _last_pre_hc = _last_hidden_by_request(_pre_hc_flat, cu_seqlens, cp_ctx)
                 v4._write_mtp_last_hidden_buffer(_last_pre_hc)
+
+    # PP: the mHC head reduce and the final norm belong to the LAST stage only —
+    # that is the only stage that loads ``head_hc`` / ``norm`` / ``head_weight``.
+    # A non-last stage must hand downstream the PRE-reduce ``[T, hc, dim]``
+    # tensor: reducing here would collapse the hyper-connection lanes the next
+    # stage continues from.  Returning before the reduce also skips the debug
+    # blocks below, which dereference ``v4.head_weight``.
+    if v4.norm is None:
+        if _fs_marks is not None:
+            _fs_marks["tail"] = time.perf_counter()
+            _fwd_stats_report_row(
+                n_tokens=int(input_ids.size(0)),
+                cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+                marks=_fs_marks,
+                mem_before=_fs_mem0,
+                mem_after=_fwd_stats_snap(),
+                ev0=_fs_ev0,
+            )
+        return h  # [T, hc, dim]
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
@@ -666,6 +1052,16 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if _fs_marks is not None:
+        _fs_marks["tail"] = time.perf_counter()
+        _fwd_stats_report_row(
+            n_tokens=int(input_ids.size(0)),
+            cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+            marks=_fs_marks,
+            mem_before=_fs_mem0,
+            mem_after=_fwd_stats_snap(),
+            ev0=_fs_ev0,
+        )
     return h  # [T, dim]
 
 
@@ -695,7 +1091,9 @@ def forward_prefill(
     the per-layer setup swaps in CPContext's request-absolute positions and
     full-length write-side view.
 
-    Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.
+    Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.  On a
+    non-last PP stage it instead carries the pre-reduce ``[T_total, hc, dim]``
+    boundary tensor, published on ``pp_intermediates`` for the next stage.
     """
     attn_inputs = inputs.attention_inputs
     attn = primary_attention_inputs(attn_inputs, kv_cache)
@@ -714,7 +1112,31 @@ def forward_prefill(
     #    (the field the dev branch called ``position_ids``; it is only populated
     #    when the model declares a position-id length factor, so the synthesize
     #    branch below stays the live path for DSV4).
-    cu_seqlens = attn.cu_seqlens
+    cu_seqlens = getattr(attn, "cu_seqlens", None)
+    # The startup real-warmup request is a valid single-request prefill, but
+    # some framework paths leave the optional cu_seqlens field as an empty
+    # tensor.  The FP8 metadata builder requires the vLLM-style [B+1] prefix
+    # sum, so reconstruct it from the authoritative input_lengths when
+    # available (and fall back to the complete flat input for a single request).
+    if cu_seqlens is None or cu_seqlens.numel() < 2:
+        input_lengths_for_cu = getattr(attn, "input_lengths", None)
+        if input_lengths_for_cu is not None and input_lengths_for_cu.numel() > 0:
+            lengths = input_lengths_for_cu.reshape(-1).to(
+                device=input_ids.device, dtype=torch.int32
+            )
+            if int(lengths.sum().item()) == int(inputs.input_ids.numel()):
+                cu_seqlens = torch.cat(
+                    [
+                        torch.zeros(1, dtype=torch.int32, device=input_ids.device),
+                        torch.cumsum(lengths, dim=0),
+                    ]
+                )
+        if cu_seqlens is None or cu_seqlens.numel() < 2:
+            cu_seqlens = torch.tensor(
+                [0, int(input_ids.numel())],
+                dtype=torch.int32,
+                device=input_ids.device,
+            )
     positions = getattr(attn, "combo_position_ids", None)
     # warmup / cudagraph capture path doesn't populate combo_position_ids —
     # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)
@@ -736,6 +1158,30 @@ def forward_prefill(
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn_inputs)
 
+    # PP: a non-first stage owns no embedding and resumes the upstream stage's
+    # activations instead.  ``forward_layers`` reads a non-None
+    # ``prepare_hidden_fn`` as "hidden is already ``[T, hc, dim]``", which is
+    # exactly the shape the upstream stage publishes.  Under CP the boundary
+    # tensor is this rank's own CP chunk: PP pairs equal ``cp_rank`` across
+    # stages (``PPLayout::rankOfStage`` preserves ``tp_rank``), so the token
+    # widths already match and no gather is needed here.
+    if v4.embed is None:
+        upstream_hidden = (
+            inputs.pp_intermediates.get("hidden_states")
+            if inputs.pp_intermediates
+            else None
+        )
+        if upstream_hidden is None:
+            raise RuntimeError(
+                "DSV4 prefill on a non-first PP stage received no upstream "
+                "hidden_states in pp_intermediates"
+            )
+
+        def _resume_upstream_hidden(input_ids, positions):
+            return upstream_hidden
+
+        prepare_hidden_fn = _resume_upstream_hidden
+
     hidden = forward_layers(
         v4,
         kv_cache,
@@ -745,5 +1191,10 @@ def forward_prefill(
         block_tables_by_type,
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
-    )  # [T_total, dim]
-    return PyModelOutputs(hidden)
+    )  # [T_total, dim], or [T_total, hc, dim] on a non-last PP stage
+    outputs = PyModelOutputs(hidden)
+    if v4.norm is None:
+        # Non-last stage: hand the pre-reduce mHC lanes downstream.  Dropping
+        # back to [T, dim] here would corrupt the hyper-connection stream.
+        outputs.pp_intermediates = {"hidden_states": hidden}
+    return outputs

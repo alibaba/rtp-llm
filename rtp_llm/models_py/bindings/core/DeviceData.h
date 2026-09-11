@@ -49,9 +49,16 @@ inline ExecProperties buildExecProperties(const ParallelismConfig&    parallelis
     props.tp_rank                     = parallelism_config.tp_rank;
     props.tp_size                     = parallelism_config.tp_size;
     props.enable_sp                   = parallelism_config.enable_sp;
-    props.enable_prefill_cp           = parallelism_config.prefill_cp_config.is_enabled();
-    props.prefill_cp_kv_cache_sharded = parallelism_config.prefill_cp_config.is_enabled()
-                                        && parallelism_config.prefill_cp_config.kv_cache_sharded
+    // PrefillCPConfig::is_enabled() deliberately EXCLUDES CPRotateMethod::PREFILL_CP
+    // (is_prefill_enabled() is the predicate for that mode), so gating on it alone
+    // silently disables CP for PREFILL_CP: ContextParallelProcessor never runs,
+    // context_parallel_info is never published, DSV4's set_cp_info clears the CP
+    // context, and every rank of a stage then duplicates the full chunk. The python
+    // side already treats the two as alternatives (backend_rpc_server_visitor.py:131).
+    const bool prefill_cp_on = parallelism_config.prefill_cp_config.is_enabled()
+                               || parallelism_config.prefill_cp_config.is_prefill_enabled();
+    props.enable_prefill_cp           = prefill_cp_on;
+    props.prefill_cp_kv_cache_sharded = prefill_cp_on && parallelism_config.prefill_cp_config.kv_cache_sharded
                                         && parallelism_config.tp_size > 1;
     props.ffn_as_service           = parallelism_config.ffn_disaggregate_config.is_ffn_service();
     props.enable_layer_micro_batch = static_cast<MicroBatchType>(device_resource_config.enable_layer_micro_batch);

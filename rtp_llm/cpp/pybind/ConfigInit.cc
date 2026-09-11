@@ -94,6 +94,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register get_block_cache_keys function
     registerCommon(m);
     registerMultimodal(m);
+    m.attr("DSV4_HCA_STATE_TAG") = py::str(std::string(DSV4_HCA_STATE_TAG));
 
     // Register enums
     py::enum_<RoleType>(m, "RoleType")
@@ -496,6 +497,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
+        .def_readwrite("dsv4_hca_state_pool_clear", &KVCacheConfig::dsv4_hca_state_pool_clear)
         .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
@@ -580,10 +582,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_retry_times,
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
-                                      self.dsv4_fixed_pool_use_memory);
+                                      self.dsv4_fixed_pool_use_memory,
+                                      self.dsv4_hca_state_pool_clear);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 57)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 57 && t.size() != 58)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -645,9 +648,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 57) {
                         // DSV4 fixed-pool knobs.
-                        c.dsv4_fixed_pool_blocks     = t[54].cast<uint32_t>();
-                        c.dsv4_hca_state_pool_blocks = t[55].cast<uint32_t>();
+                        c.dsv4_fixed_pool_blocks         = t[54].cast<uint32_t>();
+                        const auto serialized_hca_blocks = t[55].cast<int64_t>();
+                        // The released 57-field layout used zero to mean
+                        // "unset". Keep that meaning instead of silently
+                        // turning an old config into an explicit clear.
+                        c.dsv4_hca_state_pool_blocks =
+                            t.size() == 57 && serialized_hca_blocks == 0 ? -1 : serialized_hca_blocks;
                         c.dsv4_fixed_pool_use_memory = t[56].cast<bool>();
+                    }
+                    if (t.size() >= 58) {
+                        c.dsv4_hca_state_pool_clear = t[57].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
@@ -1325,6 +1336,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register FIFOSchedulerConfig
     py::class_<FIFOSchedulerConfig>(m, "FIFOSchedulerConfig")
         .def(py::init<>())
+        .def_readwrite("enable_fast_gen", &FIFOSchedulerConfig::enable_fast_gen)
+        .def_readwrite("fast_gen_max_context_len", &FIFOSchedulerConfig::fast_gen_max_context_len)
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
         .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
@@ -1341,10 +1354,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_prefill_ratio,
                                       self.cp_force_single_prefill,
                                       self.max_inited_kv_cache_streams,
-                                      self.max_batch_tokens_without_cache);
+                                      self.max_batch_tokens_without_cache,
+                                      self.enable_fast_gen,
+                                      self.fast_gen_max_context_len);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1360,6 +1375,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 7) {
                         c.max_batch_tokens_without_cache = t[6].cast<int64_t>();
+                    }
+                    if (t.size() >= 9) {
+                        c.enable_fast_gen          = t[7].cast<bool>();
+                        c.fast_gen_max_context_len = t[8].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());

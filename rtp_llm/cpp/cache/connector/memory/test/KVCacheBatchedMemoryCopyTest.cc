@@ -227,7 +227,6 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     KVCacheConfig     kv_config;
     kv_config.seq_size_per_block        = 128;
     kv_config.kernel_seq_size_per_block = 128;
-    kv_config.dsv4_fixed_pool_blocks    = 512;
     auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
     config.block_num                    = 512;
     return config;

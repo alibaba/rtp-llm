@@ -31,7 +31,10 @@ class FusedMoeFactory:
 
     @torch.inference_mode()
     def create_fused_moe(
-        self, config: MoEConfigAdapter, weights: Dict[str, torch.Tensor]
+        self,
+        config: MoEConfigAdapter,
+        weights: Dict[str, torch.Tensor],
+        strategy_override=None,
     ) -> FusedMoe:
         """Create FusedMoe instance
 
@@ -41,6 +44,10 @@ class FusedMoeFactory:
         Args:
             config: MOE configuration adapter
             weights: Weight dictionary
+            strategy_override: Optional strategy object.  Model-specific
+                callers may provide a strategy that implements the same
+                ``create_router``/``create_executor`` contract without
+                changing the process-wide registry.
 
         Returns:
             FusedMoe instance
@@ -48,7 +55,11 @@ class FusedMoeFactory:
         Raises:
             ValueError: If no suitable strategy is found or configuration is not supported
         """
-        strategy = self.registry.get_strategy(config)
+        strategy = (
+            strategy_override
+            if strategy_override is not None
+            else self.registry.get_strategy(config)
+        )
 
         router = strategy.create_router(config)
         executor = strategy.create_executor(config, weights)

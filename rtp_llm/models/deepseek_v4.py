@@ -32,6 +32,7 @@ from typing import List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.pp_layout import even_split_counts, register_pp_partitioner
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
@@ -47,7 +48,7 @@ from rtp_llm.models.dsv4_kv_cache import (
     build_dsv4_kv_cache_spec_descs,
     resolve_dsv4_tokens_per_block,
 )
-from rtp_llm.ops import HybridAttentionType, KvCacheDataType
+from rtp_llm.ops import HybridAttentionType, KvCacheDataType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -66,15 +67,25 @@ SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 _TRUTHY_ENV_VALUES = ("yes", "true", "t", "1", "on")
 
 
+def _is_prefill_role(role_type: object) -> bool:
+    """Return whether a framework role is the dedicated prefill worker.
+
+    ``ParallelismConfig.role_type`` is a pybind enum in production, but a few
+    lightweight/unit-test configurations expose the value as a string.  Keep
+    this compatibility at the boundary so role-sensitive weight selection
+    never depends on the process ``ROLE_TYPE`` environment variable.
+    """
+    if role_type == RoleType.PREFILL:
+        return True
+    return str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+
+
 def _dsv4_fixed_pool_use_host_memory() -> bool:
     """Read ``--dsv4_fixed_pool_use_memory`` / ``DSV4_FIXED_POOL_USE_MEMORY``.
 
-    ``_post_build_model_config`` only receives ``model_config``, and
-    ``KVCacheConfig`` is not reachable from it, so the env channel that backs
-    the flag (``env_name="DSV4_FIXED_POOL_USE_MEMORY"`` in
-    ``rtp_llm/server/server_args/kv_cache_group_args.py``) is read directly.
-    A CLI-only ``--dsv4_fixed_pool_use_memory`` is therefore not observed here;
-    plumbing ``kv_cache_config`` into the hook would close that gap.
+    ``_post_build_model_config`` only receives ``model_config``, so
+    ``setup_default_args`` publishes the final bound ``KVCacheConfig`` value
+    (after CLI-over-env precedence) through this compatibility bridge.
     """
     raw = os.environ.get("DSV4_FIXED_POOL_USE_MEMORY")
     if raw is None:
@@ -513,6 +524,13 @@ class DeepSeekV4(DeepSeekV2):
     `_create_python_model` until M2 lands the HCA-only forward path.
     """
 
+    def support_pp(self) -> bool:
+        """The model is stage-local: it builds only the layers this stage owns,
+        keeps the embedding on the first stage and the final norm / mHC head /
+        lm_head on the last, and exchanges the pre-reduce ``[T, hc, dim]``
+        boundary tensor through ``pp_intermediates``."""
+        return True
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
@@ -869,6 +887,12 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
 
 
 class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
+    def support_pp(self) -> bool:
+        # Inherited from DeepSeekV4, but speculative decoding and pipeline
+        # parallelism are mutually exclusive (NormalEngine asserts
+        # SP_TYPE_NONE && !propose_params_ when pp_size > 1).
+        return False
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
@@ -910,6 +934,70 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
         # DSpARK stages use the regular learned noaux_tc router rather than
         # the target model's initial hash-router schedule.
         self._num_hash_layers = 0
+
+    @property
+    def prefill_commit_only(self) -> bool:
+        """Whether this descriptor belongs to a dedicated prefill worker.
+
+        DSpARK's prefill-side model only executes ``forward_commit``: it
+        projects target features into each draft layer's SWA KV pool and never
+        evaluates queries, mHC, or MoE.  Decode and colocated (PDFUSION)
+        workers still execute ``forward_propose`` and therefore retain the
+        complete three-stage graph.
+        """
+        return _is_prefill_role(getattr(self, "role_type", None))
+
+    def get_weight_info(self) -> ModelWeightInfo:
+        """Build the normal weight descriptors, then prune them for
+        prefill commit workers.
+
+        Running the inherited descriptor normalization first is intentional:
+        it preserves all existing quantization, TP split, tied-embedding, and
+        output-vocabulary handling.  The final graph is filtered only after
+        those transforms, so a quantized ``wkv``/``main_proj`` remains a
+        complete weight+scale composite.  Descriptor construction is cheap;
+        the loader's name map is what controls checkpoint I/O and HBM usage.
+        """
+        info = super().get_weight_info()
+        if not self.prefill_commit_only:
+            return info
+
+        # ``run_commit_step`` consumes exactly these per-layer tensors.  The
+        # proposal-only sink is intentionally excluded: commit only performs
+        # wkv -> norm/RoPE before writing the SWA pool.
+        layer_names = {
+            W.v4_attn_wkv_w,
+            W.v4_attn_kv_norm,
+        }
+        global_names = {
+            # Kept for ModelLoader._load_dynamic_weights and the normal
+            # speculative alias contract.  In production these two names are
+            # aliases to the target model and do not allocate another copy.
+            W.embedding,
+            W.lm_head,
+            W.v4_dspark_main_norm,
+            W.v4_dspark_main_proj_w,
+        }
+        original_layer_count = len(info.layer_weights)
+        info.layer_weights = [
+            (
+                [weight for weight in layer if weight.name in layer_names]
+                if isinstance(layer, list)
+                else layer
+            )
+            for layer in info.layer_weights
+        ]
+        info.weights = [
+            weight for weight in info.weights if weight.name in global_names
+        ]
+        logging.info(
+            "[DeepSeekV4DSparkWeight] prefill commit-only weight descriptors: %d layers, "
+            "per-layer tags=%s, global tags=%s",
+            original_layer_count,
+            sorted(layer_names),
+            sorted(global_names),
+        )
+        return info
 
     def _get_weight_info(self) -> ModelWeightInfo:
         layer_weights: List[List[WeightModule]] = [
@@ -956,6 +1044,11 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
 
 class DeepSeekV4DSpark(DeepSeekV4):
     """Runtime-fixed-width DeepSeek-V4 DSpARK proposal model."""
+
+    def support_pp(self) -> bool:
+        # DSpARK is a speculative proposal model; pipeline parallelism rejects
+        # speculative decoding outright (see DeepSeekV4Mtp.support_pp).
+        return False
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
@@ -1036,6 +1129,41 @@ class DeepSeekV4DSpark(DeepSeekV4):
     def get_weight_cls():
         return DeepSeekV4DSparkWeight
 
+
+def _dsv4_pp_partition(num_layers: int, pp_size: int, model_config) -> List[int]:
+    """DSV4 PP layer partition.
+
+    ``resolve_pp_partition`` consults this before falling back to the even
+    split.  The CP2PP4 reference measurement this port reproduces ran an
+    explicit ``[11, 10, 11, 11]`` for V4-Flash's 43 layers at ``pp_size=4`` —
+    not the ``[11, 11, 11, 10]`` the even split yields.  Per-stage layer
+    counts set the per-stage times, which set the pipeline balance, so the
+    partition has to match the reference for a TTFT comparison to mean
+    anything.  It comes from the launch environment rather than a constant
+    here so the reproduction recipe states it explicitly.
+    """
+    override = os.environ.get("DSV4_PP_STAGE_LAYER_COUNTS", "").strip()
+    if not override:
+        return even_split_counts(num_layers, pp_size)
+    counts = [int(part) for part in override.split(",") if part.strip()]
+    if len(counts) != pp_size:
+        raise ValueError(
+            f"DSV4_PP_STAGE_LAYER_COUNTS={override!r} gives {len(counts)} stages "
+            f"but pp_size={pp_size}"
+        )
+    if sum(counts) != num_layers:
+        raise ValueError(
+            f"DSV4_PP_STAGE_LAYER_COUNTS={override!r} sums to {sum(counts)} "
+            f"but num_layers={num_layers}"
+        )
+    logging.info(
+        "[DeepSeekV4] PP layer partition from DSV4_PP_STAGE_LAYER_COUNTS: %s",
+        counts,
+    )
+    return counts
+
+
+register_pp_partitioner("deepseek_v4", _dsv4_pp_partition)
 
 register_model("deepseek_v4", DeepSeekV4, ["DeepseekV4ForCausalLM"])
 register_model("deepseek_v4_mtp", DeepSeekV4Mtp, ["DeepseekV4ForCausalLMNextN"])

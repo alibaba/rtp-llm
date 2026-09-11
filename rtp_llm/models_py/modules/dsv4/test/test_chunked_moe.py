@@ -91,6 +91,7 @@ class _FakeSharedExecutor:
 
 class _FakeStrategy(nn.Module):
     name = "mega"
+    requires_synchronized_chunk_schedule = False
 
     def __init__(self, cap: int) -> None:
         super().__init__()
@@ -107,6 +108,19 @@ class _FakeStrategy(nn.Module):
         if x.size(0) > self.cap:
             raise RuntimeError(f"chunk overflow: {x.size(0)} > {self.cap}")
         return x.float() * 2.0
+
+
+class _FakeSynchronizedStrategy(_FakeStrategy):
+    requires_synchronized_chunk_schedule = True
+
+    def __init__(self, cap: int, schedule_tokens: int) -> None:
+        super().__init__(cap)
+        self.schedule_tokens = schedule_tokens
+        self.schedule_calls: list[tuple[int, torch.device]] = []
+
+    def synchronized_chunk_extent(self, local_tokens: int, device: torch.device) -> int:
+        self.schedule_calls.append((local_tokens, device))
+        return self.schedule_tokens
 
 
 class _FakeGatePackStrategy(_FakeStrategy):
@@ -345,6 +359,20 @@ class ChunkedMoETest(unittest.TestCase):
         moe(x, input_ids)
 
         self.assertLessEqual(max(moe._strategy.token_chunks), 8)
+
+    def test_collective_chunk_schedule_keeps_short_rank_in_every_round(self):
+        moe = _fake_moe(dim=2, cap=4)
+        strategy = _FakeSynchronizedStrategy(cap=4, schedule_tokens=9)
+        moe._strategy = strategy
+        x = torch.arange(3 * 2, dtype=torch.float32).view(3, 2)
+        input_ids = torch.arange(3, dtype=torch.long)
+
+        out = moe(x, input_ids)
+
+        self.assertEqual(strategy.schedule_calls, [(3, x.device)])
+        self.assertEqual(strategy.token_chunks, [3, 0, 0])
+        self.assertEqual(moe._shared_executor.token_chunks, [3])
+        self.assertTrue(torch.equal(out, x * 3.0 + 1.0))
 
     def test_varlen_multi_request_flat_order(self):
         moe = _fake_moe(dim=1, cap=6)

@@ -34,8 +34,8 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 
-from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..._profiler import record_function_range
+from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
 from ..mega_fused_buf import (
     _get_or_create_mega_fused_buf,
@@ -59,8 +59,13 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
     def can_handle(cls, cfg: MoeCfg) -> bool:
         # Fused Mega requires EP > 1 plus the opt-in env and the fused DeepGEMM
         # entrypoints — all checked by ``_mega_moe_fused_enabled()`` except
-        # ep_size > 1, which we check here.
-        return cfg.ep_size > 1 and _mega_moe_fused_enabled()
+        # ep_size > 1, which we check here.  Reuse the inherited exact-SM10x
+        # gate so subclasses cannot bypass the base strategy's kernel ABI.
+        return (
+            cls._architecture_supported()
+            and cfg.ep_size > 1
+            and _mega_moe_fused_enabled()
+        )
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Prepare routed + shared-expert kernel weights and symm/scratch

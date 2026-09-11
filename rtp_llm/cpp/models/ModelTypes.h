@@ -93,6 +93,11 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    // Gates cache_keys in tpSync's packed broadcast. Under PP a non-root's plan
+    // is the empty marker, so this flag must travel in the hints instead of
+    // defaulting on the receiver — a root/receiver divergence shifts the packed
+    // CPU broadcast size and permanently misaligns the UDS stream.
+    pdSeparation,
     // last_hidden_states can have a different row count from combo_tokens for
     // DSpARK prefill seeding, so transmit its leading dimension explicitly.
     mtpHiddenStatesRows,
@@ -111,12 +116,13 @@ using GptModelInputShapeHints = std::array<int64_t, GptModelInputIndex::gptModel
 // Bit positions for `tensorDeviceMap`. Only fields that participate in the
 // MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
 enum GptModelInputDeviceBit : uint32_t {
-    kDeviceBitComboTokens     = 1u << 0,
-    kDeviceBitInputLengths    = 1u << 1,
-    kDeviceBitSequenceLengths = 1u << 2,
-    kDeviceBitPrefixLengths   = 1u << 3,
-    kDeviceBitLmOutputIndexes = 1u << 4,
-    kDeviceBitKernelBlockId   = 1u << 5,
+    kDeviceBitComboTokens      = 1u << 0,
+    kDeviceBitInputLengths     = 1u << 1,
+    kDeviceBitSequenceLengths  = 1u << 2,
+    kDeviceBitPrefixLengths    = 1u << 3,
+    kDeviceBitLmOutputIndexes  = 1u << 4,
+    kDeviceBitKernelBlockId    = 1u << 5,
+    kDeviceBitComboPositionIds = 1u << 6,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);

@@ -15,6 +15,11 @@ _DSV4_CUDA13_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
+_DSV4_SM120_ONLY = select({
+    "@//:using_cuda13_sm120": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 
 _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -68,6 +73,7 @@ _DSV4_FP8_CPU_TESTS = [
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
+    "test_sm120_sparse_mla",
 ]
 
 py_test(
@@ -84,6 +90,45 @@ py_test(
     srcs = ["test_fp8_sparse_attn_decode_op.py"],
     deps = _DSV4_FP8_TEST_DEPS,
     target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_sm120_sparse_mla_hardware",
+    srcs = ["test_sm120_sparse_mla_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_sm120_indexer_hardware",
+    srcs = ["test_sm120_indexer_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+# Keep the broad H20 target above, and run the same architecture-agnostic
+# kernel contract on real SM120 hardware as part of the positive-tag gate.
+py_test(
+    name = "test_dsv4_persistent_topk_sm120",
+    srcs = ["test_dsv4_persistent_topk.py"],
+    main = "test_dsv4_persistent_topk.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
 )
 
 py_test(

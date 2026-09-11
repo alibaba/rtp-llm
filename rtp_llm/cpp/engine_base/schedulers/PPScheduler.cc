@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 
+#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -11,6 +12,19 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+/** Fastgen chunks allowed in flight per context stream. pp_size fills the
+ * pipeline; 1 serializes, one chunk per pipeline round-trip. Overridable so
+ * overlap depth can be bisected without a rebuild.
+ */
+int64_t resolvePPChunkOverlapCap(int64_t pp_size) {
+    const auto override_cap = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_CHUNK_OVERLAP", static_cast<int64_t>(0));
+    return override_cap > 0 ? override_cap : std::max<int64_t>(pp_size, 1);
+}
+
+}  // namespace
 
 PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                          const ModelConfig&                     model_config,
@@ -27,7 +41,12 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                       cache_manager,
                       metrics_reporter),
     max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))) {}
+        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    pp_overlap_cap_(resolvePPChunkOverlapCap(parallelism_config.pp_size)) {
+    RTP_LLM_LOG_INFO("PPScheduler fastgen chunk overlap cap=%ld (pp_size=%ld)",
+                     static_cast<long>(pp_overlap_cap_),
+                     static_cast<long>(parallelism_config.pp_size));
+}
 
 PPScheduler::~PPScheduler() {
     (void)stop();
@@ -48,6 +67,19 @@ list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
         if (stream->isPPInflight()) {
             ++it;
             continue;
+        }
+        if (stream->enableFastGen() && stream->isContextStream()) {
+            // fastgen: gate re-scheduling on outstanding chunk results. With a
+            // pending next chunk, allow up to pp_size chunks in flight; once
+            // the cursor is at max the final chunk is in flight (or about to
+            // be) and the stream must not be re-scheduled until its result
+            // finishes it — otherwise the final window re-dispatches every
+            // round and the duplicate forwards corrupt the run.
+            const auto outstanding = stream->ppOutstandingResults();
+            if (stream->isChunkStream() ? outstanding >= pp_overlap_cap_ : outstanding > 0) {
+                ++it;
+                continue;
+            }
         }
 
         const auto new_state = stream->moveToNext();
@@ -276,6 +308,21 @@ absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
     running_streams_.splice(running_streams_.end(), new_streams_);
 
     for (const auto& stream : scheduled_streams) {
+        // fastgen: advance the three-cursor window once per scheduled round so
+        // gatherModelInput presents this round's chunk. The final chunk needs
+        // no acquire (cursor already at max; isChunkStream() false).
+        if (stream->enableFastGen() && stream->isContextStream()) {
+            if (stream->isChunkStream()) {
+                const auto acquired = stream->acquireNextChunk();
+                if (!acquired.ok()) {
+                    RTP_LLM_LOG_ERROR("stream [%ld] acquireNextChunk failed: %s",
+                                      stream->streamId(),
+                                      acquired.status().ToString().c_str());
+                    stream->reportEvent(StreamEvents::Error, ErrorCode::UNKNOWN_ERROR, "acquireNextChunk failed");
+                }
+            }
+            stream->ppChunkDispatched();
+        }
         stream->setPPInflight();
     }
 

@@ -69,11 +69,14 @@ private:
     struct InflightBatch {
         bool         skip_run = true;
         StreamGroups stream_groups;
-        int64_t      schedule_time_us = 0;
-
-        PPTickets plan_sends;
-        PPTickets activation_sends;
-        PPTickets execution_result_sends;
+        // Dispatch-time per-stream geometry, parallel to stream_groups.allStreams().
+        // Consumed with the round's execution result, by which time the live
+        // stream state has moved on.
+        std::vector<PPStreamRoundSnapshot> round_snapshot;
+        int64_t                            schedule_time_us = 0;
+        PPTickets                          plan_sends;
+        PPTickets                          activation_sends;
+        PPTickets                          execution_result_sends;
 
         void reset();
     };
@@ -170,6 +173,24 @@ private:
 
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>                   tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+
+    // Temporary #34 diagnostics: per-transport object-stream counters so a sender's
+    // send log can be diffed pair-wise against the peer's receive log after an abort.
+    // Off unless RTP_LLM_PP_OBJ_LOG=1; the counters are also reused by the
+    // RTP_LLM_PP_LOG_STEPS step trace.
+    int64_t send_seq_           = 0;
+    int64_t recv_seq_           = 0;
+    int64_t step_count_         = 0;
+    bool    pp_step_log_        = false;
+    bool    obj_log_active_     = false;
+    bool    last_step_skip_run_ = true;
+    // Whether each round ends with a device-wide host barrier. Resolved once
+    // from RTP_LLM_PP_ROUND_DEVICE_SYNC so the per-round path never calls
+    // getenv. Default keeps the barrier the fastgen port added.
+    bool round_device_sync_ = true;
+    // Whether each round blocks the host on a main-stream event before posting
+    // the activation send. Resolved from RTP_LLM_PP_ROUND_FWD_EVENT_SYNC.
+    bool round_fwd_event_sync_ = true;
 };
 
 }  // namespace rtp_llm

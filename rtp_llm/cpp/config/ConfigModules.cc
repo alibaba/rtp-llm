@@ -149,6 +149,7 @@ std::string KVCacheConfig::to_string() const {
         << "load_cache_retry_times: " << load_cache_retry_times << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
+        << "dsv4_hca_state_pool_clear: " << dsv4_hca_state_pool_clear << "\n"
         << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n";
     return oss.str();
 }
@@ -387,7 +388,9 @@ PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode) {
 
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
-    oss << "max_context_batch_size: " << max_context_batch_size << "\n"
+    oss << "enable_fast_gen: " << enable_fast_gen << "\n"
+        << "fast_gen_max_context_len: " << fast_gen_max_context_len << "\n"
+        << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
         << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"

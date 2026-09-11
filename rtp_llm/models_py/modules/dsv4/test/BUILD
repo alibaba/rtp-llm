@@ -7,6 +7,11 @@ _DSV4_CUDA13_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
+_DSV4_SM120_ONLY = select({
+    "@//:using_cuda13_sm120": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 _DSV4_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
     "//rtp_llm:testlib",
@@ -205,6 +210,32 @@ py_test(
         "//rtp_llm:testlib",
     ],
     target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_moe_communication",
+    srcs = ["test_moe_communication.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_sm120_collective_hardware",
+    srcs = ["test_sm120_collective_hardware.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "2",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
 )
 
 py_test(

@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 import tempfile
@@ -17,6 +18,7 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.tensor_source import TensorCollector
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -24,6 +26,8 @@ from rtp_llm.utils.model_weight import (
     WeightStyle,
     sp_0_pad8,
     sp_0_pad8_size,
+    transpose,
+    transpose_pad,
 )
 
 
@@ -87,6 +91,33 @@ class RecordingDeployWeightInfo(ModelDeployWeightInfo):
 
 
 class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
+    def test_atomic_weight_transpose_layout_uses_callable_identity(self):
+        source = [CkptWeightInfo("weight")]
+        self.assertTrue(AtomicWeight("real", source, transpose).need_transpose)
+        self.assertTrue(
+            AtomicWeight(
+                "partial",
+                source,
+                functools.partial(transpose_pad, align_size=8, dim=0),
+            ).need_transpose
+        )
+
+        @functools.wraps(transpose)
+        def wrapped(tensors):
+            return transpose(tensors)
+
+        self.assertTrue(AtomicWeight("wrapped", source, wrapped).need_transpose)
+
+        def same_name_but_different_layout(tensors):
+            return tensors[0]
+
+        same_name_but_different_layout.__name__ = "transpose"
+        self.assertFalse(
+            AtomicWeight(
+                "lookalike", source, same_name_but_different_layout
+            ).need_transpose
+        )
+
     def test_ckpt_tensor_name_regex_matches_layer_and_expert_placeholders(self):
         pattern = ModelDeployWeightInfo._ckpt_tensor_name_to_regex(
             "model.layers.{i_1}.mlp.experts.{expert_id}.down_proj.weight"
@@ -587,6 +618,7 @@ def make_minimal_configs(
         ),
         tp_size=1,
         tp_rank=0,
+        role_type=RoleType.PDFUSION,
     )
     hw_kernel_config = SimpleNamespace(use_swizzleA=False)
     return model_config, parallelism_config, hw_kernel_config

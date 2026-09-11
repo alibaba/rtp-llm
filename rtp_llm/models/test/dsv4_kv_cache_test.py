@@ -1,7 +1,26 @@
+import os
+import tempfile
+from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import MagicMock, patch
+
+import torch
+from safetensors.torch import save_file
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models.deepseek_v4 import DeepSeekV4
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import setup_default_args
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.model_loader.loader import ModelLoader
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
+from rtp_llm.model_loader.weight_module import AtomicWeight
+from rtp_llm.models.deepseek_v4 import (
+    DeepSeekV4,
+    DeepSeekV4DSpark,
+    DeepSeekV4DSparkWeight,
+    DeepSeekV4Weight,
+)
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     CSA_STATE_TAG,
@@ -20,6 +39,7 @@ from rtp_llm.models.dsv4_kv_cache import (
     build_dsv4_kv_cache_spec_descs,
 )
 from rtp_llm.ops import (
+    DSV4_HCA_STATE_TAG,
     CacheEvictPolicy,
     CacheMemoryPlacement,
     CpBlockSliceMode,
@@ -30,7 +50,11 @@ from rtp_llm.ops import (
     KVCacheSpecDesc,
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
+    RoleType,
+    TaskType,
 )
+from rtp_llm.utils.database import CkptDatabase
+from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 # CSA / HCA / SWA / SWA / CSA -- covers every routing branch plus a repeat.
 LAYER_COMPRESS_RATIOS = [4, 128, 0, 0, 4]
@@ -40,6 +64,187 @@ FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK = 64
 
 
 class Dsv4KvCacheSpecTest(TestCase):
+    def test_dspark_prefill_role_filters_production_weight_descriptors(self):
+        descriptor = DeepSeekV4DSparkWeight.__new__(DeepSeekV4DSparkWeight)
+        descriptor.role_type = RoleType.PREFILL
+        # Quantized attention weights are composites whose outer name is the
+        # kernel name.  Filtering must retain the whole object so its sibling
+        # FP8 scale remains available to CommitOnlyAttentionFP8.
+        wkv = SimpleNamespace(
+            name=W.v4_attn_wkv_w,
+            sub_weights={
+                W.v4_attn_wkv_w: SimpleNamespace(name=W.v4_attn_wkv_w),
+                W.v4_attn_wkv_s: SimpleNamespace(name=W.v4_attn_wkv_s),
+            },
+        )
+        source = ModelWeightInfo(
+            layer_weights=[
+                [
+                    wkv,
+                    SimpleNamespace(name=W.v4_attn_kv_norm),
+                    SimpleNamespace(name=W.v4_routed_w1_w),
+                ]
+            ],
+            weights=[
+                SimpleNamespace(name=W.embedding),
+                SimpleNamespace(name=W.lm_head),
+                SimpleNamespace(name=W.v4_dspark_main_norm),
+                SimpleNamespace(name=W.v4_dspark_main_proj_w),
+                SimpleNamespace(name=W.v4_dspark_markov_w1),
+            ],
+        )
+        with patch.object(DeepSeekV4Weight, "get_weight_info", return_value=source):
+            filtered = descriptor.get_weight_info()
+
+        self.assertEqual(
+            [weight.name for weight in filtered.layer_weights[0]],
+            [W.v4_attn_wkv_w, W.v4_attn_kv_norm],
+        )
+        self.assertIs(filtered.layer_weights[0][0], wkv)
+        self.assertIn(W.v4_attn_wkv_s, filtered.layer_weights[0][0].sub_weights)
+        self.assertEqual(
+            [weight.name for weight in filtered.weights],
+            [
+                W.embedding,
+                W.lm_head,
+                W.v4_dspark_main_norm,
+                W.v4_dspark_main_proj_w,
+            ],
+        )
+
+    def test_dspark_prefill_pruning_reaches_loader_checkpoint_key_map(self):
+        descriptor = DeepSeekV4DSparkWeight.__new__(DeepSeekV4DSparkWeight)
+        descriptor.role_type = RoleType.PREFILL
+
+        def weight(name, checkpoint_name):
+            return AtomicWeight(name, [CkptWeightInfo(checkpoint_name)])
+
+        source = ModelWeightInfo(
+            layer_weights=[
+                [
+                    weight(W.v4_attn_wkv_w, "mtp.{i}.self_attn.wkv.weight"),
+                    weight(W.v4_attn_kv_norm, "mtp.{i}.self_attn.kv_norm.weight"),
+                    weight(W.v4_routed_w1_w, "mtp.{i}.mlp.experts.weight"),
+                ]
+            ],
+            weights=[
+                weight(W.embedding, "embed.weight"),
+                weight(W.lm_head, "lm_head.weight"),
+                weight(W.v4_dspark_main_norm, "mtp.main_norm.weight"),
+                weight(W.v4_dspark_main_proj_w, "mtp.main_proj.weight"),
+                weight(W.v4_dspark_markov_w1, "mtp.markov.weight"),
+            ],
+        )
+        with patch.object(DeepSeekV4Weight, "get_weight_info", return_value=source):
+            filtered = descriptor.get_weight_info()
+
+        loader = ModelLoader.__new__(ModelLoader)
+        loader._model_weights_info = filtered
+        loader._load_config = SimpleNamespace(num_layers=1, database=MagicMock())
+        loader._global_weight_aliases = {}
+        loader._task_type = TaskType.LANGUAGE_MODEL
+        loader._misc_weights_info = []
+        checkpoint_key_map, _ = loader._generate_weight_info()
+
+        self.assertEqual(
+            set(checkpoint_key_map),
+            {
+                "mtp.0.self_attn.wkv.weight",
+                "mtp.0.self_attn.kv_norm.weight",
+                "embed.weight",
+                "lm_head.weight",
+                "mtp.main_norm.weight",
+                "mtp.main_proj.weight",
+            },
+        )
+        self.assertNotIn("mtp.0.mlp.experts.weight", checkpoint_key_map)
+        self.assertNotIn("mtp.markov.weight", checkpoint_key_map)
+
+    def test_dspark_prefill_pruning_controls_real_checkpoint_reads(self):
+        descriptor = DeepSeekV4DSparkWeight.__new__(DeepSeekV4DSparkWeight)
+        descriptor.role_type = RoleType.PREFILL
+
+        def weight(name, checkpoint_name):
+            return AtomicWeight(name, [CkptWeightInfo(checkpoint_name)])
+
+        source_info = ModelWeightInfo(
+            layer_weights=[
+                [
+                    weight(W.v4_attn_wkv_w, "mtp.{i}.self_attn.wkv.weight"),
+                    weight(W.v4_attn_kv_norm, "mtp.{i}.self_attn.kv_norm.weight"),
+                    weight(W.v4_routed_w1_w, "mtp.{i}.mlp.experts.weight"),
+                ]
+            ],
+            weights=[
+                weight(W.embedding, "embed.weight"),
+                weight(W.lm_head, "lm_head.weight"),
+                weight(W.v4_dspark_main_norm, "mtp.main_norm.weight"),
+                weight(W.v4_dspark_main_proj_w, "mtp.main_proj.weight"),
+                weight(W.v4_dspark_markov_w1, "mtp.markov.weight"),
+            ],
+        )
+        with patch.object(
+            DeepSeekV4Weight, "get_weight_info", return_value=source_info
+        ):
+            filtered = descriptor.get_weight_info()
+
+        checkpoint = {
+            "mtp.0.self_attn.wkv.weight": torch.arange(6, dtype=torch.float32).reshape(
+                2, 3
+            ),
+            "mtp.0.self_attn.kv_norm.weight": torch.arange(3, dtype=torch.float32),
+            "mtp.0.mlp.experts.weight": torch.full((2, 3), 101.0),
+            "embed.weight": torch.full((2, 3), 2.0),
+            "lm_head.weight": torch.full((2, 3), 3.0),
+            "mtp.main_norm.weight": torch.full((3,), 4.0),
+            "mtp.main_proj.weight": torch.full((2, 3), 5.0),
+            "mtp.markov.weight": torch.full((2, 3), 103.0),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            save_file(checkpoint, os.path.join(directory, "model.safetensors"))
+            database = CkptDatabase(directory)
+            tensor_source = DatabaseTensorSource(database)
+            load_config = SimpleNamespace(compute_dtype=torch.float32)
+            try:
+                with patch.object(
+                    database, "load_tensor", wraps=database.load_tensor
+                ) as load_tensor:
+                    for layer_weight in filtered.layer_weights[0]:
+                        layer_weight._load_raw_tensor(
+                            tensor_source, 0, "cpu", load_config
+                        )
+                    for global_weight in filtered.weights:
+                        global_weight._load_raw_tensor(
+                            tensor_source, None, "cpu", load_config
+                        )
+                read_names = {call.args[0] for call in load_tensor.call_args_list}
+            finally:
+                for checkpoint_file in database.pretrain_file_list:
+                    checkpoint_file.close_safetensor_handle()
+
+        self.assertEqual(
+            read_names,
+            {
+                "mtp.0.self_attn.wkv.weight",
+                "mtp.0.self_attn.kv_norm.weight",
+                "embed.weight",
+                "lm_head.weight",
+                "mtp.main_norm.weight",
+                "mtp.main_proj.weight",
+            },
+        )
+        self.assertNotIn("mtp.0.mlp.experts.weight", read_names)
+        self.assertNotIn("mtp.markov.weight", read_names)
+
+    def test_dspark_model_type_routes_to_production_wrapper(self):
+        self.assertIs(
+            ModelFactory.get_model_cls("deepseek_v4_dspark"),
+            DeepSeekV4DSpark,
+        )
+
+    def test_hca_tag_matches_cpp_contract(self):
+        self.assertEqual(HCA_STATE_TAG, DSV4_HCA_STATE_TAG)
+
     def _build(self, fp8_kv=True, fixed_pool_use_host_memory=False):
         return build_dsv4_kv_cache_spec_descs(
             layer_num=len(LAYER_COMPRESS_RATIOS),
@@ -247,7 +452,8 @@ class Dsv4KvCacheSpecTest(TestCase):
             )
             self.assertIsNotNone(desc.capacity, tag)
             self.assertFalse(desc.capacity.charge_to_paged_budget, tag)
-        # hca_state keeps its explicit sizing while leaving the HBM budget.
+        # Host placement preserves descriptor sizing while excluding it from
+        # the HBM budget.
         self.assertEqual(
             by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
             DSV4_HCA_STATE_POOL_BLOCKS,
@@ -263,6 +469,13 @@ class Dsv4KvCacheSpecTest(TestCase):
         swa = self._by_tag(layer_descs)[SWA_KV_TAG]
         self.assertEqual(swa.capacity.explicit_block_num, 512)
         self.assertTrue(swa.capacity.charge_to_paged_budget)
+
+    def test_explicit_hca_state_pool_blocks_helper(self):
+        layer_descs = self._build()
+        apply_dsv4_explicit_pool_blocks(layer_descs, HCA_STATE_TAG, 7)
+        hca_state = self._by_tag(layer_descs)[HCA_STATE_TAG]
+        self.assertEqual(hca_state.capacity.explicit_block_num, 7)
+        self.assertTrue(hca_state.capacity.charge_to_paged_budget)
 
     def test_explicit_pool_blocks_helper_keeps_host_pool_off_budget(self):
         layer_descs = self._build(fixed_pool_use_host_memory=True)
@@ -310,6 +523,29 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         self.assertEqual(
             [desc.tag for desc in config.kv_cache_spec_descs[1]],
             [HCA_KV_TAG, HCA_STATE_TAG, SWA_KV_TAG],
+        )
+
+    def test_cli_bound_fixed_pool_memory_reaches_descriptor_residency(self):
+        env_config = PyEnvConfigs()
+        env_config.model_args.model_type = "fake_model"
+        env_config.kv_cache_config.dsv4_fixed_pool_use_memory = True
+        with patch.dict(os.environ, {}, clear=True):
+            setup_default_args(env_config)
+            self.assertEqual(os.environ["DSV4_FIXED_POOL_USE_MEMORY"], "1")
+
+            config = self._model_config()
+            DeepSeekV4._post_build_model_config(config)
+
+        by_tag = {
+            desc.tag
+            for layer in config.kv_cache_spec_descs
+            for desc in layer
+            if desc.memory is not None
+            and desc.memory.placement == CacheMemoryPlacement.HOST_PINNED
+        }
+        self.assertEqual(
+            by_tag,
+            {INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG},
         )
 
     def test_post_build_promotes_default_block_size(self):

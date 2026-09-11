@@ -6,6 +6,8 @@
 #include <optional>
 #include <utility>
 
+#include "autil/EnvUtil.h"
+
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -31,14 +33,40 @@ namespace rtp_llm {
 
 PPExecutor::ModelFactory PPExecutor::test_model_factory = nullptr;
 
+namespace {
+
+std::string head8Hex(const void* data, int64_t numel) {
+    static const char* kHex = "0123456789abcdef";
+    const auto*        p    = static_cast<const uint8_t*>(data);
+    const auto         n    = std::min<int64_t>(numel, 8);
+    std::string        out;
+    out.reserve(static_cast<size_t>(n) * 2);
+    for (int64_t i = 0; i < n; ++i) {
+        out.push_back(kHex[p[i] >> 4]);
+        out.push_back(kHex[p[i] & 0xF]);
+    }
+    return out;
+}
+
+}  // namespace
+
 void PPExecutor::InflightBatch::reset() {
     skip_run         = true;
     stream_groups    = StreamGroups();
+    round_snapshot.clear();
     schedule_time_us = 0;
 }
 
 void PPExecutor::sendObject(const torch::Tensor& object, PPTickets& tickets) {
     auto object_size = torch::tensor({object.numel()}, torch::kInt64);
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPOBJ] rank=%lld send seq=%ld obj_bytes=%lld head=%s",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(send_seq_),
+                         static_cast<long long>(object.numel()),
+                         head8Hex(object.data_ptr(), object.numel()).c_str());
+    }
+    send_seq_ += 2;
     tickets.push_back(transport_->asyncSend(object_size));
     tickets.push_back(transport_->asyncSend(object));
 }
@@ -48,9 +76,18 @@ torch::Tensor PPExecutor::receiveObject() {
     auto size_receive = transport_->asyncReceive(object_size);
     size_receive->wait();
 
-    auto object         = torch::empty({object_size.item<int64_t>()}, torch::TensorOptions().dtype(torch::kUInt8));
-    auto object_receive = transport_->asyncReceive(object);
+    const auto nbytes         = object_size.item<int64_t>();
+    auto       object         = torch::empty({nbytes}, torch::TensorOptions().dtype(torch::kUInt8));
+    auto       object_receive = transport_->asyncReceive(object);
     object_receive->wait();
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPOBJ] rank=%lld recv seq=%ld obj_bytes=%lld head=%s",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(recv_seq_),
+                         static_cast<long long>(nbytes),
+                         head8Hex(object.data_ptr(), object.numel()).c_str());
+    }
+    recv_seq_ += 2;
     return object;
 }
 
@@ -68,15 +105,42 @@ void PPExecutor::asyncSendExecutionResult(const PPExecutionResult& result, PPTic
 
 void PPExecutor::asyncSendTensors(const PPIntermediateTensors& tensors, PPTickets& tickets) {
     sendObject(pp_serialization::serializeTensorsMetadata(tensors), tickets);
+    int64_t nonempty_sends = 0;
     for (const auto& tensor_entry : tensors.tensors) {
         if (tensor_entry.second.numel() != 0) {
+            if (obj_log_active_) {
+                const auto& t     = tensor_entry.second;
+                auto        cheap = t.flatten().slice(0, 0, std::min<int64_t>(t.numel(), 256)).to(torch::kCPU);
+                int64_t     h     = 1469598103934665603LL;
+                const auto* p     = static_cast<const int16_t*>(cheap.data_ptr());
+                for (int64_t i = 0; i < cheap.numel() / 2; ++i) {
+                    h = (h ^ static_cast<int64_t>(p[i])) * 1099511628211LL;
+                }
+                RTP_LLM_LOG_INFO("[PPTENS] rank=%lld send key=%s numel=%ld head_hash=%lx",
+                                 static_cast<long long>(parallelism_config_.world_rank),
+                                 tensor_entry.first.c_str(),
+                                 static_cast<long>(t.numel()),
+                                 static_cast<unsigned long>(h));
+            }
             tickets.push_back(transport_->asyncSend(tensor_entry.second));
+            ++nonempty_sends;
         }
+    }
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPTENS] rank=%lld send meta_entries=%ld nonempty=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(tensors.tensors.size()),
+                         static_cast<long>(nonempty_sends));
     }
 }
 
 PPIntermediateTensors PPExecutor::receiveTensors(PPTickets& tickets) {
     auto tensors = pp_serialization::deserializeTensorsMetadata(receiveObject());
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPTENS] rank=%lld recv meta_entries=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(tensors.tensors.size()));
+    }
     for (auto& tensor_entry : tensors.tensors) {
         if (tensor_entry.second.numel() != 0) {
             tickets.push_back(transport_->asyncReceive(tensor_entry.second));
@@ -94,7 +158,7 @@ void PPExecutor::waitAll(PPTickets& tickets) {
 
 absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
     auto result = pp_serialization::deserializeExecutionResult(receiveObject());
-    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result);
+    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result, batch.round_snapshot);
 }
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
@@ -130,6 +194,17 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
 
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, parallelism_config_.tp_rank);
+    round_device_sync_ = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_DEVICE_SYNC", static_cast<int64_t>(1)) != 0;
+    round_fwd_event_sync_ =
+        autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_FWD_EVENT_SYNC", static_cast<int64_t>(1)) != 0;
+    RTP_LLM_LOG_INFO("PPExecutor per-round sync: device_sync=%d fwd_event_sync=%d "
+                     "(RTP_LLM_PP_ROUND_DEVICE_SYNC / RTP_LLM_PP_ROUND_FWD_EVENT_SYNC)",
+                     static_cast<int>(round_device_sync_),
+                     static_cast<int>(round_fwd_event_sync_));
+    // #34 object-stream / per-step diagnostics are a paired-sender-receiver tool:
+    // they are useless without both peers logging and they are per-round chatty.
+    // Off by default and explicitly requested per launch.
+    pp_step_log_ = autil::EnvUtil::getEnv("RTP_LLM_PP_OBJ_LOG", false);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =
             std::make_shared<ModelInputsLogger>(params.parallelism_config.world_rank,
@@ -359,6 +434,20 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     plan.model_input          = std::move(model_input_status.value());
     plan.model_input.skip_run = stream_groups.empty();
+
+    static const bool kLogWindow = std::getenv("RTP_LLM_LOG_TPSYNC") != nullptr;
+    if (kLogWindow && !plan.model_input.skip_run) {
+        const auto& s = *(stream_groups.allStreams().front());
+        RTP_LLM_LOG_INFO("[WINDOW] rank=%lld req=%ld tokens=%ld input_len=%d prefix=%d ctx=%d chunk_cur=%d chunking=%d",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         s.streamId(),
+                         plan.model_input.combo_tokens.size(0),
+                         s.inputLength(),
+                         s.prefixLength(),
+                         s.contextLength(),
+                         s.currentChunkLen(),
+                         s.isChunkStream() ? 1 : 0);
+    }
 
     if (!plan.model_input.skip_run) {
         plan.sampling_plan = batch_stream_processor_->gatherSamplingPlan(stream_groups);
@@ -661,6 +750,17 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                                     && !schedule_output.streams.empty());
     RTP_LLM_PROFILE_FUNCTION();
 
+    const auto step = step_count_++;
+    if (pp_step_log_) {
+        RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld first=%d last=%d root=%d streams=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(step),
+                         isFirstStage() ? 1 : 0,
+                         isLastStage() ? 1 : 0,
+                         isStageRoot() ? 1 : 0,
+                         static_cast<long>(schedule_output.streams.size()));
+    }
+
     /** 0. Prepare SP Buffer if need.  */
     if (isFirstStage() && isStageRoot()) {
         prepareStreams(schedule_output.streams);
@@ -694,9 +794,29 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     waitAll(inflight.execution_result_sends);
     inflight.reset();
     inflight.skip_run = plan.model_input.skip_run;
+    obj_log_active_ = pp_step_log_ && (step < 256 || !inflight.skip_run || inflight.skip_run != last_step_skip_run_);
+    last_step_skip_run_ = inflight.skip_run;
+    if (obj_log_active_) {
+        RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld skip_run=%d slot=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(step),
+                         inflight.skip_run ? 1 : 0,
+                         static_cast<long>(current_slot_));
+    }
     if (isFirstStage() && isStageRoot()) {
         inflight.stream_groups    = std::move(scheduled_stream_groups);
         inflight.schedule_time_us = schedule_time_us;
+        // Snapshot this round's geometry while the cursors still describe it.
+        // The result is consumed up to pp_size rounds later, by which point a
+        // fastgen stream has advanced that many chunks: intermediate_chunk in
+        // particular must be decided here, because once the final chunk has
+        // been dispatched every still-pending intermediate chunk would read as
+        // final and append its mid-prompt token to the stream.
+        for (const auto& stream : inflight.stream_groups.allStreams()) {
+            inflight.round_snapshot.push_back({static_cast<int64_t>(stream->currentBatchSize()),
+                                               static_cast<int64_t>(stream->currentExecuteTokenSize()),
+                                               stream->isContextStream() && stream->isChunkStream()});
+        }
     }
 
     /** 4. send the plan to next stage  */
@@ -713,6 +833,25 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         if (!isFirstStage()) {
             input_tensors = receiveTensors(tensor_receives);
             waitAll(tensor_receives);
+            if (obj_log_active_) {
+                for (const auto& tensor_entry : input_tensors.tensors) {
+                    if (tensor_entry.second.numel() == 0) {
+                        continue;
+                    }
+                    const auto& t     = tensor_entry.second;
+                    auto cheap        = t.flatten().slice(0, 0, std::min<int64_t>(t.numel(), 256)).to(torch::kCPU);
+                    int64_t h         = 1469598103934665603LL;
+                    const auto* p     = static_cast<const int16_t*>(cheap.data_ptr());
+                    for (int64_t i = 0; i < cheap.numel() / 2; ++i) {
+                        h = (h ^ static_cast<int64_t>(p[i])) * 1099511628211LL;
+                    }
+                    RTP_LLM_LOG_INFO("[PPTENS] rank=%lld recv key=%s numel=%ld head_hash=%lx",
+                                     static_cast<long long>(parallelism_config_.world_rank),
+                                     tensor_entry.first.c_str(),
+                                     static_cast<long>(t.numel()),
+                                     static_cast<unsigned long>(h));
+                }
+            }
         }
 
         if (profile_step_start_) {
@@ -743,12 +882,48 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             expert_balancer_->stepForward(*model_, collector);
         }
 
-        auto forward_done = cuda_graph::makeGraphEvent();
-        forward_done.record(cuda_graph::graphGetCurrentStream());
-        forward_done.synchronize();
+        // Blocking the host here until the main stream drains is what keeps the
+        // executor from running a round ahead: the activation send below is
+        // posted only after this round's GPU work has finished. The send does
+        // not need that -- execISend enqueues NCCL on the same stream, so it is
+        // already ordered after the forward's kernels, and NcclPPCommTicket
+        // holds a reference to the tensor so its storage outlives the in-flight
+        // send. RTP_LLM_PP_ROUND_FWD_EVENT_SYNC=0 drops the host wait.
+        if (round_fwd_event_sync_) {
+            auto forward_done = cuda_graph::makeGraphEvent();
+            forward_done.record(cuda_graph::graphGetCurrentStream());
+            forward_done.synchronize();
+        }
+        // fastgen: with chunks back-to-back, side-stream work (DSV4 state-pool
+        // writes, cache writes) must be visible before this round hands the
+        // stream back to the scheduler for the next chunk. Serialized rounds
+        // hid this window; the pipeline fill exposes it.
+        //
+        // A device-wide host barrier is the blunt form of that requirement: it
+        // drains EVERY stream on the device, so no side-stream overlap survives
+        // into the next round and nothing for round k+1 (not even the activation
+        // receive) can be posted until the whole device is idle. It also predates
+        // the dispatch-snapshot fix that made overlapped chunking token-exact, so
+        // it may have been masking that bug rather than a separate hazard.
+        // RTP_LLM_PP_ROUND_DEVICE_SYNC=0 keeps only the main-stream event sync
+        // above, which is what PPExecutor did before fastgen.
+        if (round_device_sync_) {
+            cudaDeviceSynchronize();
+        }
 
         if (!isLastStage()) {
             asyncSendTensors(output_tensors, inflight.activation_sends);
+            // fastgen S3: release fastgen context streams as soon as the chunk
+            // has left stage 0 so the pipeline fills. Re-scheduling is gated by
+            // pp_outstanding_results_ in PPScheduler (the final chunk must not
+            // re-dispatch before its result finishes the stream).
+            if (isFirstStage() && isStageRoot()) {
+                for (const auto& stream : inflight.stream_groups.allStreams()) {
+                    if (stream->enableFastGen() && stream->isContextStream()) {
+                        stream->clearPPInflight();
+                    }
+                }
+            }
         } else {
             PPExecutionResult execution_result;
             if (isStageRoot()) {
