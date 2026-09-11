@@ -392,8 +392,12 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._check_finish_reason,
+                max_new_tokens=max_new_tokens,
+                request=status.request,
+            ),
+            functools.partial(self._remove_stop_word_ids, request=status.request),
         )
 
         # NOTE: With multi-token stop words (e.g., tokenized from extra_stop_words),
@@ -501,6 +505,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 )
                 if token_delta is not None:
                     collected_deltas.append(token_delta)
+                if getattr(status, "stop_words_text_finished", False):
+                    break
             return collected_deltas, normalizer_yielded
 
         # Non-streaming: accumulate all text first, then process once

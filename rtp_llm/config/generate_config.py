@@ -110,6 +110,8 @@ class GenerateConfig(BaseModel):
     top_p_decay: Optional[Union[List[float], float]] = None
     top_p_min: Optional[Union[List[float], float]] = None
     top_p_reset_ids: Optional[Union[List[int], int]] = None
+    # In thinking mode, custom stops apply only after end_think_token_ids.
+    # EOS and token limits still terminate generation in either phase.
     stop_words_str: List[str] = []
     stop_words_list: List[List[int]] = []
     bad_words_list: Optional[Union[List[List[List[int]]], List[List[int]]]] = None

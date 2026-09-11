@@ -45,6 +45,7 @@ from rtp_llm.utils.word_util import (
     get_stop_word_slices,
     match_stop_words,
     remove_padding_eos_with_numpy,
+    stop_words_content_start,
     truncate_response_with_stop_words,
     truncate_token_with_stop_word_id,
 )
@@ -240,12 +241,16 @@ class Pipeline(object):
         stop_word_ids: List[List[int]],
         stop_word_id_slices: List[List[int]],
     ):
+        content_start = stop_words_content_start(
+            tokens, generate_config.in_think_mode, generate_config.end_think_token_ids
+        )
+        prefix, tokens = tokens[:content_start], tokens[content_start:]
         if not generate_config.print_stop_words:
             if not generate_output.finished:
                 tokens = truncate_token_with_stop_word_id(tokens, stop_word_id_slices)
             else:
                 tokens = truncate_token_with_stop_word_id(tokens, stop_word_ids)
-        return tokens
+        return prefix + tokens
 
     @staticmethod
     def process_stop_str(
@@ -256,11 +261,20 @@ class Pipeline(object):
         stop_word_str_list: List[str],
         stop_word_str_slices: List[str],
         token_buffer: str,
+        content_start: int = 0,
         **kwargs: Any
     ):
         if generate_config.return_incremental:
             text = token_buffer + text
 
+        # all_text is cumulative, while text may contain only the latest chunk
+        # plus a buffered stop prefix. Never match across the think/content boundary.
+        protected_len = (
+            max(0, min(len(text), content_start - (len(all_text) - len(text))))
+            if generate_config.in_think_mode
+            else 0
+        )
+        protected_prefix, text = text[:protected_len], text[protected_len:]
         if stop_word_str_list:
             stop_idx, stop_len = match_stop_words(text, stop_word_str_list)
             if stop_idx != -1:
@@ -272,7 +286,7 @@ class Pipeline(object):
                 generate_output.finished = True
 
         if generate_output.finished:
-            return text, token_buffer
+            return protected_prefix + text, token_buffer
 
         if generate_config.return_incremental or not generate_config.print_stop_words:
             trunc_text = truncate_response_with_stop_words(
@@ -282,7 +296,31 @@ class Pipeline(object):
                 token_buffer = text[len(trunc_text) :]
             text = trunc_text
 
-        return text, token_buffer
+        return protected_prefix + text, token_buffer
+
+    def _stop_words_content_text_start(
+        self, tokens, generate_config, incremental=False, **kwargs
+    ):
+        if not generate_config.in_think_mode:
+            return 0
+        start = stop_words_content_start(
+            tokens, True, generate_config.end_think_token_ids
+        )
+        if incremental:
+            # Use the same conversion as the actual incremental output, including
+            # its special-token spacing and UTF-8 handling.
+            return len(
+                IncrementDecodingUtils.detokenize_incrementally(
+                    self.tokenizer, tokens[:start], DecodingState()
+                )
+            )
+        return len(
+            self.tokenizer.decode(
+                tokens[:start],
+                skip_special_tokens=generate_config.skip_special_tokens,
+                **kwargs,
+            ).rstrip("\ufffd")
+        )
 
     def decode_non_incremental_tokens(
         self,
@@ -364,6 +402,9 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 "",
+                content_start=self._stop_words_content_text_start(
+                    token_lists_to_decode[i], generate_config, **kwargs
+                ),
                 **kwargs,
             )
 
@@ -402,6 +443,7 @@ class Pipeline(object):
 
         newly_decoded_texts = []
         all_texts = []
+        content_starts = []
         output_lens = []
         ignore_eos = generate_config.ignore_eos
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
@@ -426,6 +468,11 @@ class Pipeline(object):
                 stop_word_ids,
                 stop_word_id_slices,
             )
+            content_starts.append(
+                self._stop_words_content_text_start(
+                    processed_tokens, generate_config, incremental=True, **kwargs
+                )
+            )
             new_text = IncrementDecodingUtils.detokenize_incrementally(
                 self.tokenizer, processed_tokens, decoding_states[i]
             )
@@ -449,6 +496,7 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 token_buffers[i],
+                content_start=content_starts[i],
                 **kwargs,
             )
 

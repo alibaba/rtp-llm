@@ -120,9 +120,16 @@ bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
     return false;
 }
 
-bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words) {
+bool CompleteTokenIds::matchStopWordsList(int                     batch_id,
+                                         const std::vector<int>& stop_words,
+                                         int                     input_length,
+                                         bool                    in_think_mode,
+                                         const std::vector<int>& end_think_token_ids) {
+    if (stop_words.empty() || (in_think_mode && end_think_token_ids.empty())) {
+        return false;
+    }
     int* token_ids = data(batch_id);
-    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+    for (size_t i = std::max<size_t>(start_check_seq_length_, stop_words.size()); i <= seq_length_; ++i) {
         bool   match_one   = true;
         size_t begin_index = i - stop_words.size();
         for (auto& token : stop_words) {
@@ -132,6 +139,22 @@ bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& 
             }
         }
         if (match_one) {
+            // Only a stop sequence entirely after the generated think-end marker
+            // can finish thinking requests. Search on a match, not every decode
+            // step; this also handles beam replacement and multi-token MTP packets.
+            if (in_think_mode) {
+                const int stop_begin = i - stop_words.size();
+                if (stop_begin < input_length) {
+                    continue;
+                }
+                const auto* content_limit = token_ids + stop_begin;
+                if (std::search(token_ids + input_length,
+                                token_ids + stop_begin,
+                                end_think_token_ids.begin(),
+                                end_think_token_ids.end()) == content_limit) {
+                    continue;
+                }
+            }
             seq_length_ = i;
             return true;
         }

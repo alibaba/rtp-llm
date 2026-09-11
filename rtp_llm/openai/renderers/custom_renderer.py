@@ -45,6 +45,7 @@ from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
     is_truncated,
+    stop_words_content_start,
     truncate_response_with_stop_words,
 )
 
@@ -141,6 +142,9 @@ class StreamStatus:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.stop_words_in_think: Optional[bool] = None
+        self.stop_words_think_tail = ""
+        self.stop_words_text_finished = False
         self.pending_logprobs: List[ChatCompletionTokenLogprob] = []
         self.emitted_logprob_token_count = 0
 
@@ -216,6 +220,9 @@ class StreamStatusSync:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.stop_words_in_think: Optional[bool] = None
+        self.stop_words_think_tail = ""
+        self.stop_words_text_finished = False
         self.pending_logprobs: List[ChatCompletionTokenLogprob] = []
         self.emitted_logprob_token_count = 0
 
@@ -350,6 +357,7 @@ class CustomChatRenderer:
         self.think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
             generate_env_config
         )
+        self.stop_words_think_end_token_id = generate_env_config.think_end_token_id
 
         # Store configs for subclasses
         self.ckpt_path = ckpt_path
@@ -1115,6 +1123,33 @@ class CustomChatRenderer:
 
         return final_result
 
+    def _stop_words_thinking_enabled(self, request: ChatCompletionRequest) -> bool:
+        if request.disable_thinking():
+            return False
+        config = request.extra_configs
+        return bool(
+            self.in_think_mode(request)
+            or request.enable_thinking_requested()
+            or (config is not None and config.in_think_mode)
+        )
+
+    def _stop_words_end_ids(self, request: ChatCompletionRequest) -> List[int]:
+        if request.extra_configs and request.extra_configs.end_think_token_ids:
+            return request.extra_configs.end_think_token_ids
+        end_id = getattr(self, "stop_words_think_end_token_id", -1)
+        if end_id != -1:
+            return [end_id]
+        return self.tokenizer.encode(self.think_end_tag, add_special_tokens=False)
+
+    def _stop_words_content_start(
+        self, token_ids: List[int], request: Optional[ChatCompletionRequest]
+    ) -> int:
+        if request is None or not self._stop_words_thinking_enabled(request):
+            return 0
+        return stop_words_content_start(
+            token_ids, True, self._stop_words_end_ids(request)
+        )
+
     def _process_stop_words(
         self,
         delta_string: str,
@@ -1159,6 +1194,34 @@ class CustomChatRenderer:
         if not delta_string:
             return delta_string, False
 
+        # Keep the phase per response, independently of the downstream reasoning
+        # parser. A chunk can contain both the closing tag and normal content.
+        # Commit the phase only when this chunk is consumed (not buffered/replayed).
+        protected_prefix = ""
+        in_think = getattr(status, "stop_words_in_think", None)
+        if in_think is None:
+            in_think = self._stop_words_thinking_enabled(status.request)
+        if in_think:
+            end_tag = getattr(status, "stop_words_end_tag", None)
+            if end_tag is None:
+                end_ids = self._stop_words_end_ids(status.request)
+                end_tag = (
+                    self.tokenizer.decode(end_ids) if end_ids else self.think_end_tag
+                )
+                status.stop_words_end_tag = end_tag
+            tail = getattr(status, "stop_words_think_tail", "")
+            combined = tail + delta_string
+            end = combined.find(end_tag) if end_tag else -1
+            if end < 0:
+                status.stop_words_in_think = True
+                status.stop_words_think_tail = (
+                    combined[-(len(end_tag) - 1) :] if len(end_tag) > 1 else ""
+                )
+                return delta_string, False
+            content_start = max(0, end + len(end_tag) - len(tail))
+            protected_prefix = delta_string[:content_start]
+            delta_string = delta_string[content_start:]
+
         # Truncate at complete stop words
         truncated = delta_string
         if stop_words_str:
@@ -1167,6 +1230,7 @@ class CustomChatRenderer:
             )
             if len(truncated) < len(delta_string):
                 status.finish_reason = FinisheReason.stop
+                status.stop_words_text_finished = True
 
         # Check if should buffer (only if didn't truncate at complete stop word)
         # In non-streaming mode, never buffer since all tokens arrive at once
@@ -1176,7 +1240,10 @@ class CustomChatRenderer:
             and is_truncated(truncated, stop_word_slice_list, is_streaming, True)
         )
 
-        return truncated, should_buffer
+        if not should_buffer:
+            status.stop_words_in_think = False
+            status.stop_words_think_tail = ""
+        return protected_prefix + truncated, should_buffer
 
     async def _update_single_status(
         self,
@@ -1191,8 +1258,12 @@ class CustomChatRenderer:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._check_finish_reason,
+                max_new_tokens=max_new_tokens,
+                request=status.request,
+            ),
+            functools.partial(self._remove_stop_word_ids, request=status.request),
         )
         self._accumulate_log_probs_from_tensors(
             status,
@@ -1416,8 +1487,8 @@ class CustomChatRenderer:
             if buffer.output is None:
                 raise Exception("last output should not be None")
             aux_info = buffer.output.aux_info
-            trunc_string = truncate_response_with_stop_words(
-                buffer.delta_output_string, stop_words_str, is_streaming
+            trunc_string, _ = self._process_stop_words(
+                buffer.delta_output_string, stop_words_str, [], is_streaming, buffer
             )
             output_items.append(
                 OutputDelta(
@@ -1644,8 +1715,12 @@ class CustomChatRenderer:
         status.update_output_sync(
             output_ids,
             input_len,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._check_finish_reason,
+                max_new_tokens=max_new_tokens,
+                request=status.request,
+            ),
+            functools.partial(self._remove_stop_word_ids, request=status.request),
         )
         self._accumulate_log_probs_from_tensors(
             status,
@@ -1779,8 +1854,8 @@ class CustomChatRenderer:
             output_len_list,
             reuse_len_list,
         ):
-            trunc_string = truncate_response_with_stop_words(
-                buffer.delta_output_string, stop_words_str, is_streaming
+            trunc_string, _ = self._process_stop_words(
+                buffer.delta_output_string, stop_words_str, [], is_streaming, buffer
             )
             output_items.append(
                 OutputDelta(
@@ -2222,7 +2297,11 @@ class CustomChatRenderer:
         return chat_response.model_dump_json(exclude_none=True)
 
     def _check_finish_reason(
-        self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1
+        self,
+        token_ids: List[int],
+        input_token_length: int,
+        max_new_tokens: int = -1,
+        request: Optional[ChatCompletionRequest] = None,
     ) -> Optional[FinisheReason]:
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
@@ -2233,15 +2312,25 @@ class CustomChatRenderer:
             return FinisheReason.length
         if token_ids and token_ids[-1] == self.eos_token_id:
             return FinisheReason.stop
+        content_start = (
+            self._stop_words_content_start(token_ids, request)
+            if request is not None
+            else 0
+        )
         for stop_word_ids in stop_word_ids_list_all:
-            if (len(token_ids) >= len(stop_word_ids)) and (
-                token_ids[-len(stop_word_ids) :] == stop_word_ids
+            if (
+                stop_word_ids
+                and (len(token_ids) - content_start >= len(stop_word_ids))
+                and (token_ids[-len(stop_word_ids) :] == stop_word_ids)
             ):
                 return FinisheReason.stop
         return None
 
     def _remove_stop_word_ids(
-        self, output_ids: List[int], delta_output_ids: List[int]
+        self,
+        output_ids: List[int],
+        delta_output_ids: List[int],
+        request: Optional[ChatCompletionRequest] = None,
     ) -> List[int]:
         """
         Truncate token sequence at FIRST occurrence of stop word (eos or stop_word_ids).
@@ -2284,12 +2373,17 @@ class CustomChatRenderer:
             min_stop_pos = min(min_stop_pos, eos_pos)
 
         # Check for stop word sequences - find first occurrence of each
+        content_start = (
+            self._stop_words_content_start(output_ids, request)
+            if request is not None
+            else 0
+        )
         for stop_word_ids in stop_word_ids_list_all:
             if not stop_word_ids:
                 continue
             stop_len = len(stop_word_ids)
             # Scan through output_ids to find first occurrence
-            for i in range(len(output_ids) - stop_len + 1):
+            for i in range(content_start, len(output_ids) - stop_len + 1):
                 if output_ids[i : i + stop_len] == stop_word_ids:
                     min_stop_pos = min(min_stop_pos, i)
                     break
