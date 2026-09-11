@@ -1,7 +1,7 @@
 import sys
 import threading
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
@@ -503,52 +503,97 @@ class KvcmOutputBackendTest(TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid KVCM"):
                     KvcmOutputBackend(self.writer, config)
 
-    def test_create_checks_native_availability_and_enabled_state(self):
+    def test_create_uses_kvcm_python_client_and_maps_config(self):
         config = _kvcm_config()
+        config.addresses = ["10.0.0.1:19001", "10.0.0.2:19001"]
+        config.instance_id = "rtp-emb-1"
+        config.instance_group = "epd-emb"
+        config.user_data = "rtp"
+        config.transfer_client_config = '{"block_size": 1}'
+        config.call_timeout_ms = 1234
+        config.write_timeout_seconds = 45
+        writer = _FakeKvcmWriter()
+        writer.close = MagicMock()
+        config_type = MagicMock(side_effect=lambda **values: SimpleNamespace(**values))
+        writer_type = MagicMock(return_value=writer)
+        package = ModuleType("kv_cache_manager")
+        package.__path__ = []
+        client_module = ModuleType("kv_cache_manager.client")
+        client_module.KvMetaObjectClientConfig = config_type
+        client_module.KvMetaObjectClient = writer_type
+        package.client = client_module
 
-        def fake_ops(available, enabled):
-            writer = _FakeKvcmWriter()
-            writer.enabled = MagicMock(return_value=enabled)
-            writer_type = MagicMock(return_value=writer)
-            writer_type.available.return_value = available
-            return (
-                SimpleNamespace(
-                    ensure_kvcm_ops_loaded=MagicMock(),
-                    MMKvcmWriter=writer_type,
-                ),
-                writer,
-                writer_type,
-            )
-
-        package = sys.modules["rtp_llm"]
-        ops, _, writer_type = fake_ops(False, True)
-        with patch.dict(sys.modules, {"rtp_llm.ops": ops}), patch.object(
-            package, "ops", ops, create=True
-        ):
-            with self.assertRaisesRegex(RuntimeError, "rebuild with"):
-                KvcmOutputBackend.create(config)
-        ops.ensure_kvcm_ops_loaded.assert_called_once_with()
-        writer_type.assert_not_called()
-
-        ops, writer, writer_type = fake_ops(True, False)
-        with patch.dict(sys.modules, {"rtp_llm.ops": ops}), patch.object(
-            package, "ops", ops, create=True
-        ):
-            with self.assertRaisesRegex(RuntimeError, "writer is disabled"):
-                KvcmOutputBackend.create(config)
-        writer_type.assert_called_once_with(config)
-        writer.enabled.assert_called_once_with()
-
-        ops, writer, writer_type = fake_ops(True, True)
-        with patch.dict(sys.modules, {"rtp_llm.ops": ops}), patch.object(
-            package, "ops", ops, create=True
+        with patch.dict(
+            sys.modules,
+            {
+                "kv_cache_manager": package,
+                "kv_cache_manager.client": client_module,
+            },
         ):
             created = KvcmOutputBackend.create(config)
         try:
             self.assertIs(created._writer, writer)
-            writer_type.assert_called_once_with(config)
+            self.assertTrue(created._owns_writer)
+            config_type.assert_called_once_with(
+                addresses=tuple(config.addresses),
+                instance_id=config.instance_id,
+                instance_group=config.instance_group,
+                user_data=config.user_data,
+                transfer_client_config=config.transfer_client_config,
+                call_timeout_ms=config.call_timeout_ms,
+                write_timeout_seconds=config.write_timeout_seconds,
+                max_object_bytes=config.max_object_bytes,
+            )
+            writer_type.assert_called_once()
+            self.assertIsInstance(writer_type.call_args.args[0], SimpleNamespace)
         finally:
             created.close()
+        writer.close.assert_called_once_with()
+
+    def test_create_reports_missing_kvcm_python_wheel(self):
+        with patch.dict(
+            sys.modules,
+            {"kv_cache_manager": None, "kv_cache_manager.client": None},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "kvcm_py_client wheel"):
+                KvcmOutputBackend.create(_kvcm_config())
+
+    def test_create_preserves_backend_error_when_writer_close_fails(self):
+        config = _kvcm_config(max_object_bytes=64, max_receipt_bytes=32)
+        writer = _FakeKvcmWriter()
+        writer.close = MagicMock(side_effect=RuntimeError("provider detail"))
+        config_type = MagicMock(side_effect=lambda **values: SimpleNamespace(**values))
+        writer_type = MagicMock(return_value=writer)
+        package = ModuleType("kv_cache_manager")
+        package.__path__ = []
+        client_module = ModuleType("kv_cache_manager.client")
+        client_module.KvMetaObjectClientConfig = config_type
+        client_module.KvMetaObjectClient = writer_type
+        package.client = client_module
+
+        with patch.dict(
+            sys.modules,
+            {
+                "kv_cache_manager": package,
+                "kv_cache_manager.client": client_module,
+            },
+        ), patch("rtp_llm.multimodal.transport.kvcm.backend.logging.warning") as logged:
+            with self.assertRaisesRegex(ValueError, "invalid KVCM"):
+                KvcmOutputBackend.create(config)
+
+        writer.close.assert_called_once_with()
+        logged.assert_called_once()
+        self.assertIn("RuntimeError", repr(logged.call_args))
+        self.assertNotIn("provider detail", repr(logged.call_args))
+
+    def test_directly_injected_writer_is_not_closed_by_backend(self):
+        writer = _FakeKvcmWriter()
+        writer.close = MagicMock()
+        backend = KvcmOutputBackend(writer, _kvcm_config())
+
+        backend.close()
+
+        writer.close.assert_not_called()
 
     def test_single_pass_logical_iterables_are_snapshotted_exactly_once(self):
         embeddings = [_rows(1), _rows(2, offset=20.0)]
@@ -808,18 +853,49 @@ class KvcmOutputBackendTest(TestCase):
 
         self.writer.remove = fail_remove
         with patch(
-            "rtp_llm.multimodal.transport.kvcm.backend.logging.exception"
+            "rtp_llm.multimodal.transport.kvcm.backend.logging.warning"
         ) as logged:
             self.backend.close()
         logged.assert_called_once()
+        self.assertIn("shutdown cleanup", repr(logged.call_args))
+        self.assertIn("RuntimeError", repr(logged.call_args))
+        self.assertNotIn("storage unavailable", repr(logged.call_args))
+        self.assertNotIn(key, repr(logged.call_args))
         self.assertEqual(self.backend._pending, {})
 
         with patch(
             "rtp_llm.multimodal.transport.kvcm.backend.logging.warning"
         ) as warning:
             self.backend._remove_or_retry([key], "post-close probe")
-        warning.assert_called_once()
+        warning.assert_not_called()
         self.assertEqual(self.backend._pending, {})
+
+    def test_retry_log_omits_native_error_text_and_object_keys(self):
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+
+        def fail_remove(_keys):
+            raise RuntimeError("secret-provider-detail")
+
+        self.writer.remove = fail_remove
+        with patch(
+            "rtp_llm.multimodal.transport.kvcm.backend.logging.warning"
+        ) as logged:
+            self.backend.release([key])
+
+        logged.assert_called_once()
+        self.assertIn("release", repr(logged.call_args))
+        self.assertIn("object_count", repr(logged.call_args))
+        self.assertIn("RuntimeError", repr(logged.call_args))
+        self.assertNotIn("secret-provider-detail", repr(logged.call_args))
+        self.assertNotIn(key, repr(logged.call_args))
+        self.assertIn(key, self.backend._pending)
+
+        # Let addCleanup close the backend without emitting a second injected
+        # failure or leaving a pending object in this unit test.
+        self.writer.remove = lambda _keys: None
 
     def test_operation_accounting_detects_underflow_and_notifies_only_at_zero(self):
         with self.assertRaisesRegex(RuntimeError, "accounting underflow"):

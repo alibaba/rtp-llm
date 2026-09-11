@@ -74,6 +74,7 @@ The core features include:
    backend/lora.ipynb
    backend/pd_disaggregation.ipynb
    backend/logits_processor.md
+   multimodal/kvcm_emb_storage.md
 
 
 .. toctree::

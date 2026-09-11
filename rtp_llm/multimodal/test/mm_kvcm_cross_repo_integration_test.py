@@ -1,8 +1,8 @@
-"""Manual RTP -> v6d -> live KVCM KVMeta contract integration test.
+"""Manual RTP -> KVCM Python client -> live KVMeta integration test.
 
 This target is intentionally tagged ``manual`` in BUILD.  It validates the
-production RTP Python output backend against v6d's native KVCM object adapter
-and a real KVMeta service without adding KVCM or v6d to the default RTP test
+production RTP Python output backend against KVCM's packaged Python object
+client and a real KVMeta service without adding KVCM to RTP's default test
 dependency graph.
 """
 
@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
-import sys
 import tempfile
-import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -37,7 +36,7 @@ _RUN_INTEGRATION = os.environ.get("RTP_KVCM_RUN_INTEGRATION") == "1"
 _KVCM_ROOT = Path(
     os.environ.get(
         "RTP_KVCM_SOURCE_ROOT",
-        "/mnt/vdb1/projects/KVCacheManager-v6d/github-opensource",
+        "/RTP_KVCM_SOURCE_ROOT-is-not-set",
     )
 )
 _KVCM_BIN = Path(
@@ -155,7 +154,6 @@ def _require_kvcm_dependencies() -> None:
 
 
 def _start_kvmeta(tmp_path: Path, startup_path: Path):
-
     ports = []
     while len(ports) < 5:
         candidate = _free_port()
@@ -193,7 +191,14 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
     )
 
     server_log = tmp_path / "logs" / "kv_cache_manager.log"
-    rpc_listening = False
+    listener_names = {
+        rpc_port: "RPC",
+        http_port: "meta HTTP",
+        admin_rpc_port: "admin RPC",
+        admin_http_port: "admin HTTP",
+        kvmeta_port: "KVMeta RPC",
+    }
+    listening_ports = set()
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -203,26 +208,39 @@ def _start_kvmeta(tmp_path: Path, startup_path: Path):
                 f"stdout:\n{stdout}\nstderr:\n{stderr}\n"
                 f"log tail:\n{_read_log_tail(server_log)}"
             )
-        if not rpc_listening:
+        for port in listener_names:
+            if port in listening_ports:
+                continue
             try:
-                with socket.create_connection(("127.0.0.1", kvmeta_port), timeout=0.2):
-                    rpc_listening = True
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    listening_ports.add(port)
             except OSError:
                 pass
-        if rpc_listening and "kvcm server start OK!" in _read_log_tail(server_log):
-            return process, f"127.0.0.1:{kvmeta_port}"
+        all_listening = len(listening_ports) == len(listener_names)
+        kvmeta_ready = (
+            "KVMeta recovery completed; generic object service is ready"
+            in _read_log_tail(server_log)
+        )
+        if all_listening and kvmeta_ready:
+            return process, f"127.0.0.1:{kvmeta_port}", server_log
         time.sleep(0.1)
 
+    missing_listeners = ", ".join(
+        name for port, name in listener_names.items() if port not in listening_ports
+    )
     _terminate_process(process)
     stdout, stderr = process.communicate()
     raise RuntimeError(
-        "KVCM did not finish leader startup within 30 seconds\n"
+        "KVCM did not finish KVMeta recovery/listener startup within 30 seconds\n"
+        f"listeners not ready: {missing_listeners or 'none'}\n"
         f"stdout:\n{stdout}\nstderr:\n{stderr}\n"
         f"log tail:\n{_read_log_tail(server_log)}"
     )
 
 
-def _stop_kvmeta(process: subprocess.Popen | None) -> None:
+def _stop_kvmeta(
+    process: subprocess.Popen | None, server_log: Path | None = None
+) -> None:
     if process is None:
         return
     if process.poll() is None:
@@ -240,6 +258,63 @@ def _stop_kvmeta(process: subprocess.Popen | None) -> None:
     sanitizer_output = f"{stdout}\n{stderr}"
     if "AddressSanitizer" in sanitizer_output or "LeakSanitizer" in sanitizer_output:
         raise RuntimeError(f"KVCM sanitizer failure:\n{sanitizer_output}")
+    if server_log is not None:
+        try:
+            log_output = server_log.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            raise RuntimeError(
+                f"could not read KVCM server log: {type(error).__name__}"
+            ) from error
+        shutdown_started = False
+        cancelled_http_ports = set()
+        unexpected_lines = []
+        # cinatra resolves its blocking async_start future with
+        # operation_aborted when Stop cancels the accept loop. KVCM currently
+        # emits that normal cancellation plus one wrapper line at ERROR level;
+        # accept only the exact paired form after shutdown has begun.
+        for line in log_output.splitlines():
+            if "server stopping..." in line:
+                shutdown_started = True
+            cancellation = re.search(
+                r"HTTP server start failed on port \[(\d+)\]: " r"Operation aborted\.$",
+                line,
+            )
+            cancellation_followup = re.search(
+                r"Failed to start (?:meta|admin) http server on port (\d+)$",
+                line,
+            )
+            normal_http_cancellation = False
+            if shutdown_started and cancellation is not None:
+                cancelled_http_ports.add(int(cancellation.group(1)))
+                normal_http_cancellation = True
+            elif shutdown_started and cancellation_followup is not None:
+                port = int(cancellation_followup.group(1))
+                if port in cancelled_http_ports:
+                    cancelled_http_ports.remove(port)
+                    normal_http_cancellation = True
+            failure_marker = (
+                "[ERROR]" in line
+                or "[FATAL]" in line
+                or "AddressSanitizer" in line
+                or "LeakSanitizer" in line
+                or "runtime error:" in line
+            )
+            if failure_marker and not normal_http_cancellation:
+                unexpected_lines.append(line)
+        unexpected_lines.extend(
+            f"missing HTTP cancellation follow-up for port {port}"
+            for port in sorted(cancelled_http_ports)
+        )
+        for marker in (
+            "KVMeta recovery completed; generic object service is ready",
+            "kvcm server stopped, goodbye!",
+        ):
+            if marker not in log_output:
+                unexpected_lines.append(f"missing KVCM lifecycle marker: {marker}")
+        if unexpected_lines:
+            raise RuntimeError(
+                "unexpected KVCM server log entries:\n" + "\n".join(unexpected_lines)
+            )
 
 
 def _transfer_config(instance_group: str, instance_id: str) -> str:
@@ -262,40 +337,21 @@ def _transfer_config(instance_group: str, instance_id: str) -> str:
     )
 
 
-class _EmbeddingStoreWriter:
-    """Adapt v6d's real object store to the RTP writer protocol."""
-
-    def __init__(self, store):
-        self._store = store
-        self._lock = threading.Lock()
-        self._live_keys = set()
-
-    def save(self, keys, tensors) -> None:
-        materialized_keys = list(keys)
-        self._store.save_tensors(
-            materialized_keys,
-            list(tensors),
-            trace_id=f"rtp-kvmeta-it-save-{uuid.uuid4().hex}",
-        )
-        with self._lock:
-            self._live_keys.update(materialized_keys)
-
-    def remove(self, keys) -> None:
-        materialized_keys = list(keys)
-        self._store.remove(
-            materialized_keys,
-            trace_id=f"rtp-kvmeta-it-remove-{uuid.uuid4().hex}",
-        )
-        with self._lock:
-            self._live_keys.difference_update(materialized_keys)
-
-    def live_keys(self):
-        with self._lock:
-            return list(self._live_keys)
-
-
-def _backend_config(*, gc_timeout_ms: int):
+def _backend_config(
+    *,
+    endpoint: str,
+    instance_id: str,
+    instance_group: str,
+    gc_timeout_ms: int,
+):
     return SimpleNamespace(
+        addresses=[endpoint],
+        instance_id=instance_id,
+        instance_group=instance_group,
+        user_data="rtp-mm-kvcm-integration",
+        transfer_client_config=_transfer_config(instance_group, instance_id),
+        call_timeout_ms=3_000,
+        write_timeout_seconds=30,
         max_object_bytes=32,
         max_receipt_bytes=1024,
         object_gc_timeout_ms=gc_timeout_ms,
@@ -341,49 +397,32 @@ def _reassemble_role(objects, tensors, role: int, logical_index: int = 0):
 )
 class MMKvcmCrossRepoIntegrationTest(TestCase):
     def test_rtp_receipt_round_trip_release_and_gc(self):
-        v6d_source_root = os.environ.get("V6D_SOURCE_ROOT", "").strip()
-        if not v6d_source_root:
-            self.fail("V6D_SOURCE_ROOT is required for the cross-repo integration test")
-        v6d_source_path = Path(v6d_source_root) / "src"
-        adapter_path = v6d_source_path / "v6d/common/tair_kvcm/emb_store.py"
-        if not adapter_path.is_file():
-            self.fail(f"v6d KVCM embedding adapter is missing: {adapter_path}")
         _require_kvcm_dependencies()
-        sys.path.insert(0, str(v6d_source_path))
 
+        from kv_cache_manager.client import KvMetaObjectClientError
         from kv_cache_manager.client.pybind import kvcm_py_client
-        from v6d.common.tair_kvcm.emb_store import (
-            KVCMEmbeddingStore,
-            KVCMEmbeddingStoreConfig,
-            KVCMEmbeddingStoreError,
-        )
 
         with tempfile.TemporaryDirectory(prefix="rtp-kvmeta-it-") as directory:
             tmp_path = Path(directory)
             process = None
+            server_log = None
             store = None
-            writer = None
             backend = None
             with _working_directory(tmp_path):
                 try:
                     startup_path, instance_group = _write_startup_config(tmp_path)
-                    process, endpoint = _start_kvmeta(tmp_path, startup_path)
+                    process, endpoint, server_log = _start_kvmeta(
+                        tmp_path, startup_path
+                    )
                     instance_id = f"rtp-kvmeta-it-{uuid.uuid4().hex}"
-                    store = KVCMEmbeddingStore(
-                        KVCMEmbeddingStoreConfig(
-                            addresses=(endpoint,),
-                            instance_id=instance_id,
-                            instance_group=instance_group,
-                            transfer_client_config=_transfer_config(
-                                instance_group, instance_id
-                            ),
-                            max_object_bytes=32,
-                        )
+                    kvcm_config = _backend_config(
+                        endpoint=endpoint,
+                        instance_id=instance_id,
+                        instance_group=instance_group,
+                        gc_timeout_ms=5_000,
                     )
-                    writer = _EmbeddingStoreWriter(store)
-                    backend = KvcmOutputBackend(
-                        writer, _backend_config(gc_timeout_ms=5_000)
-                    )
+                    backend = KvcmOutputBackend.create(kvcm_config)
+                    store = backend._writer
 
                     embeddings = [
                         torch.arange(12, dtype=torch.float32).reshape(3, 4),
@@ -450,8 +489,8 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
 
                     released_key = objects[0].key
                     backend.release([obj.key for obj in objects])
-                    self.assertEqual(writer.live_keys(), [])
-                    with self.assertRaises(KVCMEmbeddingStoreError) as missing:
+                    self.assertEqual(backend._pending, {})
+                    with self.assertRaises(KvMetaObjectClientError) as missing:
                         store.load_tensors(
                             [released_key],
                             [torch.empty_like(loaded[0])],
@@ -463,9 +502,17 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     )
 
                     backend.close()
-                    backend = KvcmOutputBackend(
-                        writer, _backend_config(gc_timeout_ms=100)
+                    backend = None
+                    store = None
+                    gc_instance_id = f"rtp-kvmeta-it-gc-{uuid.uuid4().hex}"
+                    kvcm_config = _backend_config(
+                        endpoint=endpoint,
+                        instance_id=gc_instance_id,
+                        instance_group=instance_group,
+                        gc_timeout_ms=100,
                     )
+                    backend = KvcmOutputBackend.create(kvcm_config)
+                    store = backend._writer
                     gc_result = backend.transfer(
                         MultimodalInputsPB(support_kvcm=True),
                         MMEmbeddingRes(
@@ -481,7 +528,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                                 [torch.empty(1, 4, dtype=torch.float32)],
                                 trace_id=f"rtp-kvmeta-it-gc-probe-{uuid.uuid4().hex}",
                             )
-                        except KVCMEmbeddingStoreError as error:
+                        except KvMetaObjectClientError as error:
                             self.assertEqual(
                                 error.code,
                                 kvcm_py_client.ClientErrorCode.ER_SERVICE_NOT_FOUND,
@@ -490,24 +537,15 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         time.sleep(0.02)
                     else:
                         self.fail("RTP KVCM GC did not remove the expired object")
-                    self.assertEqual(writer.live_keys(), [])
+                    self.assertNotIn(gc_object.key, backend._pending)
                 finally:
                     try:
                         if backend is not None:
                             backend.close()
+                        elif store is not None:
+                            store.close()
                     finally:
-                        try:
-                            if store is not None:
-                                try:
-                                    if writer is not None and writer.live_keys():
-                                        store.remove(
-                                            writer.live_keys(),
-                                            trace_id="rtp-kvmeta-it-final-cleanup",
-                                        )
-                                finally:
-                                    store.close()
-                        finally:
-                            _stop_kvmeta(process)
+                        _stop_kvmeta(process, server_log)
 
 
 if __name__ == "__main__":

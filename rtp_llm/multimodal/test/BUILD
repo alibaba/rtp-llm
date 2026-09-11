@@ -11,10 +11,10 @@ py_test(
     srcs = [
         "multimodal_image_load_test.py",
     ],
+    exec_properties = {"gpu": "A10"},
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -22,16 +22,16 @@ py_test(
     srcs = [
         "multimodal_process_engine_test.py",
     ],
-    deps = [
-        "//rtp_llm:testlib",
-    ],
     data = [
         ":testdata",
     ],
     env = {
-        "MM_CACHE_ITEM_NUM": "0"
+        "MM_CACHE_ITEM_NUM": "0",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
+    deps = [
+        "//rtp_llm:testlib",
+    ],
 )
 
 py_test(
@@ -39,13 +39,13 @@ py_test(
     srcs = [
         "multimodal_util_test.py",
     ],
-    deps = [
-        "//rtp_llm:testlib",
-    ],
     data = [
         ":testdata",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
+    deps = [
+        "//rtp_llm:testlib",
+    ],
 )
 
 py_test(
@@ -98,9 +98,9 @@ py_test(
     ],
 )
 
-# Explicit-only cross-repo test: production RTP receipt generation, v6d's native
-# object adapter, and a live KVCM KVMeta service. See kvcm_emb_storage.md for the
-# required source roots and invocation.
+# Explicit-only cross-repo test: production RTP receipt generation, KVCM's
+# packaged Python object client, and a live KVMeta service. See
+# kvcm_emb_storage.md for the required artifacts and invocation.
 py_test(
     name = "mm_kvcm_cross_repo_integration_test",
     timeout = "long",
@@ -125,8 +125,8 @@ py_test(
         "//rtp_llm/libs:librtp_compute_ops_so",
         "//rtp_llm/libs:libth_transformer_config_so",
     ],
+    exec_properties = {"gpu": "A10"},
     deps = [
         "//rtp_llm:config_ops",
     ],
-    exec_properties = {'gpu':'A10'},
 )

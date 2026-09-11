@@ -3,7 +3,7 @@ import threading
 import time
 import uuid
 from itertools import islice
-from typing import TYPE_CHECKING, Dict, Iterator, List, Sequence, Tuple
+from typing import Dict, Iterator, List, Protocol, Sequence, Tuple
 
 import torch
 
@@ -15,9 +15,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.transport.base import MMOutputResult, MMTransportBackend
-
-if TYPE_CHECKING:
-    from rtp_llm.ops import MMKvcmWriter
 
 TRANSPORT_KVCM = "kvcm"
 _REMOVE_RETRY_SECONDS = 1.0
@@ -33,6 +30,12 @@ _DTYPE_TO_PROTO = {
     torch.float16: TensorDataTypePB.RDMA_TENSOR_FLOAT16,
     torch.bfloat16: TensorDataTypePB.RDMA_TENSOR_BFLOAT16,
 }
+
+
+class _KvcmWriter(Protocol):
+    def save(self, keys: Sequence[str], tensors: Sequence[torch.Tensor]) -> None: ...
+
+    def remove(self, keys: Sequence[str]) -> None: ...
 
 
 def _tensor_nbytes(tensor: torch.Tensor) -> int:
@@ -135,8 +138,9 @@ class KvcmOutputBackend(MMTransportBackend):
 
     name = TRANSPORT_KVCM
 
-    def __init__(self, writer: "MMKvcmWriter", kvcm_config):
+    def __init__(self, writer: _KvcmWriter, kvcm_config, *, _owns_writer=False):
         self._writer = writer
+        self._owns_writer = _owns_writer
         self._max_object_bytes = int(kvcm_config.max_object_bytes)
         self._max_receipt_bytes = int(kvcm_config.max_receipt_bytes)
         self._gc_timeout_seconds = int(kvcm_config.object_gc_timeout_ms) / 1000.0
@@ -158,18 +162,47 @@ class KvcmOutputBackend(MMTransportBackend):
 
     @classmethod
     def create(cls, kvcm_config) -> "KvcmOutputBackend":
-        from rtp_llm import ops
-
-        ops.ensure_kvcm_ops_loaded()
-        if not ops.MMKvcmWriter.available():
-            raise RuntimeError(
-                "KVCM EMB storage is unavailable; rebuild with "
-                "--define=use_kvcm_emb_storage=true"
+        try:
+            from kv_cache_manager.client import (
+                KvMetaObjectClient,
+                KvMetaObjectClientConfig,
             )
-        writer = ops.MMKvcmWriter(kvcm_config)
-        if not writer.enabled():
-            raise RuntimeError("KVCM EMB object writer is disabled")
-        return cls(writer, kvcm_config)
+        except ImportError as error:
+            raise RuntimeError(
+                "KVCM EMB storage requires the kvcm_py_client wheel with "
+                "KVMeta object support"
+            ) from error
+
+        try:
+            writer = KvMetaObjectClient(
+                KvMetaObjectClientConfig(
+                    addresses=tuple(kvcm_config.addresses),
+                    instance_id=kvcm_config.instance_id,
+                    instance_group=kvcm_config.instance_group,
+                    user_data=kvcm_config.user_data,
+                    transfer_client_config=kvcm_config.transfer_client_config,
+                    call_timeout_ms=kvcm_config.call_timeout_ms,
+                    write_timeout_seconds=kvcm_config.write_timeout_seconds,
+                    max_object_bytes=kvcm_config.max_object_bytes,
+                )
+            )
+        except ImportError as error:
+            raise RuntimeError(
+                "KVCM EMB storage requires the kvcm_py_client wheel with "
+                "KVMeta object support"
+            ) from error
+        try:
+            return cls(writer, kvcm_config, _owns_writer=True)
+        except Exception:
+            try:
+                writer.close()
+            except Exception as close_error:  # noqa: BLE001 - preserve root cause
+                logging.warning(
+                    "[VIT] KVCM writer initialization rollback failed "
+                    "(exception_type=%s)",
+                    type(close_error).__name__,
+                )
+            raise
 
     def transfer(
         self, request: MultimodalInputsPB, res: MMEmbeddingRes
@@ -454,10 +487,21 @@ class KvcmOutputBackend(MMTransportBackend):
                 self._condition.notify_all()
 
     def _remove_or_retry(self, keys: Sequence[str], reason: str) -> None:
+        with self._condition:
+            if self._closed:
+                return
         try:
             self._writer.remove(list(keys))
         except Exception as error:  # noqa: BLE001 - retrying GC is the backstop
-            logging.warning("[VIT] KVCM %s failed, scheduling retry: %s", reason, error)
+            # Native errors may contain endpoints, keys or provider details.
+            # Keep failure logs actionable without copying those values.
+            logging.warning(
+                "[VIT] KVCM %s failed; scheduling retry "
+                "(object_count=%d, exception_type=%s)",
+                reason,
+                len(keys),
+                type(error).__name__,
+            )
             with self._condition:
                 if not self._closed:
                     # GC lifetime and retry cadence are independent. Tying
@@ -471,8 +515,27 @@ class KvcmOutputBackend(MMTransportBackend):
     def _best_effort_remove(self, keys: Sequence[str], reason: str) -> None:
         try:
             self._writer.remove(list(keys))
-        except Exception:  # noqa: BLE001 - retain the original transfer error
-            logging.exception("[VIT] KVCM %s failed", reason)
+        except Exception as error:  # noqa: BLE001 - shutdown must complete
+            logging.warning(
+                "[VIT] KVCM %s failed; objects require later namespace cleanup "
+                "(object_count=%d, exception_type=%s)",
+                reason,
+                len(keys),
+                type(error).__name__,
+            )
+
+    def _best_effort_close_writer(self) -> None:
+        if not self._owns_writer:
+            return
+        try:
+            close = getattr(self._writer, "close", None)
+            if callable(close):
+                close()
+        except Exception as error:  # noqa: BLE001 - shutdown must complete
+            logging.warning(
+                "[VIT] KVCM writer close failed (exception_type=%s)",
+                type(error).__name__,
+            )
 
     def _gc_loop(self) -> None:
         while True:
@@ -522,7 +585,10 @@ class KvcmOutputBackend(MMTransportBackend):
             if remaining:
                 self._best_effort_remove(remaining, "shutdown cleanup")
         finally:
-            with self._condition:
-                self._closed = True
-                self._closing = False
-                self._condition.notify_all()
+            try:
+                self._best_effort_close_writer()
+            finally:
+                with self._condition:
+                    self._closed = True
+                    self._closing = False
+                    self._condition.notify_all()
