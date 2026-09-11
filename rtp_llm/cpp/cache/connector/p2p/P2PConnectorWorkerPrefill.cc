@@ -30,14 +30,18 @@ int outstandingSendBudget(int routes_per_layer) {
     return kMaxOutstandingLayersPerRequest * std::max(1, routes_per_layer);
 }
 
-std::set<std::string> buildExpectedBufferKeys(const CacheTopology& topology) {
-    std::set<std::string> expected;
+void buildExpectedBufferMetadata(const CacheTopology& topology,
+                                 std::set<std::string>* expected_keys,
+                                 std::vector<std::string>* expected_tags) {
+    expected_keys->clear();
+    expected_tags->clear();
     for (const auto& layer : topology.layers()) {
         for (const auto& tag : layer.group_tags) {
-            expected.insert(std::to_string(layer.layer_id) + ":" + tag);
+            if (expected_keys->insert(std::to_string(layer.layer_id) + ":" + tag).second) {
+                expected_tags->push_back(tag);
+            }
         }
     }
-    return expected;
 }
 
 }  // namespace
@@ -64,6 +68,10 @@ P2PConnectorWorkerPrefill::~P2PConnectorWorkerPrefill() {
 
 bool P2PConnectorWorkerPrefill::init() {
     store_wait_context_checker_ = std::make_shared<StoreWaitContextChecker>(metrics_reporter_, computed_buffers_);
+
+    if (config_.topology) {
+        buildExpectedBufferMetadata(*config_.topology, &expected_buffer_keys_, &expected_buffer_tags_);
+    }
 
     cleanup_thread_ = autil::LoopThread::createLoopThread(
         std::bind(&P2PConnectorWorkerPrefill::loopCheckProc, this), 1000, "P2PConnectorWorkerCleanupThread");
@@ -616,15 +624,14 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
     const int64_t start_time_us = currentTimeUs();
     auto          collector     = std::make_shared<PrefillWorkerSendMetricsCollector>();
 
-    // 不对称 TP / CP 的配对已由编排层算完，worker 只按 route 执行。
-    const auto expected_buffer_keys = buildExpectedBufferKeys(*config_.topology);
+    // 不对称 TP / CP 的配对已由编排层算完，worker 只按 route 执行。expected
+    // buffer metadata 在 worker 初始化时预计算，CacheTopology 生命周期内不变。
+    const auto& expected_buffer_keys = expected_buffer_keys_;
 
     // 每个 (layer, tag) 上的传输数 = 该 tag 的 route 数，故按 tag 逐个累加，
     // 不能再用「buffer_key 数 × 单一 partition 数」。
     int total_transfers = 0;
-    for (const auto& buffer_key : expected_buffer_keys) {
-        const auto colon = buffer_key.find(':');
-        const auto tag   = colon == std::string::npos ? buffer_key : buffer_key.substr(colon + 1);
+    for (const auto& tag : expected_buffer_tags_) {
         total_transfers += worker_plan.routeCountForTag(tag);
     }
     if (total_transfers == 0) {
