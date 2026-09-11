@@ -6,14 +6,21 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -77,9 +84,13 @@ class PrefillRequestCapacityTest {
         var second = reserve(item(2), 2L).reservation();
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 1L).status());
         assertEquals(2L, state.observedRequestCount());
+        assertEquals(0L, state.availableRequestSlots(1L));
+        assertEquals(3L, state.availableRequestSlots(5L));
+        assertEquals(Long.MAX_VALUE, state.availableRequestSlots(0L));
         first.close();
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 1L).status());
         second.close();
+        assertEquals(1L, state.availableRequestSlots(1L));
         assertNotNull(reserve(item(3), 1L).reservation());
     }
 
@@ -122,6 +133,107 @@ class PrefillRequestCapacityTest {
                 "an intervening ownership mutation does not invalidate remaining capacity");
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status(),
                 "the old available snapshot cannot authorize overselling current capacity");
+    }
+
+    @Test
+    void advisoryReadersDoNotWaitForTheOwnershipLock() throws Exception {
+        ScheduledRequest queued = item(1);
+        assertTrue(enqueue(queued, 2L));
+        try (var reader = Executors.newSingleThreadExecutor()) {
+            lock.lock();
+            try {
+                assertFalse(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS));
+                assertTrue(reader.submit(() -> state.canAcceptRequest(2L)).get(5, TimeUnit.SECONDS));
+                assertTrue(state.terminalizeActiveUnderLock(queued));
+                assertTrue(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS),
+                        "removal publishes capacity before the ownership lock is released");
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+
+    @Test
+    void concurrentAvailableSnapshotsCannotOversellOneSeat() throws Exception {
+        int contenders = 8;
+        CountDownLatch selected = new CountDownLatch(contenders);
+        CountDownLatch admit = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(contenders)) {
+            List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> attempts = new ArrayList<>();
+            for (int i = 0; i < contenders; i++) {
+                ScheduledRequest request = item(i + 1);
+                attempts.add(executor.submit(() -> {
+                    assertTrue(state.canAcceptRequest(1L));
+                    selected.countDown();
+                    assertTrue(admit.await(5, TimeUnit.SECONDS));
+                    return reserve(request, 1L);
+                }));
+            }
+            try {
+                assertTrue(selected.await(5, TimeUnit.SECONDS));
+            } finally {
+                admit.countDown();
+            }
+            List<PrefillState.RouteReservation> acquired = new ArrayList<>();
+            for (var attempt : attempts) {
+                var result = attempt.get(5, TimeUnit.SECONDS);
+                if (result.reservation() != null) {
+                    acquired.add(result.reservation());
+                } else {
+                    assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, result.status());
+                }
+            }
+            assertEquals(1, acquired.size());
+            assertFalse(state.canAcceptRequest(1L));
+            acquired.getFirst().close();
+            assertTrue(state.canAcceptRequest(1L));
+        }
+    }
+
+    @Test
+    void summaryCountsUnknownWorkWithoutOverflowAndClearsOnRetirement() {
+        var reservation = reserve(item(1), 2L).reservation();
+        heartbeat(Map.of(), Long.MAX_VALUE);
+        assertFalse(state.canAcceptRequest(Long.MAX_VALUE));
+        reservation.close();
+        assertFalse(state.canAcceptRequest(Long.MAX_VALUE));
+        heartbeat(Map.of(), 0L);
+        assertTrue(enqueue(item(2), 1L));
+        assertFalse(state.canAcceptRequest(1L));
+        state.retireGenerationOwnership();
+        assertTrue(state.canAcceptRequest(1L));
+        assertFalse(state.canAcceptRequest(0L));
+        assertFalse(state.canAcceptRequest(-1L));
+    }
+
+    @Test
+    void failedQueueInsertionDoesNotConsumePublishedCapacity() {
+        var direct = new PrefillState(lock, PrefillActiveIndex.disabled(), () -> { });
+        lock.lock();
+        try {
+            assertThrows(IllegalStateException.class, () -> direct.enqueueActiveUnderLock(item(1), 1L));
+            assertTrue(direct.canAcceptRequest(1L));
+            assertEquals(0L, direct.observedRequestCount());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Test
+    void fullStatusPublishesUnknownCapacityBeforeEndpointNotification() {
+        var observation = mock(WorkerStatus.StatusObservation.class);
+        var engine = mock(WorkerStatus.EngineObservation.class);
+        when(engine.runningTaskList()).thenReturn(Map.of());
+        when(engine.waitingQueryLen()).thenReturn(2L);
+        when(observation.engine()).thenReturn(engine);
+        when(observation.finishedTasks()).thenReturn(Map.of());
+        var result = state.reconcileWorkerStatus(observation, unused -> 0L, () -> {
+            assertFalse(state.canAcceptRequest(2L));
+            assertTrue(state.canAcceptRequest(3L));
+        }, () -> { });
+        assertNull(result.publicationFailure());
+        heartbeat(Map.of(), 1L);
+        assertTrue(state.canAcceptRequest(2L));
     }
 
     private PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(ScheduledRequest item, long limit) {

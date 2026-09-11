@@ -293,6 +293,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return inflightRequestLimit == 0L || prefillState.canAcceptRequest(inflightRequestLimit);
     }
 
+    /** Advisory planning budget; only offerPinned can acquire these request seats. */
+    public long availableRequestSlots() {
+        return prefillState.availableRequestSlots(inflightRequestLimit);
+    }
+
     public boolean canPreemptQueuedRequest(int priority) {
         return prefillState.canPreemptQueuedRequest(priority, inflightRequestLimit);
     }
