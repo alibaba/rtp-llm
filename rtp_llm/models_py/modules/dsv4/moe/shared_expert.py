@@ -22,6 +22,7 @@ from .warmup_sync import cuda_graph_warmup_forward_enabled
 _SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
 _SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
 _SHARED_OVL_ENGAGED = [0]  # Design-C engagement proof (DSV4_DIAG, first 3 fires)
+_SHARED_FUSED_ENGAGED = [0]  # (c) fused-path engagement proof (flag-gated, first 5 fires)
 
 
 def _mode() -> str:
@@ -546,6 +547,21 @@ def _run_shared_expert(
     fast_path: FusedSharedExpertFastPath | None,
 ) -> torch.Tensor:
     if fast_path is not None and fast_path.can_run(shared_experts, x):
+        # (c) A/B engagement proof: only reachable with
+        # DSV4_SM120_SHARED_EXPERT_FUSED=1, so this prints exactly in the treatment
+        # arm (first 5 fires per process). Deliberately NOT guarded on
+        # is_current_stream_capturing(): the idxpaged [IDXDIAG] precedent showed
+        # capture-time host prints are safe, and guarding it out risks a false
+        # "never engaged" if every Python-side call lands inside capture.
+        if _SM120_SHARED_EXPERT_FUSED and _SHARED_FUSED_ENGAGED[0] < 5:
+            _SHARED_FUSED_ENGAGED[0] += 1
+            import sys
+
+            print(
+                "[SHARED-FUSED] engaged M=%d dim=%d" % (int(x.size(0)), int(x.size(1))),
+                file=sys.stderr,
+                flush=True,
+            )
         try:
             return fast_path.run(shared_experts, x)
         except Exception:
