@@ -341,9 +341,96 @@ class ServerArgsSetTest(TestCase):
         wms._reset_for_testing()
         py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
 
-        if hasattr(py_env_configs.runtime_config, "enable_sleep_mode"):
-            self.assertEqual(py_env_configs.runtime_config.enable_sleep_mode, True)
+        self.assertTrue(py_env_configs.runtime_config.enable_sleep_mode)
+        self.assertEqual(py_env_configs.runtime_config.sleep_mode_level, 1)
         self.assertTrue(wms.is_enabled())
+
+    def test_sleep_level_env_validation_with_and_without_cli(self):
+        for value in ("0", "3", "invalid", "1.5"):
+            for args in ([], ["--enable-sleep-mode", "1"]):
+                with self.subTest(value=value, args=args):
+                    os.environ["SLEEP_MODE_LEVEL"] = value
+                    with self.assertRaises(SystemExit):
+                        self._setup_args(args)
+
+    def test_sleep_level_binding_and_pickle_roundtrip(self):
+        from rtp_llm.model_loader import weight_memory_saver as wms
+
+        self.addCleanup(wms._reset_for_testing)
+        for level in (1, 2):
+            for source in ("cli", "env", "mixed", "cli_override"):
+                with self.subTest(level=level, source=source):
+                    wms._reset_for_testing()
+                    os.environ.pop("SLEEP_MODE_LEVEL", None)
+                    os.environ["ENABLE_SLEEP_MODE"] = "1"
+                    args = []
+                    if source in ("cli", "cli_override"):
+                        args = [
+                            "--enable-sleep-mode",
+                            "1",
+                            "--sleep-mode-level",
+                            str(level),
+                        ]
+                        if source == "cli_override":
+                            os.environ["SLEEP_MODE_LEVEL"] = "invalid"
+                    else:
+                        os.environ["SLEEP_MODE_LEVEL"] = str(level)
+                        if source == "mixed":
+                            args = ["--enable-sleep-mode", "1"]
+                    config = self._setup_args(args).runtime_config
+                    self.assertTrue(config.enable_sleep_mode)
+                    self.assertEqual(config.sleep_mode_level, level)
+                    self.assertTrue(wms.is_enabled())
+                    restored = pickle.loads(pickle.dumps(config))
+                    self.assertTrue(restored.enable_sleep_mode)
+                    self.assertEqual(restored.sleep_mode_level, level)
+
+    def test_runtime_config_legacy_pickle_sleep_defaults_and_field_alignment(self):
+        from rtp_llm.ops import RuntimeConfig
+
+        config = RuntimeConfig()
+        config.enable_sleep_mode = True
+        config.sleep_mode_level = 2
+        config.model_warm_up = False
+        config.use_batch_decode_scheduler = True
+        config.use_gather_batch_scheduler = False
+        config.model_name = "pickle-model"
+        config.worker_grpc_addrs = ["127.0.0.1:18001"]
+        config.worker_addrs = ["127.0.0.1:18002"]
+        config.specify_gpu_arch = "sm_100"
+        state = config.__getstate__()
+        self.assertEqual(len(state), 16)
+        # Legacy tuples lack sleep fields; the intermediate 15-field tuple
+        # has sleep fields but lacks model_warm_up.
+        legacy14 = state[:6] + state[7:15]
+        for size, saved in (
+            (13, legacy14[:13]),
+            (14, legacy14),
+            (15, state[:5] + state[6:]),
+            (16, state),
+        ):
+            with self.subTest(size=size):
+                restored = RuntimeConfig.__new__(RuntimeConfig)
+                restored.__setstate__(saved)
+                self.assertEqual(restored.enable_sleep_mode, size >= 15)
+                self.assertEqual(restored.sleep_mode_level, 2 if size >= 15 else 1)
+                self.assertEqual(
+                    restored.model_warm_up,
+                    RuntimeConfig().model_warm_up if size == 15 else False,
+                )
+                self.assertTrue(restored.use_batch_decode_scheduler)
+                self.assertFalse(restored.use_gather_batch_scheduler)
+                self.assertEqual(restored.model_name, config.model_name)
+                self.assertEqual(restored.worker_grpc_addrs, config.worker_grpc_addrs)
+                self.assertEqual(restored.worker_addrs, config.worker_addrs)
+                self.assertEqual(
+                    restored.specify_gpu_arch,
+                    (
+                        config.specify_gpu_arch
+                        if size >= 14
+                        else RuntimeConfig().specify_gpu_arch
+                    ),
+                )
 
     def _setup_args_and_reload(self):
         """Reload + setup_args with a clean weight_memory_saver, as the sleep tests do.

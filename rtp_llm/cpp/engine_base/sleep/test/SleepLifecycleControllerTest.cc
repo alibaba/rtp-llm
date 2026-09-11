@@ -93,6 +93,39 @@ TEST(SleepLifecycleControllerTest, SleepWithDefaultHooksReachesSleeping) {
     EXPECT_EQ(status.gpu_resource_state, "RELEASED");
 }
 
+TEST(SleepLifecycleControllerTest, NonEmptyTagsRejectBeforeDrainOrRelease) {
+    for (const auto& tag : {"weights", "kv_cache"}) {
+        for (const auto phase : {0, 1, 2}) {
+            SleepLifecycleController controller(true);
+            int                      hook_calls = 0;
+            SleepHooks               hooks;
+            hooks.drain = [&](const SleepOptions&) {
+                ++hook_calls;
+                return true;
+            };
+            hooks.releaseRestorableGpuMemory = [&](const SleepOptions&) {
+                ++hook_calls;
+                return true;
+            };
+            controller.setHooks(hooks);
+            auto opt         = gracefulOptions();
+            opt.tags         = {tag};
+            opt.prepare_only = phase == 1;
+            opt.commit_only  = phase == 2;
+
+            const auto result = controller.sleep(opt);
+
+            EXPECT_FALSE(result.ok);
+            EXPECT_EQ(result.code, SleepResult::Code::INVALID_ARGUMENT);
+            EXPECT_NE(result.message.find("tags"), std::string::npos);
+            EXPECT_EQ(hook_calls, 0);
+            EXPECT_EQ(controller.state(), SleepState::RUNNING);
+            EXPECT_EQ(controller.sleepEpoch(), 0);
+            EXPECT_TRUE(controller.admit());
+        }
+    }
+}
+
 TEST(SleepLifecycleControllerTest, LevelZeroIsDefinedButUnimplemented) {
     SleepLifecycleController controller(true);
     auto                     opt = gracefulOptions();

@@ -759,26 +759,13 @@ message CancelResponsePB {
     CancelStatusPB status = 1;
 }
 
-message BatchGenerateInputPB {
-    repeated GenerateInputPB inputs = 1;
-}
-
-message BatchGenerateResultPB {
-    GenerateOutputsPB final_output = 1;
-    RpcErrorPB error_info = 2;
-}
-
-message BatchGenerateOutputsPB {
-    repeated BatchGenerateResultPB results = 1;
-}
-
 // Engine sleep/wake_up (distinct from SetPause/SetRestart semantics).
 message SleepRequestPB {
     int32 level = 1;              // level=0 defined but unimplemented; 1=host backup, 2=discard weights + disk restore (fixed at startup by sleep_mode_level).
     string mode = 2;              // "wait" (default) | "abort"; "keep" is unsupported.
     int64 timeout_ms = 3;
     string reason = 4;
-    repeated string tags = 5;     // reserved for partial release/wake_up; MVP uses default tags.
+    repeated string tags = 5;     // reserved for partial release; non-empty tags are rejected.
     bool prepare_only = 6;        // close admission + drain; do not release GPU
     bool commit_only = 7;         // release GPU after all ranks prepared/drained
 }

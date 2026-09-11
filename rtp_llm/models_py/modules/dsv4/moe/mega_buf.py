@@ -80,7 +80,7 @@ def mega_output_buffer_gib() -> float:
 
 def _register_mega_strategy(strategy) -> None:
     """Track a live Mega MoE strategy so its per-layer buffer refs can be dropped
-    at sleep. Best-effort; never raises.
+    at sleep. Registration failures abort model construction.
 
     Also stamp the owning model's build scope (``id(base_model)`` while its
     py-model is under construction) so the level-2 wake reload can attribute this
@@ -90,16 +90,10 @@ def _register_mega_strategy(strategy) -> None:
     its own layers. ``None`` when built outside a scope (e.g. non-sleep runs) —
     harmless, as the reload filter matches ``None`` scope managers to ``None``
     stamps."""
-    try:
-        from rtp_llm.model_loader.weight_memory_saver import current_model_scope
+    from rtp_llm.model_loader.weight_memory_saver import current_model_scope
 
-        strategy._sleep_model_scope = current_model_scope()
-    except Exception:
-        pass
-    try:
-        _MEGA_STRATEGY_REGISTRY.add(strategy)
-    except Exception:
-        pass
+    strategy._sleep_model_scope = current_model_scope()
+    _MEGA_STRATEGY_REGISTRY.add(strategy)
 
 
 def iter_mega_strategies() -> list:

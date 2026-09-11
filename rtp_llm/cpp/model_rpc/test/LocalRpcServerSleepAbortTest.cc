@@ -52,6 +52,25 @@ std::shared_ptr<SleepLifecycleController> drainingController() {
 
 }  // namespace
 
+TEST(LocalRpcServerSleepAbortTest, DirectSleepRpcRejectsNonEmptyTags) {
+    auto           controller = std::make_shared<SleepLifecycleController>(true);
+    LocalRpcServer server;
+    server.admission_gate_ = std::make_shared<AdmissionGate>(controller.get(), "test_instance");
+
+    grpc::ServerContext context;
+    SleepRequestPB      request;
+    EmptyPB             response;
+    request.set_level(1);
+    request.set_mode("wait");
+    request.add_tags("weights");
+
+    const auto status = server.SleepServing(&context, &request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(controller->state(), SleepState::RUNNING);
+    EXPECT_EQ(controller->sleepEpoch(), 0);
+}
+
 TEST(LocalRpcServerSleepAbortTest, AbortRegistryCancelsOnlyNonStreamingStreams) {
     LocalRpcServer server;
 

@@ -318,17 +318,13 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 break
 
                         if action is not None:
-                            # Convert the value using the action's type
-                            if action.type is not None:
-                                try:
-                                    converted_value = action.type(env_value)
-                                    setattr(parsed_args, dest, converted_value)
-                                except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
-                                    pass
-                            else:
-                                # No type converter, use as string
-                                setattr(parsed_args, dest, env_value)
+                            # Apply the same type and choices validation as CLI values.
+                            try:
+                                converted_value = self._get_value(action, env_value)
+                                self._check_value(action, converted_value)
+                            except argparse.ArgumentError as error:
+                                self.error(str(error))
+                            setattr(parsed_args, dest, converted_value)
 
         # 应用所有配置绑定
         if self._root_config is not None:

@@ -50,10 +50,6 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
-    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
-                                   const BatchGenerateInputPB* request,
-                                   BatchGenerateOutputsPB*     response);
-
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
     grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
@@ -160,12 +156,6 @@ protected:
                                                 std::shared_ptr<GenerateStream>& stream);
     TorchAllocatorDumpResultPB dumpTorchAllocatorOnCurrentProcess();
 
-    // Shared helpers for single and batch paths
-    ErrorInfo             prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
-    ErrorInfo             collectStreamOutput(grpc::ServerContext*                  context,
-                                              std::shared_ptr<GenerateStream>&      stream,
-                                              const std::shared_ptr<GenerateInput>& input,
-                                              GenerateOutputs&                      last_outputs);
     std::shared_ptr<void> registerAbortableStreamForScope(const std::shared_ptr<GenerateStream>& stream);
     void                  unregisterAbortableStream(int64_t request_id);
     size_t                cancelAbortableStreams();

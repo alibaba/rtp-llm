@@ -14,10 +14,7 @@ from rtp_llm.model_loader.weight_memory_saver import (
 )
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules.dsv4 import rope
-from rtp_llm.models_py.modules.dsv4.fp8.attention import (
-    AttentionFP8,
-    _v4_fp8_linear,
-)
+from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8, _v4_fp8_linear
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import (
@@ -25,17 +22,43 @@ from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import (
     register_mega_se_strategy,
 )
 from rtp_llm.models_py.modules.dsv4.moe.strategies.mega_se import MegaMoEStrategySE
-from rtp_llm.models_py.modules.dsv4.utils import (
-    LinearFactory,
-)
+from rtp_llm.models_py.modules.dsv4.utils import LinearFactory
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear as model_fp8_linear
-from rtp_llm.models_py.modules.dsv4.utils import (
-    iter_fp8_linears,
-)
+from rtp_llm.models_py.modules.dsv4.utils import iter_fp8_linears
 from rtp_llm.utils.model_weight import W
 
 
 class SleepComputedWeightsTest(unittest.TestCase):
+
+    def test_mega_strategy_registration_is_scoped_and_weak(self):
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+
+        strategy = torch.nn.Module()
+        with mock.patch.object(mega_buf, "_MEGA_STRATEGY_REGISTRY", weakref.WeakSet()):
+            with model_build_scope("draft"):
+                mega_buf._register_mega_strategy(strategy)
+            self.assertEqual(strategy._sleep_model_scope, "draft")
+            self.assertIn(strategy, mega_buf.iter_mega_strategies())
+            ref = weakref.ref(strategy)
+            del strategy
+            gc.collect()
+            self.assertIsNone(ref())
+            self.assertEqual(mega_buf.iter_mega_strategies(), [])
+
+    def test_mega_strategy_registration_failures_are_not_swallowed(self):
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+
+        with mock.patch(
+            "rtp_llm.model_loader.weight_memory_saver.current_model_scope",
+            side_effect=RuntimeError("scope failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "scope failed"):
+                mega_buf._register_mega_strategy(torch.nn.Module())
+        with mock.patch.object(mega_buf, "_MEGA_STRATEGY_REGISTRY") as registry:
+            registry.add.side_effect = TypeError("weak registration failed")
+            with self.assertRaisesRegex(TypeError, "weak registration failed"):
+                mega_buf._register_mega_strategy(torch.nn.Module())
+
     def test_deferred_extra_weights_reopen_the_owning_model_scope(self):
         seen = []
         weights = object()

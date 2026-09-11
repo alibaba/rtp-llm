@@ -6,6 +6,7 @@ is replaced by an AsyncMock, so no backend process is required.
 """
 
 import asyncio
+import threading
 import unittest
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -297,6 +298,16 @@ class SleepRoutesTest(unittest.TestCase):
             response = client.post("/sleep", json={"tags": ["kv_cache", ""]})
         self.assertEqual(response.status_code, 400)
         self.assertIn("error", response.json())
+        post_request.assert_not_awaited()
+
+    def test_sleep_partial_tags_rejected_without_backend_call(self):
+        post_request = AsyncMock()
+        with build_test_client(post_request) as client:
+            for tags in (["weights"], ["kv_cache"], ["unknown"]):
+                with self.subTest(tags=tags):
+                    response = client.post("/sleep", json={"tags": tags})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("unsupported", response.json()["error"])
         post_request.assert_not_awaited()
 
     def test_sleep_null_tags_are_treated_as_empty_list(self):
@@ -1303,19 +1314,56 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
         wrapper._dp_stubs[address].GetSleepStatus.assert_not_awaited()
 
-    async def test_sleep_serving_level_zero_returns_unimplemented_before_status_probe(
-        self,
-    ):
-        wrapper, pb2 = self._build_wrapper()
-        address = wrapper.control_addresses[0]
-        wrapper._dp_stubs[address].GetSleepStatus = AsyncMock()
+    async def test_level_zero_reports_backend_capabilities_without_sleep_rpc(self):
+        for levels in ([1], [2], []):
+            with self.subTest(levels=levels):
+                wrapper, pb2 = self._build_wrapper()
+                stub = wrapper._dp_stubs[wrapper.control_addresses[0]]
+                stub.GetSleepStatus = AsyncMock(
+                    return_value=self._status_pb(
+                        pb2,
+                        supported_levels=levels,
+                        effective=bool(levels),
+                        sleep_mode_enabled=bool(levels),
+                        supported_modes=["wait", "abort"] if levels else [],
+                        disabled_reason="" if levels else "disabled",
+                    )
+                )
+                stub.SleepServing = AsyncMock()
+
+                result = await wrapper.sleep_serving({"level": 0})
+
+                self.assertEqual(result["grpc_status"], "UNIMPLEMENTED")
+                self.assertEqual(result["supported_levels"], levels)
+                self.assertEqual(
+                    result["supported_modes"], ["wait", "abort"] if levels else []
+                )
+                stub.GetSleepStatus.assert_awaited_once()
+                stub.SleepServing.assert_not_awaited()
+
+    async def test_level_zero_fails_closed_when_rank_probe_fails(self):
+        wrapper, _ = self._build_wrapper()
+        stub = wrapper._dp_stubs[wrapper.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(
+            side_effect=self._aio_error(grpc.StatusCode.UNAVAILABLE, "rank unreachable")
+        )
+        stub.SleepServing = AsyncMock()
 
         result = await wrapper.sleep_serving({"level": 0})
 
-        self.assertEqual(result["grpc_status"], "UNIMPLEMENTED")
-        self.assertIn("level=0", result["error"])
-        self.assertEqual(result["supported_levels"], [1])
-        wrapper._dp_stubs[address].GetSleepStatus.assert_not_awaited()
+        self.assertTrue(result["recovery_required"])
+        stub.SleepServing.assert_not_awaited()
+
+    async def test_nonempty_tags_rejected_before_status_or_sleep_rpc(self):
+        wrapper, _ = self._build_wrapper()
+        stub = wrapper._dp_stubs[wrapper.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock()
+        stub.SleepServing = AsyncMock()
+        for tags in (["weights"], ["kv_cache"]):
+            result = await wrapper.sleep_serving({"tags": tags})
+            self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
+        stub.GetSleepStatus.assert_not_awaited()
+        stub.SleepServing.assert_not_awaited()
 
     async def test_sleep_serving_invalid_tag_element_rejected_before_status_probe(self):
         wrapper, pb2 = self._build_wrapper()
@@ -1603,6 +1651,112 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         for address in addresses:
             self.assertEqual(wrapper._dp_stubs[address].WakeUpServing.await_count, 2)
 
+    def _blocking_store_call(self, result):
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        resume = threading.Event()
+
+        def call(*args):
+            loop.call_soon_threadsafe(entered.set)
+            if not resume.wait(timeout=3):
+                raise TimeoutError("test did not resume blocking store I/O")
+            return result(*args)
+
+        return call, entered, resume
+
+    async def test_address_resolution_does_not_block_event_loop(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, _ = self._build_wrapper(expected_control_address_count=2)
+        resolver, entered, resume = self._blocking_store_call(lambda: addresses)
+        wrapper._control_address_resolver = resolver
+        task = asyncio.create_task(wrapper._refresh_control_addresses_if_needed())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            self.assertFalse(task.done())
+            self.assertEqual(len(wrapper.control_addresses), 1)
+        finally:
+            resume.set()
+            await asyncio.wait_for(task, timeout=2)
+        self.assertEqual(wrapper.control_addresses, addresses)
+
+    async def test_store_factory_and_cas_do_not_block_event_loop(self):
+        for stage in ("factory", "acquire", "release"):
+            with self.subTest(stage=stage):
+                store = _FakeStore()
+                wrapper, _ = self._build_wrapper(lifecycle_store=store)
+                wrapper._sleep_serving_locked = AsyncMock(return_value={"status": "ok"})
+                original_cas = store.compare_set
+                if stage == "factory":
+                    blocking, entered, resume = self._blocking_store_call(lambda: store)
+                    wrapper._lifecycle_lease._store = None
+                    wrapper._lifecycle_lease._store_factory = blocking
+                else:
+                    blocking, entered, resume = self._blocking_store_call(original_cas)
+
+                    def compare_set(key, expected, desired):
+                        if (stage == "acquire") == bool(desired):
+                            return blocking(key, expected, desired)
+                        return original_cas(key, expected, desired)
+
+                    store.compare_set = compare_set
+                task = asyncio.create_task(wrapper.sleep_serving({}))
+                try:
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+                    self.assertFalse(task.done(), stage)
+                finally:
+                    resume.set()
+                    result = await asyncio.wait_for(task, timeout=2)
+                self.assertEqual(result, {"status": "ok"})
+                self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+
+    async def test_cancelled_acquisition_releases_late_lease_before_propagating(self):
+        store = _FakeStore()
+        wrapper, _ = self._build_wrapper(lifecycle_store=store)
+        blocking, entered, resume = self._blocking_store_call(store.compare_set)
+        store.compare_set = blocking
+        wrapper._sleep_serving_locked = AsyncMock()
+        task = asyncio.create_task(wrapper.sleep_serving({}))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # A second cancellation must not abandon the cleanup.
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+        finally:
+            resume.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2)
+        wrapper._sleep_serving_locked.assert_not_awaited()
+        self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+        self.assertFalse(wrapper._lifecycle_lock.locked())
+
+    async def test_cancelled_release_finishes_before_unlocking(self):
+        store = _FakeStore()
+        wrapper, _ = self._build_wrapper(lifecycle_store=store)
+        original_cas = store.compare_set
+        blocking, entered, resume = self._blocking_store_call(original_cas)
+
+        def compare_set(key, expected, desired):
+            return (original_cas if desired else blocking)(key, expected, desired)
+
+        store.compare_set = compare_set
+        wrapper._sleep_serving_locked = AsyncMock(return_value={"status": "ok"})
+        task = asyncio.create_task(wrapper.sleep_serving({}))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            self.assertTrue(wrapper._lifecycle_lock.locked())
+        finally:
+            resume.set()
+            result = await asyncio.wait_for(task, timeout=2)
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(store.values[wrapper.LIFECYCLE_LEASE_KEY], "")
+
     async def test_independent_wrappers_compete_for_instance_lease(self):
         store = _FakeStore()
         holder, _ = self._build_wrapper(lifecycle_store=store)
@@ -1611,7 +1765,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         loser._dp_stubs[address].GetSleepStatus = AsyncMock()
         loser._dp_stubs[address].SleepServing = AsyncMock()
 
-        record, error = holder._acquire_lifecycle_lease("sleep")
+        record, error = await holder._acquire_lifecycle_lease("sleep")
         self.assertFalse(error)
         result = await loser.sleep_serving({})
 
@@ -1619,7 +1773,7 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("holds the instance lease", result["error"])
         loser._dp_stubs[address].GetSleepStatus.assert_not_awaited()
         loser._dp_stubs[address].SleepServing.assert_not_awaited()
-        holder._release_lifecycle_lease(record)
+        await holder._release_lifecycle_lease(record)
 
     async def test_required_instance_store_unavailable_fails_closed(self):
         wrapper, _ = self._build_wrapper()
@@ -1640,15 +1794,15 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         holder, _ = self._build_wrapper(lifecycle_store=store)
         other, _ = self._build_wrapper(lifecycle_store=store)
 
-        record, error = holder._acquire_lifecycle_lease("sleep")
+        record, error = await holder._acquire_lifecycle_lease("sleep")
         self.assertFalse(error)
-        other._release_lifecycle_lease(other._lease_record("sleep"))
+        await other._release_lifecycle_lease(other._lease_record("sleep"))
         self.assertEqual(
             store.values[holder.LIFECYCLE_LEASE_KEY],
             record,
         )
 
-        holder._release_lifecycle_lease(record)
+        await holder._release_lifecycle_lease(record)
         self.assertEqual(store.values[holder.LIFECYCLE_LEASE_KEY], "")
 
     async def test_partial_sleep_commit_retries_only_draining_rank(self):

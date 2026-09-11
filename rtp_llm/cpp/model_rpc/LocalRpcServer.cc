@@ -723,117 +723,6 @@ bool LocalRpcServer::applyTimelineGate(const std::string& request_key,
     return force_timeline;
 }
 
-ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    output = QueryConverter::transQuery(&input_pb);
-    if (mm_processor_ != nullptr && output->multimodal_inputs) {
-        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = mm_processor_->updateMultimodalFeatures(output);
-        if (!mm_res.ok()) {
-            return mm_res;
-        }
-    }
-    return ErrorInfo::OkStatus();
-}
-
-ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*                  context,
-                                              std::shared_ptr<GenerateStream>&      stream,
-                                              const std::shared_ptr<GenerateInput>& input,
-                                              GenerateOutputs&                      last_outputs) {
-    while (!stream->isFinished() || stream->hasOutput()) {
-        if (context->IsCancelled()) {
-            stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
-            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
-        }
-        const auto output_result = stream->nextOutput();
-        if (!output_result.ok()) {
-            if (output_result.status().code() != ErrorCode::FINISHED) {
-                return output_result.status();
-            }
-            break;
-        }
-        last_outputs = output_result.value();
-    }
-    return ErrorInfo::OkStatus();
-}
-
-grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
-                                               const BatchGenerateInputPB* request,
-                                               BatchGenerateOutputsPB*     response) {
-    RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
-    // Whole-batch rejection: a non-RUNNING instance must not run any of them.
-    auto admission = acquireAdmission();
-    if (!admission.detail.admitted) {
-        return AdmissionGate::toGrpcStatus(admission.detail);
-    }
-    auto               admission_lease = std::move(admission.lease);
-    c10::InferenceMode inference_guard(true);
-    AtomicGuard        request_guard(onflight_requests_);
-    const int          batch_size = request->inputs_size();
-    RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
-
-    if (batch_size == 0) {
-        return grpc::Status::OK;
-    }
-
-    std::vector<std::shared_ptr<GenerateInput>> inputs;
-    inputs.reserve(batch_size);
-    for (int i = 0; i < batch_size; i++) {
-        std::shared_ptr<GenerateInput> input;
-        auto                           err = prepareInput(request->inputs(i), input);
-        if (!err.ok()) {
-            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
-            for (int j = 0; j < batch_size; j++) {
-                auto* result = response->add_results();
-                auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
-                if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
-                } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
-                }
-            }
-            return grpc::Status::OK;
-        }
-        inputs.push_back(input);
-    }
-
-    // enqueueMultiple contract: returned stream vector is 1:1 with `inputs` (same size, same order).
-    // Streams that failed checkInputLength carry an error reported via reportError() and surface
-    // it through collectStreamOutput → nextOutput → ErrorInfo path below.
-    auto                               streams = engine_->enqueueMultiple(inputs).second;
-    std::vector<std::shared_ptr<void>> abort_registrations;
-    abort_registrations.reserve(streams.size());
-    for (const auto& stream : streams) {
-        abort_registrations.push_back(registerAbortableStreamForScope(stream));
-    }
-
-    // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
-    // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
-    // mixed-length batches.
-    for (int i = 0; i < (int)streams.size(); i++) {
-        auto* result = response->add_results();
-
-        GenerateOutputs last_outputs;
-        auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
-        if (!err.ok()) {
-            auto* err_pb = result->mutable_error_info();
-            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
-                                                                        ErrorCodePB::UNKNOWN_ERROR);
-            err_pb->set_error_message(err.ToString());
-        } else {
-            auto* output_pb = result->mutable_final_output();
-            QueryConverter::transResponse(output_pb,
-                                          &last_outputs,
-                                          inputs[i]->generate_config->aux_info,
-                                          maga_init_params_.misc_config.aux_string,
-                                          streams[i]->specialTokens().eos_token_id);
-        }
-    }
-
-    RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
-    return grpc::Status::OK;
-}
-
 grpc::Status
 LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) {
     RTP_LLM_PROFILE_FUNCTION();
@@ -1296,6 +1185,10 @@ LocalRpcServer::SleepServing(grpc::ServerContext* context, const SleepRequestPB*
                      request->reason().c_str(),
                      request->prepare_only(),
                      request->commit_only());
+    if (!request->tags().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "non-empty sleep tags are unsupported; partial sleep is not implemented");
+    }
     SleepOptions options;
     options.level        = request->level();
     options.mode         = request->mode().empty() ? "wait" : request->mode();

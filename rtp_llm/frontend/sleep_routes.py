@@ -66,6 +66,13 @@ def register_sleep_routes(app: FastAPI, grpc_client: Any) -> None:
                 status_code=400,
                 content={"error": "sleep tags must be non-empty strings"},
             )
+        if tags:
+            return ORJSONResponse(
+                status_code=400,
+                content={
+                    "error": "non-empty sleep tags are unsupported; partial sleep is not implemented"
+                },
+            )
         response = await grpc_client.post_request("sleep", req)
         if "error" in response:
             return ORJSONResponse(

@@ -115,7 +115,7 @@ class GrpcClientWrapper:
             f"expected {expected} backend ranks but discovered {actual}"
         )
 
-    def _refresh_control_addresses_if_needed(self) -> None:
+    async def _refresh_control_addresses_if_needed(self) -> None:
         if self._control_address_resolver is None:
             return
         expected = int(self.expected_control_address_count or 0)
@@ -123,7 +123,7 @@ class GrpcClientWrapper:
             return
         try:
             resolved_addresses = dedupe_addresses(
-                self._control_address_resolver() or []
+                await asyncio.to_thread(self._control_address_resolver) or []
             )
         except Exception as e:
             logging.warning("sleep control address resolver failed: %s", e)
@@ -291,10 +291,20 @@ class GrpcClientWrapper:
             addresses, rpc_name, request, timeout_s
         )
 
-    def _acquire_lifecycle_lease(
+    async def _acquire_lifecycle_lease(
         self, operation: str
     ) -> tuple[Optional[str], Dict[str, Any]]:
-        return self._lifecycle_lease.acquire(operation)
+        # TCPStore connection/CAS can block. Cancellation cannot stop its worker:
+        # wait for a late acquisition and release it before propagating cancel.
+        task = asyncio.create_task(
+            asyncio.to_thread(self._lifecycle_lease.acquire, operation)
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            record, _ = await self._drive_to_terminal(task)
+            await self._release_lifecycle_lease(record)
+            raise
 
     def _lease_record(self, operation: str) -> str:
         return self._lifecycle_lease.record(operation)
@@ -307,8 +317,10 @@ class GrpcClientWrapper:
     def _require_instance_lease(self, value: bool) -> None:
         self._lifecycle_lease.required = value
 
-    def _release_lifecycle_lease(self, record: Optional[str]) -> None:
-        self._lifecycle_lease.release(record)
+    async def _release_lifecycle_lease(self, record: Optional[str]) -> None:
+        await self._drive_to_terminal(
+            asyncio.to_thread(self._lifecycle_lease.release, record)
+        )
 
     async def _raw_sleep_statuses(self) -> List[Dict[str, Any]]:
         return await self._broadcast_control_rpc(
@@ -333,7 +345,7 @@ class GrpcClientWrapper:
         (which retries laggards up to a bound); this gate only fires when the
         ranks are already inconsistent *before* the operation begins.
         """
-        self._refresh_control_addresses_if_needed()
+        await self._refresh_control_addresses_if_needed()
         statuses = await self._raw_sleep_statuses()
         status = self._aggregate_sleep_status(statuses)
         _report_sleep_status_metrics(status)
@@ -356,7 +368,7 @@ class GrpcClientWrapper:
         return status
 
     async def _drive_to_terminal(self, coro: Any) -> Any:
-        """Finish a lifecycle commit or drain rollback despite request cancellation.
+        """Finish lifecycle commit, drain rollback or lease I/O despite cancellation.
 
         Once an irreversible phase has started running the GPU-release /
         GPU-restore hooks there is no consistent rollback: freed device memory
@@ -498,14 +510,14 @@ class GrpcClientWrapper:
         """Trigger engine sleep on every lifecycle control rank."""
         start_time = perf_counter()
         async with self._lifecycle_lock:
-            lease_record, lease_error = self._acquire_lifecycle_lease("sleep")
+            lease_record, lease_error = await self._acquire_lifecycle_lease("sleep")
             if lease_error:
                 result = lease_error
             else:
                 try:
                     result = await self._sleep_serving_locked(req)
                 finally:
-                    self._release_lifecycle_lease(lease_record)
+                    await self._release_lifecycle_lease(lease_record)
         # sleep is a rare control-plane action: the synchronous response is the
         # authoritative outcome and a failure is handled as an incident, so a
         # single grep-able log line per call is the useful signal (no QPS metric).
@@ -554,18 +566,11 @@ class GrpcClientWrapper:
                     "error": "sleep level and timeout_ms must be integers",
                     "grpc_status": "INVALID_ARGUMENT",
                 }
-            if level == 0:
-                return {
-                    "error": "sleep level=0 state-preserving sleep is defined but not implemented",
-                    "grpc_status": "UNIMPLEMENTED",
-                    "supported_levels": [1],
-                    "supported_modes": ["wait", "abort"],
-                }
             # level 1 (host backup) and level 2 (discard weights) are both valid
             # requests; the backend is the authority on which one this process
             # supports (fixed at startup by sleep_mode_level) and returns
             # INVALID_ARGUMENT on a mismatch.
-            if level not in (1, 2):
+            if level not in (0, 1, 2):
                 return {
                     "error": "sleep level must be 0, 1 or 2",
                     "grpc_status": "INVALID_ARGUMENT",
@@ -589,6 +594,11 @@ class GrpcClientWrapper:
                     "error": "sleep tags must be non-empty strings",
                     "grpc_status": "INVALID_ARGUMENT",
                 }
+            if tags:
+                return {
+                    "error": "non-empty sleep tags are unsupported; partial sleep is not implemented",
+                    "grpc_status": "INVALID_ARGUMENT",
+                }
             status = await self._initial_lifecycle_status("sleep")
             if "error" in status:
                 return status
@@ -598,6 +608,13 @@ class GrpcClientWrapper:
                     "grpc_status": "UNIMPLEMENTED",
                     "sleep_mode_enabled": bool(status.get("sleep_mode_enabled", False)),
                     "effective": False,
+                    "supported_levels": status.get("supported_levels", []),
+                    "supported_modes": status.get("supported_modes", []),
+                }
+            if level == 0:
+                return {
+                    "error": "sleep level=0 state-preserving sleep is defined but not implemented",
+                    "grpc_status": "UNIMPLEMENTED",
                     "supported_levels": status.get("supported_levels", []),
                     "supported_modes": status.get("supported_modes", []),
                 }
@@ -705,14 +722,14 @@ class GrpcClientWrapper:
         """Trigger engine wake_up on every lifecycle control rank."""
         start_time = perf_counter()
         async with self._lifecycle_lock:
-            lease_record, lease_error = self._acquire_lifecycle_lease("wake_up")
+            lease_record, lease_error = await self._acquire_lifecycle_lease("wake_up")
             if lease_error:
                 result = lease_error
             else:
                 try:
                     result = await self._wake_up_serving_locked(req)
                 finally:
-                    self._release_lifecycle_lease(lease_record)
+                    await self._release_lifecycle_lease(lease_record)
         duration_ms = (perf_counter() - start_time) * 1000.0
         _report_metric_if_ready(GaugeMetrics.WAKE_UP_ACTION_RT_METRIC, duration_ms)
         if "error" in result:
@@ -814,7 +831,7 @@ class GrpcClientWrapper:
     async def get_sleep_status(self, req: Any = None) -> Dict[str, Any]:
         """Get aggregate sleep lifecycle status from every control rank."""
         try:
-            self._refresh_control_addresses_if_needed()
+            await self._refresh_control_addresses_if_needed()
             request = pb2.EmptyPB()
             results = await self._broadcast_control_rpc(
                 "GetSleepStatus", request, timeout_s=3

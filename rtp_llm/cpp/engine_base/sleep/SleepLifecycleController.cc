@@ -264,6 +264,10 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     if (opt.prepare_only && opt.commit_only) {
         return SleepResult::invalidArgument("sleep rejected: prepare_only and commit_only cannot both be true");
     }
+    if (!opt.tags.empty()) {
+        return SleepResult::invalidArgument(
+            "sleep rejected: non-empty tags are unsupported; partial sleep is not implemented");
+    }
     // torch_memory_saver binds the weights region's cpu_backup at model-load
     // time, so this process supports exactly one non-zero level, selected at
     // startup: 2 (discard weights) when sleep_mode_level=2, otherwise 1 (host
