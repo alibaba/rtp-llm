@@ -16,6 +16,8 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
 /**
@@ -87,13 +89,13 @@ public class WhitelistMetricsFilterConfig {
                     + "flexlb_app_flexlb_dispatch_ack_time_ms,"
                     + "flexlb_app_engine_balancing_master_dispatch_reason";
 
-    private final List<String> whitelist;
+    private final PrefixAllowSet allowedMetrics;
 
     public WhitelistMetricsFilterConfig(
             @Value("${flexlb.monitor.metric-whitelist:" + DEFAULT_METRIC_WHITELIST + "}")
             String metricWhitelist) {
-        this.whitelist = parseWhitelist(metricWhitelist);
-        if (this.whitelist.isEmpty()) {
+        this.allowedMetrics = new PrefixAllowSet(parseWhitelist(metricWhitelist));
+        if (this.allowedMetrics.isEmpty()) {
             log.warn("flexlb.monitor.metric-whitelist is empty/blank: denying every "
                     + "flexlb.* metric (fail-safe; configure a comma-separated prefix "
                     + "list via --flexlb.monitor.metric-whitelist)");
@@ -122,8 +124,9 @@ public class WhitelistMetricsFilterConfig {
      */
     static boolean matches(List<String> whitelist, String unprefixedMeterName) {
         String promName = PROM_PREFIX + unprefixedMeterName.replace('.', '_');
+        String counterName = promName + COUNTER_SUFFIX;
         for (String entry : whitelist) {
-            if (promName.startsWith(entry) || (promName + COUNTER_SUFFIX).startsWith(entry)) {
+            if (promName.startsWith(entry) || counterName.startsWith(entry)) {
                 return true;
             }
         }
@@ -143,7 +146,7 @@ public class WhitelistMetricsFilterConfig {
                 if (!name.startsWith(METRIC_PREFIX)) {
                     return MeterFilterReply.NEUTRAL;
                 }
-                return matches(whitelist, name.substring(METRIC_PREFIX.length()))
+                return allowedMetrics.contains(name.substring(METRIC_PREFIX.length()))
                         ? MeterFilterReply.NEUTRAL : MeterFilterReply.DENY;
             }
         };
@@ -157,7 +160,7 @@ public class WhitelistMetricsFilterConfig {
      */
     @PostConstruct
     public void init() {
-        MicrometerFlexMonitor.setAllowedMetrics(new PrefixAllowSet(whitelist));
+        MicrometerFlexMonitor.setAllowedMetrics(allowedMetrics);
     }
 
     /**
@@ -165,11 +168,13 @@ public class WhitelistMetricsFilterConfig {
      * the prefix-or-full-name match on the (unprefixed) micrometer name —
      * {@code MicrometerFlexMonitor}'s exact-match allowlist check becomes
      * prefix-aware without touching that class. Iteration/size expose the
-     * raw entries (log messages print the entry count).
+     * raw entries (log messages print the entry count). Match decisions are
+     * cached by metric name for the lifetime of this immutable whitelist.
      */
     static final class PrefixAllowSet extends AbstractSet<String> {
 
         private final List<String> entries;
+        private final ConcurrentMap<String, Boolean> matchesByName = new ConcurrentHashMap<>();
 
         PrefixAllowSet(List<String> entries) {
             this.entries = List.copyOf(entries);
@@ -177,7 +182,15 @@ public class WhitelistMetricsFilterConfig {
 
         @Override
         public boolean contains(Object o) {
-            return o instanceof String && matches(entries, (String) o);
+            if (!(o instanceof String name) || entries.isEmpty()) {
+                return false;
+            }
+            Boolean cached = matchesByName.get(name);
+            return cached != null ? cached : matchesByName.computeIfAbsent(name, this::matchesName);
+        }
+
+        private boolean matchesName(String name) {
+            return matches(entries, name);
         }
 
         @Override
