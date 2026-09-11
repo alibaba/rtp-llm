@@ -171,6 +171,33 @@ def create_moe_config_adapter(
 class TestCudaNoQuantFallbackStrategies(unittest.TestCase):
     """No-quant strategy conditions must reject quantized checkpoints."""
 
+    def test_masked_executor_checks_quantization_specific_architecture(self) -> None:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor import (
+            DeepGemmMaskedExecutor,
+        )
+
+        for quantized in (False, True):
+            model_config = (
+                create_model_config_with_fp8_block_quant()
+                if quantized
+                else create_model_config_without_quant()
+            )
+            model_config.data_type = "bf16"
+            for sm_major in (8, 9, 10):
+                with self.subTest(quantized=quantized, sm_major=sm_major), patch(
+                    "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm",
+                    return_value=True,
+                ), patch(
+                    "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor.get_sm",
+                    return_value=(sm_major, 0),
+                ):
+                    self.assertEqual(
+                        self._conditions_pass(
+                            DeepGemmMaskedExecutor, model_config, "auto"
+                        ),
+                        sm_major >= 9 if quantized else sm_major == 9,
+                    )
+
     def _conditions_pass(
         self, strategy: type, model_config: ModelConfig, moe_strategy: str
     ) -> bool:

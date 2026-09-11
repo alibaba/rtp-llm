@@ -50,6 +50,28 @@ deepseek_vl2_gpu_deps = [
     "//rtp_llm/models_py:new_weight_loader",
 ]
 
+# This test executes the production CUDA MLA backend, not the reference FMHA
+# used by the small CPU loader fixtures. ROCm vision coverage remains separate.
+py_test(
+    name = "test_deepseek_vl2_multimodal_gpu",
+    srcs = [
+        "test_deepseek_vl2_multimodal_gpu.py",
+        "test_deepseek_vl2_load.py",
+    ],
+    main = "test_deepseek_vl2_multimodal_gpu.py",
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    tags = ["H20"],
+    deps = deepseek_vl2_gpu_deps + [
+        "//rtp_llm:config",
+        "//rtp_llm:ops",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+    ],
+)
+
 py_test(
     name = "test_deepseek_vl2_gpu",
     srcs = [
