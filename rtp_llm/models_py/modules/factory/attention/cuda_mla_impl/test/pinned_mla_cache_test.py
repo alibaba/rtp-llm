@@ -1,4 +1,4 @@
-"""Run on L20D_DEV only; no skip may turn a missing GPU into a passing test."""
+"""CPU capacity checks and L20D_DEV GPU tests; missing GPUs must fail."""
 
 import ctypes
 import json
@@ -34,6 +34,55 @@ def _gather_bf16(KV, Indices, Out, N: tl.constexpr):
     rope = tl.load((KV + ids[:, None] * 656 + 528 + r[None, :] * 2)
                    .to(tl.pointer_type(tl.bfloat16)), valid[:, None], other=0)
     tl.store(Out + rows[:, None] * 576 + 512 + r[None, :], rope, (rows < N)[:, None])
+
+
+class PinnedMlaCapacityTest(unittest.TestCase):
+    def test_rejects_int32_capacity_overflow_before_allocation(self):
+        # Meta tensors exercise huge shapes without allocating host/GPU memory.
+        for host_tokens, hbm_tokens, resident_tokens, error in (
+            (1 << 31, 0, 64, "logical"),
+            (64, 0, 1 << 31, "physical"),
+            (64, (1 << 31) - 128, 128, "physical"),
+        ):
+            with self.subTest(
+                host_tokens=host_tokens,
+                hbm_tokens=hbm_tokens,
+                resident_tokens=resident_tokens,
+            ):
+                backing = torch.empty((host_tokens // 64, 64, 1), device="meta")
+                with self.assertRaisesRegex(
+                    ValueError, f"{error} token capacity must fit int32"
+                ):
+                    PinnedMlaWorkingSet(
+                        [backing],
+                        resident_tokens,
+                        64,
+                        torch.device("cuda"),
+                        hbm_tokens=hbm_tokens,
+                    )
+
+    def test_int32_capacity_limit_passes_size_validation(self):
+        max_tokens = torch.iinfo(torch.int32).max
+        for host_tokens, hbm_tokens, resident_tokens in (
+            (max_tokens, 0, 1),
+            (1, max_tokens - 1, 1),
+            (1, 0, max_tokens),
+        ):
+            with self.subTest(
+                host_tokens=host_tokens,
+                hbm_tokens=hbm_tokens,
+                resident_tokens=resident_tokens,
+            ):
+                backing = torch.empty((host_tokens, 1, 1), device="meta")
+                # An in-range shape reaches the backing-storage check.
+                with self.assertRaisesRegex(ValueError, "CPU pinned memory"):
+                    PinnedMlaWorkingSet(
+                        [backing],
+                        resident_tokens,
+                        1,
+                        torch.device("cuda"),
+                        hbm_tokens=hbm_tokens,
+                    )
 
 
 class PinnedMlaCacheTest(unittest.TestCase):

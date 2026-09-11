@@ -198,7 +198,8 @@ def _fetch_tiled(
 @triton.jit
 def _write(Host, Device, Map, Ids, Values, WIDTH: tl.constexpr, B: tl.constexpr,
            HBM_TOKENS: tl.constexpr = 0):
-    i = tl.program_id(0)
+    # Widen before multiplying by WIDTH, including the Values source offset.
+    i = tl.program_id(0).to(tl.int64)
     token = tl.load(Ids + i).to(tl.int64)
     if token >= 0:
         x = tl.arange(0, B)
@@ -280,6 +281,16 @@ class PinnedMlaWorkingSet:
         first = backing[0]
         if first.ndim < 3 or first.shape[1] != page_size:
             raise ValueError("backing must have paged [blocks, page_size, ...] shape")
+        if hbm_tokens < 0 or hbm_tokens % page_size:
+            raise ValueError("HBM capacity must contain whole pages")
+        # Metadata and attention use int32 token IDs; byte offsets stay int64.
+        # Validate both address spaces before allocating any CUDA tensors.
+        logical_tokens = hbm_tokens + first.shape[0] * page_size
+        max_tokens = torch.iinfo(torch.int32).max
+        if logical_tokens > max_tokens:
+            raise ValueError("logical token capacity must fit int32")
+        if hbm_tokens + resident_tokens > max_tokens:
+            raise ValueError("physical token capacity must fit int32")
         for tensor in backing:
             if tensor.is_cuda or not tensor.is_pinned() or not tensor.is_contiguous():
                 raise ValueError("backing must be contiguous CPU pinned memory")
@@ -288,9 +299,7 @@ class PinnedMlaWorkingSet:
         self.backing = tuple(backing)
         self.capacity = resident_tokens
         self.hbm_tokens = hbm_tokens
-        self.logical_tokens = hbm_tokens + first.shape[0] * page_size
-        if hbm_tokens < 0 or hbm_tokens % page_size:
-            raise ValueError("HBM capacity must contain whole pages")
+        self.logical_tokens = logical_tokens
         self.width = first[0, 0].numel() * first.element_size()
         shape = ((hbm_tokens + resident_tokens) // page_size, *first.shape[1:])
         self.resident = tuple(hbm_cache) if hbm_cache is not None else tuple(

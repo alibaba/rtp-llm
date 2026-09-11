@@ -143,9 +143,16 @@ void configurePinnedMla(CacheConfig& config, const RuntimeConfig& runtime, size_
                                        (remaining - 2 * hbm_block_bytes) / logical_block_hbm);
     const size_t hbm_blocks = (remaining - pin_blocks * logical_block_hbm) / hbm_block_bytes;
     const size_t blocks = hbm_blocks + pin_blocks;
+    constexpr size_t max_tokens = std::numeric_limits<int32_t>::max();
     RTP_LLM_CHECK_WITH_INFO(pin_blocks > 0 && hbm_blocks > 1
-                                && blocks * tokens_per_block <= std::numeric_limits<int32_t>::max(),
+                                && blocks <= max_tokens / tokens_per_block,
                             "invalid tiered MLA capacity: HBM=%zu pin=%zu", hbm_blocks, pin_blocks);
+    // Physical IDs also include the working set after the complete HBM blocks.
+    // Check before multiplication/addition so the validation cannot overflow.
+    RTP_LLM_CHECK_WITH_INFO(minimum <= max_tokens
+                                && hbm_blocks <= (max_tokens - minimum) / tokens_per_block,
+                            "tiered MLA physical token capacity must fit int32: HBM blocks=%zu resident tokens=%zu",
+                            hbm_blocks, minimum);
     config.dsa_mla_resident_tokens = minimum;
     config.dsa_mla_hbm_blocks = hbm_blocks;
     config.block_num = static_cast<uint32_t>(blocks);
