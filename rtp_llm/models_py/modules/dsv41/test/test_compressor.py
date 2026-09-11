@@ -284,7 +284,7 @@ class OwnerCompressorGpuTest(unittest.TestCase):
         with torch.no_grad():
             reference_norm.weight.copy_(norm)
             expected = reference_norm(
-                self.official.Block.hc_pre(None, hidden.unsqueeze(0), pre.unsqueeze(0))
+                self.official.hc_pre(None, hidden.unsqueeze(0), pre.unsqueeze(0))
             )[0]
         actual = prepare_owner_hidden(20, hidden, pre, norm)
         self.assert_exact(actual, expected)

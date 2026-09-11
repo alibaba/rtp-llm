@@ -44,7 +44,6 @@ def load_official_compressor():
         "precompute_freqs_cis",
         "apply_rotary_emb",
         "Compressor",
-        "Block",
     }
     syntax = ast.parse(source, filename=str(path))
     selected = [
@@ -54,6 +53,16 @@ def load_official_compressor():
     ]
     if {node.name for node in selected} != names:
         raise RuntimeError("the pinned official compressor definitions are incomplete")
+    hc_pre = [
+        method
+        for node in syntax.body
+        if isinstance(node, ast.ClassDef) and node.name == "Block"
+        for method in node.body
+        if isinstance(method, ast.FunctionDef) and method.name == "hc_pre"
+    ]
+    if len(hc_pre) != 1:
+        raise RuntimeError("the pinned official Block.hc_pre definition is missing")
+    selected.extend(hc_pre)
     module = ModuleType("_dsv41_official_compressor_definitions")
     module.__dict__.update(
         torch=torch,
@@ -71,6 +80,7 @@ def load_official_compressor():
     sys.modules[module.__name__] = module
     # Preserve the actual function/class ASTs. No model constructor, source edit,
     # monkeypatch of numerical operations, or unrelated official imports run.
+    # Only hc_pre is needed from Block; its class binds unrelated model types.
     exec(
         compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"),
         module.__dict__,
