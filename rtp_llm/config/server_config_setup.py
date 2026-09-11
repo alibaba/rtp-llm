@@ -428,6 +428,27 @@ def setup_default_args(py_env_configs):
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
+    if py_env_configs.prefill_cp_config.is_enabled():
+        from rtp_llm.model_factory import ModelFactory
+
+        model_cls = ModelFactory.get_model_cls(py_env_configs.model_args.model_type)
+        alignment = model_cls.prefill_cp_alignment()
+        source_config = py_env_configs.prefill_cp_config
+        target_config = py_env_configs.parallelism_config.prefill_cp_config
+        if not hasattr(source_config, "segment_size_alignment") or not hasattr(
+            target_config, "segment_size_alignment"
+        ):
+            raise RuntimeError(
+                "The ops binding must be rebuilt before context parallelism is enabled"
+            )
+        source_config.segment_size_alignment = alignment
+        target_config.segment_size_alignment = alignment
+        block_size = py_env_configs.kv_cache_config.seq_size_per_block
+        if block_size % alignment != 0:
+            raise ValueError(
+                f"KV cache block size {block_size} must be divisible by CP alignment {alignment}"
+            )
+
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting
     if py_env_configs.role_config.role_type != RoleType.FRONTEND:

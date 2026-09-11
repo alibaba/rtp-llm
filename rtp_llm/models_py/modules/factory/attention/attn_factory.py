@@ -82,6 +82,9 @@ def get_mla_impl(
     _validate_dynamic_fp8_config(attn_configs, is_cuda_graph, attn_inputs)
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    uses_context_parallel = (
+        getattr(attn_inputs, "context_parallel_info", None) is not None
+    )
     for impl in mla_impls:
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
@@ -93,12 +96,10 @@ def get_mla_impl(
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens_device.max().item()
             <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
-            )
+            and not uses_context_parallel
         )
 
-        if not use_fast_path and not impl.support_parallelism_config(
+        if uses_context_parallel and not impl.support_parallelism_config(
             parallelism_config
         ):
             continue
@@ -210,6 +211,9 @@ def get_fmha_impl(
         if attn_inputs.is_prefill
         else DYNAMIC_FP8_DECODE_IMPLS
     )
+    uses_context_parallel = (
+        getattr(attn_inputs, "context_parallel_info", None) is not None
+    )
     strict_impl_selection = dynamic_fp8 or (
         VALIDATE_FMHA_CONFIG is not None
         and VALIDATE_FMHA_CONFIG(attn_configs, attn_inputs, fmha_config)
@@ -233,7 +237,9 @@ def get_fmha_impl(
             continue
 
         # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        if uses_context_parallel and not impl.support_parallelism_config(
+            parallelism_config
+        ):
             continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:

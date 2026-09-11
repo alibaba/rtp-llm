@@ -412,26 +412,6 @@ class FIFOSchedulerConfig:
         ...
 
 
-class GrammarConfig:
-    constrained_json_disable_any_whitespace: bool
-    grammar_backend: str
-    num_workers: int
-    override_stop_tokens: list[int]
-    tokenizer_info_json: str
-
-    def __getstate__(self) -> tuple:
-        ...
-
-    def __init__(self) -> None:
-        ...
-
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
-
-    def to_string(self) -> str:
-        ...
-
-
 class FMHAConfig:
     absorb_opt_len: int
     disable_flashinfer_hybrid_prefill: bool
@@ -572,6 +552,7 @@ class GrammarConfig:
     compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
     num_workers: int
+    terminate_without_stop_token: bool
     tokenizer_info_json: str
     def __getstate__(self) -> tuple:
         ...
@@ -1305,6 +1286,7 @@ class PrefillCPConfig:
     kv_cache_sharded: bool
     method: CPRotateMethod
     prefill_cp_size: int
+    segment_size_alignment: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

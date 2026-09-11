@@ -11,7 +11,9 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
+from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 from rtp_llm.ops import CPRotateMethod, KvCacheDataType, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
@@ -318,6 +320,27 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(
             py_env_configs.parallelism_config.prefill_cp_config.prefill_cp_size, 4
         )
+
+    def test_prefill_cp_alignment_setup_and_block_validation(self):
+        self.assertEqual(PyEnvConfigs().prefill_cp_config.segment_size_alignment, 1)
+        self.assertEqual(Qwen3NextBase.prefill_cp_alignment(), 64)
+
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls",
+            return_value=Qwen3NextBase,
+        ):
+            config = PyEnvConfigs()
+            config.model_args.model_type = "aligned_model"
+            config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+            setup_default_args(config)
+            self.assertEqual(config.prefill_cp_config.segment_size_alignment, 64)
+            self.assertEqual(
+                config.parallelism_config.prefill_cp_config.segment_size_alignment, 64
+            )
+
+            config.kv_cache_config.seq_size_per_block = 96
+            with self.assertRaisesRegex(ValueError, "must be divisible"):
+                setup_default_args(config)
 
     @patch.dict(
         "os.environ",
