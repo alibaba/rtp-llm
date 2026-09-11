@@ -1,5 +1,7 @@
 package org.flexlb.balance.prediction;
 
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,10 +39,12 @@ public final class ArithmeticFormula {
 
     private final Node root;
     private final Set<String> referencedVariables;
+    private final int aggregateCacheSize;
 
-    private ArithmeticFormula(Node root, Set<String> referencedVariables) {
+    private ArithmeticFormula(Node root, Set<String> referencedVariables, int aggregateCacheSize) {
         this.root = root;
         this.referencedVariables = Set.copyOf(referencedVariables);
+        this.aggregateCacheSize = aggregateCacheSize;
     }
 
     /** Parse a scalar expression; batch aggregates are not available. */
@@ -62,7 +66,9 @@ public final class ArithmeticFormula {
         Parser parser = new Parser(expression, variables, aggregateExcludedVariables, allowAggregates);
         Node root = parser.parseExpression();
         parser.expectEnd();
-        return new ArithmeticFormula(root, parser.referencedVariables);
+        Optimizer optimizer = new Optimizer(root);
+        Node optimized = optimizer.optimize(root, false);
+        return new ArithmeticFormula(optimized, parser.referencedVariables, optimizer.aggregateSlots.size());
     }
 
     /** Includes variables parsed inside a {@code param()} initial value. */
@@ -75,6 +81,7 @@ public final class ArithmeticFormula {
         EvalContext context = EVALUATION_CONTEXT.get();
         context.reset(vars, itemVars);
         try {
+            context.prepareAggregates(aggregateCacheSize);
             return root.evaluate(context);
         } finally {
             context.reset(null, null);
@@ -90,6 +97,8 @@ public final class ArithmeticFormula {
     private static final class EvalContext {
         double[] vars;
         List<double[]> itemVars;
+        double[] aggregateValues = new double[0];
+        boolean[] aggregateComputed = new boolean[0];
 
         private EvalContext() {
         }
@@ -97,6 +106,18 @@ public final class ArithmeticFormula {
         private void reset(double[] vars, List<double[]> itemVars) {
             this.vars = vars;
             this.itemVars = itemVars;
+        }
+
+        private void prepareAggregates(int count) {
+            if (count == 0) {
+                return;
+            }
+            if (aggregateValues.length < count) {
+                aggregateValues = new double[count];
+                aggregateComputed = new boolean[count];
+            } else {
+                Arrays.fill(aggregateComputed, 0, count, false);
+            }
         }
     }
 
@@ -138,20 +159,20 @@ public final class ArithmeticFormula {
         }
     }
 
-    private record UnaryFuncNode(String name, Node arg) implements Node {
+    private record UnaryFuncNode(DoubleUnaryOperator function, Node arg) implements Node {
         @Override
         public double evaluate(EvalContext ctx) {
             double a = arg.evaluate(ctx);
-            return UNARY_FUNCTIONS.get(name).applyAsDouble(a);
+            return function.applyAsDouble(a);
         }
     }
 
-    private record BinaryFuncNode(String name, Node left, Node right) implements Node {
+    private record BinaryFuncNode(DoubleBinaryOperator function, Node left, Node right) implements Node {
         @Override
         public double evaluate(EvalContext ctx) {
             double l = left.evaluate(ctx);
             double r = right.evaluate(ctx);
-            return BINARY_FUNCTIONS.get(name).applyAsDouble(l, r);
+            return function.applyAsDouble(l, r);
         }
     }
 
@@ -183,6 +204,19 @@ public final class ArithmeticFormula {
         }
     }
 
+    /** Shared only within one evaluation; NaN and signed zero are ordinary cached values. */
+    private record CachedAggregateNode(int slot, Node aggregate) implements Node {
+        @Override
+        public double evaluate(EvalContext ctx) {
+            if (!ctx.aggregateComputed[slot]) {
+                double value = aggregate.evaluate(ctx);
+                ctx.aggregateValues[slot] = value;
+                ctx.aggregateComputed[slot] = true;
+            }
+            return ctx.aggregateValues[slot];
+        }
+    }
+
     private static final class ParameterNode implements Node {
         private final double value;
 
@@ -197,6 +231,76 @@ public final class ArithmeticFormula {
 
         double value() {
             return value;
+        }
+    }
+
+    /** Constant folding and common aggregate elimination without changing arithmetic order. */
+    private static final class Optimizer {
+        private final Map<AggregateFuncNode, Integer> aggregateUses = new HashMap<>();
+        private final Map<AggregateFuncNode, Integer> aggregateSlots = new HashMap<>();
+
+        Optimizer(Node root) {
+            countAggregates(root);
+        }
+
+        private void countAggregates(Node node) {
+            switch (node) {
+                case AggregateFuncNode aggregate -> aggregateUses.merge(aggregate, 1, Integer::sum);
+                case UnaryNode unary -> countAggregates(unary.operand());
+                case BinaryNode binary -> {
+                    countAggregates(binary.left());
+                    countAggregates(binary.right());
+                }
+                case UnaryFuncNode function -> countAggregates(function.arg());
+                case BinaryFuncNode function -> {
+                    countAggregates(function.left());
+                    countAggregates(function.right());
+                }
+                default -> { }
+            }
+        }
+
+        private Node optimize(Node node, boolean insideAggregate) {
+            return switch (node) {
+                case ParameterNode parameter -> new ConstantNode(parameter.value());
+                case UnaryNode unary -> {
+                    Node operand = optimize(unary.operand(), insideAggregate);
+                    yield fold(new UnaryNode(unary.op(), operand), operand);
+                }
+                case BinaryNode binary -> {
+                    Node left = optimize(binary.left(), insideAggregate);
+                    Node right = optimize(binary.right(), insideAggregate);
+                    yield fold(new BinaryNode(binary.op(), left, right), left, right);
+                }
+                case UnaryFuncNode function -> {
+                    Node arg = optimize(function.arg(), insideAggregate);
+                    yield fold(new UnaryFuncNode(function.function(), arg), arg);
+                }
+                case BinaryFuncNode function -> {
+                    Node left = optimize(function.left(), insideAggregate);
+                    Node right = optimize(function.right(), insideAggregate);
+                    yield fold(new BinaryFuncNode(function.function(), left, right), left, right);
+                }
+                case AggregateFuncNode aggregate -> {
+                    Node optimized = new AggregateFuncNode(optimize(aggregate.arg(), true));
+                    // Nested sums evaluate in each item's scope, not the batch scope.
+                    if (insideAggregate || aggregateUses.getOrDefault(aggregate, 0) < 2) {
+                        yield optimized;
+                    }
+                    int slot = aggregateSlots.computeIfAbsent(aggregate, ignored -> aggregateSlots.size());
+                    yield new CachedAggregateNode(slot, optimized);
+                }
+                default -> node;
+            };
+        }
+
+        private static Node fold(Node node, Node... operands) {
+            for (Node operand : operands) {
+                if (!(operand instanceof ConstantNode)) {
+                    return node;
+                }
+            }
+            return new ConstantNode(node.evaluate(null));
         }
     }
 
@@ -395,13 +499,13 @@ public final class ArithmeticFormula {
                 if (!match(')')) {
                     throw error("Expected ')' after function arguments");
                 }
-                return new BinaryFuncNode(name, arg0, arg1);
+                return new BinaryFuncNode(BINARY_FUNCTIONS.get(name), arg0, arg1);
             }
             skipWs();
             if (!match(')')) {
                 throw error("Expected ')' after function argument");
             }
-            return new UnaryFuncNode(name, arg0);
+            return new UnaryFuncNode(UNARY_FUNCTIONS.get(name), arg0);
         }
 
         Node parseNumber() {
