@@ -851,3 +851,13 @@ test_suite(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "shared_fp8_scale_l20d_test",
+    srcs = ["shared_fp8_scale_test.py"],
+    main = "shared_fp8_scale_test.py",
+    tags = ["manual", "L20D_DEV"],
+    exec_properties = {"gpu": "L20D_DEV"},
+    env = {"CUDA_VISIBLE_DEVICES": "0"},
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)

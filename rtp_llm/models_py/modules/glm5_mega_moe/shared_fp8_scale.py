@@ -83,7 +83,14 @@ def stage_shared_fp8_input_scales(
     tokens: int,
     block_m: int,
 ) -> None:
-    """Copy routed input scales into the layout consumed by shared L1."""
+    """Stage all shared-L1 scale tiles that this invocation can consume.
+
+    DeepGEMM schedules ceil(tokens / block_m) shared tasks along M. Each
+    task's TMA load reads one block_m-rounded-to-128 scale tile. Initialize
+    that entire prefix, including padding, every invocation so captured
+    graphs remain correct when batches grow or shrink. Rows beyond this
+    prefix are unused and may retain values from preceding invocations.
+    """
     if tokens == 0:
         destination.zero_()
         return
@@ -116,7 +123,7 @@ def stage_shared_fp8_input_scales(
 
     if triton is not None and source.is_cuda and destination.is_cuda:
         block_rows = 128
-        destination_rows = destination.size(0)
+        destination_rows = required_destination_rows
         grid = (triton.cdiv(destination_rows, block_rows), source.size(1))
         _stage_shared_fp8_scale_kernel[grid](
             source,
