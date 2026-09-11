@@ -15,7 +15,12 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_group_tags_for_layers,
+    get_primary_attention_inputs,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.generic_moe import (
     DecodeLayerOutput,
     GenericMoeLayer,
@@ -846,14 +851,14 @@ class KimiLinearModel(GptModelBase):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         padding_mask = self.graph_padding_mask.get(
             attention_inputs, input_ids.shape[0], hidden_states.device
         )
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         if attention_inputs.is_prefill and not is_target_verify:
-            cu_seqlen_without_padding = attention_inputs.cu_seqlens
+            cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
             if attention_inputs.is_cuda_graph:
                 token_capacity = hidden_states.shape[0]
                 prefill_conv1d_meta = prepare_causal_conv1d_graph_metadata(

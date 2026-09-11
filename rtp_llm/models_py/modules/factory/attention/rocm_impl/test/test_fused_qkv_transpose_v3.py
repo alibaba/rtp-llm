@@ -82,7 +82,9 @@ def _build_block_table(
     The third return value lets the test decode K/V back from the pool by walking
     the same block assignment used by the kernel.
     """
-    max_blocks = max((sl + tokens_per_block - 1) // tokens_per_block for sl in input_lengths)
+    max_blocks = max(
+        (sl + tokens_per_block - 1) // tokens_per_block for sl in input_lengths
+    )
     table = torch.zeros(len(input_lengths), max_blocks, dtype=torch.int32, device="cpu")
     next_block = 0
     per_batch: List[List[int]] = []
@@ -158,9 +160,7 @@ def _make_prefill_inputs(
         input_lengths, tokens_per_block, device
     )
     attn_inputs.kv_cache_kernel_block_id_device = block_table_dev
-    attn_inputs.kv_cache_kernel_block_id = block_table_dev.to(
-        "cpu", non_blocking=False
-    )
+    attn_inputs.kv_cache_kernel_block_id = block_table_dev.to("cpu", non_blocking=False)
     return attn_inputs, per_batch_block_ids
 
 
@@ -220,15 +220,15 @@ def _decode_kv_from_pool(
             blk = per_batch_block_ids[b][tok // tokens_per_block]
             local = tok % tokens_per_block
             # K: re-view block storage as [hk, hd/vs, ps, vs] then slice token.
-            k_kernel = pool[blk, 0].contiguous().view(
-                head_num_kv, head_dim // vs, tokens_per_block, vs
+            k_kernel = (
+                pool[blk, 0]
+                .contiguous()
+                .view(head_num_kv, head_dim // vs, tokens_per_block, vs)
             )
             # k_natural[h, p, d] = k_kernel[h, d//vs, p, d%vs]
-            K[pos + tok] = (
-                k_kernel.permute(0, 2, 1, 3).reshape(
-                    head_num_kv, tokens_per_block, head_dim
-                )[:, local, :]
-            )
+            K[pos + tok] = k_kernel.permute(0, 2, 1, 3).reshape(
+                head_num_kv, tokens_per_block, head_dim
+            )[:, local, :]
             v_block_flat = pool[blk, 1].contiguous().view(-1)
             if v_vec_layout:
                 v_kernel = v_block_flat.view(
@@ -269,9 +269,11 @@ def _torch_reference(
     q_size = head_num * head_dim
     kv_size = head_num_kv * head_dim
     Q = qkv[:, :q_size].reshape(token_num, head_num, head_dim).float()
-    K = qkv[:, q_size : q_size + kv_size].reshape(
-        token_num, head_num_kv, head_dim
-    ).float()
+    K = (
+        qkv[:, q_size : q_size + kv_size]
+        .reshape(token_num, head_num_kv, head_dim)
+        .float()
+    )
     V = qkv[:, q_size + kv_size :].reshape(token_num, head_num_kv, head_dim)
 
     pos = torch.zeros(token_num, dtype=torch.float32, device=qkv.device)
@@ -338,8 +340,11 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
         if rope_dim is None:
             rope_dim = head_dim
         cfg = _make_attn_configs(
-            head_num, head_num_kv, head_dim,
-            rope_dim=rope_dim, tokens_per_block=self.tokens_per_block,
+            head_num,
+            head_num_kv,
+            head_dim,
+            rope_dim=rope_dim,
+            tokens_per_block=self.tokens_per_block,
         )
         op = FusedRopeKVCachePrefillOpNonAsm(cfg)
         op.use_paged_fmha = True  # required for v3 hot path
@@ -358,8 +363,12 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
             for sl in input_lengths
         )
         layer_cache, pool = _alloc_paged_kv_cache(
-            num_blocks, head_num_kv, self.tokens_per_block, head_dim,
-            self.dtype, self.device,
+            num_blocks,
+            head_num_kv,
+            self.tokens_per_block,
+            head_dim,
+            self.dtype,
+            self.device,
         )
 
         q_out, _, _ = op.forward(qkv, kv_cache=layer_cache, params=params)
@@ -384,8 +393,13 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
         # regression where V3 forgets to template on V_VEC_LAYOUT, or writes
         # K with the wrong vector stride.
         k_decoded, v_decoded = _decode_kv_from_pool(
-            pool, per_batch_block_ids, input_lengths,
-            head_num_kv, head_dim, self.tokens_per_block, self.v_vec_layout,
+            pool,
+            per_batch_block_ids,
+            input_lengths,
+            head_num_kv,
+            head_dim,
+            self.tokens_per_block,
+            self.v_vec_layout,
         )
         torch.testing.assert_close(k_decoded, k_ref, atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(v_decoded, v_ref, atol=1e-2, rtol=1e-2)
@@ -414,6 +428,61 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
             with self.subTest(total=total):
                 self._run([total], head_num=8, head_num_kv=2, head_dim=256)
 
+    def test_graph_bucket_padding_does_not_write_kv_cache(self):
+        physical_tokens = 128
+        valid_tokens = 21
+        head_num, head_num_kv, head_dim = 8, 2, 256
+        cfg = _make_attn_configs(
+            head_num,
+            head_num_kv,
+            head_dim,
+            rope_dim=head_dim,
+            tokens_per_block=self.tokens_per_block,
+        )
+        op = FusedRopeKVCachePrefillOpNonAsm(cfg)
+        op.use_paged_fmha = True
+        attn_inputs, per_batch_block_ids = _make_prefill_inputs(
+            [physical_tokens], self.device, self.dtype, self.tokens_per_block
+        )
+        params = op.prepare(attn_inputs)
+        attn_inputs.cu_seqlens_device[1] = valid_tokens
+
+        hidden = (head_num + 2 * head_num_kv) * head_dim
+        qkv = torch.randn(physical_tokens, hidden, dtype=self.dtype, device=self.device)
+        layer_cache, pool = _alloc_paged_kv_cache(
+            physical_tokens // self.tokens_per_block,
+            head_num_kv,
+            self.tokens_per_block,
+            head_dim,
+            self.dtype,
+            self.device,
+        )
+        sentinel = 17.0
+        pool.fill_(sentinel)
+
+        q_out, _, _ = op.forward(qkv, kv_cache=layer_cache, params=params)
+        k_decoded, v_decoded = _decode_kv_from_pool(
+            pool,
+            per_batch_block_ids,
+            [physical_tokens],
+            head_num_kv,
+            head_dim,
+            self.tokens_per_block,
+            self.v_vec_layout,
+        )
+
+        torch.testing.assert_close(
+            q_out[valid_tokens:], torch.zeros_like(q_out[valid_tokens:])
+        )
+        torch.testing.assert_close(
+            k_decoded[valid_tokens:],
+            torch.full_like(k_decoded[valid_tokens:], sentinel),
+        )
+        torch.testing.assert_close(
+            v_decoded[valid_tokens:],
+            torch.full_like(v_decoded[valid_tokens:], sentinel),
+        )
+
     # ---- Fallback shapes (V1 path; head_dim != 256 is outside V3 tuning) ----
 
     def test_multi_batch_packed_prefill_consistency(self):
@@ -424,7 +493,9 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
         # Q-only here (the per-token K/V layout assertion is covered by _run);
         # this test focuses on packing invariance, not paged-cache layout.
         seqs = [11, 11, 11]
-        cfg = _make_attn_configs(8, 2, 256, rope_dim=256, tokens_per_block=self.tokens_per_block)
+        cfg = _make_attn_configs(
+            8, 2, 256, rope_dim=256, tokens_per_block=self.tokens_per_block
+        )
         op = FusedRopeKVCachePrefillOpNonAsm(cfg)
         op.use_paged_fmha = True
         head_num, head_num_kv, head_dim = 8, 2, 256
@@ -432,8 +503,7 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
 
         torch.manual_seed(42)
         per_request_qkv = [
-            torch.randn(sl, hidden, dtype=self.dtype, device=self.device)
-            for sl in seqs
+            torch.randn(sl, hidden, dtype=self.dtype, device=self.device) for sl in seqs
         ]
         solo_q = []
         for x in per_request_qkv:
@@ -441,18 +511,28 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
                 [x.shape[0]], self.device, self.dtype, self.tokens_per_block
             )
             lkv, _ = _alloc_paged_kv_cache(
-                1, head_num_kv, self.tokens_per_block, head_dim,
-                self.dtype, self.device,
+                1,
+                head_num_kv,
+                self.tokens_per_block,
+                head_dim,
+                self.dtype,
+                self.device,
             )
             params = op.prepare(ai)
             q, _, _ = op.forward(x, kv_cache=lkv, params=params)
             solo_q.append(q.clone())
 
         packed = torch.cat(per_request_qkv, dim=0)
-        ai, _ = _make_prefill_inputs(seqs, self.device, self.dtype, self.tokens_per_block)
+        ai, _ = _make_prefill_inputs(
+            seqs, self.device, self.dtype, self.tokens_per_block
+        )
         lkv, _ = _alloc_paged_kv_cache(
-            len(seqs), head_num_kv, self.tokens_per_block, head_dim,
-            self.dtype, self.device,
+            len(seqs),
+            head_num_kv,
+            self.tokens_per_block,
+            head_dim,
+            self.dtype,
+            self.device,
         )
         params = op.prepare(ai)
         q_packed, _, _ = op.forward(packed, kv_cache=lkv, params=params)
@@ -460,7 +540,10 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
         offset = 0
         for i, sl in enumerate(seqs):
             torch.testing.assert_close(
-                q_packed[offset:offset + sl], solo_q[i], atol=1e-2, rtol=1e-2,
+                q_packed[offset : offset + sl],
+                solo_q[i],
+                atol=1e-2,
+                rtol=1e-2,
                 msg=f"Q mismatch for request {i} in packed prefill",
             )
             offset += sl
@@ -527,12 +610,17 @@ class FusedQKVPrefixPrefillTest(unittest.TestCase):
         def rot(x):
             lo, hi = x[..., :half], x[..., half:]
             return torch.cat(
-                [lo * cos.unsqueeze(1) - hi * sin.unsqueeze(1),
-                 hi * cos.unsqueeze(1) + lo * sin.unsqueeze(1)], dim=-1)
+                [
+                    lo * cos.unsqueeze(1) - hi * sin.unsqueeze(1),
+                    hi * cos.unsqueeze(1) + lo * sin.unsqueeze(1),
+                ],
+                dim=-1,
+            )
 
         q_ref = rot(Q).to(self.dtype)
-        torch.testing.assert_close(q_out.reshape(sl, head_num, head_dim),
-                                   q_ref, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(
+            q_out.reshape(sl, head_num, head_dim), q_ref, atol=1e-2, rtol=1e-2
+        )
 
 
 @unittest.skipUnless(_is_rocm(), "ROCm not available")
@@ -573,8 +661,11 @@ class FusedQKVTransposePrefillAsmTest(unittest.TestCase):
         if rope_dim is None:
             rope_dim = head_dim
         cfg = _make_attn_configs(
-            head_num, head_num_kv, head_dim,
-            rope_dim=rope_dim, tokens_per_block=self.tokens_per_block,
+            head_num,
+            head_num_kv,
+            head_dim,
+            rope_dim=rope_dim,
+            tokens_per_block=self.tokens_per_block,
         )
         op = FusedRopeKVCachePrefillOpAsm(cfg)
         op.use_paged_fmha = True
@@ -592,8 +683,12 @@ class FusedQKVTransposePrefillAsmTest(unittest.TestCase):
             for sl in input_lengths
         )
         layer_cache, pool = _alloc_paged_kv_cache(
-            num_blocks, head_num_kv, self.tokens_per_block, head_dim,
-            self.dtype, self.device,
+            num_blocks,
+            head_num_kv,
+            self.tokens_per_block,
+            head_dim,
+            self.dtype,
+            self.device,
         )
 
         q_out, _, _ = op.forward(qkv, kv_cache=layer_cache, params=params)
@@ -615,8 +710,13 @@ class FusedQKVTransposePrefillAsmTest(unittest.TestCase):
         # hit production: V3 was initially templated only on the NonAsm flat V
         # layout and silently mismatched the ASM-side templated reader.
         k_decoded, v_decoded = _decode_kv_from_pool(
-            pool, per_batch_block_ids, input_lengths,
-            head_num_kv, head_dim, self.tokens_per_block, self.v_vec_layout,
+            pool,
+            per_batch_block_ids,
+            input_lengths,
+            head_num_kv,
+            head_dim,
+            self.tokens_per_block,
+            self.v_vec_layout,
         )
         torch.testing.assert_close(k_decoded, k_ref, atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(v_decoded, v_ref, atol=1e-2, rtol=1e-2)

@@ -35,6 +35,7 @@ struct CKAttn {
     int           max_seq_len                         = 0;
     bool          decode_plan                         = false;
     bool          enable_cuda_graph                   = false;
+    bool          sequence_lengths_are_plus_one       = false;
 
     torch::Tensor prefill_q_output;
     torch::Tensor prefill_q_fp8_buf;

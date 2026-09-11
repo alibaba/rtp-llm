@@ -843,8 +843,55 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
 class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
     """Unit tests for small-q dispatch under CUDA graph."""
 
+    def test_nonasm_config_preserves_linear_v_layout(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        cfg = SimpleNamespace(
+            need_rope_kv_cache=True,
+            head_num=8,
+            kv_head_num=1,
+            size_per_head=64,
+            kernel_tokens_per_block=16,
+            kv_cache_dtype=KvCacheDataType.BASE,
+        )
+        attn_inputs = SimpleNamespace(
+            is_cuda_graph=True,
+            input_lengths=torch.tensor([21], dtype=torch.int32),
+        )
+        fmha_config = FMHAConfig()
+        fmha_config.use_asm_pa = False
+        batch_impl = MagicMock()
+        batch_impl.prepare.return_value = MagicMock()
+        triton_impl = MagicMock()
+        rope_impl = MagicMock()
+        module_path = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
+
+        with patch(
+            f"{module_path}.AiterPrefillAttnOpPaged", return_value=batch_impl
+        ) as batch_factory, patch(
+            f"{module_path}.AiterPrefillAttnOpTriton", return_value=triton_impl
+        ) as triton_factory, patch(
+            f"{module_path}.FusedRopeKVCachePrefillOpNonAsm", return_value=rope_impl
+        ) as nonasm_factory, patch(
+            f"{module_path}.FusedRopeKVCachePrefillOpAsm"
+        ) as asm_factory, patch(
+            f"{module_path}.common.create_write_cache_store_impl"
+        ):
+            impl = AiterPrefillImplPaged(cfg, attn_inputs, fmha_config=fmha_config)
+
+        self.assertTrue(impl.linear_v)
+        batch_factory.assert_called_once_with(cfg, linear_v=True)
+        triton_factory.assert_called_once_with(cfg, linear_v=True)
+        nonasm_factory.assert_called_once_with(cfg)
+        asm_factory.assert_not_called()
+
     def _make_impl_with_mocked_prepare(
-        self, input_lengths, is_cuda_graph, need_rope_kv_cache=False
+        self,
+        input_lengths,
+        is_cuda_graph,
+        need_rope_kv_cache=False,
+        batch_graph_supported=False,
     ):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
@@ -853,6 +900,8 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         triton_params = SimpleNamespace(workspace_bytes=2048)
         batch_impl = MagicMock()
         batch_impl.prepare.return_value = batch_params
+        batch_impl.supports_graph_kernel.return_value = batch_graph_supported
+        batch_impl.graph_kernel_ready.return_value = False
         triton_impl = MagicMock()
         triton_impl.prepare.return_value = triton_params
         rope_impl = MagicMock()
@@ -896,20 +945,26 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             observed_pad_query,
         )
 
-    def test_cuda_graph_supports_only_triton_backend(self):
-        for input_lengths, expected_backend in (([4, 1], "triton"), ([5, 1], "batch")):
-            with self.subTest(expected_backend=expected_backend):
+    def test_cuda_graph_accepts_supported_batch_backend_before_jit_warmup(self):
+        cases = (
+            ([4, 1], False, "triton", True),
+            ([5, 1], False, "batch", False),
+            ([5, 1], True, "batch", True),
+        )
+        for input_lengths, batch_supported, expected_backend, expected_support in cases:
+            with self.subTest(
+                expected_backend=expected_backend, batch_supported=batch_supported
+            ):
                 impl, batch_impl, triton_impl, *_ = self._make_impl_with_mocked_prepare(
-                    input_lengths, True
+                    input_lengths, True, batch_graph_supported=batch_supported
                 )
                 self.assertEqual(impl.backend, expected_backend)
-                self.assertEqual(
-                    impl.support_cuda_graph(), expected_backend == "triton"
-                )
+                self.assertEqual(impl.support_cuda_graph(), expected_support)
                 selected = triton_impl if expected_backend == "triton" else batch_impl
                 rejected = batch_impl if expected_backend == "triton" else triton_impl
                 selected.prepare.assert_called_once_with(impl.attn_inputs)
                 rejected.prepare.assert_not_called()
+                batch_impl.graph_kernel_ready.assert_not_called()
 
     def test_eager_prepares_only_selected_backend_during_construction(self):
         impl, batch_impl, triton_impl, _, triton_params, _ = (
@@ -1063,6 +1118,283 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
                         ("prepare_rope", attn_inputs),
                     ],
                 )
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOpPaged module")
+class TestAiterPrefillAttnOpPagedCudaGraphLifecycle(unittest.TestCase):
+    def test_graph_warmup_invokes_unready_specialization(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        op = AiterPrefillAttnOpPaged(cfg)
+        op.enable_cuda_graph = True
+        op.cuda_graph_prepared = True
+        op.seqlen_k_buf = torch.empty(2, dtype=torch.int32)
+        op.kv_indptr_buf = torch.zeros(3, dtype=torch.int32)
+        op.kv_page_indices_buf = torch.zeros(1, dtype=torch.int32)
+        op.descale_buf = torch.ones(1, dtype=torch.float32)
+        op.sanitized_bt_buf = torch.empty(2, 10, dtype=torch.int32)
+        op.output_buf = torch.empty(8, 4, 8, dtype=torch.float16)
+        op.softmax_lse_buf = torch.empty(0, dtype=torch.float32)
+        op.dropout_randval_buf = torch.empty(0, dtype=torch.float16)
+        op.rng_state_buf = torch.zeros(2, dtype=torch.int64)
+
+        query = torch.empty(8, 4, 8, dtype=torch.float16)
+        kv_cache = SimpleNamespace(
+            kv_cache_base=torch.empty(4, 2, 2, 16, 8, dtype=torch.float16)
+        )
+        fmha_params = SimpleNamespace(
+            token_q_num=8,
+            cu_seqlens_q=torch.tensor([0, 4, 8], dtype=torch.int32),
+            cu_seqlens_k=torch.tensor([0, 20, 40], dtype=torch.int32),
+            kv_cache_block_id_device=torch.zeros(2, 3, dtype=torch.int32),
+            max_seqlen_q=4,
+            max_seqlen_k=20,
+        )
+        module_path = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
+        with patch.object(
+            op,
+            "graph_kernel_ready",
+            side_effect=AssertionError("warmup must not require prior JIT readiness"),
+        ), patch(
+            f"{module_path}.mha_batch_prefill_graph",
+            return_value=op.output_buf,
+        ) as graph_prefill:
+            result = op.forward((query,), kv_cache, fmha_params)
+
+        graph_prefill.assert_called_once()
+        self.assertEqual(result.shape, (8, 32))
+        self.assertEqual(result.data_ptr(), op.output_buf.data_ptr())
+
+
+@unittest.skipUnless(_is_rocm() and _OPS_IMPORTABLE, "Requires ROCm AIter")
+class TestAiterBatchPrefillCudaGraph(unittest.TestCase):
+    def test_exact_21_capture_replay_matches_eager_with_updated_metadata(self):
+        from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter_graph_prefill import (
+            mha_batch_prefill_graph,
+        )
+
+        torch.manual_seed(456)
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        q_len, max_k = 21, 48
+        q_heads, kv_heads, head_dim, page_size = 4, 2, 64, 16
+        vector_width = 16 // torch.empty(0, dtype=dtype).element_size()
+        num_blocks = max_k // page_size
+        q = torch.randn(q_len, q_heads, head_dim, device=device, dtype=dtype)
+        k = torch.randn(
+            num_blocks,
+            kv_heads,
+            head_dim // vector_width,
+            page_size,
+            vector_width,
+            device=device,
+            dtype=dtype,
+        )
+        v = torch.randn(
+            num_blocks,
+            kv_heads,
+            page_size // vector_width,
+            head_dim,
+            vector_width,
+            device=device,
+            dtype=dtype,
+        )
+        cu_seqlens_q = torch.tensor([0, q_len], device=device, dtype=torch.int32)
+        kv_indptr = torch.zeros(2, device=device, dtype=torch.int32)
+        kv_page_indices = torch.zeros(1, device=device, dtype=torch.int32)
+        block_table = torch.arange(num_blocks, device=device, dtype=torch.int32).view(
+            1, -1
+        )
+        seqlen_k = torch.tensor([32], device=device, dtype=torch.int32)
+        sanitized_block_table = torch.empty(
+            1, num_blocks + 8, device=device, dtype=torch.int32
+        )
+        output = torch.empty(q_len, q_heads, head_dim, device=device, dtype=dtype)
+        softmax_lse = torch.empty(0, device=device, dtype=torch.float32)
+        dropout_randval = torch.empty(0, device=device, dtype=dtype)
+        rng_state = torch.zeros(2, device=device, dtype=torch.int64)
+        softmax_scale = head_dim**-0.5
+
+        def eager_reference(query, table, lengths):
+            return aiter.mha_batch_prefill_func(
+                query,
+                k,
+                v,
+                cu_seqlens_q,
+                kv_indptr,
+                kv_page_indices,
+                q_len,
+                max_k,
+                softmax_scale=softmax_scale,
+                causal=True,
+                block_table=table,
+                seqlen_k=lengths,
+            ).clone()
+
+        first_reference = eager_reference(q, block_table, seqlen_k)
+        second_q = torch.randn_like(q)
+        second_table = torch.tensor([[2, 1, 0]], device=device, dtype=torch.int32)
+        second_seqlen_k = torch.tensor([48], device=device, dtype=torch.int32)
+        second_reference = eager_reference(second_q, second_table, second_seqlen_k)
+
+        args = (
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            kv_indptr,
+            kv_page_indices,
+            q_len,
+            max_k,
+            softmax_scale,
+            output,
+            softmax_lse,
+            dropout_randval,
+            rng_state,
+            block_table,
+            sanitized_block_table,
+            seqlen_k,
+        )
+        mha_batch_prefill_graph(*args)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            mha_batch_prefill_graph(*args)
+
+        graph.replay()
+        torch.cuda.synchronize()
+        first_output = output.clone()
+        q.copy_(second_q)
+        block_table.copy_(second_table)
+        seqlen_k.copy_(second_seqlen_k)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.equal(first_output, first_reference))
+        self.assertTrue(torch.equal(output, second_reference))
+        self.assertFalse(torch.equal(first_output, output))
+        self.assertEqual(
+            sanitized_block_table.cpu().tolist(),
+            [[2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
+        )
+
+    def test_linear_v_capture_replay_restores_cache_and_matches_eager(self):
+        from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter_graph_prefill import (
+            mha_batch_prefill_graph,
+        )
+
+        torch.manual_seed(789)
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        q_len, max_k = 21, 48
+        q_heads, kv_heads, head_dim, page_size = 4, 2, 64, 16
+        vector_width = 16 // torch.empty(0, dtype=dtype).element_size()
+        num_blocks = max_k // page_size
+        q = torch.randn(q_len, q_heads, head_dim, device=device, dtype=dtype)
+        k = torch.randn(
+            num_blocks,
+            kv_heads,
+            head_dim // vector_width,
+            page_size,
+            vector_width,
+            device=device,
+            dtype=dtype,
+        )
+        v_logical = torch.randn(
+            num_blocks,
+            kv_heads,
+            page_size,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        v_reference = (
+            v_logical.reshape(
+                num_blocks, kv_heads, page_size // vector_width, vector_width, head_dim
+            )
+            .permute(0, 1, 2, 4, 3)
+            .contiguous()
+        )
+        v_flat = v_logical.permute(0, 1, 3, 2).contiguous()
+        v_cache = v_flat.view(
+            num_blocks, kv_heads, page_size // vector_width, head_dim, vector_width
+        )
+        v_flat_before = v_flat.clone()
+
+        cu_seqlens_q = torch.tensor([0, q_len], device=device, dtype=torch.int32)
+        kv_indptr = torch.zeros(2, device=device, dtype=torch.int32)
+        kv_page_indices = torch.zeros(1, device=device, dtype=torch.int32)
+        block_table = torch.arange(num_blocks, device=device, dtype=torch.int32).view(
+            1, -1
+        )
+        seqlen_k = torch.tensor([32], device=device, dtype=torch.int32)
+        sanitized_block_table = torch.empty(
+            1, num_blocks + 8, device=device, dtype=torch.int32
+        )
+        page_claims = torch.empty_like(sanitized_block_table)
+        output = torch.empty(q_len, q_heads, head_dim, device=device, dtype=dtype)
+        softmax_lse = torch.empty(0, device=device, dtype=torch.float32)
+        dropout_randval = torch.empty(0, device=device, dtype=dtype)
+        rng_state = torch.zeros(2, device=device, dtype=torch.int64)
+        softmax_scale = head_dim**-0.5
+
+        def eager_reference(query, table, lengths):
+            return aiter.mha_batch_prefill_func(
+                query,
+                k,
+                v_reference,
+                cu_seqlens_q,
+                kv_indptr,
+                kv_page_indices,
+                q_len,
+                max_k,
+                softmax_scale=softmax_scale,
+                causal=True,
+                block_table=table,
+                seqlen_k=lengths,
+            ).clone()
+
+        second_q = torch.randn_like(q)
+        second_table = torch.tensor([[2, 1, 0]], device=device, dtype=torch.int32)
+        second_seqlen_k = torch.tensor([48], device=device, dtype=torch.int32)
+        second_reference = eager_reference(second_q, second_table, second_seqlen_k)
+        args = (
+            q,
+            k,
+            v_cache,
+            cu_seqlens_q,
+            kv_indptr,
+            kv_page_indices,
+            q_len,
+            max_k,
+            softmax_scale,
+            output,
+            softmax_lse,
+            dropout_randval,
+            rng_state,
+            block_table,
+            sanitized_block_table,
+            seqlen_k,
+            page_claims,
+            True,
+        )
+
+        mha_batch_prefill_graph(*args)
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(v_flat, v_flat_before))
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            mha_batch_prefill_graph(*args)
+
+        q.copy_(second_q)
+        block_table.copy_(second_table)
+        seqlen_k.copy_(second_seqlen_k)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.equal(output, second_reference))
+        self.assertTrue(torch.equal(v_flat, v_flat_before))
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOpTriton module")

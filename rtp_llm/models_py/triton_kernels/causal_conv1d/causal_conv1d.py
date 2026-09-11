@@ -410,7 +410,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 + dest_idx // SEQ_SIZE_PER_BLOCK
             ).to(tl.int64)
 
-        if write_to_block and write_page_idx >= 0:
+        if write_to_block and write_page_idx > 0:
             # tl.device_print("idx_seq:", idx_seq)
             # tl.device_print("stride_block_map:", stride_block_map)
             # tl.device_print("dest_idx:", dest_idx)
@@ -759,6 +759,8 @@ def _causal_conv1d_update_kernel(
     read_block_id = tl.load(
         block_map_ptr + idx_seq * stride_block_map + read_block_offset
     ).to(tl.int64)
+    if read_block_id <= 0:
+        return
     # STEP 1: READ init_state data
     conv_states_base = (
         conv_state_ptr
@@ -824,7 +826,7 @@ def _causal_conv1d_update_kernel(
             block_map_ptr + idx_seq * stride_block_map + write_block_offset
         ).to(tl.int64)
 
-        if write_block_id != -1:
+        if write_block_id > 0:
             conv_state_base = (
                 conv_state_ptr
                 + (write_block_id * stride_conv_state_seq)

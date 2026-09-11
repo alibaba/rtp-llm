@@ -54,7 +54,9 @@ py_library(
     data = [
         ":cutlass_moe_config",
         ":rocm_fp8_ptpc_hipb_solutions",
-    ],
+    ] + glob([
+        "modules/factory/attention/rocm_impl/csrc/*.cu",
+    ]),
     deps = [
         ":utils",
         ":tile_kernels_mhc",

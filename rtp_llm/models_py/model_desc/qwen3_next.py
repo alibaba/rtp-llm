@@ -9,7 +9,12 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_group_tags_for_layers,
+    get_primary_attention_inputs,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GraphPaddingMask
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -96,7 +101,6 @@ class Qwen3NextMetadata(object):
         cp_restore_indices: Optional[torch.Tensor] = None,
         cp_local_extract_indices: Optional[torch.Tensor] = None,
         cp_local_valid_mask: Optional[torch.Tensor] = None,
-        cp_write_cache_store_impl: Optional[WriteCacheStoreOp] = None,
         fla_chunk_metadata: Optional[FLAChunkMetadata] = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
@@ -106,7 +110,6 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
-        self.cp_write_cache_store_impl = cp_write_cache_store_impl
         self.fla_chunk_metadata = fla_chunk_metadata
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
@@ -320,25 +323,51 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
         use_flydsl_chunk_gdn = (
-            is_flydsl_chunk_gdn_enabled()
+            chunk_metadata is None
+            and is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
-        query = query.view(1, query.shape[0], self.local_num_k_heads, self.head_k_dim)
-        key = key.view(1, key.shape[0], self.local_num_k_heads, self.head_k_dim)
-        value = value.view(1, value.shape[0], self.local_num_v_heads, self.head_v_dim)
-        attn_out, h, final_state = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            initial_state=initial_states,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens_without_padding,
-            use_qk_l2norm_in_kernel=True,
-            chunk_metadata=chunk_metadata,
-        )
-        if ssm_states is not None:
+        if use_flydsl_chunk_gdn:
+            need_final_state = ssm_states is None
+            attn_out, final_state = chunk_gated_delta_rule_flydsl_with_cache_store(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                prefix_lengths=(
+                    attn_inputs.prefix_lengths_device
+                    if ssm_states is not None
+                    else None
+                ),
+                block_map=(
+                    attn_inputs.kv_cache_kernel_block_id_device
+                    if ssm_states is not None
+                    else None
+                ),
+                ssm_states=ssm_states,
+                seq_size_per_block=(
+                    seq_size_per_block if ssm_states is not None else None
+                ),
+                initial_state=initial_states,
+                output_final_state=need_final_state,
+                cu_seqlens=cu_seqlens_without_padding,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            attn_out, h, final_state = chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_state=initial_states,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens_without_padding,
+                use_qk_l2norm_in_kernel=True,
+                chunk_metadata=chunk_metadata,
+            )
+        if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
                 h,
                 final_state,
@@ -1191,9 +1220,11 @@ class Qwen3NextModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         return self.embed_tokens(input_ids)
 
-        attention_inputs: PyAttentionInputs = inputs.attention_inputs
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        hidden_states = self.word_embedding(inputs)
+        attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         padding_mask = self.graph_padding_mask.get(
-            attention_inputs, input_ids.shape[0], hidden_states.device
+            attention_inputs, inputs.input_ids.shape[0], hidden_states.device
         )
         prefill_conv1d_meta = None
         fla_chunk_metadata = None
@@ -1217,7 +1248,7 @@ class Qwen3NextModel(GptModelBase):
                     attention_inputs, hidden_states.device
                 )
             else:
-                cu_seqlen_without_padding = attention_inputs.cu_seqlens
+                cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
                 if attention_inputs.is_cuda_graph:
                     token_capacity = hidden_states.shape[0]
                     prefill_conv1d_meta = prepare_causal_conv1d_graph_metadata(
@@ -1250,7 +1281,6 @@ class Qwen3NextModel(GptModelBase):
             cp_restore_indices=cp_restore_indices,
             cp_local_extract_indices=cp_local_extract_indices,
             cp_local_valid_mask=cp_local_valid_mask,
-            cp_write_cache_store_impl=cp_write_cache_store_impl,
             fla_chunk_metadata=fla_chunk_metadata,
         )
 
@@ -1268,11 +1298,12 @@ class Qwen3NextModel(GptModelBase):
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
                 else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             )
+            layer_cache = self.kv_cache.get_layer_cache(i) if self.kv_cache else None
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_cache,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
                 padding_mask=padding_mask,

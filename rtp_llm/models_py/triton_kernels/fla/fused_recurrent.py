@@ -162,10 +162,16 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 block_map + i_n * block_map_stride_b + write_block_offset
             ).to(tl.int64)
             p_ht = ht + write_block_id * stride_final_state_token
+            p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
+            tl.store(
+                p_ht,
+                b_h.to(p_ht.dtype.element_ty),
+                mask=mask_h & (write_block_id > 0),
+            )
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += stride_qs
         p_k += stride_ks

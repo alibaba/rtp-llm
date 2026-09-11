@@ -343,6 +343,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     const int selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
+    if (is_prefill_cuda_graph_mode_) {
+        py_model_inputs_.attention_inputs.total_tokens            = state.current_seq_len;
+        py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+    }
 
     // Clear stale device ranges in one launch before copying the live portions.
 #if USING_CUDA
@@ -387,6 +391,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                                     max_bs_ + 1,
                                                     inputs.attention_inputs.cu_kv_seqlens_device,
                                                     state.current_batch_size);
+        } else {
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device,
+                                          state.current_batch_size,
+                                          selected_graph_batch_size,
+                                          0);
         }
         // Target-verify padding (input_lengths / prefix_lengths / cu_*) is cleared by
         // the shared tail block below, which covers both the host mirrors and the
@@ -683,6 +693,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
             cuda_graph::graphGetCurrentStream().synchronize();
         }
+        refreshTaggedAttentionInputs(py_model_inputs_);
         py::gil_scoped_acquire gil;
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
     }
@@ -1438,6 +1449,7 @@ void CudaGraphRunner::buildBucketInstance(int key) {
         }
 
         inputs.attention_inputs.context_total_kv_length = seq_len;
+        inputs.attention_inputs.total_tokens            = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -1467,6 +1479,7 @@ void CudaGraphRunner::buildBucketInstance(int key) {
         max_prefix_length = inputs.attention_inputs.prefix_lengths.max().item<int>();
     }
     inputs.attention_inputs.context_total_kv_length = batch_size * (max_input_length + max_prefix_length);
+    inputs.attention_inputs.total_tokens            = batch_size * num_tokens_per_bs_;
     refreshTaggedAttentionInputs(inputs);
 
     auto& graph_instance                 = graph_instances_.at(batch_size);
