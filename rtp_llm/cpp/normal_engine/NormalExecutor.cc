@@ -61,7 +61,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                int                                    propose_model_index,
                                MlaOpsType                             mla_ops_type,
                                std::function<void()>                  profile_step_start,
-                               std::function<void()>                  profile_step_finish):
+                               std::function<void()>                  profile_step_finish,
+                               bool                                   allow_cuda_graph):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
@@ -154,7 +155,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        model_.reset(new PyWrappedModel(
+            model_init_params, params.py_model, false, false, DSparkModelRole::NONE, allow_cuda_graph));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);
@@ -289,7 +291,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
+    if (tp_rank_ > 0 || streams.size() == 0) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
         if (profile_step_finish_) {
@@ -320,6 +322,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         sampler_output = std::move(sampler_->forward(sampler_input));
         RTP_LLM_LOG_DEBUG("sampler forward done");
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    // Match the production memory topology during profiling: the sampler owns
+    // GPU allocations that must be observed by the same trace as model forward.
+    // Warmup still stops before dispatch so it cannot mutate request state.
+    if (warm_up_) {
+        cudaSyncAndCheck();
+        model_->releaseBuffers();
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
+        return absl::OkStatus();
     }
 
     // Stream-async dispatch is opt-in and only useful for decode-only batches:

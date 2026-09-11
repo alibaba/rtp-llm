@@ -1,4 +1,17 @@
+import argparse
+import math
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def runtime_mem_safety_ratio(value):
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("must be a number") from error
+    if not math.isfinite(ratio) or ratio < 0.0 or ratio >= 1.0:
+        raise argparse.ArgumentTypeError("must be finite and in [0, 1)")
+    return ratio
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -6,6 +19,21 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     # KV Cache 相关配置
     ##############################################################################################################
     kv_cache_group = parser.add_argument_group("KVCache")
+    default_safety_ratio = kv_cache_config.runtime_mem_safety_ratio
+    kv_cache_group.add_argument(
+        "--runtime_mem_safety_ratio",
+        env_name="RUNTIME_MEM_SAFETY_RATIO",
+        bind_to=(kv_cache_config, "runtime_mem_safety_ratio"),
+        type=runtime_mem_safety_ratio,
+        metavar="FLOAT",
+        default=default_safety_ratio,
+        help=(
+            "运行期显存安全余量占 GPU 总显存的比例。"
+            f"范围 [0,1)，默认 {default_safety_ratio}；值越大 KV cache 越小。"
+            "warmup 路径将其作为实测增长之外的加性余量；no-warmup 路径固定使用 5% 下限；"
+            "需要固定绝对预留时使用 --reserver_runtime_mem_mb。"
+        ),
+    )
     kv_cache_group.add_argument(
         "--reuse_cache",
         env_name="REUSE_CACHE",

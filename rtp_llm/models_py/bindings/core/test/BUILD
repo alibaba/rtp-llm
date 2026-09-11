@@ -19,6 +19,19 @@ exec_ops_test_deps = [
     "@com_google_googletest//:gtest_main",
 ] + torch_deps()
 
+trace_memory_ops_test_deps = [
+    "@com_google_googletest//:gtest_main",
+] + torch_deps() + select({
+    "@//:using_cuda": [
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    ],
+    "@//:using_rocm": [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+    ],
+    "//conditions:default": [],
+})
+
 cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
 packed_mask_logits_test_filter = "ExecOpsTest.testRuntimeApplyPackedMaskLogits*"
 
@@ -51,6 +64,23 @@ cc_test(
     deps = exec_ops_test_deps,
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
+)
+
+cc_test_wrapper(
+    name = "trace_memory_ops_test",
+    srcs = ["TraceMemoryOpsTest.cc"],
+    deps = trace_memory_ops_test_deps,
+    copts = test_copts,
+    exec_properties = select({
+        "@//:using_rocm": {
+            "gpu": "MI308X-ROCM7",
+            "gpu_count": "1",
+        },
+        "//conditions:default": {
+            "gpu": "H20",
+            "gpu_count": "1",
+        },
+    }),
 )
 
 # Exercise the CPU fallback without initializing or allocating a GPU.
