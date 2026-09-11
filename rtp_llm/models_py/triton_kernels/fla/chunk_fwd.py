@@ -1,8 +1,6 @@
 # Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/chunk_fwd.py
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 
-from typing import Optional
 
 import torch
 import triton
@@ -68,25 +66,41 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     m_tc2 = (i_tc2 + o_i) < T
     m_tc3 = (i_tc3 + o_i) < T
 
-    p_b0 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc0,), (BC,), (0,))
-    p_b1 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc1,), (BC,), (0,))
-    p_b2 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc2,), (BC,), (0,))
-    p_b3 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc3,), (BC,), (0,))
-    b_b0 = tl.load(p_b0, boundary_check=(0,)).to(tl.float32)
-    b_b1 = tl.load(p_b1, boundary_check=(0,)).to(tl.float32)
-    b_b2 = tl.load(p_b2, boundary_check=(0,)).to(tl.float32)
-    b_b3 = tl.load(p_b3, boundary_check=(0,)).to(tl.float32)
+    p_b0_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc0)
+    p_b0_m0 = (p_b0_i0 >= 0) & (p_b0_i0 < (T))
+    p_b0 = (beta + bos * H + i_h) + p_b0_i0 * (H)
+    p_b1_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc1)
+    p_b1_m0 = (p_b1_i0 >= 0) & (p_b1_i0 < (T))
+    p_b1 = (beta + bos * H + i_h) + p_b1_i0 * (H)
+    p_b2_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc2)
+    p_b2_m0 = (p_b2_i0 >= 0) & (p_b2_i0 < (T))
+    p_b2 = (beta + bos * H + i_h) + p_b2_i0 * (H)
+    p_b3_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc3)
+    p_b3_m0 = (p_b3_i0 >= 0) & (p_b3_i0 < (T))
+    p_b3 = (beta + bos * H + i_h) + p_b3_i0 * (H)
+    b_b0 = tl.load(p_b0, mask=p_b0_m0, other=0).to(tl.float32)
+    b_b1 = tl.load(p_b1, mask=p_b1_m0, other=0).to(tl.float32)
+    b_b2 = tl.load(p_b2, mask=p_b2_m0, other=0).to(tl.float32)
+    b_b3 = tl.load(p_b3, mask=p_b3_m0, other=0).to(tl.float32)
 
     if USE_G:
-        p_g0 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc0,), (BC,), (0,))
-        p_g1 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc1,), (BC,), (0,))
-        p_g2 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc2,), (BC,), (0,))
-        p_g3 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc3,), (BC,), (0,))
+        p_g0_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc0)
+        p_g0_m0 = (p_g0_i0 >= 0) & (p_g0_i0 < (T))
+        p_g0 = (g + bos * H + i_h) + p_g0_i0 * (H)
+        p_g1_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc1)
+        p_g1_m0 = (p_g1_i0 >= 0) & (p_g1_i0 < (T))
+        p_g1 = (g + bos * H + i_h) + p_g1_i0 * (H)
+        p_g2_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc2)
+        p_g2_m0 = (p_g2_i0 >= 0) & (p_g2_i0 < (T))
+        p_g2 = (g + bos * H + i_h) + p_g2_i0 * (H)
+        p_g3_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc3)
+        p_g3_m0 = (p_g3_i0 >= 0) & (p_g3_i0 < (T))
+        p_g3 = (g + bos * H + i_h) + p_g3_i0 * (H)
 
-        b_g0 = tl.load(p_g0, boundary_check=(0,)).to(tl.float32)
-        b_g1 = tl.load(p_g1, boundary_check=(0,)).to(tl.float32)
-        b_g2 = tl.load(p_g2, boundary_check=(0,)).to(tl.float32)
-        b_g3 = tl.load(p_g3, boundary_check=(0,)).to(tl.float32)
+        b_g0 = tl.load(p_g0, mask=p_g0_m0, other=0).to(tl.float32)
+        b_g1 = tl.load(p_g1, mask=p_g1_m0, other=0).to(tl.float32)
+        b_g2 = tl.load(p_g2, mask=p_g2_m0, other=0).to(tl.float32)
+        b_g3 = tl.load(p_g3, mask=p_g3_m0, other=0).to(tl.float32)
 
     # Step 1: compute all 10 lower-triangular [BC, BC] blocks of K @ K^T
     b_A00 = tl.zeros([BC, BC], dtype=tl.float32)
@@ -102,34 +116,44 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     b_A32 = tl.zeros([BC, BC], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_k0 = tl.make_block_ptr(
-            k, (T, K), (Hg * K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0)
-        )
-        b_k0 = tl.load(p_k0, boundary_check=(0, 1))
+        p_k0_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc0)
+        p_k0_m0 = (p_k0_i0 >= 0) & (p_k0_i0 < (T))
+        p_k0_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_k0_m1 = (p_k0_i1 >= 0) & (p_k0_i1 < (K))
+        p_k0 = (k) + p_k0_i0[:, None] * (Hg * K) + p_k0_i1[None, :] * (1)
+        b_k0 = tl.load(p_k0, mask=p_k0_m0[:, None] & p_k0_m1[None, :], other=0)
         b_A00 += tl.dot(b_k0, tl.trans(b_k0))
 
         if i_tc1 < T:
-            p_k1 = tl.make_block_ptr(
-                k, (T, K), (Hg * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0)
-            )
-            b_k1 = tl.load(p_k1, boundary_check=(0, 1))
+            p_k1_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc1)
+            p_k1_m0 = (p_k1_i0 >= 0) & (p_k1_i0 < (T))
+            p_k1_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+            p_k1_m1 = (p_k1_i1 >= 0) & (p_k1_i1 < (K))
+            p_k1 = (k) + p_k1_i0[:, None] * (Hg * K) + p_k1_i1[None, :] * (1)
+            b_k1 = tl.load(p_k1, mask=p_k1_m0[:, None] & p_k1_m1[None, :], other=0)
             b_A11 += tl.dot(b_k1, tl.trans(b_k1))
             b_A10 += tl.dot(b_k1, tl.trans(b_k0))
 
             if i_tc2 < T:
-                p_k2 = tl.make_block_ptr(
-                    k, (T, K), (Hg * K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0)
-                )
-                b_k2 = tl.load(p_k2, boundary_check=(0, 1))
+                p_k2_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc2)
+                p_k2_m0 = (p_k2_i0 >= 0) & (p_k2_i0 < (T))
+                p_k2_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+                p_k2_m1 = (p_k2_i1 >= 0) & (p_k2_i1 < (K))
+                p_k2 = (k) + p_k2_i0[:, None] * (Hg * K) + p_k2_i1[None, :] * (1)
+                b_k2 = tl.load(p_k2, mask=p_k2_m0[:, None] & p_k2_m1[None, :], other=0)
                 b_A22 += tl.dot(b_k2, tl.trans(b_k2))
                 b_A20 += tl.dot(b_k2, tl.trans(b_k0))
                 b_A21 += tl.dot(b_k2, tl.trans(b_k1))
 
                 if i_tc3 < T:
-                    p_k3 = tl.make_block_ptr(
-                        k, (T, K), (Hg * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0)
+                    p_k3_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc3)
+                    p_k3_m0 = (p_k3_i0 >= 0) & (p_k3_i0 < (T))
+                    p_k3_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+                    p_k3_m1 = (p_k3_i1 >= 0) & (p_k3_i1 < (K))
+                    p_k3 = (k) + p_k3_i0[:, None] * (Hg * K) + p_k3_i1[None, :] * (1)
+                    b_k3 = tl.load(
+                        p_k3, mask=p_k3_m0[:, None] & p_k3_m1[None, :], other=0
                     )
-                    b_k3 = tl.load(p_k3, boundary_check=(0, 1))
                     b_A33 += tl.dot(b_k3, tl.trans(b_k3))
                     b_A30 += tl.dot(b_k3, tl.trans(b_k0))
                     b_A31 += tl.dot(b_k3, tl.trans(b_k1))
@@ -275,42 +299,96 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     )
 
     # Step 5: store full (I + A)^{-1} to output A
-    p_A00 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_tc0, 0), (BC, BC), (1, 0))
-    p_A10 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
-    p_A11 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_tc1, BC), (BC, BC), (1, 0))
-    p_A20 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
-    p_A21 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
-    p_A22 = tl.make_block_ptr(
-        A, (T, BT), (H * BT, 1), (i_tc2, 2 * BC), (BC, BC), (1, 0)
-    )
-    p_A30 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
-    p_A31 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
-    p_A32 = tl.make_block_ptr(
-        A, (T, BT), (H * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0)
-    )
-    p_A33 = tl.make_block_ptr(
-        A, (T, BT), (H * BT, 1), (i_tc3, 3 * BC), (BC, BC), (1, 0)
-    )
+    p_A00_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc0)
+    p_A00_m0 = (p_A00_i0 >= 0) & (p_A00_i0 < (T))
+    p_A00_i1 = tl.arange(0, BC).to(tl.int64) + (0)
+    p_A00_m1 = (p_A00_i1 >= 0) & (p_A00_i1 < (BT))
+    p_A00 = (A) + p_A00_i0[:, None] * (H * BT) + p_A00_i1[None, :] * (1)
+    p_A10_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc1)
+    p_A10_m0 = (p_A10_i0 >= 0) & (p_A10_i0 < (T))
+    p_A10_i1 = tl.arange(0, BC).to(tl.int64) + (0)
+    p_A10_m1 = (p_A10_i1 >= 0) & (p_A10_i1 < (BT))
+    p_A10 = (A) + p_A10_i0[:, None] * (H * BT) + p_A10_i1[None, :] * (1)
+    p_A11_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc1)
+    p_A11_m0 = (p_A11_i0 >= 0) & (p_A11_i0 < (T))
+    p_A11_i1 = tl.arange(0, BC).to(tl.int64) + (BC)
+    p_A11_m1 = (p_A11_i1 >= 0) & (p_A11_i1 < (BT))
+    p_A11 = (A) + p_A11_i0[:, None] * (H * BT) + p_A11_i1[None, :] * (1)
+    p_A20_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc2)
+    p_A20_m0 = (p_A20_i0 >= 0) & (p_A20_i0 < (T))
+    p_A20_i1 = tl.arange(0, BC).to(tl.int64) + (0)
+    p_A20_m1 = (p_A20_i1 >= 0) & (p_A20_i1 < (BT))
+    p_A20 = (A) + p_A20_i0[:, None] * (H * BT) + p_A20_i1[None, :] * (1)
+    p_A21_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc2)
+    p_A21_m0 = (p_A21_i0 >= 0) & (p_A21_i0 < (T))
+    p_A21_i1 = tl.arange(0, BC).to(tl.int64) + (BC)
+    p_A21_m1 = (p_A21_i1 >= 0) & (p_A21_i1 < (BT))
+    p_A21 = (A) + p_A21_i0[:, None] * (H * BT) + p_A21_i1[None, :] * (1)
+    p_A22_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc2)
+    p_A22_m0 = (p_A22_i0 >= 0) & (p_A22_i0 < (T))
+    p_A22_i1 = tl.arange(0, BC).to(tl.int64) + (2 * BC)
+    p_A22_m1 = (p_A22_i1 >= 0) & (p_A22_i1 < (BT))
+    p_A22 = (A) + p_A22_i0[:, None] * (H * BT) + p_A22_i1[None, :] * (1)
+    p_A30_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc3)
+    p_A30_m0 = (p_A30_i0 >= 0) & (p_A30_i0 < (T))
+    p_A30_i1 = tl.arange(0, BC).to(tl.int64) + (0)
+    p_A30_m1 = (p_A30_i1 >= 0) & (p_A30_i1 < (BT))
+    p_A30 = (A) + p_A30_i0[:, None] * (H * BT) + p_A30_i1[None, :] * (1)
+    p_A31_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc3)
+    p_A31_m0 = (p_A31_i0 >= 0) & (p_A31_i0 < (T))
+    p_A31_i1 = tl.arange(0, BC).to(tl.int64) + (BC)
+    p_A31_m1 = (p_A31_i1 >= 0) & (p_A31_i1 < (BT))
+    p_A31 = (A) + p_A31_i0[:, None] * (H * BT) + p_A31_i1[None, :] * (1)
+    p_A32_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc3)
+    p_A32_m0 = (p_A32_i0 >= 0) & (p_A32_i0 < (T))
+    p_A32_i1 = tl.arange(0, BC).to(tl.int64) + (2 * BC)
+    p_A32_m1 = (p_A32_i1 >= 0) & (p_A32_i1 < (BT))
+    p_A32 = (A) + p_A32_i0[:, None] * (H * BT) + p_A32_i1[None, :] * (1)
+    p_A33_i0 = tl.arange(0, BC).to(tl.int64) + (i_tc3)
+    p_A33_m0 = (p_A33_i0 >= 0) & (p_A33_i0 < (T))
+    p_A33_i1 = tl.arange(0, BC).to(tl.int64) + (3 * BC)
+    p_A33_m1 = (p_A33_i1 >= 0) & (p_A33_i1 < (BT))
+    p_A33 = (A) + p_A33_i0[:, None] * (H * BT) + p_A33_i1[None, :] * (1)
 
-    tl.store(p_A00, b_Ai00.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A10, b_Ai10.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A11, b_Ai11.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A20, b_Ai20.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A21, b_Ai21.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A22, b_Ai22.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A30, b_Ai30.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A31, b_Ai31.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A32, b_Ai32.to(A.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A33, b_Ai33.to(A.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(
+        p_A00, b_Ai00.to(A.dtype.element_ty), mask=p_A00_m0[:, None] & p_A00_m1[None, :]
+    )
+    tl.store(
+        p_A10, b_Ai10.to(A.dtype.element_ty), mask=p_A10_m0[:, None] & p_A10_m1[None, :]
+    )
+    tl.store(
+        p_A11, b_Ai11.to(A.dtype.element_ty), mask=p_A11_m0[:, None] & p_A11_m1[None, :]
+    )
+    tl.store(
+        p_A20, b_Ai20.to(A.dtype.element_ty), mask=p_A20_m0[:, None] & p_A20_m1[None, :]
+    )
+    tl.store(
+        p_A21, b_Ai21.to(A.dtype.element_ty), mask=p_A21_m0[:, None] & p_A21_m1[None, :]
+    )
+    tl.store(
+        p_A22, b_Ai22.to(A.dtype.element_ty), mask=p_A22_m0[:, None] & p_A22_m1[None, :]
+    )
+    tl.store(
+        p_A30, b_Ai30.to(A.dtype.element_ty), mask=p_A30_m0[:, None] & p_A30_m1[None, :]
+    )
+    tl.store(
+        p_A31, b_Ai31.to(A.dtype.element_ty), mask=p_A31_m0[:, None] & p_A31_m1[None, :]
+    )
+    tl.store(
+        p_A32, b_Ai32.to(A.dtype.element_ty), mask=p_A32_m0[:, None] & p_A32_m1[None, :]
+    )
+    tl.store(
+        p_A33, b_Ai33.to(A.dtype.element_ty), mask=p_A33_m0[:, None] & p_A33_m1[None, :]
+    )
 
 
 def chunk_gated_delta_rule_fwd_intra_a_only(
     k: torch.Tensor,
     beta: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-    chunk_indices: Optional[torch.LongTensor] = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, Hg, K = k.shape
     H = beta.shape[2]
@@ -349,10 +427,10 @@ def chunk_gated_delta_rule_fwd_intra(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-    chunk_indices: Optional[torch.LongTensor] = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     A = chunk_gated_delta_rule_fwd_intra_a_only(
         k=k,
