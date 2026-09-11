@@ -136,11 +136,14 @@ message MultimodalInputPB {
 
 message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
+    // Routing asks for token IDs; Prefill obtains features via the same RPC.
+    bool metadata_only = 2;
 }
 
 message MultimodalOutputPB {
     TensorPB multimodal_embedding = 1;
     TensorPB multimodal_pos_id = 2;
+    repeated int32 token_ids = 3;
 }
 
 message MultimodalOutputsPB {

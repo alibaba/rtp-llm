@@ -9,6 +9,45 @@ namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
 
+TEST_F(MultimodalProcessorTest, SameUrlDifferentImageFeaturesHaveDifferentCacheTokens) {
+    auto processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 32);
+    auto expand    = [&processor]() {
+        auto input               = std::make_shared<GenerateInput>();
+        input->input_ids         = torch::tensor({0, 1, 2}, torch::kInt32);
+        input->multimodal_inputs = std::vector<MultimodalInput>{MultimodalInput("8")};
+        auto status              = processor.updateMultimodalFeatures(input);
+        EXPECT_TRUE(status.ok());
+        return input->input_ids;
+    };
+    auto first = expand();
+    EXPECT_TRUE(torch::equal(first, expand()));
+    processor.feature_value = 1.0f;
+    auto second             = expand();
+    EXPECT_FALSE(torch::equal(first, second));
+    EXPECT_EQ(first[0].item<int32_t>(), second[0].item<int32_t>());
+    EXPECT_EQ(first[-1].item<int32_t>(), second[-1].item<int32_t>());
+}
+
+TEST_F(MultimodalProcessorTest, RequestDeadlineDoesNotExtendParentDeadline) {
+    auto       processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 32);
+    const auto begin     = std::chrono::system_clock::now();
+    for (bool shorter_parent : {false, true}) {
+        auto input                         = std::make_shared<GenerateInput>();
+        input->input_ids                   = torch::tensor({0, 1, 2}, torch::kInt32);
+        input->multimodal_inputs           = std::vector<MultimodalInput>{MultimodalInput("3")};
+        input->generate_config             = std::make_shared<GenerateConfig>();
+        input->generate_config->timeout_ms = 100;
+        input->begin_time_us = std::chrono::duration_cast<std::chrono::microseconds>(begin.time_since_epoch()).count();
+        grpc::ClientContext context;
+        auto request_deadline = std::chrono::system_clock::time_point(std::chrono::microseconds(input->begin_time_us))
+                                + std::chrono::milliseconds(100);
+        auto parent_deadline = request_deadline + std::chrono::milliseconds(shorter_parent ? -50 : 50);
+        context.set_deadline(parent_deadline);
+        ASSERT_TRUE(processor.updateMultimodalFeatures(input, &context).ok());
+        EXPECT_EQ(context.deadline(), std::min(parent_deadline, request_deadline));
+    }
+}
+
 TEST_F(MultimodalProcessorTest, testSimple) {
     FakeMultimodalProcessor        processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
     std::shared_ptr<GenerateInput> input     = std::make_shared<GenerateInput>();

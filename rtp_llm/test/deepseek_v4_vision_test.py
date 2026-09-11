@@ -12,17 +12,120 @@ from rtp_llm.models.deepseek_v4_vision import (
     Aligner,
     DeepSeekV4VisionEmbedding,
     DeepSeekV4VisionWeights,
+    PreparedImage,
     build_image_block,
+    preprocess_image,
 )
 from rtp_llm.models.multimodal.multimodal_mixin import (
     BaseMultiModalWeightInfo,
     BaseVitWeights,
     MultiModalMixin,
 )
+from rtp_llm.ops import get_multimodal_feature_hash
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
 
 
 class DeepSeekV4VisionTest(TestCase):
+    @staticmethod
+    def _batch_test_encoder(device="cpu", dtype=torch.float32, padding_size=4):
+        cfg = {
+            "hidden_size": 16,
+            "mm_padding_size": padding_size,
+            "vision_n_layers": 2,
+            "vision_dim": 32,
+            "vision_n_heads": 2,
+            "vision_inter_dim": 48,
+            "vision_patch_size": 2,
+            "vision_rope_theta": 10000.0,
+            "vision_downsample_ratio": 3,
+            "vision_max_n_token": 64,
+            "vision_min_pixels": 16,
+            "vision_max_wh_ratio": 8,
+        }
+        encoder = DeepSeekV4VisionEmbedding(
+            SimpleNamespace(config=cfg), SimpleNamespace(compute_dtype=dtype)
+        ).to(device=device, dtype=dtype)
+        with torch.no_grad():
+            for name in ("image_start", "image_end", "image_newline", "image_pad"):
+                getattr(encoder, name).normal_()
+        return encoder
+
+    @staticmethod
+    def _reference_varlen(q, k, v, cu_q, cu_k, max_q, max_k):
+        assert torch.equal(cu_q, cu_k)
+        bounds = cu_q.cpu().tolist()
+        return torch.cat(
+            [
+                torch.nn.functional.scaled_dot_product_attention(
+                    q[start:end].transpose(0, 1).unsqueeze(0),
+                    k[start:end].transpose(0, 1).unsqueeze(0),
+                    v[start:end].transpose(0, 1).unsqueeze(0),
+                )
+                .squeeze(0)
+                .transpose(0, 1)
+                for start, end in zip(bounds, bounds[1:])
+            ]
+        )
+
+    def _check_packed_encoder(self, encoder):
+        images = [
+            Image.new("RGB", (8, 12), (40, 80, 120)),
+            Image.new("RGB", (12, 8), (220, 90, 30)),
+            Image.new("RGB", (8, 8), (15, 160, 70)),
+        ]
+        for image in images:
+            image.putdata(
+                [
+                    (x * 31 % 256, y * 37 % 256, (x + y) * 17 % 256)
+                    for y in range(image.height)
+                    for x in range(image.width)
+                ]
+            )
+        prepared = [
+            PreparedImage(
+                *preprocess_image(image, encoder.mm_related_params.config), 3 - phase
+            )
+            for image, phase in zip(images, (0, 1, 3))
+        ]
+        expected = [
+            encoder.image_embedding([image], mm_padding_size=3 - phase)[0]
+            for image, phase in zip(images, (0, 1, 3))
+        ]
+        outputs = encoder.batch_embedding(prepared)
+        for item, (actual, pos), reference in zip(prepared, outputs, expected):
+            self.assertIsNone(pos)
+            self.assertEqual(actual.shape[0], item.output_tokens)
+            torch.testing.assert_close(actual, reference, atol=0.02, rtol=0.02)
+        reordered = encoder.batch_embedding(list(reversed(prepared)))
+        for (actual, _), (reference, _) in zip(reordered, reversed(outputs)):
+            torch.testing.assert_close(actual, reference, atol=0.02, rtol=0.02)
+
+    def test_packed_encoder_preserves_image_grid_padding_and_order(self):
+        with mock.patch(
+            "rtp_llm.models.deepseek_v4_vision.varlen_attn",
+            side_effect=self._reference_varlen,
+        ) as attention:
+            self._check_packed_encoder(self._batch_test_encoder())
+        self.assertEqual(attention.call_count, 4)  # Two layers, two packed forwards.
+
+    def test_packed_encoder_cuda_flash_matches_single_image(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for the packed FlashAttention path")
+        self._check_packed_encoder(self._batch_test_encoder("cuda", torch.bfloat16))
+
+    def test_feature_ids_match_on_cpu_and_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for feature hash parity")
+        features = torch.randn(11, 64, dtype=torch.bfloat16)
+        expected = get_multimodal_feature_hash(features)
+        actual = get_multimodal_feature_hash(features.cuda())
+        self.assertTrue(torch.equal(actual, expected))
+        changed = features.clone()
+        changed[0, -1] += 1
+        changed_ids = get_multimodal_feature_hash(changed)
+        self.assertNotEqual(changed_ids[0].item(), expected[0].item())
+        self.assertTrue(torch.equal(changed_ids[1:], expected[1:]))
+
     def test_image_block_alignment(self):
         for padding_size in (0, 2, 4):
             for start_pos in (0, 1, 2, 3, 18, 24, 405):
@@ -37,6 +140,34 @@ class DeepSeekV4VisionTest(TestCase):
                     self.assertEqual((start_pos + len(types)) % padding_size, 1)
                 self.assertEqual(int(types[-1]), IMAGE_END)
                 self.assertEqual(permutation.numel(), 7 * 12)
+
+    def test_prepared_image_uses_configured_padding(self):
+        image = Image.new("RGB", (12, 8))
+        stream = io.BytesIO()
+        image.save(stream, format="PNG")
+        for alignment in (0, 2, 4):
+            encoder = self._batch_test_encoder(padding_size=alignment)
+            padding = alignment - 2 if alignment else 0
+            with mock.patch(
+                "rtp_llm.models.deepseek_v4_vision.get_bytes_io_from_url",
+                return_value=io.BytesIO(stream.getvalue()),
+            ):
+                prepared = encoder.preprocess_embedding(
+                    "image", 1, configs=SimpleNamespace(mm_padding_size=padding)
+                )
+            actual = encoder.image_embedding([image], mm_padding_size=padding)[0]
+            with mock.patch(
+                "rtp_llm.models.deepseek_v4_vision.varlen_attn",
+                side_effect=self._reference_varlen,
+            ):
+                batched, _ = encoder.batch_embedding([prepared])[0]
+            torch.testing.assert_close(batched, actual, atol=0.02, rtol=0.02)
+            self.assertEqual(prepared.padding_size, alignment)
+            self.assertEqual(prepared.mm_padding_size, padding)
+            self.assertEqual(prepared.output_tokens, actual.shape[0])
+            self.assertLessEqual(
+                actual.shape[0], encoder.mm_related_params.config["vision_max_n_token"]
+            )
 
     def test_tiny_encoder_uses_multimodal_config(self):
         vision_config = {

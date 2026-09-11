@@ -4,6 +4,18 @@ requirement([
     "grpcio",
 ])
 
+py_test(
+    name = "mm_batch_scheduler_test",
+    srcs = ["mm_batch_scheduler_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "mm_process_engine_batch_test",
+    srcs = ["mm_process_engine_batch_test.py"],
+    deps = ["//rtp_llm:utils", "//rtp_llm:config_ops", "//rtp_llm:torch"],
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([

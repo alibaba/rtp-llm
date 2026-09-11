@@ -10,7 +10,8 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+                                                      std::string                                 ip_port = "",
+                                                      grpc::ClientContext* rpc_context                    = nullptr) {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {

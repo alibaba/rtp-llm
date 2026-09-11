@@ -99,6 +99,10 @@ class ModelFactory:
             device_resource_config=engine_config.device_resource_config,
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
             fastsafetensors_reserve_mb=engine_config.load_config.fastsafetensors_reserve_mb,
+            skip_python_model=(
+                vit_config is not None
+                and vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+            ),
         )
         return model
 
