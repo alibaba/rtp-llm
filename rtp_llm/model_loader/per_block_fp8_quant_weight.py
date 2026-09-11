@@ -96,6 +96,56 @@ def ceil_div(a, b):
     return (a + b - 1) // b
 
 
+def _unpack_ue8m0_scale_bytes(
+    scale: torch.Tensor, k: int, group_size: int
+) -> torch.Tensor:
+    """Unpack per-weight-row UE8M0 exponent bytes along the K dimension."""
+    shifts = torch.arange(0, 32, 8, dtype=torch.int32, device=scale.device)
+    unpacked = ((scale.unsqueeze(-1) >> shifts) & 0xFF).flatten(-2)
+    return unpacked[..., : ceil_div(k, group_size)]
+
+
+def _pack_ue8m0_scale_bytes(scale: torch.Tensor) -> torch.Tensor:
+    """Pack per-weight-row exponent bytes into DeepGEMM's TMA layout."""
+    check_with_info(scale.dim() == 2, "packed UE8M0 scale must be 2D")
+    padding = (-scale.shape[-1]) % 4
+    if padding:
+        scale = torch.cat(
+            [
+                scale,
+                torch.zeros(
+                    (scale.shape[0], padding),
+                    dtype=scale.dtype,
+                    device=scale.device,
+                ),
+            ],
+            dim=-1,
+        )
+    groups = scale.to(torch.int32).reshape(scale.shape[0], -1, 4)
+    packed = (
+        groups[..., 0]
+        | (groups[..., 1] << 8)
+        | (groups[..., 2] << 16)
+        | (groups[..., 3] << 24)
+    )
+
+    # DeepGEMM consumes packed scales through TMA.  Keep the logical shape,
+    # but pad the underlying column-major storage to its required MN stride.
+    import deep_gemm
+
+    aligned_mn = deep_gemm.get_tma_aligned_size(
+        packed.shape[0], packed.element_size()
+    )
+    packed_storage = torch.zeros(
+        (packed.shape[1], aligned_mn),
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+    packed_aligned = packed_storage.T[: packed.shape[0]]
+    packed_aligned.copy_(packed)
+    return packed_aligned
+
+
 def cast_to_fp8(x: torch.Tensor):
     return x.to(torch.float8_e4m3fn)
 
@@ -895,6 +945,59 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         )
         self.kernel = kernel
         self.scale = scale
+
+    def _split(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        load_config: LoadConfig,
+    ):
+        if (
+            not isinstance(tensor, dict)
+            or self.scale is None
+            or (
+                load_config.tp_size <= 1
+                and load_config.dp_size <= 1
+                and load_config.ep_size <= 1
+            )
+        ):
+            return super()._split(tensor, load_config)
+
+        kernel = tensor.get(self.kernel.name)
+        scale = tensor.get(self.scale.name)
+        if (
+            kernel is None
+            or scale is None
+            or kernel.dim() != 2
+            or scale.dim() != 2
+            or scale.dtype != torch.int32
+        ):
+            return super()._split(tensor, load_config)
+
+        # Packed UE8M0 stores four K-block scales in each int32 and repeats
+        # every logical MN-block scale for its physical weight rows.  Splitting
+        # the expanded rows preserves non-block-aligned sp_0 boundaries.
+        expanded_scale = _unpack_ue8m0_scale_bytes(
+            scale, kernel.shape[-1], self.group_size
+        )
+        local_kernel = self.kernel._split(kernel, load_config)[self.kernel.name]
+
+        if self.scale.name == W.attn_qkv_s:
+            # The QKV scale splitter addresses heads in 128-row blocks.
+            block_scale = expanded_scale[:: self.group_size]
+            local_scale = self.scale._split(block_scale, load_config)[
+                self.scale.name
+            ]
+            local_scale = local_scale.repeat_interleave(
+                self.group_size, dim=-2
+            )[: local_kernel.shape[-2]]
+        else:
+            local_scale = self.scale._split(expanded_scale, load_config)[
+                self.scale.name
+            ]
+        return {
+            self.kernel.name: local_kernel,
+            self.scale.name: _pack_ue8m0_scale_bytes(local_scale),
+        }
 
     def _load_raw_tensor(
         self,
