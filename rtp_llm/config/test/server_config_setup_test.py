@@ -135,27 +135,12 @@ class GenerateConfigTest(TestCase):
         config = setup_args(["--reserve_block_ratio", "7"]).kv_cache_config
         self.assertEqual(config.reserve_block_ratio, 7)
 
-    @patch.dict("os.environ", _jit_env(), clear=True)
-    def test_removed_device_min_free_cli_is_ignored(self):
-        for legacy_args in (
-            ["--device_cache_min_free_blocks", "1"],
-            ["--device_cache_min_free_blocks=123"],
-        ):
-            for reserve_args, expected_ratio in (
-                ([], 5),
-                (["--reserve_block_ratio", "7"], 7),
-            ):
-                with self.subTest(legacy_args=legacy_args, reserve_args=reserve_args):
-                    config = setup_args([*legacy_args, *reserve_args]).kv_cache_config
-                    self.assertEqual(config.reserve_block_ratio, expected_ratio)
-                    self.assertFalse(hasattr(config, "device_cache_min_free_blocks"))
-
     @patch.dict(
         "os.environ",
-        _jit_env(DEVICE_CACHE_MIN_FREE_BLOCKS="123", RESERVE_BLOCK_RATIO="7"),
+        _jit_env(RESERVE_BLOCK_RATIO="7"),
         clear=True,
     )
-    def test_removed_device_min_free_env_is_ignored(self):
+    def test_kv_cache_scheduler_reserve_from_env_and_cli_override(self):
         for args, expected_ratio in (
             (None, 7),
             ([], 7),
@@ -164,7 +149,6 @@ class GenerateConfigTest(TestCase):
             with self.subTest(args=args):
                 config = setup_args(args).kv_cache_config
                 self.assertEqual(config.reserve_block_ratio, expected_ratio)
-                self.assertFalse(hasattr(config, "device_cache_min_free_blocks"))
 
     def test_legacy_kv_cache_cli_aliases(self):
         config = setup_args(

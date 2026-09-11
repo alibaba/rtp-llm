@@ -466,13 +466,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default="",
     )
     kv_cache_group.add_argument(
-        "--device_cache_min_free_blocks",
-        env_name="DEVICE_CACHE_MIN_FREE_BLOCKS",
-        type=int,
-        default=0,
-        help="[deprecated] 仅兼容旧启动命令，参数值已忽略；请使用 --reserve_block_ratio 配置调度预留比例。",
-    )
-    kv_cache_group.add_argument(
         "--dsv4_fixed_pool_blocks",
         env_name="DSV4_FIXED_POOL_BLOCKS",
         bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),

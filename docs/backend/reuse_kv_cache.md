@@ -47,10 +47,6 @@ blocks on demand; blocks still referenced by requests or transfers may delay phy
 Scheduler admission separately uses `RESERVE_BLOCK_RATIO` (default 5%) to preserve headroom for
 running requests to grow. This admission reserve is independent of the cache eviction watermarks.
 
-Legacy `--device_cache_min_free_blocks` and `DEVICE_CACHE_MIN_FREE_BLOCKS` are accepted for startup
-compatibility but ignored. Remove these settings; use `RESERVE_BLOCK_RATIO` to configure scheduler
-admission headroom.
-
 All eight combinations are valid, including L2-only and L3-only deployments. Enabling a tier
 without its capacity or path settings is a startup error rather than a silent downgrade, so a
 misconfiguration never degrades quietly into a smaller cache than intended.
