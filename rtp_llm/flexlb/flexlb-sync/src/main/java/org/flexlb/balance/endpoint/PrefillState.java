@@ -223,7 +223,7 @@ public final class PrefillState {
                 if (entry.queueMembership == QueueMembership.UNINDEXED) {
                     committedWorkCapture = null;
                 }
-                mutationVersion++;
+                recordMutationUnderLock();
             } finally {
                 lock.unlock();
             }
@@ -597,10 +597,26 @@ public final class PrefillState {
     private final Runnable capacityAvailable;
     /** Monotonic ownership/work revision used by projection snapshots. */
     private volatile long mutationVersion;
+    /** Published at ownership mutation boundaries; admission still checks under the lock. */
+    private volatile long outstandingRequestCount;
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
     private WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
     private int batchLeasesInUse;
+
+    /** Publish the capacity summary before readers observe a new ownership revision. */
+    private void recordMutationUnderLock() {
+        publishRequestCountUnderLock();
+        mutationVersion++;
+    }
+
+    private void publishRequestCountUnderLock() {
+        requireLock();
+        long count = saturatedAdd(requests.size(), unknownEngineRequestCount);
+        if (outstandingRequestCount != count) {
+            outstandingRequestCount = count;
+        }
+    }
 
     public PrefillState(ReentrantLock lock, PrefillActiveIndex activeIndex,
                         Runnable capacityAvailable) {
@@ -657,7 +673,7 @@ public final class PrefillState {
             removeRequestUnderLock(item.requestId(), entry);
             throw failure;
         }
-        mutationVersion++;
+        recordMutationUnderLock();
         return true;
     }
 
@@ -676,7 +692,7 @@ public final class PrefillState {
         // generation handoff. NON_BATCH item-owned route reservations use the
         // atomic counterpart below so retirement can never observe an orphan.
         removeRequestUnderLock(item.requestId(), entry);
-        mutationVersion++;
+        recordMutationUnderLock();
         return true;
     }
 
@@ -766,7 +782,7 @@ public final class PrefillState {
             activeIndex.remove(victim);
             removeRequestUnderLock(victim.requestId(), entry);
         }
-        mutationVersion++;
+        recordMutationUnderLock();
         return incomingReservation;
     }
 
@@ -797,7 +813,7 @@ public final class PrefillState {
         detachAdmissionIndexUnderLock(entry, item);
         closeOpenLeaseUnderLock(exactReservation);
         removeRequestUnderLock(item.requestId(), entry);
-        mutationVersion++;
+        recordMutationUnderLock();
         return true;
     }
 
@@ -828,7 +844,7 @@ public final class PrefillState {
         // The queue-index removal is the PNR. Every fallible validation is
         // complete; the sole remaining commit is this private field store.
         entry.queueMembership = QueueMembership.STOP_DETACHED;
-        mutationVersion++;
+        recordMutationUnderLock();
         return item;
     }
 
@@ -844,7 +860,7 @@ public final class PrefillState {
         }
         boolean removed = removeRequestUnderLock(item.requestId(), entry);
         if (removed) {
-            mutationVersion++;
+            recordMutationUnderLock();
         }
         return removed;
     }
@@ -867,7 +883,7 @@ public final class PrefillState {
             RouteReservation lease = new RouteReservation(
                     entry, item.requestId(), predictedMs);
             entry.reservation = lease;
-            mutationVersion++;
+            recordMutationUnderLock();
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
         } finally {
             lock.unlock();
@@ -904,7 +920,7 @@ public final class PrefillState {
                     entry, head.requestId(), batchId, generationHandoff);
             entry.reservation = lease;
             batchLeasesInUse++;
-            mutationVersion++;
+            recordMutationUnderLock();
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
         } finally {
             lock.unlock();
@@ -1030,7 +1046,7 @@ public final class PrefillState {
             entry.commitIndividual(lease, nowMs);
         }
         committedWorkCapture = null;
-        mutationVersion++;
+        recordMutationUnderLock();
         return committedHandoff;
     }
 
@@ -1082,7 +1098,7 @@ public final class PrefillState {
             requests.get(item.requestId()).commitBatch(work);
         }
         committedWorkCapture = null;
-        mutationVersion++;
+        recordMutationUnderLock();
         return committedHandoff;
     }
 
@@ -1132,7 +1148,7 @@ public final class PrefillState {
             entry.reservation = reservation;
             putRequestUnderLock(item.requestId(), entry);
             committedWorkCapture = null;
-            mutationVersion++;
+            recordMutationUnderLock();
             return result;
         } finally {
             lock.unlock();
@@ -1254,7 +1270,7 @@ public final class PrefillState {
             unknownEngineRequestCount = nextUnknown;
             if (schedulingInputsChanged) {
                 committedWorkCapture = null;
-                mutationVersion++;
+                recordMutationUnderLock();
             }
         } finally {
             lock.unlock();
@@ -1457,7 +1473,7 @@ public final class PrefillState {
             // into the already materialized outcome and forces retirement.
             canonicalMutationStarted = true;
             committedWorkCapture = null;
-            mutationVersion++;
+            recordMutationUnderLock();
             for (Map.Entry<RequestEntry, TerminalObservation> settlement
                     : settlements.entrySet()) {
                 RequestEntry entry = settlement.getKey();
@@ -1481,6 +1497,8 @@ public final class PrefillState {
             });
             capacityReleased |= nextUnknown < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknown;
+            // Status reduction changes counts after invalidating the old work revision.
+            publishRequestCountUnderLock();
             try {
                 committedPublication.run();
             } catch (Throwable failure) {
@@ -1668,7 +1686,7 @@ public final class PrefillState {
             batchLeasesInUse = 0;
             unknownEngineRequestCount = 0L;
             committedWorkCapture = null;
-            mutationVersion++;
+            recordMutationUnderLock();
         } finally {
             lock.unlock();
         }
@@ -1800,13 +1818,15 @@ public final class PrefillState {
         }
     }
 
+    /** Advisory selection check; a positive result does not reserve capacity. */
     public boolean canAcceptRequest(long requestLimit) {
-        lock.lock();
-        try {
-            return canAcceptRequestUnderLock(requestLimit);
-        } finally {
-            lock.unlock();
-        }
+        return outstandingRequestCount < requestLimit;
+    }
+
+    /** Unreserved request seats in the published ownership summary. */
+    public long availableRequestSlots(long requestLimit) {
+        return requestLimit <= 0L ? Long.MAX_VALUE
+                : Math.max(0L, requestLimit - outstandingRequestCount);
     }
 
     private boolean canAcceptRequestUnderLock(long maxOutstandingRequests) {
@@ -1966,7 +1986,7 @@ public final class PrefillState {
                             + entry.requestId);
         }
         committedWorkCapture = null;
-        mutationVersion++;
+        recordMutationUnderLock();
         if (lease != null) {
             closeOwnedLeaseUnderLock(lease);
         }
@@ -2199,7 +2219,7 @@ public final class PrefillState {
                 committedWorkCapture = null;
             }
         }
-        mutationVersion++;
+        recordMutationUnderLock();
         return generationHandoff;
     }
 
