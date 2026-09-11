@@ -498,8 +498,12 @@ class DashScApp:
 
     def _dispatch_signal_events(self) -> None:
         while True:
-            kind, signum = self._signal_events.get()
+            kind, payload = self._signal_events.get()
             try:
+                if kind == "barrier":
+                    payload.set()
+                    continue
+                signum = payload
                 if kind == "pre_stop":
                     logging.info(
                         "[DashScApp] received pre-stop drain signal %s", signum
@@ -517,9 +521,19 @@ class DashScApp:
             except Exception:
                 # Never let the dispatcher die: a lost signal means a server that
                 # ignores SIGTERM.
-                logging.exception(
-                    "[DashScApp] signal dispatch failed for %s", signum
-                )
+                logging.exception("[DashScApp] signal dispatch failed for %s", payload)
+
+    def wait_for_signal_dispatch(self, timeout: float = 5.0) -> bool:
+        """Block until every signal handed over before this call was dispatched.
+
+        The queue is FIFO with a single consumer, so a barrier that has been
+        processed proves everything enqueued ahead of it was processed too. That
+        is what makes it sound to assert a post-condition after signalling
+        instead of racing the dispatcher.
+        """
+        done = threading.Event()
+        self._signal_events.put(("barrier", done))
+        return done.wait(timeout)
 
     def _install_signal_handlers(self) -> None:
         # Signal handlers run on the main thread and can be entered mid-update,
