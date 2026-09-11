@@ -76,8 +76,11 @@ class PlacementAvailabilityTest {
         when(olderExact.group()).thenReturn("g1");
         // Interleave the newer publication after the older exact write but
         // before the older publisher reaches its shared group and role keys.
+        var interleaved = new java.util.concurrent.atomic.AtomicBoolean();
         when(olderExact.endpoint()).thenAnswer(ignored -> {
-            availability.topologyChanged(newerExact);
+            if (interleaved.compareAndSet(false, true)) {
+                availability.topologyChanged(newerExact);
+            }
             assertEquals(2L, availability.lastChangedSequence(group));
             assertEquals(2L, availability.lastChangedSequence(role));
             return "127.0.0.1:8000";
