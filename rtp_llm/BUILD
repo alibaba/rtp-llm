@@ -617,7 +617,6 @@ whl_reqs = [
     "tiktoken==0.7.0",
     "lru-dict",
     "py-spy",
-    "pyarrow==14.0.0",
     "safetensors",
     "cpm_kernels",
     "pyodps",
@@ -656,7 +655,10 @@ whl_reqs = [
     "concurrent_log_handler",
     "apache-tvm-ffi",
     "xgrammar==0.2.5",
-] + whl_deps() + platform_deps() + xft_dep
+] + select({
+    "@//:using_cuda13_arm": ["pyarrow==21.0.0"],
+    "//conditions:default": ["pyarrow==14.0.0"],
+}) + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
     name = "rtp_llm_frontend_whl",
