@@ -133,6 +133,186 @@ class IndexerGpuTest(unittest.TestCase):
             ),
         )
 
+    def test_all32_heads_mixed_signs_and_group_scales_match_float64_oracle(self):
+        generator = torch.Generator().manual_seed(130041)
+        alphabet = torch.tensor(
+            [
+                0.0,
+                0.5,
+                1.0,
+                1.5,
+                2.0,
+                3.0,
+                4.0,
+                6.0,
+                -0.0,
+                -0.5,
+                -1.0,
+                -1.5,
+                -2.0,
+                -3.0,
+                -4.0,
+                -6.0,
+            ]
+        )
+
+        def exact_fp4(shape):
+            values = alphabet[torch.randint(16, shape, generator=generator)]
+            groups = values.unflatten(-1, (4, 32))
+            # Every group retains the independently chosen power-of-two scale.
+            groups[..., -1] = 6.0
+            scales = torch.tensor([0.5, 1.0])[
+                torch.randint(2, groups.shape[:-1], generator=generator)
+            ]
+            return (groups * scales[..., None]).flatten(-2).bfloat16()
+
+        query_values = exact_fp4((6, 32, 128))
+        keys = exact_fp4((640, 128))
+        query, weights, pages, table, requests = self.fixture([0] * 640, rows=6)
+        query.copy_(query_values)
+        # Dyadic products/sums fit FP32 exactly; no tolerance is calibrated here.
+        head = torch.arange(32)
+        weights_cpu = (((head % 3) + 1).float() / 128) * torch.where(
+            head % 2 == 0, 1, -1
+        )
+        weights.copy_(weights_cpu.bfloat16()[None, :].expand(6, -1))
+        encoded = encode_compact(keys.cuda(), CacheRegion.INDEX_K)
+        encoded.check()
+        pages.data[1:].copy_(encoded.output.reshape(5, 128 * 68))
+        mapping = [5, 2, 4, 1, 3]
+        table.copy_(ints([mapping]))
+        lengths = [0, 1, 127, 128, 129, 521]
+        result = score_candidate_tile(
+            query,
+            weights,
+            pages,
+            table,
+            requests,
+            ints(lengths),
+            self.candidates(lengths),
+            layer=32,
+        )
+        self.equal(result.status, ints([0] * 6))
+        ordered_keys = (
+            keys.view(5, 128, 128)[torch.tensor(mapping) - 1].flatten(0, 1).double()
+        )
+        expected = torch.full(result.logits.shape, -torch.inf, dtype=torch.bfloat16)
+        expected_positions = torch.full(result.positions.shape, -1, dtype=torch.int32)
+        for row, length in enumerate(lengths):
+            if length:
+                products = query_values[row].double() @ ordered_keys[:length].T
+                scores = (products.clamp_min(0) * weights_cpu.double()[:, None]).sum(0)
+                expected[row, :length] = scores.bfloat16()
+                expected_positions[row, :length] = torch.arange(
+                    length, dtype=torch.int32
+                )
+        self.equal(result.logits, expected.cuda())
+        self.equal(result.positions, expected_positions.cuda())
+
+    def test_source_scan_and_candidate_reindex_graph_refresh_across_tile_boundary(self):
+        length = 16384 + 512 + 128
+        query, weights, pages, table, requests = self.fixture(
+            [0] * 16384 + [2] * 512 + [0] * 128, rows=6
+        )
+        lengths = ints([length] * 6)
+        initial_table = table.clone()
+        swapped_table = initial_table.clone()
+        swapped_table[:, :4].copy_(initial_table[:, 128:132])
+        swapped_table[:, 128:132].copy_(initial_table[:, :4])
+
+        def operation():
+            source = select_index_positions(
+                query,
+                weights,
+                pages,
+                table,
+                requests,
+                lengths,
+                layer=20,
+                max_visible_length=length,
+            )
+            reindexed = select_index_positions(
+                query,
+                weights,
+                pages,
+                table,
+                requests,
+                lengths,
+                layer=24,
+                max_visible_length=length,
+                candidate_blocks=source.candidate_blocks,
+            )
+            return source, reindexed
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            operation()
+            operation()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            source, reindexed = operation()
+        pointers = (
+            source.topk.data_ptr(),
+            source.candidate_blocks.data_ptr(),
+            reindexed.topk.data_ptr(),
+        )
+        for step, live_lengths in enumerate(
+            ([length] * 6, [0, 1, 127, 511, 512, length], [length] * 6)
+        ):
+            table.copy_(swapped_table if step == 1 else initial_table)
+            lengths.copy_(ints(live_lengths))
+            query.fill_((1.0, 2.0, 0.5)[step])
+            graph.replay()
+            torch.cuda.synchronize()
+            source.check()
+            reindexed.check()
+            expected = torch.full((6, 512), -1, dtype=torch.int32, device="cuda")
+            for row, live_length in enumerate(live_lengths):
+                count = min(512, live_length)
+                first = 0 if step == 1 else 16384
+                expected[row, :count] = torch.arange(
+                    first, first + count, dtype=torch.int32, device="cuda"
+                )
+                selected = source.candidate_blocks[row]
+                self.assertEqual(
+                    int((selected >= 0).sum().item()), min(2048, (live_length + 7) // 8)
+                )
+                if live_length:
+                    self.assertTrue(
+                        torch.any(selected == (live_length - 1) // 8).item()
+                    )
+                    self.assertTrue(
+                        torch.all(
+                            selected[selected >= 0] < (live_length + 7) // 8
+                        ).item()
+                    )
+            self.equal(source.topk, expected)
+            self.equal(reindexed.topk, expected)
+            self.assertEqual(
+                pointers,
+                (
+                    source.topk.data_ptr(),
+                    source.candidate_blocks.data_ptr(),
+                    reindexed.topk.data_ptr(),
+                ),
+            )
+        self.assertEqual((source.scorer_calls, reindexed.scorer_calls), (2, 1))
+        self.assertEqual(source.max_logits_elements, 6 * CANDIDATE_BLOCKS * 8)
+        self.observations.append(
+            {
+                "test": self.id(),
+                "captures": 1,
+                "replays": 3,
+                "source_tiles": 2,
+                "reindex_tiles": 1,
+                "top512_margin": 1.0,
+                "independent_expected_positions": True,
+                "same_output_addresses": True,
+            }
+        )
+
     def test_top512_has_exact_margin_and_position_order(self):
         values = [0] * 700
         values[85:597] = [1] * 512
@@ -277,6 +457,23 @@ class IndexerGpuTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "rejected"):
             result.check()
+
+    def test_planar_pages_cannot_enter_the_native_index_scorer(self):
+        from rtp_llm.models_py.modules.dsv41.flashmla import PlanarPages
+
+        query, weights, pages, table, requests = self.fixture([1] * 8)
+        planar = PlanarPages(pages.data, pages.region, pages.entries_per_page)
+        with self.assertRaisesRegex(TypeError, "row-interleaved"):
+            score_candidate_tile(
+                query,
+                weights,
+                planar,
+                table,
+                requests,
+                ints([8]),
+                self.candidates([8]),
+                layer=24,
+            )
 
 
 if __name__ == "__main__":

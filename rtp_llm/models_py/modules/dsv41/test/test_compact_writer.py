@@ -128,6 +128,20 @@ class CompactWriterGpuTest(unittest.TestCase):
             )
         cls.official = _load_official_kernel()
 
+    def test_planar_destination_is_rejected_before_any_byte_is_written(self):
+        from rtp_llm.models_py.modules.dsv41.flashmla import PlanarPages
+
+        for region in (CacheRegion.SWA, CacheRegion.GLOBAL):
+            pages, storage = _pages(region, 3)
+            before = storage.clone()
+            planar = PlanarPages(pages.data, region, pages.entries_per_page)
+            values = torch.ones(
+                (3, ENCODINGS[region].head_dim), dtype=torch.bfloat16, device="cuda"
+            )
+            with self.assertRaisesRegex(TypeError, "row-interleaved"):
+                write_compact(values, planar, _ints([128, 129, 130]))
+            torch.testing.assert_close(storage, before, rtol=0, atol=0)
+
     def _assert_bytes(self, values, region):
         original = values.view(torch.int16).clone()
         expected = _official_gpu(self.official, values, region)

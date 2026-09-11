@@ -102,6 +102,8 @@ class SwaBinding:
     valid_ends: torch.Tensor
 
     def validate(self, device) -> int:
+        if not isinstance(self.pages, CompactPages):
+            raise TypeError("native SWA binding requires row-interleaved compact pages")
         self.pages.validate(device)
         if self.pages.region != CacheRegion.SWA or self.pages.entries_per_page < 128:
             raise ValueError(
@@ -120,6 +122,10 @@ class GlobalBinding:
     compress_ratio: int
 
     def validate(self, requests: int, device) -> None:
+        if not isinstance(self.pages, CompactPages):
+            raise TypeError(
+                "native global binding requires row-interleaved compact pages"
+            )
         self.pages.validate(device)
         if self.pages.region != CacheRegion.GLOBAL or self.compress_ratio not in (1, 2):
             raise ValueError(
@@ -168,6 +174,8 @@ def gather_compact(
     rows set status=1. A caller must check status after the GPU completes.
     The table is read inside the kernel on every invocation or graph replay.
     """
+    if not isinstance(pages, CompactPages):
+        raise TypeError("native gather requires row-interleaved compact pages")
     _require_enabled(pages.data)
     pages.validate(pages.data.device)
     if positions.ndim != 2 or page_table.ndim != 2:
@@ -243,6 +251,10 @@ def compact_attention(
     page, range, replay-floor and candidate tensor contents are all read on GPU
     during replay, so refreshed page IDs do not require recapture.
     """
+    if not isinstance(swa, SwaBinding) or (
+        global_kv is not None and not isinstance(global_kv, GlobalBinding)
+    ):
+        raise TypeError("native attention requires row-interleaved compact bindings")
     _require_enabled(query)
     if (
         query.ndim != 3

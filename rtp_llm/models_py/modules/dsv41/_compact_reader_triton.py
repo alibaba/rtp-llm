@@ -66,7 +66,8 @@ def gather_compact_kernel(
     position = tl.load(positions + query * SLOT_COUNT + slot).to(tl.int64)
     visible = tl.load(visible_lengths + query).to(tl.int64)
     in_request = (request >= 0) & (request < NUM_REQUESTS)
-    expected = (position >= 0) & (position < visible)
+    range_valid = (visible >= 0) & (visible <= 1048576)
+    expected = (position >= 0) & (position < visible) & range_valid
     block = tl.maximum(position, 0) // ROWS_PER_PAGE
     table_valid = in_request & (block < TABLE_WIDTH) & expected
     page = tl.load(
@@ -79,7 +80,14 @@ def gather_compact_kernel(
     values = _load_compact_row(base, dims, valid, FORMAT)
     tl.store(output + (query * SLOT_COUNT + slot) * HEAD_DIM + dims, values)
     error = tl.where(expected & ~valid, 1, 0)
-    error |= tl.where((position < -1) | (visible < 0), 2, 0)
+    error |= tl.where(
+        (position < -1)
+        | (position >= 1048576)
+        | ~range_valid
+        | ((position >= 0) & ~in_request),
+        2,
+        0,
+    )
     tl.store(status + query * SLOT_COUNT + slot, error)
 
 
@@ -139,7 +147,13 @@ def compact_attention_kernel(
     floor = tl.load(replay_floors + row).to(tl.int64)
     active = position >= 0
     request_valid = (request >= 0) & (request < NUM_REQUESTS)
-    query_valid = active & request_valid & (floor >= 0) & (floor <= position)
+    query_valid = (
+        active
+        & (position < 1048576)
+        & request_valid
+        & (floor >= 0)
+        & (floor <= position)
+    )
     q = tl.load(query + (row * HEADS + head) * 512 + dims).to(tl.float32)
     sink = tl.load(sinks + head)
     maximum = tl.maximum(sink, -1.0e30)

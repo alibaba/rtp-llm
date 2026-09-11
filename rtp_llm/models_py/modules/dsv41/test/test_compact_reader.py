@@ -282,6 +282,145 @@ class CompactReaderGpuTest(unittest.TestCase):
                 output_dtype=torch.float32,
             )
 
+    def test_planar_pages_cannot_enter_native_gather_or_bindings(self):
+        from rtp_llm.models_py.modules.dsv41.flashmla import (
+            PlanarGlobalBinding,
+            PlanarPages,
+            PlanarSwaBinding,
+        )
+
+        for region in (CacheRegion.SWA, CacheRegion.GLOBAL):
+            pages, _ = _fixture(
+                region, entries=136 if region == CacheRegion.SWA else 128
+            )
+            planar = PlanarPages(pages.data, region, pages.entries_per_page)
+            with self.assertRaisesRegex(TypeError, "row-interleaved"):
+                gather_compact(
+                    planar, _ints([[1]]), _ints([0]), _ints([[0]]), _ints([1])
+                )
+            with self.assertRaisesRegex(TypeError, "row-interleaved"):
+                if region == CacheRegion.SWA:
+                    SwaBinding(planar, _ints([1]), _ints([0]), _ints([1])).validate(
+                        pages.data.device
+                    )
+                else:
+                    GlobalBinding(planar, _ints([[1]]), 1).validate(
+                        1, pages.data.device
+                    )
+        swa_pages, _ = _fixture(CacheRegion.SWA, entries=136)
+        swa = SwaBinding(swa_pages, _ints([1]), _ints([0]), _ints([1]))
+        planar_swa = PlanarSwaBinding(
+            PlanarPages(swa_pages.data, CacheRegion.SWA, 136),
+            swa.page_ids,
+            swa.valid_starts,
+            swa.valid_ends,
+        )
+        planar_global = PlanarGlobalBinding(planar, _ints([[1]]), 1)
+        for candidate_swa, candidate_global in (
+            (planar_swa, None),
+            (swa, planar_global),
+        ):
+            with self.assertRaisesRegex(TypeError, "row-interleaved"):
+                compact_attention(
+                    torch.zeros((1, 64, 512), dtype=torch.bfloat16, device="cuda"),
+                    _ints([0]),
+                    _ints([0]),
+                    _ints([0]),
+                    candidate_swa,
+                    torch.zeros(64, device="cuda"),
+                    global_kv=candidate_global,
+                )
+
+    def test_gather_rejects_out_of_context_positions_lengths_and_active_requests(self):
+        pages, _ = _fixture(CacheRegion.INDEX_K)
+        for requests, positions, lengths in (
+            ([0], [[1048576]], [1048576]),
+            ([0], [[0]], [1048577]),
+            ([0], [[-1]], [-1]),
+            ([-1], [[0]], [1]),
+            ([1], [[-1]], [1]),
+        ):
+            result = gather_compact(
+                pages, _ints([[1]]), _ints(requests), _ints(positions), _ints(lengths)
+            )
+            if positions == [[-1]] and lengths == [1]:
+                result.check()
+            else:
+                self.assertTrue(torch.all((result.status & 2) != 0).item())
+                with self.assertRaisesRegex(RuntimeError, "rejected metadata"):
+                    result.check()
+            torch.testing.assert_close(
+                result.output, torch.zeros_like(result.output), rtol=0, atol=0
+            )
+
+    def test_attention_context_boundary_graph_rejects_then_recovers_without_recapture(
+        self,
+    ):
+        pages, reference = _fixture(CacheRegion.SWA, entries=136)
+        positions, floors, requests = _ints([1048575]), _ints([0]), _ints([0])
+        swa = SwaBinding(pages, _ints([1]), _ints([1048440]), _ints([1048576]))
+        query = torch.zeros((1, 64, 512), dtype=torch.bfloat16, device="cuda")
+        sinks = torch.zeros(64, dtype=torch.float32, device="cuda")
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+
+        def operation():
+            return compact_attention(
+                query,
+                requests,
+                positions,
+                floors,
+                swa,
+                sinks,
+                output_dtype=torch.float32,
+            )
+
+        with torch.cuda.stream(stream):
+            operation()
+            operation()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            result = operation()
+        pointers = (
+            result.output.data_ptr(),
+            result.status.data_ptr(),
+            result.lse.data_ptr(),
+        )
+        for position in (1048575, 1048576, 1048575):
+            positions.fill_(position)
+            swa.valid_starts.fill_(position - 135)
+            swa.valid_ends.fill_(position + 1)
+            graph.replay()
+            torch.cuda.synchronize()
+            self.assertEqual(
+                pointers,
+                (
+                    result.output.data_ptr(),
+                    result.status.data_ptr(),
+                    result.lse.data_ptr(),
+                ),
+            )
+            if position == 1048576:
+                self.assertTrue(torch.all(result.status == 2).item())
+                with self.assertRaisesRegex(RuntimeError, "rejected metadata"):
+                    result.check()
+                torch.testing.assert_close(
+                    result.output, torch.zeros_like(result.output), rtol=0, atol=0
+                )
+                self.assertTrue(torch.all(result.lse == -torch.inf).item())
+                continue
+            result.check()
+            expected, expected_lse = _attention_oracle(
+                query, requests, positions, floors, swa, reference, sinks
+            )
+            torch.testing.assert_close(
+                result.output.cpu(), expected, rtol=2e-5, atol=2e-5
+            )
+            torch.testing.assert_close(
+                result.lse.cpu(), expected_lse, rtol=2e-5, atol=2e-5
+            )
+
     def test_gather_graph_reads_updated_page_table_and_indices(self):
         pages, reference = _fixture(CacheRegion.INDEX_K)
         table, requests, positions, lengths = (

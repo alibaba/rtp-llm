@@ -138,6 +138,8 @@ def write_compact(
     leaves that entire destination row unchanged and sets an explicit status.
     Page padding and rows not selected by slot_mapping are never written.
     """
+    if not isinstance(pages, CompactPages):
+        raise TypeError("native writer requires row-interleaved compact pages")
     _validate(values, pages.region)
     pages.validate(values.device)
     if (

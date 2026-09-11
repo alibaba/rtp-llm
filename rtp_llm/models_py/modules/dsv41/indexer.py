@@ -126,6 +126,8 @@ def _integer(tensor, shape, device):
 
 
 def _validate(query, weights, pages, page_table, request_ids, visible_lengths, layer):
+    if not isinstance(pages, CompactPages):
+        raise TypeError("index scorer requires row-interleaved compact pages")
     source = layer_sources(layer)
     if not source.scores_queries:
         raise ValueError("only the eight V4.1 index query owners may score queries")

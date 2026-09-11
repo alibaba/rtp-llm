@@ -177,6 +177,22 @@ class CprrReaderGpuTest(unittest.TestCase):
             self.exact(result.pages.data[0], torch.zeros_like(complete[0]))
             self.assertEqual(result.pages.entries_per_page, 136)
 
+    def test_swa_restore_rejects_planar_destination_before_writing(self):
+        from rtp_llm.models_py.modules.dsv41.flashmla import PlanarPages
+
+        layout = CacheLayout()
+        received, ids, complete, _ = swa_fixture(layout)
+        before = complete.clone()
+        with self.assertRaisesRegex(TypeError, "row-interleaved"):
+            restore_cprr_swa(
+                layout,
+                21,
+                received,
+                ids,
+                output=PlanarPages(complete, CacheRegion.SWA, layout.swa_entries),
+            )
+        self.exact(complete, before)
+
     def test_paged_sources_map_all_rank_owners_without_requantization(self):
         for block in (128, 256):
             for owner in (2, 8, 14, 20):

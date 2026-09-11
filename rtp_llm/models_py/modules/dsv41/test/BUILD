@@ -22,6 +22,22 @@ py_test(
 )
 
 py_test(
+    name = "test_generation",
+    srcs = ["test_generation.py", "test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:models",
+    ],
+    env = {
+        "DSV41_ATTENTION": "1",
+        "DSV41_OWNER_COMPRESSOR": "1",
+        "DSV41_SPARSE_INDEXER": "1",
+        "DSV41_NATIVE_COMPACT_READER": "1",
+        "DSV41_NATIVE_COMPACT_WRITER": "1",
+    },
+)
+
+py_test(
     name = "test_prefill",
     srcs = ["test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
     deps = [

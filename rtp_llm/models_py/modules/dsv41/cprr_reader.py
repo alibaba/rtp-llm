@@ -107,6 +107,8 @@ def restore_cprr_swa(
             CacheRegion.SWA,
             page.entries,
         )
+    if not isinstance(output, CompactPages):
+        raise TypeError("CPRR SWA restoration requires row-interleaved compact pages")
     output.validate(device)
     if (
         output.region != CacheRegion.SWA
