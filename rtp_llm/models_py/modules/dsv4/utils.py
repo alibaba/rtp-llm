@@ -12,7 +12,25 @@ _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 def _decode_ue8m0(scale: torch.Tensor, groups: int) -> torch.Tensor:
     if scale.dtype != torch.int32:
         return scale.float().contiguous()
-    raw = scale.contiguous().view(torch.uint8).reshape(*scale.shape[:-1], -1)
+    # The `.reshape(-1)` before the dtype view is load-bearing, not decoration.
+    #
+    # DeepGEMM's packed UE8M0 scales are MN-major: `as_strided((N, k_packed),
+    # (1, aligned_rows))`, so stride(-1) is the LARGE one. When k_packed > 1 the
+    # tensor reports is_contiguous() == False and `.contiguous()` copies it into
+    # stride(-1) == 1, so the old `scale.contiguous().view(torch.uint8)` worked.
+    # But when **k_packed == 1** (i.e. K <= 512) the LAST DIM HAS SIZE 1, and
+    # PyTorch ignores size-1 dims for contiguity: is_contiguous() returns True,
+    # `.contiguous()` is a NO-OP returning the same object, and the view then dies
+    # with `self.stride(-1) must be 1 to view Int as Byte ... but got <aligned_rows>`.
+    # DSV4 production only ever escaped this because K is 4096/2048 (k_packed 8/4);
+    # any small-K fp8 linear on SM120, and the shared-expert unit-test fixture
+    # (dim=256 -> k_packed=1), hit it. `.reshape(-1)` collapses to a 1-D view whose
+    # stride is 1 by construction, so the reinterpret is always legal.
+    #
+    # Verified semantics-preserving: on the production shape (N=2048, k_packed=8)
+    # the decoded result is torch.equal to the old expression; on the size-1 case
+    # it decodes correctly where the old one raised.
+    raw = scale.contiguous().reshape(-1).view(torch.uint8).reshape(*scale.shape[:-1], -1)
     # P1b: uint8 -> float32 directly, then in-place sub/exp2 — identical
     # values (exponents <= 255 are exact in fp32), 3 kernels instead of 5.
     return raw[..., :groups].float().sub_(127).exp2_()
