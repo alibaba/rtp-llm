@@ -4,6 +4,7 @@ import time
 from concurrent import futures
 
 import grpc
+import torch
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.log_config import setup_logging
@@ -26,7 +27,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.ops import MMRdmaEncoderOp, VitSeparation, get_multimodal_feature_hash
+from rtp_llm.ops import (
+    MMRdmaEncoderOp,
+    VitSeparation,
+    ensure_engine_ops_loaded,
+    get_multimodal_feature_hash,
+)
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
@@ -271,6 +277,11 @@ def vit_start_server(py_env_configs=None):
 
     # Create and fully initialize engine config (global singleton, ports from config)
     engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
+    # ROLE skips create_engine, which normally configures native logging and signals.
+    ensure_engine_ops_loaded()
+    torch.ops.rtp_llm.init_engine(
+        engine_config.profiling_debug_logging_config.ft_alog_conf_path
+    )
 
     # Create model configs (ModelConfig construction is handled in ModelFactory)
     # All model metadata (lora_infos, multi_task_prompt, model_name, template_type, mm_model_config)
