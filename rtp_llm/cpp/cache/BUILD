@@ -37,6 +37,7 @@ cc_library(
         "CacheConfig.h",
         "CacheGroupType.h",
         "DSV4KVCacheSpec.h",
+        "DSV41KVCacheSpec.h",
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "MHAKVCacheSpec.h",
@@ -208,6 +209,7 @@ cc_library(
     srcs = ["KVCacheResource.cc"],
     hdrs = [
         "BatchKVCacheResource.h",
+        "DSV41CacheState.h",
         "KVCacheResource.h",
     ],
     copts = copts(),
@@ -223,6 +225,7 @@ cc_library(
     srcs = [
         "CacheConfigCreator.cc",
         "DSV4CacheConfigHelper.cc",
+        "DSV41CacheConfigHelper.cc",
         "HybridConfigCreator.cc",
         "HybridPoolConfigCreator.cc",
         "KVCacheHashUtil.cc",
@@ -232,6 +235,7 @@ cc_library(
     hdrs = [
         "CacheConfigCreator.h",
         "DSV4CacheConfigHelper.h",
+        "DSV41CacheConfigHelper.h",
         "HybridConfigCreator.h",
         "HybridPoolConfigCreator.h",
         "KVCacheHashUtil.h",

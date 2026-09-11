@@ -18,20 +18,23 @@ enum class CacheGroupType : int8_t {
 // CacheGroupType describes allocation/reuse policy, while KVCacheRegionName
 // describes which cache object a layer wants to access.
 enum class KVCacheRegionName : int8_t {
-    DEFAULT       = 0,
-    CSA_KV        = 1,
-    HCA_KV        = 2,
-    INDEXER_KV    = 3,
-    INDEXER_STATE = 4,
-    CSA_STATE     = 5,
-    HCA_STATE     = 6,
-    SWA_KV        = 7,
-    REGION_COUNT  = 8,
+    DEFAULT          = 0,
+    CSA_KV           = 1,
+    HCA_KV           = 2,
+    INDEXER_KV       = 3,
+    INDEXER_STATE    = 4,
+    CSA_STATE        = 5,
+    HCA_STATE        = 6,
+    SWA_KV           = 7,
+    DSV41_GLOBAL_KV  = 8,
+    DSV41_INDEX_KV   = 9,
+    DSV41_PAIR_STATE = 10,
+    REGION_COUNT     = 11,
 };
 
 inline bool isStateRegion(KVCacheRegionName region_name) {
     return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
-           || region_name == KVCacheRegionName::HCA_STATE;
+           || region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::DSV41_PAIR_STATE;
 }
 
 inline bool isDsv4FixedRegion(KVCacheRegionName region_name) {
@@ -39,7 +42,7 @@ inline bool isDsv4FixedRegion(KVCacheRegionName region_name) {
 }
 
 inline bool skipReuseCacheRegion(KVCacheRegionName region_name) {
-    return region_name == KVCacheRegionName::HCA_STATE;
+    return region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::DSV41_PAIR_STATE;
 }
 
 }  // namespace rtp_llm

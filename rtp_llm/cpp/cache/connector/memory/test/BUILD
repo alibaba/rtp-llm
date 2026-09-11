@@ -34,6 +34,16 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "dsv41_memory_checkpoint_test",
+    srcs = ["DSV41MemoryCheckpointTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
+)
+
+cc_test(
     name = "memory_connector_test",
     srcs = [
         "KVCacheMemoryConnectorTest.cc",

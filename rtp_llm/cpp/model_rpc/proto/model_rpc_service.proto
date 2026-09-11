@@ -154,6 +154,23 @@ message RequestInfoPB {
     string source_role = 5;
 }
 
+message V41ImageInputPB {
+    int32 start = 1;
+    int32 n_vit_h = 2;
+    int32 n_vit_w = 3;
+    TensorPB patches = 4;
+    repeated int32 types = 5;
+    string content_sha256 = 6;
+    string processor_identity = 7;
+}
+
+message V41RequestInputsPB {
+    int32 schema_version = 1;
+    repeated sint32 token_types = 2;
+    repeated bool image_mask = 3;
+    repeated V41ImageInputPB images = 4;
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -168,6 +185,7 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
+    V41RequestInputsPB v41_inputs = 11;
 }
 
 message AuxInfoPB {

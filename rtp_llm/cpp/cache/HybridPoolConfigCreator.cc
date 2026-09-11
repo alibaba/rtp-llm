@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
+#include "rtp_llm/cpp/cache/DSV41CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -212,9 +213,9 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     if (paged_block_bytes == 0) {
         RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,
                                 "hybrid-pool paged groups produced zero block bytes");
-        config.kv_block_size_bytes = 1;
+        config.kv_block_size_bytes = config.dsv41_cache_layout_version != 0 ? 0 : 1;
         config.kv_scale_size_bytes = 0;
-        config.block_size_bytes    = 1;
+        config.block_size_bytes    = config.kv_block_size_bytes;
     } else {
         config.block_size_bytes = paged_block_bytes;
     }
@@ -283,7 +284,10 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.linear_step        = 1;
     config.is_sparse          = model_config.attn_config.is_sparse;
 
-    if (!model_config.attn_config.layer_compress_ratios.empty()) {
+    if (model_config.attn_config.dsv41_cache_layout_version != 0) {
+        DSV41CacheConfigHelper::applyConfig(
+            config, model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
+    } else if (!model_config.attn_config.layer_compress_ratios.empty()) {
         DSV4CacheConfigHelper::applyConfig(
             config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     } else {
@@ -295,6 +299,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
+    DSV41CacheConfigHelper::populateOwnerMappings(config);
     setupIndependentPoolSizes(config, is_mtp);
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;

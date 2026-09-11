@@ -53,6 +53,18 @@ public:
 
     int32_t* data(int batch_id);
 
+    bool hasV41Inputs() const {
+        return v41_inputs_ != nullptr;
+    }
+    void                 writeV41Rows(int      batch_id,
+                                      int      begin,
+                                      int      count,
+                                      int32_t* token_types,
+                                      bool*    token_valid,
+                                      int32_t* history_ids,
+                                      bool*    history_valid);
+    std::vector<int32_t> imageCacheIdentity(int begin, int count) const;
+
     // Number of columns (max token capacity per batch row)
     int64_t tokenDim() const {
         return complete_token_ids_.size(1);
@@ -73,7 +85,9 @@ private:
     int64_t first_token_time_us_    = 0;
     int64_t first_token_latency_us_ = 0;
 
-    torch::Tensor complete_token_ids_;
+    torch::Tensor                           complete_token_ids_;
+    std::shared_ptr<const V41RequestInputs> v41_inputs_;
+    int                                     canonical_offset_ = 0;
 };
 
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;

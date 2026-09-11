@@ -26,7 +26,7 @@ RoleType checkedRoleType(int value, const char* field_name) {
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -51,7 +51,7 @@ RoleType checkedRoleString(const std::string& value) {
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
         RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
                                 "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
                                 source,
@@ -195,6 +195,51 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
+    if (input->has_v41_inputs()) {
+        const auto& typed = input->v41_inputs();
+        RTP_LLM_CHECK_WITH_INFO(typed.schema_version() == 1 && input->token_ids_size() <= 1048576
+                                    && typed.token_types_size() == input->token_ids_size()
+                                    && typed.image_mask_size() == input->token_ids_size()
+                                    && input->multimodal_inputs_size() == 0,
+                                "invalid V4.1 canonical request metadata or mixed URL expansion");
+        auto prepared         = std::make_shared<V41RequestInputs>();
+        prepared->token_types = torch::from_blob(const_cast<int32_t*>(typed.token_types().data()),
+                                                 {typed.token_types_size()},
+                                                 torch::kInt32)
+                                    .clone();
+        prepared->image_mask = torch::empty({typed.image_mask_size()}, torch::kBool);
+        for (int index = 0; index < typed.image_mask_size(); ++index) {
+            prepared->image_mask.data_ptr<bool>()[index] = typed.image_mask(index);
+        }
+        for (const auto& source : typed.images()) {
+            V41ImageInput image;
+            image.start           = source.start();
+            image.n_vit_h         = source.n_vit_h();
+            image.n_vit_w         = source.n_vit_w();
+            const int64_t patches = static_cast<int64_t>(image.n_vit_h) * image.n_vit_w;
+            RTP_LLM_CHECK_WITH_INFO(
+                image.n_vit_h > 0 && image.n_vit_w > 0 && patches <= 9198
+                    && source.patches().data_type() == TensorPB::BF16 && source.patches().shape_size() == 4
+                    && source.patches().shape(0) == patches && source.patches().shape(1) == 3
+                    && source.patches().shape(2) == 14 && source.patches().shape(3) == 14
+                    && source.patches().bf16_data().size() == static_cast<size_t>(patches * 3 * 14 * 14 * 2),
+                "V4.1 wire image patches must contain the exact BF16 grid payload");
+            image.patches = transTensor(source.patches());
+            image.types =
+                torch::from_blob(const_cast<int32_t*>(source.types().data()), {source.types_size()}, torch::kInt32)
+                    .clone();
+            image.content_sha256     = source.content_sha256();
+            image.processor_identity = source.processor_identity();
+            prepared->images.push_back(std::move(image));
+        }
+        prepared->validate(generate_input->input_ids);
+        RTP_LLM_CHECK_WITH_INFO(
+            !generate_input->generate_config
+                || generate_input->input_ids.numel() + generate_input->generate_config->max_new_tokens <= 1048576,
+            "V4.1 input plus output budget exceeds the model context limit");
+        generate_input->v41_inputs        = std::move(prepared);
+        generate_input->multimodal_inputs = std::vector<MultimodalInput>{};
+    }
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {

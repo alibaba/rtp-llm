@@ -18,6 +18,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .value("CSA_STATE", rtp_llm::KVCacheRegionName::CSA_STATE)
         .value("HCA_STATE", rtp_llm::KVCacheRegionName::HCA_STATE)
         .value("SWA_KV", rtp_llm::KVCacheRegionName::SWA_KV)
+        .value("DSV41_GLOBAL_KV", rtp_llm::KVCacheRegionName::DSV41_GLOBAL_KV)
+        .value("DSV41_INDEX_KV", rtp_llm::KVCacheRegionName::DSV41_INDEX_KV)
+        .value("DSV41_PAIR_STATE", rtp_llm::KVCacheRegionName::DSV41_PAIR_STATE)
         .export_values();
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
@@ -58,7 +61,7 @@ void registerPyOpDefs(pybind11::module& m) {
                        "Per-layer and per-attention-type KV cache tensors")
         .def_readwrite("kv_cache_base_by_layer_region_flat",
                        &KVCache::kv_cache_base_by_layer_region_flat,
-                       "Flat version of by_layer_region: [layer*8+region_name] = tensor")
+                       "Flat version of by_layer_region: [layer*region_count+region_name] = tensor")
         .def_readwrite("kv_scale_base_by_layer_region",
                        &KVCache::kv_scale_base_by_layer_region,
                        "Per-layer and per-attention-type KV scale tensors")
@@ -138,7 +141,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefill_qkv_restore_indice", &PyContextParallelParams::prefill_qkv_restore_indice)
         .def_readwrite("prefill_qkv_padding_mask", &PyContextParallelParams::prefill_qkv_padding_mask)
         .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu)
-        .def_readwrite("prefill_prefix_lengths_cpu", &PyContextParallelParams::prefill_prefix_lengths_cpu);
+        .def_readwrite("prefill_prefix_lengths_cpu", &PyContextParallelParams::prefill_prefix_lengths_cpu)
+        .def_readwrite("prefill_mm_spans", &PyContextParallelParams::prefill_mm_spans);
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
@@ -203,7 +207,15 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("multimodal_features", &PyModelInputs::multimodal_features, "Multimodal embedding tensors")
+        .def_readwrite("text_tokens_mask", &PyModelInputs::text_tokens_mask, "Text/multimodal token mask")
+        .def_readwrite("mm_features_locs", &PyModelInputs::mm_features_locs, "Multimodal embedding locations")
+        .def_readwrite("mm_features_spans", &PyModelInputs::mm_features_spans, "Original multimodal token spans")
+        .def_readwrite("v41_token_types", &PyModelInputs::v41_token_types, "Canonical V4.1 image token types")
+        .def_readwrite("v41_token_valid", &PyModelInputs::v41_token_valid, "Valid V4.1 canonical rows")
+        .def_readwrite("engram_history_ids", &PyModelInputs::engram_history_ids, "Three canonical Engram predecessors")
+        .def_readwrite("engram_history_valid", &PyModelInputs::engram_history_valid, "Canonical predecessor validity");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

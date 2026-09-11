@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
+#include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 
 namespace rtp_llm {
 
@@ -52,6 +53,7 @@ public:
     }
 
     void updatePrefix(const std::vector<int>& prefix_prompt) {
+        RTP_LLM_CHECK_WITH_INFO(!v41_inputs, "V4.1 prefixes require canonical image/history metadata");
         prefix_length = prefix_prompt.size();
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
@@ -71,6 +73,7 @@ public:
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
+    std::shared_ptr<const V41RequestInputs>     v41_inputs;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;

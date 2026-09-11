@@ -190,7 +190,28 @@ RenderedInputs ChatRender::render_chat_request(const std::string& reqBody) {
     }
     auto rendered_prompt = py::cast<std::string>(rendered_input.attr("rendered_prompt"));
 
-    return RenderedInputs(input_ids, mm_inputs, rendered_prompt);
+    auto result = RenderedInputs(input_ids, mm_inputs, rendered_prompt);
+    if (py::hasattr(rendered_input, "v41_inputs") && !rendered_input.attr("v41_inputs").is_none()) {
+        auto source = rendered_input.attr("v41_inputs");
+        source.attr("validate")(input_ids);
+        auto prepared = std::make_shared<V41RequestInputs>();
+        prepared->token_types =
+            torch::tensor(py::cast<std::vector<int32_t>>(source.attr("token_types")), torch::kInt32);
+        prepared->image_mask = py::cast<torch::Tensor>(source.attr("image_mask"));
+        for (auto item : source.attr("images")) {
+            V41ImageInput image;
+            image.start              = py::cast<int32_t>(item.attr("start"));
+            image.n_vit_h            = py::cast<int32_t>(item.attr("n_vit_h"));
+            image.n_vit_w            = py::cast<int32_t>(item.attr("n_vit_w"));
+            image.patches            = py::cast<torch::Tensor>(item.attr("patches"));
+            image.types              = py::cast<torch::Tensor>(item.attr("types")).to(torch::kInt32);
+            image.content_sha256     = py::cast<std::string>(item.attr("content_sha256"));
+            image.processor_identity = py::cast<std::string>(item.attr("processor_identity"));
+            prepared->images.push_back(std::move(image));
+        }
+        result.v41_inputs = std::move(prepared);
+    }
+    return result;
 }
 
 std::string ChatRender::toString() {

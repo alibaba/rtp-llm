@@ -264,6 +264,46 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         self.assertTrue(torch.equal(hidden, local_hidden))
 
 
+class TestMultimodalInputs(unittest.TestCase):
+    def test_mask_features_and_locations_follow_zigzag_interleave(self):
+        tokens = torch.arange(14, dtype=torch.int32)
+        text_mask = torch.ones(14, dtype=torch.int32)
+        text_mask[2:12] = 0
+        feature = torch.arange(20, dtype=torch.float32).reshape(10, 2)
+
+        rank0 = cp_test.handle_multimodal_inputs(tokens, text_mask, feature, 2, 0, 2)
+        rank1 = cp_test.handle_multimodal_inputs(tokens, text_mask, feature, 2, 1, 2)
+
+        _, mask0, features0, locs0, spans0, prefixes0 = rank0
+        _, mask1, features1, locs1, spans1, prefixes1 = rank1
+        self.assertEqual(mask0.tolist(), [1, 1, 0, 0, 1, 1, 0, 0])
+        self.assertEqual(mask1.tolist(), [0] * 8)
+        self.assertEqual(locs0.tolist(), [2])
+        self.assertEqual(locs1.tolist(), [0])
+        torch.testing.assert_close(features0[0].cpu(), feature[:2])
+        torch.testing.assert_close(features1[0].cpu(), feature[2:10])
+        torch.testing.assert_close(
+            spans0, torch.tensor([[0, 2, 12]], dtype=torch.int64)
+        )
+        torch.testing.assert_close(spans1, spans0)
+        self.assertEqual(prefixes0.tolist(), [0])
+        self.assertEqual(prefixes1.tolist(), [0])
+
+    def test_prefix_reuse_generates_absolute_position_ids(self):
+        position_ids, shuffle = cp_test.handle_prefix_reuse(
+            torch.arange(8, dtype=torch.int32), 4, 0, 2
+        )
+        self.assertEqual(shuffle.tolist(), [0, 1, 6, 7])
+        self.assertEqual(position_ids.tolist(), [4, 5, 10, 11])
+
+    def test_prefix_reuse_zeros_padding_position_ids(self):
+        position_ids, shuffle = cp_test.handle_prefix_reuse(
+            torch.arange(7, dtype=torch.int32), 4, 0, 2
+        )
+        self.assertEqual(shuffle.tolist(), [0, 1, 6, 7])
+        self.assertEqual(position_ids.tolist(), [4, 5, 10, 0])
+
+
 class TestGenerateQKVRestoreIndices(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
@@ -554,6 +594,88 @@ class TestComputeLocalLastHidden(unittest.TestCase):
 
     def test_multi_stream_cp4_with_padding(self):
         self._run_case(stream_lens=[10, 20, 7], cp_size=4)
+
+
+class TestV41CanonicalCPRows(unittest.TestCase):
+    def test_cp8_keeps_history_image_types_and_padding_aligned(self):
+        for count in (1, 31, 51):
+            for with_images in (True, False):
+                with self.subTest(count=count, with_images=with_images):
+                    tokens = torch.arange(count, dtype=torch.int32) + 100
+                    types = torch.full((count,), -1, dtype=torch.int32)
+                    features, feature_locs = [], []
+                    dense = torch.zeros((count, 2), dtype=torch.bfloat16)
+                    if with_images and count > 7:
+                        feature_locs = [3, 19] if count > 23 else [3]
+                        for image_index, start in enumerate(feature_locs):
+                            tokens[start : start + 4] = 129264
+                            types[start : start + 4] = torch.tensor(
+                                [0, 1, 2, 3], dtype=torch.int32
+                            )
+                            feature = torch.arange(8, dtype=torch.bfloat16).reshape(
+                                4, 2
+                            ) + 100 * (image_index + 1)
+                            features.append(feature)
+                            dense[start : start + 4] = feature
+                    valid = torch.ones(count, dtype=torch.bool)
+                    history = torch.zeros((count, 3), dtype=torch.int32)
+                    history_valid = torch.zeros((count, 3), dtype=torch.bool)
+                    for row in range(count):
+                        for slot, predecessor in enumerate(range(row - 3, row)):
+                            if predecessor >= 0:
+                                history[row, slot] = tokens[predecessor]
+                                history_valid[row, slot] = types[predecessor] == -1
+                    half = (count + 15) // 16
+                    seen = []
+                    for rank in range(8):
+                        result, local_features, local_locs, original_spans = (
+                            cp_test.handle_v41_inputs(
+                                tokens,
+                                types,
+                                valid,
+                                history,
+                                history_valid,
+                                rank,
+                                8,
+                                features,
+                                feature_locs,
+                            )
+                        )
+                        indices = list(range(rank * half, (rank + 1) * half))
+                        indices += list(range((15 - rank) * half, (16 - rank) * half))
+                        self.assertEqual(result[5].tolist(), indices)
+                        local_dense = torch.zeros(
+                            (len(indices), 2), dtype=torch.bfloat16
+                        )
+                        for feature, start in zip(local_features, local_locs.tolist()):
+                            local_dense[start : start + feature.size(0)] = feature.cpu()
+                        self.assertEqual(
+                            original_spans.tolist(),
+                            [[0, start, start + 4] for start in feature_locs],
+                        )
+                        for local, global_row in enumerate(indices):
+                            if global_row < count:
+                                seen.append(global_row)
+                                for actual, expected in zip(
+                                    result[:5],
+                                    (tokens, types, valid, history, history_valid),
+                                ):
+                                    self.assertTrue(
+                                        torch.equal(actual[local], expected[global_row])
+                                    )
+                                self.assertTrue(
+                                    torch.equal(local_dense[local], dense[global_row])
+                                )
+                            else:
+                                self.assertEqual(result[0][local].item(), 0)
+                                self.assertEqual(result[1][local].item(), -1)
+                                self.assertFalse(result[2][local].item())
+                                self.assertEqual(result[3][local].abs().sum().item(), 0)
+                                self.assertFalse(result[4][local].any().item())
+                                self.assertEqual(
+                                    local_dense[local].abs().sum().item(), 0
+                                )
+                    self.assertEqual(sorted(seen), list(range(count)))
 
 
 if __name__ == "__main__":

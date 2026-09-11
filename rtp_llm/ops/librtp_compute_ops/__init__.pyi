@@ -128,9 +128,15 @@ class KVCacheRegionName:
       CSA_STATE
       HCA_STATE
       SWA_KV
+      DSV41_GLOBAL_KV
+      DSV41_INDEX_KV
+      DSV41_PAIR_STATE
     """
 
     DEFAULT: typing.ClassVar[KVCacheRegionName]
+    DSV41_GLOBAL_KV: typing.ClassVar[KVCacheRegionName]
+    DSV41_INDEX_KV: typing.ClassVar[KVCacheRegionName]
+    DSV41_PAIR_STATE: typing.ClassVar[KVCacheRegionName]
     CSA_KV: typing.ClassVar[KVCacheRegionName]
     HCA_KV: typing.ClassVar[KVCacheRegionName]
     INDEXER_KV: typing.ClassVar[KVCacheRegionName]
@@ -275,6 +281,7 @@ class PyCaptureMetaData:
 class PyContextParallelParams:
     prefill_actual_input_lengths_cpu: torch.Tensor
     prefill_cp_chunk_lengths: torch.Tensor
+    prefill_mm_spans: torch.Tensor
     prefill_cp_padding_lengths: torch.Tensor
     prefill_qkv_padding_mask: torch.Tensor
     prefill_qkv_restore_indice: torch.Tensor
@@ -338,6 +345,26 @@ class PyModelInputs:
 
     @input_ids.setter
     def input_ids(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def multimodal_features(self) -> list[torch.Tensor] | None: ...
+    @multimodal_features.setter
+    def multimodal_features(self, arg0: list[torch.Tensor] | None) -> None: ...
+    @property
+    def mm_features_locs(self) -> torch.Tensor: ...
+    @mm_features_locs.setter
+    def mm_features_locs(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def mm_features_spans(self) -> torch.Tensor: ...
+    @mm_features_spans.setter
+    def mm_features_spans(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def text_tokens_mask(self) -> torch.Tensor: ...
+    @text_tokens_mask.setter
+    def text_tokens_mask(self, arg0: torch.Tensor) -> None: ...
+    v41_token_types: torch.Tensor
+    v41_token_valid: torch.Tensor
+    engram_history_ids: torch.Tensor
+    engram_history_valid: torch.Tensor
 
 class PyModelOutputs:
     @typing.overload

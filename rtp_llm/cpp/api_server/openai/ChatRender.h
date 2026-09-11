@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/api_server/openai/ApiDataType.h"
+#include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 
 namespace py = pybind11;
 namespace th = torch;
@@ -17,9 +18,10 @@ class RenderContext;
 
 class RenderedInputs {
 public:
-    std::vector<int>             input_ids;
-    std::vector<MultimodalInput> multimodal_inputs;
-    std::string                  rendered_prompt;
+    std::vector<int>                        input_ids;
+    std::vector<MultimodalInput>            multimodal_inputs;
+    std::shared_ptr<const V41RequestInputs> v41_inputs;
+    std::string                             rendered_prompt;
     RenderedInputs(std::vector<int> ids, std::vector<MultimodalInput> mm_inputs, std::string rendered_prompt):
         input_ids(ids), multimodal_inputs(mm_inputs), rendered_prompt(rendered_prompt) {}
 };

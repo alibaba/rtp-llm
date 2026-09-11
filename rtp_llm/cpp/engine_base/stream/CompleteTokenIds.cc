@@ -20,6 +20,8 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
     start_check_seq_length_(other.start_check_seq_length_),
     first_token_time_us_(other.first_token_time_us_),
     first_token_latency_us_(other.first_token_latency_us_) {
+    v41_inputs_       = other.v41_inputs_;
+    canonical_offset_ = other.canonical_offset_ + shift_token_num;
     if (share) {
         if (shift_token_num == 0) {
             complete_token_ids_ = other.complete_token_ids_;
@@ -42,6 +44,11 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
 
 void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num) {
     RTP_LLM_CHECK(generate_input != nullptr);
+    v41_inputs_       = generate_input->v41_inputs;
+    canonical_offset_ = 0;
+    if (v41_inputs_) {
+        v41_inputs_->validate(generate_input->input_ids);
+    }
 
     seq_length_ = generate_input->inputLength();
     RTP_LLM_CHECK_WITH_INFO(
@@ -65,6 +72,63 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
 
 int CompleteTokenIds::maxBatchSize() {
     return max_batch_size_;
+}
+
+void CompleteTokenIds::writeV41Rows(int      batch_id,
+                                    int      begin,
+                                    int      count,
+                                    int32_t* token_types,
+                                    bool*    token_valid,
+                                    int32_t* history_ids,
+                                    bool*    history_valid) {
+    RTP_LLM_CHECK_WITH_INFO(v41_inputs_ && batch_id >= 0 && batch_id < batch_size_ && begin >= 0 && count >= 0
+                                && static_cast<int64_t>(begin) + count <= seq_length_,
+                            "V4.1 input rows require complete committed canonical token history");
+    RTP_LLM_CHECK_WITH_INFO(canonical_offset_ == 0,
+                            "shifted V4.1 draft rows require an explicit unshifted canonical history seed");
+    const auto* tokens = data(batch_id);
+    const auto* kinds  = v41_inputs_->token_types.data_ptr<int32_t>();
+    const auto  typeAt = [&](int position) {
+        const int original = position + canonical_offset_;
+        return original < v41_inputs_->token_types.numel() ? kinds[original] : -1;
+    };
+    for (int row = 0; row < count; ++row) {
+        const int position = begin + row;
+        token_types[row]   = typeAt(position);
+        token_valid[row]   = true;
+        for (int slot = 0; slot < 3; ++slot) {
+            const int predecessor         = position - 3 + slot;
+            history_ids[row * 3 + slot]   = predecessor >= 0 ? tokens[predecessor] : 0;
+            history_valid[row * 3 + slot] = predecessor >= 0 && typeAt(predecessor) == -1;
+        }
+    }
+}
+
+std::vector<int32_t> CompleteTokenIds::imageCacheIdentity(int begin, int count) const {
+    RTP_LLM_CHECK_WITH_INFO(begin >= 0 && count >= 0, "cache identity range must be nonnegative");
+    std::vector<int32_t> result;
+    if (!v41_inputs_) {
+        return result;
+    }
+    for (const auto& image : v41_inputs_->images) {
+        const int64_t start = image.start - canonical_offset_;
+        const int64_t end   = start + image.types.numel();
+        if (end <= begin || start >= static_cast<int64_t>(begin) + count) {
+            continue;
+        }
+        // Domain-separate image content from ordinary canonical token words.
+        result.insert(result.end(),
+                      {-41, static_cast<int32_t>(start), static_cast<int32_t>(end), image.n_vit_h, image.n_vit_w});
+        for (const auto* digest : {&image.content_sha256, &image.processor_identity}) {
+            for (size_t offset = 0; offset < digest->size(); offset += 8) {
+                const uint32_t word = static_cast<uint32_t>(std::stoul(digest->substr(offset, 8), nullptr, 16));
+                int32_t        value;
+                std::memcpy(&value, &word, sizeof(value));
+                result.push_back(value);
+            }
+        }
+    }
+    return result;
 }
 
 int CompleteTokenIds::batchSize() {

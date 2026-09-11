@@ -345,6 +345,13 @@ cc_test(
 )
 
 cc_test(
+    name = "dsv41_cache_test",
+    srcs = ["DSV41CacheTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [":block_pool_test_helper"],
+)
+
+cc_test(
     name = "kv_cache_resource_test",
     srcs = [
         "KVCacheResourceTest.cc",

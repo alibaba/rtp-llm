@@ -103,6 +103,7 @@ class ArpcConfig:
 
 
 class AttentionConfigs:
+    dsv41_cache_layout_version: int
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int

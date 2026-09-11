@@ -71,6 +71,12 @@ const char* dsv4RegionName(KVCacheRegionName region_name) {
             return "HCA_STATE";
         case KVCacheRegionName::SWA_KV:
             return "SWA_KV";
+        case KVCacheRegionName::DSV41_GLOBAL_KV:
+            return "DSV41_GLOBAL_KV";
+        case KVCacheRegionName::DSV41_INDEX_KV:
+            return "DSV41_INDEX_KV";
+        case KVCacheRegionName::DSV41_PAIR_STATE:
+            return "DSV41_PAIR_STATE";
         case KVCacheRegionName::REGION_COUNT:
             return "REGION_COUNT";
     }
@@ -175,6 +181,8 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
         } else if (ratio == 0) {
             sets.swa_only_layers.push_back(layer_id);
         } else {
+            RTP_LLM_CHECK_WITH_INFO(
+                ratio != 1 && ratio != 2, "compression ratio %d requires explicit V4.1 cache layout version 1", ratio);
             RTP_LLM_LOG_WARNING("Unknown DSV4 compress_ratio %d at layer %zu, treating as HCA", ratio, i);
             sets.hca_layers.push_back(layer_id);
         }
@@ -221,14 +229,13 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
     // SWA_KV ring = window + MTP draft slack, sized like the HCA state ring.
     // Without the +gen_num_per_cycle slack, a decode step's later draft writes
     // wrap onto ring slots still inside earlier tokens' SWA window -> MTP garble.
-    const uint32_t swa_kv_eb = maybeAdjustSwaEntriesForCpSharding(
-        computeStateRing(/*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
-                         /*overlap=*/0,
-                         gen_num_per_cycle),
-        parallelism_config);
-    const size_t swa_kv_block_size_bytes_override =
-        maybeSwaPrefillCpByteSliceBytes(swa_kv_eb, parallelism_config);
-    const uint32_t fixed_cp_size = fixedRegionCpSize(parallelism_config);
+    const uint32_t swa_kv_eb =
+        maybeAdjustSwaEntriesForCpSharding(computeStateRing(/*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
+                                                            /*overlap=*/0,
+                                                            gen_num_per_cycle),
+                                           parallelism_config);
+    const size_t   swa_kv_block_size_bytes_override = maybeSwaPrefillCpByteSliceBytes(swa_kv_eb, parallelism_config);
+    const uint32_t fixed_cp_size                    = fixedRegionCpSize(parallelism_config);
     const uint32_t fixed_tokens_per_block =
         fixed_cp_size > 1 ? physical_tokens_per_block * fixed_cp_size : physical_tokens_per_block;
     return {
@@ -343,7 +350,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                      parallelism_config.prefill_cp_config.kv_cache_sharded,
                      parallelism_config.tp_size);
 
-    const auto sets = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
+    const auto sets  = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
     const auto pools = buildDSV4PoolDescs(
         sets, model_config, kernel_tokens_per_block, physical_tokens_per_block, parallelism_config, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);

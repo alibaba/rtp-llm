@@ -9,6 +9,26 @@ namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
 
+TEST_F(MultimodalProcessorTest, V41TextRequestClearsPreviousImageOutputs) {
+    auto processor             = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 1048576);
+    auto input                 = std::make_shared<GenerateInput>();
+    input->input_ids           = torch::tensor({7, 8, 9}, torch::kInt32);
+    auto prepared              = std::make_shared<V41RequestInputs>();
+    prepared->token_types      = torch::full({3}, -1, torch::kInt32);
+    prepared->image_mask       = torch::zeros({3}, torch::kBool);
+    input->v41_inputs          = prepared;
+    input->multimodal_inputs   = std::vector<MultimodalInput>{};
+    input->multimodal_features = std::vector<torch::Tensor>{torch::ones({4, 8}, torch::kBFloat16)};
+    input->mm_locs             = torch::tensor({1}, torch::kInt32);
+    input->mm_position_ids     = std::vector<torch::Tensor>{torch::ones({4}, torch::kInt32)};
+    EXPECT_TRUE(processor.updateMultimodalFeatures(input).ok());
+    EXPECT_TRUE(input->multimodal_features->empty());
+    EXPECT_EQ(input->mm_locs->numel(), 0);
+    EXPECT_FALSE(input->mm_position_ids.has_value());
+    EXPECT_TRUE(torch::equal(*input->text_tokens_mask, torch::ones({3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(input->input_ids, torch::tensor({7, 8, 9}, torch::kInt32)));
+}
+
 TEST_F(MultimodalProcessorTest, testSimple) {
     FakeMultimodalProcessor        processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
     std::shared_ptr<GenerateInput> input     = std::make_shared<GenerateInput>();

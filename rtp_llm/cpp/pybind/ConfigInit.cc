@@ -1507,6 +1507,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
         // DeepSeek-V4 fields
         .def_readwrite("layer_compress_ratios", &AttentionConfigs::layer_compress_ratios)
+        .def_readwrite("dsv41_cache_layout_version", &AttentionConfigs::dsv41_cache_layout_version)
         .def_readwrite("o_groups", &AttentionConfigs::o_groups)
         .def_readwrite("o_lora_rank", &AttentionConfigs::o_lora_rank)
         .def_readwrite("sliding_window", &AttentionConfigs::sliding_window)

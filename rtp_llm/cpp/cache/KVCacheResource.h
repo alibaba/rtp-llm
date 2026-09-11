@@ -11,6 +11,8 @@
 
 namespace rtp_llm {
 
+class DSV41CacheState;
+
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
 
@@ -81,6 +83,13 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
+    void setDsv41CacheState(std::shared_ptr<DSV41CacheState> state) {
+        dsv41_cache_state_ = std::move(state);
+    }
+    const std::shared_ptr<DSV41CacheState>& dsv41CacheState() const {
+        return dsv41_cache_state_;
+    }
+
     void initGroups(int                                  group_num,
                     int                                  layer_num,
                     const std::vector<int>&              layer_to_group_id          = {},
@@ -157,15 +166,16 @@ public:
     std::string debugString() const;
 
 private:
+    std::shared_ptr<DSV41CacheState> dsv41_cache_state_;
     // layer_id -> block_indices
     LayerBlockIds layer_block_ids;
     // layer_id -> region_name -> block_indices
     LayerAttnBlockIds layer_region_block_ids;
     // group_id -> block_indices
-    GroupBlockIds group_block_ids;
-    CacheKeysType cache_keys;
+    GroupBlockIds         group_block_ids;
+    CacheKeysType         cache_keys;
     BlockDependenciesType block_dependencies;
-    bool cache_keys_are_cp_canonical_{false};
+    bool                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

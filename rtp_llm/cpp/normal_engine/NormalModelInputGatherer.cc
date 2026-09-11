@@ -36,6 +36,7 @@ struct GatherModelInputContext {
     int*         prefix_lengths_host;
     int*         merged_text_mask;
     int*         mm_features_locs;
+    int64_t*     mm_features_spans;
     int          token_idx;
     int          mm_feature_index;
 };
@@ -63,6 +64,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     ctx.prefix_lengths_host  = nullptr;
     ctx.merged_text_mask     = ctx.has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
     ctx.mm_features_locs     = ctx.has_multimodal_input ? model_input.mm_features_locs.data_ptr<int32_t>() : nullptr;
+    ctx.mm_features_spans    = ctx.has_multimodal_input ? model_input.mm_features_spans.data_ptr<int64_t>() : nullptr;
 
     size_t kv_cache_mapping_offset = 0;
     if (mode == GatherContextMode::DECODE) {
@@ -125,23 +127,75 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     if (!ctx.has_multimodal_input) {
         return;
     }
+    const auto& input = stream->generateInput();
+    if (input->v41_inputs) {
+        const auto&   prepared = *input->v41_inputs;
+        const int64_t begin    = stream->prefixLength();
+        const int64_t end      = begin + stream->contextLength();
+        prepared.validateChunk(begin, end);
+        RTP_LLM_CHECK_WITH_INFO(input->multimodal_features.has_value()
+                                    && input->multimodal_features->size() == prepared.images.size(),
+                                "V4.1 prefill requires one complete prepared feature per image");
+        const auto* mask = prepared.image_mask.data_ptr<bool>();
+        for (int64_t row = begin; row < end; ++row) {
+            ctx.merged_text_mask[ctx.token_idx + row - begin] = !mask[row];
+        }
+        for (size_t index = 0; index < prepared.images.size(); ++index) {
+            const auto& image = prepared.images[index];
+            if (image.start < begin || image.start >= end) {
+                continue;
+            }
+            auto feature = input->multimodal_features.value()[index];
+            RTP_LLM_CHECK_WITH_INFO(feature.dim() == 2 && feature.size(0) == image.types.numel(),
+                                    "V4.1 gathered image feature lost canonical rows");
+            if (!feature.is_cuda()) {
+                host_holder.hold_host(feature);
+                feature = feature.to(torch::kCUDA, /*non_blocking=*/true);
+            }
+            gathered_mm_features.push_back(std::move(feature));
+            ctx.mm_features_locs[ctx.mm_feature_index]          = ctx.token_idx + image.start - begin;
+            ctx.mm_features_spans[ctx.mm_feature_index * 3]     = ctx.batch_idx - ctx.total_decode_batch_size;
+            ctx.mm_features_spans[ctx.mm_feature_index * 3 + 1] = image.start;
+            ctx.mm_features_spans[ctx.mm_feature_index * 3 + 2] = image.start + image.types.numel();
+            ++ctx.mm_feature_index;
+        }
+        return;
+    }
     std::vector<torch::Tensor> mm_features = stream->multimodalFeatures();
     torch::Tensor              mm_locs     = stream->multimodalLocations();
     if (!mm_locs.defined()) {
         return;
     }
-    auto* mm_locs_data = mm_locs.data_ptr<int>();
-    for (int i = 0; i < mm_locs.numel(); ++i) {
-        ctx.mm_features_locs[ctx.mm_feature_index] = mm_locs_data[i] + ctx.token_idx - stream->reuseLength();
-        ctx.mm_feature_index++;
-    }
-    for (auto& mm_feature : mm_features) {
-        if (!mm_feature.is_cuda()) {
-            host_holder.hold_host(mm_feature);
-            gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA, /*non_blocking=*/true));
-        } else {
-            gathered_mm_features.emplace_back(mm_feature);
+    RTP_LLM_CHECK_WITH_INFO(mm_locs.numel() == static_cast<int64_t>(mm_features.size()),
+                            "mm_locs count %ld != mm_features count %zu for stream %ld",
+                            mm_locs.numel(),
+                            mm_features.size(),
+                            stream->streamId());
+    auto*     mm_locs_data = mm_locs.data_ptr<int32_t>();
+    const int reuse_length = stream->reuseLength();
+    for (int i = 0; i < static_cast<int>(mm_features.size()); ++i) {
+        const auto&   mm_feature  = mm_features[i];
+        const int64_t feature_len = mm_feature.size(0);
+        const int64_t feature_loc = mm_locs_data[i];
+        const int64_t feature_end = feature_loc + feature_len;
+        if (reuse_length >= feature_end) {
+            continue;
         }
+
+        const int64_t token_offset    = std::max<int64_t>(reuse_length - feature_loc, 0);
+        auto          current_feature = mm_feature.slice(0, token_offset, feature_len).contiguous();
+        if (!current_feature.is_cuda()) {
+            host_holder.hold_host(current_feature);
+            gathered_mm_features.emplace_back(current_feature.to(torch::kCUDA, /*non_blocking=*/true));
+        } else {
+            gathered_mm_features.emplace_back(std::move(current_feature));
+        }
+        ctx.mm_features_locs[ctx.mm_feature_index] =
+            ctx.token_idx + static_cast<int>(std::max<int64_t>(feature_loc - reuse_length, 0));
+        ctx.mm_features_spans[ctx.mm_feature_index * 3]     = ctx.batch_idx - ctx.total_decode_batch_size;
+        ctx.mm_features_spans[ctx.mm_feature_index * 3 + 1] = feature_loc;
+        ctx.mm_features_spans[ctx.mm_feature_index * 3 + 2] = feature_end;
+        ++ctx.mm_feature_index;
     }
     auto text_token_mask = stream->textTokensMask();
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
@@ -240,6 +294,20 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     static const auto cuda_i32    = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
 
     GptModelInputs model_input;
+    const auto     is_v41 = [](const auto& stream) { return stream->generateInput()->v41_inputs != nullptr; };
+    const bool     has_v41 =
+        std::any_of(stream_groups.contextStreams().begin(), stream_groups.contextStreams().end(), is_v41)
+        || std::any_of(stream_groups.decodeStreams().begin(), stream_groups.decodeStreams().end(), is_v41);
+    if (has_v41) {
+        RTP_LLM_CHECK_WITH_INFO(
+            std::all_of(stream_groups.contextStreams().begin(), stream_groups.contextStreams().end(), is_v41)
+                && std::all_of(stream_groups.decodeStreams().begin(), stream_groups.decodeStreams().end(), is_v41),
+            "V4.1 batches require canonical metadata on every request");
+        model_input.v41_token_types      = torch::full({static_cast<int64_t>(current_tokens_size)}, -1, pinned_i32);
+        model_input.v41_token_valid      = torch::zeros({static_cast<int64_t>(current_tokens_size)}, pinned_bool);
+        model_input.engram_history_ids   = torch::zeros({static_cast<int64_t>(current_tokens_size), 3}, pinned_i32);
+        model_input.engram_history_valid = torch::zeros({static_cast<int64_t>(current_tokens_size), 3}, pinned_bool);
+    }
     model_input.combo_tokens          = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
@@ -269,8 +337,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
             torch::empty({(int64_t)(current_tokens_size * config_.position_id_len_factor)}, pinned_i32);
     }
     if (has_multimodal_input) {
-        model_input.text_tokens_mask = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
-        model_input.mm_features_locs = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
+        model_input.text_tokens_mask  = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+        model_input.mm_features_locs  = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
+        model_input.mm_features_spans = torch::empty({(int64_t)multimodal_features_len, 3}, pinned_i64);
     }
 
     model_input.kv_block_stride_bytes     = config_.block_stride_bytes;
@@ -342,6 +411,19 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.trace_ids.push_back(stream->traceId());
+            if (model_input.v41_token_types.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    !stream->hasPendingAsyncBookkeeping(),
+                    "V4.1 canonical history requires committed token bookkeeping before decode gather");
+                stream->completeTokenIdsPtr()->writeV41Rows(
+                    i,
+                    stream->seqLength() - 1,
+                    1,
+                    model_input.v41_token_types.data_ptr<int32_t>() + ctx.batch_idx,
+                    model_input.v41_token_valid.data_ptr<bool>() + ctx.batch_idx,
+                    model_input.engram_history_ids.data_ptr<int32_t>() + ctx.batch_idx * 3,
+                    model_input.engram_history_valid.data_ptr<bool>() + ctx.batch_idx * 3);
+            }
             if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
                 static std::atomic<int> debug_log_budget{200};
@@ -422,6 +504,18 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             model_input.trace_ids.push_back(stream->traceId());
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
+            if (model_input.v41_token_types.defined()) {
+                stream->generateInput()->v41_inputs->validateChunk(stream->prefixLength(),
+                                                                   stream->prefixLength() + input_tokens.size());
+                stream->completeTokenIdsPtr()->writeV41Rows(
+                    i,
+                    stream->prefixLength(),
+                    input_tokens.size(),
+                    model_input.v41_token_types.data_ptr<int32_t>() + ctx.token_idx,
+                    model_input.v41_token_valid.data_ptr<bool>() + ctx.token_idx,
+                    model_input.engram_history_ids.data_ptr<int32_t>() + ctx.token_idx * 3,
+                    model_input.engram_history_valid.data_ptr<bool>() + ctx.token_idx * 3);
+            }
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
 
             for (int index = 0; index < (int)input_tokens.size(); ++index) {
@@ -476,10 +570,15 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
+    if (ctx.has_multimodal_input && model_input.mm_features_locs.defined()
+        && ctx.mm_feature_index < model_input.mm_features_locs.numel()) {
+        model_input.mm_features_locs  = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
+        model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
+    }
     // Keep the CPU source alongside the CUDA publication. CP Python metadata
     // consumes these scalar prefixes without synchronizing a device tensor.
     model_input.prefix_lengths_host_for_log = prefix_lengths_host;
-    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
+    model_input.prefix_lengths              = publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
 }
 

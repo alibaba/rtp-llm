@@ -82,6 +82,7 @@ enum GptModelInputIndex : size_t {
     comboPositionIds,
     textTokensMask,
     mmFeaturesLocs,
+    mmFeaturesSpans,
     mmFeaturesNum,   // number of mm features
     mmFeaturesSize,  // hidden_size of mm features
     mmFeaturesDtype,
@@ -98,6 +99,7 @@ enum GptModelInputIndex : size_t {
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
+    v41InputsPresent,
     gptModelInputLength,
 };
 

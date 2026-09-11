@@ -24,6 +24,11 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
             const int pos       = index * seq_size_per_block;
             const int block_len = std::min(seq_size_per_block, seq_len - pos);
             rolling_hash        = rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
+            auto image_identity = complete_token_ids->imageCacheIdentity(pos, block_len);
+            if (!image_identity.empty()) {
+                rolling_hash = rtp_llm::hashInt64Array(
+                    rolling_hash, image_identity.data(), image_identity.data() + image_identity.size());
+            }
             batch_kv_cache_resource->pushBackCacheKey(i, rolling_hash);
         }
     }
@@ -58,6 +63,11 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         for (int index = start_idx; index < total_blocks; ++index) {
             const int pos = index * seq_size_per_block;
             hash          = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
+            auto image_identity = complete_token_ids->imageCacheIdentity(pos, seq_size_per_block);
+            if (!image_identity.empty()) {
+                hash =
+                    rtp_llm::hashInt64Array(hash, image_identity.data(), image_identity.data() + image_identity.size());
+            }
             batch_kv_cache_resource->pushBackCacheKey(i, hash);
         }
     }

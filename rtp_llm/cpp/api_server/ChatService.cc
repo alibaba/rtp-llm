@@ -26,6 +26,12 @@ std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t           
     input->input_ids = torch::from_blob(const_cast<int*>(vec.data()), {(int64_t)vec.size()}, torch::kInt32).clone();
 
     input->multimodal_inputs = std::move(rendered_input.multimodal_inputs);
+    input->v41_inputs        = rendered_input.v41_inputs;
+    if (input->v41_inputs) {
+        input->v41_inputs->validate(input->input_ids);
+        RTP_LLM_CHECK_WITH_INFO(input->input_ids.numel() + input->generate_config->max_new_tokens <= 1048576,
+                                "V4.1 input plus output budget exceeds the model context limit");
+    }
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);
         if (!mm_res.ok()) {

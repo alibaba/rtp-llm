@@ -4,6 +4,7 @@ cc_library(
     name = "multimodal_types",
     hdrs = [
         "MultimodalTypes.h",
+        "V41Input.h",
     ],
     deps = [
         "//:rtp_compute_ops",
@@ -15,7 +16,7 @@ cc_library(
     name = "multimodal_processor",
     hdrs = glob([
         "*.h",
-    ], exclude = ["MultimodalTypes.h"]),
+    ], exclude = ["MultimodalTypes.h", "V41Input.h"]),
     srcs = glob([
         "*.cc",
     ]),

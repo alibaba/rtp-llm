@@ -57,7 +57,7 @@ struct KVCache {
 
     // Flat version of kv_cache_base_by_layer_region for pybind11 compatibility.
     // Layout: [layer_0_type_0, layer_0_type_1, ..., layer_0_type_7, layer_1_type_0, ...]
-    // Size = layer_num * REGION_COUNT (8). Use region_name_count=8 to index.
+    // Size = layer_num * REGION_COUNT. Use the active region count to index.
     std::vector<torch::Tensor> kv_cache_base_by_layer_region_flat;
 
     LayerKVCache getLayerCache(int idx) {
@@ -283,6 +283,7 @@ struct PyContextParallelParams {
     torch::Tensor prefill_qkv_padding_mask;
     torch::Tensor prefill_actual_input_lengths_cpu;
     torch::Tensor prefill_prefix_lengths_cpu;
+    torch::Tensor prefill_mm_spans;
 };
 
 struct PyAttentionInputs {
@@ -344,10 +345,18 @@ struct BertEmbeddingInputs {
 };
 
 struct PyModelInputs {
-    torch::Tensor       input_ids;
-    torch::Tensor       input_hiddens;
-    PyAttentionInputs   attention_inputs;
-    BertEmbeddingInputs bert_embedding_inputs;
+    torch::Tensor                             input_ids;
+    torch::Tensor                             input_hiddens;
+    PyAttentionInputs                         attention_inputs;
+    BertEmbeddingInputs                       bert_embedding_inputs;
+    std::optional<std::vector<torch::Tensor>> multimodal_features;
+    torch::Tensor                             text_tokens_mask;
+    torch::Tensor                             mm_features_locs;
+    torch::Tensor                             mm_features_spans;
+    torch::Tensor                             v41_token_types;
+    torch::Tensor                             v41_token_valid;
+    torch::Tensor                             engram_history_ids;
+    torch::Tensor                             engram_history_valid;
 
     PyModelInputs() = default;
     PyModelInputs(torch::Tensor       input_ids,

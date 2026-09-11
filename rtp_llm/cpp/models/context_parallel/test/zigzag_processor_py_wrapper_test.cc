@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include <pybind11/pybind11.h>
@@ -83,6 +84,109 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                            cp_params.prefill_shuffle_indices.cpu().clone());
 }
 
+std::tuple<torch::Tensor, torch::Tensor, std::vector<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
+zigzagHandleMultimodalInputs(const torch::Tensor& total_input_tokens,
+                             const torch::Tensor& text_tokens_mask,
+                             const torch::Tensor& feature,
+                             int                  feature_loc,
+                             int                  cp_rank,
+                             int                  cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens        = total_input_tokens.contiguous().clone();
+    model_input.input_lengths       = torch::tensor({total_input_tokens.numel()}, torch::kInt32);
+    model_input.sequence_lengths    = torch::empty({0}, torch::kInt32);
+    model_input.text_tokens_mask    = text_tokens_mask.contiguous().clone();
+    model_input.multimodal_features = std::vector<torch::Tensor>{feature.contiguous().clone()};
+    model_input.mm_features_locs    = torch::tensor({feature_loc}, torch::kInt32);
+    model_input.mm_features_spans =
+        torch::tensor({int64_t{0}, static_cast<int64_t>(feature_loc), feature_loc + feature.size(0)}, torch::kInt64)
+            .reshape({1, 3});
+    model_input.prefix_lengths = torch::tensor({0}, torch::kInt32).to(torch::kCUDA);
+
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(model_input, cp_params);
+
+    return std::make_tuple(model_input.combo_tokens.cpu().clone(),
+                           model_input.text_tokens_mask.cpu().clone(),
+                           model_input.multimodal_features.value(),
+                           model_input.mm_features_locs.cpu().clone(),
+                           cp_params.prefill_mm_spans.cpu().clone(),
+                           cp_params.prefill_prefix_lengths_cpu.clone());
+}
+
+std::tuple<torch::Tensor, torch::Tensor>
+zigzagHandlePrefixReuse(const torch::Tensor& total_input_tokens, int prefix_length, int cp_rank, int cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens     = total_input_tokens.contiguous().clone();
+    model_input.input_lengths    = torch::tensor({total_input_tokens.numel()}, torch::kInt32);
+    model_input.sequence_lengths = torch::empty({0}, torch::kInt32);
+    model_input.prefix_lengths   = torch::tensor({prefix_length}, torch::kInt32).to(torch::kCUDA);
+
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(model_input, cp_params);
+    return {model_input.combo_position_ids.cpu().clone(), cp_params.prefill_shuffle_indices.cpu().clone()};
+}
+
+py::tuple zigzagHandleV41Inputs(const torch::Tensor&              tokens,
+                                const torch::Tensor&              types,
+                                const torch::Tensor&              valid,
+                                const torch::Tensor&              history,
+                                const torch::Tensor&              history_valid,
+                                int                               cp_rank,
+                                int                               cp_size,
+                                const std::vector<torch::Tensor>& features,
+                                const std::vector<int32_t>&       feature_locs) {
+    ParallelismConfig config;
+    config.tp_rank = cp_rank;
+    config.tp_size = cp_size;
+    ZigZagProcessor processor(config);
+    GptModelInputs  input;
+    input.combo_tokens         = tokens.contiguous().clone();
+    input.input_lengths        = torch::tensor({tokens.numel()}, torch::kInt32);
+    input.sequence_lengths     = torch::empty({0}, torch::kInt32);
+    input.v41_token_types      = types.contiguous().clone();
+    input.v41_token_valid      = valid.contiguous().clone();
+    input.engram_history_ids   = history.contiguous().clone();
+    input.engram_history_valid = history_valid.contiguous().clone();
+    RTP_LLM_CHECK(features.size() == feature_locs.size());
+    if (!features.empty()) {
+        input.multimodal_features = features;
+        input.mm_features_locs    = torch::tensor(feature_locs, torch::kInt32);
+        input.mm_features_spans   = torch::empty({static_cast<int64_t>(features.size()), 3}, torch::kInt64);
+        auto* spans               = input.mm_features_spans.data_ptr<int64_t>();
+        for (size_t index = 0; index < features.size(); ++index) {
+            spans[index * 3]     = 0;
+            spans[index * 3 + 1] = feature_locs[index];
+            spans[index * 3 + 2] = feature_locs[index] + features[index].size(0);
+        }
+        input.text_tokens_mask = types.eq(-1).to(torch::kInt32);
+    }
+    torch_ext::PyContextParallelParams params;
+    processor.handleInputs(input, params);
+    std::vector<torch::Tensor> metadata{input.combo_tokens.cpu().clone(),
+                                        input.v41_token_types.cpu().clone(),
+                                        input.v41_token_valid.cpu().clone(),
+                                        input.engram_history_ids.cpu().clone(),
+                                        input.engram_history_valid.cpu().clone(),
+                                        params.prefill_shuffle_indices.cpu().clone()};
+    return py::make_tuple(metadata,
+                          input.multimodal_features.value_or(std::vector<torch::Tensor>{}),
+                          input.mm_features_locs.defined() ? input.mm_features_locs.cpu().clone() :
+                                                             torch::empty({0}, torch::kInt32),
+                          params.prefill_mm_spans.defined() ? params.prefill_mm_spans.cpu().clone() :
+                                                              torch::empty({0, 3}, torch::kInt64));
+}
+
 // Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
 // to the gathered last-token hidden (no comm). The Python test sums these across
 // ranks to simulate the all-reduce in handleOutputsLastHidden.
@@ -142,6 +246,36 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_size"),
           py::arg("split_hidden_states") = true,
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
+
+    m.def("handle_multimodal_inputs",
+          &zigzagHandleMultimodalInputs,
+          py::arg("total_input_tokens"),
+          py::arg("text_tokens_mask"),
+          py::arg("feature"),
+          py::arg("feature_loc"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "Run CP handleInputs and return remapped multimodal inputs");
+
+    m.def("handle_prefix_reuse",
+          &zigzagHandlePrefixReuse,
+          py::arg("total_input_tokens"),
+          py::arg("prefix_length"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "Run CP handleInputs and return cache-aware absolute position ids");
+
+    m.def("handle_v41_inputs",
+          &zigzagHandleV41Inputs,
+          py::arg("tokens"),
+          py::arg("types"),
+          py::arg("valid"),
+          py::arg("history"),
+          py::arg("history_valid"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          py::arg("features")     = std::vector<torch::Tensor>{},
+          py::arg("feature_locs") = std::vector<int32_t>{});
 
     m.def("compute_local_last_hidden",
           &zigzagComputeLocalLastHidden,

@@ -33,12 +33,32 @@ struct CacheConfig {
     std::vector<size_t>            group_kv_scale_stride_bytes;
     std::vector<size_t>            group_block_size_bytes;
     std::vector<uint32_t>          group_block_nums;
-    uint32_t                       dsv4_fixed_pool_blocks                  = 0;
-    uint32_t                       dsv4_hca_state_pool_blocks              = 0;
+    uint32_t                       dsv4_fixed_pool_blocks                   = 0;
+    uint32_t                       dsv4_hca_state_pool_blocks               = 0;
     bool                           use_independent_block_pools              = false;
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
     bool                           disable_decode_first_malloc_device_reuse = false;
+    int                            dsv41_cache_layout_version               = 0;
+    bool                           dsv41_draft_cache                        = false;
+    // Physical owner IDs are distinct from reader layer IDs and pool group IDs.
+    std::vector<std::vector<int>> layer_region_to_owner;
+    std::vector<int>              dsv41_topk_owner;
+
+    int physicalOwner(int layer, KVCacheRegionName region) const {
+        if (dsv41_cache_layout_version == 0 || region == KVCacheRegionName::DEFAULT) {
+            return layer;
+        }
+        const auto rid = static_cast<size_t>(region);
+        RTP_LLM_CHECK_WITH_INFO(layer >= 0 && static_cast<size_t>(layer) < layer_region_to_owner.size()
+                                    && rid < layer_region_to_owner[static_cast<size_t>(layer)].size(),
+                                "V4.1 owner mapping is missing for layer=%d region=%zu",
+                                layer,
+                                rid);
+        const int owner = layer_region_to_owner[static_cast<size_t>(layer)][rid];
+        RTP_LLM_CHECK_WITH_INFO(owner >= 0, "V4.1 layer=%d has no owner for region=%zu", layer, rid);
+        return owner;
+    }
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -115,11 +135,11 @@ struct CacheConfig {
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
             const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
             const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
-            const bool is_dsv4_fixed_region       = isDsv4FixedRegion(region);
-            const bool use_explicit_hca_blocks    = region == KVCacheRegionName::HCA_STATE
-                                                 && dsv4_hca_state_pool_blocks > 0;
-            const bool use_explicit_fixed_blocks  = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
-            const bool use_explicit_dsv4_blocks   = use_explicit_hca_blocks || use_explicit_fixed_blocks;
+            const bool is_dsv4_fixed_region = isDsv4FixedRegion(region);
+            const bool use_explicit_hca_blocks =
+                region == KVCacheRegionName::HCA_STATE && dsv4_hca_state_pool_blocks > 0;
+            const bool use_explicit_fixed_blocks = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
+            const bool use_explicit_dsv4_blocks  = use_explicit_hca_blocks || use_explicit_fixed_blocks;
             uint32_t   rule_blocks;
             if (use_explicit_hca_blocks) {
                 rule_blocks = dsv4_hca_state_pool_blocks;
@@ -194,6 +214,8 @@ struct CacheConfig {
         OUTPUT_FIELD(dsv4_hca_state_pool_blocks);
         OUTPUT_FIELD(use_independent_block_pools);
         OUTPUT_FIELD(use_typed_cache_regions);
+        OUTPUT_FIELD(dsv41_cache_layout_version);
+        OUTPUT_FIELD(dsv41_draft_cache);
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);
         os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";

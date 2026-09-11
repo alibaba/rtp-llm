@@ -59,6 +59,12 @@ const char* cacheRegionName(KVCacheRegionName region_name) {
             return "HCA_STATE";
         case KVCacheRegionName::SWA_KV:
             return "SWA_KV";
+        case KVCacheRegionName::DSV41_GLOBAL_KV:
+            return "DSV41_GLOBAL_KV";
+        case KVCacheRegionName::DSV41_INDEX_KV:
+            return "DSV41_INDEX_KV";
+        case KVCacheRegionName::DSV41_PAIR_STATE:
+            return "DSV41_PAIR_STATE";
         case KVCacheRegionName::REGION_COUNT:
             return "REGION_COUNT";
     }
@@ -100,14 +106,14 @@ bool HybridPoolKVCacheAllocator::doInit() {
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int gid = 0; gid < group_nums; ++gid) {
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
-        if (gid >= 0 && gid <= 2) {
+        if (config_.dsv41_cache_layout_version == 0 && gid >= 0 && gid <= 2) {
             const size_t paged_idx                  = static_cast<size_t>(gid);
             has_dsv4_paged_pool                     = true;
             dsv4_paged_pool_group_bytes[paged_idx]  = pool_config.total_size_bytes;
             dsv4_paged_pool_group_blocks[paged_idx] = pool_config.block_num;
             dsv4_paged_pool_total_bytes += pool_config.total_size_bytes;
         }
-        if (static_cast<size_t>(gid) < config_.group_region_names.size()
+        if (config_.dsv41_cache_layout_version == 0 && static_cast<size_t>(gid) < config_.group_region_names.size()
             && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)])) {
             has_dsv4_fixed_pool = true;
             dsv4_fixed_pool_total_bytes += pool_config.total_size_bytes;
@@ -303,8 +309,8 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
         const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
         const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
         const auto region_name   = static_cast<size_t>(gid < static_cast<int>(config_.group_region_names.size()) ?
-                                                         config_.group_region_names[static_cast<size_t>(gid)] :
-                                                         KVCacheRegionName::DEFAULT);
+                                                           config_.group_region_names[static_cast<size_t>(gid)] :
+                                                           KVCacheRegionName::DEFAULT);
         RTP_LLM_CHECK_WITH_INFO(
             region_name < region_name_count, "group %d has invalid region id %zu", gid, region_name);
         for (const auto& [layer_id, tensor] : layer_tensors) {
@@ -322,6 +328,19 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
                 layer_id,
                 layout.layers_to_scale_buffer_ptrs_by_attn.size());
             layout.layers_to_scale_buffer_ptrs_by_attn[static_cast<size_t>(layer_id)][region_name] = tensor;
+        }
+    }
+    if (config_.dsv41_cache_layout_version != 0) {
+        for (size_t layer = 0; layer < config_.layer_all_num; ++layer) {
+            for (size_t region = 0; region < config_.layer_region_to_owner[layer].size(); ++region) {
+                const int owner = config_.layer_region_to_owner[layer][region];
+                if (owner >= 0 && static_cast<size_t>(owner) != layer) {
+                    layout.layers_to_kv_buffer_ptrs_by_attn[layer][region] =
+                        layout.layers_to_kv_buffer_ptrs_by_attn[static_cast<size_t>(owner)][region];
+                    layout.layers_to_scale_buffer_ptrs_by_attn[layer][region] =
+                        layout.layers_to_scale_buffer_ptrs_by_attn[static_cast<size_t>(owner)][region];
+                }
+            }
         }
     }
     return layout;
@@ -349,20 +368,22 @@ std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(int laye
 BlockAddrInfo
 HybridPoolKVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const {
     const int gid = groupIdForLayerRegion(layer_id, region_name);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
+    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(config_.physicalOwner(layer_id, region_name),
+                                                                          block_id);
 }
 
 std::vector<BlockInfo>
 HybridPoolKVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const {
     const int gid = groupIdForLayerRegion(layer_id, region_name);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
+    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
+        config_.physicalOwner(layer_id, region_name), block_id);
 }
 
 std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(
     int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const {
     const int gid = groupIdForLayerRegion(layer_id, region_name);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
-        layer_id, block_id, partition_count, partition_id);
+        config_.physicalOwner(layer_id, region_name), block_id, partition_count, partition_id);
 }
 
 void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPair* end_ptr) {

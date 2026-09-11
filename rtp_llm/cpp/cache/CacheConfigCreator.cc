@@ -4,6 +4,8 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/DSV41CacheConfigHelper.h"
+#include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
@@ -15,7 +17,8 @@ namespace rtp_llm {
 namespace {
 
 bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
-    return !model_config.attn_config.layer_compress_ratios.empty();
+    return model_config.attn_config.dsv41_cache_layout_version != 0
+           || !model_config.attn_config.layer_compress_ratios.empty();
 }
 
 bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
@@ -40,7 +43,7 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
             if (!isDsv4FixedRegion(region)) {
                 continue;
             }
-            const bool explicit_hca = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
+            const bool explicit_hca   = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
             const bool explicit_fixed = config.dsv4_fixed_pool_blocks > 0;
             if (!explicit_hca && !explicit_fixed) {
                 bytes += config.group_block_size_bytes[gid];
@@ -154,8 +157,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const int  joint_step       = std::max(1, config.linear_step);
-        block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
+        const int joint_step = std::max(1, config.linear_step);
+        block_num            = paged_budget / effectivePagedBlockBytes(config, joint_step);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
@@ -185,6 +188,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
+    const int score_version = score_model_config.attn_config.dsv41_cache_layout_version;
+    const int draft_version = propose_model_config.attn_config.dsv41_cache_layout_version;
+    if (score_version != 0 || draft_version != 0) {
+        RTP_LLM_CHECK_WITH_INFO(score_version == 1 && draft_version == 1 && is_mtp && !is_eagle
+                                    && sp_config.type == SP_TYPE_DSPARK && sp_config.gen_num_per_cycle == 5,
+                                "V4.1 target/draft cache integration requires matched version1 DSpark gamma5");
+    }
     CacheConfig score_config = CacheConfigCreator::createBasicConfig(
         score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle);
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
@@ -424,6 +434,20 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         config.mtp_sub_configs.push_back(sub_cfg);
     }
 
+    DSV41CacheConfigHelper::populateOwnerMappings(config);
+    if (config.dsv41_cache_layout_version != 0) {
+        config.swa_block_size_bytes   = score_config.swa_block_size_bytes + propose_config.swa_block_size_bytes;
+        config.state_block_size_bytes = score_config.state_block_size_bytes + propose_config.state_block_size_bytes;
+        config.group_layer_num        = 0;
+        for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+            auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config.cache_specs[gid]);
+            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "V4.1 merged cache contains an incompatible spec");
+            auto merged             = std::make_shared<DSV41KVCacheSpec>(*spec);
+            merged->layer_num       = config.global_layer_ids[gid].size();
+            config.group_layer_num  = std::max(config.group_layer_num, static_cast<int>(merged->layer_num));
+            config.cache_specs[gid] = std::move(merged);
+        }
+    }
     config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
     config.fixed_pool_reserve_bytes = fixed_reserve;
 

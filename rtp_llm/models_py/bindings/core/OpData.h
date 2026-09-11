@@ -64,8 +64,13 @@ struct GptModelInputs {
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
-    torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
-    torch::Tensor mm_features_locs;  // features index
+    torch::Tensor text_tokens_mask;      // text part in multimodal input tokens [cumulated_seq_len]
+    torch::Tensor mm_features_locs;      // features index
+    torch::Tensor mm_features_spans;     // [features, 3]: request index, original start, original end (exclusive)
+    torch::Tensor v41_token_types;       // int32 [tokens], text=-1, image=0..3.
+    torch::Tensor v41_token_valid;       // bool [tokens], excludes CP/graph padding.
+    torch::Tensor engram_history_ids;    // int32 [tokens, 3], canonical predecessors before CP remap.
+    torch::Tensor engram_history_valid;  // bool [tokens, 3], excludes image spans and missing predecessors.
 
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
