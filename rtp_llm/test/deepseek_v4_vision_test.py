@@ -72,6 +72,14 @@ class DeepSeekV4VisionTest(TestCase):
             Image.new("RGB", (12, 8), (220, 90, 30)),
             Image.new("RGB", (8, 8), (15, 160, 70)),
         ]
+        for image in images:
+            image.putdata(
+                [
+                    (x * 31 % 256, y * 37 % 256, (x + y) * 17 % 256)
+                    for y in range(image.height)
+                    for x in range(image.width)
+                ]
+            )
         prepared = [
             PreparedImage(
                 *preprocess_image(image, encoder.mm_related_params.config), phase
