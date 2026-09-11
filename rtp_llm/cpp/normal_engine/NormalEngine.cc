@@ -290,20 +290,25 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
-    // Snapshot hybrid-cache group info from a basic cache_config before
-    // constructing the warmup NormalExecutor — see decodeWarmUp comment.
-    // Without this, CudaGraphRunner inside the warmup executor sees
-    // kv_cache_group_num_=0 and skips per-group block_table setup.
-    {
-        const int cache_gen_num_per_cycle =
-            sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-        auto cfg = CacheConfigCreator::createBasicConfig(
-            model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
-        kv_cache_group_num_      = cfg.groupNums();
-        kv_cache_layer_to_group_ = cfg.layer_to_group_id;
-    }
-    executor_.reset(new NormalExecutor(
-        params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
+    // Graph/model initialization and input gathering need page geometry as
+    // well as group mappings before the real cache memory is allocated.
+    const int cache_gen_num_per_cycle =
+        sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
+    const auto cache_config = CacheConfigCreator::createBasicConfig(
+        model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+    kv_cache_group_num_      = cache_config.groupNums();
+    kv_cache_layer_to_group_ = cache_config.layer_to_group_id;
+    executor_.reset(new NormalExecutor(params,
+                                       nullptr,
+                                       true,
+                                       false,
+                                       0,
+                                       mla_ops_type_,
+                                       kv_cache_group_num_,
+                                       kv_cache_layer_to_group_,
+                                       nullptr,
+                                       nullptr,
+                                       &cache_config));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);

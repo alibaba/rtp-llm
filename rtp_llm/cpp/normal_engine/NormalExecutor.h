@@ -24,16 +24,18 @@ struct GptModelInitParams;
 
 class NormalExecutor: public Executor {
 public:
+    // prefill_warmup_cache_config is borrowed only during construction.
     explicit NormalExecutor(const EngineInitParams&                params,
                             const std::shared_ptr<KVCacheManager>& cache_manager,
-                            bool                                   warm_up                 = false,
-                            bool                                   is_propose              = false,
-                            int                                    propose_model_index     = 0,
-                            MlaOpsType                             mla_ops_type            = MlaOpsType::AUTO,
-                            int32_t                                kv_cache_group_num      = 1,
-                            const std::vector<int32_t>&            kv_cache_layer_to_group = {},
-                            std::function<void()>                  profile_step_start      = nullptr,
-                            std::function<void()>                  profile_step_finish     = nullptr);
+                            bool                                   warm_up                     = false,
+                            bool                                   is_propose                  = false,
+                            int                                    propose_model_index         = 0,
+                            MlaOpsType                             mla_ops_type                = MlaOpsType::AUTO,
+                            int32_t                                kv_cache_group_num          = 1,
+                            const std::vector<int32_t>&            kv_cache_layer_to_group     = {},
+                            std::function<void()>                  profile_step_start          = nullptr,
+                            std::function<void()>                  profile_step_finish         = nullptr,
+                            const CacheConfig*                     prefill_warmup_cache_config = nullptr);
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&                        stream_groups,

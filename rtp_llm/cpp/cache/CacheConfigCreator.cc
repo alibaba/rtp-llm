@@ -87,14 +87,35 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
+    CacheConfig config;
     if (shouldUseHybridPoolLayout(model_config)) {
-        return HybridPoolConfigCreator::createConfig(
+        config = HybridPoolConfigCreator::createConfig(
             model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
-        return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
+        config = HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
     } else {
-        return SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp);
+        config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp);
     }
+
+    // Warmup needs the same page geometry as the allocated cache, before its
+    // memory budget and block count are known. Only typed creators set an
+    // explicit kernel size; ordinary creators retain CacheConfig's default 1.
+    if (kv_cache_config.kernel_seq_size_per_block > 0) {
+        const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
+        if (hasTypedHybridPoolLayout(model_config)) {
+            validateDsv4KernelSeqSize(config.seq_size_per_block, kernel_seq_size_per_block, "cache");
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block > 0
+                                        && config.seq_size_per_block % kernel_seq_size_per_block == 0,
+                                    "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                                    config.seq_size_per_block,
+                                    kernel_seq_size_per_block);
+        }
+        config.kernel_seq_size_per_block = kernel_seq_size_per_block;
+    } else if (!hasTypedHybridPoolLayout(model_config) || config.kernel_seq_size_per_block == 0) {
+        config.kernel_seq_size_per_block = config.seq_size_per_block;
+    }
+    return config;
 }
 
 CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
@@ -108,23 +129,6 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     uint32_t block_num = 0;
 
     config.linear_step = kv_cache_config.linear_step;
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        if (hasTypedHybridPoolLayout(model_config)) {
-            validateDsv4KernelSeqSize(config.seq_size_per_block, kernel_seq_size_per_block, "cache");
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
-                                    "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
-                                    kv_cache_config.seq_size_per_block,
-                                    kv_cache_config.kernel_seq_size_per_block);
-        }
-        config.kernel_seq_size_per_block = kernel_seq_size_per_block;
-    } else if (config.kernel_seq_size_per_block == 0 || config.kernel_seq_size_per_block == config.seq_size_per_block) {
-        // Default: kernel block size == physical block size (no split). Keep
-        // any explicit value already set by createBasicConfig (e.g. DSV4 forces
-        // kernel_seq_size_per_block = 256 even when physical seq_size > 256).
-        config.kernel_seq_size_per_block = config.seq_size_per_block;
-    }
 
     // DSV4 fixed-pool residency toggle must be set before the pre-pass
     // finalizeBlockNums so CPU-backed STATE/SWA_KV bytes are excluded from HBM.
@@ -199,43 +203,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle);
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
         propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle);
-
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        if (hasTypedHybridPoolLayout(score_model_config)) {
-            validateDsv4KernelSeqSize(score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                    "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                    score_config.seq_size_per_block,
-                                    kernel_seq_size_per_block);
-        }
-        if (hasTypedHybridPoolLayout(propose_model_config)) {
-            validateDsv4KernelSeqSize(propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(
-                propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                "propose seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                propose_config.seq_size_per_block,
-                kernel_seq_size_per_block);
-        }
-        score_config.kernel_seq_size_per_block   = kernel_seq_size_per_block;
-        propose_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
-    } else {
-        // Default: kernel block size == physical block size (no split). Keep
-        // any explicit value already set by createBasicConfig (e.g. DSV4
-        // forces kernel_seq_size_per_block = 256 even when physical
-        // seq_size_per_block > 256); only fill in when unset or already
-        // matches the physical block.
-        if (score_config.kernel_seq_size_per_block == 0
-            || score_config.kernel_seq_size_per_block == score_config.seq_size_per_block) {
-            score_config.kernel_seq_size_per_block = score_config.seq_size_per_block;
-        }
-        if (propose_config.kernel_seq_size_per_block == 0
-            || propose_config.kernel_seq_size_per_block == propose_config.seq_size_per_block) {
-            propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
-        }
-    }
 
     int num_mtp_modules = 1;
     if (is_mtp) {
