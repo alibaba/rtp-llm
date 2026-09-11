@@ -9,9 +9,7 @@ from unittest import mock
 compute_ops = types.ModuleType("rtp_llm.ops.compute_ops")
 compute_ops.PyAttentionInputs = type("PyAttentionInputs", (), {})
 compute_ops.PyCacheStorePublishPlan = type("PyCacheStorePublishPlan", (), {})
-compute_ops.PyEmbeddingInputs = type("PyEmbeddingInputs", (), {})
 compute_ops.PyModelInputs = type("PyModelInputs", (), {})
-compute_ops.PyMultimodalInputs = type("PyMultimodalInputs", (), {})
 rtp_llm_package = types.ModuleType("rtp_llm")
 rtp_llm_package.__path__ = [str(Path(__file__).resolve().parents[4])]
 ops_package = types.ModuleType("rtp_llm.ops")
