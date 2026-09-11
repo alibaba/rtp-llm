@@ -86,6 +86,7 @@ final class WhaleMockMonitor implements AutoCloseable {
         tags.put("dp_rank", "0"); // Whale mode enforces one engine per Pod.
         tags.put("priority", "0"); // Aggregate mock series, not a per-priority breakdown.
         tags.put("mtp_model_type", "main");
+        tags.put("pool", "0"); // The mock has one physical KV pool, matching C++ gid=0.
         return tags;
     }
 

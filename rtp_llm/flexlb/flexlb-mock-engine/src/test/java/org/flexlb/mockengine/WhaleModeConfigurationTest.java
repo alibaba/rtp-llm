@@ -102,7 +102,7 @@ class WhaleModeConfigurationTest {
         assertEquals("test.prefill-cpu_part0", tags.get("hippo_role"));
         assertEquals("10.0.0.1", tags.get("host_ip"));
         assertEquals("10.1.0.2", tags.get("container_ip"));
-        for (String key : List.of("dp_rank", "priority", "mtp_model_type")) {
+        for (String key : List.of("dp_rank", "priority", "mtp_model_type", "pool")) {
             assertFalse(tags.get(key).isEmpty(), "wildcard filters require tag " + key);
         }
     }
