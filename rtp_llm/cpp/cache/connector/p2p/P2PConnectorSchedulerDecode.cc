@@ -413,7 +413,8 @@ P2PConnectorSchedulerDecode::startAsyncReadCalls(int64_t            request_id,
                                                    unique_key,
                                                    request_deadline_ms,
                                                    transfer_deadline_ms,
-                                                   no_transfer);
+                                                   no_transfer,
+                                                   plan_digest);
     const int64_t server_load_cost_us = currentTimeUs() - server_load_start_us;
     if (server_load_cost_us >= 100000) {
         RTP_LLM_LOG_WARNING("[PD-DIAG] startAsyncReadCalls slow server_caller->load, "

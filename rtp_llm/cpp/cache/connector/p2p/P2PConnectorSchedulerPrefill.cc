@@ -40,6 +40,29 @@ std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int deco
     return it->second;
 }
 
+ErrorInfo P2PConnectorSchedulerPrefill::checkPlanDigest(int decode_tp_size, uint64_t decode_plan_digest) {
+    if (!config_.topology) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "StartLoad plan digest check: cache topology is null");
+    }
+    if (decode_tp_size <= 0) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "StartLoad plan digest check: decode worker list is empty");
+    }
+    auto plan = planFor(decode_tp_size);
+    if (!plan->ok()) {
+        return ErrorInfo(plan->error.code(), "StartLoad plan digest check: " + plan->error.ToString());
+    }
+    const uint64_t prefill_plan_digest = plan->plan.digest();
+    if (decode_plan_digest != prefill_plan_digest) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "StartLoad plan digest mismatch: decode=" + std::to_string(decode_plan_digest)
+                             + " prefill=" + std::to_string(prefill_plan_digest)
+                             + " decode_tp_size=" + std::to_string(decode_tp_size));
+    }
+    return ErrorInfo::OkStatus();
+}
+
 P2PBroadcastClient::RankRoutes
 P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan& plan, size_t worker_num) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);

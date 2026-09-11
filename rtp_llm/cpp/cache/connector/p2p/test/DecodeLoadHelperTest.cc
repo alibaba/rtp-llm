@@ -110,17 +110,21 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestSuccess) {
 TEST_F(DecodeLoadHelperTest, LoadCarriesRequestDeadlineButUsesTransferTimeout) {
     const int64_t request_deadline_ms  = currentTimeMs() + 5000;
     const int64_t transfer_deadline_ms = currentTimeMs() + 500;
+    constexpr uint64_t plan_digest     = 0x12345678ULL;
 
     auto result = client_->load(1010,
                                 "127.0.0.1",
                                 static_cast<uint32_t>(server_->listenPort()),
                                 "test_split_deadline",
                                 request_deadline_ms,
-                                transfer_deadline_ms);
+                                transfer_deadline_ms,
+                                false,
+                                plan_digest);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->request.deadline_ms(), transfer_deadline_ms);
     EXPECT_EQ(result->request.request_deadline_ms(), request_deadline_ms);
+    EXPECT_EQ(result->request.plan_digest(), plan_digest);
     EXPECT_GT(result->timeout_ms, 0);
     EXPECT_LE(result->timeout_ms, 500);
     EXPECT_TRUE(waitDone(result));

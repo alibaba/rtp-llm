@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -114,7 +115,8 @@ public:
                                  const std::string& unique_key,
                                  int64_t            request_deadline_ms,
                                  int64_t            transfer_deadline_ms,
-                                 bool               no_transfer = false);
+                                 bool               no_transfer = false,
+                                 uint64_t           plan_digest = 0);
 
 private:
     bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
@@ -122,7 +124,8 @@ private:
                                int64_t                        request_deadline_ms,
                                int64_t                        transfer_deadline_ms,
                                int64_t                        request_id,
-                               bool                           no_transfer);
+                               bool                           no_transfer,
+                               uint64_t                       plan_digest);
 
     std::vector<std::string>    worker_addrs_;
     std::shared_ptr<RPCPool>    rpc_pool_;

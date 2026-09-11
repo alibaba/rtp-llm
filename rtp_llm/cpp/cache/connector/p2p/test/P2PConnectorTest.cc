@@ -7,6 +7,7 @@
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
@@ -145,6 +146,10 @@ protected:
             worker->set_ip("127.0.0.1");
             worker->set_cache_store_port(12345 + i);
         }
+        P2PConnectorSchedulerPrefill scheduler(config_.scheduler_config, nullptr, nullptr);
+        const auto plan = scheduler.planFor(num_workers);
+        RTP_LLM_CHECK_WITH_INFO(plan && plan->ok(), "test StartLoad plan must be valid");
+        request.set_plan_digest(plan->plan.digest());
 
         return request;
     }
@@ -271,6 +276,20 @@ TEST_F(P2PConnectorTest, HandleReadRejectsEmptyUniqueKeyWithoutWaiting) {
 
     EXPECT_EQ(response.error_code(),
               transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+    EXPECT_LT(currentTimeMs() - start_ms, 100);
+}
+
+TEST_F(P2PConnectorTest, HandleReadRejectsPlanDigestMismatchBeforeResourceWait) {
+    auto request = createValidStartLoadRequest("plan-digest-mismatch", currentTimeMs() + 5000, 2);
+    request.set_plan_digest(request.plan_digest() + 1);
+
+    P2PConnectorStartLoadResponsePB response;
+    const int64_t                   start_ms = currentTimeMs();
+    connector_->handleRead(request, response);
+
+    EXPECT_EQ(response.error_code(),
+              transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+    EXPECT_NE(response.error_message().find("plan digest mismatch"), std::string::npos);
     EXPECT_LT(currentTimeMs() - start_ms, 100);
 }
 

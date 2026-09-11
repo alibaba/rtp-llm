@@ -650,6 +650,9 @@ message P2PConnectorStartLoadRequestPB {
     // Original user-request deadline. deadline_ms remains the absolute
     // deadline of this physical P2P transfer.
     int64 request_deadline_ms = 5;
+    // Digest of the Decode-side transfer plan. Prefill computes its mirror
+    // plan before resource wait and rejects a mismatch immediately.
+    uint64 plan_digest = 6;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode

@@ -36,6 +36,9 @@ public:
     /// cp_size = kv_cache_sharded ? decode_tp_size : 1（部署级同配开关）。
     std::shared_ptr<const PlanResult> planFor(int decode_tp_size);
 
+    /// @brief StartLoad 建立前核对 Decode 传来的计划摘要，避免 plan 分歧退化为传输超时。
+    ErrorInfo checkPlanDigest(int decode_tp_size, uint64_t decode_plan_digest);
+
     /// @brief 把 plan 投影成每个 prefill worker 的 route 列表。
     /// prefill 方向不带 layer_blocks —— 在所有被允许的 CP 形态下 (src_rank, dst_rank, tag)
     /// 唯一确定一条 route，而 worker 自己 writeByLayer 产出的本地投影恰好等于该 route 的键集。

@@ -254,7 +254,8 @@ std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t        
                                                                    const std::string& unique_key,
                                                                    int64_t            request_deadline_ms,
                                                                    int64_t            transfer_deadline_ms,
-                                                                   bool               no_transfer) {
+                                                                   bool               no_transfer,
+                                                                   uint64_t           plan_digest) {
     if (!rpc_pool_) {
         RTP_LLM_LOG_WARNING("DecodeLoadHelper load failed: rpc_pool is null");
         return nullptr;
@@ -301,7 +302,7 @@ std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t        
 
     const int64_t build_rpc_start_us = currentTimeUs();
     if (!buildAndStartAsyncRpc(
-            result, unique_key, request_deadline_ms, transfer_deadline_ms, request_id, no_transfer)) {
+            result, unique_key, request_deadline_ms, transfer_deadline_ms, request_id, no_transfer, plan_digest)) {
         return nullptr;
     }
     const int64_t build_rpc_cost_us = currentTimeUs() - build_rpc_start_us;
@@ -328,11 +329,13 @@ bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& resu
                                               int64_t                        request_deadline_ms,
                                               int64_t                        transfer_deadline_ms,
                                               int64_t                        request_id,
-                                              bool                           no_transfer) {
+                                              bool                           no_transfer,
+                                              uint64_t                       plan_digest) {
     result->request.set_unique_key(unique_key);
     result->request.set_deadline_ms(transfer_deadline_ms);
     result->request.set_request_deadline_ms(request_deadline_ms);
     result->request.set_no_transfer(no_transfer);
+    result->request.set_plan_digest(plan_digest);
 
     for (const auto& tp_worker : tp_worker_infos_) {
         auto tp_worker_info = result->request.add_workers();

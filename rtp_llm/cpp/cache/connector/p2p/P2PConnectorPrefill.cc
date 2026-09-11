@@ -170,6 +170,20 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     for (const auto& worker : request.workers()) {
         decode_transfer_servers.emplace_back(worker.ip(), worker.cache_store_port());
     }
+    if (!request.no_transfer()) {
+        const auto plan_error =
+            scheduler_->checkPlanDigest(static_cast<int>(decode_transfer_servers.size()), request.plan_digest());
+        if (plan_error.hasError()) {
+            RTP_LLM_LOG_WARNING("handleRead rejected StartLoad, unique_key=%s, error=%s",
+                                unique_key.c_str(),
+                                plan_error.ToString().c_str());
+            stream_store_->markTerminal(unique_key, request_deadline_ms);
+            stream_store_->clearSideChannelData(unique_key);
+            response.set_error_code(transErrorCodeToRPC(plan_error.code()));
+            response.set_error_message(plan_error.ToString());
+            return;
+        }
+    }
 
     RTP_LLM_LOG_DEBUG("[PD-DIAG] handleRead start, unique_key=%s, deadline_ms=%ld, timestamp_us=%ld",
                      unique_key.c_str(),
