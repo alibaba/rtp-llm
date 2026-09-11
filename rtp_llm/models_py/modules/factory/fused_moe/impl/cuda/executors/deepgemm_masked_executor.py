@@ -68,7 +68,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in [None, "FP8_PER_BLOCK"])
-        checker.check(get_sm()[0] >= 9)
+        # The BF16 masked implementation is Hopper-only. A callable symbol on
+        # Blackwell does not imply that this kernel supports that architecture.
+        sm_major = get_sm()[0]
+        checker.check(sm_major == 9 if quant_method is None else sm_major >= 9)
 
     def __init__(
         self,
