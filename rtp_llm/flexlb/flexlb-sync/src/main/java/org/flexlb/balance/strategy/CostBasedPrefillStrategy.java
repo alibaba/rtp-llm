@@ -57,9 +57,9 @@ public class CostBasedPrefillStrategy {
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
-        EndpointDiscovery discovery = discoverAliveEndpoints(roleType, group);
-        if (discovery.registeredCount() == 0) {
-            Logger.debug("Prefill select failed: no registered endpoints, request_id={}",
+        EndpointDiscovery discovery = discoverAvailableEndpoints(balanceContext, roleType, group);
+        if (discovery.candidates().isEmpty()) {
+            Logger.debug("Prefill select failed: no admission capacity, request_id={}",
                     requestId);
             return PlacementResult.blocked(roleType);
         }
@@ -71,7 +71,6 @@ public class CostBasedPrefillStrategy {
         PrefillCandidateSet survivors = evaluateCandidates(
                 discovery,
                 balanceContext,
-                config,
                 cacheMatchResults,
                 rejections,
                 poolWideBlockers);
@@ -291,15 +290,12 @@ public class CostBasedPrefillStrategy {
     }
 
     private record EndpointDiscovery(
-            List<EndpointRegistry.PrefillRoutingEntry> candidates) {
+            List<EndpointRegistry.PrefillRoutingEntry> candidates,
+            int registeredCount) {
 
         private EndpointDiscovery {
             candidates = java.util.Objects.requireNonNull(
                     candidates, "candidates");
-        }
-
-        private int registeredCount() {
-            return candidates.size();
         }
 
         /** Zero-copy address view over the exact fleet used by this decision. */
@@ -321,7 +317,6 @@ public class CostBasedPrefillStrategy {
     private PrefillCandidateSet evaluateCandidates(
             EndpointDiscovery discovery,
             BalanceContext balanceContext,
-            FlexlbConfig config,
             Map<String, Integer> cacheMatchResults,
             Map<String, Integer> rejections,
             Map<RoleType, Integer> poolWideBlockers) {
@@ -331,18 +326,12 @@ public class CostBasedPrefillStrategy {
         candidates.reset(eligibleSize);
         long planningAtMs = System.currentTimeMillis();
         RouteProjection.Session projectionSession = RouteProjection.session();
-        boolean preemptQueued = config.allowsPreemption(VictimStage.PREFILL_QUEUED);
 
         // Use one endpoint snapshot for both service prediction and decision-group planning.
         for (int i = 0; i < discovery.candidates().size(); i++) {
             EndpointRegistry.PrefillRoutingEntry routingEntry =
                     discovery.candidates().get(i);
             PrefillEndpoint ep = routingEntry.endpoint();
-            if (!ep.canAcceptRequest()
-                    && !(preemptQueued && ep.canPreemptQueuedRequest(balanceContext.getPriority()))) {
-                rejections.merge("PREFILL_INFLIGHT_REQUESTS", 1, Integer::sum);
-                continue;
-            }
             String endpointAddress = routingEntry.address();
             CacheTokenMatch cacheMatch =
                     calculateCacheMatch(ep, endpointAddress, cacheMatchResults, request);
@@ -389,7 +378,7 @@ public class CostBasedPrefillStrategy {
                     projectionInputs.ownershipVersion());
             if (Logger.isTraceEnabled()) {
                 Logger.trace("Prefill projection - ip: {}, order: {}, hitCache: {}, ttftMs: {}",
-                        endpointAddress, config.isPriorityOrdering() ? "PRIORITY" : "FIFO",
+                        endpointAddress, balanceContext.getConfig().isPriorityOrdering() ? "PRIORITY" : "FIFO",
                         cacheHit, projection.projectedTtftMsValue());
             }
         }
@@ -411,23 +400,27 @@ public class CostBasedPrefillStrategy {
         return null;
     }
 
-    private EndpointDiscovery discoverAliveEndpoints(
+    private EndpointDiscovery discoverAvailableEndpoints(
+            BalanceContext context,
             RoleType roleType,
             String group) {
         List<EndpointRegistry.PrefillRoutingEntry> directory =
                 workerDirectory.prefillRoutingSnapshot(roleType);
-        if (group == null) {
-            return new EndpointDiscovery(directory);
-        }
         List<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>();
+        int registered = 0;
+        boolean preemptQueued = context.getConfig().allowsPreemption(VictimStage.PREFILL_QUEUED);
         for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
-            WorkerStatus.TopologySnapshot topology = entry.endpoint()
-                    .getStatus().topologySnapshot();
-            if (group.equals(topology.group())) {
+            PrefillEndpoint endpoint = entry.endpoint();
+            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
+                continue;
+            }
+            registered++;
+            if (endpoint.canAcceptRequest()
+                    || preemptQueued && endpoint.canPreemptQueuedRequest(context.getPriority())) {
                 matching.add(entry);
             }
         }
-        return new EndpointDiscovery(List.copyOf(matching));
+        return new EndpointDiscovery(matching, registered);
     }
 
     private Map<String, Integer> getCacheMatchResults(
