@@ -2,11 +2,15 @@
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Test suite for TRT-LLM AllReduce Fusion kernels on ROCm.
 
+import faulthandler
 import os
 import socket
 import sys
+import threading
+import time
 import unittest
 import warnings
+from datetime import timedelta
 from typing import Tuple
 
 import torch
@@ -16,9 +20,7 @@ import torch.multiprocessing as mp
 warnings.filterwarnings(
     "ignore", message="barrier.*using the device under current context"
 )
-warnings.filterwarnings(
-    "ignore", message="Guessing device ID based on global rank"
-)
+warnings.filterwarnings("ignore", message="Guessing device ID based on global rank")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -39,6 +41,7 @@ def _setup_distributed(rank: int, world_size: int, port: int):
     torch.cuda.set_device(rank)
     dist.init_process_group(
         backend="nccl",
+        timeout=timedelta(seconds=90),
         init_method="env://",
         world_size=world_size,
         rank=rank,
@@ -100,7 +103,8 @@ def _native_allreduce_residual_rmsnorm(
         return residual_out, norm_out, norm_out_scale
     else:
         scale_out = torch.empty(
-            allreduce_in.shape[0], 1,
+            allreduce_in.shape[0],
+            1,
             dtype=torch.float32,
             device=allreduce_in.device,
         )
@@ -126,45 +130,53 @@ def _worker_allreduce_residual_rmsnorm(
 
         device = torch.device(f"cuda:{rank}")
         dist_env = TrtllmDistEnv(
-            group=dist.group.WORLD, device_id=rank,
+            group=dist.group.WORLD,
+            device_id=rank,
         )
 
         torch.manual_seed(42 + rank)
-        allreduce_in = torch.randn(
-            batch_size, hidden_size, dtype=dtype, device=device
-        )
-        residual_in = torch.randn(
-            batch_size, hidden_size, dtype=dtype, device=device
-        )
+        allreduce_in = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
+        residual_in = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
         rms_weight = torch.randn(hidden_size, dtype=dtype, device=device)
 
         allreduce_in_ref = allreduce_in.clone()
 
         # Fused kernel
         residual_out, norm_out, scale_out = dist_env.allreduce_add_rms_fused(
-            allreduce_in, residual_in, rms_weight, eps, fp8_out=fp8_out,
+            allreduce_in,
+            residual_in,
+            rms_weight,
+            eps,
+            fp8_out=fp8_out,
         )
 
         # Native reference
         ref_residual, ref_norm, ref_scale = _native_allreduce_residual_rmsnorm(
-            allreduce_in_ref, residual_in, rms_weight, eps,
-            dist.group.WORLD, fp8_out=fp8_out,
+            allreduce_in_ref,
+            residual_in,
+            rms_weight,
+            eps,
+            dist.group.WORLD,
+            fp8_out=fp8_out,
         )
 
         # --- shape / dtype checks ---
-        assert residual_out.shape == (batch_size, hidden_size), (
-            f"residual_out shape mismatch: {residual_out.shape}"
-        )
-        assert norm_out.shape == (batch_size, hidden_size), (
-            f"norm_out shape mismatch: {norm_out.shape}"
-        )
+        assert residual_out.shape == (
+            batch_size,
+            hidden_size,
+        ), f"residual_out shape mismatch: {residual_out.shape}"
+        assert norm_out.shape == (
+            batch_size,
+            hidden_size,
+        ), f"norm_out shape mismatch: {norm_out.shape}"
         if fp8_out:
-            assert norm_out.dtype == FP8_DTYPE, (
-                f"Expected FP8 dtype, got {norm_out.dtype}"
-            )
-            assert scale_out.shape == (batch_size, 1), (
-                f"scale_out shape mismatch for FP8: {scale_out.shape}"
-            )
+            assert (
+                norm_out.dtype == FP8_DTYPE
+            ), f"Expected FP8 dtype, got {norm_out.dtype}"
+            assert scale_out.shape == (
+                batch_size,
+                1,
+            ), f"scale_out shape mismatch for FP8: {scale_out.shape}"
 
         # --- NaN / Inf checks ---
         assert not torch.isnan(residual_out).any(), "residual_out contains NaN"
@@ -193,8 +205,7 @@ def _worker_allreduce_residual_rmsnorm(
             f"abs={residual_diff:.6e}"
         )
         assert norm_rel < rtol or norm_diff < atol, (
-            f"[Rank {rank}] norm mismatch: rel={norm_rel:.6e}, "
-            f"abs={norm_diff:.6e}"
+            f"[Rank {rank}] norm mismatch: rel={norm_rel:.6e}, " f"abs={norm_diff:.6e}"
         )
 
         if rank == 0:
@@ -209,6 +220,7 @@ def _worker_allreduce_residual_rmsnorm(
             file=sys.stderr,
         )
         import traceback
+
         traceback.print_exc()
         raise
     finally:
@@ -232,13 +244,12 @@ def _worker_pure_allreduce(
 
         device = torch.device(f"cuda:{rank}")
         dist_env = TrtllmDistEnv(
-            group=dist.group.WORLD, device_id=rank,
+            group=dist.group.WORLD,
+            device_id=rank,
         )
 
         torch.manual_seed(42 + rank)
-        allreduce_in = torch.randn(
-            batch_size, hidden_size, dtype=dtype, device=device
-        )
+        allreduce_in = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
         allreduce_in_ref = allreduce_in.clone()
         allreduce_out = torch.empty_like(allreduce_in)
 
@@ -255,14 +266,12 @@ def _worker_pure_allreduce(
 
         rtol, atol = 1e-2, 1e-3
         assert rel_diff < rtol or diff < atol, (
-            f"[Rank {rank}] allreduce mismatch: rel={rel_diff:.6e}, "
-            f"abs={diff:.6e}"
+            f"[Rank {rank}] allreduce mismatch: rel={rel_diff:.6e}, " f"abs={diff:.6e}"
         )
 
         if rank == 0:
             print(
-                f"  [pure_allreduce] hidden={hidden_size} "
-                f"rel_diff={rel_diff:.2e} ✓"
+                f"  [pure_allreduce] hidden={hidden_size} " f"rel_diff={rel_diff:.2e} ✓"
             )
 
     except Exception as exc:
@@ -271,6 +280,7 @@ def _worker_pure_allreduce(
             file=sys.stderr,
         )
         import traceback
+
         traceback.print_exc()
         raise
     finally:
@@ -291,35 +301,67 @@ def _worker_fused_vs_native(
     dtype: torch.dtype,
 ):
     """Compare TrtllmDistEnv.allreduce_add_rms_fused with allreduce_add_rms_native."""
+
+    def phase(name):
+        print(
+            f"TRT_DIAG rank={rank} time={time.monotonic():.3f} phase={name}", flush=True
+        )
+
+    monitor_done = threading.Event()
+    faulthandler.dump_traceback_later(60)
+    phase("setup.enter")
     try:
         _setup_distributed(rank, world_size, port)
+        phase("setup.ready")
         from rtp_llm.models_py.modules.base.rocm.trt_allreduce import TrtllmDistEnv
 
         device = torch.device(f"cuda:{rank}")
         dist_env = TrtllmDistEnv(
-            group=dist.group.WORLD, device_id=rank,
+            group=dist.group.WORLD,
+            device_id=rank,
         )
 
         torch.manual_seed(42 + rank)
-        allreduce_in = torch.randn(
-            batch_size, hidden_size, dtype=dtype, device=device
-        )
-        residual_in = torch.randn(
-            batch_size, hidden_size, dtype=dtype, device=device
-        )
+        allreduce_in = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
+        residual_in = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
         rms_weight = torch.randn(hidden_size, dtype=dtype, device=device)
 
         allreduce_in_native = allreduce_in.clone()
 
         # Fused path
+        phase("fused.enter")
         fused_residual, fused_norm, fused_scale = dist_env.allreduce_add_rms_fused(
-            allreduce_in, residual_in, rms_weight, eps, fp8_out=fp8_out,
+            allreduce_in,
+            residual_in,
+            rms_weight,
+            eps,
+            fp8_out=fp8_out,
         )
+        phase("fused.enqueued")
+        fused_done = torch.cuda.Event()
+        fused_done.record(torch.cuda.current_stream())
+
+        def monitor_fused():
+            torch.cuda.set_device(rank)
+            while not monitor_done.wait(5):
+                phase(f"fused.event_complete={fused_done.query()}")
+
+        threading.Thread(target=monitor_fused, daemon=True).start()
+        if os.environ.get("RTP_TRT_TEST_SYNC_BEFORE_NATIVE") == "1":
+            phase("fused.synchronize.enter")
+            fused_done.synchronize()
+            phase("fused.synchronize.done")
 
         # Native path (uses the same dist_env)
+        phase("native.enter")
         native_residual, native_norm, native_scale = dist_env.allreduce_add_rms_native(
-            allreduce_in_native, residual_in, rms_weight, eps, fp8_out=fp8_out,
+            allreduce_in_native,
+            residual_in,
+            rms_weight,
+            eps,
+            fp8_out=fp8_out,
         )
+        phase("native.enqueued")
 
         # --- residual check ---
         residual_diff = (fused_residual - native_residual).abs().max().item()
@@ -354,6 +396,7 @@ def _worker_fused_vs_native(
                 f"  [fused_vs_native] hidden={hidden_size} fp8={fp8_out} "
                 f"residual_rel={residual_rel:.2e} norm_rel={norm_rel:.2e} ✓"
             )
+        phase("assertions.done")
 
     except Exception as exc:
         print(
@@ -361,10 +404,15 @@ def _worker_fused_vs_native(
             file=sys.stderr,
         )
         import traceback
+
         traceback.print_exc()
         raise
     finally:
+        monitor_done.set()
+        faulthandler.cancel_dump_traceback_later()
+        phase("cleanup.enter")
         _cleanup_distributed()
+        phase("cleanup.done")
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +422,7 @@ def _get_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("", 0))
         return sock.getsockname()[1]
+
 
 # ---------------------------------------------------------------------------
 # Process launcher
@@ -395,9 +444,7 @@ def _launch_workers(worker_fn, world_size: int, timeout: int = 120, **kwargs):
     for proc in processes:
         proc.join(timeout=timeout)
         if proc.exitcode != 0:
-            raise RuntimeError(
-                f"Process {proc.name} exited with code {proc.exitcode}"
-            )
+            raise RuntimeError(f"Process {proc.name} exited with code {proc.exitcode}")
 
 
 # ===========================================================================
@@ -422,20 +469,29 @@ class TestTrtAllReduceFusion(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_pure_allreduce_hidden4096_ws2(self):
         _launch_workers(
-            _worker_pure_allreduce, world_size=2,
-            batch_size=8, hidden_size=4096, dtype=torch.bfloat16,
+            _worker_pure_allreduce,
+            world_size=2,
+            batch_size=8,
+            hidden_size=4096,
+            dtype=torch.bfloat16,
         )
 
     def test_pure_allreduce_hidden2560_ws2(self):
         _launch_workers(
-            _worker_pure_allreduce, world_size=2,
-            batch_size=8, hidden_size=2560, dtype=torch.bfloat16,
+            _worker_pure_allreduce,
+            world_size=2,
+            batch_size=8,
+            hidden_size=2560,
+            dtype=torch.bfloat16,
         )
 
     def test_pure_allreduce_hidden5120_ws2(self):
         _launch_workers(
-            _worker_pure_allreduce, world_size=2,
-            batch_size=8, hidden_size=5120, dtype=torch.bfloat16,
+            _worker_pure_allreduce,
+            world_size=2,
+            batch_size=8,
+            hidden_size=5120,
+            dtype=torch.bfloat16,
         )
 
     # ------------------------------------------------------------------
@@ -443,14 +499,22 @@ class TestTrtAllReduceFusion(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_fused_rmsnorm_hidden4096_ws2(self):
         _launch_workers(
-            _worker_allreduce_residual_rmsnorm, world_size=2,
-            batch_size=8, hidden_size=4096, eps=1e-6,
-            fp8_out=False, dtype=torch.bfloat16,
+            _worker_allreduce_residual_rmsnorm,
+            world_size=2,
+            batch_size=8,
+            hidden_size=4096,
+            eps=1e-6,
+            fp8_out=False,
+            dtype=torch.bfloat16,
         )
+
     def test_pure_allreduce_large_batch_ws2(self):
         _launch_workers(
-            _worker_pure_allreduce, world_size=2,
-            batch_size=64, hidden_size=4096, dtype=torch.bfloat16,
+            _worker_pure_allreduce,
+            world_size=2,
+            batch_size=64,
+            hidden_size=4096,
+            dtype=torch.bfloat16,
         )
 
     # ------------------------------------------------------------------
@@ -458,17 +522,26 @@ class TestTrtAllReduceFusion(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_fused_vs_native_hidden4096_ws2(self):
         _launch_workers(
-            _worker_fused_vs_native, world_size=2,
-            batch_size=8, hidden_size=4096, eps=1e-6,
-            fp8_out=False, dtype=torch.bfloat16,
+            _worker_fused_vs_native,
+            world_size=2,
+            batch_size=8,
+            hidden_size=4096,
+            eps=1e-6,
+            fp8_out=False,
+            dtype=torch.bfloat16,
         )
 
     def test_fused_vs_native_fp8_hidden4096_ws2(self):
         _launch_workers(
-            _worker_fused_vs_native, world_size=2,
-            batch_size=8, hidden_size=4096, eps=1e-6,
-            fp8_out=True, dtype=torch.bfloat16,
+            _worker_fused_vs_native,
+            world_size=2,
+            batch_size=8,
+            hidden_size=4096,
+            eps=1e-6,
+            fp8_out=True,
+            dtype=torch.bfloat16,
         )
+
 
 if __name__ == "__main__":
     os.environ.setdefault("NCCL_DEBUG", "WARN")
