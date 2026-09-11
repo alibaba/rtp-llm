@@ -2,6 +2,8 @@ import math
 import os
 import random
 import sys
+from types import SimpleNamespace
+from unittest.mock import patch
 from typing import List, Optional
 from unittest import SkipTest, TestCase, main
 
@@ -34,6 +36,27 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+class TestNoncausalBackendSelection(TestCase):
+    def test_trtllm_generation_backends_reject_noncausal_queries(self):
+        module = "rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen"
+        inputs = SimpleNamespace(
+            is_prefill=True,
+            input_lengths=torch.tensor([3, 3]),
+            kv_cache_kernel_block_id_device=torch.tensor([[0], [1]]),
+        )
+        with patch(f"{module}.is_blackwell", return_value=True), patch(
+            f"{module}.is_sm12x", return_value=False
+        ), patch(f"{module}.release_trt_workspace_buffer"):
+            for cls in (FlashInferTRTLLMPrefillOp, FlashInferTRTLLMDecodeOp):
+                op = cls.__new__(cls)
+                op.workspace_buffer = None
+                op.attn_configs = SimpleNamespace(is_causal=False)
+                self.assertFalse(op.support(inputs))
+                op.attn_configs.is_causal = True
+                self.assertTrue(op.support(inputs))
+                del op
 
 
 class FlashInferPythonMHATest(TestCase):

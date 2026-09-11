@@ -1460,6 +1460,22 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_EQ((std::vector<int32_t>{2, 1, 3}), processor->observedDraftTokens());
 }
 
+TEST_F(MtpExecutorTest, testDSparkReducedVocabUsesTargetIdsForNextMarkovStep) {
+    auto opts = torch::TensorOptions().device(torch::kCUDA);
+    auto d2t = torch::tensor({2, 5}, opts.dtype(torch::kLong));
+    speculative::SpeculativeSampler sampler(d2t, 2);
+    auto w1 = torch::tensor({-100.f, 0.f, 100.f, 0.f, 0.f, 0.f}, opts).reshape({6, 1});
+    auto w2 = torch::tensor({0.f, 1.f}, opts).reshape({2, 1});
+    auto logits = torch::tensor({100.f, -100.f, 0.f, 0.f}, opts).reshape({2, 2});
+    auto output = sampler.sampleDSparkDraft(
+        logits, torch::tensor({4}, opts.dtype(torch::kInt32)), torch::ones({1}, opts), w1, w2, 2);
+    EXPECT_TRUE(torch::equal(output.token_ids.cpu(), torch::tensor({{2, 5}}, torch::kInt32)));
+    // q remains in draft vocabulary for the existing rejection sampler's d2t scatter.
+    ASSERT_EQ((std::vector<int64_t>{1, 2, 2}), output.all_probs.sizes().vec());
+    auto expected = torch::softmax(torch::tensor({0.f, 100.f}, opts), -1);
+    EXPECT_TRUE(torch::allclose(output.all_probs[0][1], expected));
+}
+
 TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;

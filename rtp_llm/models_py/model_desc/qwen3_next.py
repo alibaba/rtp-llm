@@ -19,6 +19,7 @@ from rtp_llm.models_py.model_desc.block_map import (
 )
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.speculative.aux_hidden_capture import AuxHiddenCaptureMixin
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
@@ -1478,7 +1479,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class Qwen3NextModel(GptModelBase):
+class Qwen3NextModel(AuxHiddenCaptureMixin, GptModelBase):
     def __init__(
         self,
         model_config: ModelConfig,
@@ -1750,6 +1751,7 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
+        self.begin_aux_hidden_capture(hidden_states, is_cuda_graph)
 
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
@@ -1768,6 +1770,7 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            self.capture_aux_hidden(i, hidden_states, residual)
 
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states)

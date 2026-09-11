@@ -1443,7 +1443,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreReadsNonContiguousHostMetadata) {
     EXPECT_NE(cache_store->records[1].blocks.find(second_key), cache_store->records[1].blocks.end());
 }
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 TEST_F(ExecOpsTest, testSampleFromProbsHandlesSingleAndMultiBlockVocab) {
     auto forced_probs  = torch::eye(4, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto forced_output = execSampleFromProbs(forced_probs);
@@ -1459,18 +1459,16 @@ TEST_F(ExecOpsTest, testSampleFromProbsHandlesSingleAndMultiBlockVocab) {
 TEST_F(ExecOpsTest, testSampleFromProbsUsesDefaultGenerator) {
     auto probabilities =
         torch::full({64, 16}, 1.0f / 16.0f, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    auto generator = at::cuda::detail::getDefaultCUDAGenerator();
-    generator.set_current_seed(17);
+    torch::manual_seed(17);
     auto first = execSampleFromProbs(probabilities);
-    generator.set_current_seed(17);
+    torch::manual_seed(17);
     auto second = execSampleFromProbs(probabilities);
     EXPECT_TRUE(torch::equal(first, second));
 }
 
 TEST_F(ExecOpsTest, testSampleFromProbsMatchesDistribution) {
     constexpr int64_t distribution_rows = 2048;
-    auto              generator         = at::cuda::detail::getDefaultCUDAGenerator();
-    generator.set_current_seed(23);
+    torch::manual_seed(23);
     auto distribution_probs = torch::softmax(torch::tensor({1.0f, 0.0f, -1.0f}, torch::kFloat32), -1)
                                   .repeat({distribution_rows, 1})
                                   .to(torch::kCUDA);

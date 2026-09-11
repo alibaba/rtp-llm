@@ -22,8 +22,8 @@ class QwenV3(QWenV2):
         return QWenV3Weight
 
     @classmethod
-    def _create_config(cls, ckpt_path: str):
-        config = super()._create_config(ckpt_path)
+    def _create_config_from_json(cls, ckpt_path: str, config_json):
+        config = super()._create_config_from_json(ckpt_path, config_json)
         config.qk_norm = True
         return config
 

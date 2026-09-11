@@ -19,7 +19,8 @@ public:
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
-        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
+        dspark_query_width_(propose_step_ + static_cast<int>(!sp_config.sp_dspark_sample_from_anchor)) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -60,7 +61,9 @@ public:
                                                   GptModelInputs&     model_input,
                                                   TensorHolder&       host_holder) const;
 
-    void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+    void expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
+                                       GptModelInputs&     model_input,
+                                       const torch::Tensor& committed_ends = {}) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,
@@ -165,6 +168,7 @@ protected:
     size_t  vocab_size_           = 0;
     bool    is_dspark_            = false;
     int32_t dspark_mask_token_id_ = -1;
+    int     dspark_query_width_;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

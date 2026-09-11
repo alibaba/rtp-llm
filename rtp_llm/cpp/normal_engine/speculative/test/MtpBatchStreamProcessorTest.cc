@@ -853,6 +853,20 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5}), toVec<int32_t>(model_input.lm_output_indexes));
+
+    // Qwen checkpoints condition on an extra anchor. Only the noise rows
+    // enter lm_head; the fixed gamma proposal/verification contract is shared.
+    sp_config.sp_dspark_sample_from_anchor = false;
+    MtpBatchStreamProcessor qwen_processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    qwen_processor.buildDSparkProposeInput(model_input, anchors, committed_ends, host_holder);
+    EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, mask_id, 202, mask_id, mask_id, mask_id}),
+              toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{4, 4}), toVec<int32_t>(model_input.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{1, 2, 3, 5, 6, 7}), toVec<int32_t>(model_input.lm_output_indexes));
+    // Shrinking the batch reuses the cached geometry without cross-request rows.
+    qwen_processor.buildDSparkProposeInput(model_input, anchors.slice(0, 0, 1), committed_ends.slice(0, 0, 1), host_holder);
+    EXPECT_EQ((std::vector<int32_t>{1, 2, 3}), toVec<int32_t>(model_input.lm_output_indexes));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDeviceState) {
@@ -867,6 +881,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     model_config.max_seq_len          = 2048;
     model_config.vocab_size           = 256;
     model_config.num_layers           = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor = 3;
     sp_config.type                    = SP_TYPE_DSPARK;
     sp_config.gen_num_per_cycle       = gamma;
     sp_config.sp_dspark_mask_token_id = 255;
@@ -877,6 +893,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     auto fresh_stream  = createContextStream(model_config, runtime_config, resource_context, {20, 21, 22}, 2);
     steady_stream->setIsContextStream(false);
     fresh_stream->setIsContextStream(false);
+    steady_stream->setContextPositionIds(torch::tensor({0, 0, 0, 4, 5, 6}, torch::kInt32));
+    fresh_stream->setContextPositionIds(torch::tensor({0, 0, 0, 1, 1, 1, 2, 2, 2}, torch::kInt32));
 
     // The steady stream's host token/length deliberately trail the state
     // published before its previous bookkeeping worker. The fresh stream has
@@ -890,6 +908,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     StreamGroups   stream_groups({steady_stream, fresh_stream});
     GptModelInputs model_input;
     model_input.sequence_lengths = torch::tensor({1, 2}, torch::kInt32);
+    model_input.combo_position_ids = torch::tensor({6, 6, 6, 2, 2, 2}, torch::kInt32);
 
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
@@ -901,6 +920,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{102, 255, 255, 22, 255, 255}), toVec<int32_t>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
+    const std::vector<int32_t> expected_positions = {
+        14, 14, 14, 15, 15, 15, 16, 16, 16, 17, 17, 17, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5};
+    EXPECT_EQ(expected_positions, toVec<int32_t>(model_input.combo_position_ids));
 
     auto proposals = torch::tensor({{31, 32, 33}, {41, 42, 43}}, torch::kInt32).to(torch::kCUDA);
     processor.updateDSparkTargetVerifyModelInput(round_head, model_input, proposals, host_holder);
@@ -908,6 +930,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{gamma + 1, gamma + 1}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}), toVec<int32_t>(model_input.lm_output_indexes));
+    EXPECT_EQ(expected_positions, toVec<int32_t>(model_input.combo_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
