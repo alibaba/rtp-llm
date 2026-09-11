@@ -12,7 +12,6 @@ from rtp_llm.models.deepseek_v4_vision import (
     Aligner,
     DeepSeekV4VisionEmbedding,
     DeepSeekV4VisionWeights,
-    build_image_attention_spans,
     build_image_block,
 )
 from rtp_llm.models.multimodal.multimodal_mixin import (
@@ -235,20 +234,6 @@ class DeepSeekV4VisionTest(TestCase):
         self.assertIs(first, again)
         self.assertEqual(process.call_count, 2)
         self.assertNotEqual(first.size(0), other_phase.size(0))
-
-    def test_image_attention_spans_keep_original_position_across_reuse(self):
-        raw_spans = torch.tensor([[0, 2, 12], [1, 8, 20]])
-        spans = build_image_attention_spans(
-            raw_spans, torch.tensor([5, 4]), device="cpu"
-        )
-        torch.testing.assert_close(spans, torch.tensor([[0, 3, 11], [1, 11, 19]]))
-
-        with self.assertRaisesRegex(RuntimeError, "too deep inside an image block"):
-            build_image_attention_spans(
-                torch.tensor([[0, 2, 300]]),
-                torch.tensor([200]),
-                device="cpu",
-            )
 
     def test_mm_process_engine_preserves_image_start_phase(self):
         class FakeMMPart:

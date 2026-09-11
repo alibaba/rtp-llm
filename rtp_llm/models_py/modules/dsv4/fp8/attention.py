@@ -630,39 +630,6 @@ def _get_window_topk_idxs_varlen(
     ).contiguous()
 
 
-def _get_visible_window_overrides(
-    window_size: int,
-    query_positions: torch.Tensor,
-    image_spans: torch.Tensor,
-    query_req_ids: Optional[torch.Tensor] = None,
-):
-    """Return absolute per-query ``(start, length)`` visible windows."""
-    query_positions = _flat_1d(query_positions).to(torch.long)
-    image_spans = image_spans.reshape(-1, 3).to(
-        device=query_positions.device, dtype=torch.long
-    )
-    if query_req_ids is None:
-        query_req_ids = torch.zeros_like(query_positions)
-    else:
-        query_req_ids = _flat_1d(query_req_ids).to(
-            device=query_positions.device, dtype=torch.long
-        )
-    start = (query_positions - window_size + 1).clamp_min(0)
-    end = query_positions.clone()
-    for image_req, image_start, image_end in image_spans.unbind(0):
-        inside = (
-            (query_req_ids == image_req)
-            & (query_positions >= image_start)
-            & (query_positions <= image_end)
-        )
-        start = torch.where(inside, torch.minimum(start, image_start), start)
-        end = torch.where(inside, torch.maximum(end, image_end), end)
-    return (
-        start.to(torch.int32).contiguous(),
-        (end - start + 1).to(torch.int32).contiguous(),
-    )
-
-
 class SwaPrefillMeta(NamedTuple):
     """FP8 prefill metadata bundle — built once per ``_prefill_common_setup``
     call for **all FP8 KV-cache layers** (compress_ratio 0/4/128 alike).
@@ -875,10 +842,6 @@ class PrefillMeta(NamedTuple):
     # by ``build_and_propagate_prefill_meta_fp8`` from the forward's local
     # ``PrefillWorkspace``; non-None for every production prefill call.
     workspace: Optional[PrefillWorkspace] = None
-    image_spans: Optional[torch.Tensor] = None
-    swa_win_starts: Optional[torch.Tensor] = None
-    swa_win_lens: Optional[torch.Tensor] = None
-    swa_win_max_len: int = 0
     # Identity of the ungathered per-layer RoPE table that produced
     # ``freqs_cis``. ratio0 uses base RoPE while ratio4/128 use compressed
     # RoPE, so cross-ratio frequency reuse is valid only when this id matches.
@@ -3217,7 +3180,7 @@ class AttentionFP8(nn.Module):
         )
         D = self.head_dim
 
-        if wm.use_cp_raw_q_merge and common.image_spans is None:
+        if wm.use_cp_raw_q_merge:
             with record_function_range("dsv4.fp8.attn.workspace.cp_raw_q_merge"):
                 o = self._attn_via_workspace_cp_raw_q_merge(
                     qkv=qkv,
@@ -3396,15 +3359,6 @@ class AttentionFP8(nn.Module):
                 dtype=torch.bfloat16,
                 device=qkv.q.device,
             )
-            visible_window_kwargs = (
-                dict(
-                    swa_win_starts=common.swa_win_starts,
-                    swa_win_lens=common.swa_win_lens,
-                    swa_win_max_len=common.swa_win_max_len,
-                )
-                if common.swa_win_starts is not None
-                else {}
-            )
 
             if common.cp_on:
                 # Phase F2/Phase-2: kernel ``combine_topk_swa_indices`` derives
@@ -3424,7 +3378,6 @@ class AttentionFP8(nn.Module):
                     topk=int(cmp_topk.shape[-1]),
                     M=wm.M,
                     N=wm.N,
-                    **visible_window_kwargs,
                 )
                 assert common.req_id_per_token is not None
                 assert common.prefix_lengths is not None
@@ -3450,7 +3403,6 @@ class AttentionFP8(nn.Module):
                         M=wm.M,
                         N=wm.N,
                         flash_mla_indices=True,
-                        **visible_window_kwargs,
                     )
 
             post_gather_stream = None
@@ -3994,7 +3946,6 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
-        image_spans: Optional[torch.Tensor] = None,
         reuse_common_meta: Optional["PrefillMeta"] = None,
         reuse_freqs_meta: Optional["PrefillMeta"] = None,
     ) -> "PrefillMeta":
@@ -4070,8 +4021,6 @@ class AttentionFP8(nn.Module):
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         sp_per_req = _flat_1d(sp_per_req)
-        if image_spans is not None:
-            image_spans = image_spans.reshape(-1, 3).to(device=device, dtype=torch.long)
         assert (
             position_ids.numel() == seqlen
         ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
@@ -4095,9 +4044,6 @@ class AttentionFP8(nn.Module):
             reuse_freqs_meta is not None
             and reuse_freqs_meta.freqs_cis_source_id == id(self.freqs_cis)
         )
-        swa_win_starts = None
-        swa_win_lens = None
-        swa_win_max_len = 0
         position_ids_eff: Optional[torch.Tensor] = None
         if reuse_common_meta is None or not can_reuse_freqs:
             position_ids_eff = position_ids
@@ -4129,19 +4075,6 @@ class AttentionFP8(nn.Module):
                                 device=device, dtype=torch.int32
                             )
                         )
-                if image_spans is not None:
-                    swa_win_starts, swa_win_lens = _get_visible_window_overrides(
-                        win,
-                        position_ids_eff,
-                        image_spans,
-                        req_id_per_token,
-                    )
-                    # The checkpoint caps a complete image block at 384 tokens.
-                    # Use the model-wide upper bound instead of the current
-                    # suffix length: prefix reuse may start inside an image, so
-                    # the visible row can be wider than this forward's suffix.
-                    # A fixed bound also avoids a GPU -> CPU max() sync here.
-                    swa_win_max_len = int(win) + 384
                 topk_idxs, topk_length_kv_full = (
                     _swa_ops.compute_window_topk_and_length_varlen(
                         win,
@@ -4149,9 +4082,6 @@ class AttentionFP8(nn.Module):
                         position_ids_eff,
                         prefix_lengths,
                         req_id_per_token,
-                        swa_win_starts=swa_win_starts,
-                        swa_win_lens=swa_win_lens,
-                        swa_win_max_len=swa_win_max_len or None,
                     )
                 )
                 any_cont = bool((prefix_lengths > 0).any().item())
@@ -4168,9 +4098,6 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     topk_length_kv_full=topk_length_kv_full,
-                    swa_win_starts=swa_win_starts,
-                    swa_win_lens=swa_win_lens,
-                    swa_win_max_len=swa_win_max_len or None,
                 )
             row_seqlens_full = torch.tensor(
                 [seqlen_full], device=device, dtype=torch.long
@@ -4208,10 +4135,6 @@ class AttentionFP8(nn.Module):
                         ),
                     )
             topk_idxs = reuse_common_meta.topk_idxs
-            image_spans = reuse_common_meta.image_spans
-            swa_win_starts = reuse_common_meta.swa_win_starts
-            swa_win_lens = reuse_common_meta.swa_win_lens
-            swa_win_max_len = reuse_common_meta.swa_win_max_len
             any_cont = reuse_common_meta.any_cont
             row_seqlens_full = reuse_common_meta.row_seqlens_full
             source_swa = reuse_common_meta.swa_meta
@@ -4302,10 +4225,6 @@ class AttentionFP8(nn.Module):
             swa_meta=swa_meta,
             csa_meta=csa_meta,
             hca_meta=hca_meta,
-            image_spans=image_spans,
-            swa_win_starts=swa_win_starts,
-            swa_win_lens=swa_win_lens,
-            swa_win_max_len=swa_win_max_len,
             freqs_cis_source_id=id(self.freqs_cis),
         )
 
@@ -5017,9 +4936,6 @@ class AttentionFP8(nn.Module):
         position_ids: torch.Tensor,
         req_id_per_token: torch.Tensor,
         topk_length_kv_full: Optional[torch.Tensor] = None,
-        swa_win_starts: Optional[torch.Tensor] = None,
-        swa_win_lens: Optional[torch.Tensor] = None,
-        swa_win_max_len: Optional[int] = None,
     ) -> SwaPrefillMeta:
         """Varlen path: B>=1, per-request tensor plumbing.
 
@@ -5042,14 +4958,6 @@ class AttentionFP8(nn.Module):
         prefix_lengths = _flat_1d(prefix_lengths)
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
-        if swa_win_starts is not None:
-            assert swa_win_lens is not None
-            swa_win_starts = _flat_1d(swa_win_starts)
-            swa_win_lens = _flat_1d(swa_win_lens)
-            assert swa_win_starts.numel() == seqlen
-            assert swa_win_lens.numel() == seqlen
-        else:
-            assert swa_win_lens is None
         assert (
             position_ids.numel() == seqlen
         ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
@@ -5279,9 +5187,6 @@ class AttentionFP8(nn.Module):
                     N=0,
                     req_id_per_token=req_id_per_token,
                     prefix_lengths=prefix_lengths,
-                    swa_win_starts=swa_win_starts,
-                    swa_win_lens=swa_win_lens,
-                    swa_win_max_len=swa_win_max_len,
                 )
 
                 slot_in_flat = _swa_ops.compute_swa_slot_in_flat_from_cu(
@@ -5307,9 +5212,6 @@ class AttentionFP8(nn.Module):
                     topk=0,
                     M=M,
                     N=0,
-                    swa_win_starts=swa_win_starts,
-                    swa_win_lens=swa_win_lens,
-                    swa_win_max_len=swa_win_max_len,
                 )
                 # Pre-bake the per-token scatter index for ``via_concat``
                 # step-2. E6c fuses the casts/gathers/arithmetic into one

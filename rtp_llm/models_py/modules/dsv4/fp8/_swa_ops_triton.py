@@ -1,6 +1,6 @@
 """DSV4 SWA prefill ops — vLLM-aligned Triton kernels.
 
-Two kernels derived from vLLM and extended for DSV4 visible windows:
+Core kernels derived from vLLM for causal SWA windows:
 
 * ``compute_prefill_gather_lens`` — vLLM
   ``vllm/v1/attention/backends/mla/sparse_swa.py:_compute_prefill_metadata_kernel``.
@@ -14,8 +14,8 @@ Two kernels derived from vLLM and extended for DSV4 visible windows:
       ``M * batch_idx`` so they land in this batch's slice of the gathered
       workspace
     - next ``swa_len`` entries: SWA window indices into the same workspace
-      (shifted by ``N`` to skip the compressed segment). Image-prefill callers
-      may override the causal SWA start/length per query.
+      (shifted by ``N`` to skip the compressed segment). Every query sees
+      at most ``window_size - 1`` previous raw tokens and itself.
   + a parallel ``[num_tokens]`` int32 ``combined_lens`` so
   ``flash_mla_sparse_fwd``'s ``topk_length`` masks the right tail.
 
@@ -138,14 +138,11 @@ def _compute_window_topk_and_length_varlen_kernel(
     position_ids_ptr,  # [num_tokens] int32/int64
     prefix_lengths_ptr,  # [B] int32
     req_id_per_token_ptr,  # [num_tokens] int32
-    swa_win_starts_ptr,  # optional [num_tokens] absolute int32
-    swa_win_lens_ptr,  # optional [num_tokens] int32
     num_tokens,
     causal_window_size: tl.constexpr,
     output_width: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_W: tl.constexpr,
-    HAS_SWA_WIN: tl.constexpr,
 ):
     """Build varlen SWA cold-path topk metadata in one launch.
 
@@ -170,12 +167,8 @@ def _compute_window_topk_and_length_varlen_kernel(
     req_start = tl.load(cu_seqlens_ptr + req, mask=row_mask, other=0).to(tl.int32)
 
     local_pos = pos - prefix
-    if HAS_SWA_WIN:
-        win_start = tl.load(swa_win_starts_ptr + rows, mask=row_mask, other=0) - prefix
-        topk_len = tl.load(swa_win_lens_ptr + rows, mask=row_mask, other=0)
-    else:
-        win_start = tl.maximum(local_pos - causal_window_size + 1, 0)
-        topk_len = tl.minimum(local_pos + 1, causal_window_size)
+    win_start = tl.maximum(local_pos - causal_window_size + 1, 0)
+    topk_len = tl.minimum(local_pos + 1, causal_window_size)
     tl.store(topk_length_ptr + rows, topk_len, mask=row_mask)
 
     idx = req_start[:, None] + win_start[:, None] + cols[None, :]
@@ -194,10 +187,6 @@ def compute_window_topk_and_length_varlen(
     position_ids: torch.Tensor,
     prefix_lengths: torch.Tensor,
     req_id_per_token: torch.Tensor,
-    *,
-    swa_win_starts: torch.Tensor | None = None,
-    swa_win_lens: torch.Tensor | None = None,
-    swa_win_max_len: int | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Return ``(topk_idxs, topk_length)`` for varlen SWA prefill.
 
@@ -216,18 +205,7 @@ def compute_window_topk_and_length_varlen(
     req_id_per_token = req_id_per_token.reshape(-1)
     assert window_size >= 1
     assert position_ids.numel() == req_id_per_token.numel()
-    has_swa_win = swa_win_lens is not None
-    assert has_swa_win == (
-        swa_win_starts is not None
-    ), "swa_win_starts and swa_win_lens must be passed together"
     output_width = window_size
-    if has_swa_win:
-        assert swa_win_starts is not None and swa_win_lens is not None
-        assert swa_win_starts.numel() == position_ids.numel()
-        assert swa_win_lens.numel() == position_ids.numel()
-        if swa_win_max_len is None:
-            swa_win_max_len = int(swa_win_lens.max().item())
-        output_width = max(output_width, int(swa_win_max_len))
 
     device = position_ids.device
     num_tokens = int(position_ids.numel())
@@ -247,15 +225,8 @@ def compute_window_topk_and_length_varlen(
         req_start_in_flat = cu_i32.gather(0, req_id_idx)
         local_query_pos = pos_i32 - prefix_per_token
         offsets = torch.arange(output_width, device=device, dtype=torch.int32)
-        if has_swa_win:
-            assert swa_win_starts is not None and swa_win_lens is not None
-            win_start = (
-                swa_win_starts.to(device=device, dtype=torch.int32) - prefix_per_token
-            )
-            topk_len = swa_win_lens.to(device=device, dtype=torch.int32)
-        else:
-            win_start = (local_query_pos - window_size + 1).clamp_min(0)
-            topk_len = torch.clamp(local_query_pos + 1, max=window_size)
+        win_start = (local_query_pos - window_size + 1).clamp_min(0)
+        topk_len = torch.clamp(local_query_pos + 1, max=window_size)
         win_start = win_start.unsqueeze(1)
         local_idx = win_start + offsets
         topk_idxs.copy_(
@@ -286,12 +257,6 @@ def compute_window_topk_and_length_varlen(
         prefix_lengths = prefix_lengths.contiguous()
     if not req_id_per_token.is_contiguous():
         req_id_per_token = req_id_per_token.contiguous()
-    if has_swa_win:
-        assert swa_win_starts is not None and swa_win_lens is not None
-        swa_win_starts = swa_win_starts.to(
-            device=device, dtype=torch.int32
-        ).contiguous()
-        swa_win_lens = swa_win_lens.to(device=device, dtype=torch.int32).contiguous()
 
     block_t = 16
     block_w = max(1, triton.next_power_of_2(output_width))
@@ -304,14 +269,11 @@ def compute_window_topk_and_length_varlen(
         position_ids,
         prefix_lengths,
         req_id_per_token,
-        swa_win_starts if has_swa_win else position_ids,
-        swa_win_lens if has_swa_win else position_ids,
         num_tokens,
         causal_window_size=window_size,
         output_width=output_width,
         BLOCK_T=block_t,
         BLOCK_W=block_w,
-        HAS_SWA_WIN=has_swa_win,
     )
     return topk_idxs, topk_length
 
@@ -904,8 +866,6 @@ def _combine_topk_swa_indices_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     gather_lens_ptr,
-    swa_win_starts_ptr,
-    swa_win_lens_ptr,
     M,
     N,
     TOP_K,
@@ -913,7 +873,6 @@ def _combine_topk_swa_indices_kernel(
     WINDOW_SIZE: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
     PADDED_WINDOW_SIZE: tl.constexpr,
-    HAS_SWA_WIN: tl.constexpr,
 ):
     """Per-query layout of ``[combined_topk]`` row in the gathered workspace.
 
@@ -954,12 +913,8 @@ def _combine_topk_swa_indices_kernel(
         # this matches that. Caller passes TOP_K=0 for SWA-only layers
         # to zero out the compressed contribution.
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        if HAS_SWA_WIN:
-            swa_start = tl.load(swa_win_starts_ptr + token_idx)
-            swa_len = tl.load(swa_win_lens_ptr + token_idx)
-        else:
-            swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
-            swa_start = pos - swa_len + 1
+        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        swa_start = pos - swa_len + 1
 
         # Promote the row index once. Long-context HCA prefill of a 1.1M-token
         # query can reach token_idx ~ 274092 with strides 8565 / 9600, so the
@@ -1012,20 +967,16 @@ def combine_topk_swa_indices(
     N: int,
     *,
     flash_mla_indices: bool = False,
-    swa_win_starts: torch.Tensor | None = None,
-    swa_win_lens: torch.Tensor | None = None,
-    swa_win_max_len: int | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build ``(combined_indices, combined_lens)`` for ``flash_mla_sparse_fwd``.
 
     Returns:
       combined_indices: ``[num_tokens, combined_topk]`` int32; ``combined_topk
-        = align(topk + effective_window_size, 128)``. Sentinel ``-1`` in unused tail.
+        = align(topk + window_size, 128)``. Sentinel ``-1`` in unused tail.
       combined_lens:   ``[num_tokens]`` int32 — pass to ``flash_mla_sparse_fwd``
         as ``topk_length``.
 
-    ``swa_win_starts``/``swa_win_lens`` optionally replace the causal SWA
-    range with DSV4 image-visible windows. ``M`` is the per-batch workspace
+    ``M`` is the per-batch workspace
     stride (``N + window_size + max_num_batched_tokens``). ``N`` is the
     compressed-region size (``ceil(max_model_len / compress_ratio)``); pass
     ``N=0`` and ``topk=0`` for SWA-only layers.
@@ -1042,25 +993,10 @@ def combine_topk_swa_indices(
         topk
     ), f"topk_indices width {topk_indices.shape[-1]} < topk {topk}"
 
-    has_swa_win = swa_win_lens is not None
-    assert has_swa_win == (
-        swa_win_starts is not None
-    ), "swa_win_starts and swa_win_lens must be passed together"
-    effective_window_size = int(window_size)
-    if has_swa_win:
-        assert swa_win_starts is not None and swa_win_lens is not None
-        assert swa_win_starts.dtype == torch.int32
-        assert swa_win_lens.dtype == torch.int32
-        assert swa_win_starts.numel() == topk_indices.shape[0]
-        assert swa_win_lens.numel() == topk_indices.shape[0]
-        if swa_win_max_len is None:
-            swa_win_max_len = int(swa_win_lens.max().item())
-        effective_window_size = max(effective_window_size, int(swa_win_max_len))
-
     num_tokens = int(topk_indices.shape[0])
     num_reqs = int(seq_lens.shape[0])
     combined_topk = (
-        (topk + effective_window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
@@ -1089,7 +1025,7 @@ def combine_topk_swa_indices(
     padded_top_k = max(1, triton.next_power_of_2(int(topk_indices.shape[-1])))
     # Same constraint for the SWA arange tile — Triton requires arange ranges
     # to be power-of-2; mask inside the kernel handles the real ``window_size``.
-    padded_window_size = max(1, triton.next_power_of_2(effective_window_size))
+    padded_window_size = max(1, triton.next_power_of_2(window_size))
     NUM_WORKERS = 128
     _combine_topk_swa_indices_kernel[(num_reqs, NUM_WORKERS)](
         combined_indices,
@@ -1100,8 +1036,6 @@ def combine_topk_swa_indices(
         query_start_loc,
         seq_lens,
         gather_lens,
-        swa_win_starts if has_swa_win else combined_lens,
-        swa_win_lens if has_swa_win else combined_lens,
         M,
         N,
         TOP_K=topk,
@@ -1109,7 +1043,6 @@ def combine_topk_swa_indices(
         WINDOW_SIZE=window_size,
         PADDED_TOP_K=padded_top_k,
         PADDED_WINDOW_SIZE=padded_window_size,
-        HAS_SWA_WIN=has_swa_win,
     )
     return combined_indices, combined_lens
 
@@ -1135,8 +1068,6 @@ def _combine_topk_swa_indices_cp_kernel(
     global_positions_ptr,
     req_id_per_token_ptr,
     prefix_lengths_ptr,
-    swa_win_starts_ptr,
-    swa_win_lens_ptr,
     num_tokens,
     sp_int,
     M,
@@ -1148,7 +1079,6 @@ def _combine_topk_swa_indices_cp_kernel(
     BLOCK_T: tl.constexpr,
     BLOCK_C: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HAS_SWA_WIN: tl.constexpr,
 ):
     """CP-aware fused combine.
 
@@ -1176,14 +1106,8 @@ def _combine_topk_swa_indices_cp_kernel(
     p = tl.minimum(prefix, WINDOW_SIZE - 1)
     gather_start = prefix - p
     topk_len = tl.minimum((gp + 1) // COMPRESS_RATIO, TOP_K)
-    if HAS_SWA_WIN:
-        swa_start = tl.load(swa_win_starts_ptr + rows, mask=row_mask, other=0).to(
-            tl.int64
-        )
-        swa_len = tl.load(swa_win_lens_ptr + rows, mask=row_mask, other=0).to(tl.int64)
-    else:
-        swa_len = tl.minimum(gp + 1, WINDOW_SIZE)
-        swa_start = gp - swa_len + 1
+    swa_len = tl.minimum(gp + 1, WINDOW_SIZE)
+    swa_start = gp - swa_len + 1
     combined_len = topk_len + swa_len
 
     col = cols[None, :]
@@ -1241,9 +1165,6 @@ def combine_topk_swa_indices_cp(
     prefix_lengths: torch.Tensor | None = None,
     *,
     flash_mla_indices: bool = False,
-    swa_win_starts: torch.Tensor | None = None,
-    swa_win_lens: torch.Tensor | None = None,
-    swa_win_max_len: int | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """CP-aware fused combine for ``flash_mla_sparse_fwd``.
 
@@ -1258,22 +1179,9 @@ def combine_topk_swa_indices_cp(
     assert topk_indices.dim() == 2, f"topk_indices must be 2D, got {topk_indices.shape}"
     assert window_size >= 1 and compress_ratio >= 1
 
-    has_swa_win = swa_win_lens is not None
-    assert has_swa_win == (
-        swa_win_starts is not None
-    ), "swa_win_starts and swa_win_lens must be passed together"
-    effective_window_size = int(window_size)
-    if has_swa_win:
-        assert swa_win_starts is not None and swa_win_lens is not None
-        assert swa_win_starts.dtype == torch.int32
-        assert swa_win_lens.dtype == torch.int32
-        if swa_win_max_len is None:
-            swa_win_max_len = int(swa_win_lens.max().item())
-        effective_window_size = max(effective_window_size, int(swa_win_max_len))
-
     num_tokens = int(global_positions.numel())
     combined_topk = (
-        (topk + effective_window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
@@ -1296,10 +1204,6 @@ def combine_topk_swa_indices_cp(
     assert (
         topk_indices.shape[0] == num_tokens
     ), f"topk rows {topk_indices.shape[0]} != positions {num_tokens}"
-    if has_swa_win:
-        assert swa_win_starts is not None and swa_win_lens is not None
-        assert swa_win_starts.numel() == num_tokens
-        assert swa_win_lens.numel() == num_tokens
     assert int(topk_indices.shape[1]) >= int(
         topk
     ), f"topk_indices width {topk_indices.shape[1]} < topk {topk}"
@@ -1343,8 +1247,6 @@ def combine_topk_swa_indices_cp(
         global_positions,
         req_ptr,
         prefix_ptr,
-        swa_win_starts if has_swa_win else global_positions,
-        swa_win_lens if has_swa_win else global_positions,
         num_tokens,
         int(sp_int),
         int(M),
@@ -1356,7 +1258,6 @@ def combine_topk_swa_indices_cp(
         BLOCK_T=BLOCK_T,
         BLOCK_C=BLOCK_C,
         IS_VARLEN=bool(is_varlen),
-        HAS_SWA_WIN=has_swa_win,
         num_warps=4,
     )
     return combined_indices, combined_lens

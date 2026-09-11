@@ -158,30 +158,6 @@ def build_image_block(n_llm_h: int, n_llm_w: int, start_pos: int):
     return types, perm
 
 
-def build_image_attention_spans(
-    raw_spans, prefix_lengths, device, swa_window_size: int = 128
-):
-    """Convert generic feature spans to aligned DSV4 image-attention spans.
-
-    A shallow prefix cut is valid because the raw SWA tail still contains the
-    image start. The cache allocator caps deeper cuts to the block before the
-    image; this check is the model-side contract guard for other reuse paths.
-    """
-    spans = raw_spans.to(device="cpu", dtype=torch.long).reshape(-1, 3).clone()
-    spans[:, 1] += 3 - spans[:, 1] % COMPRESS_PAD_TO
-    spans[:, 2] -= 1
-    prefixes = prefix_lengths.reshape(-1).cpu().tolist()
-    for request_idx, image_start, image_end in spans.tolist():
-        prefix = prefixes[request_idx]
-        if image_start < prefix - (swa_window_size - 1) and prefix <= image_end:
-            raise RuntimeError(
-                "DeepSeek-V4 prefix reuse ended too deep inside an image block: "
-                f"request={request_idx} image=[{image_start}, {image_end}] "
-                f"prefix={prefix}"
-            )
-    return spans.to(device=device)
-
-
 @lru_cache(32)
 def _vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float, device: str):
     inv_freq = 1.0 / (
@@ -419,7 +395,6 @@ __all__ = [
     "DeepSeekV4VisionEmbedding",
     "DeepSeekV4VisionWeights",
     "build_image_block",
-    "build_image_attention_spans",
     "grid_tokens",
     "preprocess_image",
     "safe_resize",

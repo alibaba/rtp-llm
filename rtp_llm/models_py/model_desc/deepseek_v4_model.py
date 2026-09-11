@@ -1117,27 +1117,7 @@ class DeepSeekV4Model(GptModelBase):
         hidden = self.v4.embed(safe_ids)
         MultimodalEmbeddingInjector()(hidden, features, locations_tensor)
 
-        raw_spans = (
-            cp_info.prefill_mm_spans
-            if cp_info is not None
-            else inputs.mm_features_spans
-        )
-        prefix_lengths = (
-            cp_info.prefill_prefix_lengths_cpu
-            if cp_info is not None
-            else inputs.attention_inputs.prefix_lengths
-        )
-        from rtp_llm.models.deepseek_v4_vision import build_image_attention_spans
-
-        spans = build_image_attention_spans(
-            raw_spans,
-            prefix_lengths,
-            device=input_ids.device,
-            swa_window_size=int(self._v4_args.window_size),
-        )
-
         self.v4._image_token_mask = image_mask
-        self.v4._image_spans = spans
         return hidden.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
 
     def prepare_fmha_impl(
@@ -1323,7 +1303,6 @@ class DeepSeekV4Model(GptModelBase):
             return PyModelOutputs(hidden)
         attn = inputs.attention_inputs
         self.v4._image_token_mask = None
-        self.v4._image_spans = None
         has_visual_tokens = bool(inputs.multimodal_features)
         if getattr(self.v4, "_has_visual_tokens", None) != has_visual_tokens:
             self.v4._has_visual_tokens = has_visual_tokens
