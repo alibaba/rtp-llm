@@ -145,16 +145,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# gfx950 (MI355) excludes module_custom_all_reduce, module_moe_ck2stages, and
-# module_quick_all_reduce because aiter does not provide these .so for gfx950.
-# Runtime fallback: Python-level import guards handle missing modules gracefully
-# (ImportError is caught and the feature is disabled).
+# Revalidated against AITER 0.1.21.dev80+g987203ba5. The packaged custom and
+# quick all-reduce modules contain gfx950 code objects, so both are available on
+# every supported ROCm architecture.
 cc_library(
     name = "module_custom_all_reduce",
-    srcs = select({
-        "@//:rocm_gfx950": [],
-        "//conditions:default": ["aiter/jit/module_custom_all_reduce.so"],
-    }),
+    srcs = ["aiter/jit/module_custom_all_reduce.so"],
     hdrs = ["aiter_meta/csrc/include/custom_all_reduce.h"],
     deps = [
         ":aiter_so",
@@ -268,13 +264,10 @@ cc_library(
 
 cc_library(
     name = "module_pa",
-    srcs = [
-        "aiter/jit/module_pa.so",
-        "aiter/jit/module_attention_asm.so"
-    ],
-    hdrs = [
-        "aiter_meta/csrc/include/attention.h",
-    ],
+    # module_pa.so and attention.h are no longer packaged by AITER 0.1.21;
+    # module_attention_asm.so is the remaining prebuilt attention module.
+    srcs = ["aiter/jit/module_attention_asm.so"],
+    hdrs = [],
     deps = [
         ":aiter_so",
         ":aiter_headers",
@@ -301,10 +294,10 @@ cc_library(
 
 cc_library(
     name = "module_mha_fwd",
-    srcs = ["aiter/jit/module_mha_fwd.so"],
-    # glob is used because module_mha_fwd depends on multiple headers in this
-    # directory (attention.h, mha_v3_varlen_fwd.h, etc.) and the exact set
-    # changes across aiter versions. This avoids breakage on aiter upgrades.
+    # module_mha_fwd.so was removed from the AITER 0.1.21 wheel. Keep the label
+    # as a header-only compatibility target; specialized packaged modules such
+    # as module_fmha_v3_varlen_fwd remain separate targets below.
+    srcs = [],
     hdrs = glob([
         "aiter_meta/csrc/include/*.h",
     ]),
@@ -383,14 +376,11 @@ cc_library(
 
 cc_library(
     name = "module_moe_ck2stages",
-    srcs = select({
-        "@//:rocm_gfx950": [],
-        "//conditions:default": ["aiter/jit/module_moe_ck2stages.so"],
-    }),
-    hdrs = select({
-        "@//:rocm_gfx950": [],
-        "//conditions:default": ["aiter_meta/csrc/include/moe_ck.h"],
-    }),
+    # This prebuilt module is absent from AITER 0.1.21 on every architecture;
+    # preserve the label so existing optional consumers can use runtime/JIT
+    # fallback without making the external repository fail to analyze.
+    srcs = [],
+    hdrs = [],
     deps = [
         ":aiter_so",
         ":aiter_headers",
@@ -404,10 +394,7 @@ cc_library(
 
 cc_library(
     name = "module_quick_all_reduce",
-    srcs = select({
-        "@//:rocm_gfx950": [],
-        "//conditions:default": ["aiter/jit/module_quick_all_reduce.so"],
-    }),
+    srcs = ["aiter/jit/module_quick_all_reduce.so"],
     hdrs = ["aiter_meta/csrc/include/quick_all_reduce.h"],
     deps = [
         ":aiter_so",

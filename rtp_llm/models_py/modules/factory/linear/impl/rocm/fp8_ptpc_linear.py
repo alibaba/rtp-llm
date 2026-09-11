@@ -3,9 +3,11 @@
 import importlib.metadata as importlib_metadata
 import json
 import logging
+import re
+from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import aiter
 import torch
@@ -17,6 +19,20 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
+
+
+class _RuntimeTarget(NamedTuple):
+    arch: str
+    torch_hip: str
+    aiter_version: str
+
+
+class _TargetMismatch(Enum):
+    INVALID_CONFIG = "invalid_config"
+    UNVALIDATED = "unvalidated"
+    PLATFORM = "platform"
+    MISSING_AITER_VERSION = "missing_aiter_version"
+    STALE_AITER_VERSION = "stale_aiter_version"
 
 
 class RocmFp8PTPCLinearBase(LinearBase):
@@ -215,31 +231,54 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         return Path(__file__).resolve().parent / "data" / "fp8_ptpc_hipb_solutions.json"
 
     @staticmethod
-    def _target_matches(payload: dict) -> bool:
-        target = payload.get("target", {})
-        arch_prefix = str(target.get("arch_prefix", ""))
-        hip_prefix = str(target.get("torch_hip_prefix", ""))
-        aiter_version_prefix = str(target.get("aiter_version_prefix", ""))
-
+    def _runtime_target() -> _RuntimeTarget:
         try:
             props = torch.cuda.get_device_properties(torch.cuda.current_device())
             gpu_arch = str(getattr(props, "gcnArchName", ""))
-        except Exception:
+        # Expected unavailable/invalid-device failures only disable the offline
+        # cache. Unexpected exceptions remain fail-fast because they indicate a
+        # programming or runtime bug rather than missing best-effort metadata.
+        except (RuntimeError, AssertionError):
             gpu_arch = ""
         torch_hip = str(getattr(torch.version, "hip", "") or "")
         try:
             installed_aiter = importlib_metadata.version("aiter")
-        except Exception:
+        except importlib_metadata.PackageNotFoundError:
             installed_aiter = ""
+        return _RuntimeTarget(gpu_arch, torch_hip, installed_aiter)
 
-        return (
-            (not arch_prefix or gpu_arch.startswith(arch_prefix))
-            and (not hip_prefix or torch_hip.startswith(hip_prefix))
-            and (
-                not aiter_version_prefix
-                or installed_aiter.startswith(aiter_version_prefix)
-            )
-        )
+    @staticmethod
+    def _target_mismatch_reason(
+        payload: dict, runtime: _RuntimeTarget
+    ) -> Optional[_TargetMismatch]:
+        target = payload.get("target", {})
+        if not isinstance(target, dict):
+            return _TargetMismatch.INVALID_CONFIG
+        arch_prefix = str(target.get("arch_prefix", ""))
+        hip_prefix = str(target.get("torch_hip_prefix", ""))
+        validated_versions = target.get("validated_aiter_versions", [])
+        if not isinstance(validated_versions, list):
+            return _TargetMismatch.INVALID_CONFIG
+        if not validated_versions:
+            return _TargetMismatch.UNVALIDATED
+        if not all(
+            isinstance(version, str) and re.fullmatch(r"[^\s]+\+g[0-9a-f]{7,}", version)
+            for version in validated_versions
+        ):
+            return _TargetMismatch.INVALID_CONFIG
+        if (arch_prefix and not runtime.arch.startswith(arch_prefix)) or (
+            hip_prefix and not runtime.torch_hip.startswith(hip_prefix)
+        ):
+            return _TargetMismatch.PLATFORM
+        if not runtime.aiter_version:
+            return _TargetMismatch.MISSING_AITER_VERSION
+        if not any(
+            runtime.aiter_version == version
+            or runtime.aiter_version.startswith(f"{version}.")
+            for version in validated_versions
+        ):
+            return _TargetMismatch.STALE_AITER_VERSION
+        return None
 
     @staticmethod
     def _parse_solution_cache(payload: dict) -> dict[Tuple[int, int, int, str], int]:
@@ -266,21 +305,57 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         except FileNotFoundError:
             logger.debug("FP8 PTPC HIPB solution cache not found: %s", cache_path)
             return {}
-        except Exception as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             logger.debug(
                 "Failed to read FP8 PTPC HIPB solution cache %s: %s", cache_path, exc
             )
             return {}
 
-        if payload.get("format_version") != 1:
+        if payload.get("format_version") not in (2,):
             logger.debug(
                 "Unsupported FP8 PTPC HIPB solution cache format: %s", cache_path
             )
             return {}
-        if not RocmFp8PTPCLinearWithSwizzle._target_matches(payload):
-            logger.debug(
-                "FP8 PTPC HIPB solution cache metadata mismatch: %s", cache_path
-            )
+        runtime = RocmFp8PTPCLinearWithSwizzle._runtime_target()
+        mismatch = RocmFp8PTPCLinearWithSwizzle._target_mismatch_reason(
+            payload, runtime
+        )
+        if mismatch is not None:
+            target = payload.get("target", {})
+            if mismatch is _TargetMismatch.UNVALIDATED:
+                logger.warning(
+                    "FP8 PTPC HIPB solution cache %s is intentionally disabled: "
+                    "no validated AITER version is recorded; falling back to "
+                    "hipBLASLt default heuristics",
+                    cache_path,
+                )
+            elif mismatch is _TargetMismatch.INVALID_CONFIG:
+                logger.warning(
+                    "FP8 PTPC HIPB solution cache %s has invalid target metadata %r; "
+                    "falling back to hipBLASLt default heuristics",
+                    cache_path,
+                    target,
+                )
+            elif mismatch is _TargetMismatch.PLATFORM:
+                logger.info(
+                    "FP8 PTPC HIPB solution cache %s does not target this platform: "
+                    "expected arch/ROCm prefixes %r/%r, got %r/%r; falling back "
+                    "to hipBLASLt default heuristics",
+                    cache_path,
+                    target.get("arch_prefix", ""),
+                    target.get("torch_hip_prefix", ""),
+                    runtime.arch,
+                    runtime.torch_hip,
+                )
+            else:
+                logger.warning(
+                    "FP8 PTPC HIPB solution cache %s cannot be used with AITER %r "
+                    "(validated versions: %r); falling back to hipBLASLt default "
+                    "heuristics without affecting correctness",
+                    cache_path,
+                    runtime.aiter_version,
+                    target.get("validated_aiter_versions", []),
+                )
             return {}
         return RocmFp8PTPCLinearWithSwizzle._parse_solution_cache(payload)
 

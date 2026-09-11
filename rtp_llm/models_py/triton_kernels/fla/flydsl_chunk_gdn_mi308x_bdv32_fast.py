@@ -15,6 +15,7 @@ Starting from the MI308 V1 baseline:
 Architecture: 8 waves (512 threads), single-buffer LDS under the CDNA3 64KB limit.
 Target: MI300X (gfx942), DK=DV=128, BT=64, block_DV=32 small-H fast path
 """
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
@@ -24,10 +25,12 @@ from flydsl._mlir.dialects import llvm as llvm_dialect
 from flydsl._mlir.dialects import math as math_dialect
 from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+
+from rtp_llm.models_py.triton_kernels.fla._flydsl_compat import buffer_ops, vector
 
 # See flydsl_chunk_gdn_mi308x.py for rationale: the global RocmBackend
 # pipeline_fragments monkey-patch is removed because the O=3 upgrade was a
@@ -139,12 +142,11 @@ def build_megakernel(
         v1bf16 = T.vec(1, T.bf16)
         v1f32 = T.vec(1, T.f32)
         v4i16 = T.vec(4, T.i16)
-        _z = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), 0)
 
         def mfma(a, b, c):
             r = rocdl.mfma_f32_16x16x16bf16_1k(
                 v4f32,
-                [vector.bitcast(v4i16, a), vector.bitcast(v4i16, b), c, _z, _z, _z],
+                [vector.bitcast(v4i16, a), vector.bitcast(v4i16, b), c, 0, 0, 0],
             )
             return r.result if hasattr(r, "result") else r
 
