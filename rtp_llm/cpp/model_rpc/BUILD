@@ -86,6 +86,8 @@ cc_library(
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:torch_cuda_oom",

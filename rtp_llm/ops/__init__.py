@@ -140,6 +140,7 @@ try:
         FMHAType,
         GrammarConfig,
         HWKernelConfig,
+        HiddenStateCaptureDtype,
         KVCacheConfig,
         KVCacheSpecDesc,
         MiscellaneousConfig,

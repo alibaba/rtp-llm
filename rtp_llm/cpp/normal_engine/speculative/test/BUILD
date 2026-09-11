@@ -83,6 +83,7 @@ cc_test(
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base/schedulers",
         "//rtp_llm/cpp/models",
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/normal_engine/test:mock_engine",

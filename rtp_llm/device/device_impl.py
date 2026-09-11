@@ -623,13 +623,20 @@ class CudaImpl(GpuImpl):
                 epilogue_tile_m,
                 num_elts_per_sf=16,
             )
-            scale_fp4_shuffled.append(
-                nvfp4_block_scale_interleave(
-                    scale_linear_fp4[i]
-                    .view(torch.uint8)[permute_sf_indices.to(scale_linear_fp4.device)]
-                    .contiguous()
-                )
+            scale_bytes = (
+                scale_linear_fp4[i]
+                .view(torch.uint8)[permute_sf_indices.to(scale_linear_fp4.device)]
+                .contiguous()
             )
+            if scale_bytes.device.type == "cpu":
+                scale_bytes = scale_bytes.to(
+                    torch.device("cuda", torch.cuda.current_device())
+                )
+                scale_fp4_shuffled.append(
+                    nvfp4_block_scale_interleave(scale_bytes).cpu()
+                )
+            else:
+                scale_fp4_shuffled.append(nvfp4_block_scale_interleave(scale_bytes))
 
         weight_fp4_shuffled = torch.stack(weight_fp4_shuffled)
         scale_fp4_shuffled = (
@@ -920,6 +927,7 @@ class RocmImpl(GpuImpl):
                     "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
                 )
             from aiter.utility.fp4_utils import e8m0_shuffle
+
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
@@ -970,7 +978,9 @@ class RocmImpl(GpuImpl):
                 # physical layout from the actual TP-local shape so aligned
                 # projections keep the fast path while N=24/12 safely fall
                 # back to the raw layout.
-                should_swizzle = should_swizzle and should_swizzle_linear_attn_ba(weight)
+                should_swizzle = should_swizzle and should_swizzle_linear_attn_ba(
+                    weight
+                )
             if should_swizzle:
                 if weight.dtype != torch.float8_e4m3fn:
                     weight = swizzle_tensor(weight.t(), False).t()

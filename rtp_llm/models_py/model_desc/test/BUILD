@@ -47,6 +47,21 @@ py_test(
 )
 
 py_test(
+    name = "hidden_state_capture_test",
+    srcs = ["hidden_state_capture_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
+)
+
+py_test(
     name = "generic_moe_allreduce_test",
     srcs = ["generic_moe_allreduce_test.py"],
     deps = py_test_deps + [

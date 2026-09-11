@@ -21,9 +21,12 @@
 
 import logging
 import unittest
+from types import SimpleNamespace
+from unittest.mock import mock_open, patch
 
 from pydantic import ValidationError
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import (
     _DIVERGE_START_COMBO_WARN_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
 )
@@ -34,8 +37,415 @@ from rtp_llm.config.generate_config import (
     _reset_sanitize_warn_state,  # pyright: ignore[reportPrivateUsage]
 )
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.config.response_format import ResponseFormat
+from rtp_llm.models.base_model import BaseModel
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.structure.request_extractor import RequestExtractor
+
+
+class TestPrefillOnlyGenerateConfig(unittest.TestCase):
+    def test_prefill_only_preserves_cache_setting(self):
+        config = GenerateConfig(max_new_tokens=0, reuse_cache=True)
+
+        self.assertTrue(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+        config.validate()
+
+    def test_update_preserves_cache_setting_across_prefill_only(self):
+        config = GenerateConfig(max_new_tokens=1, reuse_cache=True)
+
+        config.update({"max_new_tokens": 0})
+        self.assertTrue(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+
+        config.update({"max_new_tokens": 1})
+        self.assertFalse(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+
+    def test_update_and_pop_preserves_cache_setting_across_prefill_only(self):
+        config = GenerateConfig(max_new_tokens=1, reuse_cache=True)
+
+        remain = config.update_and_pop({"max_new_tokens": 0, "unknown": "keep"})
+        self.assertEqual(remain, {"unknown": "keep"})
+        self.assertTrue(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+
+        remain = config.update_and_pop({"max_new_tokens": 1, "unknown": "keep"})
+        self.assertEqual(remain, {"unknown": "keep"})
+        self.assertFalse(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+
+    def test_negative_max_new_tokens_is_rejected(self):
+        for values, field in (
+            ({"max_new_tokens": -1}, "max_new_tokens"),
+            (
+                {"max_new_tokens": -1, "return_prompt_logits": True},
+                "max_new_tokens",
+            ),
+            ({"max_new_tokens": None}, "max_new_tokens"),
+            ({"min_new_tokens": None}, "min_new_tokens"),
+        ):
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(ValidationError, field) as ctx:
+                    GenerateConfig(**values)
+                self.assertEqual(ctx.exception.errors()[0]["loc"], (field,))
+
+    def test_nested_extra_configs_reports_field_and_model_errors(self):
+        for values, location, message in (
+            (
+                {"max_new_tokens": -1},
+                ("extra_configs", "max_new_tokens"),
+                "max_new_tokens",
+            ),
+            (
+                {"max_new_tokens": 0, "return_logits": True},
+                ("extra_configs",),
+                "return_logits",
+            ),
+            (
+                {"min_new_tokens": None},
+                ("extra_configs", "min_new_tokens"),
+                "min_new_tokens",
+            ),
+        ):
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(ValidationError, message) as ctx:
+                    ChatCompletionRequest(messages=[], extra_configs=values)
+                errors = ctx.exception.errors()
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(errors[0]["loc"], location)
+
+    def test_is_prefill_only_is_a_pure_boolean_query(self):
+        for return_prompt_logits in (False, True):
+            with self.subTest(return_prompt_logits=return_prompt_logits):
+                config = GenerateConfig(max_new_tokens=1)
+                config.max_new_tokens = -1
+                config.return_prompt_logits = return_prompt_logits
+                before = config.model_copy(deep=True)
+
+                self.assertIs(config.is_prefill_only(), False)
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "max_new_tokens"
+                ) as ctx:
+                    config.validate()
+                self.assertEqual(
+                    ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+                )
+                self.assertEqual(config, before)
+
+    def test_failed_update_is_atomic(self):
+        config = GenerateConfig(max_new_tokens=1, return_logits=True, reuse_cache=True)
+
+        with self.assertRaisesRegex(FtRuntimeException, "return_logits") as ctx:
+            config.update({"reuse_cache": False, "max_new_tokens": 0})
+
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertTrue(config.return_logits)
+        self.assertTrue(config.reuse_cache)
+
+    def test_failed_update_and_pop_is_atomic(self):
+        config = GenerateConfig(max_new_tokens=1, return_logits=True, reuse_cache=True)
+
+        with self.assertRaisesRegex(FtRuntimeException, "return_logits") as ctx:
+            config.update_and_pop(
+                {"reuse_cache": False, "max_new_tokens": 0, "unknown": "keep"}
+            )
+
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertTrue(config.return_logits)
+        self.assertTrue(config.reuse_cache)
+
+    def test_negative_update_is_validated_atomically(self):
+        for update_method in ("update", "update_and_pop"):
+            for initial, values in (
+                (3, {"max_new_tokens": -1, "return_prompt_logits": True}),
+                (3, {"max_new_tokens": None}),
+                (-1, {"return_prompt_logits": True}),
+            ):
+                with self.subTest(method=update_method, initial=initial, values=values):
+                    config = GenerateConfig(max_new_tokens=3, reuse_cache=True)
+                    config.max_new_tokens = initial
+                    before = config.model_copy(deep=True)
+                    with self.assertRaisesRegex(
+                        FtRuntimeException, "max_new_tokens"
+                    ) as ctx:
+                        getattr(config, update_method)({"reuse_cache": False, **values})
+
+                    self.assertEqual(
+                        ctx.exception.exception_type,
+                        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    )
+                    self.assertEqual(config, before)
+                    self.assertEqual(config.model_fields_set, before.model_fields_set)
+
+    def test_prompt_scoring_normalizes_zero_max_new_tokens(self):
+        config = GenerateConfig(max_new_tokens=0, return_prompt_logits=True)
+
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertFalse(config.is_prefill_only())
+        self.assertFalse(config.is_streaming)
+        self.assertFalse(config.reuse_cache)
+        self.assertFalse(config.can_use_pd_separation)
+        config.validate()
+
+    def test_prompt_scoring_normalizes_zero_max_new_tokens_on_update(self):
+        config = GenerateConfig(max_new_tokens=1, return_prompt_logits=True)
+
+        config.update({"max_new_tokens": 0})
+
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertFalse(config.is_prefill_only())
+
+    def test_positive_min_new_tokens_is_rejected_for_prefill_only(self):
+        for min_new_tokens in (1,):
+            with self.subTest(min_new_tokens=min_new_tokens):
+                with self.assertRaisesRegex(ValidationError, "min_new_tokens"):
+                    GenerateConfig(max_new_tokens=0, min_new_tokens=min_new_tokens)
+
+    def test_unsupported_config_is_rejected_without_mutating_cache_setting(self):
+        bad_configs = {
+            "num_beams": {"num_beams": 2},
+            "variable_num_beams": {"variable_num_beams": [1]},
+            "num_return_sequences": {"num_return_sequences": 2},
+            "return_logits": {"return_logits": True},
+            "calculate_loss": {"calculate_loss": 1},
+            "return_softmax_probs": {"return_softmax_probs": True},
+            "return_all_probs": {"return_all_probs": 1},
+            "return_cum_log_probs": {"return_cum_log_probs": True},
+            "return_hidden_states": {"return_hidden_states": True},
+            "return_all_hidden_states": {"return_all_hidden_states": True},
+        }
+        for field, overrides in bad_configs.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValidationError, field) as ctx:
+                    GenerateConfig(max_new_tokens=0, **overrides)
+                self.assertEqual(ctx.exception.errors()[0]["loc"], ())
+
+        config = GenerateConfig(max_new_tokens=1, return_logits=True)
+        with self.assertRaisesRegex(FtRuntimeException, "return_logits"):
+            config.update({"max_new_tokens": 0})
+        self.assertTrue(config.reuse_cache)
+        config.max_new_tokens = 0
+        with self.assertRaisesRegex(FtRuntimeException, "return_logits") as ctx:
+            config.validate()
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+
+    def test_prompt_scoring_normalizes_positive_max_new_tokens(self):
+        config = GenerateConfig(
+            max_new_tokens=32,
+            return_prompt_logits=True,
+            is_streaming=True,
+            reuse_cache=True,
+            can_use_pd_separation=True,
+        )
+
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertFalse(config.is_streaming)
+        self.assertFalse(config.reuse_cache)
+        self.assertFalse(config.can_use_pd_separation)
+        config.validate()
+
+    def test_prompt_scoring_update_normalization_table(self):
+        cases = [
+            ({"return_prompt_logits": True, "max_new_tokens": 32}, 1, False, False),
+            ({"return_prompt_logits": True, "max_new_tokens": 1}, 1, False, False),
+            ({"return_prompt_logits": True, "reuse_cache": True}, 1, False, False),
+            ({"return_prompt_logits": True, "is_streaming": True}, 1, False, False),
+            (
+                {"return_prompt_logits": True, "max_new_tokens": 32, "aux_info": False},
+                1,
+                False,
+                False,
+            ),
+        ]
+        for update, expected_max_tokens, expected_streaming, expected_reuse in cases:
+            with self.subTest(update=update):
+                config = GenerateConfig()
+                config.update(update)
+                self.assertTrue(config.return_prompt_logits)
+                self.assertEqual(config.max_new_tokens, expected_max_tokens)
+                self.assertEqual(config.is_streaming, expected_streaming)
+                self.assertEqual(config.reuse_cache, expected_reuse)
+                if "aux_info" in update:
+                    self.assertFalse(config.aux_info)
+
+    def test_update_preserves_private_state_atomically(self):
+        config = GenerateConfig()
+        config._diverge_depth_warned = True
+
+        config.update({"return_prompt_logits": True, "max_new_tokens": 8})
+
+        self.assertTrue(config._diverge_depth_warned)
+        self.assertTrue(config.return_prompt_logits)
+        self.assertEqual(config.max_new_tokens, 1)
+
+    def test_positive_generation_is_unchanged(self):
+        config = GenerateConfig(
+            max_new_tokens=1,
+            min_new_tokens=1,
+            num_beams=2,
+            variable_num_beams=[1],
+            num_return_sequences=2,
+            return_logits=True,
+            calculate_loss=1,
+            return_softmax_probs=True,
+            return_all_probs=1,
+            return_cum_log_probs=True,
+            return_hidden_states=True,
+            return_all_hidden_states=True,
+        )
+
+        config.validate()
+        self.assertTrue(config.reuse_cache)
+        self.assertTrue(
+            GenerateConfig(
+                max_new_tokens=1, return_prompt_logits=True
+            ).return_prompt_logits
+        )
+
+
+class TestGenerateConfigUpdates(unittest.TestCase):
+    def test_internal_value_error_propagates_without_committing(self):
+        for update_method in ("update", "update_and_pop"):
+            with self.subTest(update_method=update_method):
+                config = GenerateConfig()
+                config._diverge_depth_warned = True
+                before = config.model_copy(deep=True)
+                error = ValueError("internal cross-sequence compatibility failure")
+                with patch.object(
+                    GenerateConfig,
+                    "_check_cross_seq_ban_compatibility",
+                    side_effect=error,
+                ):
+                    with self.assertRaises(ValueError) as ctx:
+                        getattr(config, update_method)({"num_return_sequences": 2})
+
+                self.assertIs(ctx.exception, error)
+                self.assertEqual(config, before)
+                self.assertEqual(config.model_fields_set, before.model_fields_set)
+
+    def test_checkpoint_token_limit_null_preserves_default_without_mutating_input(self):
+        for initial_min, overrides, expected in (
+            (0, {}, (16, 0)),
+            (0, {"max_new_tokens": None}, (16, 0)),
+            (0, {"max_new_tokens": 0}, (0, 0)),
+            (0, {"max_new_tokens": 8}, (8, 0)),
+            (0, {"max_new_tokens": None, "aux_info": None}, None),
+            (3, {}, (16, 3)),
+            (0, {"min_new_tokens": None}, (16, 0)),
+            (3, {"min_new_tokens": None}, (16, 3)),
+            (3, {"min_new_tokens": 0}, (16, 0)),
+            (0, {"min_new_tokens": 2}, (16, 2)),
+            (3, {"max_new_tokens": None, "min_new_tokens": None}, (16, 3)),
+            (
+                3,
+                {"max_new_tokens": None, "min_new_tokens": None, "aux_info": None},
+                None,
+            ),
+        ):
+            with self.subTest(initial_min=initial_min, overrides=overrides):
+                values = {"top_k": 7, **overrides}
+                original = values.copy()
+                config = GenerateConfig(max_new_tokens=16, min_new_tokens=initial_min)
+                before = config.model_copy(deep=True)
+                model = SimpleNamespace(default_generate_config=config)
+                env = GenerateEnvConfig()
+                env.generation_config_path = "checkpoint"
+                with patch("rtp_llm.models.base_model.open", mock_open()), patch(
+                    "rtp_llm.models.base_model.json.load", return_value=values
+                ):
+                    if expected is None:
+                        with self.assertRaisesRegex(
+                            FtRuntimeException, "aux_info"
+                        ) as ctx:
+                            BaseModel.load_default_generate_config(model, env)
+                        self.assertEqual(
+                            ctx.exception.exception_type,
+                            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                        )
+                        self.assertEqual(config, before)
+                        self.assertEqual(
+                            config.model_fields_set, before.model_fields_set
+                        )
+                    else:
+                        BaseModel.load_default_generate_config(model, env)
+                        self.assertEqual(
+                            (config.max_new_tokens, config.min_new_tokens), expected
+                        )
+                        self.assertEqual(config.top_k, 7)
+                        config.validate()
+
+                self.assertIs(model.default_generate_config, config)
+                self.assertEqual(values, original)
+
+    def test_updates_only_declared_fields(self):
+        values = {"validate": "shadowed", "unknown": "keep"}
+
+        for update_method in ("update", "update_and_pop"):
+            with self.subTest(update_method=update_method):
+                config = GenerateConfig()
+
+                remaining = getattr(config, update_method)(values)
+
+                self.assertTrue(callable(config.validate))
+                if update_method == "update":
+                    self.assertIsNone(remaining)
+                else:
+                    self.assertEqual(remaining, values)
+
+    def test_updates_preserve_constructor_coercion(self):
+        startup_values = {
+            "max_new_tokens": "4",
+            "reuse_cache": "false",
+            "top_p": "0.75",
+        }
+        expected = GenerateConfig(**startup_values)
+
+        for update_method in ("update", "update_and_pop"):
+            with self.subTest(update_method=update_method):
+                config = GenerateConfig()
+
+                remaining = getattr(config, update_method)(startup_values)
+
+                self.assertEqual(config.max_new_tokens, expected.max_new_tokens)
+                self.assertEqual(config.reuse_cache, expected.reuse_cache)
+                self.assertEqual(config.top_p, expected.top_p)
+                if update_method == "update_and_pop":
+                    self.assertEqual(remaining, {})
+
+    def test_type_validation_failure_is_wrapped_and_atomic(self):
+        for values, field in (
+            ({"reuse_cache": False, "aux_info": object()}, "aux_info"),
+            ({"reuse_cache": False, "min_new_tokens": None}, "min_new_tokens"),
+        ):
+            original = values.copy()
+            for update_method in ("update", "update_and_pop"):
+                with self.subTest(update_method=update_method, field=field):
+                    config = GenerateConfig(
+                        reuse_cache=True, aux_info=True, min_new_tokens=3
+                    )
+                    before = config.model_copy(deep=True)
+
+                    with self.assertRaisesRegex(FtRuntimeException, field) as context:
+                        getattr(config, update_method)(values)
+
+                    self.assertEqual(
+                        context.exception.exception_type,
+                        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    )
+                    self.assertIsInstance(context.exception.__cause__, ValidationError)
+                    self.assertEqual(config, before)
+                    self.assertEqual(config.model_fields_set, before.model_fields_set)
+                    self.assertEqual(values, original)
 
 
 class TestRawGenerateConfigParsing(unittest.TestCase):
