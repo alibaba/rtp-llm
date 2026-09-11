@@ -2,6 +2,7 @@ package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.enums.EngineType;
 import org.flexlb.util.JsonUtils;
@@ -72,9 +73,12 @@ public class ConfigService {
         String lbConfigStr = environment.get(FLEXLB_CONFIG_ENV);
         log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
         FlexlbConfig config;
+        boolean jsonDefinesEngineType = false;
         if (lbConfigStr != null) {
             try {
-                config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
+                JsonNode configJson = JsonUtils.toObject(lbConfigStr, JsonNode.class);
+                jsonDefinesEngineType = configJson.has("engineType");
+                config = JsonUtils.toObject(configJson, FlexlbConfig.class);
             } catch (Exception e) {
                 throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
                     "Failed to parse FLEXLB_CONFIG JSON: " + e.getMessage(), e);
@@ -85,7 +89,7 @@ public class ConfigService {
 
         // If corresponding advanced environment variables exist, override and update
         applyEnvironmentOverrides(config, environment);
-        applyEngineTypeOverride(config, environment);
+        applyEngineTypeOverride(config, environment, jsonDefinesEngineType);
         applyTrafficPolicyOverride(config, environment);
         applyPrefillFormulaOverride(config, environment);
 
@@ -207,12 +211,20 @@ public class ConfigService {
      * The namespaced form is authoritative and remains fail-fast; the bare name is retained only
      * as a deprecated, best-effort migration fallback.
      */
-    private void applyEngineTypeOverride(FlexlbConfig config, Map<String, String> environment) {
+    private void applyEngineTypeOverride(FlexlbConfig config, Map<String, String> environment,
+                                         boolean jsonDefinesEngineType) {
         String namespaced = StringUtils.trimToNull(environment.get(FLEXLB_ENGINE_TYPE_ENV));
         if (namespaced != null) {
             config.setEngineType(parseEngineType(namespaced, FLEXLB_ENGINE_TYPE_ENV));
             log.info("Environment variable override: {} = {} (field: engineType)",
                     FLEXLB_ENGINE_TYPE_ENV, config.getEngineType());
+            return;
+        }
+
+        // ENGINE_TYPE predates FLEXLB_CONFIG and is intentionally only a migration fallback.
+        // An explicit JSON value (including null, which validation rejects below) is newer and
+        // must never be silently replaced by a generic process-wide variable.
+        if (jsonDefinesEngineType) {
             return;
         }
 

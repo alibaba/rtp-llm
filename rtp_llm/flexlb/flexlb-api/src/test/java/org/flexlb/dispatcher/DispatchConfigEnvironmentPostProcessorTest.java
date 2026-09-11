@@ -23,6 +23,7 @@ import static org.flexlb.dispatcher.DispatchConfigEnvironmentPostProcessor.ENABL
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 
 class DispatchConfigEnvironmentPostProcessorTest {
@@ -54,14 +55,36 @@ class DispatchConfigEnvironmentPostProcessorTest {
     }
 
     @Test
-    void malformedConfigDoesNotEnableAndDoesNotThrow() {
+    void malformedConfigFailsFast() {
         MockEnvironment env = new MockEnvironment();
         env.setProperty("DISPATCH_CONFIG", "{not valid json");
 
-        epp.postProcessEnvironment(env, null);
-
+        assertThrows(IllegalStateException.class,
+                () -> epp.postProcessEnvironment(env, null));
         assertNull(env.getProperty(ENABLE_PROPERTY),
-                "a malformed DISPATCH_CONFIG must leave the dispatcher disabled, not crash boot");
+                "a malformed DISPATCH_CONFIG must never partially enable the dispatcher");
+    }
+
+    @Test
+    void explicitEnablePropertyDoesNotHideMalformedJson() {
+        MockEnvironment env = new MockEnvironment();
+        env.setProperty(ENABLE_PROPERTY, "explicit.service");
+        env.setProperty("DISPATCH_CONFIG", "{not valid json");
+
+        assertThrows(IllegalStateException.class,
+                () -> epp.postProcessEnvironment(env, null));
+    }
+
+    @Test
+    void effectiveConfigUsesTheSameCommandLineStylePropertiesAsActivation() {
+        MockEnvironment env = new MockEnvironment();
+        env.setProperty("dispatch.fe-pool-service-id", "cli.service");
+        env.setProperty("dispatch.batch-timeout-ms", "4321");
+
+        DispatchConfig cfg = DispatcherConfiguration.loadAndValidate(env);
+
+        assertEquals("cli.service", cfg.getFePoolServiceId());
+        assertEquals(4321, cfg.getBatchTimeoutMs());
     }
 
     @Test
@@ -99,6 +122,20 @@ class DispatchConfigEnvironmentPostProcessorTest {
             assertNotNull(routes.route(request).block(),
                     "JSON-only activation must publish the real dispatcher route table");
         }
+    }
+
+    @Test
+    void springFactoriesMalformedConfigAbortsTheRealApplicationContext() {
+        SpringApplication application = new SpringApplication(JsonOnlyDispatcherTestApplication.class);
+        application.setWebApplicationType(WebApplicationType.NONE);
+        application.setRegisterShutdownHook(false);
+        application.setLogStartupInfo(false);
+
+        assertThrows(RuntimeException.class, () -> application.run(
+                "--spring.main.banner-mode=off",
+                "--spring.main.web-application-type=none",
+                "--logging.level.root=OFF",
+                "--DISPATCH_CONFIG={not-json"));
     }
 
     @SpringBootConfiguration(proxyBeanMethods = false)

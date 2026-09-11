@@ -39,19 +39,18 @@ public class DispatchConfigEnvironmentPostProcessor implements EnvironmentPostPr
 
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
-        if (StringUtils.hasText(environment.getProperty(ENABLE_PROPERTY))) {
-            return;
-        }
         String json = environment.getProperty("DISPATCH_CONFIG");
         if (!StringUtils.hasText(json)) {
             return;
         }
-        // Malformed DISPATCH_CONFIG parses to null here, leaving the dispatcher disabled rather than
-        // crashing boot; if the env-var path is used instead, DispatcherConfiguration.validate reports it.
-        DispatchConfig cfg = JsonUtils.toObjectOrNull(json, DispatchConfig.class);
-        if (cfg == null) {
-            log.warn("DISPATCH_CONFIG is set but is not valid JSON — dispatcher stays DISABLED. "
-                    + "Fix the JSON or set DISPATCH_FE_POOL_SERVICE_ID to fail fast at boot instead.");
+        final DispatchConfig cfg;
+        try {
+            cfg = JsonUtils.toObject(json, DispatchConfig.class);
+        } catch (RuntimeException error) {
+            log.error("DISPATCH_CONFIG is set but is not valid JSON; startup is aborted", error);
+            throw new IllegalStateException("DISPATCH_CONFIG must be valid JSON", error);
+        }
+        if (StringUtils.hasText(environment.getProperty(ENABLE_PROPERTY))) {
             return;
         }
         String fePoolServiceId = cfg.getFePoolServiceId();

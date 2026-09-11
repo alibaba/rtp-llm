@@ -192,14 +192,13 @@ public:
                     int64_t            input_length  = 0,
                     int64_t            prefix_length = 0,
                     int64_t            error_code    = 0,
-                    const std::string& error_message = "") {
+                    const std::string& error_message = "",
+                    int64_t            batch_id      = -1) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
-        EngineScheduleInfo::TaskInfo        task_info{request_id,
-                                               prefix_length,
-                                               input_length,
-                                               /*waiting_time_ms=*/0,
-                                               /*iterate_count=*/0,
-                                               /*end_time_ms=*/-1};
+        auto task_info = makeTaskInfo(TaskIdentity{request_id, batch_id},
+                                      prefix_length,
+                                      input_length,
+                                      /*waiting_time_ms=*/0);
         auto                                ptr = running_streams_.find(request_id);
         if (ptr != running_streams_.end()) {
             task_info = ptr->second.task_info;

@@ -189,6 +189,15 @@ class RouteServiceTest {
                 "batch target selection must not block the subscribing event-loop thread");
     }
 
+    @Test
+    void cancelPlacementDelegatesToRouter() {
+        when(defaultRouter.cancelPlacement(701L)).thenReturn(true);
+
+        assertTrue(routeService.cancelPlacement(701L));
+
+        verify(defaultRouter).cancelPlacement(701L);
+    }
+
     private static Response successResponse() {
         Response response = new Response();
         response.setSuccess(true);

@@ -15,6 +15,8 @@ import java.util.TreeSet;
  */
 final class DispatcherHeaders {
 
+    static final String TRUSTED_ROUTING_HEADER = "X-Rtp-Llm-Dispatcher-Routing-Token";
+
     private DispatcherHeaders() {
     }
 
@@ -38,6 +40,10 @@ final class DispatcherHeaders {
             "host",
             "content-length");
 
+    /** Caller-controlled copies of the internal trust header must never cross into FE. */
+    static final Set<String> TO_FE_SKIP = caseInsensitiveSet(
+            HOP_BY_HOP, TRUSTED_ROUTING_HEADER);
+
     /**
      * Fanout drops everything hop-by-hop plus two more, because unlike passthrough it does not
      * stream bytes through — it parses each FE response and re-serializes a merged one:
@@ -49,7 +55,8 @@ final class DispatcherHeaders {
      *       by {@link FeClient}; {@code content-length} is already hop-by-hop).</li>
      * </ul>
      */
-    static final Set<String> FANOUT_SKIP = caseInsensitiveSet(HOP_BY_HOP, "content-type", "accept-encoding");
+    static final Set<String> FANOUT_SKIP = caseInsensitiveSet(
+            TO_FE_SKIP, "content-type", "accept-encoding");
 
     /**
      * Copy end-to-end headers while also honoring fields dynamically nominated by

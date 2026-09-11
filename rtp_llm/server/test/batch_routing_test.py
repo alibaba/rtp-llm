@@ -85,6 +85,17 @@ class BatchEnqueueRoutingTest(TestCase):
         model_rpc_client.batch_enqueue = fake_batch_enqueue
         visitor.model_rpc_client = model_rpc_client
         route_calls = []
+        visitor.placement_events = []
+
+        class RecordingLease:
+            def __init__(self, route_index):
+                self.route_index = route_index
+
+            def transfer_to_engine(self):
+                visitor.placement_events.append(("transfer", self.route_index))
+
+            async def release(self):
+                visitor.placement_events.append(("release", self.route_index))
 
         async def fake_route_ips(
             inp,
@@ -95,8 +106,9 @@ class BatchEnqueueRoutingTest(TestCase):
             batch_seq_lens_hint=None,
             batch_request_ids_hint=None,
         ):
+            route_index = len(route_calls)
             inp.generate_config.role_addrs = [
-                master_rotation[len(route_calls) % len(master_rotation)]
+                master_rotation[route_index % len(master_rotation)]
             ]
             route_calls.append(
                 (
@@ -109,6 +121,7 @@ class BatchEnqueueRoutingTest(TestCase):
                     batch_request_ids_hint,
                 )
             )
+            return RecordingLease(route_index)
 
         visitor.route_ips = fake_route_ips
         return visitor, route_calls, sent
@@ -376,6 +389,78 @@ class BatchEnqueueRoutingTest(TestCase):
         client._addresses = []
         client._decode_entrance = False
         self.assertEqual("10.0.0.7:8089", client._select_batch_address(inputs))
+
+    def test_preassigned_batch_does_not_require_homogeneous_routing_metadata(self):
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.9")])
+        stamped = self._addr("10.0.0.7")
+        first = self._input(0, [stamped])
+        first.headers = {"x-api-key": "tenant-a"}
+        second = self._input(1, [stamped])
+        second.headers = {"x-api-key": "tenant-b"}
+
+        asyncio.run(visitor.batch_enqueue([first, second]))
+
+        self.assertEqual([], route_calls)
+        self.assertIn("inputs", sent)
+
+    def test_static_fallback_does_not_validate_unused_placement_metadata(self):
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.9")])
+        visitor.host_service = SimpleNamespace(service_available=False)
+        first = self._input(0)
+        first.headers = {"x-api-key": "tenant-a"}
+        second = self._input(0)
+        second.headers = {"x-api-key": "tenant-b"}
+
+        asyncio.run(visitor.batch_enqueue([first, second]))
+
+        self.assertEqual([], route_calls)
+        self.assertIn("inputs", sent)
+
+    def test_both_abandoned_placements_are_released_when_reroute_also_cannot_start(self):
+        visitor, route_calls, _ = self._visitor(
+            [self._addr("10.0.0.7"), self._addr("10.0.0.9")]
+        )
+        inputs = [self._input(0), self._input(1)]
+        calls = []
+
+        async def never_started(batch, *, rpc_deadline=None):
+            calls.append(visitor.model_rpc_client._select_batch_address(batch))
+            raise BatchRpcNotStartedError(
+                ExceptionType.CONNECT_FAILED,
+                "connection refused before dispatch",
+                rpc_deadline=asyncio.get_running_loop().time() + 1.0,
+            )
+
+        visitor.model_rpc_client.batch_enqueue = never_started
+
+        with self.assertRaises(BatchRpcNotStartedError):
+            asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(["10.0.0.7:8089", "10.0.0.9:8089"], calls)
+        self.assertEqual(2, len(route_calls))
+        self.assertEqual([("release", 0), ("release", 1)], visitor.placement_events)
+
+    def test_same_target_replacement_releases_both_placements_without_retry(self):
+        visitor, route_calls, _ = self._visitor([self._addr("10.0.0.7")])
+        inputs = [self._input(0), self._input(1)]
+        calls = []
+
+        async def never_started(batch, *, rpc_deadline=None):
+            calls.append(visitor.model_rpc_client._select_batch_address(batch))
+            raise BatchRpcNotStartedError(
+                ExceptionType.CONNECT_FAILED,
+                "connection refused before dispatch",
+                rpc_deadline=asyncio.get_running_loop().time() + 1.0,
+            )
+
+        visitor.model_rpc_client.batch_enqueue = never_started
+
+        with self.assertRaises(BatchRpcNotStartedError):
+            asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(["10.0.0.7:8089"], calls)
+        self.assertEqual(2, len(route_calls))
+        self.assertEqual([("release", 0), ("release", 1)], visitor.placement_events)
 
     def test_mixed_batch_is_rejected_before_master_even_if_it_would_agree(self):
         # A batch RPC must have one routing source. Asking the master to route only the
@@ -651,6 +736,29 @@ class RouteIpsSeqLenHintTest(TestCase):
         asyncio.run(visitor.route_ips(self._input()))
 
         self.assertIsNone(seen["seq_len_hint"])
+
+    def test_normal_route_preserves_historical_one_argument_override(self):
+        visitor, _ = self._visitor()
+        request = self._input()
+        calls = []
+
+        async def historical_override(inp):
+            calls.append(inp)
+            inp.generate_config.role_addrs = [
+                SimpleNamespace(
+                    role=RoleType.PDFUSION,
+                    ip="10.0.0.9",
+                    http_port=8088,
+                    grpc_port=8089,
+                )
+            ]
+            return None
+
+        visitor.get_master_route_addrs = historical_override
+
+        asyncio.run(visitor.route_ips(request))
+
+        self.assertEqual([request], calls)
 
     def test_batch_placement_omits_generate_input_and_cannot_enqueue_first_item(self):
         visitor, seen = self._visitor()

@@ -4,6 +4,8 @@
 #include <chrono>
 #include <future>
 #include <mutex>
+#include <optional>
+#include <stdexcept>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -49,6 +51,10 @@ public:
         meta_   = std::move(meta);
     }
 
+    void failPrepareFor(int64_t request_id, ErrorCode error_code) {
+        prepare_failure_ = std::make_pair(request_id, error_code);
+    }
+
     EngineScheduleInfo scheduleInfo(int64_t latest_finished_version = -1) {
         return meta_->getEngineScheduleInfo(latest_finished_version);
     }
@@ -60,6 +66,13 @@ public:
     std::atomic<bool> cancelled{false};
 
 protected:
+    ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) override {
+        if (prepare_failure_ && prepare_failure_->first == input_pb.request_id()) {
+            return ErrorInfo(prepare_failure_->second, "injected prepare failure");
+        }
+        return LocalRpcServer::prepareInput(input_pb, output);
+    }
+
     bool isCancelled(grpc::ServerContext*) const override {
         std::call_once(cancellation_check_once_, [this] { cancellation_checked_.set_value(); });
         return cancelled.load();
@@ -68,6 +81,7 @@ protected:
 private:
     mutable std::once_flag     cancellation_check_once_;
     mutable std::promise<void> cancellation_checked_;
+    std::optional<std::pair<int64_t, ErrorCode>> prepare_failure_;
 };
 
 class FixedBatchEngine: public EngineBase {
@@ -107,6 +121,16 @@ private:
     std::vector<GenerateStreamPtr> streams_;
 };
 
+class ThrowingBatchEngine: public FixedBatchEngine {
+public:
+    ThrowingBatchEngine(): FixedBatchEngine({}) {}
+
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&) override {
+        throw std::runtime_error("injected enqueue failure");
+    }
+};
+
 class RecordingWriter: public LocalRpcServer::WriterInterface {
 public:
     bool Write(const GenerateOutputsPB& outputs, grpc::WriteOptions) override {
@@ -144,6 +168,17 @@ std::shared_ptr<MockGenerateStream> createMockStream(int64_t request_id = 0, int
     ModelConfig model_config;
     model_config.max_seq_len = 3;
     return std::make_shared<MockGenerateStream>(input, model_config, RuntimeConfig{});
+}
+
+void addBatchInput(BatchGenerateInputPB& request, int64_t request_id, int64_t batch_id) {
+    auto* input = request.add_inputs();
+    input->set_request_id(request_id);
+    input->add_token_ids(1);
+    input->mutable_group_id()->set_value(batch_id);
+    auto* config = input->mutable_generate_config();
+    config->set_max_new_tokens(1);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
 }
 
 std::shared_ptr<NormalGenerateStream> createNormalStream() {
@@ -372,6 +407,81 @@ TEST(LocalRpcServerTest, BatchGeneratePublishesEveryMemberLifecycle) {
     EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
     EXPECT_EQ(info.finished_task_info_list[1].request_id, 102);
     EXPECT_EQ(info.finished_task_info_list[1].batch_id, batch_id);
+}
+
+TEST(LocalRpcServerTest, BatchGeneratePublishesEveryMemberWhenInputPreparationFails) {
+    constexpr int64_t  batch_id = 901;
+    TestLocalRpcServer server;
+    auto               meta = std::make_shared<RpcServerRuntimeMeta>();
+    server.setBatchRuntime(nullptr, meta);
+    server.failPrepareFor(102, ErrorCode::LOAD_CACHE_TIMEOUT);
+    BatchGenerateInputPB request;
+    addBatchInput(request, 101, batch_id);
+    addBatchInput(request, 102, batch_id);
+    BatchGenerateOutputsPB response;
+
+    const auto status = server.BatchGenerateCall(nullptr, &request, &response);
+
+    EXPECT_TRUE(status.ok());
+    ASSERT_EQ(response.results_size(), 2);
+    EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::CANCELLED);
+    EXPECT_EQ(response.results(1).error_info().error_code(), ErrorCodePB::LOAD_CACHE_TIMEOUT);
+    const auto info = server.scheduleInfo();
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    ASSERT_EQ(info.finished_task_info_list.size(), 2);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 101);
+    EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::CANCELLED));
+    EXPECT_EQ(info.finished_task_info_list[1].request_id, 102);
+    EXPECT_EQ(info.finished_task_info_list[1].batch_id, batch_id);
+    EXPECT_EQ(info.finished_task_info_list[1].error_code,
+              static_cast<int64_t>(ErrorCode::LOAD_CACHE_TIMEOUT));
+}
+
+TEST(LocalRpcServerTest, BatchGeneratePublishesEveryMemberWhenEngineEnqueueThrows) {
+    constexpr int64_t  batch_id = 902;
+    TestLocalRpcServer server;
+    auto               meta = std::make_shared<RpcServerRuntimeMeta>();
+    server.setBatchRuntime(std::make_shared<ThrowingBatchEngine>(), meta);
+    BatchGenerateInputPB request;
+    addBatchInput(request, 201, batch_id);
+    addBatchInput(request, 202, batch_id);
+    BatchGenerateOutputsPB response;
+
+    EXPECT_THROW(server.BatchGenerateCall(nullptr, &request, &response), std::runtime_error);
+
+    const auto info = server.scheduleInfo();
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    ASSERT_EQ(info.finished_task_info_list.size(), 2);
+    for (const auto& task : info.finished_task_info_list) {
+        EXPECT_EQ(task.batch_id, batch_id);
+        EXPECT_EQ(task.error_code, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION));
+    }
+}
+
+TEST(LocalRpcServerTest, BatchGeneratePreservesTypedPerItemErrorCode) {
+    constexpr int64_t  batch_id = 903;
+    TestLocalRpcServer server;
+    auto               stream = createMockStream(301, batch_id);
+    auto               meta   = std::make_shared<RpcServerRuntimeMeta>();
+    server.setBatchRuntime(std::make_shared<FixedBatchEngine>(std::vector<GenerateStreamPtr>{stream}), meta);
+    EXPECT_CALL(*stream, nextOutput(_)).WillOnce(InvokeWithoutArgs([] {
+        return ErrorResult<GenerateOutputs>(ErrorCode::LOAD_CACHE_TIMEOUT, "load cache timed out");
+    }));
+    BatchGenerateInputPB request;
+    addBatchInput(request, 301, batch_id);
+    BatchGenerateOutputsPB response;
+
+    const auto status = server.BatchGenerateCall(nullptr, &request, &response);
+
+    EXPECT_TRUE(status.ok());
+    ASSERT_EQ(response.results_size(), 1);
+    EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::LOAD_CACHE_TIMEOUT);
+    const auto info = server.scheduleInfo();
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code,
+              static_cast<int64_t>(ErrorCode::LOAD_CACHE_TIMEOUT));
+    EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
 }
 
 }  // namespace rtp_llm

@@ -1,6 +1,8 @@
 import asyncio
+import hmac
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Union
@@ -12,6 +14,7 @@ from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.log_config import get_log_path
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
@@ -40,6 +43,8 @@ from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
+DISPATCHER_ROUTING_HEADER = "x-rtp-llm-dispatcher-routing-token"
+DISPATCHER_ROUTING_TOKEN_ENV = "DISPATCH_ROUTING_TOKEN"
 
 
 def _field(value: Any, name: str) -> Any:
@@ -157,7 +162,38 @@ class FrontendServer(object):
         self._global_controller = get_global_controller()
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
+        self._dispatcher_routing_token = os.environ.get(
+            DISPATCHER_ROUTING_TOKEN_ENV, ""
+        ).strip()
         kmonitor.init()
+
+    @staticmethod
+    def _contains_preassigned_role_addrs(req: Dict[Any, Any]) -> bool:
+        if req.get("role_addrs"):
+            return True
+        for key in ("generate_config", "generation_config"):
+            config = req.get(key)
+            if isinstance(config, dict) and config.get("role_addrs"):
+                return True
+        return False
+
+    def _validate_dispatcher_routing_context(
+        self, req: Dict[Any, Any], raw_request: RawRequest
+    ) -> None:
+        if not self._contains_preassigned_role_addrs(req):
+            return
+        headers = getattr(raw_request, "headers", None)
+        provided = headers.get(DISPATCHER_ROUTING_HEADER, "") if headers else ""
+        expected = self._dispatcher_routing_token
+        if (
+            not expected
+            or not provided
+            or not hmac.compare_digest(expected, str(provided))
+        ):
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "role_addrs is reserved for authenticated dispatcher routing",
+            )
 
     def start(self):
         if (
@@ -368,6 +404,7 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
+            self._validate_dispatcher_routing_context(req, raw_request)
             sequence = self._global_controller.increment() % 4096  # 12 bits
             req[request_id_field_name] = generate_request_id(
                 self.py_env_configs.server_config.ip,
@@ -532,6 +569,7 @@ class FrontendServer(object):
     async def batch_infer(self, req: dict, raw_request: Request):
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
 
+        self._validate_dispatcher_routing_context(req, raw_request)
         # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
         # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
         # reject under the same concurrency_limit; the trade-off is that a large batch occupies

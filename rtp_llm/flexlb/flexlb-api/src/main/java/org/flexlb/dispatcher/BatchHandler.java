@@ -9,6 +9,7 @@ import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.pv.DispatchPvLogData;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.stereotype.Component;
@@ -16,6 +17,7 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
+import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
@@ -52,6 +54,7 @@ public class BatchHandler {
     private final FeAllocationMode feAllocationMode;
     private final int maxChunkCount;
     private final long maxAggregateRequestBytes;
+    private final Scheduler cpuScheduler;
 
     @Autowired
     public BatchHandler(FanoutService fanoutService,
@@ -59,10 +62,11 @@ public class BatchHandler {
                         BatchScheduleClient batchScheduleClient,
                         PassthroughClient passthroughClient,
                         DispatcherMetricsReporter metricsReporter,
-                        ConfigService configService) {
+                        ConfigService configService,
+                        @Qualifier("dispatcherCpuScheduler") Scheduler cpuScheduler) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
                 configService.loadBalanceConfig(),
-                cfg.getMaxAggregateRequestBytes());
+                cfg.getMaxAggregateRequestBytes(), cpuScheduler);
     }
 
     private BatchHandler(FanoutService fanoutService,
@@ -71,10 +75,11 @@ public class BatchHandler {
                          PassthroughClient passthroughClient,
                          DispatcherMetricsReporter metricsReporter,
                          FlexlbConfig loadBalanceConfig,
-                         long maxAggregateRequestBytes) {
+                         long maxAggregateRequestBytes,
+                         Scheduler cpuScheduler) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
                 loadBalanceConfig.getBatchScheduleMaxCount(), maxAggregateRequestBytes,
-                loadBalanceConfig);
+                loadBalanceConfig, cpuScheduler);
     }
 
     /** Package-private convenience for focused tests; mirrors the production default. */
@@ -84,7 +89,7 @@ public class BatchHandler {
                  PassthroughClient passthroughClient,
                  DispatcherMetricsReporter metricsReporter) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                1000, cfg.getMaxAggregateRequestBytes(), null);
+                1000, cfg.getMaxAggregateRequestBytes(), null, Schedulers.immediate());
     }
 
     BatchHandler(FanoutService fanoutService,
@@ -94,7 +99,7 @@ public class BatchHandler {
                  DispatcherMetricsReporter metricsReporter,
                  int maxChunkCount) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                maxChunkCount, cfg.getMaxAggregateRequestBytes(), null);
+                maxChunkCount, cfg.getMaxAggregateRequestBytes(), null, Schedulers.immediate());
     }
 
     BatchHandler(FanoutService fanoutService,
@@ -105,7 +110,7 @@ public class BatchHandler {
                  int maxChunkCount,
                  long maxAggregateRequestBytes) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                maxChunkCount, maxAggregateRequestBytes, null);
+                maxChunkCount, maxAggregateRequestBytes, null, Schedulers.immediate());
     }
 
     BatchHandler(FanoutService fanoutService,
@@ -116,6 +121,20 @@ public class BatchHandler {
                  int maxChunkCount,
                  long maxAggregateRequestBytes,
                  FlexlbConfig loadBalanceConfig) {
+        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
+                maxChunkCount, maxAggregateRequestBytes, loadBalanceConfig,
+                Schedulers.immediate());
+    }
+
+    BatchHandler(FanoutService fanoutService,
+                 DispatchConfig cfg,
+                 BatchScheduleClient batchScheduleClient,
+                 PassthroughClient passthroughClient,
+                 DispatcherMetricsReporter metricsReporter,
+                 int maxChunkCount,
+                 long maxAggregateRequestBytes,
+                 FlexlbConfig loadBalanceConfig,
+                 Scheduler cpuScheduler) {
         this.fanoutService = fanoutService;
         this.subBatch = cfg.getSubBatchSpec();
         this.splitPolicy = subBatch.mode().name().toLowerCase() + ":" + subBatch.value();
@@ -136,13 +155,61 @@ public class BatchHandler {
         }
         this.maxChunkCount = maxChunkCount;
         this.maxAggregateRequestBytes = maxAggregateRequestBytes;
+        this.cpuScheduler = cpuScheduler;
     }
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
         DispatchPvLogData pv = DispatchPvLogData.batch(spec.getPath(), System.currentTimeMillis());
         AtomicBoolean delegatedToPassthrough = new AtomicBoolean(false);
         AtomicBoolean pvFinalized = new AtomicBoolean(false);
-        return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0]).flatMap(bytes -> {
+        return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0])
+                .flatMap(bytes -> Mono.fromCallable(
+                                () -> handleBody(request, spec, bytes, pv, delegatedToPassthrough))
+                        .subscribeOn(cpuScheduler)
+                        .flatMap(response -> response))
+                .onErrorResume(e -> {
+            String errMsg = DispatcherResponses.briefReason(e);
+            Logger.warn("dispatcher request failed: spec={}, err={}", spec.getPath(), errMsg);
+            pv.setError(errMsg);
+            if (e instanceof DataBufferLimitException) {
+                // Body over spring.codec.max-in-memory-size is a deterministic client error;
+                // a 500 would invite pointless retries and pollute the server error rate.
+                return DispatcherResponses.error(413, "request_body_too_large",
+                        "batch body exceeds the server limit; see MAX_IN_MEMORY_SIZE");
+            }
+            if (e instanceof AggregateResponseTooLargeException) {
+                return DispatcherResponses.error(413, "batch_response_too_large",
+                        "aggregate sub-batch response exceeds the dispatcher limit");
+            }
+            if (e instanceof AggregateRequestTooLargeException) {
+                return DispatcherResponses.error(413, "batch_request_too_large",
+                        "aggregate sub-batch request exceeds the dispatcher limit");
+            }
+            // Stable, non-revealing text: the exception message can carry the FE address or
+            // upstream response detail, which must not cross the client boundary. The full
+            // reason is in the WARN above and in pv.log.
+            return DispatcherResponses.error(500, "dispatch_failed", "batch dispatch failed");
+        }).doOnNext(resp -> {
+            pv.setHttpStatus(resp.rawStatusCode());
+            if (!delegatedToPassthrough.get() && pvFinalized.compareAndSet(false, true)) {
+                // Emit before handing the response downstream. A doFinally-only record can race
+                // the caller observing Mono.block()/onNext after CPU work was offloaded.
+                finalizePvRecord(pv, SignalType.ON_COMPLETE);
+            }
+        })
+          .doFinally(signal -> {
+              // Cancellation before any response has no onNext; this is also a defensive fallback
+              // for an unexpected terminal error while preserving exactly-once accounting.
+              if (!delegatedToPassthrough.get()
+                      && pvFinalized.compareAndSet(false, true)) {
+                  finalizePvRecord(pv, signal);
+              }
+          });
+    }
+
+    private Mono<ServerResponse> handleBody(ServerRequest request, BatchEndpointSpec spec,
+                                            byte[] bytes, DispatchPvLogData pv,
+                                            AtomicBoolean delegatedToPassthrough) {
             JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {
                 return badRequest("expected a JSON object body");
@@ -186,13 +253,13 @@ public class BatchHandler {
             }
             boolean trafficPolicyActive = hasActiveTrafficPolicy();
             boolean atomicBatchAllowed = !trafficPolicyActive;
-            return Mono.fromCallable(() -> prepareBatch(
-                            body, arr, chunkCount, spec, pv, atomicBatchAllowed))
-                    .subscribeOn(Schedulers.parallel())
-                    .flatMap(prepared -> {
+            PreparedBatch prepared = prepareBatch(
+                    body, arr, chunkCount, spec, pv, atomicBatchAllowed);
+            return Mono.defer(() -> {
                         boolean assignBe = shouldPreAssignBe(spec, trafficPolicyActive);
                         boolean assignFe = feAllocationMode == FeAllocationMode.MASTER;
                         return resolveTargets(prepared.chunkBodies().size(), assignBe, assignFe)
+                                .publishOn(cpuScheduler)
                                 .flatMap(targets -> {
                                     if (assignBe) {
                                         BatchChunkAssembler.stampPreAssignedBe(
@@ -209,6 +276,7 @@ public class BatchHandler {
                                             .doOnNext(subs -> metricsReporter.reportFanoutRt(
                                                     System.currentTimeMillis() - fanoutStart,
                                                     feAllocationMode.configValue()))
+                                            .publishOn(cpuScheduler)
                                             .map(subs -> ResponseMerger.merge(subs, spec, body))
                                             .flatMap(merged -> {
                                                 pv.setFailedChunks(
@@ -224,44 +292,6 @@ public class BatchHandler {
                                             });
                                 });
                     });
-        }).onErrorResume(e -> {
-            String errMsg = DispatcherResponses.briefReason(e);
-            Logger.warn("dispatcher request failed: spec={}, err={}", spec.getPath(), errMsg);
-            pv.setError(errMsg);
-            if (e instanceof DataBufferLimitException) {
-                // Body over spring.codec.max-in-memory-size is a deterministic client error;
-                // a 500 would invite pointless retries and pollute the server error rate.
-                return DispatcherResponses.error(413, "request_body_too_large",
-                        "batch body exceeds the server limit; see MAX_IN_MEMORY_SIZE");
-            }
-            if (e instanceof AggregateResponseTooLargeException) {
-                return DispatcherResponses.error(413, "batch_response_too_large",
-                        "aggregate sub-batch response exceeds the dispatcher limit");
-            }
-            if (e instanceof AggregateRequestTooLargeException) {
-                return DispatcherResponses.error(413, "batch_request_too_large",
-                        "aggregate sub-batch request exceeds the dispatcher limit");
-            }
-            // Stable, non-revealing text: the exception message can carry the FE address or
-            // upstream response detail, which must not cross the client boundary. The full
-            // reason is in the WARN above and in pv.log.
-            return DispatcherResponses.error(500, "dispatch_failed", "batch dispatch failed");
-        }).doOnNext(resp -> {
-            pv.setHttpStatus(resp.rawStatusCode());
-            if (!delegatedToPassthrough.get() && pvFinalized.compareAndSet(false, true)) {
-                // Emit before handing the response downstream. A doFinally-only record can race
-                // the caller observing Mono.block()/onNext after CPU work was offloaded.
-                finalizePvRecord(pv, SignalType.ON_COMPLETE);
-            }
-        })
-          .doFinally(signal -> {
-              // Cancellation before any response has no onNext; this is also a defensive fallback
-              // for an unexpected terminal error while preserving exactly-once accounting.
-              if (!delegatedToPassthrough.get()
-                      && pvFinalized.compareAndSet(false, true)) {
-                  finalizePvRecord(pv, signal);
-              }
-          });
     }
 
     private void finalizePvRecord(DispatchPvLogData pv, SignalType signal) {

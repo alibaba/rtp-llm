@@ -113,6 +113,25 @@ class FeClientTest {
     }
 
     @Test
+    void replacesCallerRoutingHeaderWithDispatcherCredential() throws Exception {
+        server.enqueue(new MockResponse().setBody("{}").setResponseCode(200));
+        WebClient webClient = WebClient.builder().build();
+        FeClient client = new FeClient(webClient, Duration.ofSeconds(5), "trusted-secret");
+        HttpHeaders inbound = new HttpHeaders();
+        inbound.set(DispatcherHeaders.TRUSTED_ROUTING_HEADER, "caller-forgery");
+
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes(), inbound, null))
+                .expectNextCount(1)
+                .verifyComplete();
+
+        RecordedRequest rec = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS);
+        Assertions.assertNotNull(rec);
+        Assertions.assertEquals("trusted-secret",
+                rec.getHeader(DispatcherHeaders.TRUSTED_ROUTING_HEADER));
+    }
+
+    @Test
     void dropsAcceptEncodingAndInboundContentTypeOnChunkRequests() throws Exception {
         // The fanout path parses each FE body as raw bytes and re-serializes each chunk body as
         // JSON, so an inbound accept-encoding (a gzipped FE body would break the parse) must be

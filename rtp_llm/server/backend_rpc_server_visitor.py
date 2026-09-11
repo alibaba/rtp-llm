@@ -65,6 +65,29 @@ class _BatchPlacementHints(NamedTuple):
     request_ids: tuple[int, ...]
 
 
+class _BatchPlacementLease:
+    """One-shot ownership of a FlexLB placement reservation.
+
+    A successful engine invocation transfers accounting ownership to the
+    engine lifecycle.  Before that point, a caller that can prove the RPC was
+    never invoked must explicitly release the reservation.
+    """
+
+    def __init__(self, master_client: MasterClient, request_id: int) -> None:
+        self._master_client = master_client
+        self._request_id = request_id
+        self._active = True
+
+    def transfer_to_engine(self) -> None:
+        self._active = False
+
+    async def release(self) -> None:
+        if not self._active:
+            return
+        self._active = False
+        await self._master_client.cancel_placement(self._request_id)
+
+
 def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
     """Return the set of human-readable role names from a list of RoleAddr."""
     return {role_addr.role.name for role_addr in role_addrs}
@@ -437,7 +460,7 @@ class BackendRPCServerVisitor:
         generate_timeout_hint: Optional[int] = None,
         batch_seq_lens_hint: Optional[Sequence[int]] = None,
         batch_request_ids_hint: Optional[Sequence[int]] = None,
-    ):
+    ) -> Optional[_BatchPlacementLease]:
         # PD node selection span: master routing is a real RPC round-trip that
         # directly delays TTFT. Child of the HTTP SERVER span (same contextvars
         # chain as model_rpc_client.enqueue); no-op when telemetry is off.
@@ -453,6 +476,7 @@ class BackendRPCServerVisitor:
             route_span.set_attribute(trace_attrs.RTP_LLM_REQUEST_ID, input.request_id)
         route_source = "none"
         route_error_type = ""
+        placement_lease: Optional[_BatchPlacementLease] = None
         try:
             # proactive rejection: check cached queue length before making request to master
             if self.master_config:
@@ -495,7 +519,8 @@ class BackendRPCServerVisitor:
                 if not role_addrs_specified and master_addr and not input_token_batched:
                     with Timer() as master_route_timer:
                         if (
-                            placement_only
+                            seq_len_hint is not None
+                            or placement_only
                             or max_new_tokens_hint is not None
                             or generate_timeout_hint is not None
                             or batch_seq_lens_hint is not None
@@ -511,11 +536,9 @@ class BackendRPCServerVisitor:
                                 batch_request_ids_hint=batch_request_ids_hint,
                             )
                         else:
-                            # Preserve compatibility with test/deployment overrides that implement
-                            # the historical two-argument internal hook.
-                            master_route_result = await self.get_master_route_addrs(
-                                input, seq_len_hint
-                            )
+                            # Preserve compatibility with deployment overrides that implement
+                            # the historical one-argument internal hook.
+                            master_route_result = await self.get_master_route_addrs(input)
                     kmonitor.report(
                         GaugeMetrics.MASTER_ROUTE_RT_METRIC,
                         master_route_timer.cost_ms(),
@@ -524,6 +547,10 @@ class BackendRPCServerVisitor:
                         # get_master_route_addrs returns None on success
                         master_route_succeeded = True
                         route_source = "master"
+                        if placement_only:
+                            placement_lease = _BatchPlacementLease(
+                                self.master_client, input.request_id
+                            )
                 elif not role_addrs_specified:
                     route_logger.warning(
                         "master address: %s or input token batched: %s is not valid, fallback to domain routing",
@@ -574,6 +601,8 @@ class BackendRPCServerVisitor:
                     route_error.rtp_error_code = master_route_result.error_code
                 raise route_error
         except BaseException as e:
+            if placement_lease is not None:
+                await placement_lease.release()
             if route_span is not None:
                 route_span.set_attribute(trace_attrs.RTP_LLM_ROUTE_SOURCE, route_source)
                 if isinstance(e, asyncio.CancelledError):
@@ -590,6 +619,7 @@ class BackendRPCServerVisitor:
         if route_span is not None:
             route_span.set_attribute(trace_attrs.RTP_LLM_ROUTE_SOURCE, route_source)
             route_span.finish()
+        return placement_lease
 
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
@@ -814,7 +844,8 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        placement_hints = self._batch_placement_hints(inputs)
+        placement_hints: Optional[_BatchPlacementHints] = None
+        placement_lease: Optional[_BatchPlacementLease] = None
         if self.host_service.service_available:
             # A batch RPC is one scheduling unit: every input goes to the same backend in a
             # single BatchGenerateCall (ModelRpcClient._select_batch_address enforces this).
@@ -842,7 +873,8 @@ class BackendRPCServerVisitor:
                 # the whole batch, and under-reporting it as a single request would
                 # make load-aware strategies (SHORTEST_TTFT) pile followers onto the
                 # worker that just absorbed N inputs.
-                await self.route_ips(
+                placement_hints = self._batch_placement_hints(inputs)
+                placement_lease = await self.route_ips(
                     inputs[0],
                     seq_len_hint=placement_hints.prompt_tokens,
                     max_new_tokens_hint=placement_hints.output_tokens,
@@ -857,22 +889,40 @@ class BackendRPCServerVisitor:
                     )
 
         try:
-            return await self.model_rpc_client.batch_enqueue(inputs)
+            outputs = await self.model_rpc_client.batch_enqueue(inputs)
+            if placement_lease is not None:
+                placement_lease.transfer_to_engine()
+            return outputs
         except BaseException as error:
             if (
                 not inputs
                 or not self.host_service.service_available
                 or not self._is_confirmed_not_executed_batch_error(error)
             ):
+                # Once invocation is possible, only the engine lifecycle may retire
+                # the reservation. Releasing here could undercount live work.
+                if placement_lease is not None:
+                    placement_lease.transfer_to_engine()
                 raise
 
             failed_target = self.model_rpc_client._role_addr_target(inputs[0])
+            if placement_lease is not None:
+                await placement_lease.release()
             rpc_deadline = error.rpc_deadline
             route_timeout = None
             if rpc_deadline is not None:
                 route_timeout = rpc_deadline - asyncio.get_running_loop().time()
                 if route_timeout <= 0:
                     raise
+            if placement_hints is None:
+                try:
+                    placement_hints = self._batch_placement_hints(inputs)
+                except FtRuntimeException:
+                    # Pre-assigned callers need not share placement metadata. If
+                    # their target is unavailable, preserve the original confirmed
+                    # connection failure instead of replacing it with a reroute-only
+                    # validation error.
+                    raise error
             for inp in inputs:
                 inp.generate_config.role_addrs = []
                 inp.enqueued_by_master = False
@@ -887,9 +937,11 @@ class BackendRPCServerVisitor:
             )
             try:
                 if route_timeout is None:
-                    await route_call
+                    replacement_lease = await route_call
                 else:
-                    await asyncio.wait_for(route_call, timeout=route_timeout)
+                    replacement_lease = await asyncio.wait_for(
+                        route_call, timeout=route_timeout
+                    )
             except asyncio.TimeoutError as timeout_error:
                 raise BatchRpcNotStartedError(
                     ExceptionType.CONNECT_TIMEOUT,
@@ -904,6 +956,8 @@ class BackendRPCServerVisitor:
             if replacement == failed_target:
                 # Retrying the same unhealthy peer adds duplicate risk without providing a
                 # replacement. Preserve the original, confirmed connection failure.
+                if replacement_lease is not None:
+                    await replacement_lease.release()
                 raise
             route_logger.warning(
                 "rerouting batch after pre-execution connection failure, "
@@ -912,9 +966,20 @@ class BackendRPCServerVisitor:
                 failed_target,
                 replacement,
             )
-            return await self.model_rpc_client.batch_enqueue(
-                inputs, rpc_deadline=rpc_deadline
-            )
+            try:
+                outputs = await self.model_rpc_client.batch_enqueue(
+                    inputs, rpc_deadline=rpc_deadline
+                )
+            except BaseException as replacement_error:
+                if replacement_lease is not None:
+                    if self._is_confirmed_not_executed_batch_error(replacement_error):
+                        await replacement_lease.release()
+                    else:
+                        replacement_lease.transfer_to_engine()
+                raise
+            if replacement_lease is not None:
+                replacement_lease.transfer_to_engine()
+            return outputs
 
     @staticmethod
     def _batch_placement_hints(

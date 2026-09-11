@@ -9,6 +9,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RerankerMergerTest {
 
@@ -119,6 +120,30 @@ class RerankerMergerTest {
                 "query", "q", "documents", JSONArray.of("d"), "sorted", "true")));
         assertEquals("top_k must be an integer or null", RERANKER.validateForFanout(JSONObject.of(
                 "query", "q", "documents", JSONArray.of("d"), "top_k", 1.5)));
+    }
+
+    @Test
+    void rejectsFractionalDuplicateAndMissingShardIndices() {
+        JSONObject request = JSONObject.of(
+                "query", "q", "documents", JSONArray.of("d0", "d1"));
+
+        SubBatchResult fractional = SubBatchResult.ok(rerankerBody(1,
+                JSONObject.of("index", 0.5, "relevance_score", 0.9),
+                item(1, "d1", 0.8)), 2, 0);
+        assertThrows(IllegalStateException.class,
+                () -> ResponseMerger.merge(List.of(fractional), RERANKER, request));
+
+        SubBatchResult duplicate = SubBatchResult.ok(rerankerBody(1,
+                item(0, "d0", 0.9), item(0, "d1", 0.8)), 2, 0);
+        assertThrows(IllegalStateException.class,
+                () -> ResponseMerger.merge(List.of(duplicate), RERANKER, request));
+
+        // The generic shape check requires two results, so repeating index 1 is how a missing
+        // index 0 appears on the wire; the exact-cover validation rejects it deterministically.
+        SubBatchResult missing = SubBatchResult.ok(rerankerBody(1,
+                item(1, "d0", 0.9), item(1, "d1", 0.8)), 2, 0);
+        assertThrows(IllegalStateException.class,
+                () -> ResponseMerger.merge(List.of(missing), RERANKER, request));
     }
 
     private static JSONObject rerankerBody(long totalTokens, JSONObject... items) {

@@ -258,6 +258,47 @@ class MasterClient:
                 exc_info=True,
             )
 
+    async def cancel_placement(self, request_id: int) -> None:
+        """Release a scheduling reservation that will not be sent to an engine.
+
+        Master discovery can change between the Schedule response and this
+        cleanup call.  Send the idempotent cancellation to both discovered
+        control-plane peers so the node that owns the reservation observes it.
+        Each RPC is independently bounded by ``_best_effort_cancel``.
+        """
+        if self.host_service is None:
+            return
+        addrs = {
+            addr
+            for addr in (
+                self.host_service.get_master_addr(),
+                self.host_service.get_slave_addr(),
+            )
+            if addr
+        }
+        if not addrs:
+            return
+
+        results = await asyncio.gather(
+            *(self._cancel_placement_at(addr, request_id) for addr in addrs),
+            return_exceptions=True,
+        )
+        for addr, result in zip(addrs, results):
+            if isinstance(result, BaseException):
+                route_logger.warning(
+                    "best-effort placement cleanup failed, addr=%s, request_id=%s",
+                    addr,
+                    request_id,
+                    exc_info=result,
+                )
+
+    async def _cancel_placement_at(self, addr: str, request_id: int) -> None:
+        target = self._get_grpc_target(addr)
+        stub = FlexlbServiceStub(self._get_channel(target))
+        await self._best_effort_cancel(
+            stub, request_id, CANCEL_REASON_CLIENT_CANCELLED
+        )
+
     async def get_backend_role_addrs(
         self,
         block_cache_keys: list[int],

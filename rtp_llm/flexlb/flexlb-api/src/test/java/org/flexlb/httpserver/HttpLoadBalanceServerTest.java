@@ -264,7 +264,7 @@ class HttpLoadBalanceServerTest {
         when(activeRequestCounter.acquire()).thenReturn(org.mockito.Mockito.mock(
                 org.flexlb.service.grace.ActiveRequestCounter.RequestToken.class));
         when(batchScheduleCoordinator.schedule(batchRequest))
-                .thenReturn(Mono.error(new RuntimeException("boom")));
+                .thenReturn(Mono.error(new RuntimeException("private-worker-token=top-secret")));
 
         org.springframework.web.reactive.function.server.ServerResponse out =
                 server.batchScheduleRequest(serverRequest).block();
@@ -273,6 +273,8 @@ class HttpLoadBalanceServerTest {
         assertEquals(500, out.statusCode().value());
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
                 capturedBatchContext().getBatchResponse().getCode());
+        assertEquals("batch scheduling failed",
+                capturedBatchContext().getBatchResponse().getErrorMessage());
     }
 
     @Test

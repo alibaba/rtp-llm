@@ -129,7 +129,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         cachedWaitTimeExpireAtMs = 0;
     }
 
-    public void releaseBatch(long batchId) {
+    public boolean releaseBatch(long batchId) {
         AtomicReference<BatchInflight> removedBatch = new AtomicReference<>();
         inflightBatches.compute(batchId, (id, batch) -> {
             // Keep the lock order consistent with begin/calibration:
@@ -143,6 +143,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             inflightRequestCount.addAndGet(-removed.requests().size());
             cachedWaitTimeExpireAtMs = 0;
         }
+        return removed != null;
     }
 
     /**

@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
@@ -221,6 +222,19 @@ public class DefaultRouter implements Router {
                             + targets.size() + " targets for batch_count " + count);
         }
         return BatchScheduleResponse.success(targets);
+    }
+
+    @Override
+    public boolean cancelPlacement(long requestId) {
+        boolean released = false;
+        for (RoleType role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
+            for (WorkerEndpoint endpoint : endpointRegistry.getEndpoints(role).values()) {
+                if (endpoint instanceof PrefillEndpoint prefillEndpoint) {
+                    released |= prefillEndpoint.releaseBatch(requestId);
+                }
+            }
+        }
+        return released;
     }
 
     /** Distinguish a missing route table from discovery resolving a configured route to no hosts. */

@@ -42,6 +42,7 @@ public class FeClient {
 
     private final WebClient webClient;
     private final Duration overallTimeout;
+    private final String trustedRoutingToken;
 
     /**
      * The live {@code (feBaseUrl, fePath)} pair set is FE pool size × registered spec paths, so
@@ -69,12 +70,19 @@ public class FeClient {
                 .exchangeStrategies(strategies)
                 .build();
         this.overallTimeout = Duration.ofMillis(cfg.getBatchTimeoutMs() + cfg.getBodyReadMarginMs());
+        this.trustedRoutingToken = cfg.isPreAssignBe() ? cfg.getTrustedRoutingToken() : "";
     }
 
     /** Test seam for exercising streaming body accounting without a real socket. */
     FeClient(WebClient webClient, Duration overallTimeout) {
+        this(webClient, overallTimeout, "");
+    }
+
+    /** Test seam for the dispatcher-owned routing credential. */
+    FeClient(WebClient webClient, Duration overallTimeout, String trustedRoutingToken) {
         this.webClient = webClient;
         this.overallTimeout = overallTimeout;
+        this.trustedRoutingToken = trustedRoutingToken == null ? "" : trustedRoutingToken;
     }
 
     /**
@@ -106,8 +114,13 @@ public class FeClient {
                     // End-to-end headers first (Authorization, tenant, tracing — the caller's
                     // request must not lose them just because it took the split path), then the
                     // content type of the chunk body we re-serialized.
-                    .headers(h -> DispatcherHeaders.copyEndToEnd(
-                            inboundHeaders, h, DispatcherHeaders.FANOUT_SKIP))
+                    .headers(h -> {
+                        DispatcherHeaders.copyEndToEnd(
+                                inboundHeaders, h, DispatcherHeaders.FANOUT_SKIP);
+                        if (!trustedRoutingToken.isBlank()) {
+                            h.set(DispatcherHeaders.TRUSTED_ROUTING_HEADER, trustedRoutingToken);
+                        }
+                    })
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(body)
                     .exchangeToMono(response -> readBody(response, reservation)

@@ -11,6 +11,9 @@ import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import reactor.core.publisher.Mono;
@@ -57,8 +60,9 @@ class BatchScheduleCoordinatorTest {
         BatchScheduleResponse response = BatchScheduleResponse.success(null);
         when(routeService.batchSchedule(any())).thenReturn(Mono.just(response));
 
-        BatchScheduleResponse returned =
-                coordinator.schedule(new BatchScheduleRequest()).block();
+        BatchScheduleRequest forwarded = new BatchScheduleRequest();
+        forwarded.setForwardHop(1);
+        BatchScheduleResponse returned = coordinator.schedule(forwarded).block();
 
         assertSame(response, returned);
         assertEquals("10.0.0.1:7001", returned.getRealMasterHost());
@@ -96,13 +100,58 @@ class BatchScheduleCoordinatorTest {
                 eq(BatchScheduleResponse.class)))
                 .thenReturn(Mono.just(response));
 
-        BatchScheduleResponse returned =
-                coordinator.schedule(new BatchScheduleRequest()).block();
+        BatchScheduleRequest request = new BatchScheduleRequest();
+        request.setBatchCount(3);
+        request.setAssignBe(false);
+        request.setAssignFe(true);
+        BatchScheduleResponse returned = coordinator.schedule(request).block();
 
         assertSame(response, returned);
         assertFalse(returned.isResolvedLocally());
         verify(engineHealthReporter).reportForwardToMasterResult("10.0.0.2", "200");
         verifyNoInteractions(routeService);
+        ArgumentCaptor<BatchScheduleRequest> forwarded = ArgumentCaptor.forClass(BatchScheduleRequest.class);
+        verify(httpNettyService).request(forwarded.capture(), eq(URI.create("http://10.0.0.2:7001")),
+                eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class));
+        assertEquals(1, forwarded.getValue().getForwardHop());
+        assertEquals(3, forwarded.getValue().getBatchCount());
+        assertFalse(forwarded.getValue().isAssignBe());
+        assertTrue(forwarded.getValue().isAssignFe());
+        assertEquals(0, request.getForwardHop(), "forwarding must not mutate the caller's request");
+    }
+
+    @Test
+    void demotedMasterCannotForwardToItsCachedSelfAddress() {
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenReturn(false);
+        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
+        when(consistency.getLocalHostIp()).thenReturn("10.0.0.1");
+
+        BatchScheduleTransportException ex = assertThrows(
+                BatchScheduleTransportException.class,
+                () -> coordinator.schedule(new BatchScheduleRequest()).block());
+
+        assertEquals("SELF_FORWARD_BLOCKED", ex.getErrorCode());
+        verify(engineHealthReporter).reportForwardToMasterResult("10.0.0.1", "SELF_FORWARD_BLOCKED");
+        verifyNoInteractions(routeService, httpNettyService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2, -1})
+    void followerCannotRelayAnAlreadyForwardedRequest(int hop) {
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenReturn(false);
+        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
+        BatchScheduleRequest request = new BatchScheduleRequest();
+        request.setForwardHop(hop);
+
+        BatchScheduleTransportException ex = assertThrows(
+                BatchScheduleTransportException.class,
+                () -> coordinator.schedule(request).block());
+
+        assertEquals("FORWARD_HOP_LIMIT", ex.getErrorCode());
+        verify(engineHealthReporter).reportForwardToMasterResult("10.0.0.2", "FORWARD_HOP_LIMIT");
+        verifyNoInteractions(routeService, httpNettyService);
     }
 
     @Test

@@ -76,20 +76,38 @@ public final class RerankerMerger implements BatchEndpointSpec.ChunkBodyTransfor
             totalTokens = Math.addExact(totalTokens, tokenNumber.longValue());
 
             JSONArray localResults = sub.body().getJSONArray(spec.getResponseArrayField());
+            boolean[] seen = new boolean[sub.chunkSize()];
             for (Object value : localResults) {
                 if (!(value instanceof JSONObject item)) {
                     throw new IllegalStateException("reranker result item must be an object");
                 }
                 Object indexValue = item.get("index");
-                if (!(indexValue instanceof Number indexNumber)) {
+                BigInteger exactIndex = integralValue(indexValue);
+                if (exactIndex == null) {
                     throw new IllegalStateException("reranker result item is missing index");
                 }
-                long localIndex = indexNumber.longValue();
+                final int localIndex;
+                try {
+                    localIndex = exactIndex.intValueExact();
+                } catch (ArithmeticException outOfRange) {
+                    throw new IllegalStateException(
+                            "reranker result index is outside its chunk", outOfRange);
+                }
                 if (localIndex < 0 || localIndex >= sub.chunkSize()) {
                     throw new IllegalStateException("reranker result index is outside its chunk");
                 }
-                item.put("index", Math.addExact(sub.startIndex(), Math.toIntExact(localIndex)));
+                if (seen[localIndex]) {
+                    throw new IllegalStateException("reranker result indices must be unique within a chunk");
+                }
+                seen[localIndex] = true;
+                item.put("index", Math.addExact(sub.startIndex(), localIndex));
                 scoreOf(item); // Validate before sorting, including the sorted=false path.
+            }
+            for (boolean indexSeen : seen) {
+                if (!indexSeen) {
+                    throw new IllegalStateException(
+                            "reranker result indices must cover every item in the chunk");
+                }
             }
         }
         mergedBody.put("total_tokens", totalTokens);

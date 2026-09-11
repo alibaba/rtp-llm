@@ -106,6 +106,9 @@ public class DispatchConfig {
      * request with HTTP 500 at {@code model_rpc_client}'s {@code addr.role} access — the
      * dispatcher is the first caller to deliver {@code role_addrs} via the HTTP body, so the
      * latent FE bug only fires with this toggle on.
+     * The dispatcher and every receiving FE must also share the same non-blank
+     * {@code DISPATCH_ROUTING_TOKEN}; unauthenticated HTTP clients are forbidden from choosing
+     * internal gRPC targets through {@code role_addrs}.
      *
      * <p>Operators can keep/flip {@code DISPATCH_PRE_ASSIGN_BE=false} (or set
      * {@code preAssignBe: false} in {@code DISPATCH_CONFIG}) to opt out for diagnostics or
@@ -115,6 +118,14 @@ public class DispatchConfig {
      * FE-only, so no unused BE target is selected and no BE round-robin cursor is advanced.
      */
     private boolean preAssignBe = false;
+
+    /**
+     * Shared secret used only on dispatcher-to-FE fanout when {@link #preAssignBe} is enabled.
+     * Loaded from {@code DISPATCH_ROUTING_TOKEN}; it is deliberately excluded from JSON config
+     * and boot logs so the dispatcher cannot disclose it through config dumps or diagnostics.
+     */
+    @JsonIgnore
+    private String trustedRoutingToken = "";
 
     /**
      * Maximum bytes retained across all successful FE responses for one fanout request. The

@@ -18,9 +18,12 @@ import org.springframework.web.reactive.function.server.EntityResponse;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -111,6 +114,29 @@ class BatchHandlerContractTest {
         assertSame(passthroughResponse, out,
                 "non-batch-shaped body on a registered path must be passthrough-forwarded");
         verifyNoInteractions(fanoutService, batchScheduleClient);
+    }
+
+    @Test
+    void requestJsonPipelineRunsOnDedicatedCpuScheduler() {
+        Scheduler scheduler = Schedulers.newSingle("batch-json-test");
+        try {
+            handler = new BatchHandler(fanoutService, cfg, batchScheduleClient,
+                    passthroughClient, DispatcherTestSupport.noopMetrics(),
+                    1000, 128L * 1024 * 1024, null, scheduler);
+            stubBody("not-json");
+            AtomicReference<String> responseThread = new AtomicReference<>();
+
+            ServerResponse response = handler.handle(
+                            serverRequest, BatchEndpointSpec.BY_PATH.get("/batch_infer"))
+                    .doOnNext(ignored -> responseThread.set(Thread.currentThread().getName()))
+                    .block();
+
+            assertNotNull(response);
+            assertTrue(responseThread.get().startsWith("batch-json-test"),
+                    "parsing and validation must not run on the subscribing Reactor/Netty thread");
+        } finally {
+            scheduler.dispose();
+        }
     }
 
     @Test

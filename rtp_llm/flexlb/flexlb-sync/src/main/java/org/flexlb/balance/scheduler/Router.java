@@ -32,4 +32,7 @@ public interface Router {
      */
     BatchScheduleResponse batchSchedule(BatchScheduleRequest batchScheduleRequest);
 
+    /** Release a direct-routing reservation before any engine invocation. */
+    boolean cancelPlacement(long requestId);
+
 }

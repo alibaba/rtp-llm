@@ -365,6 +365,82 @@ class FrontendServerTest(TestCase):
             call["headers"],
         )
 
+    def test_external_batch_cannot_choose_grpc_backend(self):
+        request = {
+            "prompt_batch": ["hello"],
+            "generate_config": {
+                "role_addrs": [
+                    {
+                        "role": "PDFUSION",
+                        "ip": "attacker-chosen",
+                        "http_port": 8088,
+                        "grpc_port": 8089,
+                    }
+                ]
+            },
+        }
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            asyncio.run(
+                self.frontend_server.batch_infer(request, FakeRawRequest())
+            )
+
+        self.assertEqual(ExceptionType.INVALID_PARAMS, raised.exception.exception_type)
+        self.assertEqual([], self.frontend_server._frontend_worker.batch_calls)
+
+    def test_external_root_request_cannot_hide_backend_in_generation_config(self):
+        response = asyncio.run(
+            self.frontend_server.inference(
+                {
+                    "prompt": "hello",
+                    "generation_config": {
+                        "role_addrs": [
+                            {
+                                "role": "PDFUSION",
+                                "ip": "attacker-chosen",
+                                "http_port": 8088,
+                                "grpc_port": 8089,
+                            }
+                        ]
+                    },
+                },
+                FakeRawRequest(),
+            )
+        )
+
+        payload = json.loads(response.body)
+        self.assertEqual("INVALID_PARAMS", payload["error_code_str"])
+        self.assertIn("authenticated dispatcher", payload["message"])
+
+    def test_authenticated_dispatcher_can_supply_preassigned_backend(self):
+        self.frontend_server._dispatcher_routing_token = "trusted-secret"
+        request = {
+            "prompt_batch": ["hello"],
+            "generate_config": {
+                "role_addrs": [
+                    {
+                        "role": "PDFUSION",
+                        "ip": "master-selected",
+                        "http_port": 8088,
+                        "grpc_port": 8089,
+                    }
+                ]
+            },
+        }
+
+        response = asyncio.run(
+            self.frontend_server.batch_infer(
+                request,
+                FakeRawRequest(
+                    {"x-rtp-llm-dispatcher-routing-token": "trusted-secret"}
+                ),
+            )
+        )
+
+        self.assertEqual(b'{"response_batch":[]}', response.body)
+        call = self.frontend_server._frontend_worker.batch_calls[-1]
+        self.assertEqual(request["generate_config"], call["generate_config"])
+
     def test_response_chunk_event_is_streaming_only(self):
         try:
             from opentelemetry.sdk.trace.export.in_memory_span_exporter import (

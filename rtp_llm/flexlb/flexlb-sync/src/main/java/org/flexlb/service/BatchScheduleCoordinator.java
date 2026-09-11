@@ -29,6 +29,8 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class BatchScheduleCoordinator {
 
+    private static final int MAX_FORWARD_HOPS = 1;
+
     private final RouteService routeService;
     private final LBStatusConsistencyService consistency;
     private final GeneralHttpNettyService httpNettyService;
@@ -61,9 +63,29 @@ public class BatchScheduleCoordinator {
             return Mono.error(new BatchScheduleTransportException(
                     "master unreachable", "MASTER_NULL"));
         }
-        Logger.debug("[BatchSchedule] Forwarding to master {}: batchCount={}", master, request.getBatchCount());
         URI uri = URI.create("http://" + master);
-        return httpNettyService.request(request, uri, "/rtp_llm/batch_schedule", BatchScheduleResponse.class)
+        // Match the gRPC forwarder's guard: stale leader views must not form relay loops.
+        long incomingHop = Integer.toUnsignedLong(request.getForwardHop());
+        String blockedReason = incomingHop >= MAX_FORWARD_HOPS
+                ? "FORWARD_HOP_LIMIT"
+                : uri.getHost() != null && uri.getHost().equals(consistency.getLocalHostIp())
+                        ? "SELF_FORWARD_BLOCKED"
+                        : null;
+        if (blockedReason != null) {
+            masterUnreachableWarn.warn("[BatchSchedule] Forward blocked: reason={}, master={}, hop={}",
+                    blockedReason, master, incomingHop);
+            engineHealthReporter.reportForwardToMasterResult(uri.getHost(), blockedReason);
+            return Mono.error(new BatchScheduleTransportException(
+                    "batch schedule forward blocked: " + blockedReason, blockedReason));
+        }
+
+        BatchScheduleRequest forwarded = new BatchScheduleRequest();
+        forwarded.setBatchCount(request.getBatchCount());
+        forwarded.setAssignBe(request.isAssignBe());
+        forwarded.setAssignFe(request.isAssignFe());
+        forwarded.setForwardHop(Math.toIntExact(incomingHop + 1));
+        Logger.debug("[BatchSchedule] Forwarding to master {}: batchCount={}", master, request.getBatchCount());
+        return httpNettyService.request(forwarded, uri, "/rtp_llm/batch_schedule", BatchScheduleResponse.class)
                 .doOnNext(response -> engineHealthReporter.reportForwardToMasterResult(
                         uri.getHost(), String.valueOf(response.getCode())))
                 .onErrorResume(e -> {

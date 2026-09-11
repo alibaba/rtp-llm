@@ -8,12 +8,15 @@ import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 
@@ -51,24 +54,27 @@ public class DispatcherInspectionHandler {
     private final FlexlbConfig loadBalanceConfig;
     private final int maxChunkCount;
     private final long maxResponseBytes;
+    private final Scheduler cpuScheduler;
 
     @Autowired
     public DispatcherInspectionHandler(DispatchConfig cfg,
                                        DispatcherFePoolRefresher refresher,
                                        FeHealthChecker healthChecker,
                                        BatchScheduleClient batchScheduleClient,
-                                       ConfigService configService) {
+                                       ConfigService configService,
+                                       @Qualifier("dispatcherCpuScheduler") Scheduler cpuScheduler) {
         this(cfg, refresher, healthChecker, batchScheduleClient,
-                configService.loadBalanceConfig());
+                configService.loadBalanceConfig(), cpuScheduler);
     }
 
     private DispatcherInspectionHandler(DispatchConfig cfg,
                                         DispatcherFePoolRefresher refresher,
                                         FeHealthChecker healthChecker,
                                         BatchScheduleClient batchScheduleClient,
-                                        FlexlbConfig loadBalanceConfig) {
+                                        FlexlbConfig loadBalanceConfig,
+                                        Scheduler cpuScheduler) {
         this(cfg, refresher, healthChecker, batchScheduleClient,
-                loadBalanceConfig.getBatchScheduleMaxCount(), loadBalanceConfig);
+                loadBalanceConfig.getBatchScheduleMaxCount(), loadBalanceConfig, cpuScheduler);
     }
 
     /** Package-private convenience for focused tests; mirrors the production default. */
@@ -76,7 +82,8 @@ public class DispatcherInspectionHandler {
                                 DispatcherFePoolRefresher refresher,
                                 FeHealthChecker healthChecker,
                                 BatchScheduleClient batchScheduleClient) {
-        this(cfg, refresher, healthChecker, batchScheduleClient, 1000);
+        this(cfg, refresher, healthChecker, batchScheduleClient, 1000,
+                null, Schedulers.immediate());
     }
 
     DispatcherInspectionHandler(DispatchConfig cfg,
@@ -84,7 +91,8 @@ public class DispatcherInspectionHandler {
                                 FeHealthChecker healthChecker,
                                 BatchScheduleClient batchScheduleClient,
                                 int maxChunkCount) {
-        this(cfg, refresher, healthChecker, batchScheduleClient, maxChunkCount, null);
+        this(cfg, refresher, healthChecker, batchScheduleClient, maxChunkCount,
+                null, Schedulers.immediate());
     }
 
     DispatcherInspectionHandler(DispatchConfig cfg,
@@ -93,6 +101,17 @@ public class DispatcherInspectionHandler {
                                 BatchScheduleClient batchScheduleClient,
                                 int maxChunkCount,
                                 FlexlbConfig loadBalanceConfig) {
+        this(cfg, refresher, healthChecker, batchScheduleClient, maxChunkCount,
+                loadBalanceConfig, Schedulers.immediate());
+    }
+
+    DispatcherInspectionHandler(DispatchConfig cfg,
+                                DispatcherFePoolRefresher refresher,
+                                FeHealthChecker healthChecker,
+                                BatchScheduleClient batchScheduleClient,
+                                int maxChunkCount,
+                                FlexlbConfig loadBalanceConfig,
+                                Scheduler cpuScheduler) {
         if (maxChunkCount < 1) {
             throw new IllegalArgumentException("maxChunkCount must be >= 1, got " + maxChunkCount);
         }
@@ -103,6 +122,7 @@ public class DispatcherInspectionHandler {
         this.loadBalanceConfig = loadBalanceConfig;
         this.maxChunkCount = maxChunkCount;
         this.maxResponseBytes = cfg.getMaxDryRunResponseBytes();
+        this.cpuScheduler = cpuScheduler;
     }
 
     // ───────────────────────── snapshot ─────────────────────────
@@ -137,7 +157,17 @@ public class DispatcherInspectionHandler {
         }
         boolean atomicBatchAllowed = !hasActiveTrafficPolicy();
         boolean effectivePreAssign = resolvePreAssign(request) && atomicBatchAllowed;
-        return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0]).flatMap(bytes -> {
+        return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0])
+                .flatMap(bytes -> Mono.fromCallable(() -> dryRunBody(
+                                spec, bytes, effectivePreAssign, atomicBatchAllowed))
+                        .subscribeOn(cpuScheduler)
+                        .flatMap(response -> response))
+                .onErrorResume(this::handleDryRunException);
+    }
+
+    private Mono<ServerResponse> dryRunBody(BatchEndpointSpec spec, byte[] bytes,
+                                            boolean effectivePreAssign,
+                                            boolean atomicBatchAllowed) {
             JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {
                 return badRequest("expected a JSON object body");
@@ -171,7 +201,6 @@ public class DispatcherInspectionHandler {
             }
             return buildDryRunResponse(
                     spec, body, arr, chunkCount, effectivePreAssign, atomicBatchAllowed);
-        }).onErrorResume(this::handleDryRunException);
     }
 
     private Mono<ServerResponse> handleDryRunException(Throwable e) {
@@ -220,7 +249,7 @@ public class DispatcherInspectionHandler {
                 // that deliberately sends no chunk to the selected FE.
                 ? batchScheduleClient.requestTargets(chunkCount, true, false)
                 : Mono.just(List.of());
-        return targetsMono.flatMap(targets -> {
+        return targetsMono.publishOn(cpuScheduler).flatMap(targets -> {
             // Target strings come from trusted discovery rather than the caller, but they are not
             // length-bounded by the wire type. Account for them before materializing repeated
             // envelopes as well; the final serialization check remains the authoritative backstop.

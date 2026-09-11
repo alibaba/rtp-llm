@@ -121,6 +121,18 @@ class _RejectingMasterClient(MasterClient):
         return SimpleNamespace(**fields)
 
 
+class _CancelCaptureMasterClient(MasterClient):
+    def __init__(self):
+        super().__init__(
+            host_service=_FakeHostServiceWithSlave(),
+            master_config=_FakeMasterConfig(),
+        )
+        self.cancelled = []
+
+    async def _cancel_placement_at(self, addr, request_id):
+        self.cancelled.append((addr, request_id))
+
+
 class _FakeInputPB:
     def SerializeToString(self):
         return b"serialized-input"
@@ -143,6 +155,15 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             int(AdmissionRejectReason.RESOURCE_EXHAUSTED),
             RESOURCE_EXHAUSTED,
+        )
+
+    async def test_cancel_placement_contacts_both_discovered_peers(self):
+        client = _CancelCaptureMasterClient()
+
+        await client.cancel_placement(991)
+
+        self.assertCountEqual(
+            [("master:1234", 991), ("slave:1234", 991)], client.cancelled
         )
 
     async def test_schedule_payload_contains_batch_fields_and_pb(self):

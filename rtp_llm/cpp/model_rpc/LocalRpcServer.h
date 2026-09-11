@@ -116,7 +116,7 @@ protected:
                                   std::shared_ptr<GenerateStream>& stream);
 
     // Shared helpers for single and batch paths
-    ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
+    virtual ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
     ErrorInfo collectStreamOutput(grpc::ServerContext*                  context,
                                   std::shared_ptr<GenerateStream>&      stream,
                                   const std::shared_ptr<GenerateInput>& input,

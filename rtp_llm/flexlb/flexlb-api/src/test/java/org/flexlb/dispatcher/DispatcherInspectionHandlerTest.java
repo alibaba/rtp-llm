@@ -16,11 +16,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.reactive.function.server.MockServerRequest;
 import org.springframework.web.reactive.function.server.EntityResponse;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -148,6 +151,27 @@ class DispatcherInspectionHandlerTest {
 
     @Nested
     class DryRun {
+
+        @Test
+        void requestJsonPipelineRunsOnDedicatedCpuScheduler() {
+            Scheduler scheduler = Schedulers.newSingle("dryrun-json-test");
+            try {
+                DispatchConfig cfg = config("size:2");
+                DispatcherInspectionHandler handler = new DispatcherInspectionHandler(
+                        cfg, refresher(), mock(FeHealthChecker.class),
+                        mock(BatchScheduleClient.class), 1000, null, scheduler);
+                AtomicReference<String> responseThread = new AtomicReference<>();
+
+                handler.dryRun(dryRunRequest("not-json"))
+                        .doOnNext(ignored -> responseThread.set(Thread.currentThread().getName()))
+                        .block();
+
+                assertTrue(responseThread.get().startsWith("dryrun-json-test"),
+                        "dry-run parsing and projection must leave the Reactor/Netty thread");
+            } finally {
+                scheduler.dispose();
+            }
+        }
 
         @Test
         void unknownPathReturns400WithRegistryContents() {

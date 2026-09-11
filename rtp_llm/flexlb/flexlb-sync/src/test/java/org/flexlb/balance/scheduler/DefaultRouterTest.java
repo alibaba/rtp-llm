@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
@@ -153,6 +154,23 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
+    }
+
+    @Test
+    void cancelPlacementReleasesMatchingPrefillAndFusionLedgers() {
+        PrefillEndpoint prefill = org.mockito.Mockito.mock(PrefillEndpoint.class);
+        PrefillEndpoint fusion = org.mockito.Mockito.mock(PrefillEndpoint.class);
+        org.mockito.Mockito.doReturn(Map.of("prefill:1", prefill))
+                .when(endpointRegistry).getEndpoints(RoleType.PREFILL);
+        org.mockito.Mockito.doReturn(Map.of("fusion:1", fusion))
+                .when(endpointRegistry).getEndpoints(RoleType.PDFUSION);
+        when(prefill.releaseBatch(700L)).thenReturn(false);
+        when(fusion.releaseBatch(700L)).thenReturn(true);
+
+        assertTrue(defaultRouter.cancelPlacement(700L));
+
+        verify(prefill).releaseBatch(700L);
+        verify(fusion).releaseBatch(700L);
     }
 
     /**

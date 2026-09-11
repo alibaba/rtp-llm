@@ -101,6 +101,10 @@ public class RouteService {
                 : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
     }
 
+    public boolean cancelPlacement(long requestId) {
+        return router.cancelPlacement(requestId);
+    }
+
     /**
      * Resolve a whole dispatcher chunk atomically for a single-role deployment.
      * This intentionally bypasses the normal request queue and its per-request lifecycle.

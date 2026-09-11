@@ -168,7 +168,10 @@ public class HttpLoadBalanceServer {
 
     private Mono<ServerResponse> batchError(
             BatchScheduleContext context, StrategyErrorType type, Throwable error) {
-        BatchScheduleResponse response = BatchScheduleResponse.error(type, error.getMessage());
+        String publicMessage = type == StrategyErrorType.INVALID_REQUEST
+                ? "invalid batch schedule request"
+                : "batch scheduling failed";
+        BatchScheduleResponse response = BatchScheduleResponse.error(type, publicMessage);
         context.setBatchResponse(response);
         return json(statusOf(response), response);
     }

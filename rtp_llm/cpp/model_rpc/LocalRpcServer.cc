@@ -43,26 +43,43 @@ std::string formatRequestLogTag(const std::string& request_key, const RequestInf
 }
 
 // BatchGenerateCall does not use GenerateContext, whose setStream/stopStream pair normally
-// publishes worker lifecycle deltas. Keep the same contract for every batch member so master-side
-// reservations are released as each stream completes. The guard also cancels and publishes any
-// still-registered stream if an unexpected exception aborts the RPC midway through the batch.
+// publishes worker lifecycle deltas. Own every raw member before conversion or enqueue so even an
+// early multimodal/engine failure produces one terminal delta per scheduling reservation.
 class BatchStreamRuntimeGuard {
 public:
-    BatchStreamRuntimeGuard(std::shared_ptr<RpcServerRuntimeMeta> meta, const std::vector<GenerateStreamPtr>& streams):
+    BatchStreamRuntimeGuard(std::shared_ptr<RpcServerRuntimeMeta> meta, const BatchGenerateInputPB& request):
         meta_(std::move(meta)) {
         RTP_LLM_CHECK_WITH_INFO(meta_ != nullptr, "batch stream runtime metadata is not initialized");
-        entries_.reserve(streams.size());
+        entries_.reserve(request.inputs_size());
+        for (const auto& input : request.inputs()) {
+            entries_.push_back(Entry{input.request_id(),
+                                     input.has_group_id() ? input.group_id().value() : -1,
+                                     input.token_ids_size(),
+                                     nullptr,
+                                     ErrorCode::EXECUTION_EXCEPTION,
+                                     "batch RPC aborted before engine enqueue",
+                                     true,
+                                     false});
+        }
+    }
+
+    void registerStreams(const std::vector<GenerateStreamPtr>& streams) {
+        RTP_LLM_CHECK_WITH_INFO(streams.size() == entries_.size(),
+                                "enqueueMultiple returned a stream count that differs from the batch size");
         try {
-            for (const auto& stream : streams) {
+            for (size_t i = 0; i < streams.size(); ++i) {
+                const auto& stream = streams[i];
                 RTP_LLM_CHECK_WITH_INFO(stream != nullptr, "enqueueMultiple returned a null stream");
                 const auto input = stream->generateInput();
                 RTP_LLM_CHECK_WITH_INFO(input != nullptr, "batch stream has no generate input");
-                entries_.push_back(Entry{input->request_id, stream, false});
-                meta_->enqueue(input->request_id, stream);
-                entries_.back().active = true;
+                RTP_LLM_CHECK_WITH_INFO(input->request_id == entries_[i].request_id,
+                                        "enqueueMultiple changed batch member ordering or identity");
+                entries_[i].stream = stream;
+                meta_->enqueue(TaskIdentity{entries_[i].request_id, entries_[i].batch_id}, stream);
+                entries_[i].registered = true;
             }
         } catch (...) {
-            cancelAndFinishRemaining();
+            finishRemaining();
             throw;
         }
     }
@@ -71,37 +88,67 @@ public:
     BatchStreamRuntimeGuard& operator=(const BatchStreamRuntimeGuard&) = delete;
 
     ~BatchStreamRuntimeGuard() {
-        cancelAndFinishRemaining();
+        finishRemaining();
     }
 
-    void finish(size_t index) {
+    void finish(size_t index, const ErrorInfo& error = ErrorInfo::OkStatus()) {
         RTP_LLM_CHECK_WITH_INFO(index < entries_.size(), "batch stream runtime index out of range");
         auto& entry = entries_[index];
         if (!entry.active) {
             return;
         }
-        meta_->dequeue(entry.request_id, entry.stream);
+        if (!error.ok()) {
+            entry.error_code    = error.code();
+            entry.error_message = error.ToString();
+        }
+        finishEntry(entry, error.ok());
         entry.active = false;
+    }
+
+    void setFailure(size_t index, const ErrorInfo& error, const std::string& message = "") {
+        RTP_LLM_CHECK_WITH_INFO(index < entries_.size(), "batch stream runtime index out of range");
+        auto& entry          = entries_[index];
+        entry.error_code     = error.code();
+        entry.error_message  = message.empty() ? error.ToString() : message;
     }
 
 private:
     struct Entry {
         int64_t           request_id;
+        int64_t           batch_id;
+        int64_t           input_length;
         GenerateStreamPtr stream;
+        ErrorCode         error_code;
+        std::string       error_message;
         bool              active;
+        bool              registered;
     };
 
-    void cancelAndFinishRemaining() noexcept {
+    void finishEntry(Entry& entry, bool success) {
+        if (entry.registered) {
+            if (!success && entry.stream->getStatus() != StreamState::FINISHED && !entry.stream->hasError()) {
+                entry.stream->reportError(entry.error_code, entry.error_message);
+            }
+            meta_->dequeue(entry.request_id, entry.stream);
+            return;
+        }
+        meta_->finishTask(entry.request_id,
+                          entry.input_length,
+                          /*prefix_length=*/0,
+                          static_cast<int64_t>(entry.error_code),
+                          entry.error_message,
+                          entry.batch_id);
+    }
+
+    void finishRemaining() noexcept {
         for (size_t i = 0; i < entries_.size(); ++i) {
             auto& entry = entries_[i];
             if (!entry.active) {
                 continue;
             }
             try {
-                if (entry.stream->getStatus() != StreamState::FINISHED && !entry.stream->hasError()) {
-                    entry.stream->reportError(ErrorCode::CANCELLED, "batch RPC aborted before stream completion");
-                }
-                finish(i);
+                finishEntry(entry, false);
+                entry.active = false;
             } catch (const std::exception& error) {
                 RTP_LLM_LOG_ERROR(
                     "failed to finalize batch stream runtime request [%ld]: %s", entry.request_id, error.what());
@@ -378,6 +425,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     if (batch_size == 0) {
         return grpc::Status::OK;
     }
+    BatchStreamRuntimeGuard stream_runtime(meta_, *request);
 
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     inputs.reserve(batch_size);
@@ -389,11 +437,16 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             for (int j = 0; j < batch_size; j++) {
                 auto* result = response->add_results();
                 auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
+                err_pb->set_error_code(j == i ? transErrorCodeToRPC(err.code()) : ErrorCodePB::CANCELLED);
                 if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
+                    const auto message = "multimodal processing failed: " + err.ToString();
+                    stream_runtime.setFailure(j, err, message);
+                    err_pb->set_error_message(message);
                 } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+                    const auto message =
+                        "batch aborted due to multimodal failure at index " + std::to_string(i);
+                    stream_runtime.setFailure(j, ErrorInfo(ErrorCode::CANCELLED, message));
+                    err_pb->set_error_message(message);
                 }
             }
             return grpc::Status::OK;
@@ -405,7 +458,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     // order). Streams that failed checkInputLength carry an error reported via reportError() and
     // surface it through collectStreamOutput → nextOutput → ErrorInfo path below.
     auto                    streams = engine_->enqueueMultiple(inputs).second;
-    BatchStreamRuntimeGuard stream_runtime(meta_, streams);
+    stream_runtime.registerStreams(streams);
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
@@ -415,13 +468,13 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
 
         GenerateOutputs last_outputs;
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
-        stream_runtime.finish(i);
         if (!err.ok()) {
+            stream_runtime.finish(i, err);
             auto* err_pb = result->mutable_error_info();
-            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
-                                                                        ErrorCodePB::UNKNOWN_ERROR);
+            err_pb->set_error_code(transErrorCodeToRPC(err.code()));
             err_pb->set_error_message(err.ToString());
         } else {
+            stream_runtime.finish(i);
             auto* output_pb = result->mutable_final_output();
             QueryConverter::transResponse(output_pb,
                                           &last_outputs,

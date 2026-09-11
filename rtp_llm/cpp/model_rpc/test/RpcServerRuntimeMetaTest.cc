@@ -115,6 +115,22 @@ TEST(RpcServerRuntimeMetaTest, FinishTaskWithoutPendingStillReportsFailure) {
     EXPECT_EQ(finished.error_message, "remote load failed");
 }
 
+TEST(RpcServerRuntimeMetaTest, FinishTaskWithoutPendingPreservesBatchIdentity) {
+    RpcServerRuntimeMeta meta;
+
+    meta.finishTask(/*request_id=*/304,
+                    /*input_length=*/128,
+                    /*prefix_length=*/0,
+                    /*error_code=*/14,
+                    /*error_message=*/"prepare failed",
+                    /*batch_id=*/91);
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 304);
+    EXPECT_EQ(info.finished_task_info_list[0].batch_id, 91);
+}
+
 TEST(RpcServerRuntimeMetaTest, PriorityCancelDecoratesExistingTaskWithoutDuplicateRuntimeEntry) {
     RpcServerRuntimeMeta meta;
     auto                 input = std::make_shared<GenerateInput>();

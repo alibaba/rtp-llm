@@ -9,16 +9,21 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
+import java.util.AbstractMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Dispatcher infrastructure beans (config, connection provider, shared WebClient, route table).
@@ -71,8 +76,8 @@ public class DispatcherConfiguration {
     private static final int FE_MAX_PENDING_ACQUIRE_PER_HOST = 1000;
 
     @Bean
-    public DispatchConfig dispatchConfig() {
-        return loadAndValidate(System.getenv());
+    public DispatchConfig dispatchConfig(ConfigurableEnvironment environment) {
+        return loadAndValidate(environment);
     }
 
     /**
@@ -83,6 +88,13 @@ public class DispatcherConfiguration {
     @Bean
     public List<BatchEndpointSpec> batchEndpointSpecs() {
         return BatchEndpointSpec.SPECS;
+    }
+
+    /** Fixed CPU pool for request-controlled JSON parsing, projection and merging. */
+    @Bean(name = "dispatcherCpuScheduler", destroyMethod = "dispose")
+    public Scheduler dispatcherCpuScheduler() {
+        int threads = Math.max(2, Math.min(Runtime.getRuntime().availableProcessors(), 8));
+        return Schedulers.newParallel("dispatcher-cpu", threads);
     }
 
     /**
@@ -99,8 +111,48 @@ public class DispatcherConfiguration {
                 ? new DispatchConfig()
                 : JsonUtils.toObject(json, DispatchConfig.class);
         EnvConfigOverrides.apply(c, "DISPATCH_", env);
+        String routingToken = env.get("DISPATCH_ROUTING_TOKEN");
+        c.setTrustedRoutingToken(routingToken == null ? "" : routingToken.trim());
         validate(c);
         return c;
+    }
+
+    /** Use the same resolved Spring property sources that activate the dispatcher beans. */
+    static DispatchConfig loadAndValidate(ConfigurableEnvironment environment) {
+        return loadAndValidate(new EnvironmentBackedMap(environment));
+    }
+
+    /**
+     * {@link EnvConfigOverrides} only needs {@link Map#get(Object)}. This adapter also maps the
+     * established {@code DISPATCH_FOO_BAR} names to Spring's relaxed
+     * {@code dispatch.foo-bar} form, so command-line, system-property and environment sources all
+     * produce the same effective config.
+     */
+    private static final class EnvironmentBackedMap extends AbstractMap<String, String> {
+        private final ConfigurableEnvironment environment;
+
+        private EnvironmentBackedMap(ConfigurableEnvironment environment) {
+            this.environment = environment;
+        }
+
+        @Override
+        public String get(Object key) {
+            if (!(key instanceof String name)) {
+                return null;
+            }
+            String value = environment.getProperty(name);
+            if (value != null || !name.startsWith("DISPATCH_")) {
+                return value;
+            }
+            String relaxed = name.substring("DISPATCH_".length())
+                    .toLowerCase(java.util.Locale.ROOT).replace('_', '-');
+            return environment.getProperty("dispatch." + relaxed);
+        }
+
+        @Override
+        public Set<Entry<String, String>> entrySet() {
+            return Set.of();
+        }
     }
 
     private static void validate(DispatchConfig c) {
@@ -138,6 +190,10 @@ public class DispatcherConfiguration {
             throw new IllegalArgumentException(
                     "probePath must not be blank — set DISPATCH_PROBE_PATH=/frontend_health (rtp_llm) "
                             + "or /health (vLLM) etc.; got '" + c.getProbePath() + "'");
+        }
+        if (c.isPreAssignBe() && c.getTrustedRoutingToken().isBlank()) {
+            throw new IllegalArgumentException(
+                    "DISPATCH_ROUTING_TOKEN must be non-blank when preAssignBe is enabled");
         }
         FeAllocationMode allocationMode = FeAllocationMode.parse(c.getFeAllocation());
         // Normalize once so logs, metrics, and JSON-loaded vs env-loaded configs expose one value.

@@ -302,7 +302,9 @@ class FlexlbServiceImplTest {
     void testSchedule_exceptionHandling() {
         // Given: route throws exception
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.failedFuture(new RuntimeException("test error")));
+        when(routeService.route(any(BalanceContext.class))).thenReturn(
+                CompletableFuture.failedFuture(
+                        new RuntimeException("private-worker-token=top-secret")));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -322,7 +324,7 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertFalse(resp.getSuccess());
         assertEquals(500, resp.getCode());
-        assertTrue(resp.getErrorMessage().contains("test error"));
+        assertEquals("batch scheduling failed", resp.getErrorMessage());
     }
 
     @Test
@@ -445,6 +447,25 @@ class FlexlbServiceImplTest {
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.GetRequestStateResponsePB.class);
         verify(observer).onNext(captor.capture());
         assertFalse(captor.getValue().getFound());
+    }
+
+    @Test
+    void testCancel_releasesPlacementAndReturnsTerminalLifecycle() {
+        when(routeService.cancelPlacement(703L)).thenReturn(true);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
+                mock(StreamObserver.class);
+
+        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                .setRequestId(703L)
+                .build(), observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> captor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbCancelResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        verify(observer).onCompleted();
+        assertTrue(captor.getValue().getFound());
+        assertEquals(FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED,
+                captor.getValue().getLifecycle().getState());
     }
 
     private void assertPvContains(String expected) {

@@ -199,6 +199,22 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         responseObserver.onCompleted();
     }
 
+    @Override
+    public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+                       StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
+        boolean found = routeService.cancelPlacement(request.getRequestId());
+        FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response =
+                FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(found);
+        if (found) {
+            response.setLifecycle(FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
+                    .setRequestId(request.getRequestId())
+                    .setBatchId(request.getBatchId())
+                    .setState(FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED));
+        }
+        responseObserver.onNext(response.build());
+        responseObserver.onCompleted();
+    }
+
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
         return routeService.route(ctx).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
@@ -349,8 +365,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (cause instanceof TimeoutException) {
             return buildErrorResponse(8402, "NO_AVAILABLE_WORKER: schedule timeout");
         }
-        return buildErrorResponse(500,
-                error.getMessage() != null ? error.getMessage() : "internal error");
+        return buildErrorResponse(500, "batch scheduling failed");
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(int code, String message) {

@@ -41,6 +41,7 @@ public class PassthroughClient {
      * config: extreme long-stream workloads should bypass the dispatcher rather than tune this.
      */
     private static final int STREAM_TIMEOUT_MS = 600_000;
+    private static final Duration DISCARD_RELEASE_TIMEOUT = Duration.ofSeconds(1);
 
     private final WebClient webClient;
     private final FePool fePool;
@@ -109,7 +110,7 @@ public class PassthroughClient {
                     return webClient.method(request.method())
                             .uri(target)
                             .headers(h -> DispatcherHeaders.copyEndToEnd(
-                                    request.headers().asHttpHeaders(), h, DispatcherHeaders.HOP_BY_HOP))
+                                    request.headers().asHttpHeaders(), h, DispatcherHeaders.TO_FE_SKIP))
                             .body(bodyInserter)
                             .exchange()
                             .timeout(headersTimeout)
@@ -217,7 +218,7 @@ public class PassthroughClient {
             if (!state.compareAndSet(PENDING, TERMINAL)) {
                 return;
             }
-            response.releaseBody().subscribe(
+            response.releaseBody().timeout(DISCARD_RELEASE_TIMEOUT).subscribe(
                     ignored -> { },
                     error -> Logger.warn("failed to release discarded passthrough body: {}",
                             DispatcherResponses.briefReason(error)));

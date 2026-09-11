@@ -204,7 +204,9 @@ class DispatchConfigTest {
 
     @Test
     void preAssignBeJsonExplicitTrueEnables() {
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\",\"preAssignBe\":true}");
+        DispatchConfig c = DispatcherConfiguration.loadAndValidate(mutableEnv(
+                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"preAssignBe\":true}",
+                "DISPATCH_ROUTING_TOKEN", "shared-secret"));
         assertTrue(c.isPreAssignBe(),
                 "operator opt-in via JSON must be honored after FE versions converge");
     }
@@ -213,7 +215,8 @@ class DispatchConfigTest {
     void envOverridesPreAssignBeOn() {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
-                "DISPATCH_PRE_ASSIGN_BE", "true");
+                "DISPATCH_PRE_ASSIGN_BE", "true",
+                "DISPATCH_ROUTING_TOKEN", "shared-secret");
         DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
         assertTrue(c.isPreAssignBe(),
                 "DISPATCH_PRE_ASSIGN_BE=true must opt into the optimization without code change");
@@ -223,13 +226,25 @@ class DispatchConfigTest {
     void booleanAliasEnablesPreAssignBeAndTypoPreservesDefault() {
         DispatchConfig enabled = DispatcherConfiguration.loadAndValidate(mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
-                "DISPATCH_PRE_ASSIGN_BE", "1"));
+                "DISPATCH_PRE_ASSIGN_BE", "1",
+                "DISPATCH_ROUTING_TOKEN", "shared-secret"));
         assertTrue(enabled.isPreAssignBe());
 
         DispatchConfig typo = DispatcherConfiguration.loadAndValidate(mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
                 "DISPATCH_PRE_ASSIGN_BE", "treu"));
         assertFalse(typo.isPreAssignBe(), "invalid boolean must leave the default unchanged");
+    }
+
+    @Test
+    void preAssignmentRequiresASecretNotStoredInJson() {
+        assertThrows(IllegalArgumentException.class,
+                () -> load("{\"fePoolServiceId\":\"x\",\"preAssignBe\":true}"));
+        DispatchConfig c = DispatcherConfiguration.loadAndValidate(mutableEnv(
+                "DISPATCH_FE_POOL_SERVICE_ID", "x",
+                "DISPATCH_PRE_ASSIGN_BE", "true",
+                "DISPATCH_ROUTING_TOKEN", "shared-secret"));
+        assertEquals("shared-secret", c.getTrustedRoutingToken());
     }
 
     @Test

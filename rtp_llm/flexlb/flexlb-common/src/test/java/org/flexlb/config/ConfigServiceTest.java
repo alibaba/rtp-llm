@@ -282,10 +282,20 @@ class ConfigServiceTest {
     }
 
     @Test
+    void explicit_json_engine_type_wins_over_deprecated_legacy_value() {
+        ConfigService service = new ConfigService(Map.of(
+                "FLEXLB_CONFIG", "{\"engineType\":\"LLM\"}",
+                "ENGINE_TYPE", "EMBEDDING"));
+
+        assertEquals(EngineType.LLM, service.loadBalanceConfig().getEngineType());
+    }
+
+    @Test
     void null_engine_type_in_json_aborts_startup() {
         ConfigValidationException error = assertThrows(ConfigValidationException.class,
                 () -> new ConfigService(Map.of(
-                        "FLEXLB_CONFIG", "{\"engineType\":null}")));
+                        "FLEXLB_CONFIG", "{\"engineType\":null}",
+                        "ENGINE_TYPE", "EMBEDDING")));
         assertTrue(error.getMessage().contains("engineType"));
     }
 

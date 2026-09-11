@@ -532,6 +532,52 @@ class PassthroughClientTest {
         }
     }
 
+    @Test
+    void discardedUnwrittenBodyCannotHoldTheOnlyPoolConnectionForever() throws Exception {
+        server.enqueue(new MockResponse()
+                .setBody("never-consumed")
+                // Longer than DISCARD_RELEASE_TIMEOUT, but short enough that MockWebServer's
+                // response task finishes deterministically before @AfterEach shuts it down.
+                .setBodyDelay(3, TimeUnit.SECONDS));
+        server.enqueue(new MockResponse().setBody("second"));
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
+        reactor.netty.resources.ConnectionProvider provider =
+                reactor.netty.resources.ConnectionProvider.builder("passthrough-unwritten-release")
+                        .maxConnections(1)
+                        .pendingAcquireTimeout(Duration.ofSeconds(4))
+                        .build();
+        try {
+            WebClient webClient = WebClient.builder()
+                    .clientConnector(new ReactorClientHttpConnector(HttpClient.create(provider)))
+                    .build();
+            PassthroughClient client = new PassthroughClient(
+                    webClient, pool, DispatcherTestSupport.noopMetrics(), new DispatchConfig());
+            MockServerRequest first = MockServerRequest.builder()
+                    .method(HttpMethod.GET).uri(URI.create("/unwritten")).body(Flux.empty());
+            ServerResponse firstResponse = client.forward(first).block(Duration.ofSeconds(5));
+            Assertions.assertNotNull(firstResponse);
+            Assertions.assertEquals("/unwritten", takeRequestWithin(server).getPath());
+
+            // Simulate WebFlux discarding the emitted response before writeTo. Draining this
+            // delayed body cannot complete, so the bounded release must cancel and evict it.
+            PassthroughClient.releaseIfUnwritten(firstResponse);
+
+            MockServerRequest second = MockServerRequest.builder()
+                    .method(HttpMethod.GET).uri(URI.create("/next")).body(Flux.empty());
+            MockServerWebExchange secondExchange = MockServerWebExchange.from(
+                    MockServerHttpRequest.get("http://x/next"));
+            client.forward(second)
+                    .flatMap(response -> response.writeTo(secondExchange, responseContext()))
+                    .block(Duration.ofSeconds(5));
+            Assertions.assertEquals("second",
+                    secondExchange.getResponse().getBodyAsString().block(Duration.ofSeconds(5)));
+            Assertions.assertEquals("/next", takeRequestWithin(server).getPath());
+        } finally {
+            provider.disposeLater().block(Duration.ofSeconds(5));
+        }
+    }
+
     /** Production wiring must not impose a response timeout on a valid quiet SSE stream. */
     @Test
     void streamingResponseWithLongBodyDelayIsNotCutOff() {

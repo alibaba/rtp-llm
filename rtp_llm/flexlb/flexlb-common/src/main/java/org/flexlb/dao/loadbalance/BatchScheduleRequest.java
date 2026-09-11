@@ -15,6 +15,10 @@ public class BatchScheduleRequest {
     @JsonProperty("batch_count")
     private int batchCount;
 
+    /** Number of master forwards; omitted by existing callers and therefore initially zero. */
+    @JsonProperty("forward_hop")
+    private int forwardHop;
+
     /**
      * Whether the response must contain backend worker fields. Defaults to {@code true} so an old
      * caller that only sends {@code batch_count} keeps the original wire behavior. A dispatcher
