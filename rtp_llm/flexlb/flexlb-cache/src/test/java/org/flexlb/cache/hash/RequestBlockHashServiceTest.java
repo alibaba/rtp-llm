@@ -238,16 +238,17 @@ class RequestBlockHashServiceTest {
     }
 
     @Test
-    void rejectsEmptyKeysAndInputIds() {
+    void acceptsEmptyKeysWithoutInputIds() {
         Request request = new Request();
+        request.setBlockCacheKeys(List.of());
+        request.setSeqLen(2);
+        request.setBlockSize(4);
 
-        IllegalArgumentException error = assertThrows(
-                IllegalArgumentException.class,
-                () -> service.prepareBlockCacheKeys(contextFor(request)).block());
+        service.prepareBlockCacheKeys(contextFor(request)).block();
 
-        assertEquals(
-                "block_cache_keys and input_ids must not both be empty",
-                error.getMessage());
+        assertEquals(List.of(), request.getBlockCacheKeys());
+        assertNull(request.getInputIds());
+        verifyNoInteractions(configResolver, executor, localStandbyHashService);
     }
 
     private BalanceContext contextFor(Request request) {

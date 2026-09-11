@@ -317,13 +317,19 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void testSchedule_rejectsMissingCacheKeysAndInputIds() {
+    void testSchedule_acceptsEmptyCacheKeysWithoutInputIds() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("missing-cache-identity")
+                        .setRequestId("short-prompt")
                         .setSeqLen(100)
+                        .setCacheKeyBlockSize(1024)
                         .build();
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
@@ -335,23 +341,30 @@ class FlexlbServiceImplTest {
         verify(observer).onNext(captor.capture());
         verify(observer).onCompleted();
         verify(observer, never()).onError(any());
-        assertFalse(captor.getValue().getSuccess());
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                captor.getValue().getCode());
-        assertEquals("block_cache_keys and input_ids must not both be empty",
-                captor.getValue().getErrorMessage());
-        verify(cacheAwareService, never()).prepareBlockCacheKeys(any(BalanceContext.class));
-        verify(routeService, never()).route(any(BalanceContext.class));
+        assertTrue(captor.getValue().getSuccess());
+        verify(cacheAwareService).prepareBlockCacheKeys(any(BalanceContext.class));
+        verify(routeService).route(any(BalanceContext.class));
     }
 
     @Test
-    void testSchedule_rejectsMissingCacheIdentityBeforeMasterForward() {
+    void testSchedule_forwardsEmptyCacheKeysWithoutInputIds() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB masterResponse =
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                        .setSuccess(true)
+                        .setCode(200)
+                        .build();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
+                CompletableFuture.completedFuture(
+                        FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                                masterResponse, "10.0.0.2:7001")));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("missing-cache-identity-forward")
+                        .setRequestId("short-prompt-forward")
+                        .setSeqLen(100)
+                        .setCacheKeyBlockSize(1024)
                         .build();
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
@@ -362,10 +375,8 @@ class FlexlbServiceImplTest {
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
         verify(observer).onNext(captor.capture());
         verify(observer).onCompleted();
-        assertFalse(captor.getValue().getSuccess());
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                captor.getValue().getCode());
-        verify(grpcForwarder, never()).forwardScheduleToMaster(any());
+        assertTrue(captor.getValue().getSuccess());
+        verify(grpcForwarder).forwardScheduleToMaster(request);
         verify(cacheAwareService, never()).prepareBlockCacheKeys(any(BalanceContext.class));
         verify(routeService, never()).route(any(BalanceContext.class));
     }
