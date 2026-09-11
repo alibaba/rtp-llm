@@ -742,9 +742,15 @@ class DeepSeekV4Model(GptModelBase):
         # authoritative RankLayout; this re-resolves the same strict parser so a
         # model built without that setup step cannot silently proceed. `None`
         # on every other launch keeps the existing behaviour untouched.
+        #
+        # The config lives on the base class (module_base.GptModelBase.__init__
+        # sets self.parallelism_config); this method has no `parallelism_config`
+        # parameter, so the unqualified name is a NameError on every path,
+        # including the opt-in-off one.
         self._v4_args.moe_stage_context = None
+        _pcfg = self.parallelism_config
         pp_ep_enabled, _pp_ep_backend = (
-            resolve_pp_ep_opt_in(parallelism_config) if parallelism_config is not None else (False, "")
+            resolve_pp_ep_opt_in(_pcfg) if _pcfg is not None else (False, "")
         )
         if pp_ep_enabled:
             from rtp_llm.models_py.distributed.ep_stage_context import (
@@ -752,9 +758,9 @@ class DeepSeekV4Model(GptModelBase):
                 validate_pp_ep_shape,
             )
 
-            validate_pp_ep_shape(parallelism_config)
+            validate_pp_ep_shape(_pcfg)
             self._v4_args.moe_stage_context = EpStageContext.build(
-                parallelism_config, backend=_pp_ep_backend
+                _pcfg, backend=_pp_ep_backend
             )
             logging.info(
                 "[DeepSeekV4Model] stage-local EP enabled: %s",

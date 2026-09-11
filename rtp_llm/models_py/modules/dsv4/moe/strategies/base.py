@@ -174,6 +174,45 @@ def register_strategy(cls: Type[RoutedExpertsStrategy]) -> Type[RoutedExpertsStr
     return cls
 
 
+#: Resolved CP4EP4PP2 backend name -> registered strategy name.
+#:
+#: `purecp_bf16` is the DESIGN name for the existing SM120 FusedMoe + CP-router
+#: path, whose registered strategy name is `sm120_fused_moe`. The two names must
+#: not drift, so the mapping lives here next to the registry and
+#: `select_strategy` consults it — a fixture or a caller can then ask for the
+#: class by backend name instead of guessing a registry string.
+BACKEND_STRATEGY_NAME: Dict[str, str] = {
+    "purecp_bf16": "sm120_fused_moe",
+    "fork_nccl_mxfp8": "fork_nccl_mxfp8",
+}
+
+
+def strategy_name_for_backend(backend: str) -> str:
+    try:
+        return BACKEND_STRATEGY_NAME[backend]
+    except KeyError:
+        raise RuntimeError(
+            "unknown expert backend %r; known: %s"
+            % (backend, sorted(BACKEND_STRATEGY_NAME))
+        ) from None
+
+
+def strategy_class_for_backend(backend: str) -> Type[RoutedExpertsStrategy]:
+    """The registered class a resolved backend name maps to.
+
+    Raises if the class is absent, so a renamed or unregistered strategy fails
+    here rather than silently selecting something else.
+    """
+    name = strategy_name_for_backend(backend)
+    cls = next((c for c in _STRATEGY_PRIORITY if c.name == name), None)
+    if cls is None:
+        raise RuntimeError(
+            "backend %r maps to strategy %r, which is not registered; loaded: %s"
+            % (backend, name, [c.name for c in _STRATEGY_PRIORITY])
+        )
+    return cls
+
+
 def _resolve_forced(strategy_arg: Optional[str]) -> tuple[Optional[str], bool]:
     """Apply env-var overrides on top of constructor kwarg.
 
@@ -322,15 +361,10 @@ def select_strategy(
         # The resolved CP4EP4PP2 backend names the strategy, so an explicitly
         # enabled launch gets the backend it declared instead of whichever
         # distributed strategy happens to be healthy. `purecp_bf16` maps onto the
-        # existing SM120 FusedMoe + CP-router path.
+        # existing SM120 FusedMoe + CP-router path via BACKEND_STRATEGY_NAME.
         declared = getattr(cfg.stage_context, "backend", None) if cfg.stage_context is not None else None
         if declared is not None:
-            declared_cls = next((c for c in _STRATEGY_PRIORITY if c.name == declared), None)
-            if declared_cls is None:
-                raise RuntimeError(
-                    f"Resolved expert backend {declared!r} has no registered strategy "
-                    f"(layer_id={cfg.layer_id})."
-                )
+            declared_cls = strategy_class_for_backend(declared)
             if not declared_cls.can_handle(cfg):
                 raise RuntimeError(
                     f"Resolved expert backend {declared!r} cannot handle this cfg "

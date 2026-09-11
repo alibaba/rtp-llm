@@ -215,7 +215,12 @@ class EpStageContext:
 
         if process_group is None:
             process_group = _stage_process_group(parallelism_config)
-        _verify_process_group(process_group, stage_ranks)
+        _verify_process_group(process_group, stage_ranks, world_rank)
+        if ep_rank != int(getattr(parallelism_config, "ep_rank", ep_rank)):
+            raise ValueError(
+                "loader ep_rank=%r disagrees with the layout's %d for world_rank=%d"
+                % (getattr(parallelism_config, "ep_rank", None), ep_rank, world_rank)
+            )
 
         ctx = cls(
             process_group=process_group,
@@ -227,13 +232,95 @@ class EpStageContext:
             backend=backend,
         )
         logger.info(
-            "[EpStageContext] %s backend=%s pp_rank=%d group_rank=%d/%d world_ranks=%s",
-            type(parallelism_config).__name__,
+            "[EpStageContext] backend=%s pp_rank=%d group_rank=%d/%d world_ranks=%s",
             ctx.backend,
             ctx.pp_rank,
             ctx.group_rank,
             ctx.group_size,
             list(ctx.world_ranks),
+        )
+        return ctx
+
+    # ---- construction (single-stage / PP1) --------------------------------
+
+    @classmethod
+    def build_single_stage(
+        cls,
+        parallelism_config,
+        backend: str,
+        process_group=None,
+        generation: int = 0,
+    ) -> "EpStageContext":
+        """Context for a PP1 launch, where WORLD *is* the expert roster.
+
+        This is a SEPARATE entry point on purpose. `validate_pp_ep_shape` encodes
+        the CP4EP4PP2 engine contract (pp2 x dp1 x tp4 x ep4, world8) and must not
+        be relaxed to serve a fixture — that guard is what stops an env var from
+        enabling an unvalidated shape. Here the identity is instead PROVEN rather
+        than assumed: exactly one stage, world size equal to the expert count.
+
+        At pp1 there is no cross-stage hazard, so `_verify_process_group`'s
+        "must not be WORLD" rule does not apply; the roster, order and local rank
+        are still checked against the live group.
+        """
+        import torch.distributed as dist
+
+        if backend not in PP_EP_BACKENDS:
+            raise ValueError("unknown expert backend %r" % backend)
+        if not dist.is_initialized():
+            raise ValueError("distributed is not initialized while building EpStageContext")
+
+        pp_size = int(getattr(parallelism_config, "pp_size", 1) or 1)
+        ep_size = int(getattr(parallelism_config, "ep_size", 1) or 1)
+        world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
+        if pp_size != 1:
+            raise ValueError(
+                "build_single_stage is for pp_size==1; got pp_size=%d. Use build() "
+                "for the CP4EP4PP2 two-stage target." % pp_size
+            )
+        if world_size != ep_size:
+            raise ValueError(
+                "at pp_size==1 the WORLD group is the expert roster only when "
+                "world_size == ep_size; got %d != %d" % (world_size, ep_size)
+            )
+
+        world_rank = int(getattr(parallelism_config, "world_rank", 0) or 0)
+        if process_group is None:
+            process_group = dist.group.WORLD
+
+        roster = tuple(int(r) for r in dist.get_process_group_ranks(process_group))
+        if len(roster) != world_size or tuple(sorted(roster)) != tuple(range(world_size)):
+            raise ValueError(
+                "the pp1 expert roster must be ranks 0..%d in order; got %r"
+                % (world_size - 1, list(roster))
+            )
+        if int(dist.get_rank()) != world_rank:
+            raise ValueError(
+                "caller world_rank=%d disagrees with the live world rank %d"
+                % (world_rank, int(dist.get_rank()))
+            )
+        group_rank = int(dist.get_rank(process_group))
+        ep_rank = int(getattr(parallelism_config, "ep_rank", group_rank))
+        if ep_rank != group_rank:
+            raise ValueError(
+                "loader ep_rank=%d disagrees with the live group rank %d"
+                % (ep_rank, group_rank)
+            )
+
+        ctx = cls(
+            process_group=process_group,
+            world_ranks=roster,
+            group_rank=group_rank,
+            group_size=len(roster),
+            pp_rank=0,
+            generation=int(generation),
+            backend=backend,
+        )
+        logger.info(
+            "[EpStageContext] single-stage backend=%s roster=%s group_rank=%d",
+            ctx.backend,
+            list(ctx.world_ranks),
+            ctx.group_rank,
         )
         return ctx
 
@@ -268,12 +355,18 @@ def _stage_process_group(parallelism_config):
     return collective_torch._get_group(Group.STAGE)
 
 
-def _verify_process_group(process_group, stage_ranks: Tuple[int, ...]) -> None:
-    """The live communicator must match the layout-derived roster exactly.
+def _verify_process_group(process_group, stage_ranks: Tuple[int, ...], live_rank: int) -> None:
+    """The LIVE communicator must match the layout-derived roster exactly.
 
-    A mismatch means the group map was built for a different parallelism
-    configuration than the one being validated — the failure mode that would
-    otherwise show up as a hang or as cross-stage contamination much later.
+    Checks size, membership, ORDER, the caller's local rank inside the group and
+    the loader's `ep_rank`. A mismatch means the group map was built for a
+    different parallelism configuration than the one being validated — the
+    failure mode that would otherwise show up as a hang or as cross-stage
+    contamination much later.
+
+    `live_rank` is the world rank the CALLER believes it is; it is compared
+    against `dist.get_rank(group.WORLD)` so a caller whose view of its own rank
+    disagrees with the process group fails here rather than in a collective.
     """
     import torch.distributed as dist
 
@@ -287,15 +380,42 @@ def _verify_process_group(process_group, stage_ranks: Tuple[int, ...]) -> None:
             "stage process group resolved to WORLD; the stage must be a strict "
             "subset under pp_size>1"
         )
-    actual = tuple(sorted(int(r) for r in dist.get_process_group_ranks(process_group)))
-    expected = tuple(sorted(int(r) for r in stage_ranks))
-    if actual != expected:
+    if len(stage_ranks) < 2:
+        raise ValueError("stage roster %r has fewer than 2 ranks; EP needs >=2" % (stage_ranks,))
+
+    actual_world_rank = int(dist.get_rank())
+    if int(live_rank) != actual_world_rank:
+        raise ValueError(
+            "caller world_rank=%d disagrees with the live world rank %d"
+            % (int(live_rank), actual_world_rank)
+        )
+
+    actual = tuple(int(r) for r in dist.get_process_group_ranks(process_group))
+    if len(actual) != len(stage_ranks):
+        raise ValueError(
+            "stage process group has %d rank(s) but the layout roster has %d: %r vs %r"
+            % (len(actual), len(stage_ranks), list(actual), list(stage_ranks))
+        )
+    if tuple(sorted(actual)) != tuple(sorted(stage_ranks)):
         raise ValueError(
             "stage process group ranks %r do not match the layout roster %r"
-            % (list(actual), list(expected))
+            % (list(actual), list(stage_ranks))
         )
-    if len(actual) <= 1:
-        raise ValueError("stage process group has %d rank(s); EP needs >=2" % len(actual))
+    if actual != tuple(stage_ranks):
+        # The collective's peer order IS this order; agreeing as a set is not
+        # enough, because the send/recv split vectors are indexed by it.
+        raise ValueError(
+            "stage process group order %r differs from the layout roster order %r"
+            % (list(actual), list(stage_ranks))
+        )
+
+    local_rank = int(dist.get_rank(process_group))
+    expected_local = stage_ranks.index(actual_world_rank)
+    if local_rank != expected_local:
+        raise ValueError(
+            "rank %d has group-local rank %d, but the layout roster %r places it at %d"
+            % (actual_world_rank, local_rank, list(stage_ranks), expected_local)
+        )
 
 
 def maybe_build(

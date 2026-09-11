@@ -314,11 +314,31 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
 
     @staticmethod
     def _all_to_all(send: torch.Tensor, send_splits, recv_splits, cols: int, group) -> torch.Tensor:
-        """NCCL all_to_all_single over a flattened [rows, cols] byte payload."""
-        recv = torch.empty((sum(recv_splits), cols), dtype=torch.uint8, device=send.device)
+        """NCCL all_to_all_single over `[rows, cols]` byte payloads.
+
+        Splits are in ROWS, matching the donor's contract and matching what the
+        tensors actually are. `all_to_all_single` splits dimension 0, so passing
+        a FLATTENED payload with row-sized splits would ask for `sum(rows)`
+        elements out of `rows * cols` and violate the API shape contract — the
+        buffers must therefore stay 2-D here. The `cols` argument is retained
+        only as an assertion of that shape.
+        """
+        if send.dim() != 2 or send.size(1) != cols:
+            raise ValueError(
+                "%s._all_to_all expects a [rows, %d] payload, got %s"
+                % (BACKEND_NAME, cols, tuple(send.shape))
+            )
+        if sum(send_splits) != send.size(0):
+            raise ValueError(
+                "send splits %r sum to %d but the payload has %d rows"
+                % (list(send_splits), sum(send_splits), send.size(0))
+            )
+        recv = torch.empty(
+            (sum(recv_splits), cols), dtype=torch.uint8, device=send.device
+        )
         torch.distributed.all_to_all_single(
-            recv.view(-1),
-            send.reshape(-1).contiguous(),
+            recv,
+            send.contiguous(),
             output_split_sizes=list(recv_splits),
             input_split_sizes=list(send_splits),
             group=group,
