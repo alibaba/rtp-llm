@@ -2,6 +2,7 @@ import logging
 import os
 import unittest
 from typing import List
+from unittest import mock
 
 import torch
 
@@ -27,8 +28,9 @@ def _resolve_model_path() -> str:
 
 
 class TestCudaGraphDecodePadding(unittest.TestCase):
-    def __init__(self, methodName: str = "runTest") -> None:
-        super().__init__(methodName)
+
+    def setUp(self) -> None:
+        super().setUp()
         os.environ["RESERVER_RUNTIME_MEM_MB"] = "10240"
 
         # Test parameters (can be configured)
@@ -249,6 +251,30 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         for bs in batch_range:
             self._test_single(bs)
             print(f"success for batch size: {bs}")
+
+
+class TestCudaGraphDiscovery(unittest.TestCase):
+    def test_missing_model_is_reported_as_skip_by_unittest_runner(self):
+        # Discovery must not allocate GPU resources or raise SkipTest itself.
+        with mock.patch(
+            __name__ + "._resolve_model_path", return_value="/missing-model"
+        ), mock.patch(__name__ + ".os.path.isdir", return_value=False), mock.patch(
+            __name__ + ".use_synthetic_cuda_graph_model", return_value=False
+        ), mock.patch.object(
+            torch.cuda, "set_device"
+        ) as set_device:
+            suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+                TestCudaGraphDecodePadding
+            )
+            count = suite.countTestCases()
+            self.assertGreater(count, 0)
+            result = unittest.TestResult()
+            suite.run(result)
+            self.assertEqual(result.testsRun, count)
+            self.assertEqual(len(result.skipped), count)
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.failures, [])
+            set_device.assert_not_called()
 
 
 if __name__ == "__main__":

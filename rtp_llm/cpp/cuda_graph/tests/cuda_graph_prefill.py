@@ -2,6 +2,7 @@ import logging
 import os
 import unittest
 from typing import List
+from unittest import mock
 
 import torch
 
@@ -27,21 +28,10 @@ def _resolve_model_path() -> str:
 
 
 class TestCudaGraphPrefill(unittest.TestCase):
-    def __init__(self, methodName: str = "runTest") -> None:
-        super().__init__(methodName)
+
+    def setUp(self) -> None:
+        super().setUp()
         os.environ["RESERVER_RUNTIME_MEM_MB"] = "10240"
-
-        # Set device first to ensure all tensors are created on the correct device
-        self.device = "cuda:0"
-        torch.cuda.set_device(self.device)
-
-        # Test parameters (can be configured)
-        self.max_seq_len = 64
-        self.tokens_per_block = 64
-        self.max_context_batch_size = 16
-
-        # Generate prefill_capture_seq_lens
-        self.prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
 
         # Build model using shared model builder (only load 1 layer for test).
         # The default path is an integration-test convention; local/Bazel runs
@@ -55,6 +45,19 @@ class TestCudaGraphPrefill(unittest.TestCase):
                 "RTP_LLM_CUDA_GRAPH_USE_SYNTHETIC_MODEL=1 for local "
                 "CudaGraphRunner coverage"
             )
+
+        # Set device first to ensure all tensors are created on the correct device
+        self.device = "cuda:0"
+        torch.cuda.set_device(self.device)
+
+        # Test parameters (can be configured)
+        self.max_seq_len = 64
+        self.tokens_per_block = 64
+        self.max_context_batch_size = 16
+
+        # Generate prefill_capture_seq_lens
+        self.prefill_capture_seq_lens = self._generate_prefill_capture_seq_lens()
+
         self.model_builder = CudaGraphTestModelBuilder(
             ModelBuildConfig(
                 model_path=model_path,
@@ -302,6 +305,30 @@ class TestCudaGraphPrefill(unittest.TestCase):
             print(f"start test for batch size: {bs}")
             self._test_single(bs)
             print(f"success for batch size: {bs}")
+
+
+class TestCudaGraphDiscovery(unittest.TestCase):
+    def test_missing_model_is_reported_as_skip_by_unittest_runner(self):
+        # Discovery must not allocate GPU resources or raise SkipTest itself.
+        with mock.patch(
+            __name__ + "._resolve_model_path", return_value="/missing-model"
+        ), mock.patch(__name__ + ".os.path.isdir", return_value=False), mock.patch(
+            __name__ + ".use_synthetic_cuda_graph_model", return_value=False
+        ), mock.patch.object(
+            torch.cuda, "set_device"
+        ) as set_device:
+            suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+                TestCudaGraphPrefill
+            )
+            count = suite.countTestCases()
+            self.assertGreater(count, 0)
+            result = unittest.TestResult()
+            suite.run(result)
+            self.assertEqual(result.testsRun, count)
+            self.assertEqual(len(result.skipped), count)
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.failures, [])
+            set_device.assert_not_called()
 
 
 if __name__ == "__main__":
