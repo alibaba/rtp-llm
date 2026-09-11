@@ -128,7 +128,7 @@ private:
                                        bool                                       all_callbacks_received,
                                        int                                        sent_transfer_count,
                                        int                                        total_transfers,
-                                       int64_t                                    return_deadline_ms,
+                                       const P2PWorkerRoutePlan&                  worker_plan,
                                        const std::string&                         unique_key) const;
 
     struct AsyncSendTaskState {

@@ -30,6 +30,18 @@ int outstandingSendBudget(int routes_per_layer) {
     return kMaxOutstandingLayersPerRequest * std::max(1, routes_per_layer);
 }
 
+std::string describeRoutes(const P2PWorkerRoutePlan& worker_plan) {
+    std::string result = "[";
+    for (size_t i = 0; i < worker_plan.routes.size(); ++i) {
+        if (i != 0) {
+            result += ",";
+        }
+        const auto& route = worker_plan.routes[i];
+        result += std::to_string(route.route_id) + ":" + route.cache_tag;
+    }
+    return result + "]";
+}
+
 void buildExpectedBufferMetadata(const CacheTopology& topology,
                                  std::set<std::string>* expected_keys,
                                  std::vector<std::string>* expected_tags) {
@@ -825,7 +837,7 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
                                            all_callbacks_received,
                                            sent_transfer_count,
                                            total_transfers,
-                                           return_deadline_ms,
+                                           worker_plan,
                                            unique_key);
 
     if (metrics_reporter_) {
@@ -904,14 +916,9 @@ P2PConnectorWorkerPrefill::determineSendResult(const std::shared_ptr<SendTransfe
                                                bool                                       all_callbacks_received,
                                                int                                        sent_transfer_count,
                                                int                                        total_transfers,
-                                               int64_t                                    return_deadline_ms,
+                                               const P2PWorkerRoutePlan&                  worker_plan,
                                                const std::string&                         unique_key) const {
 
-    if (timeout_cancelled_pending_tasks) {
-        return {false,
-                ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
-                "sendKVCache: transfer callback wait timeout, unique_key: " + unique_key};
-    }
     if (cancel_flag->load()) {
         return {false,
                 ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED,
@@ -921,15 +928,26 @@ P2PConnectorWorkerPrefill::determineSendResult(const std::shared_ptr<SendTransfe
         std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
         return {false, transfer_result->error_code, transfer_result->error_msg};
     }
+    const std::string transfer_summary = "sent=" + std::to_string(sent_transfer_count)
+                                         + " planned=" + std::to_string(total_transfers)
+                                         + " routes=" + describeRoutes(worker_plan);
+    if (sent_transfer_count != total_transfers) {
+        return {false,
+                ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
+                "sendKVCache: dispatched transfer count mismatch, " + transfer_summary
+                    + ", unique_key: " + unique_key};
+    }
+    if (timeout_cancelled_pending_tasks) {
+        return {false,
+                ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
+                "sendKVCache: transfer callback wait timeout, " + transfer_summary
+                    + ", unique_key: " + unique_key};
+    }
     if (!all_callbacks_received) {
         return {false,
                 ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
-                "sendKVCache: transfer callback wait timeout, unique_key: " + unique_key};
-    }
-    if (currentTimeMs() >= return_deadline_ms && sent_transfer_count < total_transfers) {
-        return {false,
-                ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
-                "sendKVCache timeout before all transfers dispatched (return_deadline), unique_key: " + unique_key};
+                "sendKVCache: transfer callback wait timeout, " + transfer_summary
+                    + ", unique_key: " + unique_key};
     }
     if (!transfer_result->all_success.load()) {
         std::lock_guard<std::mutex> lk(transfer_result->result_mutex);

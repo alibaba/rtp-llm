@@ -722,6 +722,9 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) 
         write_thread.join();
     }
     EXPECT_TRUE(result.hasError());
+    EXPECT_NE(result.ToString().find("dispatched transfer count mismatch"), std::string::npos);
+    EXPECT_NE(result.ToString().find("sent=1 planned=2"), std::string::npos);
+    EXPECT_NE(result.ToString().find("routes=["), std::string::npos);
 
     auto          calls = mock_sender_->getTransferCalls();
     std::set<int> transferred_layers;
