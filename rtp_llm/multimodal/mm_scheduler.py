@@ -18,6 +18,7 @@ from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import vit_emb_cache_
@@ -52,9 +53,7 @@ class MMSchedulerExecutionError(MMSchedulerError):
         self.source_type = source_type
         self.source_message = source_message
         self.is_oom = is_oom
-        super().__init__(
-            f"batch embedding failed: {source_type}: {source_message}"
-        )
+        super().__init__(f"batch embedding failed: {source_type}: {source_message}")
 
 
 class MMSchedulerOverloadError(MMSchedulerError):
@@ -136,12 +135,13 @@ class _EmbeddingRequest:
                   shared lock resolves the cancel-vs-start race.
     """
 
-    __slots__ = ("work_items", "n_images", "future")
+    __slots__ = ("work_items", "n_images", "future", "work_estimate")
 
     def __init__(self, work_items: List[MMWorkItem]):
         self.work_items = work_items
         self.n_images = sum(len(wi.mm_inputs) for wi in work_items)
         self.future: Future[None] = Future()
+        self.work_estimate = MMWorkEstimate()
 
 
 # Fallback for hand-built work items without a positive request timeout.
@@ -200,6 +200,13 @@ class MMScheduler:
         self._batch_wait_ms = batch_wait_ms
         self._max_batch_size = max_batch_size
         self._max_batch_images = max_batch_images
+        budget_fn = getattr(mm_part, "get_batch_work_budget", None)
+        self._work_budget = budget_fn(max_batch_images) if budget_fn else None
+        if self._work_budget is not None and not isinstance(
+            self._work_budget, MMWorkEstimate
+        ):
+            raise TypeError("get_batch_work_budget must return MMWorkEstimate or None")
+
         # Device the forward must run on. The executor is a fresh thread, which
         # defaults to cuda:0; without pinning, a non-zero local rank would run the
         # forward on the wrong device. None (tests / CPU) skips pinning.
@@ -244,25 +251,54 @@ class MMScheduler:
 
     @property
     def max_request_images(self) -> int:
-        """Per-request media cap (a request never splits across batches, so one
-        exceeding this can never fit). Callers can pre-check before preprocessing."""
-        return self._max_batch_images
+        # Cost-aware models can split a multi-media request after preprocessing.
+        return (
+            (1 << 63) - 1 if self._work_budget is not None else self._max_batch_images
+        )
+
+    def _estimate_work(self, items: List[MMWorkItem]) -> MMWorkEstimate:
+        work = MMWorkEstimate()
+        if self._work_budget is not None:
+            for wi in items:
+                estimate = self._mm_part.estimate_work(wi.preprocess_result, wi.mm_type)
+                if not isinstance(estimate, MMWorkEstimate):
+                    raise TypeError("cost-aware models must estimate every work item")
+                work = work + estimate
+        return work
+
+    def _request_chunks(self, work_items: List[MMWorkItem]) -> List[List[MMWorkItem]]:
+        if self._work_budget is None:
+            if sum(len(wi.mm_inputs) for wi in work_items) > self._max_batch_images:
+                raise MMSchedulerRequestTooLargeError(
+                    f"request image count exceeds gpu_max_batch_images {self._max_batch_images}"
+                )
+            return [work_items]
+        chunks, current = [], []
+        work, n_images = MMWorkEstimate(), 0
+        for wi in work_items:
+            estimate = self._estimate_work([wi])
+            images = len(wi.mm_inputs)
+            if images > self._max_batch_images or not estimate.fits_within(
+                self._work_budget
+            ):
+                raise MMSchedulerRequestTooLargeError(
+                    f"one media work item exceeds the GPU batch budget: {estimate}; "
+                    f"budget={self._work_budget}"
+                )
+            if current and (
+                n_images + images > self._max_batch_images
+                or not (work + estimate).fits_within(self._work_budget)
+            ):
+                chunks.append(current)
+                current, work, n_images = [], MMWorkEstimate(), 0
+            current.append(wi)
+            work, n_images = work + estimate, n_images + images
+        if current:
+            chunks.append(current)
+        return chunks
 
     def submit_and_wait(self, work_items: List[MMWorkItem]) -> None:
-        req = _EmbeddingRequest(work_items)
-        # max_batch_images is also the SINGLE-request cap: a request is never
-        # split across batches, so one exceeding it can never fit — reject up
-        # front. Serial mode passes sys.maxsize (no single-request limit).
-        if req.n_images > self._max_batch_images:
-            raise MMSchedulerRequestTooLargeError(
-                f"request image count {req.n_images} exceeds "
-                f"gpu_max_batch_images {self._max_batch_images}, "
-                f"request rejected"
-            )
-
-        # The scheduler owns only the embedding-stage timeout. Preprocessing keeps
-        # its existing timeout semantics and does not consume this budget. Use the
-        # largest positive timeout, matching MMWorkItem and the remote VIT proxy.
+        chunks = self._request_chunks(work_items)
         timeout_values_ms = [
             wi.mm_timeout_ms
             for wi in work_items
@@ -271,6 +307,31 @@ class MMScheduler:
         timeout_ms = (
             max(timeout_values_ms) if timeout_values_ms else _DEFAULT_MM_TIMEOUT_MS
         )
+        started = time.monotonic()
+        deadline = started + timeout_ms / 1000.0
+        try:
+            # Only one chunk per caller is admitted at a time. Rejoining the
+            # queue tail lets other callers progress and preserves bounded queues.
+            for chunk in chunks:
+                remaining_ms = (deadline - time.monotonic()) * 1000.0
+                if remaining_ms <= 0:
+                    raise MMSchedulerTimeoutError(
+                        "request timed out between GPU chunks"
+                    )
+                self._submit_chunk_and_wait(chunk, remaining_ms)
+        except MMSchedulerExecutionError:
+            # Do not retain prior chunks/tensors in a public exception traceback.
+            work_items, chunks, chunk = [], [], None
+            raise
+        kmonitor.report(
+            GaugeMetrics.VIT_EMBEDDING_RT_METRIC, (time.monotonic() - started) * 1000.0
+        )
+
+    def _submit_chunk_and_wait(
+        self, work_items: List[MMWorkItem], timeout_ms: float
+    ) -> None:
+        req = _EmbeddingRequest(work_items)
+        req.work_estimate = self._estimate_work(work_items)
         timeout_s = timeout_ms / 1000.0
 
         submit_ms = current_time_ms()
@@ -319,14 +380,6 @@ class MMScheduler:
             raise MMSchedulerTimeoutError(
                 f"MMScheduler: embedding wait timeout after {timeout_s * 1000:.0f}ms"
             ) from None
-
-        # Per-request latency = wait + forward (queue wait + batch-collect wait +
-        # forward), preserving VIT_EMBEDDING_RT_METRIC's historical per-request
-        # meaning and sampling. Reported only on success; failures are tracked by
-        # VIT_ERROR_QPS_METRIC.
-        kmonitor.report(
-            GaugeMetrics.VIT_EMBEDDING_RT_METRIC, current_time_ms() - submit_ms
-        )
 
     @staticmethod
     def _drain(
@@ -452,9 +505,7 @@ class MMScheduler:
                             # TOCTOU where a caller cancels a still-PENDING request.
                             if not req.future.done():
                                 try:
-                                    self._fail(
-                                        req, source_type, source_message, is_oom
-                                    )
+                                    self._fail(req, source_type, source_message, is_oom)
                                 except InvalidStateError:
                                     pass
         finally:
@@ -508,6 +559,7 @@ class MMScheduler:
                 break
         batch = [first]
         n_images = first.n_images
+        batch_work = first.work_estimate
 
         deadline = time.monotonic() + self._batch_wait_ms / 1000.0
 
@@ -532,11 +584,15 @@ class MMScheduler:
                 continue  # caller already timed out; don't spend budget on it
 
             # The while guard caps the count; here only stop on image overflow.
-            if n_images + req.n_images > self._max_batch_images:
+            if n_images + req.n_images > self._max_batch_images or (
+                self._work_budget is not None
+                and not (batch_work + req.work_estimate).fits_within(self._work_budget)
+            ):
                 self._pending = req
                 break
             batch.append(req)
             n_images += req.n_images
+            batch_work = batch_work + req.work_estimate
 
         return batch
 
@@ -553,11 +609,7 @@ class MMScheduler:
         with self._lock:
             if self._stopped.is_set():
                 return None
-            return [
-                req
-                for req in batch
-                if req.future.set_running_or_notify_cancel()
-            ]
+            return [req for req in batch if req.future.set_running_or_notify_cancel()]
 
     def _execute_batch(self, batch: List[_EmbeddingRequest]) -> None:
         """Run the batched forward and write results back.

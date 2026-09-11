@@ -51,7 +51,8 @@ rtp_kernel = [
 
 flashattn = [
     "flash_attn",
-    "flash-attn-3"
+    "flash-attn-3",
+    "flash-attn-4"
 ]
 
 xft_dep = select({
@@ -111,6 +112,7 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
+    "pynvvideocodec",
     "av",
     # add qwen agent package
     "pydantic",
@@ -264,6 +266,8 @@ py_library(
         ":torchvision",
         ":protobuf",
         ":pyOpenSSL",
+        ":flash-attn-4",
+        ":pynvvideocodec",
     ] + select({
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
@@ -305,10 +309,9 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 locks ship flashinfer-python (+apache-tvm-ffi, nvidia-cutlass-dsl)
-        # and flash-mla (+tilelang on arm), but not flashinfer-cubin/jit-cache or
-        # fast-hadamard; those rebuilds for torch 2.11+cu130 are tracked separately.
-        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla"],
+        # CUDA 13 x86 ships matching FlashInfer Python/cubin and hadamard wheels.
+        # ARM keeps its existing dependencies; the cu129 JIT cache is not reused.
+        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform"],
         "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],

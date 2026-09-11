@@ -20,6 +20,7 @@ from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     OutputCountMismatchError,
 )
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -327,10 +328,7 @@ class MMSchedulerTest(TestCase):
             all(isinstance(e, MMSchedulerExecutionError) for e in errors), errors
         )
         self.assertTrue(
-            all(
-                e.source_type == torch.cuda.OutOfMemoryError.__name__
-                for e in errors
-            ),
+            all(e.source_type == torch.cuda.OutOfMemoryError.__name__ for e in errors),
             errors,
         )
         self.assertTrue(all(e.is_oom for e in errors), errors)
@@ -789,6 +787,114 @@ class VitEmbeddingSchedulerArgsTest(TestCase):
         cfg.gpu_batch_wait_ms = -1
         with self.assertRaises(ValueError):
             cfg.embedding_scheduler_args()
+
+
+class _CostMMPart(_FakeMMPart):
+    def get_batch_work_budget(self, max_batch_media):
+        return MMWorkEstimate(input_patches=10)
+
+    def estimate_work(self, data, mm_type=None):
+        return MMWorkEstimate(input_patches=int(data.item()))
+
+
+class MMSchedulerCostTest(TestCase):
+    @staticmethod
+    def item(cost, timeout_ms=5000):
+        return _FakeWorkItem(
+            preprocess_result=torch.tensor([cost]), timeout_ms=timeout_ms
+        )
+
+    def test_cost_prevents_oversized_cross_request_batch(self):
+        fake = _CostMMPart()
+        scheduler = MMScheduler(
+            fake, batch_wait_ms=100, max_batch_size=4, max_batch_images=8
+        )
+        try:
+            errors = _submit_concurrently(
+                scheduler,
+                [[self.item(6)], [self.item(6)]],
+                barrier=threading.Barrier(2),
+            )
+            self.assertEqual(errors, [None, None])
+            self.assertEqual(fake.calls, [1, 1])
+        finally:
+            scheduler.close()
+
+    def test_multi_media_request_splits_and_preserves_results(self):
+        fake = _CostMMPart()
+        scheduler = MMScheduler(
+            fake, batch_wait_ms=1, max_batch_size=2, max_batch_images=2
+        )
+        items = [self.item(4), self.item(6), self.item(7)]
+        try:
+            scheduler.submit_and_wait(items)
+            self.assertEqual(fake.calls, [2, 1])
+            self.assertTrue(all(wi.embedding_result is not None for wi in items))
+            self.assertGreater(scheduler.max_request_images, 2)
+        finally:
+            scheduler.close()
+
+    def test_oversized_item_is_rejected_before_forward(self):
+        fake = _CostMMPart()
+        scheduler = MMScheduler(fake)
+        try:
+            with self.assertRaisesRegex(ValueError, "exceeds the GPU batch budget"):
+                scheduler.submit_and_wait([self.item(11)])
+            self.assertEqual(fake.calls, [])
+        finally:
+            scheduler.close()
+
+    def test_chunk_rejoins_queue_tail(self):
+        released = threading.Event()
+        fake = _CostMMPart(block_until=released)
+        scheduler = MMScheduler(fake, max_batch_size=1, batch_wait_ms=0)
+        order = []
+        original = fake.batched_embedding
+
+        def record(data, kinds):
+            order.extend(int(d.item()) for d in data)
+            return original(data, kinds)
+
+        fake.batched_embedding = record
+        errors = []
+
+        def submit(items):
+            try:
+                scheduler.submit_and_wait(items)
+            except Exception as error:
+                errors.append(error)
+
+        long = threading.Thread(target=submit, args=([self.item(6), self.item(6)],))
+        short = threading.Thread(target=submit, args=([self.item(1)],))
+        try:
+            long.start()
+            self.assertTrue(fake.forward_entered.wait(2))
+            short.start()
+            deadline = time.monotonic() + 2
+            while scheduler._waiting.qsize() == 0 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertEqual(scheduler._waiting.qsize(), 1)
+            released.set()
+            long.join(3)
+            short.join(3)
+            self.assertFalse(long.is_alive() or short.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(order, [6, 1, 6])
+        finally:
+            released.set()
+            scheduler.close()
+            long.join(3)
+            short.join(3)
+
+    def test_timeout_is_shared_across_chunks(self):
+        fake = _CostMMPart(delay=0.04)
+        scheduler = MMScheduler(fake, max_batch_size=1, batch_wait_ms=0)
+        try:
+            with self.assertRaises(TimeoutError):
+                scheduler.submit_and_wait([self.item(6, 60) for _ in range(3)])
+            self.assertLessEqual(len(fake.calls), 2)
+        finally:
+            scheduler.close()
 
 
 if __name__ == "__main__":

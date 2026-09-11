@@ -25,6 +25,16 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
 def requirement(names):
     for name in names:
+        if name in ("flash-attn-4", "pynvvideocodec"):
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
@@ -91,13 +101,26 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@rtp_llm//:using_cuda13_x86": [
+            # Keep CUDA 13 x86 wheel metadata aligned with the hashed requirements.
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
-            "deep_gemm@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/4af4ac732eae77acb57ab3ac59e3ceb796b797b5/deep_gemm-2.5.0%2Blocal-cp310-cp310-linux_x86_64.whl",
-            "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
-            "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel-0.1.0%2B3bc0ca45.cu13sm103a-cp310-cp310-linux_x86_64.whl",
+            "deep_gemm@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.6.1+e46e564.cu132-cp310-cp310-linux_x86_64.whl",
+            "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/flash_mla/flash_mla-1.0.0%2Bcb10b79-cp310-cp310-linux_x86_64.whl",
             "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
             "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
+            "fast-hadamard-transform@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
+            "flashinfer-python@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260608/flashinfer_python-0.6.12-py3-none-any.whl",
+            "flashinfer-cubin@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260608/flashinfer_cubin-0.6.12-py3-none-any.whl",
+            "deep-ep@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl",
+            "tilelang==0.1.9",
+            "quack-kernels==0.5.3",
+            "flash-attn-4@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl",
+            "nvidia-cutlass-dsl==4.6.0.dev0",
+            "nvidia-cutlass-dsl-libs-base@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/nvidia_cutlass_dsl_libs_base-4.6.0.dev0-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel-0.1.0%2B3bc0ca45.cu13sm103a-cp310-cp310-linux_x86_64.whl",
+            "apache-tvm-ffi>=0.1.12,<0.2",
+            "triton==3.6.0",
+            "pynvvideocodec@https://mirrors.aliyun.com/pypi/packages/3d/8b/aa04d63c7b74a1c20a7a1e8de93949a2097af02dc08a7446cfe5ee2faf67/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
@@ -202,7 +225,10 @@ def telemetry_test_deps():
     return []
 
 def jit_deps():
-    return []
+    return select({
+        "@rtp_llm//:using_cuda13_x86": ["@cuda13_jit_gcc//:runtime"],
+        "//conditions:default": [],
+    })
 
 def select_py_bindings():
     return select({

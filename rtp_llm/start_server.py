@@ -5,6 +5,11 @@ import sys
 import time
 import traceback
 
+from rtp_llm.utils.jit_toolchain import configure_bazel_jit_toolchain
+
+# Resolve runtime compiler paths before importing/starting backend JIT users.
+configure_bazel_jit_toolchain()
+
 import requests
 import torch
 

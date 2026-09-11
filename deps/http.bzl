@@ -120,6 +120,28 @@ def http_deps():
         sha256 = "dd375f794557a1135934b40b23a7435569644922c5c7116cb69dd36f699ad5a4",
     )
 
+
+    # CUDA 13 packages are separate repositories so CUDA 12 builds retain
+    # their existing runtime dependencies.
+    http_file(
+        name = "remote_kv_cache_manager_client_cuda13_rpm",
+        urls = [
+            "http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_10_09_32_46.rpm",
+        ],
+        sha256 = "f99dc8ad8652cc7578d39586af247f71a75e61cee938ffa0922f6a30935f75b2",
+    )
+
+    http_archive(
+        name = "remote_kv_cache_manager_server_cuda13",
+        urls = [
+            "http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/server/kv_cache_manager_server_2026_08_19_20_01.tar.gz",
+        ],
+        sha256 = "facbcee3395e3fa129cf45c7034d82e576fefc5af7017fead26ed795bb6f7bf6",
+        build_file_content = """
+exports_files(["bin/kv_cache_manager_bin"])
+        """,
+    )
+
     http_file(
         name = "remote_kv_cache_manager_client_rpm",
         urls = [

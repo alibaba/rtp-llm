@@ -44,6 +44,10 @@ load("@rtp_deps//:http.bzl", "http_deps")
 
 http_deps()
 
+load("//3rdparty/cuda13_jit_toolchain:repositories.bzl", "cuda13_jit_gcc_repository")
+
+cuda13_jit_gcc_repository(name = "cuda13_jit_gcc")
+
 load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()

@@ -58,9 +58,17 @@ def _worker_initializer(
     # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _worker_vit_config = vit_config
+    # Spawned workers own separate caches and must apply the configured limits.
+    vit_emb_cache_.resize_cache(vit_config.mm_cache_item_num)
+    url_data_cache_.resize_cache(vit_config.url_cache_item_num)
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
-    logging.info(f"Worker process {os.getpid()} initialized.")
+    logging.info(
+        "Worker process %s initialized: mm_cache_item_num=%s, url_cache_item_num=%s",
+        os.getpid(),
+        vit_config.mm_cache_item_num,
+        vit_config.url_cache_item_num,
+    )
 
 
 def _worker_process_task(

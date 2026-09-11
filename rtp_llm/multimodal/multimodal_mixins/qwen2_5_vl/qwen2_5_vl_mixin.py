@@ -92,6 +92,39 @@ def smart_nframes(configs, total_frames, video_fps) -> int:
     return nframes
 
 
+def video_resize_shape(
+    configs, nframes, height, width, factor=IMAGE_FACTOR, max_total_pixels=None
+):
+    image_factor = factor
+
+    min_pixels = configs.min_pixels if configs.min_pixels != -1 else VIDEO_MIN_PIXELS
+    total_pixels = VIDEO_TOTAL_PIXELS
+    max_pixels = max(
+        min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR),
+        int(min_pixels * 1.05),
+    )
+    max_pixels_supposed = configs.max_pixels if configs.max_pixels != -1 else max_pixels
+    max_pixels = min(max_pixels_supposed, max_pixels)
+    if max_total_pixels is not None:
+        max_pixels = min(max_pixels, max_total_pixels / nframes)
+
+    if configs.height != -1 and configs.width != -1:
+        resized_height, resized_width = smart_resize(
+            configs.height,
+            configs.width,
+            factor=image_factor,
+        )
+    else:
+        resized_height, resized_width = smart_resize(
+            height,
+            width,
+            factor=image_factor,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
+        )
+    return resized_height, resized_width
+
+
 class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
     def __init__(self, mm_related_params: VitParameters):
         self.mm_related_params = mm_related_params
@@ -133,38 +166,18 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
             idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
             height, width = vr[0].shape[:2]
 
-            video = torch.tensor(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
+            video = torch.from_numpy(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
             del vr
 
-        image_factor = IMAGE_FACTOR
-
         nframes, _, height, width = video.shape
-        min_pixels = (
-            configs.min_pixels if configs.min_pixels != -1 else VIDEO_MIN_PIXELS
+        resized_height, resized_width = video_resize_shape(
+            configs,
+            nframes,
+            height,
+            width,
+            kwargs.get("factor", IMAGE_FACTOR),
+            kwargs.get("max_total_pixels"),
         )
-        total_pixels = VIDEO_TOTAL_PIXELS
-        max_pixels = max(
-            min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR),
-            int(min_pixels * 1.05),
-        )
-        max_pixels_supposed = (
-            configs.max_pixels if configs.max_pixels != -1 else max_pixels
-        )
-        max_pixels = min(max_pixels_supposed, max_pixels)
-        if configs.height != -1 and configs.width != -1:
-            resized_height, resized_width = smart_resize(
-                configs.height,
-                configs.width,
-                factor=image_factor,
-            )
-        else:
-            resized_height, resized_width = smart_resize(
-                height,
-                width,
-                factor=image_factor,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-            )
         resize_timer = (
             vit_preprocess_timer(
                 GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, vit_metrics_tags
