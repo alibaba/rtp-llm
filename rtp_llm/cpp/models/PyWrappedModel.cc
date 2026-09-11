@@ -650,6 +650,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyEmbeddingInputs");
     torch_ext::PyEmbeddingInputs embedding_inputs;
+    embedding_inputs.input_ids_host = inputs.input_ids_host;
+    embedding_inputs.input_lengths_host = inputs.input_lengths_host;
+    embedding_inputs.text_tokens_mask_host = inputs.text_tokens_mask;
     if (inputs.combo_tokens_type_ids.defined()) {
         embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
     }
@@ -677,6 +680,7 @@ torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptM
         multimodal_input.mm_extra_input = mm_extra_input;
     }
     if (inputs.mm_features_locs.defined()) {
+        multimodal_input.mm_features_locs_host = inputs.mm_features_locs;
         multimodal_input.mm_features_locs = inputs.mm_features_locs.cuda();
     }
     return multimodal_input;
@@ -1392,10 +1396,25 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
             }
         }
     }
+    // CPU mirrors must describe the same slices as their device tensors.
+    size_t host_batch_offset = 0;
+    for (size_t i = 0; i < token_slice_recipes.size(); ++i) {
+        auto&       micro = micro_batch_inputs[i];
+        const auto& slice = token_slice_recipes[i];
+        if (inputs.input_ids_host.defined()) {
+            micro.input_ids_host = inputs.input_ids_host.narrow(0, slice.offset, slice.count);
+        }
+        if (inputs.input_lengths_host.defined()) {
+            micro.input_lengths_host = inputs.input_lengths_host.narrow(0, host_batch_offset, micro.input_lengths.size(0));
+        }
+        host_batch_offset += micro.input_lengths.size(0);
+    }
     return {micro_batch_inputs, token_slice_recipes};
 }
 
 void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
+    buffer_holder_.hold_host(inputs.input_ids_host);
+    buffer_holder_.hold_host(inputs.input_lengths_host);
     buffer_holder_.hold_host(inputs.combo_tokens);
     buffer_holder_.hold_host(inputs.input_lengths);
     buffer_holder_.hold_host(inputs.sequence_lengths);

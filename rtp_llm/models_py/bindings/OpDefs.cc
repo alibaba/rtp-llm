@@ -188,6 +188,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite(
             "combo_tokens_type_ids", &PyEmbeddingInputs::combo_tokens_type_ids, "Combined token type IDs tensor")
         .def_readwrite("text_tokens_mask", &PyEmbeddingInputs::text_tokens_mask, "Text tokens mask tensor")
+        .def_readwrite("input_ids_host", &PyEmbeddingInputs::input_ids_host)
+        .def_readwrite("input_lengths_host", &PyEmbeddingInputs::input_lengths_host)
+        .def_readwrite("text_tokens_mask_host", &PyEmbeddingInputs::text_tokens_mask_host)
         .def("__repr__", [](const PyEmbeddingInputs& self) { return "PyEmbeddingInputs"; });
 
     pybind11::class_<PyMultimodalInputs>(m, "PyMultimodalInputs")
@@ -195,6 +198,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("multimodal_features", &PyMultimodalInputs::multimodal_features, "Multimodal features tensor")
         .def_readwrite(
             "mm_features_locs", &PyMultimodalInputs::mm_features_locs, "Multimodal features locations tensor")
+        .def_readwrite("mm_features_locs_host", &PyMultimodalInputs::mm_features_locs_host)
         .def_readwrite(
             "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
         .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });

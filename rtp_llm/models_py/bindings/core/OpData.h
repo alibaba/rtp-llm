@@ -45,6 +45,10 @@ struct GptModelInputs {
     torch::Tensor         prefix_lengths;           // [context_batch_size]
     torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
+    // Optional CPU mirrors retained by the embedding executor, without a readback.
+    torch::Tensor input_ids_host;
+    torch::Tensor input_lengths_host;
+
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
 
