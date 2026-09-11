@@ -1,9 +1,9 @@
-"""Manual RTP -> KVCM Python client -> live KVMeta integration test.
+"""Manual RTP producer/control path -> KVCM -> live KVMeta integration test.
 
 This target is intentionally tagged ``manual`` in BUILD.  It validates the
-production RTP Python output backend against KVCM's packaged Python object
-client and a real KVMeta service without adding KVCM to RTP's default test
-dependency graph.
+production RTP transport factory, output transport, proxy-routed release, and
+GC against KVCM's packaged Python object client and a real KVMeta service
+without adding KVCM to RTP's default test dependency graph.
 """
 
 from __future__ import annotations
@@ -19,18 +19,20 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 
 import torch
 
+from rtp_llm.config.py_config_modules import MM_TRANSPORT_MODE_KVCM, MMTransportConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaSlotPB,
     MultimodalInputsPB,
+    ReleaseLeasePB,
     TensorDataTypePB,
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
-from rtp_llm.multimodal.transport.kvcm.backend import KvcmOutputBackend
+from rtp_llm.multimodal.transport.factory import create_mm_output_transport
+from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
 
 _RUN_INTEGRATION = os.environ.get("RTP_KVCM_RUN_INTEGRATION") == "1"
 _KVCM_ROOT = Path(
@@ -337,25 +339,55 @@ def _transfer_config(instance_group: str, instance_id: str) -> str:
     )
 
 
-def _backend_config(
+def _transport_config(
     *,
     endpoint: str,
     instance_id: str,
     instance_group: str,
     gc_timeout_ms: int,
 ):
-    return SimpleNamespace(
-        addresses=[endpoint],
-        instance_id=instance_id,
-        instance_group=instance_group,
-        user_data="rtp-mm-kvcm-integration",
-        transfer_client_config=_transfer_config(instance_group, instance_id),
-        call_timeout_ms=3_000,
-        write_timeout_seconds=30,
-        max_object_bytes=32,
-        max_receipt_bytes=1024,
-        object_gc_timeout_ms=gc_timeout_ms,
-    )
+    config = MMTransportConfig()
+    config.mode = MM_TRANSPORT_MODE_KVCM
+    config.control.release_timeout_ms = 3_000
+    config.kvcm.addresses = [endpoint]
+    config.kvcm.instance_id = instance_id
+    config.kvcm.instance_group = instance_group
+    config.kvcm.user_data = "rtp-mm-kvcm-integration"
+    config.kvcm.transfer_client_config = _transfer_config(instance_group, instance_id)
+    config.kvcm.call_timeout_ms = 3_000
+    config.kvcm.write_timeout_seconds = 30
+    config.kvcm.max_object_bytes = 32
+    config.kvcm.max_receipt_bytes = 1024
+    config.kvcm.object_gc_timeout_ms = gc_timeout_ms
+    return config
+
+
+class _ReleaseContext:
+    def time_remaining(self):
+        return 5.0
+
+
+class _LocalReleaseStub:
+    """Stand-in for the owning ViT worker's ReleaseRdmaLease RPC."""
+
+    def __init__(self, transport):
+        self._transport = transport
+        self.calls = []
+
+    def ReleaseRdmaLease(self, request, timeout):
+        self.calls.append((list(request.lease_id), timeout))
+        self._transport.release(request)
+
+
+class _LocalConnectionPool:
+    def __init__(self, worker_address: str, transport):
+        self._worker_address = worker_address
+        self.stub = _LocalReleaseStub(transport)
+
+    def get_stub(self, worker_address: str):
+        if worker_address != self._worker_address:
+            raise AssertionError(f"unexpected ViT worker route: {worker_address}")
+        return self.stub
 
 
 def _load_receipt_tensors(store, receipt):
@@ -408,6 +440,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
             server_log = None
             store = None
             backend = None
+            transport = None
             with _working_directory(tmp_path):
                 try:
                     startup_path, instance_group = _write_startup_config(tmp_path)
@@ -415,13 +448,14 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         tmp_path, startup_path
                     )
                     instance_id = f"rtp-kvmeta-it-{uuid.uuid4().hex}"
-                    kvcm_config = _backend_config(
+                    transport_config = _transport_config(
                         endpoint=endpoint,
                         instance_id=instance_id,
                         instance_group=instance_group,
                         gc_timeout_ms=5_000,
                     )
-                    backend = KvcmOutputBackend.create(kvcm_config)
+                    transport = create_mm_output_transport(transport_config)
+                    backend = transport._backend
                     store = backend._writer
 
                     embeddings = [
@@ -436,7 +470,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         torch.tensor([1.5, -2.0, 3.25], dtype=torch.float16),
                         torch.arange(7, dtype=torch.int32),
                     ]
-                    result = backend.transfer(
+                    receipt = transport.transfer(
                         MultimodalInputsPB(support_kvcm=True),
                         MMEmbeddingRes(
                             embeddings,
@@ -445,8 +479,8 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         ),
                     )
 
-                    receipt_objects = list(result.receipt.output_kvcm_objects)
-                    self.assertEqual(list(result.receipt.split_size), [3, 2])
+                    receipt_objects = list(receipt.output_kvcm_objects)
+                    self.assertEqual(list(receipt.split_size), [3, 2])
                     self.assertEqual(
                         [obj.value_size for obj in receipt_objects],
                         [32, 32, 16, 32, 8, 6, 28],
@@ -461,7 +495,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     )
                     self.assertEqual(len({obj.key for obj in receipt_objects}), 7)
 
-                    objects, loaded = _load_receipt_tensors(store, result.receipt)
+                    objects, loaded = _load_receipt_tensors(store, receipt)
                     self.assertTrue(
                         torch.equal(
                             _reassemble_role(objects, loaded, MMRdmaSlotPB.EMBEDDING),
@@ -488,7 +522,20 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         )
 
                     released_key = objects[0].key
-                    backend.release([obj.key for obj in objects])
+                    worker_address = "vit-worker.integration:0"
+                    connection_pool = _LocalConnectionPool(worker_address, transport)
+                    router = MMOutputProxyRouter(connection_pool, transport_config)
+                    router.record_receipt(worker_address, receipt)
+                    router.release(
+                        ReleaseLeasePB(lease_id=[obj.key for obj in objects]),
+                        _ReleaseContext(),
+                    )
+                    self.assertEqual(len(connection_pool.stub.calls), 1)
+                    forwarded_keys, forwarded_timeout = connection_pool.stub.calls[0]
+                    self.assertEqual(forwarded_keys, [obj.key for obj in objects])
+                    self.assertGreater(forwarded_timeout, 0)
+                    self.assertLessEqual(forwarded_timeout, 3.0)
+                    self.assertEqual(router._handle_routes, {})
                     self.assertEqual(backend._pending, {})
                     with self.assertRaises(KvMetaObjectClientError) as missing:
                         store.load_tensors(
@@ -501,25 +548,27 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         kvcm_py_client.ClientErrorCode.ER_SERVICE_NOT_FOUND,
                     )
 
-                    backend.close()
+                    transport.close()
+                    transport = None
                     backend = None
                     store = None
                     gc_instance_id = f"rtp-kvmeta-it-gc-{uuid.uuid4().hex}"
-                    kvcm_config = _backend_config(
+                    transport_config = _transport_config(
                         endpoint=endpoint,
                         instance_id=gc_instance_id,
                         instance_group=instance_group,
                         gc_timeout_ms=100,
                     )
-                    backend = KvcmOutputBackend.create(kvcm_config)
+                    transport = create_mm_output_transport(transport_config)
+                    backend = transport._backend
                     store = backend._writer
-                    gc_result = backend.transfer(
+                    gc_receipt = transport.transfer(
                         MultimodalInputsPB(support_kvcm=True),
                         MMEmbeddingRes(
                             [torch.arange(4, dtype=torch.float32).reshape(1, 4)]
                         ),
                     )
-                    gc_object = gc_result.receipt.output_kvcm_objects[0]
+                    gc_object = gc_receipt.output_kvcm_objects[0]
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
                         try:
@@ -540,10 +589,8 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     self.assertNotIn(gc_object.key, backend._pending)
                 finally:
                     try:
-                        if backend is not None:
-                            backend.close()
-                        elif store is not None:
-                            store.close()
+                        if transport is not None:
+                            transport.close()
                     finally:
                         _stop_kvmeta(process, server_log)
 

@@ -1,10 +1,13 @@
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,7 +39,15 @@ public:
             loaded_keys.push_back(object.key);
             loaded_sizes.push_back(object.nbytes);
             if (load_error.empty()) {
-                std::memset(object.data, 0, static_cast<size_t>(object.nbytes));
+                const auto payload = payloads.find(object.key);
+                if (payload == payloads.end()) {
+                    std::memset(object.data, 0, static_cast<size_t>(object.nbytes));
+                } else {
+                    if (payload->second.size() != object.nbytes) {
+                        throw std::runtime_error("injected payload size mismatch");
+                    }
+                    std::memcpy(object.data, payload->second.data(), payload->second.size());
+                }
             }
         }
         return load_error;
@@ -46,14 +57,22 @@ public:
         return {};
     }
 
-    size_t                   load_calls           = 0;
-    int64_t                  last_load_timeout_ms = 0;
-    std::string              load_error;
-    bool                     throw_standard_load = false;
-    bool                     throw_unknown_load  = false;
-    std::vector<std::string> loaded_keys;
-    std::vector<uint64_t>    loaded_sizes;
+    size_t                                                load_calls           = 0;
+    int64_t                                               last_load_timeout_ms = 0;
+    std::string                                           load_error;
+    bool                                                  throw_standard_load = false;
+    bool                                                  throw_unknown_load  = false;
+    std::vector<std::string>                              loaded_keys;
+    std::vector<uint64_t>                                 loaded_sizes;
+    std::unordered_map<std::string, std::vector<uint8_t>> payloads;
 };
+
+template<typename T>
+std::vector<uint8_t> bytesOf(std::initializer_list<T> values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(T));
+    std::memcpy(bytes.data(), values.begin(), bytes.size());
+    return bytes;
+}
 
 class FakeControl final: public MMControlClient {
 public:
@@ -214,6 +233,47 @@ TEST(MMKvcmTransportTest, loadsVariableSizeObjectsAndReassemblesLogicalValues) {
     EXPECT_EQ(
         h.control.asynchronous_releases,
         (std::vector<std::vector<std::string>>{{"embedding-0", "embedding-1", "position", "extra-0", "extra-1"}}));
+}
+
+TEST(MMKvcmTransportTest, preservesVariableSizeChunkBytesAndReceiptOrder) {
+    Harness            h;
+    MultimodalOutputPB receipt;
+    receipt.add_split_size(2);
+    receipt.add_split_size(3);
+    addObject(&receipt, "embedding-0", MMRdmaSlotPB::EMBEDDING, 0, {1, 2}, RDMA_TENSOR_FLOAT32, 8);
+    addObject(&receipt, "embedding-1", MMRdmaSlotPB::EMBEDDING, 0, {4, 2}, RDMA_TENSOR_FLOAT32, 32);
+    addObject(&receipt, "position-0", MMRdmaSlotPB::POS_ID, 0, {2}, RDMA_TENSOR_INT32, 8);
+    addObject(&receipt, "position-1", MMRdmaSlotPB::POS_ID, 0, {3}, RDMA_TENSOR_INT32, 12);
+    addObject(&receipt, "extra-0-0", MMRdmaSlotPB::EXTRA_INPUT, 0, {1}, RDMA_TENSOR_FLOAT32, 4);
+    addObject(&receipt, "extra-0-1", MMRdmaSlotPB::EXTRA_INPUT, 0, {2}, RDMA_TENSOR_FLOAT32, 8);
+    addObject(&receipt, "extra-1", MMRdmaSlotPB::EXTRA_INPUT, 1, {2}, RDMA_TENSOR_INT32, 8);
+    h.client->payloads = {
+        {"embedding-0", bytesOf<float>({1.0f, 2.0f})},
+        {"embedding-1", bytesOf<float>({3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f})},
+        {"position-0", bytesOf<int32_t>({10, 11})},
+        {"position-1", bytesOf<int32_t>({12, 13, 14})},
+        {"extra-0-0", bytesOf<float>({0.5f})},
+        {"extra-0-1", bytesOf<float>({1.5f, 2.5f})},
+        {"extra-1", bytesOf<int32_t>({7, 8})},
+    };
+
+    auto result = h.consume(receipt);
+
+    ASSERT_TRUE(result.succeeded()) << result.error().ToString();
+    ASSERT_EQ(result.output().mm_features.size(), 2u);
+    EXPECT_TRUE(torch::equal(result.output().mm_features[0],
+                             torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}, torch::kFloat32).reshape({2, 2})));
+    EXPECT_TRUE(torch::equal(result.output().mm_features[1],
+                             torch::tensor({5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}, torch::kFloat32).reshape({3, 2})));
+    ASSERT_TRUE(result.output().mm_position_ids.has_value());
+    ASSERT_EQ(result.output().mm_position_ids->size(), 2u);
+    EXPECT_TRUE(torch::equal(result.output().mm_position_ids->at(0), torch::tensor({10, 11}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(result.output().mm_position_ids->at(1), torch::tensor({12, 13, 14}, torch::kInt32)));
+    ASSERT_TRUE(result.output().mm_extra_input.has_value());
+    ASSERT_EQ(result.output().mm_extra_input->size(), 2u);
+    EXPECT_TRUE(
+        torch::equal(result.output().mm_extra_input->at(0), torch::tensor({0.5f, 1.5f, 2.5f}, torch::kFloat32)));
+    EXPECT_TRUE(torch::equal(result.output().mm_extra_input->at(1), torch::tensor({7, 8}, torch::kInt32)));
 }
 
 TEST(MMKvcmTransportTest, loadsEmbeddingOnlyReceiptAtConfiguredByteBoundaries) {

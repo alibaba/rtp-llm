@@ -1,3 +1,4 @@
+import importlib
 import sys
 import threading
 from contextlib import contextmanager
@@ -19,10 +20,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseLeasePB,
     TensorDataTypePB,
 )
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.transport import factory as transport_factory
 from rtp_llm.multimodal.transport.base import (
     MMOutputTransport,
     MMTransportBackend,
@@ -95,6 +98,38 @@ class MMOutputTransportFactoryTest(TestCase):
         self.assertIsInstance(
             create_mm_output_transport()._backend, GrpcInlineOutputBackend
         )
+
+    def test_default_grpc_path_does_not_import_optional_transport_modules(self):
+        real_import = __import__
+
+        def reject_optional_import(name, *args, **kwargs):
+            if name.startswith(
+                (
+                    "kv_cache_manager",
+                    "rtp_llm.multimodal.transport.kvcm",
+                    "rtp_llm.multimodal.transport.rdma",
+                )
+            ):
+                raise AssertionError(f"default gRPC path imported {name}")
+            return real_import(name, *args, **kwargs)
+
+        blocked_modules = {
+            name: None
+            for name in (
+                "kv_cache_manager",
+                "kv_cache_manager.client",
+                "rtp_llm.multimodal.transport.kvcm",
+                "rtp_llm.multimodal.transport.kvcm.backend",
+                "rtp_llm.multimodal.transport.rdma",
+                "rtp_llm.multimodal.transport.rdma.backend",
+            )
+        }
+        with patch.dict(sys.modules, blocked_modules), patch(
+            "builtins.__import__", side_effect=reject_optional_import
+        ):
+            reloaded_factory = importlib.reload(transport_factory)
+            transport = reloaded_factory.create_mm_output_transport(MMTransportConfig())
+        self.assertIsInstance(transport._backend, GrpcInlineOutputBackend)
 
     @patch("rtp_llm.multimodal.transport.rdma.backend.RdmaOutputBackend.create")
     def test_explicit_rdma_mode_selects_only_rdma_backend(self, create):
@@ -264,6 +299,74 @@ def _kvcm_config(max_object_bytes=32, max_receipt_bytes=1024):
     config.max_receipt_bytes = max_receipt_bytes
     config.object_gc_timeout_ms = 60 * 1000
     return config
+
+
+class KvcmOutputPipelineTest(TestCase):
+    @patch("rtp_llm.multimodal.transport.base.kmonitor.report")
+    def test_factory_to_release_pipeline_uses_packaged_client_contract(self, report):
+        config = MMTransportConfig()
+        config.mode = MM_TRANSPORT_MODE_KVCM
+        config.kvcm.addresses = ["10.0.0.1:19001"]
+        config.kvcm.instance_id = "rtp-emb-pipeline"
+        config.kvcm.instance_group = "epd-emb"
+        config.kvcm.user_data = "rtp"
+        config.kvcm.transfer_client_config = '{"block_size": 1}'
+        config.kvcm.max_object_bytes = 32
+        config.kvcm.max_receipt_bytes = 1024
+        config.kvcm.object_gc_timeout_ms = 60 * 1000
+
+        writer = _FakeKvcmWriter()
+        writer.close = MagicMock()
+        config_type = MagicMock(side_effect=lambda **values: SimpleNamespace(**values))
+        writer_type = MagicMock(return_value=writer)
+        package = ModuleType("kv_cache_manager")
+        package.__path__ = []
+        client_module = ModuleType("kv_cache_manager.client")
+        client_module.KvMetaObjectClientConfig = config_type
+        client_module.KvMetaObjectClient = writer_type
+        package.client = client_module
+
+        with patch.dict(
+            sys.modules,
+            {
+                "kv_cache_manager": package,
+                "kv_cache_manager.client": client_module,
+            },
+        ):
+            transport = create_mm_output_transport(config)
+
+        try:
+            receipt = transport.transfer(
+                MultimodalInputsPB(support_kvcm=True),
+                MMEmbeddingRes(
+                    [_rows(2), _rows(1, offset=100.0)],
+                    position_ids=[
+                        torch.arange(2, dtype=torch.int32),
+                        torch.arange(10, 11, dtype=torch.int32),
+                    ],
+                    extra_input=[
+                        torch.tensor([1.0], dtype=torch.float16),
+                        torch.tensor([2, 3], dtype=torch.int32),
+                    ],
+                ),
+            )
+            objects = list(receipt.output_kvcm_objects)
+            keys = [obj.key for obj in objects]
+
+            self.assertEqual(list(receipt.split_size), [2, 1])
+            self.assertEqual([obj.value_size for obj in objects], [32, 16, 12, 2, 8])
+            self.assertEqual(writer.saved[0][0], keys)
+            self.assertEqual(report.call_count, 5)
+
+            transport.release(ReleaseLeasePB(lease_id=keys))
+            self.assertEqual(writer.removed, [keys])
+            self.assertEqual(transport._backend._pending, {})
+        finally:
+            transport.close()
+
+        config_type.assert_called_once()
+        writer_type.assert_called_once()
+        writer.close.assert_called_once_with()
 
 
 class KvcmOutputBackendTest(TestCase):

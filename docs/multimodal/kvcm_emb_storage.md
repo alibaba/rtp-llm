@@ -381,12 +381,13 @@ ViT writer 和 LLM reader，否则可能在一端写入后被另一端按不同�
 
 | 测试 | 覆盖范围 |
 |---|---|
-| `mm_output_transport_test.py` | 使用 fake writer 覆盖 Python producer 的 receipt、切片、rollback、release、GC、shutdown races、post-close retry、日志脱敏和输入上限 |
-| `MMKvcmTransportTest` | C++ reader、manifest/reassembly、deadline/release 失败，以及 client 配置、对象和分批边界 |
-| `mm_kvcm_cross_repo_integration_test.py` | RTP Python output backend + KVCM wheel 中的 object client + 真实 KVCM service；等待全部 listener/KVMeta recovery ready，并检查停机日志无非预期 ERROR/FATAL/Sanitizer |
+| `mm_output_transport_test.py` | 使用 fake writer 覆盖 Python producer 的 receipt、切片、rollback、release、GC、shutdown races、post-close retry、日志脱敏和输入上限；另覆盖 factory → packaged-client contract → output metrics → release/close 组合链路，以及默认 gRPC 不导入 KVCM/RDMA 可选模块的主链路隔离 |
+| `MMKvcmTransportTest` | C++ reader、manifest/reassembly、真实分片字节与 receipt 顺序、deadline/release 失败，以及 client 配置、对象和分批边界 |
+| `mm_kvcm_cross_repo_integration_test.py` | RTP transport config/factory → `MMOutputTransport` → KVCM wheel object client → 真实 KVCM service → proxy-routed release/GC；校验变长 payload 字节，并等待全部 listener/KVMeta recovery ready、检查停机日志无非预期 ERROR/FATAL/Sanitizer |
 
-跨仓测试执行生产 `KvcmOutputBackend.create` 和 KVCM Python client，但不执行 C++ reader。完整 RTP 进程、GPU
-tensor 和内部 TairMempool/PACE 仍必须在 KVCM-enabled RTP build image 及仓库标准 CI 环境验证。
+跨仓测试执行生产 factory、`KvcmOutputBackend.create`、`MMOutputTransport`、proxy release router 和 KVCM Python
+client，但不执行 C++ reader；reader 的同一 receipt/object 契约由内容级 C++ UT 覆盖。完整 RTP 进程、GPU tensor
+和内部 TairMempool/PACE 仍必须在 KVCM-enabled RTP build image 及仓库标准 CI 环境验证。
 
 跨仓 target 带 `manual` tag，不进入默认 wildcard 测试。执行 Bazel target 时必须遵循 RTP 仓库要求，通过
 `/test-execution` skill 运行，并显式提供：
