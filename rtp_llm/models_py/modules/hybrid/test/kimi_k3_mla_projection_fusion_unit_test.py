@@ -38,8 +38,8 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         module.attn_tp_rank = 0
         module.use_output_gate = True
         module._mla_backend = "kernel"
-        module._sp_prefill_input_is_sharded = False
-        module._sp_prefill_layout_for_forward = None
+        module._sp_active_for_forward = False
+        module._sp_layout_for_forward = None
         projection = _CountingProjection(torch.randn(5, 14))
         module.fused_qkv_a_proj = projection
         module._packed_qkv_gate_w = projection.weight
