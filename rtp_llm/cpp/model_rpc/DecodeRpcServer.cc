@@ -396,8 +396,10 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         return;
     }
 
+    GenerateOutputsPB allocate_response;
+    allocate_response.set_supports_prefill_completion(true);
     GRPC_RET_IF_ERROR(decode_context,
-                      decode_context.rpc_context.grpc_stream->Write(GenerateOutputsPB()),
+                      decode_context.rpc_context.grpc_stream->Write(allocate_response),
                       grpc::StatusCode::INTERNAL,
                       "failed to write allocate output");
 
@@ -486,6 +488,27 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                             decode_context.request_key.c_str(),
                             cancelled ? 1 : 0,
                             static_cast<int>(decode_context.error_status.error_code()));
+        return;
+    }
+    if (generate_request.stage() == RemoteStage::PREFILL_COMPLETE) {
+        GRPC_RET_IF_ERROR(decode_context,
+                          generate_request.request_id() == decode_context.request_id
+                              && generate_request.client_id() == decode_context.allocate_request.client_id(),
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "prefill completion request identity mismatch");
+        GRPC_RET_IF_ERROR(
+            decode_context, !decode_context.isRequestCancelled(), grpc::StatusCode::CANCELLED, "request is cancelled");
+        GRPC_RET_IF_ERROR(decode_context,
+                          !decode_context.requestDeadlineExceeded(),
+                          grpc::StatusCode::DEADLINE_EXCEEDED,
+                          "request deadline exhausted");
+        if (!generate_stream->finishWithoutGenerate()) {
+            const auto error            = generate_stream->statusInfo();
+            decode_context.error_status = error.hasError() ?
+                                              serializeErrorMsg(decode_context.request_key, error) :
+                                              grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                                           "decode stream cannot complete before generation");
+        }
         return;
     }
     GRPC_RET_IF_ERROR(decode_context,

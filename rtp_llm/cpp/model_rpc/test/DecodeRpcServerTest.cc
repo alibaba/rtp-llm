@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 
 namespace rtp_llm {
 
@@ -408,6 +409,131 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
     EXPECT_EQ(status.error_message(), "poll generate request failed");
+}
+
+class PrefillCompletionRpcTest: public DeviceTestBase {};
+
+TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailures) {
+    class CompletionService final: public RpcService::Service {
+    public:
+        grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* rpc_stream) override {
+            DecodeRpcContext             rpc_context{rpc_stream};
+            kmonitor::MetricsReporterPtr reporter;
+            auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+            DecodeGenerateContext        context(rpc_context, 0, server_context, reporter, meta);
+            context.request_id = 42;
+            context.allocate_request.set_client_id("prefill");
+            auto cache = std::make_shared<KVCacheManager>(
+                test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16), false, nullptr);
+            EXPECT_TRUE(cache->init());
+            ResourceContext resources;
+            resources.cache_manager = cache;
+            resources.role_type     = RoleType::DECODE;
+            auto input              = std::make_shared<GenerateInput>();
+            input->request_id       = 42;
+            input->begin_time_us    = currentTimeUs();
+            input->generate_config  = std::make_shared<GenerateConfig>();
+            input->input_ids        = torch::tensor({1, 2, 3}, torch::kInt32);
+            ModelConfig config;
+            config.max_seq_len = 16;
+            auto stream = std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, resources, nullptr);
+            EXPECT_TRUE(stream->initKVBlock().ok());
+            EXPECT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
+            if (running) {
+                stream->generate_status_->status.store(StreamState::RUNNING);
+            }
+            context.setStream(stream);
+            if (expired) {
+                context.request_deadline = std::chrono::system_clock::now() - std::chrono::seconds(1);
+            }
+            if (stream_error) {
+                stream->reportError(ErrorCode::MALLOC_FAILED, "test allocation failure");
+            }
+            DecodeRpcServer server;
+            server.localGenerate(context);
+            status                  = context.error_status;
+            finished                = stream->isFinished();
+            had_error               = stream->hasError();
+            resource_released       = stream->stream_cache_resource_->isResourceReleased();
+            blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
+            const auto timing       = stream->getTimeInfo();
+            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+            RpcMetricsCollector metrics;
+            context.collectBasicMetrics(metrics);
+            error_qps = metrics.error_qps;
+            if (running) {
+                // This fixture has no scheduler to drain the deliberately invalid running stream.
+                stream->reportError(ErrorCode::CANCELLED, "test cleanup");
+                stream->moveToNext();
+            }
+            context.stopStream();
+            error_after_cleanup = stream->hasError();
+            remaining_requests  = meta->getEngineScheduleInfo(-1).running_task_info_list.size();
+            return status;
+        }
+        bool         expired      = false;
+        bool         stream_error = false;
+        bool         running      = false;
+        grpc::Status status;
+        bool         finished = false, had_error = false, resource_released = false;
+        bool         executed = false, error_qps = false, error_after_cleanup = false;
+        size_t       remaining_requests      = 1;
+        size_t       blocks_after_completion = 1;
+    };
+
+    for (const std::string mode :
+         {"complete", "eof", "wrong_request", "wrong_client", "wrong_stage", "expired", "stream_error", "running"}) {
+        SCOPED_TRACE(mode);
+        CompletionService service;
+        service.expired      = mode == "expired";
+        service.stream_error = mode == "stream_error";
+        service.running      = mode == "running";
+        grpc::ServerBuilder builder;
+        int                 port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        auto stub = RpcService::NewStub(
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto rpc = stub->RemoteGenerate(&context);
+        if (mode != "eof") {
+            GenerateRequestPB request;
+            request.set_stage(mode == "wrong_stage" ? RemoteStage::LOAD : RemoteStage::PREFILL_COMPLETE);
+            request.set_request_id(mode == "wrong_request" ? 43 : 42);
+            request.set_client_id(mode == "wrong_client" ? "other" : "prefill");
+            EXPECT_TRUE(rpc->Write(request));
+        }
+        rpc->WritesDone();
+        const auto status = rpc->Finish();
+        server->Shutdown();
+        server->Wait();
+        EXPECT_EQ(service.remaining_requests, 0u);
+        EXPECT_FALSE(service.executed);
+        if (mode == "complete") {
+            EXPECT_TRUE(status.ok());
+            EXPECT_TRUE(service.finished);
+            EXPECT_TRUE(service.resource_released);
+            EXPECT_EQ(service.blocks_after_completion, 0u);
+            EXPECT_FALSE(service.had_error);
+            EXPECT_FALSE(service.error_qps);
+            EXPECT_FALSE(service.error_after_cleanup);
+        } else {
+            EXPECT_FALSE(status.ok());
+            EXPECT_TRUE(service.error_qps);
+            if (mode == "eof" || mode == "wrong_stage") {
+                EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+            } else if (mode == "wrong_request" || mode == "wrong_client") {
+                EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+            } else if (mode == "expired") {
+                EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+            } else if (mode == "running") {
+                EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+            }
+        }
+    }
 }
 
 TEST(DecodeRpcServerTest, CacheLoadClientErrorPreservesCodeWithoutTopologyDetails) {
