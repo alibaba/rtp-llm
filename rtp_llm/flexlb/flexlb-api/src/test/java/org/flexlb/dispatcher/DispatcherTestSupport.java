@@ -4,7 +4,6 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.metric.NoOpFlexMonitor;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.List;
@@ -76,23 +75,10 @@ final class DispatcherTestSupport {
         }
     }
 
-    /**
-     * A {@link MasterFeAssigner} with no FePool wired — {@code assign()} is a guarded no-op, for
-     * tests that exercise a code path taking the assigner but not asserting on FE stamping.
-     */
-    @SuppressWarnings("unchecked")
-    static MasterFeAssigner noopFeAssigner() {
-        ObjectProvider<FePool> provider = mock(ObjectProvider.class);
-        // getIfAvailable() returns null by default → assign() short-circuits without stamping.
-        return new MasterFeAssigner(provider);
-    }
-
-    /** A {@link MasterFeAssigner} backed by the cursor used in stamping assertions. */
-    @SuppressWarnings("unchecked")
-    static MasterFeAssigner masterFeAssigner(FePool pool) {
-        ObjectProvider<FePool> provider = mock(ObjectProvider.class);
-        when(provider.getIfAvailable()).thenReturn(pool);
-        return new MasterFeAssigner(provider);
+    static org.flexlb.config.ConfigService configService(org.flexlb.config.FlexlbConfig config) {
+        org.flexlb.config.ConfigService service = mock(org.flexlb.config.ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        return service;
     }
 
     /**

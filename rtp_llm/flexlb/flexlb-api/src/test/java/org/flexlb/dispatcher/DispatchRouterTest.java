@@ -50,7 +50,7 @@ class DispatchRouterTest {
         BatchHandler batch = mock(BatchHandler.class);
         PassthroughClient passthrough = mock(PassthroughClient.class);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), new ActiveRequestCounter(), List.of(BATCH_INFER)).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/batch_infer").bodyValue("{}").exchange().expectStatus().isNotFound();
@@ -67,7 +67,7 @@ class DispatchRouterTest {
         when(passthrough.forward(any()))
                 .thenReturn(ServerResponse.ok().bodyValue("pass"));
         WebTestClient client = WebTestClient.bindToRouterFunction(
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), new ActiveRequestCounter(), List.of(BATCH_INFER)).routes()).build();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes()).build();
 
         client.get().uri("/dispatcher/v1/models").exchange()
                 .expectStatus().isOk()
@@ -89,7 +89,7 @@ class DispatchRouterTest {
 
         List<BatchEndpointSpec> specs = List.of(BATCH_INFER, EMBEDDINGS);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), new ActiveRequestCounter(), specs).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), specs).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange()
@@ -113,9 +113,7 @@ class DispatchRouterTest {
         PassthroughClient passthrough = mock(PassthroughClient.class);
         when(passthrough.forward(any())).thenReturn(ServerResponse.ok().bodyValue("pass"));
 
-        RouterFunction<ServerResponse> routes = new DispatchRouter(
-                batch, passthrough, mock(DispatcherInspectionHandler.class),
-                new ActiveRequestCounter(), List.of(root)).routes();
+        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(root)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/dispatcher/").bodyValue("{}").exchange()
@@ -136,8 +134,9 @@ class DispatchRouterTest {
         }));
         PassthroughClient passthrough = mock(PassthroughClient.class);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), counter, List.of(BATCH_INFER)).routes();
-        WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
+        WebTestClient client = WebTestClient.bindToRouterFunction(routes)
+                .webFilter(new org.flexlb.httpserver.ActiveRequestWebFilter(counter)).build();
 
         client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange().expectStatus().isOk();
 
@@ -152,56 +151,14 @@ class DispatchRouterTest {
         when(batch.handle(any(), eq(BATCH_INFER)))
                 .thenReturn(Mono.error(new IllegalStateException("boom")));
         PassthroughClient passthrough = mock(PassthroughClient.class);
-        RouterFunction<ServerResponse> routes = new DispatchRouter(
-                batch, passthrough, mock(DispatcherInspectionHandler.class), counter, List.of(BATCH_INFER)).routes();
-        WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
+        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
+        WebTestClient client = WebTestClient.bindToRouterFunction(routes)
+                .webFilter(new org.flexlb.httpserver.ActiveRequestWebFilter(counter)).build();
 
         client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange().expectStatus().is5xxServerError();
 
         assertEquals(0, counter.getCount(),
                 "token must be released on the error path, otherwise a leaked in-flight token blocks graceful drain forever");
-    }
-
-    @Test
-    void responseDiscardedByCancelBeforeWriteToStillReleasesDrainToken() {
-        // A client that disconnects after the handler produced the response but before WebFlux
-        // subscribes writeTo means writeTo's doFinally never runs — the token must be released by
-        // the chain itself. Zero downstream demand parks the emitted response inside the tracked
-        // chain, so cancelling from there exercises that window deterministically.
-        //
-        // What this pins is the invariant, not the mechanism: the cancel reaches the inner chain,
-        // so doOnCancel is what releases the token here and removing it turns this red. The
-        // doOnDiscard hook stays green through this case — it covers drops that surface only as a
-        // discard, which this route cannot produce — so nothing here holds it in place.
-        ActiveRequestCounter counter = new ActiveRequestCounter();
-        BatchHandler batch = mock(BatchHandler.class);
-        when(batch.handle(any(), eq(BATCH_INFER))).thenReturn(ServerResponse.ok().bodyValue("ok"));
-        PassthroughClient passthrough = mock(PassthroughClient.class);
-        RouterFunction<ServerResponse> routes = new DispatchRouter(
-                batch, passthrough, mock(DispatcherInspectionHandler.class), counter, List.of(BATCH_INFER)).routes();
-
-        org.springframework.mock.web.server.MockServerWebExchange exchange =
-                org.springframework.mock.web.server.MockServerWebExchange.from(
-                        org.springframework.mock.http.server.reactive.MockServerHttpRequest
-                                .post("http://master/dispatcher/batch_infer"));
-        org.springframework.web.reactive.function.server.ServerRequest request =
-                org.springframework.web.reactive.function.server.ServerRequest.create(exchange,
-                        org.springframework.web.reactive.function.server.HandlerStrategies
-                                .withDefaults().messageReaders());
-        org.springframework.web.reactive.function.server.HandlerFunction<ServerResponse> handler =
-                routes.route(request).block();
-        assertNotNull(handler, "route table must match POST /dispatcher/batch_infer");
-
-        reactor.test.StepVerifier.create(handler.handle(request), 0)
-                .expectSubscription()
-                .then(() -> assertEquals(1, counter.getCount(),
-                        "request must be counted while the response is parked awaiting demand"))
-                .thenCancel()
-                .verify();
-
-        assertEquals(0, counter.getCount(),
-                "a response discarded before writeTo must still release its drain token, "
-                        + "otherwise graceful drain waits out its full timeout");
     }
 
     @Test
@@ -217,9 +174,9 @@ class DispatchRouterTest {
                 .doOnNext(chunk -> countsWhileBodyStreaming.add(counter.getCount()));
         when(passthrough.forward(any())).thenReturn(
                 ServerResponse.ok().body(BodyInserters.fromPublisher(feBody, String.class)));
-        RouterFunction<ServerResponse> routes = new DispatchRouter(
-                batch, passthrough, mock(DispatcherInspectionHandler.class), counter, List.of(BATCH_INFER)).routes();
-        WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
+        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
+        WebTestClient client = WebTestClient.bindToRouterFunction(routes)
+                .webFilter(new org.flexlb.httpserver.ActiveRequestWebFilter(counter)).build();
 
         client.get().uri("/dispatcher/v1/models").exchange().expectStatus().isOk();
 

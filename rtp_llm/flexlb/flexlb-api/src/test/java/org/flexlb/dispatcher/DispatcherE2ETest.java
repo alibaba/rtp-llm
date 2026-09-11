@@ -6,10 +6,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.service.BatchScheduleCoordinator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.mockito.ArgumentMatchers;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -17,6 +21,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import reactor.core.scheduler.Schedulers;
 import reactor.netty.DisposableServer;
 import reactor.netty.http.server.HttpServer;
 
@@ -29,8 +34,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -130,8 +133,8 @@ class DispatcherE2ETest {
         assertEquals(List.of(2, 3), failedIndices);
 
         // Exactly two FE calls — fe3 never contacted.
-        assertChunkRequest(fe1.takeRequest(), "/v1/batch/chat/completions", "requests", 2);
-        assertChunkRequest(fe2.takeRequest(), "/v1/batch/chat/completions", "requests", 2);
+        assertChunkRequest(fe1.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "/v1/batch/chat/completions", "requests", 2);
+        assertChunkRequest(fe2.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "/v1/batch/chat/completions", "requests", 2);
         assertEquals(0, fe3.getRequestCount());
     }
 
@@ -199,9 +202,9 @@ class DispatcherE2ETest {
         pf.get("failed_indices").forEach(n -> failedIndices.add(n.asInt()));
         assertEquals(List.of(2, 3), failedIndices);
 
-        assertChunkRequest(fe1.takeRequest(), "/v1/embeddings", "input", 2);
-        assertChunkRequest(fe2.takeRequest(), "/v1/embeddings", "input", 2);
-        assertChunkRequest(fe3.takeRequest(), "/v1/embeddings", "input", 2);
+        assertChunkRequest(fe1.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "/v1/embeddings", "input", 2);
+        assertChunkRequest(fe2.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "/v1/embeddings", "input", 2);
+        assertChunkRequest(fe3.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "/v1/embeddings", "input", 2);
     }
 
     @Test
@@ -243,9 +246,9 @@ class DispatcherE2ETest {
         assertEquals(28L, response.get("total_tokens").asLong());
 
         JsonNode firstChunk = assertChunkRequest(
-                fe1.takeRequest(), "/v1/reranker", "documents", 2);
+                fe1.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "/v1/reranker", "documents", 2);
         JsonNode secondChunk = assertChunkRequest(
-                fe2.takeRequest(), "/v1/reranker", "documents", 2);
+                fe2.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "/v1/reranker", "documents", 2);
         for (JsonNode chunk : List.of(firstChunk, secondChunk)) {
             assertFalse(chunk.get("sorted").asBoolean(),
                     "FE must not sort independently inside each chunk");
@@ -322,7 +325,7 @@ class DispatcherE2ETest {
 
         for (int chunk = 0; chunk < servers.size(); chunk++) {
             JsonNode child = assertChunkRequest(
-                    servers.get(chunk).takeRequest(), "/v1/reranker", "documents", sizes[chunk]);
+                    servers.get(chunk).takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "/v1/reranker", "documents", sizes[chunk]);
             assertEquals(query, child.get("query").asText());
             assertEquals(model, child.get("model").asText());
             assertEquals(146280, child.get("__request_id__").asInt());
@@ -423,7 +426,7 @@ class DispatcherE2ETest {
         // Dispatcher must not have stamped any _partial_failure on passthrough payloads.
         assertNull(resp.get("_partial_failure"));
 
-        RecordedRequest rec = fe1.takeRequest();
+        RecordedRequest rec = fe1.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS);
         // Prefix stripped.
         assertEquals("/v1/chat/completions", rec.getPath());
         assertEquals("POST", rec.getMethod());
@@ -473,9 +476,9 @@ class DispatcherE2ETest {
                 .expectStatus().isOk();
 
         // Each FE saw one chunk; each chunk's generate_config.role_addrs carries the i-th target.
-        verifyChunkHasRoleAddr(fe1.takeRequest(), "10.0.0.1", 3);
-        verifyChunkHasRoleAddr(fe2.takeRequest(), "10.0.0.2", 3);
-        verifyChunkHasRoleAddr(fe3.takeRequest(), "10.0.0.3", 3);
+        verifyChunkHasRoleAddr(fe1.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "10.0.0.1", 3);
+        verifyChunkHasRoleAddr(fe2.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "10.0.0.2", 3);
+        verifyChunkHasRoleAddr(fe3.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS), "10.0.0.3", 3);
     }
 
     @Test
@@ -567,11 +570,7 @@ class DispatcherE2ETest {
 
     @Test
     void masterAssigningNoFeFailsWholeBatchAndContactsNoFe() throws Exception {
-        // End-to-end regression lock for the "no local fallback" contract at the assembled-dispatcher
-        // layer: when the master returns no targets, BatchHandler derives an all-null preAssignedFeUrls
-        // and every chunk fails with CHUNK_NO_FE. The load-bearing proof is that NO FE is contacted at
-        // all — if anyone reintroduces a local FePool fallback in the fanout path, some FE would get a
-        // request and this turns red. No FE responses are enqueued precisely because none must be hit.
+        // An allocation failure must stop the request before any FE is contacted.
         WebTestClient client = buildClient(/*subBatchSize=*/2, /*preAssignBe=*/false,
                 /*targets=*/List.of(), /*masterReturnsNoTargets=*/true);
 
@@ -596,15 +595,7 @@ class DispatcherE2ETest {
                 .returnResult().getResponseBody();
 
         assertNotNull(resp);
-        assertEquals("all_sub_batches_failed", resp.get("error").asText());
-        assertEquals(4, resp.get("failed_count").asInt());
-        assertEquals(2, resp.get("total_chunks").asInt());
-        assertTrue(resp.get("failed_reasons").isArray() && resp.get("failed_reasons").size() > 0,
-                "all-failed body must carry at least one failure reason");
-        assertTrue(resp.get("failed_reasons").toString().contains("fe_unavailable"),
-                "a chunk with no master FE assignment categorizes as fe_unavailable (no FE HTTP "
-                        + "status), distinct from fe_client_error/fe_server_error");
-        // The whole point of "no fallback": nothing was dispatched anywhere.
+        assertEquals("batch_schedule_failed", resp.get("error").asText());
         assertEquals(0, fe1.getRequestCount(), "no chunk may reach any FE when the master assigns none");
         assertEquals(0, fe2.getRequestCount());
         assertEquals(0, fe3.getRequestCount());
@@ -648,7 +639,7 @@ class DispatcherE2ETest {
     @Test
     void dryRunEndpointReturnsStampedChunksThroughRealRouter() throws Exception {
         // End-to-end proof that POST /dispatcher/_dryrun/<path> is routed through HTTP transport,
-        // delegates to the real BatchScheduleClient for pre-assign, and returns chunk bodies
+        // delegates to the real BatchScheduleCoordinator for pre-assign, and returns chunk bodies
         // byte-equivalent to what the real fanout would have written to FE — without actually
         // calling any FE.
         List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets = List.of(
@@ -748,22 +739,18 @@ class DispatcherE2ETest {
         feConnectionProvider = reactor.netty.resources.ConnectionProvider.builder("e2e").build();
         FeClient feClient = new FeClient(WebClient.builder(), feConnectionProvider, cfg);
         org.flexlb.dispatcher.FanoutService fanout =
-                new org.flexlb.dispatcher.FanoutService(feClient, DispatcherTestSupport.noopMetrics());
-        BatchScheduleClient batchScheduleClient = mock(BatchScheduleClient.class);
-        when(batchScheduleClient.requestTargets(anyInt(), anyBoolean(), anyBoolean()))
+                new org.flexlb.dispatcher.FanoutService(feClient, DispatcherTestSupport.noopMetrics(), pool, cfg);
+        BatchScheduleCoordinator batchScheduleCoordinator = mock(BatchScheduleCoordinator.class);
+        when(batchScheduleCoordinator.schedule(ArgumentMatchers.any()))
                 .thenAnswer(invocation -> {
-                int count = invocation.getArgument(0);
+                int count = ((org.flexlb.dao.loadbalance.BatchScheduleRequest)
+                        invocation.getArgument(0)).getBatchCount();
                 if (masterReturnsNoTargets) {
-                    // The master resolved no FE for this batch (empty targets — e.g. it has no FE
-                    // view, or a slave could not reach it). Every chunk then gets a null fe_url; the
-                    // "no fallback" contract requires the whole batch to fail without contacting any FE.
-                    return reactor.core.publisher.Mono.just(List.of());
+                    return reactor.core.publisher.Mono.just(BatchScheduleResponse.error(
+                            org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER,
+                            "no FE endpoints available"));
                 }
-                // FE selection is now master-sourced (no local pool in FanoutService): return one
-                // target per chunk, cycling fe_url across the three FEs so fanout still routes
-                // chunk i → fe(i % 3) — the same distribution the old FePool round-robin produced,
-                // now assigned per chunk index. Reuse any caller-supplied BE targets so preAssignBe
-                // stamping still sees the intended role_addrs, overlaying the fe_url onto them.
+                // The master assigns one FE per chunk, preserving any requested BE placement.
                 List<org.flexlb.dao.loadbalance.BatchScheduleTarget> out = new ArrayList<>(count);
                 for (int i = 0; i < count; i++) {
                     org.flexlb.dao.loadbalance.BatchScheduleTarget t = i < targets.size()
@@ -772,33 +759,36 @@ class DispatcherE2ETest {
                     t.setFeUrl(urls.get(i % urls.size()));
                     out.add(t);
                 }
-                return reactor.core.publisher.Mono.just(out);
+                return reactor.core.publisher.Mono.just(BatchScheduleResponse.success(out));
             });
         PassthroughClient passthrough =
                 new PassthroughClient(WebClient.create(), pool, DispatcherTestSupport.noopMetrics(), cfg);
         org.flexlb.dispatcher.BatchHandler batchHandler =
-                new org.flexlb.dispatcher.BatchHandler(fanout, cfg, batchScheduleClient, passthrough,
-                        DispatcherTestSupport.noopMetrics());
+                new org.flexlb.dispatcher.BatchHandler(fanout, cfg, batchScheduleCoordinator, passthrough,
+                        DispatcherTestSupport.noopMetrics(),
+                        DispatcherTestSupport.configService(new FlexlbConfig()),
+                        Schedulers.immediate());
 
         // Real inspection handler — refresher source returns the same pool URLs the router fans
         // out to, so /dispatcher/_snapshot reflects what dispatcher actually sees. FeHealthChecker
         // is mocked rather than instantiated to avoid starting the background probe loop in tests;
         // snapshot reads of isAlive/consecFails route through these stubs. The same handler also
-        // serves /dispatcher/_dryrun, sharing cfg + ObjectMapper + BatchScheduleClient so its
+        // serves /dispatcher/_dryrun, sharing cfg + ObjectMapper + BatchScheduleCoordinator so its
         // ?pre_assign behavior and stamping logic exercise the same code paths as production.
         DispatcherFePoolRefresher inspectionRefresher = mock(DispatcherFePoolRefresher.class);
         when(inspectionRefresher.source()).thenReturn(() -> urls);
         FeHealthChecker hc = mock(FeHealthChecker.class);
         when(hc.isAlive(anyString())).thenReturn(true);
         when(hc.consecFails(anyString())).thenReturn(0);
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
         DispatcherInspectionHandler inspectionHandler =
-                new DispatcherInspectionHandler(cfg, inspectionRefresher, hc, batchScheduleClient);
+                new DispatcherInspectionHandler(cfg, inspectionRefresher, hc, batchScheduleCoordinator,
+                        DispatcherTestSupport.configService(testLoadBalanceConfig),
+                        Schedulers.immediate());
 
         List<org.flexlb.dispatcher.BatchEndpointSpec> specs =
                 org.flexlb.dispatcher.BatchEndpointSpec.SPECS;
-        DispatchRouter router = new DispatchRouter(
-                batchHandler, passthrough, inspectionHandler,
-                new org.flexlb.service.grace.ActiveRequestCounter(), specs);
+        DispatchRouter router = new DispatchRouter(batchHandler, passthrough, inspectionHandler, specs);
 
         // Bind to a real Reactor Netty server (rather than WebTestClient.bindToRouterFunction's
         // in-memory connector) so the passthrough's raw DataBuffer body actually traverses an HTTP

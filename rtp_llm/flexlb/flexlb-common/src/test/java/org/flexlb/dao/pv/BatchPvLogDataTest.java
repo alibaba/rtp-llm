@@ -22,6 +22,8 @@ class BatchPvLogDataTest {
     void successResponse_populatesAllFields() {
         BatchScheduleRequest req = new BatchScheduleRequest();
         req.setBatchCount(3);
+        req.setAssignBe(false);
+        req.setAssignFe(true);
 
         List<BatchScheduleTarget> targets = List.of(
                 new BatchScheduleTarget("10.1.2.1", 28100, 28101),
@@ -38,6 +40,8 @@ class BatchPvLogDataTest {
         assertEquals("batch_schedule", data.getType());
         assertEquals(3, data.getBatchCount());
         assertEquals(3, data.getTargetCount());
+        assertFalse(data.isAssignBe());
+        assertTrue(data.isAssignFe());
         assertTrue(data.isSuccess());
         assertEquals(200, data.getCode());
         assertNull(data.getError());
@@ -60,6 +64,8 @@ class BatchPvLogDataTest {
         BatchPvLogData data = new BatchPvLogData(bctx);
 
         assertEquals(5, data.getBatchCount());
+        assertTrue(data.isAssignBe());
+        assertTrue(data.isAssignFe());
         assertEquals(0, data.getTargetCount());
         assertFalse(data.isSuccess());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), data.getCode());
@@ -75,6 +81,8 @@ class BatchPvLogDataTest {
         BatchPvLogData data = new BatchPvLogData(bctx);
 
         assertEquals(0, data.getBatchCount());
+        assertFalse(data.isAssignBe());
+        assertFalse(data.isAssignFe());
         assertEquals(0, data.getTargetCount());
         assertFalse(data.isSuccess());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), data.getCode());

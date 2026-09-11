@@ -66,7 +66,7 @@ public class FePool {
     /**
      * Returns {@code count} FE base URLs for a single batch, advancing the shared cursor by exactly
      * {@code count}. Resolves the liveness-filtered pool <em>once</em> for the whole batch instead
-     * of once per pick as repeated {@link #next()} would: {@link MasterFeAssigner} calls this once
+     * of once per pick as repeated {@link #next()} would: the batch coordinator calls this once
      * per batch-schedule request with {@code count == targets.size()}, so a 500-target request that
      * would otherwise rebuild and re-filter the FE snapshot 500 times (once per {@code next()}) now
      * does it once. Per-pick semantics are identical to {@link #next()}: round-robin over the alive

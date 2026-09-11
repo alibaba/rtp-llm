@@ -212,15 +212,16 @@ class FeClientTest {
         Assertions.assertEquals("keep-me", copied.getFirst("X-End-To-End"));
     }
 
-    @Test
-    void feNon2xxResponseErrorsWithExtractableStatus() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {302, 307, 400, 500})
+    void feNon2xxResponseErrorsWithExtractableStatus(int status) {
         // .retrieve() turns a 5xx into a WebClientResponseException; the fanout path relies on
         // DispatcherResponses.httpStatusOf recovering the status so a chunk degrades to a failed
         // SubBatchResult carrying the real FE status (which the all-failed merge can then surface).
         server.enqueue(new MockResponse()
-                .setResponseCode(500)
+                .setResponseCode(status)
                 .setHeader("Content-Type", "application/json")
-                .setBody("{\"error\":\"backend boom\"}"));
+                .setBody("{\"response_batch\":[{\"response\":\"looks successful\"}]}"));
         DispatchConfig cfg = new DispatchConfig();
         cfg.setBatchTimeoutMs(5000);
         FeClient client = new FeClient(WebClient.builder(), connectionProvider, cfg);
@@ -228,7 +229,7 @@ class FeClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes(), new HttpHeaders(), null))
                 .expectErrorSatisfies(e ->
-                        Assertions.assertEquals(500, DispatcherResponses.httpStatusOf(e)))
+                        Assertions.assertEquals(status, DispatcherResponses.httpStatusOf(e)))
                 .verify(java.time.Duration.ofSeconds(5));
     }
 

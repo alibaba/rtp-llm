@@ -134,7 +134,7 @@ class FePoolTest {
     @Test
     void nextBatchThrowsOnEmptySnapshotBeforeAnyPick() {
         // All-or-nothing per batch: an empty snapshot throws rather than returning a short list, so
-        // MasterFeAssigner stamps no target instead of a prefix.
+        // The batch coordinator stamps no target instead of a prefix.
         FePool pool = fePool(List.of());
         assertThrows(IllegalStateException.class, () -> pool.nextBatch(3));
     }

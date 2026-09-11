@@ -29,12 +29,16 @@ class DispatcherFePoolRefresherTest {
     void coldSeedAcceptsEmptyDiscoverySnapshot() {
         StubServiceDiscovery discovery = new StubServiceDiscovery("svc.fe");
         DispatcherFePoolRefresher r = refresher(discovery, "svc.fe");
-        assertEquals(0, r.currentSize(),
-                "cold seed must accept an empty initial pool without throwing");
-        assertEquals(1, discovery.getHostsCalls,
-                "constructor must seed via getHosts exactly once");
-        assertNotNull(discovery.registeredListener,
-                "constructor must register a listener for push-based fast-path updates");
+        try {
+            assertEquals(0, r.currentSize(),
+                    "cold seed must accept an empty initial pool without throwing");
+            assertEquals(1, discovery.getHostsCalls,
+                    "constructor must seed via getHosts exactly once");
+            assertNotNull(discovery.registeredListener,
+                    "constructor must register a listener for push-based fast-path updates");
+        } finally {
+            r.shutdown();
+        }
     }
 
     @Test
@@ -64,14 +68,18 @@ class DispatcherFePoolRefresherTest {
         };
 
         DispatcherFePoolRefresher r = refresher(flaky, "svc.fe");
-        assertEquals(0, r.currentSize(),
-                "boot-time discovery failure must degrade to an empty pool, not fail startup");
-        assertNotNull(inner.registeredListener,
-                "listener must still be registered after a failed boot seed");
+        try {
+            assertEquals(0, r.currentSize(),
+                    "boot-time discovery failure must degrade to an empty pool, not fail startup");
+            assertNotNull(inner.registeredListener,
+                    "listener must still be registered after a failed boot seed");
 
-        failing.set(false);
-        r.refresh();
-        assertEquals(1, r.currentSize(), "poll must repair the pool once discovery recovers");
+            failing.set(false);
+            r.refresh();
+            assertEquals(1, r.currentSize(), "poll must repair the pool once discovery recovers");
+        } finally {
+            r.shutdown();
+        }
     }
 
     @Test

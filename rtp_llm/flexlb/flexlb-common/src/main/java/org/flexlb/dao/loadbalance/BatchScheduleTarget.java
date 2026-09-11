@@ -45,13 +45,7 @@ public class BatchScheduleTarget {
     @JsonProperty("role")
     private RoleType role;
 
-    /**
-     * Optional master-assigned FE base URL ({@code http://ip:port}) for this chunk. Present when
-     * the request carries {@code assign_fe=true}; {@code null} for BE-only and FE-only placeholder
-     * responses the master could not stamp. A dispatcher in master mode treats a missing value as
-     * a visible chunk failure. A dispatcher in local mode ignores this field and reserves its own
-     * index-aligned FE vector.
-     */
+    /** FE URL assigned by the master when assign_fe is requested; absent for BE-only placement. */
     @JsonProperty("fe_url")
     private String feUrl;
 

@@ -5,15 +5,20 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.service.BatchScheduleCoordinator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -33,10 +38,9 @@ class BatchHandlerPvTest {
 
     @Mock
     private FanoutService fanoutService;
-    @Mock
     private DispatchConfig cfg;
     @Mock
-    private BatchScheduleClient batchScheduleClient;
+    private BatchScheduleCoordinator batchScheduleCoordinator;
     @Mock
     private PassthroughClient passthroughClient;
     @Mock
@@ -48,14 +52,12 @@ class BatchHandlerPvTest {
 
     @BeforeEach
     void setUp() {
-        when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("count:2"));
-        when(cfg.isPreAssignBe()).thenReturn(false);
-        lenient().when(cfg.getMaxAggregateRequestBytes()).thenReturn(128L * 1024 * 1024);
-        lenient().when(batchScheduleClient.requestTargets(
-                        org.mockito.ArgumentMatchers.anyInt(),
-                        org.mockito.ArgumentMatchers.anyBoolean(),
-                        org.mockito.ArgumentMatchers.anyBoolean()))
-                .thenReturn(Mono.just(List.of()));
+        cfg = new DispatchConfig();
+        cfg.setSubBatchSpec(SubBatchSpec.parse("count:2"));
+        cfg.setPreAssignBe(false);
+        cfg.setMaxAggregateRequestBytes(128L * 1024 * 1024);
+        lenient().when(batchScheduleCoordinator.schedule(ArgumentMatchers.any()))
+                .thenReturn(Mono.just(BatchScheduleResponse.success(List.of())));
         // BatchHandler now relays the caller's end-to-end headers + query to each chunk.
         ServerRequest.Headers headers = mock(ServerRequest.Headers.class);
         lenient().when(headers.asHttpHeaders()).thenReturn(new org.springframework.http.HttpHeaders());
@@ -98,8 +100,11 @@ class BatchHandlerPvTest {
         byte[] body = "{\"prompt_batch\":[\"a\",\"b\",\"c\",\"d\",\"e\"]}".getBytes(StandardCharsets.UTF_8);
         when(serverRequest.bodyToMono(byte[].class)).thenReturn(Mono.just(body));
 
-        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics());
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         handler.handle(serverRequest, spec).block();
 
         assertEquals(1, pvAppender.list.size(), "exactly one pv record per request");
@@ -123,8 +128,11 @@ class BatchHandlerPvTest {
         byte[] body = "{\"prompt_batch\":[\"a\",\"b\"]}".getBytes(StandardCharsets.UTF_8);
         when(serverRequest.bodyToMono(byte[].class)).thenReturn(Mono.just(body));
 
-        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics());
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         reactor.test.StepVerifier.create(handler.handle(serverRequest, spec))
                 .thenCancel()
                 .verify();
@@ -162,8 +170,11 @@ class BatchHandlerPvTest {
                 .getBytes(StandardCharsets.UTF_8);
         when(serverRequest.bodyToMono(byte[].class)).thenReturn(Mono.just(body));
 
-        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics());
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         handler.handle(serverRequest, spec).block();
 
         assertEquals(1, pvAppender.list.size(), "exactly one pv record per request");

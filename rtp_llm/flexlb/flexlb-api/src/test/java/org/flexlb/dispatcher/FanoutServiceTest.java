@@ -37,7 +37,9 @@ class FanoutServiceTest {
         FeClient feClient = mock(FeClient.class);
         when(feClient.postBytes(anyString(), anyString(), any(), any(), any(), any()))
                 .thenReturn(Mono.error(new RuntimeException("connection refused")));
-        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient,
+                DispatcherTestSupport.noopMetrics(), org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         ch.qos.logback.classic.Logger flexlbLogger =
                 (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger("flexlbLogger");
@@ -78,7 +80,9 @@ class FanoutServiceTest {
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r2")));
 
-        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient,
+                DispatcherTestSupport.noopMetrics(), org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
@@ -109,7 +113,9 @@ class FanoutServiceTest {
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.error(new RuntimeException("FE down")));
 
-        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient,
+                DispatcherTestSupport.noopMetrics(), org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
@@ -137,7 +143,9 @@ class FanoutServiceTest {
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.empty());
 
-        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient,
+                DispatcherTestSupport.noopMetrics(), org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
@@ -167,7 +175,8 @@ class FanoutServiceTest {
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just("not json".getBytes(StandardCharsets.UTF_8)));
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
-        FanoutService svc = new FanoutService(feClient, metrics);
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient, metrics, org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
@@ -203,7 +212,8 @@ class FanoutServiceTest {
         when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just("[1,2,3]".getBytes(StandardCharsets.UTF_8)));
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
-        FanoutService svc = new FanoutService(feClient, metrics);
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient, metrics, org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0")), List.of("http://a"),
@@ -233,7 +243,8 @@ class FanoutServiceTest {
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("x0", "x1")));
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
-        FanoutService svc = new FanoutService(feClient, metrics);
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient, metrics, org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")),
@@ -261,7 +272,9 @@ class FanoutServiceTest {
         FeClient feClient = mock(FeClient.class);
         when(feClient.postBytes(eq("http://master-fe"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
-        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient,
+                DispatcherTestSupport.noopMetrics(), org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0")), List.of("http://master-fe"),
@@ -283,8 +296,9 @@ class FanoutServiceTest {
                 .thenReturn(Mono.just(responseBatchBytes("r1")));
         FePool pool = mock(FePool.class);
         when(pool.nextBatch(2)).thenReturn(List.of("http://local-a", "http://local-b"));
-        FanoutService svc = new FanoutService(
-                feClient, DispatcherTestSupport.noopMetrics(), pool, FeAllocationMode.LOCAL);
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        testDispatchConfig.setFeAllocation(FeAllocationMode.LOCAL.configValue());
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics(), pool, testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0"), chunk("p1")),
@@ -312,7 +326,8 @@ class FanoutServiceTest {
         // would be called + the chunk would succeed.
         FeClient feClient = mock(FeClient.class);
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
-        FanoutService svc = new FanoutService(feClient, metrics);
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient, metrics, org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         java.util.List<String> withNull = new java.util.ArrayList<>();
         withNull.add(null);
@@ -342,7 +357,9 @@ class FanoutServiceTest {
         FeClient feClient = mock(FeClient.class);
         when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
-        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient,
+                DispatcherTestSupport.noopMetrics(), org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0"), chunk("p1")), List.of("http://a"),
@@ -366,7 +383,8 @@ class FanoutServiceTest {
         // Mutation guard: reintroduce a local fallback and feClient would be called + chunks succeed.
         FeClient feClient = mock(FeClient.class);
         DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
-        FanoutService svc = new FanoutService(feClient, metrics);
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient, metrics, org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         List<JSONObject> chunks = List.of(chunk("p0"), chunk("p1"), chunk("p2"));
         List<SubBatchResult> subs = svc.dispatchChunks(
@@ -391,7 +409,9 @@ class FanoutServiceTest {
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         when(feClient.postBytes(anyString(), anyString(), payload.capture(), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
-        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics());
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        FanoutService svc = new FanoutService(feClient,
+                DispatcherTestSupport.noopMetrics(), org.mockito.Mockito.mock(FePool.class), testDispatchConfig);
 
         JSONObject embeddingBody = new JSONObject();
         embeddingBody.put("input", JSONArray.of("a"));
@@ -420,16 +440,17 @@ class FanoutServiceTest {
                 .thenReturn(Mono.just(responseBatchBytes("response-over-limit")));
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any(), any()))
                 .thenReturn(Mono.never());
-        FanoutService svc = new FanoutService(
-                feClient, DispatcherTestSupport.noopMetrics(), null,
-                FeAllocationMode.MASTER, 1);
+        DispatchConfig testDispatchConfig = new DispatchConfig();
+        testDispatchConfig.setFeAllocation(FeAllocationMode.MASTER.configValue());
+        testDispatchConfig.setMaxAggregateResponseBytes(1);
+        FanoutService svc = new FanoutService(feClient, DispatcherTestSupport.noopMetrics(), null, testDispatchConfig);
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0"), chunk("p1")),
                         List.of("http://a", "http://b"), BATCH_INFER,
                         new HttpHeaders(), null))
                 .expectError(AggregateResponseTooLargeException.class)
-                .verify();
+                .verify(java.time.Duration.ofSeconds(5));
 
         verify(feClient, never()).postBytes(
                 eq("http://b"), eq("/batch_infer"), any(), any(), any(), any());

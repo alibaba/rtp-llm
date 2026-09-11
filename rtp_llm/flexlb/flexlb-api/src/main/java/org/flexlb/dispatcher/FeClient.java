@@ -126,7 +126,7 @@ public class FeClient {
                     .exchangeToMono(response -> readBody(response, reservation)
                             .flatMap(bytes -> {
                                 int status = response.rawStatusCode();
-                                if (status >= 400) {
+                                if (status < 200 || status >= 300) {
                                     HttpStatus resolved = HttpStatus.resolve(status);
                                     String reason = resolved == null
                                             ? "FE response" : resolved.getReasonPhrase();

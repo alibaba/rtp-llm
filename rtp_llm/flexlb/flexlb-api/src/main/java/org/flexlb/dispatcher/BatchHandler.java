@@ -5,10 +5,14 @@ import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.pv.DispatchPvLogData;
+import org.flexlb.exception.BatchScheduleTransportException;
+import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBufferLimitException;
@@ -18,7 +22,6 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
 import reactor.core.scheduler.Scheduler;
-import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -46,7 +49,7 @@ public class BatchHandler {
     private final FanoutService fanoutService;
     private final SubBatchSpec subBatch;
     private final String splitPolicy;
-    private final BatchScheduleClient batchScheduleClient;
+    private final BatchScheduleCoordinator batchScheduleCoordinator;
     private final PassthroughClient passthroughClient;
     private final DispatcherMetricsReporter metricsReporter;
     private final boolean preAssignBe;
@@ -56,105 +59,24 @@ public class BatchHandler {
     private final long maxAggregateRequestBytes;
     private final Scheduler cpuScheduler;
 
-    @Autowired
     public BatchHandler(FanoutService fanoutService,
                         DispatchConfig cfg,
-                        BatchScheduleClient batchScheduleClient,
+                        BatchScheduleCoordinator batchScheduleCoordinator,
                         PassthroughClient passthroughClient,
                         DispatcherMetricsReporter metricsReporter,
                         ConfigService configService,
                         @Qualifier("dispatcherCpuScheduler") Scheduler cpuScheduler) {
-        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                configService.loadBalanceConfig(),
-                cfg.getMaxAggregateRequestBytes(), cpuScheduler);
-    }
-
-    private BatchHandler(FanoutService fanoutService,
-                         DispatchConfig cfg,
-                         BatchScheduleClient batchScheduleClient,
-                         PassthroughClient passthroughClient,
-                         DispatcherMetricsReporter metricsReporter,
-                         FlexlbConfig loadBalanceConfig,
-                         long maxAggregateRequestBytes,
-                         Scheduler cpuScheduler) {
-        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                loadBalanceConfig.getRouter().getBatchScheduleMaxCount(), maxAggregateRequestBytes,
-                loadBalanceConfig, cpuScheduler);
-    }
-
-    /** Package-private convenience for focused tests; mirrors the production default. */
-    BatchHandler(FanoutService fanoutService,
-                 DispatchConfig cfg,
-                 BatchScheduleClient batchScheduleClient,
-                 PassthroughClient passthroughClient,
-                 DispatcherMetricsReporter metricsReporter) {
-        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                1000, cfg.getMaxAggregateRequestBytes(), null, Schedulers.immediate());
-    }
-
-    BatchHandler(FanoutService fanoutService,
-                 DispatchConfig cfg,
-                 BatchScheduleClient batchScheduleClient,
-                 PassthroughClient passthroughClient,
-                 DispatcherMetricsReporter metricsReporter,
-                 int maxChunkCount) {
-        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                maxChunkCount, cfg.getMaxAggregateRequestBytes(), null, Schedulers.immediate());
-    }
-
-    BatchHandler(FanoutService fanoutService,
-                 DispatchConfig cfg,
-                 BatchScheduleClient batchScheduleClient,
-                 PassthroughClient passthroughClient,
-                 DispatcherMetricsReporter metricsReporter,
-                 int maxChunkCount,
-                 long maxAggregateRequestBytes) {
-        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                maxChunkCount, maxAggregateRequestBytes, null, Schedulers.immediate());
-    }
-
-    BatchHandler(FanoutService fanoutService,
-                 DispatchConfig cfg,
-                 BatchScheduleClient batchScheduleClient,
-                 PassthroughClient passthroughClient,
-                 DispatcherMetricsReporter metricsReporter,
-                 int maxChunkCount,
-                 long maxAggregateRequestBytes,
-                 FlexlbConfig loadBalanceConfig) {
-        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                maxChunkCount, maxAggregateRequestBytes, loadBalanceConfig,
-                Schedulers.immediate());
-    }
-
-    BatchHandler(FanoutService fanoutService,
-                 DispatchConfig cfg,
-                 BatchScheduleClient batchScheduleClient,
-                 PassthroughClient passthroughClient,
-                 DispatcherMetricsReporter metricsReporter,
-                 int maxChunkCount,
-                 long maxAggregateRequestBytes,
-                 FlexlbConfig loadBalanceConfig,
-                 Scheduler cpuScheduler) {
         this.fanoutService = fanoutService;
         this.subBatch = cfg.getSubBatchSpec();
         this.splitPolicy = subBatch.mode().name().toLowerCase() + ":" + subBatch.value();
-        this.batchScheduleClient = batchScheduleClient;
+        this.batchScheduleCoordinator = batchScheduleCoordinator;
         this.passthroughClient = passthroughClient;
         this.metricsReporter = metricsReporter;
         this.preAssignBe = cfg.isPreAssignBe();
-        this.loadBalanceConfig = loadBalanceConfig;
-        this.feAllocationMode = cfg.getFeAllocation() == null
-                ? FeAllocationMode.MASTER
-                : FeAllocationMode.parse(cfg.getFeAllocation());
-        if (maxChunkCount < 1) {
-            throw new IllegalArgumentException("maxChunkCount must be >= 1, got " + maxChunkCount);
-        }
-        if (maxAggregateRequestBytes <= 0) {
-            throw new IllegalArgumentException("maxAggregateRequestBytes must be > 0, got "
-                    + maxAggregateRequestBytes);
-        }
-        this.maxChunkCount = maxChunkCount;
-        this.maxAggregateRequestBytes = maxAggregateRequestBytes;
+        this.loadBalanceConfig = configService.loadBalanceConfig();
+        this.feAllocationMode = FeAllocationMode.parse(cfg.getFeAllocation());
+        this.maxChunkCount = loadBalanceConfig.getRouter().getBatchScheduleMaxCount();
+        this.maxAggregateRequestBytes = cfg.getMaxAggregateRequestBytes();
         this.cpuScheduler = cpuScheduler;
     }
 
@@ -171,6 +93,9 @@ public class BatchHandler {
             String errMsg = DispatcherResponses.briefReason(e);
             Logger.warn("dispatcher request failed: spec={}, err={}", spec.getPath(), errMsg);
             pv.setError(errMsg);
+            if (e instanceof BatchScheduleTransportException) {
+                return DispatcherResponses.error(503, "batch_schedule_failed", "batch target allocation failed");
+            }
             if (e instanceof DataBufferLimitException) {
                 // Body over spring.codec.max-in-memory-size is a deterministic client error;
                 // a 500 would invite pointless retries and pollute the server error rate.
@@ -260,7 +185,14 @@ public class BatchHandler {
                         boolean assignFe = feAllocationMode == FeAllocationMode.MASTER;
                         return resolveTargets(prepared.chunkBodies().size(), assignBe, assignFe)
                                 .publishOn(cpuScheduler)
-                                .flatMap(targets -> {
+                                .flatMap(allocation -> {
+                                    if (!allocation.isSuccess()) {
+                                        int status = allocation.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode()
+                                                ? 400 : 503;
+                                        return DispatcherResponses.error(status, "batch_schedule_failed",
+                                                allocation.getErrorMessage());
+                                    }
+                                    List<BatchScheduleTarget> targets = allocation.getServerStatus();
                                     if (assignBe) {
                                         BatchChunkAssembler.stampPreAssignedBe(
                                                 prepared.chunkBodies(), targets);
@@ -333,8 +265,7 @@ public class BatchHandler {
     }
 
     private boolean hasActiveTrafficPolicy() {
-        TrafficPolicyConfig policy = loadBalanceConfig == null
-                ? null : loadBalanceConfig.getRouter().getGroupSelector();
+        TrafficPolicyConfig policy = loadBalanceConfig.getRouter().getGroupSelector();
         return policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty());
     }
 
@@ -376,11 +307,7 @@ public class BatchHandler {
         return text.substring(0, MAX_LOG_SCALAR_CHARS);
     }
 
-    /**
-     * Master mode's per-chunk FE assignment, index-aligned to {@code targets} (and thus to chunks).
-     * A null entry — or an index past a short target list — means "no master FE for this chunk";
-     * {@link FanoutService} fails such a chunk visibly rather than changing allocation source.
-     */
+    /** FE assignments retain the same index order as the allocated targets and chunks. */
     private static List<String> preAssignedFeUrls(List<BatchScheduleTarget> targets) {
         List<String> feUrls = new ArrayList<>(targets.size());
         for (BatchScheduleTarget target : targets) {
@@ -416,14 +343,20 @@ public class BatchHandler {
      * stamped role address. Local FE mode with BE pre-assignment disabled needs no master call at
      * all. This keeps both global cursors free of invisible, discarded advances.
      */
-    private Mono<List<BatchScheduleTarget>> resolveTargets(
+    private Mono<BatchScheduleResponse> resolveTargets(
             int chunkCount, boolean assignBe, boolean assignFe) {
         if (!assignBe && !assignFe) {
-            return Mono.just(List.of());
+            return Mono.just(BatchScheduleResponse.success(List.of()));
         }
+        BatchScheduleRequest request = new BatchScheduleRequest();
+        request.setBatchCount(chunkCount);
+        request.setAssignBe(assignBe);
+        request.setAssignFe(assignFe);
         long start = System.currentTimeMillis();
-        return batchScheduleClient.requestTargets(chunkCount, assignBe, assignFe)
-                .doOnNext(targets -> metricsReporter.reportPreassignRt(
-                        System.currentTimeMillis() - start, !targets.isEmpty(), assignBe, assignFe));
+        return batchScheduleCoordinator.schedule(request)
+                .doOnNext(response -> metricsReporter.reportPreassignRt(
+                        System.currentTimeMillis() - start, response.isSuccess(), assignBe, assignFe))
+                .doOnError(error -> metricsReporter.reportPreassignRt(
+                        System.currentTimeMillis() - start, false, assignBe, assignFe));
     }
 }

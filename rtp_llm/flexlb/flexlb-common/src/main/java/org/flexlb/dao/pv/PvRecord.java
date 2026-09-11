@@ -5,7 +5,7 @@ import org.flexlb.util.Logger;
 
 /**
  * Common emission contract for the PV record types sharing {@code pv.log}
- * ({@link PvLogData}, {@link BatchPvLogData}, {@link DispatchPvLogData}). Success records
+ * ({@link BatchPvLogData}, {@link DispatchPvLogData}). Success records
  * use INFO, non-success uses ERROR. Serialization failure surfaces to the operational log
  * (not pv.log) so ops dashboards see it; PV emission must never propagate an exception
  * into the request path.

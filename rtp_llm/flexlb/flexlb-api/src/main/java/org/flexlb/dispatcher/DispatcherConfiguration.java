@@ -156,7 +156,7 @@ public class DispatcherConfiguration {
 
     /**
      * Dedicated named connection provider so dispatcher fanout cannot starve
-     * {@code GeneralHttpNettyService}'s master connections. Reactor-netty pools per remote
+     * master forwarding connections. Reactor-netty pools per remote
      * address, so the effective ceiling is {@code FE_MAX_CONNECTIONS_PER_HOST × N FE hosts}.
      */
     @Bean("dispatcherFeConnectionProvider")

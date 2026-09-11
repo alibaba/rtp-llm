@@ -86,7 +86,7 @@ locally and the cursors are independent.
 
 Both assignment flags default to true. `batch_count` must be between 1 and the configured maximum;
 a request with both flags false is invalid. Successful responses contain exactly that many
-`server_status` entries, each with its requested BE fields and/or optional `fe_url`.
+`server_status` entries, each with its requested BE fields and/or `fe_url`.
 
 | FE mode | BE pre-assignment used | Master request | FE source |
 | --- | --- | --- | --- |
@@ -98,8 +98,10 @@ a request with both flags false is invalid. Successful responses contain exactly
 BE assignment supports a single configured role. It rejects active `router.groupSelector`
 rules or default targets because batch-count-only requests lack per-item routing information.
 The dispatcher automatically defers BE placement to the FEs when group routing is active.
-FE-only assignment works with multi-role deployments and during BE warm-up. Missing FE
-assignments produce visible chunk failures; master mode does not fall back to a local FE cursor.
+FE-only assignment works with multi-role deployments and during BE warm-up. Missing requested
+assignments fail the allocation before fanout. Dispatcher returns 400 for invalid allocation
+requests and 503 for unavailable workers or master transport failures. Master mode does not
+fall back to a local FE cursor.
 
 ## LLM execution follows mainline scheduling
 

@@ -5,7 +5,6 @@ import com.alibaba.fastjson2.JSONException;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.util.RateLimitedWarn;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
@@ -57,51 +56,14 @@ public class FanoutService {
     /** During an FE outage the fanout path fails per chunk; cap the WARN stream at 1/s. */
     private final RateLimitedWarn failureWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
 
-    @Autowired
     public FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
                          FePool fePool, DispatchConfig config) {
-        this(feClient, metricsReporter, fePool, FeAllocationMode.parse(config.getFeAllocation()),
-                config.getMaxAggregateResponseBytes(), config.getMaxAggregateRequestBytes());
-    }
-
-    /** Focused-test constructor preserving the default master-authoritative behavior. */
-    FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter) {
-        this(feClient, metricsReporter, null, FeAllocationMode.MASTER,
-                128L * 1024 * 1024, 128L * 1024 * 1024);
-    }
-
-    /** Test seam for exercising both allocation modes with a controlled pool. */
-    FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
-                  FePool fePool, FeAllocationMode feAllocationMode) {
-        this(feClient, metricsReporter, fePool, feAllocationMode,
-                128L * 1024 * 1024, 128L * 1024 * 1024);
-    }
-
-    /** Test seam for exercising the aggregate response watermark. */
-    FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
-                  FePool fePool, FeAllocationMode feAllocationMode,
-                  long maxAggregateResponseBytes) {
-        this(feClient, metricsReporter, fePool, feAllocationMode,
-                maxAggregateResponseBytes, 128L * 1024 * 1024);
-    }
-
-    FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
-                  FePool fePool, FeAllocationMode feAllocationMode,
-                  long maxAggregateResponseBytes, long maxAggregateRequestBytes) {
-        if (maxAggregateResponseBytes <= 0) {
-            throw new IllegalArgumentException("maxAggregateResponseBytes must be > 0, got "
-                    + maxAggregateResponseBytes);
-        }
-        if (maxAggregateRequestBytes <= 0) {
-            throw new IllegalArgumentException("maxAggregateRequestBytes must be > 0, got "
-                    + maxAggregateRequestBytes);
-        }
         this.feClient = feClient;
         this.metricsReporter = metricsReporter;
         this.fePool = fePool;
-        this.feAllocationMode = feAllocationMode;
-        this.maxAggregateResponseBytes = maxAggregateResponseBytes;
-        this.maxAggregateRequestBytes = maxAggregateRequestBytes;
+        this.feAllocationMode = FeAllocationMode.parse(config.getFeAllocation());
+        this.maxAggregateResponseBytes = config.getMaxAggregateResponseBytes();
+        this.maxAggregateRequestBytes = config.getMaxAggregateRequestBytes();
     }
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,

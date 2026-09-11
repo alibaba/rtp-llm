@@ -5,11 +5,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.exception.BatchScheduleTransportException;
+import org.flexlb.service.BatchScheduleCoordinator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.core.io.buffer.DataBufferLimitException;
@@ -30,8 +37,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -58,10 +63,9 @@ class BatchHandlerContractTest {
 
     @Mock
     private FanoutService fanoutService;
-    @Mock
     private DispatchConfig cfg;
     @Mock
-    private BatchScheduleClient batchScheduleClient;
+    private BatchScheduleCoordinator batchScheduleCoordinator;
     @Mock
     private PassthroughClient passthroughClient;
     @Mock
@@ -72,21 +76,53 @@ class BatchHandlerContractTest {
 
     @BeforeEach
     void setUp() {
-        lenient().when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("count:2"));
-        lenient().when(cfg.isPreAssignBe()).thenReturn(false);
-        lenient().when(cfg.getMaxAggregateRequestBytes()).thenReturn(128L * 1024 * 1024);
+        cfg = new DispatchConfig();
+        cfg.setSubBatchSpec(SubBatchSpec.parse("count:2"));
+        cfg.setPreAssignBe(false);
+        cfg.setMaxAggregateRequestBytes(128L * 1024 * 1024);
         // Master mode requests FE assignment for each splittable batch. The explicit dimensions
         // vary by endpoint and preAssignBe, so the generic fixture accepts either combination.
-        lenient().when(batchScheduleClient.requestTargets(
-                        org.mockito.ArgumentMatchers.anyInt(), anyBoolean(), anyBoolean()))
-                .thenReturn(Mono.just(java.util.List.of()));
+        lenient().when(batchScheduleCoordinator.schedule(ArgumentMatchers.any()))
+                .thenReturn(Mono.just(BatchScheduleResponse.success(java.util.List.of())));
         // BatchHandler now relays the caller's end-to-end headers + query to each chunk.
         ServerRequest.Headers headers = mock(ServerRequest.Headers.class);
         lenient().when(headers.asHttpHeaders()).thenReturn(new org.springframework.http.HttpHeaders());
         lenient().when(serverRequest.headers()).thenReturn(headers);
         lenient().when(serverRequest.uri()).thenReturn(java.net.URI.create("http://master/dispatcher/batch_infer"));
-        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics());
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"master,INVALID_REQUEST,400", "local,INVALID_REQUEST,400",
+            "master,NO_AVAILABLE_WORKER,503", "local,NO_AVAILABLE_WORKER,503"})
+    void requestedAllocationFailureStopsBeforeFanout(String mode, StrategyErrorType error, int status) {
+        cfg.setFeAllocation(mode);
+        cfg.setPreAssignBe(true);
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(new FlexlbConfig()), Schedulers.immediate());
+        stubBody("{\"prompt_batch\":[\"a\",\"b\"]}");
+        when(batchScheduleCoordinator.schedule(any()))
+                .thenReturn(Mono.just(BatchScheduleResponse.error(error, "allocation unavailable")));
+        ServerResponse response = handler.handle(serverRequest, BatchEndpointSpec.BY_PATH.get("/batch_infer")).block();
+        assertEquals(status, response.rawStatusCode());
+        assertEquals("batch_schedule_failed", parseBody(response).get("error").asText());
+        verifyNoInteractions(fanoutService, passthroughClient);
+    }
+
+    @Test
+    void unavailableMasterReturns503WithoutLeakingItsAddress() {
+        stubBody("{\"prompt_batch\":[\"a\",\"b\"]}");
+        when(batchScheduleCoordinator.schedule(any())).thenReturn(Mono.error(
+                new BatchScheduleTransportException("internal-master:7001", "CONNECT_FAILED")));
+        ServerResponse response = handler.handle(serverRequest, BatchEndpointSpec.BY_PATH.get("/batch_infer")).block();
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.statusCode());
+        assertEquals("batch target allocation failed", parseBody(response).get("message").asText());
+        verifyNoInteractions(fanoutService, passthroughClient);
     }
 
     private void stubBody(String json) {
@@ -113,16 +149,19 @@ class BatchHandlerContractTest {
 
         assertSame(passthroughResponse, out,
                 "non-batch-shaped body on a registered path must be passthrough-forwarded");
-        verifyNoInteractions(fanoutService, batchScheduleClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator);
     }
 
     @Test
     void requestJsonPipelineRunsOnDedicatedCpuScheduler() {
         Scheduler scheduler = Schedulers.newSingle("batch-json-test");
         try {
-            handler = new BatchHandler(fanoutService, cfg, batchScheduleClient,
-                    passthroughClient, DispatcherTestSupport.noopMetrics(),
-                    1000, 128L * 1024 * 1024, null, scheduler);
+            FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+            testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(1000);
+            cfg.setMaxAggregateRequestBytes(128L * 1024 * 1024);
+            handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                    DispatcherTestSupport.noopMetrics(),
+                    DispatcherTestSupport.configService(testLoadBalanceConfig), scheduler);
             stubBody("not-json");
             AtomicReference<String> responseThread = new AtomicReference<>();
 
@@ -150,7 +189,7 @@ class BatchHandlerContractTest {
 
         assertSame(passthroughResponse, out,
                 "single-string input is a legal OpenAI embedding request and must reach FE");
-        verifyNoInteractions(fanoutService, batchScheduleClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator);
     }
 
     @Test
@@ -168,7 +207,7 @@ class BatchHandlerContractTest {
 
         assertSame(passthroughResponse, out,
                 "object-element input is a single embedding input and must reach FE whole");
-        verifyNoInteractions(fanoutService, batchScheduleClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator);
     }
 
     @Test
@@ -185,7 +224,7 @@ class BatchHandlerContractTest {
 
         assertSame(passthroughResponse, out,
                 "a prompt_batch body carrying sample-aligned images must be forwarded whole");
-        verifyNoInteractions(fanoutService, batchScheduleClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator);
     }
 
     @Test
@@ -199,7 +238,7 @@ class BatchHandlerContractTest {
 
         assertSame(passthroughResponse, out,
                 "a list-form adapter_name is aligned to prompt_batch and must be forwarded whole");
-        verifyNoInteractions(fanoutService, batchScheduleClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator);
     }
 
     @Test
@@ -213,7 +252,7 @@ class BatchHandlerContractTest {
 
         assertSame(passthroughResponse, out,
                 "FE promotes top-level adapter_name, so it must retain whole-batch alignment");
-        verifyNoInteractions(fanoutService, batchScheduleClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator);
     }
 
     @Test
@@ -226,7 +265,7 @@ class BatchHandlerContractTest {
 
         assertSame(passthroughResponse, out,
                 "SSE responses cannot be buffered and JSON-merged by the fanout path");
-        verifyNoInteractions(fanoutService, batchScheduleClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator);
     }
 
     @Test
@@ -239,7 +278,7 @@ class BatchHandlerContractTest {
         handler.handle(serverRequest, spec).block();
 
         verifyNoInteractions(passthroughClient);
-        org.mockito.Mockito.verify(fanoutService)
+        verify(fanoutService)
                 .dispatchChunks(eq("/v1/embeddings"), anyList(), anyList(), eq(spec), any(), any());
     }
 
@@ -254,7 +293,7 @@ class BatchHandlerContractTest {
         ObjectNode response = parseBody(out);
         assertEquals(0, response.get("results").size());
         assertEquals(0L, response.get("total_tokens").asLong());
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
@@ -271,7 +310,7 @@ class BatchHandlerContractTest {
         assertEquals(0, response.get("data").size());
         assertEquals(0L, response.get("usage").get("prompt_tokens").asLong());
         assertEquals(0L, response.get("usage").get("total_tokens").asLong());
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
@@ -283,16 +322,19 @@ class BatchHandlerContractTest {
 
         assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
         assertEquals("invalid_batch_request", parseBody(out).get("error").asText());
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
     void nonPreAssignableEndpointRequestsFeOnlyAndDoesNotAdvanceBeCursor() {
         // This endpoint ignores generate_config, so master is asked for FE only. A stampable BE
         // fixture proves that BE data is neither requested nor accidentally written.
-        org.mockito.Mockito.when(cfg.isPreAssignBe()).thenReturn(true);
-        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics());
+        cfg.setPreAssignBe(true);
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/batch/chat/completions");
         stubBody("{\"requests\":[{\"messages\":[]},{\"messages\":[]}]}");
         // A stampable BE target — so the skip is proven to come from the endpoint being
@@ -301,8 +343,9 @@ class BatchHandlerContractTest {
                 new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 8088, 50051,
                         org.flexlb.dao.route.RoleType.PDFUSION);
         beTarget.setFeUrl("http://fe-1");
-        when(batchScheduleClient.requestTargets(anyInt(), eq(false), eq(true)))
-                .thenReturn(Mono.just(List.of(beTarget)));
+        when(batchScheduleCoordinator.schedule(ArgumentMatchers.argThat(request ->
+                !request.isAssignBe() && request.isAssignFe())))
+                .thenReturn(Mono.just(BatchScheduleResponse.success(List.of(beTarget))));
         @SuppressWarnings("rawtypes")
         org.mockito.ArgumentCaptor<List> chunkBodies = org.mockito.ArgumentCaptor.forClass(List.class);
         when(fanoutService.dispatchChunks(anyString(), chunkBodies.capture(), anyList(), any(), any(), any()))
@@ -310,7 +353,8 @@ class BatchHandlerContractTest {
 
         handler.handle(serverRequest, spec).block();
 
-        verify(batchScheduleClient).requestTargets(anyInt(), eq(false), eq(true));
+        verify(batchScheduleCoordinator).schedule(ArgumentMatchers.argThat(request ->
+                !request.isAssignBe() && request.isAssignFe()));
         // ...but no chunk carries a stamped BE role_addrs on a non-preAssignable endpoint.
         for (Object o : chunkBodies.getValue()) {
             JSONObject gc = ((JSONObject) o).getJSONObject("generate_config");
@@ -321,10 +365,13 @@ class BatchHandlerContractTest {
 
     @Test
     void localFeModeWithoutBePreassignmentSkipsMasterEntirely() {
-        when(cfg.getFeAllocation()).thenReturn("local");
-        when(cfg.isPreAssignBe()).thenReturn(false);
-        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics());
+        cfg.setFeAllocation("local");
+        cfg.setPreAssignBe(false);
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
         stubBody("{\"model\":\"m\",\"input\":[\"a\",\"b\"]}");
         @SuppressWarnings("rawtypes")
@@ -336,16 +383,20 @@ class BatchHandlerContractTest {
 
         handler.handle(serverRequest, spec).block();
 
-        verifyNoInteractions(batchScheduleClient);
+        verifyNoInteractions(batchScheduleCoordinator);
         assertTrue(feAssignments.getValue().isEmpty(),
                 "FanoutService must source local mode from FePool, not a stale master assignment");
     }
 
     @Test
     void chunkCountAboveMasterLimitIsRejectedBeforeScheduling() {
-        when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("size:2"));
-        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics(), 2);
+        cfg.setSubBatchSpec(SubBatchSpec.parse("size:2"));
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(2);
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
         stubBody("{\"model\":\"m\",\"input\":[\"a\",\"b\",\"c\",\"d\",\"e\"]}");
 
@@ -355,13 +406,18 @@ class BatchHandlerContractTest {
         ObjectNode body = parseBody(out);
         assertEquals("too_many_sub_batches", body.get("error").asText());
         assertTrue(body.get("message").asText().contains("maximum is 2"));
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
     void repeatedEnvelopeOverRequestBudgetIsRejectedBeforeScheduling() {
-        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics(), 1000, 2048);
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(1000);
+        cfg.setMaxAggregateRequestBytes(2048);
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
         stubBody("{\"model\":\"" + "x".repeat(1500)
                 + "\",\"input\":[\"a\",\"b\"]}");
@@ -370,30 +426,34 @@ class BatchHandlerContractTest {
 
         assertEquals(HttpStatus.PAYLOAD_TOO_LARGE, out.statusCode());
         assertEquals("batch_request_too_large", parseBody(out).get("error").asText());
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
     void preAssignStillRunsForPromptBatchEndpoints() {
-        org.mockito.Mockito.when(cfg.isPreAssignBe()).thenReturn(true);
-        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics());
+        cfg.setPreAssignBe(true);
+        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("{\"prompt_batch\":[\"a\",\"b\"]}");
-        when(batchScheduleClient.requestTargets(anyInt(), eq(true), eq(true)))
-                .thenReturn(Mono.just(List.of()));
+        when(batchScheduleCoordinator.schedule(ArgumentMatchers.argThat(request ->
+                request.isAssignBe() && request.isAssignFe())))
+                .thenReturn(Mono.just(BatchScheduleResponse.success(List.of())));
         when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(SubBatchResult.failed(2, 0, "fe_http_500"))));
 
         handler.handle(serverRequest, spec).block();
 
-        org.mockito.Mockito.verify(batchScheduleClient)
-                .requestTargets(anyInt(), eq(true), eq(true));
+        verify(batchScheduleCoordinator)
+                .schedule(ArgumentMatchers.argThat(request -> request.isAssignBe() && request.isAssignFe()));
     }
 
     @Test
     void activeTrafficPolicyDefersBackendPlacementToFrontendRouting() {
-        org.mockito.Mockito.when(cfg.isPreAssignBe()).thenReturn(true);
+        cfg.setPreAssignBe(true);
         FlexlbConfig loadBalanceConfig = new FlexlbConfig();
         TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
         TrafficPolicyConfig.Target target = new TrafficPolicyConfig.Target();
@@ -401,19 +461,24 @@ class BatchHandlerContractTest {
         target.setWeight(1);
         trafficPolicy.setDefaultTargets(List.of(target));
         loadBalanceConfig.getRouter().setGroupSelector(trafficPolicy);
-        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
-                DispatcherTestSupport.noopMetrics(), 1000,
-                cfg.getMaxAggregateRequestBytes(), loadBalanceConfig);
+        FlexlbConfig testLoadBalanceConfig = loadBalanceConfig;
+        testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(1000);
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleCoordinator, passthroughClient,
+                DispatcherTestSupport.noopMetrics(),
+                DispatcherTestSupport.configService(testLoadBalanceConfig),
+                Schedulers.immediate());
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("{\"prompt_batch\":[\"a\",\"b\"]}");
-        when(batchScheduleClient.requestTargets(anyInt(), eq(false), eq(true)))
-                .thenReturn(Mono.just(List.of()));
+        when(batchScheduleCoordinator.schedule(ArgumentMatchers.argThat(request ->
+                !request.isAssignBe() && request.isAssignFe())))
+                .thenReturn(Mono.just(BatchScheduleResponse.success(List.of())));
         when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
                 .thenReturn(Mono.just(List.of(SubBatchResult.failed(2, 0, "fe_http_500"))));
 
         handler.handle(serverRequest, spec).block();
 
-        verify(batchScheduleClient).requestTargets(anyInt(), eq(false), eq(true));
+        verify(batchScheduleCoordinator).schedule(ArgumentMatchers.argThat(request ->
+                !request.isAssignBe() && request.isAssignFe()));
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<JSONObject>> chunks = ArgumentCaptor.forClass(List.class);
         verify(fanoutService).dispatchChunks(
@@ -432,7 +497,7 @@ class BatchHandlerContractTest {
 
         assertNotNull(out);
         assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
@@ -446,7 +511,7 @@ class BatchHandlerContractTest {
 
         assertNotNull(out);
         assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
@@ -459,7 +524,7 @@ class BatchHandlerContractTest {
 
         assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
         assertTrue(parseBody(out).get("message").asText().contains("role_addrs"));
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
@@ -472,7 +537,7 @@ class BatchHandlerContractTest {
 
         assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
         assertTrue(parseBody(out).get("message").asText().contains("role_addrs"));
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
@@ -486,7 +551,7 @@ class BatchHandlerContractTest {
 
         assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
         assertTrue(parseBody(out).get("message").asText().contains("role_addrs"));
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
@@ -500,7 +565,7 @@ class BatchHandlerContractTest {
 
         assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
         assertTrue(parseBody(out).get("message").asText().contains("role_addrs"));
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test
@@ -532,7 +597,7 @@ class BatchHandlerContractTest {
         assertEquals(HttpStatus.PAYLOAD_TOO_LARGE, out.statusCode());
         ObjectNode body = parseBody(out);
         assertEquals("request_body_too_large", body.get("error").asText());
-        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+        verifyNoInteractions(fanoutService, batchScheduleCoordinator, passthroughClient);
     }
 
     @Test

@@ -422,6 +422,7 @@ class PassthroughClientTest {
         Assertions.assertNull(rec.getHeader("Upgrade"));
         Assertions.assertNull(rec.getHeader("Proxy-Authorization"));
         Assertions.assertNull(rec.getHeader("TE"));
+        Assertions.assertNull(rec.getHeader("Transfer-Encoding"));
         Assertions.assertEquals("trace-keep-me", rec.getHeader("X-Trace-Id"),
                 "non-hop-by-hop headers must still pass through");
     }

@@ -5,9 +5,13 @@ import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.exception.BatchScheduleTransportException;
+import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBufferLimitException;
@@ -16,7 +20,6 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
-import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 
@@ -32,7 +35,7 @@ import java.util.List;
  *       chunk-assembly pipeline ({@link BatchChunkAssembler}) against the request body and
  *       returns the resulting sub-batch bodies as JSON instead of fanning out. Side-effect-free
  *       by default: BE resolution is skipped, so no master traffic and no RR-cursor movement.
- *       Only an explicit {@code ?pre_assign=true} calls {@link BatchScheduleClient} for real BE
+ *       Only an explicit {@code ?pre_assign=true} calls {@link BatchScheduleCoordinator} for real BE
  *       resolution when traffic-policy routing is inactive — which <em>does</em> advance master's
  *       batch RR cursor exactly like a production request, so use it only when you need the
  *       production wire shape and can accept perturbing live distribution.</li>
@@ -50,77 +53,24 @@ public class DispatcherInspectionHandler {
     private final DispatchConfig cfg;
     private final DispatcherFePoolRefresher refresher;
     private final FeHealthChecker healthChecker;
-    private final BatchScheduleClient batchScheduleClient;
+    private final BatchScheduleCoordinator batchScheduleCoordinator;
     private final FlexlbConfig loadBalanceConfig;
     private final int maxChunkCount;
     private final long maxResponseBytes;
     private final Scheduler cpuScheduler;
 
-    @Autowired
     public DispatcherInspectionHandler(DispatchConfig cfg,
                                        DispatcherFePoolRefresher refresher,
                                        FeHealthChecker healthChecker,
-                                       BatchScheduleClient batchScheduleClient,
+                                       BatchScheduleCoordinator batchScheduleCoordinator,
                                        ConfigService configService,
                                        @Qualifier("dispatcherCpuScheduler") Scheduler cpuScheduler) {
-        this(cfg, refresher, healthChecker, batchScheduleClient,
-                configService.loadBalanceConfig(), cpuScheduler);
-    }
-
-    private DispatcherInspectionHandler(DispatchConfig cfg,
-                                        DispatcherFePoolRefresher refresher,
-                                        FeHealthChecker healthChecker,
-                                        BatchScheduleClient batchScheduleClient,
-                                        FlexlbConfig loadBalanceConfig,
-                                        Scheduler cpuScheduler) {
-        this(cfg, refresher, healthChecker, batchScheduleClient,
-                loadBalanceConfig.getRouter().getBatchScheduleMaxCount(), loadBalanceConfig, cpuScheduler);
-    }
-
-    /** Package-private convenience for focused tests; mirrors the production default. */
-    DispatcherInspectionHandler(DispatchConfig cfg,
-                                DispatcherFePoolRefresher refresher,
-                                FeHealthChecker healthChecker,
-                                BatchScheduleClient batchScheduleClient) {
-        this(cfg, refresher, healthChecker, batchScheduleClient, 1000,
-                null, Schedulers.immediate());
-    }
-
-    DispatcherInspectionHandler(DispatchConfig cfg,
-                                DispatcherFePoolRefresher refresher,
-                                FeHealthChecker healthChecker,
-                                BatchScheduleClient batchScheduleClient,
-                                int maxChunkCount) {
-        this(cfg, refresher, healthChecker, batchScheduleClient, maxChunkCount,
-                null, Schedulers.immediate());
-    }
-
-    DispatcherInspectionHandler(DispatchConfig cfg,
-                                DispatcherFePoolRefresher refresher,
-                                FeHealthChecker healthChecker,
-                                BatchScheduleClient batchScheduleClient,
-                                int maxChunkCount,
-                                FlexlbConfig loadBalanceConfig) {
-        this(cfg, refresher, healthChecker, batchScheduleClient, maxChunkCount,
-                loadBalanceConfig, Schedulers.immediate());
-    }
-
-    DispatcherInspectionHandler(DispatchConfig cfg,
-                                DispatcherFePoolRefresher refresher,
-                                FeHealthChecker healthChecker,
-                                BatchScheduleClient batchScheduleClient,
-                                int maxChunkCount,
-                                FlexlbConfig loadBalanceConfig,
-                                Scheduler cpuScheduler) {
-        if (maxChunkCount < 1) {
-            throw new IllegalArgumentException("maxChunkCount must be >= 1, got " + maxChunkCount);
-        }
         this.cfg = cfg;
         this.refresher = refresher;
         this.healthChecker = healthChecker;
-        this.batchScheduleClient = batchScheduleClient;
-        this.loadBalanceConfig = loadBalanceConfig;
-        this.maxChunkCount = maxChunkCount;
+        this.batchScheduleCoordinator = batchScheduleCoordinator;
+        this.loadBalanceConfig = configService.loadBalanceConfig();
+        this.maxChunkCount = loadBalanceConfig.getRouter().getBatchScheduleMaxCount();
         this.maxResponseBytes = cfg.getMaxDryRunResponseBytes();
         this.cpuScheduler = cpuScheduler;
     }
@@ -206,6 +156,9 @@ public class DispatcherInspectionHandler {
     private Mono<ServerResponse> handleDryRunException(Throwable e) {
         // Detail to the log only — the exception text can name internal hosts.
         Logger.warn("dispatcher dry-run unexpected error: {}", DispatcherResponses.briefReason(e));
+        if (e instanceof BatchScheduleTransportException) {
+            return DispatcherResponses.error(503, "batch_schedule_failed", "batch target allocation failed");
+        }
         if (e instanceof DataBufferLimitException) {
             return DispatcherResponses.error(413, "request_body_too_large",
                     "dry-run body exceeds the server limit; see MAX_IN_MEMORY_SIZE");
@@ -234,8 +187,7 @@ public class DispatcherInspectionHandler {
     }
 
     private boolean hasActiveTrafficPolicy() {
-        TrafficPolicyConfig policy = loadBalanceConfig == null
-                ? null : loadBalanceConfig.getRouter().getGroupSelector();
+        TrafficPolicyConfig policy = loadBalanceConfig.getRouter().getGroupSelector();
         return policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty());
     }
 
@@ -244,12 +196,19 @@ public class DispatcherInspectionHandler {
                                                      boolean effectivePreAssign,
                                                      boolean atomicBatchAllowed) {
         boolean shouldResolveTargets = effectivePreAssign && spec.isPreAssignable() && chunkCount > 0;
-        Mono<List<BatchScheduleTarget>> targetsMono = shouldResolveTargets
-                // A dry-run only renders BE role_addrs. Never consume the FE cursor for a request
-                // that deliberately sends no chunk to the selected FE.
-                ? batchScheduleClient.requestTargets(chunkCount, true, false)
-                : Mono.just(List.of());
-        return targetsMono.publishOn(cpuScheduler).flatMap(targets -> {
+        BatchScheduleRequest request = new BatchScheduleRequest();
+        request.setBatchCount(chunkCount);
+        request.setAssignBe(true);
+        request.setAssignFe(false);
+        Mono<BatchScheduleResponse> allocation = shouldResolveTargets
+                ? batchScheduleCoordinator.schedule(request)
+                : Mono.just(BatchScheduleResponse.success(List.of()));
+        return allocation.publishOn(cpuScheduler).flatMap(response -> {
+            if (!response.isSuccess()) {
+                int status = response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode() ? 400 : 503;
+                return DispatcherResponses.error(status, "batch_schedule_failed", response.getErrorMessage());
+            }
+            List<BatchScheduleTarget> targets = response.getServerStatus();
             // Target strings come from trusted discovery rather than the caller, but they are not
             // length-bounded by the wire type. Account for them before materializing repeated
             // envelopes as well; the final serialization check remains the authoritative backstop.
@@ -268,11 +227,11 @@ public class DispatcherInspectionHandler {
             chunksOut.addAll(chunkBodies);
             JSONObject out = dryRunEnvelope(
                     spec, arr.size(), chunkCount, effectivePreAssign, targets, chunksOut);
-            byte[] response = BatchBodyParser.serialize(out);
-            if (response.length > maxResponseBytes) {
+            byte[] serialized = BatchBodyParser.serialize(out);
+            if (serialized.length > maxResponseBytes) {
                 return responseTooLarge();
             }
-            return DispatcherResponses.jsonBytes(200, response);
+            return DispatcherResponses.jsonBytes(200, serialized);
         });
     }
 

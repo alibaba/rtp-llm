@@ -20,14 +20,12 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.pv.BatchPvLogData;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.dispatcher.MasterFeAssigner;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.BatchScheduleCoordinator;
-import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
@@ -71,9 +69,7 @@ public class HttpLoadBalanceServer {
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
-    private final ActiveRequestCounter activeRequestCounter;
     private final BatchScheduleCoordinator batchScheduleCoordinator;
-    private final MasterFeAssigner masterFeAssigner;
     private final EngineHealthReporter engineHealthReporter;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
@@ -84,9 +80,7 @@ public class HttpLoadBalanceServer {
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
                                  ServerScheduleLatencyRecorder serverLatencyRecorder,
-                                 ActiveRequestCounter activeRequestCounter,
                                  BatchScheduleCoordinator batchScheduleCoordinator,
-                                 MasterFeAssigner masterFeAssigner,
                                  EngineHealthReporter engineHealthReporter) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
@@ -95,9 +89,7 @@ public class HttpLoadBalanceServer {
         this.workerDirectory = workerDirectory;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
-        this.activeRequestCounter = activeRequestCounter;
         this.batchScheduleCoordinator = batchScheduleCoordinator;
-        this.masterFeAssigner = masterFeAssigner;
         this.engineHealthReporter = engineHealthReporter;
     }
 
@@ -131,10 +123,7 @@ public class HttpLoadBalanceServer {
                 .switchIfEmpty(Mono.error(new ServerWebInputException("empty request body")))
                 .flatMap(batchRequest -> {
                     context.setBatchRequest(batchRequest);
-                    return Mono.using(
-                            activeRequestCounter::acquire,
-                            ignored -> processBatchScheduleRequest(context),
-                            ActiveRequestCounter.RequestToken::close);
+                    return processBatchScheduleRequest(context);
                 })
                 .onErrorResume(error -> {
                     Logger.error("Batch schedule request processing error", error);
@@ -147,11 +136,7 @@ public class HttpLoadBalanceServer {
         return batchScheduleCoordinator.schedule(context.getBatchRequest())
                 .flatMap(response -> {
                     context.setBatchResponse(response);
-                    if (response.isSuccess()) {
-                        // The same singleton cursor also serves the master's in-process dispatcher,
-                        // so locally handled and forwarded requests share one FE allocation order.
-                        masterFeAssigner.assign(context.getBatchRequest(), response);
-                    } else {
+                    if (!response.isSuccess()) {
                         Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
                     }
                     return json(statusOf(response), response);
