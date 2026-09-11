@@ -10,14 +10,16 @@
 namespace rtp_llm {
 namespace test {
 
-TEST(LinearKVCacheGroupPartitionTest, PartitionEightSlicesEveryKdaHeadSegment) {
+class LinearKVCacheGroupPartitionTest: public ::testing::TestWithParam<int> {};
+
+TEST_P(LinearKVCacheGroupPartitionTest, PartitionSlicesEveryKdaHeadSegment) {
     auto spec                 = std::make_shared<LinearKVCacheSpec>();
     spec->type               = KVCacheSpecType::LinearAttention;
     spec->dtype              = DataType::TYPE_FP16;
     spec->layer_num          = 1;
-    spec->local_num_k_heads  = 8;
-    spec->local_num_v_heads  = 8;
-    spec->local_head_num_kv  = 8;
+    spec->local_num_k_heads  = 96;
+    spec->local_num_v_heads  = 96;
+    spec->local_head_num_kv  = 96;
     spec->head_k_dim         = 2;
     spec->head_v_dim         = 2;
     spec->conv_kernel_dim    = 3;
@@ -40,7 +42,7 @@ TEST(LinearKVCacheGroupPartitionTest, PartitionEightSlicesEveryKdaHeadSegment) {
     ASSERT_EQ(whole.size(), 1u);
     auto* base = static_cast<char*>(whole[0].addr);
 
-    constexpr int kPartitions = 8;
+    const int kPartitions = GetParam();
     const size_t ssm_bytes = spec->k_block_size_bytes();
     const size_t q_bytes = static_cast<size_t>(spec->local_num_k_heads)
                            * spec->head_k_dim * getTypeSize(spec->conv_state_dtype);
@@ -71,6 +73,8 @@ TEST(LinearKVCacheGroupPartitionTest, PartitionEightSlicesEveryKdaHeadSegment) {
     }
     block_pool->requestFree(allocated);
 }
+
+INSTANTIATE_TEST_SUITE_P(PrefillTP, LinearKVCacheGroupPartitionTest, ::testing::Values(8, 16));
 
 }  // namespace test
 }  // namespace rtp_llm

@@ -145,7 +145,8 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
         const int     prefill_attention_tp = allocate_request.prefill_attention_tp_size();
         const int     decode_attention_tp  = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
         const int     decode_ktp           = static_cast<int>(maga_init_params_.parallelism_config.get_ktp_size());
-        const bool    projection_ktp       = decode_ktp > 1 && decode_attention_tp == 1 && prefill_attention_tp == 8;
+        const bool    projection_ktp       = decode_ktp > 1 && decode_attention_tp == 1
+                                             && (prefill_attention_tp == 8 || prefill_attention_tp == 16);
         const bool    equal_attention_tp   = decode_attention_tp == prefill_attention_tp;
         const int64_t prefill_block        = allocate_request.prefill_seq_size_per_block();
         const int64_t prefill_kernel_block = allocate_request.prefill_kernel_seq_size_per_block();
@@ -159,7 +160,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                     && decode_context.peer_addrs.size() == static_cast<size_t>(prefill_attention_tp),
                                 "K3 PD requires one ordered Prefill peer per Prefill attention TP rank");
         RTP_LLM_CHECK_WITH_INFO(equal_attention_tp || projection_ktp,
-                                "K3 PD supports equal attention TP or P8 projection-KTP Decode; got P%d->D%d/KTP%d",
+                                "K3 PD supports equal attention TP or P8/P16 projection-KTP Decode; got P%d->D%d/KTP%d",
                                 prefill_attention_tp,
                                 decode_attention_tp,
                                 decode_ktp);
@@ -479,7 +480,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     const bool  equal_attention_tp =
         k3_hybrid_cache && decode_attention_tp > 1 && static_cast<size_t>(decode_attention_tp) == peer_addrs.size();
     // Keep generic unequal attention topologies rejected. Projection-KTP is
-    // the one explicit P8 fan-in contract and is validated separately.
+    // the explicit P8/P16 fan-in contract and is validated separately.
     RTP_LLM_CHECK_WITH_INFO(
         !k3_hybrid_cache || load_context.prefill_cp_size > 1 || equal_attention_tp || projection_ktp,
                             "K3 hybrid cache PD requires equal attention TP or projection KTP, got D%d/KTP%d with %zu prefill peers",

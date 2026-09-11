@@ -174,3 +174,11 @@ py_library(
     deps = ["//rtp_llm/models_py:modules"],
     visibility = ["//visibility:public"],
 )
+
+
+py_test(
+    name = "kimi_k3_fp8_nccl_test",
+    srcs = ["kimi_k3_fp8_nccl_test.py"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    timeout = "short",
+)

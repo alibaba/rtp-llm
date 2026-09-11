@@ -1,4 +1,4 @@
-"""DeepGEMM BF16 and FP8 GEMM/ReduceScatter for Kimi K3 Prefill."""
+"""Fused GEMM/ReduceScatter, with independent NCCL communication for FP8 TP16."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ class _GemmReduceScatterState:
     n: int
     deep_gemm: Optional[Any] = None
     workspace: Optional[Any] = None
+    fp8: bool = False
 
 
 _STATES: dict[tuple[dist.ProcessGroup, int], _GemmReduceScatterState] = {}
@@ -42,7 +43,7 @@ def _validate_fp8_workspace(deep_gemm: Any, workspace: Any) -> None:
 
 
 def configure_gemm_reduce_scatter(group, device, *, max_m, n, fp8=False) -> bool:
-    """Create the fused DeepGEMM workspace; unavailable backends fail at startup."""
+    """Create fused workspace; FP8 TP16 uses ordinary NCCL buffers instead."""
     key = collective_gemm_state_key(group, device)
     device = torch.device("cuda", key[1])
     existing = _STATES.get(key)
@@ -51,11 +52,14 @@ def configure_gemm_reduce_scatter(group, device, *, max_m, n, fp8=False) -> bool
             raise RuntimeError(
                 "K3 GEMM/RS was already configured with a different shape"
             )
-        if fp8:
+        if existing.world_size == 16 and existing.fp8:
+            if not fp8:
+                raise RuntimeError("FP8 TP16 NCCL state cannot serve BF16 GEMM/RS")
+        elif fp8:
             _validate_fp8_workspace(existing.deep_gemm, existing.workspace)
         return True
     world_size = int(group.size())
-    if world_size not in _SUPPORTED_WORLD_SIZES:
+    if world_size not in _SUPPORTED_WORLD_SIZES and not (fp8 and world_size == 16):
         raise RuntimeError(
             f"DeepGEMM GEMM/RS supports TP{_SUPPORTED_WORLD_SIZES}, got TP{world_size}"
         )
@@ -63,6 +67,14 @@ def configure_gemm_reduce_scatter(group, device, *, max_m, n, fp8=False) -> bool
         raise ValueError(
             "GEMM/RS capacity must be positive with max_m divisible by TP size"
         )
+    if fp8 and world_size == 16:
+        _STATES[key] = _GemmReduceScatterState(
+            group, device, world_size, max_m, n, fp8=True
+        )
+        logging.info(
+            "[K3_GEMM_REDUCE_SCATTER] nccl TP%d max_m=%d n=%d", world_size, max_m, n
+        )
+        return True
     deep_gemm = None
     failure_reason = ""
     try:
@@ -93,7 +105,7 @@ def configure_gemm_reduce_scatter(group, device, *, max_m, n, fp8=False) -> bool
     if fp8:
         _validate_fp8_workspace(deep_gemm, workspace)
     _STATES[key] = _GemmReduceScatterState(
-        group, device, world_size, max_m, n, deep_gemm, workspace
+        group, device, world_size, max_m, n, deep_gemm, workspace, fp8=fp8
     )
     logging.info(
         "[K3_GEMM_REDUCE_SCATTER] fused TP%d max_m=%d n=%d workspace=%.3f GiB",
@@ -112,7 +124,7 @@ def gemm_reduce_scatter(
     *,
     pad_rows: bool,
 ) -> torch.Tensor:
-    """Run fused GEMM/RS for every Prefill size, including padded small M."""
+    """Run fused GEMM/RS, or independent NCCL for FP8 TP16, including padding."""
     if not x.is_cuda:
         raise TypeError("K3 GEMM/RS requires CUDA input")
     state = _STATES.get(collective_gemm_state_key(group, x.device))
@@ -141,6 +153,8 @@ def gemm_reduce_scatter(
             f"K3 GEMM/RS M={physical_m} must be divisible by TP{state.world_size}"
         )
     if not isinstance(weight, torch.Tensor):
+        if state.world_size == 16:
+            return _fp8_nccl_gemm_reduce_scatter(x, weight, state, physical_m)
         return _fp8_remote_gemm_reduce_scatter(x, weight, state, physical_m)
     if (
         weight.ndim != 2
@@ -248,4 +262,32 @@ def _fp8_remote_gemm_reduce_scatter(x, projection, state, physical_m):
             )
             workspace._barrier(1)
             workspace._last_stream = stream
+    return output
+
+
+def _fp8_nccl_gemm_reduce_scatter(x, projection, state, physical_m):
+    """Compute one FP8 GEMM, then sum/scatter its BF16 output with NCCL."""
+    if not state.fp8 or projection.K != x.shape[1] or projection.N != state.n:
+        raise ValueError("FP8 RS projection does not match the configured workspace")
+    if physical_m > state.max_m:
+        raise RuntimeError("FP8 RS exceeds the configured token capacity")
+    output = torch.empty(
+        (physical_m // state.world_size, state.n), dtype=torch.bfloat16, device=x.device
+    )
+    if physical_m == 0:
+        return output
+    if isinstance(x, QuantizedActivation):
+        x = x.pad_rows(physical_m)
+    elif physical_m != x.shape[0]:
+        padded = x.new_zeros((physical_m, x.shape[1]))
+        padded[: x.shape[0]].copy_(x)
+        x = padded
+    else:
+        x = x.contiguous()
+    with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.fp8_nccl"):
+        if isinstance(x, QuantizedActivation):
+            partial = projection.forward_quantized(x.values, x.scales)
+        else:
+            partial = projection(x)
+        dist.reduce_scatter_tensor(output, partial, op=dist.ReduceOp.SUM, group=state.group)
     return output
