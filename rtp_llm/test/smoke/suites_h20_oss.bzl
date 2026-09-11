@@ -181,6 +181,13 @@ def h20_oss_suites():
                 smoke_args="--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
                 gpu_type=["H20"],
             ),
+            # Chunked prefill regression for the normal executor.
+            smoke_test(
+                name="dense_chunked_prefill",
+                task_info="data/model/qwen3/q_r_h20_chunked_prefill.json",
+                smoke_args="--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64",
+                gpu_type=["H20"],
+            ),
             smoke_test(
                 name="dense_fp8pt_dynamic",
                 task_info="data/model/qwen3/q_r_h20_per_tensor_w13.json",
@@ -438,6 +445,14 @@ def h20_oss_suites():
                 task_info="data/model/qwen2_14b/q_r_mtp.json",
                 smoke_args="--max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
                 gpu_type=["H20"]
+            ),
+            # Default warmup covers real FlashInfer chunks; 320 leaves MTP draft headroom for
+            # the existing 155 + 100-token golden, whose prefill runs as 64 + 64 + 27.
+            smoke_test(
+                name="eagle_mtp_chunked_prefill_tp2",
+                task_info="data/model/qwen2_14b/q_r_mtp_chunked_prefill.json",
+                smoke_args="--max_seq_len 320 --seq_size_per_block 64 --prefill_chunk_size 64 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --reserver_runtime_mem_mb 21954 --tp_size 2",
+                gpu_type=["H20"],
             ),
             smoke_test(
                 name="eagle_mtp_reuse",

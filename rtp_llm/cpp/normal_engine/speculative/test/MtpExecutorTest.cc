@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
 #define private public
@@ -180,6 +181,8 @@ vector<T> catVectors(const vector<vector<T>>& vectors) {
 
 class FakeModel: public ModelBase {
 public:
+    std::function<void(GptModelInputs&)> forward_hook;
+
     FakeModel(const GptModelInitParams& params) {
         weights_  = params.weights;
         model_id_ = params.model_id;
@@ -187,6 +190,9 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         checkInputs(inputs);
+        if (forward_hook) {
+            forward_hook(const_cast<GptModelInputs&>(inputs));
+        }
         ++forward_count_;
         recordEvent("forward");
         return output_holder.get();
@@ -556,7 +562,6 @@ public:
         model_config.max_seq_len                           = test_config.max_seq_len;
         model_config.vocab_size                            = test_config.vocab_size;
         model_config.num_layers                            = test_config.num_layers;
-        model_config.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
         model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
         sp_config.type                                     = test_config.sp_type;
         sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
@@ -570,10 +575,13 @@ public:
                                                                             /*local_head_num_kv=*/128,
                                                                             /*size_per_head=*/256));
 
-        EngineInitParams params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-        params.sp_config                   = sp_config;
-        params.pd_sep_config.role_type     = test_config.role_type;
-        params.parallelism_config.role_type = test_config.role_type;
+        EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        // createEngineInitParams resets MM defaults; apply the requested style afterwards.
+        model_config.mm_model_config.mm_position_ids_style         = test_config.mm_position_ids_style;
+        params.model_config_.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
+        params.sp_config                                           = sp_config;
+        params.pd_sep_config.role_type                             = test_config.role_type;
+        params.parallelism_config.role_type                        = test_config.role_type;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
@@ -768,6 +776,92 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
+}
+
+TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
+    // Use the real CP splitter with fake model forwards and TP collectives.
+    for (const bool explicit_position_ids : {false, true}) {
+        for (const bool middle_chunk : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "explicit_position_ids=" << explicit_position_ids
+                                           << ", middle_chunk=" << middle_chunk);
+            MtpExecutorTestConfig test_config;
+            test_config.gen_num_per_cycle      = 2;
+            test_config.mm_position_ids_style  = explicit_position_ids ? MROPE : DEFAULT;
+            test_config.position_id_len_factor = explicit_position_ids ? 3 : 1;
+            auto  components = createMtpExecutorComponents(test_config);
+            auto& executor = *components.executor;
+            executor.parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+            executor.warm_up_ = true;  // Stop after draft forward, before draft sampling.
+
+            constexpr int prefix_len = 4;
+            constexpr int chunk_len  = 8;
+            const int     prompt_len = prefix_len + chunk_len + (middle_chunk ? 2 : 0);
+            vector<int> prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
+            prompt.resize(prompt_len);
+            auto stream = createContextStream(
+                components.model_config, components.runtime_config, components.resource_context, prompt);
+            stream->setReuseLength(prefix_len);
+            stream->setChunkSize(chunk_len);
+            stream->enableWarmupChunkWindow();
+            ASSERT_EQ(stream->isMiddleChunk(), middle_chunk);
+
+            torch::Tensor prompt_positions;
+            if (explicit_position_ids) {
+                prompt_positions = (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10
+                                    + torch::arange(3, torch::kInt32)).flatten();
+                stream->setContextPositionIds(prompt_positions);
+            }
+
+            GptModelInputs target_input;
+            target_input.combo_tokens      = torch::tensor({0, 1, 2, 3, 0, 1, 2, 3}, torch::kInt32);
+            target_input.input_lengths     = torch::tensor({chunk_len}, torch::kInt32);
+            target_input.prefix_lengths    = torch::tensor({prefix_len}, torch::kInt32);
+            target_input.lm_output_indexes = torch::tensor({chunk_len - 1}, torch::kInt32);
+            if (explicit_position_ids) {
+                target_input.combo_position_ids = prompt_positions.narrow(0, prefix_len * 3, chunk_len * 3);
+            }
+            GptModelOutputs target_output;
+            target_output.logits            = torch::zeros({1, 4});
+            target_output.all_hidden_states = torch::zeros({chunk_len / 2, 2});
+            components.fake_target_model->setInputs({target_input});
+            components.fake_target_model->setOutputs({target_output});
+            components.fake_target_model->forward_hook = [explicit_position_ids](GptModelInputs& input) {
+                ParallelismConfig cp_config;
+                cp_config.tp_size = 2;
+                cp_config.tp_rank = 0;
+                torch_ext::PyContextParallelParams cp_params;
+                ZigZagProcessor(cp_config).handleInputs(input, cp_params);
+                const int factor = explicit_position_ids ? 3 : 1;
+                EXPECT_EQ(input.combo_tokens.numel(), chunk_len / 2);
+                EXPECT_EQ(input.combo_position_ids.numel(), chunk_len / 2 * factor);
+                // Preserve the real rank-local shape, but give the old buggy
+                // memmove enough backing storage to fail assertions safely.
+                auto storage         = torch::full({chunk_len * factor}, -999, input.combo_position_ids.options());
+                auto local_positions = storage.narrow(0, 0, input.combo_position_ids.numel());
+                local_positions.copy_(input.combo_position_ids);
+                input.combo_position_ids = local_positions;
+            };
+
+            GptModelInputs draft_input = target_input;
+            draft_input.combo_tokens       = torch::tensor({1, 2, 3, 0, 1, 2, 3, middle_chunk ? 0 : 2}, torch::kInt32);
+            draft_input.last_hidden_states = target_output.all_hidden_states;
+            if (explicit_position_ids) {
+                auto tail = middle_chunk ? torch::tensor({120, 121, 122}, torch::kInt32) :
+                                           torch::tensor({112, 112, 112}, torch::kInt32);
+                draft_input.combo_position_ids = torch::cat(
+                    {prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
+            }
+            components.fake_draft_model->setInputs({draft_input});
+            components.fake_draft_model->setOutputs({GptModelOutputs{}});
+            components.fake_sampler->setInputs({SamplerInputs{target_output.logits}});
+            components.fake_sampler->setOutputs({SamplerOutput{torch::tensor({{2}}, torch::kInt32)}});
+            executor.setTargetModel(std::move(components.fake_target_model));
+            executor.setDraftModel(std::move(components.fake_draft_model));
+            executor.setSampler(std::move(components.fake_sampler));
+            MtpMetricsCollector metrics;
+            EXPECT_TRUE(executor.prefillStep({stream}, metrics, 0).ok());
+        }
+    }
 }
 
 TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {

@@ -1,6 +1,7 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 #include <cstdlib>
+#include <limits>
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -123,6 +124,56 @@ TEST_F(NormalEngineTest, testSimple) {
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
+    CustomConfig config;
+    config.warm_up                  = true;
+    config.prefill_chunk_size       = 4;
+    config.forward_shapes           = std::make_shared<std::vector<ForwardShape>>();
+    config.multi_task_prompt_tokens = {{"system", {1, 2, 3, 4, 5, 6, 7}}};
+    auto engine                     = createMockEngine(config);
+
+    // Token-heavy: one row walks the 19-token prompt in budget-4 chunks. Row-heavy: four rows
+    // each execute one final token after a block-aligned 18-token synthetic prefix. The 7-token
+    // whole-segment shape runs once during warmup and once while constructing the system prompt.
+    ASSERT_EQ(*config.forward_shapes,
+              (std::vector<ForwardShape>{
+                  {4, 0, 1},
+                  {4, 4, 1},
+                  {4, 8, 1},
+                  {4, 12, 1},
+                  {3, 16, 1},
+                  {4, 18, 4},
+                  {7, 0, 1},
+                  {7, 0, 1}}));
+    ASSERT_EQ(engine->resourceContext().cache_manager->cacheConfig().block_num, 100);
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupCapsIntMaxBudgetByContextBatchSize) {
+    CustomConfig config;
+    config.warm_up                = true;
+    config.prefill_chunk_size     = std::numeric_limits<int>::max();
+    config.max_context_batch_size = 8;
+    config.forward_shapes         = std::make_shared<std::vector<ForwardShape>>();
+    (void)createMockEngine(config);
+
+    ASSERT_EQ(*config.forward_shapes,
+              (std::vector<ForwardShape>{
+                  {19, 0, 1},
+                  {8, 18, 8},
+              }));
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillLossWarmupUsesWholeSegment) {
+    CustomConfig config;
+    config.warm_up             = true;
+    config.warm_up_with_loss   = true;
+    config.prefill_chunk_size  = 4;
+    config.forward_shapes      = std::make_shared<std::vector<ForwardShape>>();
+    (void)createMockEngine(config);
+
+    ASSERT_EQ(*config.forward_shapes, (std::vector<ForwardShape>{{19 * 128, 0, 128}}));
 }
 
 TEST_F(NormalEngineTest, testSystemPrompt) {
