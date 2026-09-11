@@ -1,5 +1,6 @@
 load("//:def.bzl", "cc_test_wrapper", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
+load(":header_deps.bzl", "model_headers")
 
 cc_test = cc_test_wrapper
 
@@ -45,14 +46,22 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+model_headers(
+    name = "tp_sync_model_headers",
+    testonly = True,
+    models = "//rtp_llm/cpp/models:models",
+)
+
 cc_library(
     name = "tp_sync_model_inputs_test_ops_lib",
     testonly = True,
-    srcs = ["tp_sync_model_inputs_test_ops.cc"],
+    srcs = [
+        "tp_sync_model_inputs_test_ops.cc",
+        "//rtp_llm/cpp/models:ModelTypes.cc",
+    ],
     copts = cuda_copts(),
     deps = [
-        "//rtp_llm/cpp/models:models",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        ":tp_sync_model_headers",
     ] + torch_deps(),
     alwayslink = True,
 )

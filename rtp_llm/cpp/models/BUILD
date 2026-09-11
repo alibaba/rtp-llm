@@ -1,5 +1,10 @@
 load("//:def.bzl", "copts")
 
+exports_files(
+    ["ModelTypes.cc"],
+    visibility = ["//rtp_llm/cpp/models/test:__pkg__"],
+)
+
 # Sample infos - model sampling data structures
 cc_library(
     name = "sample_infos",
