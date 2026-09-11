@@ -8,12 +8,3 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
-
-py_test(
-    name = "test_prefill",
-    srcs = ["test_prefill.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm:testlib",
-    ],
-)

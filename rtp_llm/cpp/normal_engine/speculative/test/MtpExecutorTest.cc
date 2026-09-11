@@ -610,7 +610,7 @@ TEST_F(MtpExecutorTest, testMakePrefillRoundInputPacksMultiRequestRounds) {
     inputs.last_hidden_states        = torch::ones({8, 3}, torch::kFloat32).cuda();
 
     // Python-planned rounds (plan_kimi_k3_chunk_rounds, chunk_budget=4,
-    // alignment_tokens=2): two aligned non-terminal slices, then a terminal round.
+    // page_size=2): two aligned non-terminal slices, then a terminal round.
     PrefillChunkRound first_round;
     first_round.slices = {
         {0, 0, 2, 2, 0, 2, false},
@@ -699,7 +699,7 @@ TEST_F(MtpExecutorTest, testMakePrefillRoundInputSelectsPerRequestMetadataRows) 
     inputs.kv_cache_kernel_block_id_host = inputs.kv_cache_kernel_block_id.cpu().clone();
     inputs.request_id                    = torch::tensor({100, 200, 300}, torch::kInt64).cuda();
 
-    // Python-planned rounds (chunk_budget=4, alignment_tokens=2): requests 0+1
+    // Python-planned rounds (chunk_budget=4, page_size=2): requests 0+1
     // advance in round 0, request 2 alone in round 1.
     PrefillChunkRound first_round;
     first_round.slices = {
@@ -1118,39 +1118,6 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanPublishesReusedPref
     EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->end_block_host), (std::vector<int32_t>{26}));
     components.executor->advanceDraftCacheStorePublishFrontier(terminal_input, terminal_round, publish_frontier);
     EXPECT_EQ(publish_frontier, (std::vector<int32_t>{26}));
-}
-
-TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePlanUsesPhysicalBlocksIndependentOfPlannerBoundary) {
-    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
-
-    // A model planner may choose a 1024-token non-terminal boundary while
-    // cache publication uses 128-token physical blocks. The shared round
-    // carrier contains only absolute token positions.
-    PrefillChunkRound planned_round;
-    planned_round.slices = {{0, 0, 1024, 1024, 0, 1024, false}};
-    GptModelInputs       planned_input;
-    std::vector<int32_t> publish_frontier{0};
-    planned_input.input_lengths  = torch::tensor({1024}, torch::kInt32);
-    planned_input.prefix_lengths = torch::tensor({0}, torch::kInt32);
-    components.executor->setPrefillChunkCacheStorePublishPlan(
-        planned_input, planned_round, /*seq_size_per_block=*/128, /*complete_blocks_only=*/true, publish_frontier);
-    ASSERT_TRUE(planned_input.cache_store_publish_plan.has_value());
-    EXPECT_EQ(toVec<int32_t>(planned_input.cache_store_publish_plan->begin_block_host), (std::vector<int32_t>{0}));
-    EXPECT_EQ(toVec<int32_t>(planned_input.cache_store_publish_plan->end_block_host), (std::vector<int32_t>{8}));
-
-    components.executor->advanceDraftCacheStorePublishFrontier(planned_input, planned_round, publish_frontier);
-    EXPECT_EQ(publish_frontier, (std::vector<int32_t>{8}));
-
-    PrefillChunkRound terminal_round;
-    terminal_round.slices = {{0, 1024, 1153, 129, 1024, 1153, true}};
-    GptModelInputs terminal_input;
-    terminal_input.input_lengths  = torch::tensor({129}, torch::kInt32);
-    terminal_input.prefix_lengths = torch::tensor({1024}, torch::kInt32);
-    components.executor->setPrefillChunkCacheStorePublishPlan(
-        terminal_input, terminal_round, /*seq_size_per_block=*/128, /*complete_blocks_only=*/false, publish_frontier);
-    ASSERT_TRUE(terminal_input.cache_store_publish_plan.has_value());
-    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->begin_block_host), (std::vector<int32_t>{8}));
-    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->end_block_host), (std::vector<int32_t>{10}));
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {

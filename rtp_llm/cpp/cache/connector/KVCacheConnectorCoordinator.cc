@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
@@ -25,15 +24,13 @@ CacheGroupType groupTypeForConnector(const CacheConfig& cache_config, int group_
     return CacheGroupType::FULL;
 }
 
-bool groupUsesVirtualBlockCacheLayout(const CacheConfig& cache_config, int group_id, int shard_size) {
-    if (shard_size <= 1 || groupTypeForConnector(cache_config, group_id) == CacheGroupType::FULL || group_id < 0
+bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp_size) {
+    if (cp_size <= 1 || groupTypeForConnector(cache_config, group_id) == CacheGroupType::FULL || group_id < 0
         || static_cast<size_t>(group_id) >= cache_config.group_seq_size_per_block.size()) {
         return false;
     }
-    return usesVirtualBlockCacheLayout(groupTypeForConnector(cache_config, group_id),
-                                       cache_config.seq_size_per_block,
-                                       cache_config.group_seq_size_per_block[static_cast<size_t>(group_id)],
-                                       shard_size);
+    const auto row_tokens = cache_config.group_seq_size_per_block[static_cast<size_t>(group_id)];
+    return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
 }
 
 bool isCompactFullBlockList(const KVCacheResource& source,
@@ -92,9 +89,10 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 
-        if (groupUsesVirtualBlockCacheLayout(cache_config, gid, cp_size)) {
-            // A virtual-block LINEAR/SWA row spans one complete page-RR stripe,
-            // so its compact block list already uses canonical stripe-end keys.
+        if (isCpCompactFixedGroup(cache_config, gid, cp_size)) {
+            // DSV4 fixed/SWA groups can be CP-compact by using a row size of
+            // seq_size_per_block * cp_size, so their block list is already in
+            // the canonical last-rank key namespace.
             for (size_t i = 0; i < selected_keys.size(); ++i) {
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
             }

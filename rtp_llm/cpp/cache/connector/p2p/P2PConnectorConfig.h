@@ -68,8 +68,8 @@ struct P2PConnectorWorkerConfig {
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
         config.layer_all_num                           = layer_all_num;
-        config.kv_cache_sharded                        = parallelism_config.kv_page_rr_enabled();
-        if (config.kv_cache_sharded) {
+        config.kv_cache_sharded                        = parallelism_config.prefill_cp_config.kv_cache_sharded;
+        if (config.kv_cache_sharded && parallelism_config.tp_size > 1) {
             config.cp_size = static_cast<int>(parallelism_config.tp_size);
             config.cp_rank = static_cast<int>(parallelism_config.tp_rank);
         }

@@ -258,7 +258,6 @@ cc_test(
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
-        "//rtp_llm/models_py/bindings/core:device_data",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

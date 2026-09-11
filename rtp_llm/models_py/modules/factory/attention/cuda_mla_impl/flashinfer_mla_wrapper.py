@@ -18,7 +18,6 @@ from .flashinfer_mla import (
     check_attention_inputs,
     warmup_flashinfer_python,
 )
-from .mla_page_rr_cache import MlaPageRRCacheAdapter
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 
@@ -202,14 +201,13 @@ class MlaFlashInferImplBase(MlaImplBase):
         positions = getattr(self.fmha_params, "positions_d", None)
         batch_indices = getattr(self.fmha_params, "batch_indice_d", None)
         block_table = getattr(self.attn_inputs, "kv_cache_kernel_block_id_device", None)
-        page_rr_adapter = getattr(self, "page_rr_cache_adapter", None)
         if (
             positions is None
             or batch_indices is None
             or block_table is None
             or positions.numel() == 0
             or batch_indices.numel() == 0
-            or (block_table.numel() == 0 and page_rr_adapter is None)
+            or block_table.numel() == 0
         ):
             raise RuntimeError(
                 "direct CUDA MLA cache write requires positions, batch indices, "
@@ -220,15 +218,6 @@ class MlaFlashInferImplBase(MlaImplBase):
                 "direct CUDA MLA position/batch metadata size mismatch: "
                 f"positions={positions.numel()} batch={batch_indices.numel()}"
             )
-
-        if page_rr_adapter is not None:
-            slot_mapping = page_rr_adapter.slot_mapping(
-                positions,
-                batch_indices,
-                block_table,
-            )
-            slot_mapping.record_stream(torch.cuda.current_stream(slot_mapping.device))
-            return slot_mapping
 
         positions_i64 = positions.to(torch.int64)
         batch_indices_i64 = batch_indices.to(torch.int64)
@@ -478,18 +467,6 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
     ) -> None:
         from .flashmla_dense_prefill import MlaFlashMLAPrefillOp
 
-        page_rr_enabled = bool(
-            parallelism_config is not None and parallelism_config.kv_page_rr_enabled()
-        )
-        self.page_rr_cache_adapter = (
-            MlaPageRRCacheAdapter(
-                page_tokens=attn_configs.kernel_tokens_per_block,
-                shard_size=int(parallelism_config.tp_size),
-                shard_rank=int(parallelism_config.tp_rank),
-            )
-            if page_rr_enabled
-            else None
-        )
         MlaFlashInferImplBase.__init__(
             self,
             MlaFlashMLAPrefillOp(
@@ -510,7 +487,6 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
                 fp8_compute=attn_configs.mla_fp8_compute,
                 q_scale=attn_configs.mla_fp8_q_scale,
                 kv_scale=attn_configs.mla_fp8_kv_scale,
-                external_prefix_cache=self.page_rr_cache_adapter is not None,
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
@@ -545,35 +521,6 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         if self.fmha_impl is not None:
             self.prepare(attn_inputs)
 
-    def _validate_direct_cache_capacity(
-        self,
-        params: Any,
-        block_table: Optional[torch.Tensor],
-    ) -> None:
-        if block_table is None:
-            if params.has_reuse_cache:
-                raise RuntimeError("FlashMLA cache reuse requires a cache block table")
-            return
-        if self.page_rr_cache_adapter is not None:
-            self.page_rr_cache_adapter.validate_block_table_capacity(
-                block_table,
-                params.kv_lens_host,
-            )
-            return
-
-        required_pages = tuple(
-            (kv_len + self.seq_size_per_block - 1) // self.seq_size_per_block
-            for kv_len in params.kv_lens_host
-        )
-        table_width = int(block_table.shape[1])
-        if params.has_reuse_cache and table_width == 0:
-            raise RuntimeError("FlashMLA cache reuse requires a CUDA block table")
-        if table_width and any(required > table_width for required in required_pages):
-            raise RuntimeError(
-                "FlashMLA query write exceeds the selected block table: "
-                f"required={required_pages} max_blocks={table_width}"
-            )
-
     def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False):
         """Plan dense FlashMLA directly from CUDA metadata.
 
@@ -587,68 +534,11 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         from .flashmla_dense_prefill import build_flashmla_device_params
 
         params = build_flashmla_device_params(attn_inputs, self.seq_size_per_block)
-        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-        self._validate_direct_cache_capacity(params, block_table)
         self.attn_inputs = attn_inputs
         self.fmha_params = params
         self.rope_params = params
         self.fmha_impl.plan(params)
         return params
-
-    def compute_prefill_context(
-        self,
-        q: torch.Tensor,
-        compressed_kv: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_id: int,
-    ) -> torch.Tensor:
-        """Read page-RR cache into canonical rows before backend computation."""
-
-        assert self.fmha_impl is not None
-        assert self.fmha_params is not None
-        canonical_prefix_kv = None
-        adapter = self.page_rr_cache_adapter
-        prefix_lens = tuple(int(value) for value in self.fmha_params.prefix_lens_host)
-        if adapter is not None and any(prefix_lens):
-            if kv_cache is None:
-                raise RuntimeError("MLA page-RR prefix reuse requires an MLA KV cache")
-            block_table = getattr(
-                self.attn_inputs,
-                "kv_cache_kernel_block_id_device",
-                None,
-            )
-            if block_table is None:
-                raise RuntimeError("MLA page-RR prefix reuse requires a block table")
-            raw_cache = kv_cache.kv_cache_base
-            expected_width = (
-                self.attn_configs.kv_lora_rank + self.attn_configs.rope_head_dim
-            )
-            if (
-                raw_cache.dtype != torch.bfloat16
-                or not raw_cache.is_cuda
-                or raw_cache.shape[-1] != expected_width
-            ):
-                raise RuntimeError(
-                    "MLA page-RR Prefill requires BF16 raw cache "
-                    f"[blocks,{adapter.page_tokens},{expected_width}], got "
-                    f"shape={tuple(raw_cache.shape)} dtype={raw_cache.dtype} "
-                    f"device={raw_cache.device}"
-                )
-            canonical_prefix_kv = adapter.read_prefix(
-                raw_cache,
-                block_table,
-                prefix_lens,
-            )
-
-        return self.fmha_impl.forward(
-            q,
-            compressed_kv,
-            k_pe,
-            kv_cache,
-            layer_id,
-            canonical_prefix_kv=canonical_prefix_kv,
-        )
 
     @classmethod
     def support(
@@ -660,10 +550,6 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
             and not attn_configs.is_sparse
             and attn_inputs.is_prefill
         )
-
-    @classmethod
-    def support_page_rr_prefill(cls) -> bool:
-        return True
 
 
 class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):

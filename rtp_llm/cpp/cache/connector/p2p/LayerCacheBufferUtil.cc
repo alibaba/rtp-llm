@@ -5,7 +5,7 @@
 namespace rtp_llm {
 
 std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
-    const KVCacheResource& resource, int batch_id, int start_block_idx, int block_count, int cp_rank, int cp_size) {
+    KVCacheResource& resource, int batch_id, int start_block_idx, int block_count, int cp_rank, int cp_size) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
     const auto& layer_block_ids = resource.layerBlocks();
@@ -18,13 +18,13 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
     return layer_cache_buffers;
 }
 
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const KVCacheResource& resource,
-                                                                     int                    batch_id,
-                                                                     int                    layer_id,
-                                                                     int                    start_block_idx,
-                                                                     int                    block_count,
-                                                                     int                    cp_rank,
-                                                                     int                    cp_size) {
+std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource& resource,
+                                                                     int              batch_id,
+                                                                     int              layer_id,
+                                                                     int              start_block_idx,
+                                                                     int              block_count,
+                                                                     int              cp_rank,
+                                                                     int              cp_size) {
     const auto& layer_block_ids = resource.layerBlocks();
     const auto& cache_keys      = resource.cacheKeys();
 
@@ -53,12 +53,11 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const KVCac
     // remap the prefill side registers each owned block under cache_keys[i],
     // which the decode-side per-peer block_pos lookup never finds → load
     // buffer timeouts.
-    const bool keys_are_prepaired      = resource.cacheKeysAreCpCanonical();
-    const int  local_to_logical_stride = keys_are_prepaired ? 1 : cp_size;
-    const int  local_to_logical_offset = keys_are_prepaired ? 0 : cp_rank;
-    const int  max_local_blocks_for_keys =
-        cp_size > 1 && !keys_are_prepaired ?
-             static_cast<int>((cache_keys.size() > static_cast<size_t>(cp_rank) ? cache_keys.size() - cp_rank : 0)
+    const int local_to_logical_stride = cp_size;
+    const int local_to_logical_offset = cp_rank;
+    const int max_local_blocks_for_keys =
+        cp_size > 1 ?
+            static_cast<int>((cache_keys.size() > static_cast<size_t>(cp_rank) ? cache_keys.size() - cp_rank : 0)
                              + cp_size - 1)
                 / cp_size :
             static_cast<int>(cache_keys.size());
@@ -80,12 +79,11 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const KVCac
         const int local_idx   = start_block_idx + static_cast<int>(i);
         const int logical_idx = local_to_logical_offset + local_idx * local_to_logical_stride;
         if (logical_idx < 0 || static_cast<size_t>(logical_idx) >= cache_keys.size()) {
-            RTP_LLM_LOG_WARNING("logical_idx %d out of cache_keys range %zu (cp_rank=%d cp_size=%d prepaired=%d)",
+            RTP_LLM_LOG_WARNING("logical_idx %d out of cache_keys range %zu (cp_rank=%d cp_size=%d)",
                                 logical_idx,
                                 cache_keys.size(),
                                 cp_rank,
-                                cp_size,
-                                keys_are_prepaired);
+                                cp_size);
             break;
         }
         int     block_id = block_ids[local_idx];

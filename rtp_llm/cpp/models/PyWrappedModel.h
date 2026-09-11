@@ -299,8 +299,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         kv_cache.seq_size_per_block        = params.tokens_per_block;
         kv_cache.kernel_seq_size_per_block = params.kernel_tokens_per_block;
         const auto& layout                 = params.kv_cache_layer_layout.value();
-        kv_cache.local_shard_count         = layout.local_shard_count;
-        kv_cache.linear_step               = layout.linear_step;
         kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
         kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
         kv_cache.head_dim      = params.description.attention_conf.size_per_head;

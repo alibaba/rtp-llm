@@ -86,7 +86,7 @@ class KimiK3ChunkRdmaPublisher:
         input_lengths: Sequence[int],
         prefix_lengths: Sequence[int],
         *,
-        transfer_page_tokens: int,
+        page_size: int,
         kda_layer_indices: Sequence[int],
     ) -> None:
         self.input_lengths = tuple(int(value) for value in input_lengths)
@@ -98,12 +98,11 @@ class KimiK3ChunkRdmaPublisher:
             raise ValueError(
                 "K3 chunk RDMA publisher requires matching non-empty lengths"
             )
-        if transfer_page_tokens <= 0:
+        if page_size <= 0:
             raise ValueError(
-                "K3 chunk RDMA transfer page size must be positive, "
-                f"got {transfer_page_tokens}"
+                f"K3 chunk RDMA page size must be positive, got {page_size}"
             )
-        self.transfer_page_tokens = int(transfer_page_tokens)
+        self.page_size = int(page_size)
         self.kda_layer_indices = frozenset(
             int(value) for value in kda_layer_indices
         )
@@ -111,8 +110,7 @@ class KimiK3ChunkRdmaPublisher:
         self._terminal = [False] * len(self.input_lengths)
         self._published_kda: set[tuple[int, int]] = set()
         self._final_pages = tuple(
-            (prefix + length + self.transfer_page_tokens - 1)
-            // self.transfer_page_tokens
+            (prefix + length + self.page_size - 1) // self.page_size
             for prefix, length in zip(self.prefix_lengths, self.input_lengths)
         )
 
@@ -146,7 +144,7 @@ class KimiK3ChunkRdmaPublisher:
 
     def prefix_step(self) -> KimiK3ChunkRdmaPublishStep:
         return self._make_step(
-            [prefix // self.transfer_page_tokens for prefix in self.prefix_lengths],
+            [prefix // self.page_size for prefix in self.prefix_lengths],
             [False] * len(self.input_lengths),
         )
 
@@ -165,7 +163,7 @@ class KimiK3ChunkRdmaPublisher:
                 raise RuntimeError(
                     f"K3 chunk RDMA request {index} appeared after its terminal round"
                 )
-            expected_frontier = int(item.absolute_start) // self.transfer_page_tokens
+            expected_frontier = int(item.absolute_start) // self.page_size
             if self._frontier[index] != expected_frontier:
                 raise RuntimeError(
                     "K3 chunk RDMA publication frontier does not match the round start: "
@@ -174,11 +172,9 @@ class KimiK3ChunkRdmaPublisher:
                 )
             absolute_end = int(item.absolute_end)
             if item.terminal:
-                end = (
-                    absolute_end + self.transfer_page_tokens - 1
-                ) // self.transfer_page_tokens
+                end = (absolute_end + self.page_size - 1) // self.page_size
             else:
-                end = absolute_end // self.transfer_page_tokens
+                end = absolute_end // self.page_size
             ends[index] = end
             terminals[index] = bool(item.terminal)
         return self._make_step(ends, terminals)
@@ -284,7 +280,7 @@ class KimiK3ChunkCachePublisher:
         *,
         input_lengths: Sequence[int],
         prefix_lengths: Sequence[int],
-        transfer_page_tokens: int,
+        page_size: int,
     ) -> KimiK3ChunkCachePublisher:
         if not chunkwise_rdma_enabled():
             return cls()
@@ -303,7 +299,7 @@ class KimiK3ChunkCachePublisher:
             publisher=KimiK3ChunkRdmaPublisher(
                 input_lengths,
                 prefix_lengths,
-                transfer_page_tokens=transfer_page_tokens,
+                page_size=page_size,
                 kda_layer_indices=(
                     layer_idx
                     for layer_idx, layer in enumerate(layers)
@@ -383,9 +379,9 @@ def plan_kimi_k3_chunk_rounds(
     prefix_lengths: Sequence[int],
     *,
     chunk_budget: int,
-    alignment_tokens: int,
+    page_size: int,
 ) -> tuple[KimiK3ChunkRound, ...]:
-    """Split a packed Prefill batch at absolute joint-checkpoint boundaries."""
+    """Split a packed Prefill batch at absolute MLA page boundaries."""
 
     lengths = [int(value) for value in input_lengths]
     prefixes = [int(value) for value in prefix_lengths]
@@ -398,23 +394,19 @@ def plan_kimi_k3_chunk_rounds(
         raise ValueError("K3 chunk planner requires at least one request")
     if chunk_budget <= 0:
         raise ValueError(f"K3 chunk budget must be positive, got {chunk_budget}")
-    if alignment_tokens <= 0:
-        raise ValueError(
-            f"K3 chunk checkpoint alignment must be positive, got {alignment_tokens}"
-        )
+    if page_size <= 0:
+        raise ValueError(f"K3 MLA page size must be positive, got {page_size}")
     if any(prefix < 0 for prefix in prefixes):
         raise ValueError(f"K3 prefix lengths must be non-negative, got {prefixes}")
-    if any(prefix % alignment_tokens for prefix in prefixes):
+    if any(prefix % page_size for prefix in prefixes):
         raise ValueError(
-            "whole-model K3 chunk Prefill requires checkpoint-aligned prefixes: "
-            f"prefixes={prefixes} alignment={alignment_tokens}"
+            "whole-model K3 chunk Prefill requires page-aligned prefixes: "
+            f"prefixes={prefixes} page={page_size}"
         )
-    if chunk_budget < alignment_tokens and any(
-        length > chunk_budget for length in lengths
-    ):
+    if chunk_budget < page_size and any(length > chunk_budget for length in lengths):
         raise ValueError(
-            "K3 chunk budget must reach one joint checkpoint when a request "
-            f"spans rounds: budget={chunk_budget}, checkpoint={alignment_tokens}"
+            "K3 chunk budget must cover one MLA page when a request spans "
+            f"rounds: budget={chunk_budget}, page={page_size}"
         )
 
     source_offsets = _source_offsets(lengths)
@@ -434,15 +426,18 @@ def plan_kimi_k3_chunk_rounds(
                 take = remaining
             else:
                 absolute_start = prefixes[request_idx] + done
-                aligned_end = (
-                    (absolute_start + available) // alignment_tokens
-                ) * alignment_tokens
+                aligned_end = ((absolute_start + available) // page_size) * page_size
                 take = aligned_end - absolute_start
                 if take <= 0:
                     continue
 
             absolute_start = prefixes[request_idx] + done
             absolute_end = absolute_start + take
+            if not terminal and absolute_end % page_size:
+                raise AssertionError(
+                    "non-terminal K3 chunk slice is not page aligned: "
+                    f"request={request_idx} end={absolute_end} page={page_size}"
+                )
             source_start = source_offsets[request_idx] + done
             round_slices.append(
                 KimiK3ChunkSlice(
@@ -460,33 +455,46 @@ def plan_kimi_k3_chunk_rounds(
             processed[request_idx] += take
             available -= take
 
+        if not round_slices:
+            pending = [
+                idx
+                for idx, (done, total) in enumerate(zip(processed, lengths))
+                if done < total
+            ]
+            raise RuntimeError(
+                "K3 chunk budget cannot advance any pending request to an "
+                "MLA page boundary: "
+                f"budget={chunk_budget}, page={page_size}, pending={pending}"
+            )
         rounds.append(KimiK3ChunkRound(tuple(round_slices)))
     return tuple(rounds)
 
 
 def validate_whole_chunk_prefill(
     inputs: PyModelInputs,
-    query_budget_tokens: int,
+    chunk_tokens: int,
     *,
     tp_size: int,
     ep_size: int,
-    alignment_tokens: int,
+    page_size: Optional[int],
 ) -> None:
     """Reject unsupported whole-chunk modes before any cache mutation."""
 
     attention_inputs = inputs.attention_inputs
     if attention_inputs is None:
         raise RuntimeError("whole-model K3 Prefill requires attention inputs")
-    if alignment_tokens % 64:
+    if page_size is None:
+        raise RuntimeError("whole-model K3 Prefill requires an initialized cache")
+    if page_size <= 0 or page_size % 64:
         raise RuntimeError(
-            "whole-model K3 Prefill requires a checkpoint alignment "
+            "whole-model K3 Prefill requires a positive cache page size "
             "divisible by the cuLA checkpoint step 64; "
-            f"alignment_tokens={alignment_tokens}"
+            f"page_size={page_size}"
         )
-    if query_budget_tokens % tp_size:
+    if chunk_tokens <= 0 or chunk_tokens % tp_size:
         raise RuntimeError(
             "KIMI_K3_PREFILL_CHUNK_TOKENS must be divisible by attention TP; "
-            f"chunk={query_budget_tokens}, TP={tp_size}"
+            f"chunk={chunk_tokens}, TP={tp_size}"
         )
     if ep_size != tp_size:
         raise RuntimeError(

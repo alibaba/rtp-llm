@@ -30,9 +30,8 @@ struct PrefillCPConfig {
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
     // When true + tp_size > 1, KV cache uses page-level round-robin sharding
-    // across the physical TP group. This placement switch is independent of
-    // method, which controls Query CP. Each rank physically holds only owned
-    // blocks (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
+    // across the CP (== TP) group. Each rank physically holds only owned blocks
+    // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
     bool    kv_cache_sharded = false;
     int64_t prefill_cp_size  = 0;  // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     bool    is_enabled() const {
@@ -91,11 +90,6 @@ struct ParallelismConfig {
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
 
-    bool kv_page_rr_enabled() const {
-        return prefill_cp_config.kv_cache_sharded && tp_size > 1;
-    }
-    int64_t local_kv_page_rr_shard_count() const;
-    int64_t upstream_kv_page_rr_shard_count() const;
     int64_t get_attn_tp_size() const {
         return prefill_cp_config.is_enabled() ? 1 : tp_size;
     }

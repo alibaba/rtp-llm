@@ -43,13 +43,6 @@ ModelConfig makeK3ModelConfig(int physical_page_tokens, bool draft) {
     return model;
 }
 
-void expectGeometry(const CacheLayerLayout& layout, int page_tokens, int shards, bool decode) {
-    EXPECT_EQ(layout.local_shard_count, decode ? 1 : shards);
-    EXPECT_EQ(layout.group_seq_size_per_block,
-              (std::vector<size_t>{static_cast<size_t>(page_tokens), static_cast<size_t>(page_tokens * shards)}));
-    EXPECT_EQ(layout.group_types, (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR}));
-}
-
 class K3CacheGeometryManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -118,121 +111,6 @@ TEST_F(K3CacheGeometryManagerTest, TargetFp8AndMtpBf16UseSeparatePhysicalPools) 
                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA)).cpu();
             EXPECT_TRUE(torch::equal(bytes.slice(0, 0, k.numel()), k));
             EXPECT_TRUE(torch::equal(bytes.slice(0, k.numel()), v));
-        }
-    }
-}
-
-TEST_F(K3CacheGeometryManagerTest, ExportRejectsInconsistentPhysicalSpecs) {
-    ParallelismConfig parallelism;
-    parallelism.tp_size                            = 8;
-    parallelism.prefill_cp_config.kv_cache_sharded = true;
-    for (int invalid = 0; invalid < 7; ++invalid) {
-        SCOPED_TRACE(invalid);
-        auto config = CacheConfigCreator::createBasicConfig(
-            makeK3ModelConfig(128, false), parallelism, KVCacheConfig{}, false, 1);
-        ASSERT_EQ(config.cache_specs.size(), 2);
-        switch (invalid) {
-            case 0:
-                config.cache_specs.clear();
-                break;
-            case 1:
-                config.group_seq_size_per_block.pop_back();
-                break;
-            case 2:
-                config.cache_specs[0].reset();
-                break;
-            case 3:
-                config.cache_specs[1]->seq_size_per_block = 128;
-                break;
-            case 4:
-                config.cache_specs[0]->type = KVCacheSpecType::LinearAttention;
-                break;
-            case 5:
-                config.cache_specs[0]                     = std::make_shared<LinearKVCacheSpec>();
-                config.cache_specs[0]->type               = KVCacheSpecType::MultiHeadLatentAttention;
-                config.cache_specs[0]->seq_size_per_block = 128;
-                break;
-            case 6:
-                config.cache_specs[1]                     = std::make_shared<MLAKVCacheSpec>();
-                config.cache_specs[1]->type               = KVCacheSpecType::LinearAttention;
-                config.cache_specs[1]->seq_size_per_block = 1024;
-                break;
-        }
-        KVCacheManager manager(config, true, nullptr, KVCacheConfig{}, parallelism);
-        EXPECT_THROW(manager.getMainModelCacheLayerLayout(), std::invalid_argument);
-    }
-}
-
-TEST_F(K3CacheGeometryManagerTest, AllocatedMainAndMtpLayoutsRetainLocalAndUpstreamGeometry) {
-    for (const int page_tokens : {128, 256}) {
-        for (const int shards : {2, 4, 8}) {
-            for (const bool decode : {false, true}) {
-                SCOPED_TRACE(::testing::Message() << "B=" << page_tokens << " D=" << shards << " decode=" << decode);
-                ParallelismConfig parallelism;
-                parallelism.role_type                          = decode ? RoleType::DECODE : RoleType::PREFILL;
-                parallelism.tp_size                            = shards;
-                parallelism.tp_rank                            = shards - 1;
-                parallelism.prefill_cp_config.kv_cache_sharded = !decode;
-                parallelism.prefill_cp_config.prefill_cp_size  = shards;
-                KVCacheConfig kv_config;
-                kv_config.test_block_num            = 2;
-                kv_config.seq_size_per_block        = page_tokens;
-                kv_config.kernel_seq_size_per_block = decode ? 128 : page_tokens;
-                kv_config.linear_step               = 1;
-                SpeculativeExecutionConfig speculative;
-                speculative.type              = SP_TYPE_MTP;
-                speculative.gen_num_per_cycle = 2;
-                auto config = CacheConfigCreator::createSpConfig(makeK3ModelConfig(page_tokens, false),
-                                                                 makeK3ModelConfig(page_tokens, true),
-                                                                 parallelism,
-                                                                 RuntimeConfig{},
-                                                                 kv_config,
-                                                                 speculative,
-                                                                 std::nullopt,
-                                                                 true,
-                                                                 false);
-                ASSERT_EQ(config.mtp_sub_configs.size(), 2);
-                // Warmup bypasses inter-rank capacity synchronization only. init()
-                // still executes the production allocator and allocates CUDA pools.
-                KVCacheManager manager(config, true, nullptr, kv_config, parallelism);
-                ASSERT_TRUE(manager.init());
-                const auto main = manager.getMainModelCacheLayerLayout();
-                expectGeometry(main, page_tokens, shards, decode);
-                EXPECT_EQ(main.layer_to_groups, (std::vector<int>{1, 0, 1, 0}));
-                ASSERT_EQ(main.layers_to_kv_buffer_ptrs.size(), 4);
-                const auto all = manager.allLayerCacheBase();
-                ASSERT_EQ(all.layers_to_kv_buffer_ptrs.size(), 8);
-                for (size_t layer = 0; layer < 8; ++layer) {
-                    const auto& buffer = all.layers_to_kv_buffer_ptrs[layer];
-                    // Physical bytes: BF16 MLA latent+RoPE, or FP32 KDA
-                    // state plus one BF16 convolution-history row.
-                    const size_t expected_stride = layer % 2 == 0 ?
-                                                       (96 / shards) * (128 * 128 * sizeof(float) + 3 * 128 * 2) :
-                                                       page_tokens * (512 + 64) * 2;
-                    EXPECT_EQ(buffer.stride(0) * buffer.element_size(), expected_stride);
-                }
-                for (size_t layer = 0; layer < 4; ++layer) {
-                    ASSERT_TRUE(main.layers_to_kv_buffer_ptrs[layer].is_cuda());
-                    EXPECT_EQ(main.layers_to_kv_buffer_ptrs[layer].data_ptr(),
-                              manager.convertIndexToAddr(0, layer).kv_addr);
-                }
-                for (int module = 0; module < 2; ++module) {
-                    const auto mtp = manager.getMTPModuleCacheLayerLayout(module);
-                    expectGeometry(mtp, page_tokens, shards, decode);
-                    EXPECT_EQ(mtp.layer_to_groups, (std::vector<int>{1, 0}));
-                    ASSERT_EQ(mtp.layers_to_kv_buffer_ptrs.size(), 2);
-                    for (int local_layer = 0; local_layer < 2; ++local_layer) {
-                        const int global_layer = 4 + 2 * module + local_layer;
-                        ASSERT_TRUE(mtp.layers_to_kv_buffer_ptrs[local_layer].is_cuda());
-                        EXPECT_EQ(mtp.layers_to_kv_buffer_ptrs[local_layer].data_ptr(),
-                                  all.layers_to_kv_buffer_ptrs[global_layer].data_ptr());
-                        EXPECT_EQ(mtp.layers_to_kv_buffer_ptrs[local_layer].data_ptr(),
-                                  manager.convertIndexToAddr(0, global_layer).kv_addr);
-                        EXPECT_NE(mtp.layers_to_kv_buffer_ptrs[local_layer].data_ptr(),
-                                  main.layers_to_kv_buffer_ptrs[local_layer].data_ptr());
-                    }
-                }
-            }
         }
     }
 }

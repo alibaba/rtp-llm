@@ -77,15 +77,6 @@ CacheConfig makeCPHybridConfig() {
     return config;
 }
 
-CacheConfig makeCompactLinearCPHybridConfig() {
-    auto config                               = makeCPHybridConfig();
-    config.group_types                        = {CacheGroupType::LINEAR, CacheGroupType::FULL};
-    config.group_seq_size_per_block           = {8, 4};
-    config.cache_specs[0]->seq_size_per_block = 8;
-    config.linear_step                        = 1;
-    return config;
-}
-
 CompleteTokenIdsPtr makeTokens(int batch_size, int seq_length, int seq_size_per_block) {
     auto  tokens = std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_length + 64, seq_size_per_block);
     auto  ids    = torch::empty({(int64_t)seq_length}, torch::kInt32);
@@ -286,44 +277,6 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(100, gid_full)));
     EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(102, gid_full)));
     EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(103, gid_full)));
-}
-
-TEST_F(HybridKVCacheAllocatorCPShardTest, CompactLinearReuseKeepsCanonicalVirtualCoordinates) {
-    auto config    = makeCompactLinearCPHybridConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
-    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
-    ASSERT_TRUE(allocator->init());
-
-    auto block_pool   = allocator->getBlockPool();
-    auto shared_cache = allocator->sharedBlockCache();
-    ASSERT_NE(block_pool, nullptr);
-    ASSERT_NE(shared_cache, nullptr);
-
-    constexpr int gid_linear    = 0;
-    constexpr int gid_full      = 1;
-    constexpr int group_num     = 2;
-    const auto    full_blocks   = seedCache(block_pool, shared_cache, group_num, gid_full, CacheKeysType{101, 103});
-    const auto    linear_blocks = seedCache(block_pool, shared_cache, group_num, gid_linear, CacheKeysType{101, 103});
-
-    auto batch_res = makeBatchRes(1,
-                                  group_num,
-                                  static_cast<int>(config.layer_all_num),
-                                  config.layer_to_group_id,
-                                  CacheKeysType{100, 101, 102, 103, 104});
-    auto tokens    = makeTokens(/*batch_size=*/1, /*seq_length=*/17, /*seq_size_per_block=*/4);
-
-    MallocInfo info{batch_res, tokens};
-    info.enable_device_cache = true;
-    info.reuse_cache         = true;
-    info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
-    const auto result        = allocator->malloc(info);
-    ASSERT_TRUE(result.success);
-
-    EXPECT_EQ(result.reuse_len, 16);
-    ASSERT_EQ(batch_res->blocksNum(0, gid_full), 3u);
-    ASSERT_EQ(batch_res->blocksNum(0, gid_linear), 3u);
-    EXPECT_EQ(batch_res->blocks(0, gid_full)[1], full_blocks[1]);
-    EXPECT_EQ(batch_res->blocks(0, gid_linear)[1], linear_blocks[1]);
 }
 
 // 6) Two-malloc smoke: cp_size=4 sharding, request occupies 8 logical blocks ⇒ 2 per rank.

@@ -5,8 +5,13 @@ Using unittest framework
 """
 
 import random
+import sys
 import unittest
 
+# Add RTP-LLM to path if needed
+sys.path.append("/data2/baowending.bwd/new/RTP-LLM/github-opensource/")
+
+import numpy as np
 import torch
 
 from rtp_llm.models_py.bindings.cuda.test.concat_and_cache_mla.util import (
@@ -187,38 +192,6 @@ class TestConcatAndCacheMLA(unittest.TestCase):
                 torch.testing.assert_close(cache_k_pe, k_pe[i], atol=1e-5, rtol=1e-5)
 
         print("✓ Padding test passed")
-
-    def test_negative_slots_leave_canary_cache_bitwise_unchanged(self):
-        block_size = 4
-        num_blocks = 2
-        kv_lora_rank = 512
-        qk_rope_head_dim = 64
-        entry_size = kv_lora_rank + qk_rope_head_dim
-        kv_c = torch.randn(4, kv_lora_rank, dtype=torch.bfloat16, device=self.device)
-        k_pe = torch.randn(
-            4, qk_rope_head_dim, dtype=torch.bfloat16, device=self.device
-        )
-        slot_mapping = torch.tensor(
-            [1, -1, 6, -1], dtype=torch.long, device=self.device
-        )
-        scale = torch.tensor(1.0, dtype=torch.float32, device=self.device)
-        kv_cache = torch.full(
-            (num_blocks, block_size, entry_size),
-            37.0,
-            dtype=torch.bfloat16,
-            device=self.device,
-        )
-        expected = kv_cache.clone()
-        expected[0, 1, :kv_lora_rank] = kv_c[0]
-        expected[0, 1, kv_lora_rank:] = k_pe[0]
-        expected[1, 2, :kv_lora_rank] = kv_c[2]
-        expected[1, 2, kv_lora_rank:] = k_pe[2]
-
-        compute_ops.concat_and_cache_mla(
-            kv_c, k_pe, kv_cache, slot_mapping, "auto", scale
-        )
-
-        self.assertTrue(torch.equal(kv_cache, expected))
 
     def test_clear_page_on_boundary(self):
         block_size = 8

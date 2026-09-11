@@ -95,17 +95,15 @@ class KimiK3KDACache:
         kv_cache: LayerKVCache,
         attention_inputs: PyAttentionInputs,
         linear_block_map: torch.Tensor,
-        *,
-        checkpoint_tokens: int,
     ) -> torch.Tensor:
-        """Gather the initial state using explicit LINEAR checkpoint geometry."""
+        """Gather cache-backed cuLA initial state without touching conv state."""
 
         ssm_cache, _ = self.get_views(kv_cache)
         return kimi_kda_load_recurrent_state(
             attention_inputs.prefix_lengths,
             linear_block_map,
             ssm_cache,
-            checkpoint_tokens,
+            int(kv_cache.seq_size_per_block),
         )
 
     def store_recurrent_checkpoints(

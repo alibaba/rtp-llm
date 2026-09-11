@@ -308,14 +308,13 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     EXPECT_EQ(decode_config.cache_specs[6]->block_size_bytes(), 74880u);
 }
 
-TEST(KVCacheTransferPlannerTest, VirtualBlockSwaUsesCanonicalTailRows) {
+TEST(KVCacheTransferPlannerTest, CpCompactSwaUsesCanonicalTailRows) {
     auto plan = buildCacheStoreBlockPlan(/*total_logical_blocks=*/8,
                                          /*reuse_block_size=*/0,
                                          /*use_hybrid=*/true,
                                          CacheGroupType::SWA,
                                          /*cp_rank=*/0,
-                                         /*cp_size=*/4,
-                                         /*virtual_block_cache_layout=*/true);
+                                         /*cp_size=*/4);
     ASSERT_EQ(plan.size(), 2u);
     EXPECT_EQ(plan[0].key_index, 3);
     EXPECT_EQ(plan[0].offset_index, 0);
@@ -323,15 +322,14 @@ TEST(KVCacheTransferPlannerTest, VirtualBlockSwaUsesCanonicalTailRows) {
     EXPECT_EQ(plan[1].offset_index, 1);
 }
 
-TEST(KVCacheTransferPlannerTest, VirtualBlockSwaKeepsPartialTailRows) {
+TEST(KVCacheTransferPlannerTest, CpCompactSwaKeepsPartialTailRows) {
     {
         auto plan = buildCacheStoreBlockPlan(/*total_logical_blocks=*/1,
                                              /*reuse_block_size=*/0,
                                              /*use_hybrid=*/true,
                                              CacheGroupType::SWA,
                                              /*cp_rank=*/0,
-                                             /*cp_size=*/2,
-                                             /*virtual_block_cache_layout=*/true);
+                                             /*cp_size=*/2);
         ASSERT_EQ(plan.size(), 1u);
         EXPECT_EQ(plan[0].key_index, 0);
         EXPECT_EQ(plan[0].offset_index, 0);
@@ -342,8 +340,7 @@ TEST(KVCacheTransferPlannerTest, VirtualBlockSwaKeepsPartialTailRows) {
                                              /*use_hybrid=*/true,
                                              CacheGroupType::SWA,
                                              /*cp_rank=*/0,
-                                             /*cp_size=*/2,
-                                             /*virtual_block_cache_layout=*/true);
+                                             /*cp_size=*/2);
         ASSERT_EQ(plan.size(), 2u);
         EXPECT_EQ(plan[0].key_index, 9);
         EXPECT_EQ(plan[0].offset_index, 4);

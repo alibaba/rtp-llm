@@ -2,16 +2,6 @@ load("//:def.bzl", "copts")
 
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
-cc_import(
-    name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
-)
-
-cuda13_torch_link_deps = select({
-    "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
-    "//conditions:default": [],
-})
-
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -60,7 +50,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
-    ] + device_impl_target() + cuda13_torch_link_deps,
+    ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
 )
@@ -79,7 +69,7 @@ cc_test(
         "//rtp_llm/cpp/engine_base/stream:stream",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
-    ] + device_impl_target() + cuda13_torch_link_deps,
+    ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
 )
@@ -97,7 +87,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
-    ] + device_impl_target() + cuda13_torch_link_deps,
+    ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
 )
@@ -113,7 +103,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
-    ] + device_impl_target() + cuda13_torch_link_deps,
+    ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
 )

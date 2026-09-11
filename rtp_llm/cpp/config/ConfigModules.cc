@@ -50,17 +50,6 @@ std::string PrefillCPConfig::to_string() const {
 }
 
 // ParallelismConfig
-int64_t ParallelismConfig::local_kv_page_rr_shard_count() const {
-    return kv_page_rr_enabled() ? tp_size : 1;
-}
-
-int64_t ParallelismConfig::upstream_kv_page_rr_shard_count() const {
-    if (role_type == RoleType::DECODE && prefill_cp_config.prefill_cp_size > 1) {
-        return prefill_cp_config.prefill_cp_size;
-    }
-    return local_kv_page_rr_shard_count();
-}
-
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
     oss << "tp_size: " << tp_size << "\n"
@@ -81,8 +70,6 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
         << "role_type: " << static_cast<int>(role_type) << "\n"
-        << "local_kv_page_rr_shard_count: " << local_kv_page_rr_shard_count() << "\n"
-        << "upstream_kv_page_rr_shard_count: " << upstream_kv_page_rr_shard_count() << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
         << "prefill_cp_config: {\n"

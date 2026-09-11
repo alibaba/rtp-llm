@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 
 #include <algorithm>
-#include <limits>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
@@ -279,33 +278,6 @@ void setupGroupCounts(CacheConfig& config) {
     }
 }
 
-void setupKimiK3CompactLinearSpans(CacheConfig& config, const ParallelismConfig& parallelism_config) {
-    if (!config.use_mla) {
-        return;
-    }
-
-    // Decode can retain a replicated local FULL-page layout while preserving the
-    // upstream Prefill page-RR checkpoint geometry for KDA LINEAR groups.
-    const size_t shard_count = static_cast<size_t>(parallelism_config.upstream_kv_page_rr_shard_count());
-    if (shard_count == 1) {
-        return;
-    }
-    RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block <= std::numeric_limits<uint32_t>::max() / shard_count,
-                            "K3 page-RR virtual checkpoint overflows uint32: physical_page_tokens=%zu shard_count=%zu",
-                            config.seq_size_per_block,
-                            shard_count);
-    const size_t checkpoint_tokens = config.seq_size_per_block * shard_count;
-
-    for (size_t gid = 0; gid < config.group_types.size(); ++gid) {
-        if (config.group_types[gid] != CacheGroupType::LINEAR) {
-            continue;
-        }
-        config.group_seq_size_per_block[gid]        = checkpoint_tokens;
-        config.cache_specs[gid]->seq_size_per_block = static_cast<uint32_t>(checkpoint_tokens);
-    }
-    config.linear_step = 1;
-}
-
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
                                             const ParallelismConfig& parallelism_config,
                                             const KVCacheConfig&     kv_cache_config,
@@ -346,7 +318,6 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;
         config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;
     } else {
-        setupKimiK3CompactLinearSpans(config, parallelism_config);
         config.kimi_k3_kda_pool_blocks = kv_cache_config.kimi_k3_kda_pool_blocks;
     }
     return config;

@@ -39,9 +39,8 @@ struct PrefillChunkSlice {
     bool terminal           = false;
 };
 
-// One model-planned Prefill round. The planner owns slice boundaries and
-// alignment; this carrier records absolute token ranges without encoding cache
-// transfer block geometry. Requests may become terminal in different rounds.
+// One Python-planned Prefill round. Non-terminal slices end at MLA page
+// boundaries. Requests may become terminal in different rounds.
 struct PrefillChunkRound {
     std::vector<PrefillChunkSlice> slices;
 
@@ -271,9 +270,6 @@ struct CacheStoreInputs {
     torch::Tensor            request_pd_separation;  // [context_batch_size]
     std::vector<std::string> cache_keys;             // [context_batch_size]
     size_t                   tokens_per_block;
-    // Raw-token span represented by one row in the current layer/group cache.
-    // This may be wider than tokens_per_block for virtual-block LINEAR/SWA rows.
-    size_t group_tokens_per_block = 0;
     size_t                   kv_block_stride_bytes = 0;
     size_t                   kv_scale_stride_bytes = 0;
     bool                     pd_separation         = false;
