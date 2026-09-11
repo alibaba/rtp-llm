@@ -2,6 +2,8 @@
 
 #include <limits>
 
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
@@ -102,6 +104,37 @@ bool GenerateContext::requestDeadlineExceeded() const {
     return request_deadline.has_value() && std::chrono::system_clock::now() >= *request_deadline;
 }
 
+ErrorInfo GenerateContext::finalErrorInfo() const {
+    if (error_info.hasError()) {
+        return error_info;
+    }
+    if (stream_ && stream_->hasError()) {
+        return stream_->statusInfo();
+    }
+
+    ErrorDetailsPB error_details;
+    if (!error_status.error_details().empty() && error_details.ParseFromString(error_status.error_details())
+        && error_details.error_code() != static_cast<int>(ErrorCode::NONE_ERROR)) {
+        return ErrorInfo(static_cast<ErrorCode>(error_details.error_code()), error_details.error_message());
+    }
+    switch (error_status.error_code()) {
+        case grpc::StatusCode::OK:
+            return ErrorInfo::OkStatus();
+        case grpc::StatusCode::CANCELLED:
+            return ErrorInfo(ErrorCode::CANCELLED, error_status.error_message());
+        case grpc::StatusCode::INVALID_ARGUMENT:
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, error_status.error_message());
+        case grpc::StatusCode::DEADLINE_EXCEEDED:
+            return ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, error_status.error_message());
+        case grpc::StatusCode::RESOURCE_EXHAUSTED:
+            return ErrorInfo(ErrorCode::MALLOC_FAILED, error_status.error_message());
+        case grpc::StatusCode::INTERNAL:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_status.error_message());
+        default:
+            return ErrorInfo(ErrorCode::UNKNOWN_ERROR, error_status.error_message());
+    }
+}
+
 int64_t GenerateContext::executeTimeMs() {
     return (currentTimeUs() - request_begin_time_us) / 1000;
 }
@@ -113,18 +146,11 @@ void GenerateContext::reportTime() {
 }
 
 void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
-    collector.qps        = true;
-    collector.error_qps  = hasError();
-    collector.cancel_qps = cancelled();
-    if (error_info.hasError()) {
-        collector.error_code = error_info.code();
-    } else if (stream_ && stream_->hasError()) {
-        collector.error_code = stream_->statusInfo().code();
-    } else if (cancelled()) {
-        collector.error_code = ErrorCode::CANCELLED;
-    } else if (hasError()) {
-        collector.error_code = ErrorCode::UNKNOWN_ERROR;
-    }
+    const auto final_error_info  = finalErrorInfo();
+    collector.qps                = true;
+    collector.error_qps          = final_error_info.hasError();
+    collector.cancel_qps         = final_error_info.code() == ErrorCode::CANCELLED;
+    collector.error_code         = final_error_info.code();
     collector.onflight_request   = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
     collector.total_rt_us        = executeTimeMs() * 1000;
     collector.retry_times        = retry_times;
@@ -140,7 +166,9 @@ void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
 void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
     stream_ = stream;
     if (stream) {
-        meta->enqueue(request_id, stream_);
+        if (meta) {
+            meta->enqueue(request_id, stream_);
+        }
     }
 }
 
@@ -167,7 +195,9 @@ void GenerateContext::stopStream() {
             RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
             usleep(1000);
         }
-        meta->dequeue(request_id, stream_);
+        if (meta) {
+            meta->dequeue(request_id, stream_);
+        }
         stream_.reset();
     }
 }

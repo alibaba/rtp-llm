@@ -336,6 +336,14 @@ class PyModelInputs:
     @bert_embedding_inputs.setter
     def bert_embedding_inputs(self, arg0: BertEmbeddingInputs) -> None: ...
     @property
+    def capture_hidden_states(self) -> bool:
+        """
+        Capture configured hidden states for this homogeneous target-prefill batch
+        """
+
+    @capture_hidden_states.setter
+    def capture_hidden_states(self, arg0: bool) -> None: ...
+    @property
     def combo_position_ids(self) -> torch.Tensor:
         """
         Combo position IDs tensor

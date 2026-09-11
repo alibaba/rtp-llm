@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
@@ -10,9 +11,10 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
-#include <memory>
 
 namespace kmonitor {
 class MetricsReporter;
@@ -64,8 +66,12 @@ struct GptModelInitParams {
     // is the contract between target and draft for MTP — see
     // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
     // input_hiddens.
-    int64_t                                    hc_mult = 1;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
+    int64_t hc_mult = 1;
+
+    std::vector<int64_t>         hidden_state_capture_layer_ids;
+    HiddenStateCaptureDtype      hidden_state_capture_dtype     = HiddenStateCaptureDtype::BF16;
+    bool                         hidden_state_capture_fail_open = false;
+    kmonitor::MetricsReporterPtr metrics_reporter               = nullptr;
 };
 
 enum GptModelInputIndex : size_t {
@@ -102,6 +108,8 @@ enum GptModelInputIndex : size_t {
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
+    skipLmHead,
+    captureHiddenStates,
     gptModelInputLength,
 };
 
@@ -144,10 +152,13 @@ struct TokenSliceInfo {
 
 class ModelBase {
 public:
-    virtual ~ModelBase()                                          = default;
-    virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
-    virtual void            releaseBuffers() {}
-    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual ~ModelBase()                                                     = default;
+    virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
+    virtual void                       releaseBuffers() {}
+    virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
+        return std::nullopt;
+    }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).

@@ -270,7 +270,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    if (seqLength() - last_output_pos_ == 0) {
+    if (seqLength() - last_output_pos_ == 0
+        && !(update_info.num_new_tokens == 0 && generate_input_->generate_config->isPrefillOnly())) {
         return;
     }
 

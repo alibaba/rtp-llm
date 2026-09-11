@@ -326,7 +326,10 @@ class Dsv4PostBuildModelConfigTest(TestCase):
                     argv += ["--dsv4_fixed_pool_use_memory", cli_value]
                 with patch.dict(os.environ, env, clear=True):
                     configs = setup_args(argv)
-                    architecture = self._model_config()
+                    configs.kv_cache_config.fp8_kv_cache = 1
+                    architecture = self._model_config(
+                        kv_cache_dtype=KvCacheDataType.FP8
+                    )
                     architecture.attn_config.head_num = 1
                     architecture.hidden_size = HEAD_DIM
                     with patch.object(
@@ -370,16 +373,62 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         )
         self.assertEqual(swa.memory.placement, CacheMemoryPlacement.HOST_PINNED)
 
-    def _model_config(self, tokens_per_block=FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK):
+    def _model_config(
+        self,
+        tokens_per_block=FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK,
+        kv_cache_dtype=None,
+    ):
         config = ModelConfig()
         config.num_layers = len(LAYER_COMPRESS_RATIOS)
         config.attn_config.size_per_head = HEAD_DIM
         config.attn_config.indexer_head_dim = INDEXER_HEAD_DIM
-        config.attn_config.kv_cache_dtype = KvCacheDataType.FP8
+        if kv_cache_dtype is not None:
+            config.attn_config.kv_cache_dtype = kv_cache_dtype
         config.attn_config.layer_compress_ratios = LAYER_COMPRESS_RATIOS
         config.attn_config.tokens_per_block = tokens_per_block
         config.attn_config.kernel_tokens_per_block = tokens_per_block
         return config
+
+    def _assert_fp8_topology(self, config):
+        by_tag = {
+            desc.tag: desc for descs in config.kv_cache_spec_descs for desc in descs
+        }
+        self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
+        self.assertEqual(by_tag[CSA_KV_TAG].entry_elems, DSV4_FP8_KV_ENTRY_BYTES)
+        self.assertEqual(by_tag[HCA_KV_TAG].entry_elems, DSV4_FP8_KV_ENTRY_BYTES)
+        self.assertEqual(by_tag[SWA_KV_TAG].entry_elems, DSV4_FP8_KV_ENTRY_BYTES)
+        self.assertEqual(
+            by_tag[INDEXER_KV_TAG].entry_elems, DSV4_FP8_INDEXER_ENTRY_BYTES
+        )
+
+    def test_fp8_per_block_without_explicit_kv_dtype_uses_fp8_everywhere(self):
+        config = self._model_config()
+        config.quantization = "FP8_PER_BLOCK"
+        self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
+
+        DeepSeekV4._post_build_model_config(config)
+
+        self._assert_fp8_topology(config)
+
+    def test_explicit_fp8_kv_dtype_stays_fp8(self):
+        config = self._model_config(kv_cache_dtype=KvCacheDataType.FP8)
+
+        DeepSeekV4._post_build_model_config(config)
+
+        self._assert_fp8_topology(config)
+
+    def test_explicit_non_fp8_kv_dtype_fails_when_building_specs(self):
+        config = self._model_config(kv_cache_dtype=KvCacheDataType.BASE)
+
+        with self.assertRaisesRegex(ValueError, "only supports FP8"):
+            DeepSeekV4._apply_kv_cache_config(config, KVCacheConfig())
+
+    def test_legacy_default_non_fp8_dtype_is_normalized(self):
+        config = self._model_config(kv_cache_dtype=KvCacheDataType.BASE)
+
+        DeepSeekV4._post_build_model_config(config)
+
+        self._assert_fp8_topology(config)
 
     def test_post_build_enables_independent_pools(self):
         config = self._model_config()
@@ -424,12 +473,23 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         sentinel.cache_type = KVCacheSpecType.MHA
         config.kv_cache_spec_descs = [[sentinel]] * config.num_layers
 
-        DeepSeekV4._post_build_model_config(config)
+        DeepSeekV4._apply_kv_cache_config(config, KVCacheConfig())
 
         self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "sentinel")
         self.assertEqual(
             config.attn_config.tokens_per_block, FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK
         )
+
+    def test_post_build_does_not_rewrite_dtype_for_existing_descs(self):
+        config = self._model_config(kv_cache_dtype=KvCacheDataType.BASE)
+        sentinel = KVCacheSpecDesc()
+        sentinel.tag = "sentinel"
+        sentinel.cache_type = KVCacheSpecType.MHA
+        config.kv_cache_spec_descs = [[sentinel]] * config.num_layers
+
+        DeepSeekV4._post_build_model_config(config)
+
+        self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
 
     def _by_tag(self, layer_descs):
         return {desc.tag: desc for descs in layer_descs for desc in descs}
@@ -476,7 +536,7 @@ class Dsv4PostBuildModelConfigTest(TestCase):
                     "321",
                 ]
             )
-            config = self._model_config()
+            config = self._model_config(kv_cache_dtype=KvCacheDataType.FP8)
             DeepSeekV4._apply_kv_cache_config(config, kv_cache_config)
 
         by_tag = self._by_tag(config.kv_cache_spec_descs)
@@ -492,7 +552,7 @@ class Dsv4PostBuildModelConfigTest(TestCase):
             kv_cache_config = self._parse_kv_cache_cli(
                 ["--dsv4_fixed_pool_use_memory", "true"]
             )
-            config = self._model_config()
+            config = self._model_config(kv_cache_dtype=KvCacheDataType.FP8)
             DeepSeekV4._apply_kv_cache_config(config, kv_cache_config)
 
         by_tag = self._by_tag(config.kv_cache_spec_descs)

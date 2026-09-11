@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_weight import Qwen35MoeWeight
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
     Qwen3_5MoeImageEmbedding,
@@ -11,6 +12,48 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
 
 
 class Qwen35PrefixDetectionTest(unittest.TestCase):
+    @staticmethod
+    def _new_model_config():
+        return SimpleNamespace(
+            ckpt_path="/models/qwen35",
+            mm_model_config=SimpleNamespace(
+                is_multimodal=False,
+                mm_sep_tokens=[],
+            ),
+            mm_related_params=SimpleNamespace(config={}),
+        )
+
+    def test_language_model_only_skips_multimodal_config(self):
+        config = self._new_model_config()
+
+        Qwen35Moe._parse_mm_config({"language_model_only": True}, config)
+
+        self.assertFalse(config.mm_model_config.is_multimodal)
+        self.assertEqual([], config.mm_model_config.mm_sep_tokens)
+        self.assertEqual({}, config.mm_related_params.config)
+
+    def test_false_or_missing_language_model_only_keeps_vlm_config(self):
+        for language_model_only in (False, None):
+            with self.subTest(language_model_only=language_model_only):
+                config = self._new_model_config()
+                config_json = {
+                    "vision_start_token_id": 151652,
+                    "vision_end_token_id": 151653,
+                }
+                if language_model_only is not None:
+                    config_json["language_model_only"] = language_model_only
+
+                Qwen35Moe._parse_mm_config(config_json, config)
+
+                self.assertTrue(config.mm_model_config.is_multimodal)
+                self.assertEqual(
+                    [[151652, 151653]], config.mm_model_config.mm_sep_tokens
+                )
+                self.assertEqual(
+                    "/models/qwen35",
+                    config.mm_related_params.config["ckpt_path"],
+                )
+
     def test_image_position_ids_follow_thw_order_and_handle_empty_grid(self):
         embedding = SimpleNamespace(visual=SimpleNamespace(spatial_merge_size=2))
         grid_thw = torch.tensor([[2, 4, 2], [0, 4, 2]], dtype=torch.int32)

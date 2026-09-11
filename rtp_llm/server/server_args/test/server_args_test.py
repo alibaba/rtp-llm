@@ -7,12 +7,9 @@ import sys
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
-
-from rtp_llm.config.test.kv_cache_event_test_values import (
-    KV_CACHE_EVENT_ENV_CASES,
-)
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -175,6 +172,18 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaisesRegex(ValueError, "valid HTTP header"):
             config.validate_allocator_dump_config()
 
+    def test_hidden_state_capture_fail_open_cli_overrides_env(self):
+        os.environ["RTP_LLM_HIDDEN_STATE_CAPTURE_FAIL_OPEN"] = "true"
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args(
+            ["--hidden_state_capture_fail_open", "false"]
+        )
+
+        self.assertFalse(py_env_configs.model_args.hidden_state_capture_fail_open)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -204,6 +213,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["RTP_LLM_HIDDEN_STATE_CAPTURE_FAIL_OPEN"] = "true"
 
         sys.argv = ["prog"]
 
@@ -217,6 +227,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.model_args.model_type, "qwen")
         self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/checkpoint")
         self.assertEqual(py_env_configs.model_args.act_type, "BF16")
+        self.assertTrue(py_env_configs.model_args.hidden_state_capture_fail_open)
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
