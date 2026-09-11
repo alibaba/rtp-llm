@@ -29,15 +29,16 @@ mode reads tensors from `mw.global_weights[W.*]` and
 `mw.weights[layer_id][W.v4_*]` (W tag enum, no string keys).
 """
 
+import json
 import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models.dsv4.specs import forward_capabilities, validate_forward_phase
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
@@ -50,7 +51,13 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.modules.dsv4.platform_provider import (
+    Dsv4ProviderCapability,
+    build_dsv4_decode_metadata,
+    resolve_dsv4_platform_provider,
+)
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import tp_local_prefill_q_dim
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     cp_padded_tokens_per_rank_bound,
@@ -352,7 +359,31 @@ class DeepSeekV4Model(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
+        module_build_context=None,
+        platform_provider=None,
     ):
+        self.module_build_context = module_build_context
+        from types import MappingProxyType
+
+        self._execution_options = (
+            None
+            if module_build_context is None
+            else MappingProxyType(
+                module_build_context.selection.model_metadata["execution_options"]
+            )
+        )
+        if platform_provider is None and module_build_context is not None:
+            raise ValueError(
+                "ModuleFactory builder must bind an instance operator provider"
+            )
+        if platform_provider is None:
+            from rtp_llm.utils.backend_registry import run_backend_registrations
+
+            run_backend_registrations("dsv4")
+            platform_provider = resolve_dsv4_platform_provider(
+                {Dsv4ProviderCapability.BLOCK, Dsv4ProviderCapability.TRANSFORMER}
+            )
+        self._platform_provider = platform_provider
         super().__init__(
             model_config,
             parallelism_config,
@@ -489,6 +520,11 @@ class DeepSeekV4Model(GptModelBase):
         self.v4: Optional[V4Transformer] = None
 
         self._materialized = False
+        self._module_forward_capabilities = (
+            forward_capabilities(module_build_context.bindings)
+            if module_build_context is not None
+            else None
+        )
         self._ckpt_path: str = model_config.ckpt_path
 
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
@@ -503,6 +539,15 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_trigger,
                 self._profile_path,
             )
+
+    def get_execution_capabilities(self):
+        capabilities = {"graph_requires_kv_cache_layout": True}
+        if self.module_build_context is not None:
+            capabilities.update(
+                module_build_complete=self.module_build_context.state == "closed",
+                module_protocol_digest=self.module_build_context.protocol_digest,
+            )
+        return capabilities
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
@@ -528,6 +573,7 @@ class DeepSeekV4Model(GptModelBase):
                 is_decode_role=True,
                 is_speculative=self._is_speculative,
                 gen_num_per_cycle=self._gen_num_per_cycle,
+                chunking_enabled=False,
             )
         cp_size = int(self._prefill_cp_size)
         if cp_size > 1:
@@ -542,6 +588,14 @@ class DeepSeekV4Model(GptModelBase):
 
     def _resolve_prefill_q_token_capacity(self) -> int:
         return self._resolve_shared_token_capacity()
+
+    def _resolve_prefill_q_dim(self) -> int:
+        """Return the TP-local dense-Q width backed by the prefill workspace."""
+        return tp_local_prefill_q_dim(
+            self._v4_args.n_heads,
+            self._v4_args.head_dim,
+            self._v4_args.tp_size,
+        )
 
     def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
         return None
@@ -607,7 +661,10 @@ class DeepSeekV4Model(GptModelBase):
         assert self.v4 is not None
         mtp_hidden = None
         mtp_last_hidden_capacity = None
-        if Dsv4SharedRuntimeBufferStore.mtp_hidden_requested():
+        if (
+            self.module_build_context is None
+            and Dsv4SharedRuntimeBufferStore.mtp_hidden_requested()
+        ):
             # MTP rows are the pre-hc residual (hc_mult*dim); DSpARK rows are
             # the captured aux features (len(capture_ids)*dim). Target and
             # draft carry the same capture ids in their configs, so both
@@ -632,7 +689,13 @@ class DeepSeekV4Model(GptModelBase):
         # lifetime. CP gather/restore region is sized only when CP is active.
         cp_size = int(self._prefill_cp_size)
         q_rows = int(self._resolve_prefill_q_token_capacity())
-        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
+        # Attention Q is row-sharded by heads under tensor parallelism.  The
+        # workspace backs the local ``wq_b`` output, so sizing it with the
+        # global head count makes ``_materialize_prefill_q`` try to reinterpret
+        # a TP-size-larger buffer as the local Q tensor (for TP8: 32768 vs
+        # 4096 elements per token).  Keep TP1 unchanged and fail loudly on an
+        # invalid head partition.
+        q_dim = self._resolve_prefill_q_dim()
         if cp_size > 1:
             full_rows = q_rows * cp_size
             main_w, idx_w = self._resolve_prefill_ws_gather_widths()
@@ -642,11 +705,22 @@ class DeepSeekV4Model(GptModelBase):
             idx_w = 0
         self.v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
 
-        self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
-            device=device,
-            dtype=torch.bfloat16,
-            mtp_hidden=mtp_hidden,
-        )
+        if self.module_build_context is None:
+            self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
+                device=device,
+                dtype=torch.bfloat16,
+                mtp_hidden=mtp_hidden,
+            )
+        elif self._shared_runtime_buffers is None:
+            # This explicit Prefill contract does not share state with an MTP
+            # model. A process-global subscriber would retain an unrelated
+            # model's weights after its owner is destroyed.
+            self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore(
+                device=device,
+                dtype=torch.bfloat16,
+                mtp_hidden_enabled=False,
+                mtp_hidden=None,
+            )
         self._shared_runtime_buffers.bind(self.v4)
 
         if mtp_last_hidden_capacity is not None:
@@ -681,21 +755,23 @@ class DeepSeekV4Model(GptModelBase):
             is_decode_role=self._is_decode_role,
             is_speculative=self._is_speculative,
             gen_num_per_cycle=self._gen_num_per_cycle,
-            chunking_enabled=chunked_moe_enabled(),
-            chunk_tokens=moe_chunk_tokens_from_env(),
+            chunking_enabled=chunked_moe_enabled(self._execution_options),
+            chunk_tokens=moe_chunk_tokens_from_env(options=self._execution_options),
         )
         if runtime_resolved_max_tokens_per_rank != self._v4_args.max_tokens_per_rank:
             chunk_tokens_env_for_log = (
                 DSV4_CHUNK_TOKENS_ENV
-                if dsv4_global_chunk_tokens_configured()
+                if dsv4_global_chunk_tokens_configured(self._execution_options)
                 else "DSV4_MOE_CHUNK_TOKENS"
             )
             chunk_tokens_for_log = -1
             if not self._is_decode_role and (
-                dsv4_global_chunk_tokens_configured()
-                or os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+                dsv4_global_chunk_tokens_configured(self._execution_options)
+                or chunked_moe_enabled(self._execution_options)
             ):
-                chunk_tokens_for_log = moe_chunk_tokens_from_env()
+                chunk_tokens_for_log = moe_chunk_tokens_from_env(
+                    options=self._execution_options
+                )
             logging.info(
                 "[DeepSeekV4Model] runtime MoE token budget: "
                 "max_tokens_per_rank %d -> %d (%s=%d, role=%s, "
@@ -733,7 +809,17 @@ class DeepSeekV4Model(GptModelBase):
         torch.set_default_dtype(torch.bfloat16)
         try:
             with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                self.v4 = self._platform_provider.build_transformer(
+                    V4Transformer,
+                    self._v4_args,
+                    self.weight,
+                    platform_provider=self._platform_provider,
+                    **(
+                        {"module_build_context": self.module_build_context}
+                        if self.module_build_context is not None
+                        else {}
+                    ),
+                )
         finally:
             torch.set_default_dtype(prev_dtype)
         if self._captures_aux_hidden:
@@ -787,7 +873,6 @@ class DeepSeekV4Model(GptModelBase):
             # same (H, D, ratio, T) but with mask. We compile both APPLY_MASK
             # variants here.
             import torch as _torch
-
             from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                 v4_indexer_score as _v4_idx,
             )
@@ -987,9 +1072,12 @@ class DeepSeekV4Model(GptModelBase):
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self)
                 _dense_gemm_prefill_chunk_size = 0
-                if not self._is_decode_role and chunked_moe_enabled():
+                if not self._is_decode_role and chunked_moe_enabled(
+                    self._execution_options
+                ):
                     _dense_gemm_prefill_chunk_size = max(
-                        int(moe_chunk_tokens_from_env()), 0
+                        int(moe_chunk_tokens_from_env(options=self._execution_options)),
+                        0,
                     )
                 _prefill_cp_config = getattr(
                     self.parallelism_config, "prefill_cp_config", None
@@ -1235,8 +1323,10 @@ class DeepSeekV4Model(GptModelBase):
             group_tags=group_tags_snapshot,
         )
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
-        impl = _DecodeFmhaImpl(
+        impl = build_dsv4_decode_metadata(
+            _DecodeFmhaImpl,
             cfg,
+            platform_provider=self._platform_provider,
             device=device,
             attn_inputs=attn,
         )
@@ -1325,6 +1415,13 @@ class DeepSeekV4Model(GptModelBase):
         if attn is None:
             raise RuntimeError(
                 "DeepSeekV4Model.forward: PyModelInputs carries no attention inputs"
+            )
+        if self._module_forward_capabilities is not None:
+            validate_forward_phase(
+                self._module_forward_capabilities,
+                is_prefill=attn.is_prefill,
+                has_decode_fmha=_is_decode_fmha(fmha_impl),
+                is_target_verify=bool(getattr(attn, "is_target_verify", False)),
             )
 
         # Subclass-overridable hidden-state preparation hooks.  When a

@@ -4,6 +4,23 @@ exports_files([
     "ops/librtp_compute_ops/__init__.pyi",
 ])
 
+# Deferred model adapters and registry primitives are also available without
+# the model/kernel dependency closure. Runtime clients provide those dependencies.
+py_library(
+    name = "module_dispatch_support",
+    srcs = [
+        "__init__.py",
+        "model_factory_register.py",
+        "models/__init__.py",
+        "device/__init__.py",
+        "device/device_type.py",
+        "device/runtime.py",
+        "config/module_dispatch_config.py",
+        "utils/import_util.py",
+        "utils/backend_registry.py",
+    ] + glob(["models/dsv4/*.py"]),
+)
+
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
@@ -157,6 +174,7 @@ _JIT_CACHE_SRCS = [
 
 py_library(
     name = "utils",
+    data = ["//rtp_llm/platforms:platform_sources"],
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + [

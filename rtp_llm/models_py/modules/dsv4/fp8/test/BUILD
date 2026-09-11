@@ -16,6 +16,16 @@ _DSV4_CUDA13_ONLY = select({
 })
 
 
+# These compressor metadata/gather tests exercise shared tensor contracts and
+# are also run by the PPU regression. This does not qualify a PPU CP model.
+_DSV4_CUDA13_OR_PPU = select({
+    "@//:using_cuda13_x86": [],
+    "@//:using_cuda13_arm": [],
+    "@//:using_ppu": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+
 _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
     "//rtp_llm:testlib",
@@ -28,7 +38,6 @@ _DSV4_FP8_TESTS = [
     "test_compressor_forward_flat_input",
     "test_compressor_fp8_per_token",
     "test_compressor_gemm_merge",
-    "test_compressor_prepare_metadata_varlen",
     "test_compressor_raw_dispatch",
     "test_compressor_state_pool_cpu",
     "test_compressor_varlen_raw_path",
@@ -70,6 +79,7 @@ _DSV4_FP8_CPU_TESTS = [
     "test_compressor_start_finish_prefill",
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
+    "test_pool_slot_mapping_contract",
     "test_prefill_mixed_layer_cache_store",
 ]
 
@@ -89,10 +99,56 @@ py_test(
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 
+alias(
+    name = "test_rich_contract",
+    actual = ":test_rich_contract_source_only",
+)
+
+py_test(
+    name = "test_rich_contract_source_only",
+    srcs = ["test_rich_contract.py"],
+    data = ["//rtp_llm/models_py:dsv4_rich_attention_contract_sources"],
+    main = "test_rich_contract.py",
+)
+
+py_test(
+    name = "test_indexer_topk_routing_ppu_cpu",
+    srcs = ["test_indexer_topk_v3_routing.py"],
+    data = ["//rtp_llm/models_py:dsv4_indexer_source"],
+    deps = ["@pip_ppu_torch//torch"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "DSV4_INDEXER_TOPK_SOURCE_ONLY": "1",
+    },
+    main = "test_indexer_topk_v3_routing.py",
+    tags = ["ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 py_test(
     name = "test_pool_slot_mapping_split",
     srcs = ["test_pool_slot_mapping_split.py"],
     deps = _DSV4_FP8_TEST_DEPS,
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_model1_layout_contract",
+    srcs = ["test_model1_layout_contract.py"],
+    data = ["testdata/dsv4_model1_golden_v1.json"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_fused_pool_slot_mapping_contract",
+    srcs = ["test_fused_pool_slot_mapping_contract.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 
@@ -109,7 +165,16 @@ py_test(
     name = "test_compressor_cp_merged_gather",
     srcs = ["test_compressor_cp_merged_gather.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    target_compatible_with = _DSV4_CUDA13_ONLY,
+    target_compatible_with = _DSV4_CUDA13_OR_PPU,
+)
+
+py_test(
+    name = "test_compressor_prepare_metadata_varlen",
+    srcs = ["test_compressor_prepare_metadata_varlen.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["gpu", "H20", "ppu"],
+    exec_properties = select({"@//:using_ppu": {}, "//conditions:default": {"gpu": "H20"}}),
+    target_compatible_with = _DSV4_CUDA13_OR_PPU,
 )
 
 [

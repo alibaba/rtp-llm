@@ -34,6 +34,7 @@ mutate the Python list first, then assign it once.
 
 from typing import Optional, Sequence
 
+from rtp_llm.models.dsv4.cache_mode import Dsv4IndexerCacheMode
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
@@ -54,6 +55,8 @@ from rtp_llm.ops import (
 # declared as UINT8 so ``entry_elems`` is a byte count.
 DSV4_FP8_KV_ENTRY_BYTES = 584
 DSV4_FP8_INDEXER_ENTRY_BYTES = 132
+# 128 E2M1 values packed into 64 bytes, followed by four UE8M0 scales.
+DSV4_FP4_INDEXER_ENTRY_BYTES = 68
 # FlashMLA requires the FP8 KV block stride to be a multiple of 576 bytes.
 DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576
 # Sliding window length in entries; doubles as the HCA compression unit and as
@@ -223,6 +226,7 @@ def build_dsv4_kv_cache_spec_descs(
     head_dim: int,
     indexer_head_dim: int,
     fixed_pool_use_host_memory: bool = False,
+    indexer_cache_mode: Dsv4IndexerCacheMode = Dsv4IndexerCacheMode.FOLLOW_KV,
 ) -> list[list[KVCacheSpecDesc]]:
     """Build the per-layer DSv4 desc lists.
 
@@ -244,13 +248,21 @@ def build_dsv4_kv_cache_spec_descs(
             (``indexer_state`` / ``csa_state`` / ``hca_state`` / ``swa_kv``) in
             pinned host memory and take them off the paged HBM budget.
     """
+    if not isinstance(indexer_cache_mode, Dsv4IndexerCacheMode):
+        raise TypeError("indexer_cache_mode must be a Dsv4IndexerCacheMode")
     if layer_num <= 0:
         raise ValueError(f"dsv4 kv cache descs require layer_num > 0, got {layer_num}")
 
     kv_entry_elems = DSV4_FP8_KV_ENTRY_BYTES if fp8_kv else head_dim * 2
-    indexer_entry_elems = (
-        DSV4_FP8_INDEXER_ENTRY_BYTES if fp8_kv else indexer_head_dim * 2
-    )
+    if indexer_cache_mode is Dsv4IndexerCacheMode.FOLLOW_KV:
+        indexer_entry_elems = (
+            DSV4_FP8_INDEXER_ENTRY_BYTES if fp8_kv else indexer_head_dim * 2
+        )
+    else:
+        indexer_entry_elems = {
+            Dsv4IndexerCacheMode.FP8: DSV4_FP8_INDEXER_ENTRY_BYTES,
+            Dsv4IndexerCacheMode.FP4: DSV4_FP4_INDEXER_ENTRY_BYTES,
+        }[indexer_cache_mode]
 
     csa_kv = _make_dsv4_desc(
         CSA_KV_TAG,

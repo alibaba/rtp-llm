@@ -652,7 +652,7 @@ class AtomicWeight(WeightModule):
         if tp_for_skip <= 1 and load_config.dp_size <= 1 and load_config.ep_size <= 1:
             return {self.name: raw_tensor}
 
-        split_func = self._get_split_func()
+        split_func = self._resolve_split_func(load_config)
 
         ts = (
             self.__split_tensor(split_func, raw_tensor, load_config)
@@ -684,6 +684,13 @@ class AtomicWeight(WeightModule):
 
     def _get_split_func(self):
         return W.gpt_style_tp_strategy[self.name]
+
+    def _resolve_split_func(self, load_config):
+        default = self._get_split_func()
+        preparation = load_config.weight_preparation
+        return (
+            preparation.split_function(self.name, default) if preparation else default
+        )
 
     @classmethod
     def support(

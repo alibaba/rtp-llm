@@ -31,7 +31,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
@@ -1268,9 +1267,7 @@ def build_kv_allgather_restore_indices(
         if batch_size == 1 and total_kv_len is not None:
             total_local = cp_padded_local_kv_len(total_real, cp_size, block_size)
         else:
-            local_per_req = cp_padded_local_kv_lens(
-                total_kv_lens, cp_size, block_size
-            )
+            local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
             total_local = int(local_per_req.sum().item())
     else:
         total_local = int(total_local_kv)
@@ -1284,9 +1281,7 @@ def build_kv_allgather_restore_indices(
         cu_offsets = None
     else:
         local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
-        cu_local_per_req = torch.zeros(
-            batch_size + 1, dtype=torch.int64, device=device
-        )
+        cu_local_per_req = torch.zeros(batch_size + 1, dtype=torch.int64, device=device)
         cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
         req_ids = torch.repeat_interleave(
             torch.arange(batch_size, dtype=torch.int64, device=device),
@@ -1311,8 +1306,7 @@ def build_kv_allgather_restore_indices(
         restore = restore + cu_offsets
     restore = restore.contiguous()
     assert int(restore.numel()) == total_real, (
-        f"restore size {int(restore.numel())} != expected total_kv_len "
-        f"{total_real}"
+        f"restore size {int(restore.numel())} != expected total_kv_len " f"{total_real}"
     )
     return restore
 

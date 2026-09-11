@@ -1,12 +1,12 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import torch
-
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.module_dispatch_config import ModuleDispatchConfig
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
     LoadConfig,
@@ -72,6 +72,10 @@ class EngineConfig:
     dash_sc_grpc_config: DashScGrpcConfig
     grammar_config: GrammarConfig
     load_config: LoadConfig
+    module_dispatch: ModuleDispatchConfig = field(default_factory=ModuleDispatchConfig)
+    # Worker-local construction state, created after device assignment. This is
+    # deliberately not serialized through PyEnvConfigs or sent to another rank.
+    module_build_context: Any = field(default=None, repr=False)
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -141,6 +145,8 @@ class EngineConfig:
         lines.append(self.grammar_config.to_string())
         lines.append("\n[LoadConfig]")
         lines.append(self.load_config.to_string())
+        lines.append("\n[ModuleDispatchConfig]")
+        lines.append(self.module_dispatch.to_string())
 
         lines.append("\n" + "=" * 80)
         return "\n".join(lines)
@@ -242,6 +248,7 @@ class EngineConfig:
             dash_sc_grpc_config=dash_sc_grpc_config,
             grammar_config=grammar_config,
             load_config=load_config,
+            module_dispatch=py_env_configs.module_dispatch,
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit

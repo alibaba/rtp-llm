@@ -1,0 +1,30 @@
+{
+  "schema": "dsv4-model1-striped-v1",
+  "logical_entry_bytes": 584,
+  "data_bytes_per_entry": 576,
+  "scale_bytes_per_entry": 8,
+  "block_alignment_bytes": 576,
+  "tail_fill_byte": 165,
+  "data_formula": "(slot * 37 + offset * 13 + 17) % 256",
+  "scale_formula": "[(slot * 11 + index * 7 + 101) % 256 for index in 0..6] + [0]",
+  "cases": [
+    {
+      "entries_per_block": 1,
+      "physical_stride_bytes": 1152,
+      "physical_sha256": "c291c1b5a584b7636f668535d1bdb90d4105f1acd22cd1b3588a3cd36d46ec93",
+      "last_logical_slot_sha256": "439f2fa51fa42be3b2c9d8f441174b5dcc0babd50d510c5122744cf5ebfef312"
+    },
+    {
+      "entries_per_block": 2,
+      "physical_stride_bytes": 1728,
+      "physical_sha256": "28797f50bc6101e70900a3da5fd15f5d26c99e2f476337984ef919b9967f86fa",
+      "last_logical_slot_sha256": "66ae98a666203b2c7ab3143f49a3f08082b24aff9a5e90ea26e14bc9ad0e0ce7"
+    },
+    {
+      "entries_per_block": 256,
+      "physical_stride_bytes": 149760,
+      "physical_sha256": "9b93b3618133faced164fc72ea88a6bddc877f603c1599a555e123cd7f039c64",
+      "last_logical_slot_sha256": "7cde771472c9632e4381fc99adb567e5e3e9de549dfd306b8245e80eb5039da0"
+    }
+  ]
+}

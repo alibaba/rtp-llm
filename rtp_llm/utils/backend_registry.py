@@ -50,8 +50,10 @@ _failures: Dict[str, BaseException] = {}
 
 def ensure_backend_entrypoint_loaded() -> bool:
     """Load the optional model-backend entrypoint before consuming a slot."""
+    from rtp_llm.platforms import register_backend_hooks
     from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
 
+    register_backend_hooks()
     return import_optional_internal_source_entrypoint("models_py")
 
 
@@ -62,6 +64,9 @@ def register_backend_hook(slot: str, hook: BackendHook) -> None:
     consistently to every owner of that slot.
     """
     with _condition:
+        # Re-loading an entrypoint is idempotent, even after the slot freezes.
+        if hook in _hooks.get(slot, ()):
+            return
         if slot in _started:
             raise RuntimeError(
                 f"backend slot {slot!r} was already initialised; register the "

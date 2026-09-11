@@ -85,6 +85,66 @@ def _module_type(name, attrs):
 
 
 class Dsv4KernelJitWarmupTest(unittest.TestCase):
+    def test_cuda_prenorm_launcher_preserves_split_planes(self):
+        calls = []
+
+        def producer(x, fn, out, sqrsum, splits):
+            calls.append(splits)
+            self.assertEqual(tuple(out.shape), (splits, 3, 24))
+            self.assertEqual(tuple(sqrsum.shape), (splits, 3))
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper": SimpleNamespace(
+                    tf32_hc_prenorm_gemm=producer
+                ),
+            },
+        ):
+            for splits in (1, 8):
+                warmup_module._launch_dummy_mhc_prenorm_gemm(
+                    key=(24, 4096),
+                    info={"fn": torch.zeros(24, 4096)},
+                    m_value=3,
+                    num_splits=splits,
+                    device=torch.device("cpu"),
+                )
+        self.assertEqual(calls, [1, 8])
+
+    def test_cuda_fuse_launcher_uses_partial_planes_and_current_signature(self):
+        calls = []
+
+        def build_kernel(*args, n_splits, **kwargs):
+            def kernel(mixes, squares, scale, base, residual, post, comb, output, norm):
+                self.assertEqual(tuple(mixes.shape), (n_splits, 3, 24))
+                self.assertEqual(tuple(squares.shape), (n_splits, 3))
+                self.assertEqual(norm.numel(), 0)
+                calls.append(n_splits)
+
+            return kernel
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "rtp_llm.models_py.modules.dsv4.tilelang_kernels": types.ModuleType(
+                    "tilelang_kernels"
+                ),
+            },
+        ), mock.patch.object(
+            warmup_module,
+            "import_module",
+            return_value=SimpleNamespace(_mhc_pre_big_fuse=build_kernel),
+        ):
+            for splits in (1, 8):
+                warmup_module._launch_dummy_mhc_pre_big_fuse(
+                    key=(24, 4096),
+                    info={},
+                    m_value=3,
+                    num_splits=splits,
+                    device=torch.device("cpu"),
+                )
+        self.assertEqual(calls, [1, 8])
+
     def test_public_jit_warmup_entrypoints_skip_when_model_warmup_disabled(self):
         with mock.patch.object(
             warmup_module, "model_warm_up_enabled", return_value=False
@@ -418,7 +478,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertIn(("fp8", 7168, 7168), shapes)
         self.assertEqual(shapes[("fp8", 7168, 7168)]["name"], "e_proj")
 
-    def test_collect_mhc_prenorm_shapes_uses_tilelang_units_only(self):
+    def test_collect_mhc_prenorm_shapes_uses_runtime_eligible_units(self):
         root = nn.Module()
         TileLangHCUnit = _module_type(
             "TileLangHCUnit",
@@ -450,12 +510,23 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         root.add_module("head_hc", TileLangHCHead())
         root.add_module("fallback_hc", FallbackHCUnit())
 
-        shapes = _collect_dsv4_mhc_prenorm_shapes(root)
+        with mock.patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "fallback"}):
+            shapes = _collect_dsv4_mhc_prenorm_shapes(root)
         self.assertEqual(sorted(shapes.keys()), [(24, 16384)])
         self.assertEqual(shapes[(24, 16384)]["name"], "attn_hc")
         self.assertEqual(shapes[(24, 16384)]["dim"], 4096)
         self.assertEqual(shapes[(24, 16384)]["hc_mult"], 4)
         self.assertEqual(shapes[(24, 16384)]["hc_sinkhorn_iters"], 20)
+        self.assertFalse(shapes[(24, 16384)]["projection_only"])
+
+        fallback_root = nn.Module()
+        fallback_root.add_module("fallback_hc", FallbackHCUnit())
+        with mock.patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"}):
+            fallback_shapes = _collect_dsv4_mhc_prenorm_shapes(fallback_root)
+        self.assertEqual(sorted(fallback_shapes.keys()), [(24, 16384)])
+        self.assertTrue(fallback_shapes[(24, 16384)]["projection_only"])
+        with mock.patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": ""}):
+            self.assertEqual(_collect_dsv4_mhc_prenorm_shapes(fallback_root), {})
 
     def test_collect_mhc_head_fused_shapes_uses_tilelang_heads_only(self):
         root = nn.Module()
@@ -702,6 +773,50 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             [("fuse_launch", 8), ("fuse_launch", 1)],
         )
 
+    def test_mhc_projection_only_warmup_forces_one_split_and_skips_fuse(self):
+        calls = []
+        shapes = {
+            (24, 16384): {
+                "fn": torch.empty((24, 16384), dtype=torch.float32),
+                "projection_only": True,
+            }
+        }
+
+        def run_retry(_label, _desc, launch_fn, *, device):
+            launch_fn()
+
+        with mock.patch.multiple(
+            warmup_module,
+            model_warm_up_enabled=lambda: True,
+            _is_cuda_device=lambda device: True,
+            _assert_not_capturing=lambda: None,
+            _get_deep_gemm_num_sms=lambda device: 39,
+            _mhc_prenorm_deepgemm_backend_name=lambda: "deepgemm",
+            _mhc_prenorm_deepgemm_backend_enabled=lambda: True,
+            _generate_mhc_prenorm_warmup_specs=lambda **kwargs: (
+                (7, 64),
+                (3, 4096),
+            ),
+            _dist_rank=lambda: 0,
+            _sync_cuda=lambda device: None,
+            _release_cuda_cache=lambda device: None,
+            _run_deepgemm_warmup_launches_serialized=lambda label, fn: fn(),
+            _run_deepgemm_warmup_launch_with_retry=run_retry,
+            _run_tilelang_warmup_launch_with_retry=lambda *args, **kwargs: self.fail(
+                "projection-only fallback must not warm TileLang finalizer"
+            ),
+            _launch_dummy_mhc_prenorm_gemm=lambda **kwargs: calls.append(
+                (kwargs["num_splits"], kwargs["m_value"])
+            ),
+        ):
+            warmup_module._MHC_PRENORM_GEMM_JIT_WARMED_KEYS.clear()
+            warmup_module.warmup_mhc_prenorm_gemm_jit(
+                shapes, max_m=4096, device=torch.device("cuda")
+            )
+            warmup_module._MHC_PRENORM_GEMM_JIT_WARMED_KEYS.clear()
+
+        self.assertEqual(calls, [(1, 64), (1, 4096)])
+
     def test_mhc_tilelang_single_warmup_uses_runtime_wrapper(self):
         calls = []
         shapes = {
@@ -887,8 +1002,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(_collect_dsv4_mhc_head_fused_shapes(root), {})
 
     def test_slot_dequant_warmup_uses_padded_cp_full_stride(self):
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _swa_dequant_triton,
+            _swa_ops_triton,
+        )
 
         calls = []
         metadata_batches = []

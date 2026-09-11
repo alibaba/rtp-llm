@@ -283,6 +283,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 norm_name,
                 [CkptWeightInfo(self._key(f"{ckpt_prefix}.norm.weight"), identity)],
                 identity,
+                data_type=torch.float32 if inner else None,
             ),
             AtomicWeight(
                 ape_name,
@@ -424,6 +425,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     stack_,
                     config=moe_cfg,
                     data_type=torch.int8,
+                    enable_pure_tp_preshard=True,
                 )
             )
             out.append(
@@ -438,6 +440,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                     stack_,
                     config=moe_cfg,
                     data_type=torch.float8_e8m0fnu,
+                    enable_pure_tp_preshard=True,
                 )
             )
         return out
@@ -581,24 +584,53 @@ class DeepSeekV4(DeepSeekV2):
 
     @classmethod
     def _apply_kv_cache_config(
-        cls, model_config: ModelConfig, kv_cache_config: KVCacheConfig
+        cls,
+        model_config: ModelConfig,
+        kv_cache_config: KVCacheConfig,
+        *,
+        indexer_cache_mode=None,
     ) -> None:
-        cls._build_dsv4_kv_cache_config(model_config, kv_cache_config)
+        cls._build_dsv4_kv_cache_config(
+            model_config, kv_cache_config, indexer_cache_mode=indexer_cache_mode
+        )
 
     @classmethod
-    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+    def _post_build_model_config(
+        cls, model_config: ModelConfig, *, indexer_cache_mode=None
+    ) -> None:
         """Preserve direct callers that configure DSV4 through environment variables."""
-        cls._build_dsv4_kv_cache_config(model_config, None)
+        cls._build_dsv4_kv_cache_config(
+            model_config, None, indexer_cache_mode=indexer_cache_mode
+        )
 
     @classmethod
     def _build_dsv4_kv_cache_config(
         cls,
         model_config: ModelConfig,
         kv_cache_config: KVCacheConfig | None,
+        *,
+        indexer_cache_mode=None,
     ) -> None:
         """Declare the seven-pool DSV4 cache topology after runtime config parsing."""
         if model_config.kv_cache_spec_descs:
             return
+
+        from rtp_llm.models.dsv4_kv_cache import Dsv4IndexerCacheMode
+
+        if indexer_cache_mode is None:
+            from rtp_llm.models_py.modules.dsv4.platform_provider import (
+                resolve_dsv4_platform_provider,
+            )
+            from rtp_llm.utils.backend_registry import run_backend_registrations
+
+            run_backend_registrations("dsv4")
+            provider = resolve_dsv4_platform_provider(())
+            indexer_mode = getattr(provider, "indexer_mode", None)
+            indexer_cache_mode = (
+                Dsv4IndexerCacheMode(indexer_mode.lower())
+                if indexer_mode is not None
+                else Dsv4IndexerCacheMode.FOLLOW_KV
+            )
 
         attn_config = model_config.attn_config
         layer_num = int(model_config.num_layers)
@@ -634,12 +666,11 @@ class DeepSeekV4(DeepSeekV2):
             fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(
                 kv_cache_config
             ),
+            indexer_cache_mode=indexer_cache_mode,
         )
 
         fixed_pool_blocks = _dsv4_pool_blocks(
-            None
-            if kv_cache_config is None
-            else kv_cache_config.dsv4_fixed_pool_blocks,
+            None if kv_cache_config is None else kv_cache_config.dsv4_fixed_pool_blocks,
             "DSV4_FIXED_POOL_BLOCKS",
         )
         if fixed_pool_blocks > 0:
@@ -652,21 +683,27 @@ class DeepSeekV4(DeepSeekV2):
             )
         # HCA_STATE takes a dedicated override that wins over the shared value.
         hca_state_pool_blocks = _dsv4_pool_blocks(
-            None
-            if kv_cache_config is None
-            else kv_cache_config.dsv4_hca_state_pool_blocks,
+            (
+                None
+                if kv_cache_config is None
+                else kv_cache_config.dsv4_hca_state_pool_blocks
+            ),
             "DSV4_HCA_STATE_POOL_BLOCKS",
         )
         if hca_state_pool_blocks > 0:
-            apply_dsv4_explicit_pool_blocks(
-                descs, HCA_STATE_TAG, hca_state_pool_blocks
-            )
+            apply_dsv4_explicit_pool_blocks(descs, HCA_STATE_TAG, hca_state_pool_blocks)
             logging.info(
                 "DeepSeek-V4 pinned HCA_STATE pool to %d blocks",
                 hca_state_pool_blocks,
             )
 
         model_config.kv_cache_spec_descs = descs
+
+    @classmethod
+    def get_module_adapter(cls):
+        from rtp_llm.models.dsv4.adapter import Dsv4ModelAdapter
+
+        return Dsv4ModelAdapter()
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -1036,7 +1073,9 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
             [weight for weight in layer if weight.name in layer_names]
             for layer in info.layer_weights
         ]
-        info.weights = [weight for weight in info.weights if weight.name in global_names]
+        info.weights = [
+            weight for weight in info.weights if weight.name in global_names
+        ]
         logging.info(
             "[DeepSeekV4DSparkWeight] PREFILL commit-only descriptors: "
             "layers=%d per-layer=%s globals=%s",

@@ -240,30 +240,35 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
-    auto py_initialize_method = py_model_.attr("initialize");
+    auto py_initialize_method =
+        py::module::import("rtp_llm.models_py.pluggable.lifecycle").attr("initialize_model");
     try {
-        py_init_result = py_initialize_method(init_resources);
+        py_init_result = py_initialize_method(py_model_, init_resources);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
+    }
+    if (!py_init_result.cast<bool>()) {
+        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
     const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                       "forward";
     py_forward_method_             = py_model_.attr(forward_method);
-    const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
-    const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
-                                             || py_model_class_name == "DeepSeekV4MtpModel"
-                                             || py_model_class_name == "DeepSeekV4DSparkModel";
+    bool graph_requires_kv_cache_layout = false;
+    if (py::hasattr(py_instance, "get_execution_capabilities")) {
+        const auto capabilities = py_instance.attr("get_execution_capabilities")().cast<py::dict>();
+        if (capabilities.contains("graph_requires_kv_cache_layout")) {
+            graph_requires_kv_cache_layout = capabilities["graph_requires_kv_cache_layout"].cast<bool>();
+        }
+    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !is_prefill_cuda_graph_mode) {
         RTP_LLM_LOG_WARNING(
             "CUDA graph enabled but kv_cache_layer_layout not available (warmup?), skipping graph capture");
         enable_cuda_graph_ = false;
-    } else if (enable_cuda_graph_ && is_deepseek_v4_python_model && !params.kv_cache_layer_layout.has_value()) {
-        // DeepSeekV4 also refuses to capture prefill graphs during warmup: the
-        // real executor captures once the CacheManager exists.
+    } else if (enable_cuda_graph_ && graph_requires_kv_cache_layout && !params.kv_cache_layer_layout.has_value()) {
         RTP_LLM_LOG_WARNING(
-            "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
+            "Disable CUDA graph for model requiring kv_cache_layer_layout; real executor can capture after "
             "CacheManager is initialized.");
         enable_cuda_graph_ = false;
     }
@@ -367,9 +372,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
-        auto py_initialize_method = py_instance.attr("initialize");
         try {
-            py_init_result = py_initialize_method(init_resources);
+            py_init_result = py_initialize_method(py_model_, init_resources);
+            if (!py_init_result.cast<bool>()) {
+                throw std::runtime_error("PyWrappedModel constructor: Python model graph initialization failed.");
+            }
             // Python initialization/JIT can take a different amount of time on
             // each EP/TP rank. Synchronize immediately before capture so every
             // rank enters graph-held collectives in the same order.
@@ -379,11 +386,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;
         }
-    }
-
-    auto py_init_success = py_init_result.cast<bool>();
-    if (!py_init_success) {
-        throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
     cache_store_async_writer_ =

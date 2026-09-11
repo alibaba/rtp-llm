@@ -132,6 +132,7 @@ class BaseModel(object):
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
+        self.module_build_context = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
         self._finalize_output_vocab_config()
@@ -165,9 +166,15 @@ class BaseModel(object):
                          {json.dumps(self.default_generate_config.model_dump(), indent=4)}"
             )
 
+    @classmethod
+    def get_module_adapter(cls):
+        """Optional model integration metadata, associated with this registration."""
+        return None
+
     def _get_device_str(self) -> str:
-        """Get device string from parallelism_config."""
-        return f"cuda:{self.parallelism_config.local_rank}"
+        from rtp_llm.device import get_current_device
+
+        return get_current_device().device_string(self.parallelism_config.local_rank)
 
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):
@@ -195,7 +202,11 @@ class BaseModel(object):
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
-        self._create_python_model()
+        if self.module_build_context is None:
+            self._create_python_model()
+        else:
+            ctx = self.module_build_context
+            self.py_model = ctx.model_adapter.build_root(self, ctx)
 
     def _create_python_model(self):
         pass
@@ -211,6 +222,8 @@ class BaseModel(object):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
             device=device, global_weight_aliases=aliases
         )
+        if self.module_build_context is not None:
+            self.module_build_context.finish_weight_loading(self.model_weights_loader)
         self._load_custom_module()
 
         # 清理checkpoint加载过程中使用的临时资源，释放host内存
@@ -311,6 +324,7 @@ class BaseModel(object):
         moe_pure_tp_preshard: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        module_build_context=None,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -348,6 +362,16 @@ class BaseModel(object):
             )
         model._weight_alias_owner = weight_alias_owner
         model._weight_alias_names = tuple(weight_alias_names)
+        if module_build_context is not None:
+            if skip_python_model:
+                raise ValueError(
+                    "Offline weight loading must not receive a module build context"
+                )
+            if module_build_context.state != "verified":
+                raise ValueError(
+                    "Model loading requires a verified module build context"
+                )
+            model.module_build_context = module_build_context
 
         import os
 
@@ -359,7 +383,12 @@ class BaseModel(object):
 
         # 在加载前后分别记录内存使用
         logging.info(f"Before loading: {get_host_memory_usage():.2f} MB")
-        model.load(skip_python_model=skip_python_model)
+        try:
+            model.load(skip_python_model=skip_python_model)
+        except BaseException:
+            if module_build_context is not None:
+                module_build_context.fail()
+            raise
         logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
 
@@ -503,7 +532,7 @@ class BaseModel(object):
         misc_weights_info = (
             self.custom_module.get_custom_weight_info() if self.custom_module else []
         )
-        return get_model_loader(
+        loader = get_model_loader(
             self.model_config,
             weights_info,
             misc_weights_info,
@@ -512,3 +541,12 @@ class BaseModel(object):
             force_cpu_load_weights=self.force_cpu_load_weights,
             moe_pure_tp_preshard=self.moe_pure_tp_preshard,
         )
+        if self.module_build_context is not None:
+            self.module_build_context.configure_weight_loader(loader)
+        else:
+            from rtp_llm.device import get_current_device
+
+            get_current_device().configure_model_weight_loader(
+                self.model_config, loader
+            )
+        return loader

@@ -1,5 +1,6 @@
 import functools
 import glob
+import importlib
 import json
 import logging
 import os
@@ -27,20 +28,12 @@ def load_all_configs():
     # Try to get internal source config directory
     # Collect all config directories to load
     config_dirs = [opensource_dir]
-    try:
-        import internal_source.rtp_llm.models_py.kernels.cuda.fp8_kernel
+    from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
 
-        internalsource_dir = os.path.join(
-            os.path.dirname(
-                os.path.realpath(
-                    internal_source.rtp_llm.models_py.kernels.cuda.fp8_kernel.__file__
-                )
-            ),
-            op_name,
-        )
-        config_dirs.append(internalsource_dir)
-    except ImportError:
-        logging.info("internal_source not found")
+    entrypoint = "models_py.kernels.cuda.fp8_kernel"
+    if import_optional_internal_source_entrypoint(entrypoint):
+        extension = importlib.import_module("internal_source.rtp_llm." + entrypoint)
+        config_dirs.append(os.path.join(os.path.dirname(extension.__file__), op_name))
 
     # Load configs from all directories
     for config_dir in config_dirs:

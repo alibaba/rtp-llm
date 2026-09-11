@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -87,6 +88,35 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_graph_initialization_uses_public_boundary_before_capture(self):
+        from rtp_llm.models_py.pluggable import lifecycle
+
+        initialize = lifecycle.initialize_model
+        for fail_at in (1, 2):
+            for failure in (False, ValueError("graph resource validation failed")):
+                model = CacheStoreForwardModel()
+                calls = []
+
+                def checked(candidate, resources):
+                    self.assertIs(candidate, model)
+                    calls.append(resources)
+                    if len(calls) == fail_at:
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return failure
+                    return initialize(candidate, resources)
+
+                with self.subTest(fail_at=fail_at, failure=failure), patch.object(
+                    lifecycle, "initialize_model", side_effect=checked
+                ), self.assertRaisesRegex(
+                    (ValueError, RuntimeError),
+                    "initialization failed|resource validation failed",
+                ):
+                    run_scenario(model, "multi_tag", enable_graph=True)
+                self.assertEqual(len(calls), fail_at)
+                self.assertEqual(model.forward_calls, 0)
+                self.assertEqual(model.micro_batch_calls, 0)
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")
@@ -180,15 +210,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             [72, 96, 120, 144, 168, 192],
         )
         self.assertEqual({block["length"] for block in full_blocks.values()}, {16})
-        self.assertEqual(
-            {block["length"] for block in linear_blocks.values()}, {24}
-        )
+        self.assertEqual({block["length"] for block in linear_blocks.values()}, {24})
         for token_key in range(3101, 3107):
             self.assertTrue(
-                any(
-                    f"_token_id_str_{token_key}_" in key
-                    for key in linear_blocks
-                )
+                any(f"_token_id_str_{token_key}_" in key for key in linear_blocks)
             )
         for token_key in (3102, 3104, 3106):
             self.assertTrue(

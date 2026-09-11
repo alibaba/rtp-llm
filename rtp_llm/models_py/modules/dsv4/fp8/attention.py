@@ -29,11 +29,8 @@ import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deep_gemm.utils.layout import (  # noqa: E402
-    get_mn_major_tma_aligned_packed_ue8m0_tensor,
-)
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -76,7 +73,11 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
-from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
+from rtp_llm.models_py.modules.dsv4.rope import (
+    apply_rotary_emb,
+    apply_rotary_emb_batched,
+    precompute_freqs_cis,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -374,6 +375,8 @@ def _prepare_wo_a_stacked(
     floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
     int32; output shape ``[G, R, K/512]`` matches
     ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
     w_stk = weight_fp8.view(G, R, K).contiguous()
     scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
     idx = torch.arange(R, device=scale_raw.device) // 128
@@ -382,36 +385,41 @@ def _prepare_wo_a_stacked(
     return w_stk, s_stk
 
 
-def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
+def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor, *, platform_provider=None):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors.
 
     Repacks the UE8M0 ``float8_e8m0fnu`` scale into DeepGEMM's int32
     TMA-aligned packed layout when needed. Framework descriptor path may
     deliver the scale already packed (dtype int32) — we no-op then."""
+    from rtp_llm.models_py.modules.dsv4.platform_provider import build_dsv4_fp8_linear
+
+    def _default_factory(weight: torch.Tensor, scale: torch.Tensor):
+        if scale.dtype == torch.float8_e8m0fnu:
+            scale = _repack_v4_fp8_scale_to_int32(scale)
+        # LinearFactory.create_linear_from_weights consumes a (weights_dict,
+        # weight_key, scale_key) triple — feed it a one-shot dict so the
+        # factory plumbing is unchanged.
+        local = {"_w": weight, "_s": scale}
+        return LinearFactory.create_linear_from_weights(
+            local,
+            "_w",
+            "_s",
+            quant_config=_V4_FP8_BLOCK_CFG,
+        )
+
     assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-    # LinearFactory.create_linear_from_weights consumes a (weights_dict,
-    # weight_key, scale_key) triple — feed it a one-shot dict so the
-    # factory plumbing is unchanged.
-    local = {"_w": w, "_s": s}
-    return LinearFactory.create_linear_from_weights(
-        local,
-        "_w",
-        "_s",
-        quant_config=_V4_FP8_BLOCK_CFG,
+    return build_dsv4_fp8_linear(
+        _default_factory, w, s, platform_provider=platform_provider
     )
 
 
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     """Backwards-compat bridge over ``_v4_fp8_linear`` for callers that
-    still pass a flat dict + keys.  Mutates ``weights[scale_key]`` to the
-    packed form so subsequent callers don't repack."""
+    still pass a flat dict + keys. Preserve the checkpoint scale layout
+    until the selected platform constructs the linear."""
     w = weights[weight_key]
     s = weights[scale_key]
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-        weights[scale_key] = s
+    # Platform dispatch must see checkpoint scales before CUDA repacking.
     return _v4_fp8_linear(w, s)
 
 
@@ -840,6 +848,8 @@ class PrefillQKV(NamedTuple):
 
 
 class AttentionFP8(nn.Module):
+    prefill_fast_protocol = "dsv4.fp8-attention.v1"
+
     def __init__(
         self,
         layer_id: int,
@@ -868,6 +878,8 @@ class AttentionFP8(nn.Module):
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
+        platform_provider=None,
+        indexer_factory=None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -875,6 +887,7 @@ class AttentionFP8(nn.Module):
         for the outer compressor, ``W.v4_indexer_*`` (forwarded) for the
         indexer."""
         super().__init__()
+        self._platform_provider = platform_provider
         self.layer_id = layer_id
         self.dim = dim
         self.q_lora_rank = q_lora_rank
@@ -951,7 +964,7 @@ class AttentionFP8(nn.Module):
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
                 s = s.contiguous()
-            return _v4_fp8_linear(w, s)
+            return _v4_fp8_linear(w, s, platform_provider=platform_provider)
 
         self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
         # wq_b is row-split along N (n_heads * head_dim)
@@ -984,11 +997,27 @@ class AttentionFP8(nn.Module):
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+        from rtp_llm.models_py.modules.dsv4.platform_provider import (
+            build_dsv4_wo_a_fp8_linear,
         )
-        self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
-        self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+
+        self.wo_a = build_dsv4_wo_a_fp8_linear(
+            lambda *_args, **_kwargs: None,
+            wo_a_w,
+            wo_a_s,
+            groups=n_groups_local,
+            k_local=K_local,
+            platform_provider=platform_provider,
+        )
+        if self.wo_a is None:
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
+            self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
+            self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+        else:
+            self.register_buffer("_wo_a_stk_w", None, persistent=False)
+            self.register_buffer("_wo_a_stk_s", None, persistent=False)
 
         # wo_b row-split along K (cols), all_reduce after forward
         self.wo_b = _fp8_w_s(
@@ -1031,6 +1060,7 @@ class AttentionFP8(nn.Module):
                 cp_role=_CP_ROLE_MAIN,
                 norm_eps=norm_eps,
                 compressor_weights=outer_cmp_weights,
+                platform_provider=platform_provider,
             )
             self.compressor._profile_label = (
                 f"L{layer_id:02d}.csa_main"
@@ -1049,7 +1079,7 @@ class AttentionFP8(nn.Module):
             if compress_ratio == 4:
                 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 
-                self.indexer = IndexerFP8(
+                self.indexer = (indexer_factory or IndexerFP8)(
                     dim=dim,
                     q_lora_rank=q_lora_rank,
                     index_n_heads=index_n_heads,
@@ -1061,6 +1091,7 @@ class AttentionFP8(nn.Module):
                     max_seq_len=max_seq_len,
                     norm_eps=norm_eps,
                     layer_weights=layer_weights,
+                    platform_provider=platform_provider,
                 )
 
                 # Configure nested indexer compressor shape hint so warmup
@@ -1163,7 +1194,12 @@ class AttentionFP8(nn.Module):
         coff_idx = 2  # Indexer's nested Compressor overlap=True
         # HCA uses coff=1 (overlap=False) so HCA_STATE vec_dim = 2*head_dim.
         kv_spec = (torch.uint8, _DSV4_FP8_KV_ENTRY_BYTES)
-        indexer_kv_spec = (torch.uint8, _DSV4_FP8_INDEXER_ENTRY_BYTES)
+        indexer_kv_spec = (
+            torch.uint8,
+            getattr(
+                indexer_factory, "CACHE_ENTRY_BYTES", _DSV4_FP8_INDEXER_ENTRY_BYTES
+            ),
+        )
         self._pool_spec: Dict[str, tuple] = {
             SWA_KV: kv_spec,
             CSA_KV: kv_spec,
@@ -1994,6 +2030,7 @@ class AttentionFP8(nn.Module):
         consumes, so the wo_a projection is a single einsum launch.
         Matches vLLM ``deepseek_v4_attention.py:325`` (same
         ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
+        assert self.wo_a is None, "provider wo_a consumes BF16 grouped input"
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
@@ -2005,6 +2042,28 @@ class AttentionFP8(nn.Module):
             recipe=(1, 1, 128),
         )
         return out.view(B, S, G, R)
+
+    def _wo_a_from_bf16(
+        self,
+        o: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        B: int,
+        S: int,
+    ) -> torch.Tensor:
+        """Inverse-RoPE then invoke a provider-owned grouped FP8 projection."""
+        assert self.wo_a is not None
+        o_4d = o.view(B, S, self.n_heads, self.head_dim)
+        rope = o_4d[..., -self.rope_head_dim :]
+        if freqs_cis.dim() == 2 and int(freqs_cis.shape[0]) == B:
+            apply_rotary_emb_batched(rope, freqs_cis, inverse=True)
+        else:
+            apply_rotary_emb(
+                rope,
+                freqs_cis.reshape(-1, freqs_cis.shape[-1]).contiguous(),
+                inverse=True,
+            )
+        grouped = o_4d.reshape(B, S, self.n_groups, -1)
+        return self.wo_a(grouped)
 
     def forward_decode(
         self,
@@ -2233,6 +2292,7 @@ class AttentionFP8(nn.Module):
             num_heads=self.n_heads,
             topk=self.window_size,
             extra_attn_type=None,
+            extra_index_width=None,
         )
         # opt_flash_mla: pass the per-request SWA effective length so FlashMLA
         # scans only ``min(window, seq_len)`` instead of the full window width.
@@ -2252,6 +2312,58 @@ class AttentionFP8(nn.Module):
             topk_length=swa_topk_length,
         )
 
+    def _decode_update_indexer(
+        self, x, qr, bsz, q_len, start_pos, position_ids, attn_metadata
+    ):
+        """Update only the Indexer pools and raw compressed indices."""
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            INDEXER_KV,
+            INDEXER_STATE,
+        )
+
+        assert self.indexer is not None, "CSA layer must have an indexer"
+        meta = self._decode_compressor_meta_from_metadata(
+            attn_metadata,
+            state_attn_type=INDEXER_STATE,
+            kv_attn_type=INDEXER_KV,
+            bsz=bsz,
+            q_len=q_len,
+        )
+        self.indexer.forward_decode_vectorized(
+            x,
+            qr,
+            start_pos,
+            attn_metadata.topk_buffer_compressed[:bsz],
+            position_ids=position_ids,
+            compressor_meta=meta,
+        )
+
+    def _decode_update_compressor(
+        self, x, bsz, q_len, start_pos, position_ids, attn_metadata
+    ):
+        """Update the main CSA/HCA pools independently of Q and the Indexer."""
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            CSA_KV,
+            CSA_STATE,
+            HCA_KV,
+            HCA_STATE,
+        )
+
+        assert self.compress_ratio in (4, 128)
+        kv_tag, state_tag = (
+            (CSA_KV, CSA_STATE) if self.compress_ratio == 4 else (HCA_KV, HCA_STATE)
+        )
+        meta = self._decode_compressor_meta_from_metadata(
+            attn_metadata,
+            state_attn_type=state_tag,
+            kv_attn_type=kv_tag,
+            bsz=bsz,
+            q_len=q_len,
+        )
+        self.compressor.forward_decode_vectorized(
+            x, start_pos, meta=meta, position_ids=position_ids
+        )
+
     def _forward_decode_csa(
         self,
         x: torch.Tensor,
@@ -2266,45 +2378,13 @@ class AttentionFP8(nn.Module):
         both scatter into their pools; the indexer's topk buffer holds
         raw (pre +win) compressed local indices which the shared
         dual-pool epilogue consumes."""
-        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-            CSA_KV,
-            CSA_STATE,
-            INDEXER_KV,
-            INDEXER_STATE,
-        )
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV
 
-        assert self.indexer is not None, "CSA layer must have an indexer"
-        indexer_compressor_meta = self._decode_compressor_meta_from_metadata(
-            attn_metadata,
-            state_attn_type=INDEXER_STATE,
-            kv_attn_type=INDEXER_KV,
-            bsz=bsz,
-            q_len=q_len,
+        self._decode_update_indexer(
+            x, qkv.qr, bsz, q_len, start_pos, position_ids, attn_metadata
         )
-        # Indexer fills ``topk_buffer_compressed[:bsz]`` + self-scatters
-        # nested compressor state into INDEXER_KV / INDEXER_STATE.
-        self.indexer.forward_decode_vectorized(
-            x,
-            qkv.qr,
-            start_pos,
-            attn_metadata.topk_buffer_compressed[:bsz],
-            position_ids=position_ids,
-            compressor_meta=indexer_compressor_meta,
-        )
-        csa_compressor_meta = self._decode_compressor_meta_from_metadata(
-            attn_metadata,
-            state_attn_type=CSA_STATE,
-            kv_attn_type=CSA_KV,
-            bsz=bsz,
-            q_len=q_len,
-        )
-        # Main CSA compressor emits boundary compressed-K into
-        # CSA_KV / CSA_STATE (required by the dual-pool paged read).
-        self.compressor.forward_decode_vectorized(
-            x,
-            start_pos,
-            meta=csa_compressor_meta,
-            position_ids=position_ids,
+        self._decode_update_compressor(
+            x, bsz, q_len, start_pos, position_ids, attn_metadata
         )
         # CSA cmp_local_raw = indexer's raw indices (the +win offset is
         # added later inside the epilogue's translate path).
@@ -2333,21 +2413,11 @@ class AttentionFP8(nn.Module):
         idx precomputed once per step by
         ``update_decode_metadata_in_place._build_dense_compressed_idxs``
         (reused across all HCA layers via ``topk_total_by_ratio[128]``)."""
-        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, HCA_STATE
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV
 
         assert self.indexer is None, "HCA layer must not have an indexer"
-        hca_compressor_meta = self._decode_compressor_meta_from_metadata(
-            attn_metadata,
-            state_attn_type=HCA_STATE,
-            kv_attn_type=HCA_KV,
-            bsz=bsz,
-            q_len=q_len,
-        )
-        self.compressor.forward_decode_vectorized(
-            x,
-            start_pos,
-            meta=hca_compressor_meta,
-            position_ids=position_ids,
+        self._decode_update_compressor(
+            x, bsz, q_len, start_pos, position_ids, attn_metadata
         )
         win = self.window_size
         tt_h = attn_metadata.topk_total_by_ratio.get(int(self.compress_ratio))
@@ -2450,6 +2520,7 @@ class AttentionFP8(nn.Module):
             num_heads=self.n_heads,
             topk=win,
             extra_attn_type=cmp_attn_type,
+            extra_index_width=K_cmp,
         )
         # opt_flash_mla: pass per-request effective lengths so FlashMLA scans
         # only the true SWA / compressed widths. ``extra_topk_length`` keyed by
@@ -2468,6 +2539,10 @@ class AttentionFP8(nn.Module):
             q=q,
             swa_pool_3d=swa_pool_3d,
             cmp_pool_3d=cmp_pool_3d,
+            compress_ratio=int(self.compress_ratio),
+            cmp_tokens_per_block=int(
+                self._kv_cache.get_kernel_seq_size_per_block(cmp_attn_type)
+            ),
             attn_sink=self.attn_sink,
             swa_topk_3d=swa_topk_3d,
             cmp_topk_3d=cmp_topk_3d,
@@ -2671,6 +2746,8 @@ class AttentionFP8(nn.Module):
             qkv = self._prefill_compute_qkv(
                 x, common, shared_input_quant=shared_input_quant
             )
+        if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_qr", qkv.qr)
 
         # Phase-Z overlap dispatch: hoist the SWA write into the orchestrator
         # so it can run on the default stream while the compressor NCCL
@@ -2874,6 +2951,10 @@ class AttentionFP8(nn.Module):
                     post_gather_stream=indexer_post_stream,
                 )
                 nested_pending = None
+                if _rt.should_record_layer(self.layer_id):
+                    _rt.record_if_level(
+                        2, f"L{self.layer_id:02d}_csa_indexer_topk", raw
+                    )
             if main_pending is not None:
                 with record_function_range(
                     "dsv4.fp8.attn.csa_overlap.finish_main_compressor"
@@ -3039,6 +3120,12 @@ class AttentionFP8(nn.Module):
         # compressor just above; overlap already drained via finish_prefill in
         # the orchestrator before reaching here (_skip_compressor_write=True).
         qkv = self._materialize_prefill_q(qkv, common)
+        if (
+            self.compress_ratio == 4
+            and qkv.q is not None
+            and _rt.should_record_layer(self.layer_id)
+        ):
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_q_materialized", qkv.q)
 
         if workspace_meta is None:
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
@@ -3407,6 +3494,13 @@ class AttentionFP8(nn.Module):
                     )
                 swa_prefix_pending = None
 
+            if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
+                prefix = f"L{self.layer_id:02d}_csa"
+                _rt.record_if_level(2, f"{prefix}_cmp_topk", cmp_topk)
+                _rt.record_if_level(2, f"{prefix}_combined_indices", combined_indices)
+                _rt.record_if_level(2, f"{prefix}_combined_lens", combined_lens)
+                _rt.record_if_level(2, f"{prefix}_attention_workspace", workspace)
+
             return self._flash_mla_sparse_fwd_chunked_projected(
                 q=qkv.q,
                 kv=kv_view,
@@ -3599,7 +3693,6 @@ class AttentionFP8(nn.Module):
             qkv.q is not None
         ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 
@@ -5308,6 +5401,8 @@ class AttentionFP8(nn.Module):
                     attn_sink=self.attn_sink,
                     topk_length=topk_length[start:end],
                 )
+            if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
+                _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_flash_out", o_part)
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 self._prefill_output_proj_into(
                     o_part,
@@ -5317,6 +5412,8 @@ class AttentionFP8(nn.Module):
             dispose_tensor(o_part)
 
         self._prefill_output_all_reduce(out)
+        if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_projected_out", out)
         return out
 
     def _attn_fp8_swa_via_kv_full(
@@ -5534,17 +5631,21 @@ class AttentionFP8(nn.Module):
         """
         o_3d = o.view(-1, self.n_heads, self.head_dim)
         seqlen = o_3d.shape[0]
-        with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
-            o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                o_3d,
-                freqs_cis,
-                n_groups=self.n_groups,
-                heads_per_group=self.n_heads // self.n_groups,
-                nope_dim=self.head_dim - self.rope_head_dim,
-                rope_head_dim=self.rope_head_dim,
-            )
-        with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
-            o_proj = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
+        if self.wo_a is not None:
+            with record_function_range("dsv4.fp8.attn.out.provider_wo_a"):
+                o_proj = self._wo_a_from_bf16(o_3d, freqs_cis, 1, seqlen)
+        else:
+            with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
+                o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                    o_3d,
+                    freqs_cis,
+                    n_groups=self.n_groups,
+                    heads_per_group=self.n_heads // self.n_groups,
+                    nope_dim=self.head_dim - self.rope_head_dim,
+                    rope_head_dim=self.rope_head_dim,
+                )
+            with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
+                o_proj = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
         with record_function_range("dsv4.fp8.attn.out.wo_b"):
             wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
             self.wo_b(wo_b_in, out=out)

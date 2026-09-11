@@ -107,6 +107,8 @@ class W13SharedExpert(nn.Module):
         inter_dim: int,
         expert_weights: dict[str, torch.Tensor],
         swiglu_limit: float = 0.0,
+        *,
+        linear_factory=None,
     ) -> None:
         super().__init__()
         w13_w = expert_weights["w13_w"]
@@ -118,8 +120,9 @@ class W13SharedExpert(nn.Module):
                 "shared w13 weight shape mismatch: "
                 f"got {tuple(w13_w.shape)}, expected {(2 * inter_dim, dim)}"
             )
-        self.w13 = create_fp8_linear(w13_w, w13_s)
-        self.w2 = create_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+        factory = create_fp8_linear if linear_factory is None else linear_factory
+        self.w13 = factory(w13_w, w13_s)
+        self.w2 = factory(expert_weights["w2_w"], expert_weights["w2_s"])
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -187,10 +190,22 @@ class FusedSharedExpertFastPath:
         return weight, scale
 
     @staticmethod
+    def _has_linear_parts(linear: nn.Module) -> bool:
+        return isinstance(getattr(linear, "weight", None), torch.Tensor) and isinstance(
+            getattr(linear, "weight_scales", None), torch.Tensor
+        )
+
+    @staticmethod
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
             return False
-        return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
+        return all(
+            hasattr(shared_experts, name)
+            and FusedSharedExpertFastPath._has_linear_parts(
+                getattr(shared_experts, name)
+            )
+            for name in ("w13", "w2")
+        )
 
     @classmethod
     def has_merged_w13(cls, shared_experts: nn.Module) -> bool:
@@ -214,7 +229,17 @@ class FusedSharedExpertFastPath:
     def prepare(self, shared_experts: nn.Module) -> None:
         """Validate the loader-prepared merged w13; no runtime concatenation."""
         if not hasattr(shared_experts, "w13"):
-            raise RuntimeError("shared expert requires loader-prepared w13")
+            raise RuntimeError("DSV4 shared expert requires loader-prepared w13")
+        # Platform linears such as M890P PpuFp8Linear own their quantization
+        # and GEMM ABI and expose ``weight_scale`` rather than the CUDA
+        # factory's packed ``weight_scales``.  They must use Expert.forward,
+        # not this CUDA/Triton fused workspace path.
+        if not all(
+            hasattr(shared_experts, name)
+            and self._has_linear_parts(getattr(shared_experts, name))
+            for name in ("w13", "w2")
+        ):
+            return
         w13_w, w13_s = self._linear_parts(shared_experts.w13)
         if w13_w.dim() != 2:
             raise RuntimeError(f"shared w13 weight must be 2D, got {w13_w.dim()}D")
@@ -389,6 +414,8 @@ class FusedSharedExpertExecutor(FusedSharedExpertFastPath):
 
 class SharedExpertExecutor(ABC):
     name: str
+    # The executor must fence the input producer and join its output consumer.
+    start_before_routing = False
 
     def prepare(self, shared_experts: nn.Module) -> None:
         return None
@@ -521,7 +548,11 @@ def _run_shared_expert(
             "MOE_STRICT_FUSED=1 forbids the generic Expert.forward "
             "shared-expert fallback"
         )
-    return shared_experts(x).float()
+    shared = shared_experts(x)
+    if getattr(shared_experts, "preserve_output_dtype", False):
+        # fused_moe_epilogue converts BF16 to FP32 in registers before adding.
+        return shared
+    return shared.float()
 
 
 def get_shared_expert_executor(

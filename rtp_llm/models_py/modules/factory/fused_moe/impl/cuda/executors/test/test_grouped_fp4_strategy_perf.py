@@ -305,6 +305,54 @@ class GroupedFP4StrategyPerfTest(unittest.TestCase):
             f"grouped={grouped_ms:.3f}ms median paired ratio={paired_ratio:.3f}",
         )
 
+    def test_tp2_loader_setup_and_forward_keep_full_cuda_layout(self):
+        from rtp_llm.device.device_type import DeviceType, get_device_type
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
+        from rtp_llm.model_loader.load_config import LoadConfig
+
+        if (
+            get_device_type() != DeviceType.Cuda
+            or torch.cuda.get_device_capability()[0] != 10
+        ):
+            self.skipTest("requires CUDA SM100")
+        self.assertTrue(_has_fp8_fp4_grouped_kernel())
+        torch.manual_seed(1396)
+        E, D, inter, topk, tokens = 8, 512, 256, 6, 32
+        raw = _make_layer_weights(E, D, inter)
+        cfg = _cfg(E, D, inter, topk, tokens)
+        baseline = GroupedFp4Executor(cfg, FusedMoEQuantConfig(), _clone_weights(raw))
+        x, weights, indices = _make_inputs(tokens, D, E, topk)
+        with torch.inference_mode():
+            expected = baseline(x, weights, indices).clone()
+            for rank in (0, 1):
+                load = LoadConfig.model_construct(
+                    tp_size=2,
+                    tp_rank=rank,
+                    ep_size=1,
+                    ep_rank=0,
+                    dp_size=1,
+                    dp_rank=0,
+                    ffn_tp_size=1,
+                    ffn_tp_rank=0,
+                    hidden_size=D,
+                    head_num=1,
+                    head_num_kv=1,
+                    size_per_head=D,
+                    moe_pure_tp_mode=True,
+                    compute_dtype=torch.bfloat16,
+                    weight_preparation=None,
+                )
+                loaded = {}
+                for name, tensor in raw.items():
+                    loaded.update(MoeAtomicWeight(name, [])._split(tensor, load))
+                    self.assertEqual(loaded[name].shape, tensor.shape)
+                cfg.tp_size = 2
+                strategy = GroupedFp4Executor(cfg, FusedMoEQuantConfig(), loaded)
+                actual = strategy(x, weights, indices)
+                self.assertTrue(torch.isfinite(actual).all().item())
+                torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
+        torch.cuda.synchronize()
+
 
 if __name__ == "__main__":
     unittest.main()

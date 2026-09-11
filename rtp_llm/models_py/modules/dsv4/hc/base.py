@@ -32,6 +32,7 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 class HCMode(str, Enum):
     TILELANG = "tilelang"
+    HYBRID = "hybrid"
     FALLBACK = "fallback"
 
 
@@ -128,6 +129,21 @@ class HCUnitBase(nn.Module):
         self, x: torch.Tensor, dbg_tag: Optional[str] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         raise NotImplementedError
+
+    def pre_norm(self, x, norm, *, tp_size, tp_rank, dbg_tag=None):
+        """HC readout followed by hidden-shard RMSNorm.
+
+        Platforms may fuse this boundary while preserving the HC mixers and
+        token layout. The default retains the ordinary TP normalization path.
+        """
+        from rtp_llm.models_py.modules.dsv4.tp_norm import tp_rms_norm
+
+        y, post, comb = self.pre(x, dbg_tag=dbg_tag)
+        shape = y.shape
+        y = tp_rms_norm(
+            norm, y.reshape(-1, shape[-1]), tp_size=tp_size, tp_rank=tp_rank
+        ).view(shape)
+        return y, post, comb
 
     def post(
         self,

@@ -1,8 +1,8 @@
+from __future__ import annotations
+
 import logging
 from collections.abc import Mapping
-from typing import Any, Optional
-
-from torch import nn
+from typing import TYPE_CHECKING, Any, Optional
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
@@ -11,8 +11,6 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
 )
-from rtp_llm.models_py.modules import AttnImplFactory
-from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -21,6 +19,10 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from torch import nn
+
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 
 
 class GptModelBase(nn.Module):
@@ -74,9 +76,14 @@ class GptModelBase(nn.Module):
             )
         return True
 
+    def get_execution_capabilities(self):
+        return {"graph_requires_kv_cache_layout": False}
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> AttentionImpl | dict[str, AttentionImpl]:
+        from rtp_llm.models_py.modules import AttnImplFactory
+
         attention_inputs = get_attention_inputs_value(inputs)
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()

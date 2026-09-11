@@ -190,6 +190,33 @@ def _fake_fp8_gemm_nt(a, b, output, *args, **kwargs) -> None:
 
 
 class TestSharedExpertExecutor(unittest.TestCase):
+    def test_platform_linear_skips_cuda_fused_fast_path(self):
+        class PlatformLinear(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("weight", torch.ones((128, 128)))
+                self.register_buffer("weight_scale", torch.ones((1, 1)))
+
+        class PlatformShared(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w13 = PlatformLinear()
+                self.w2 = PlatformLinear()
+
+            def forward(self, x):
+                return x
+
+        shared = PlatformShared()
+        fast_path = FusedSharedExpertFastPath()
+        fast_path.prepare(shared)
+        self.assertFalse(fast_path._has_linear_parts(shared.w13))
+
+        executor = SequentialSharedExpertExecutor(fast_path)
+        x = torch.ones((1, 128), dtype=torch.bfloat16)
+        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+            executor.start(shared, x)
+        self.assertTrue(torch.equal(executor.finish(), x.float()))
+
     def test_combine_preserves_fp32_accumulate_semantics(self):
         routed = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
         shared = torch.tensor([[0.5, -0.25], [0.125, -0.5]], dtype=torch.float32)

@@ -1,0 +1,30 @@
+The csrc/ and include/ files are unmodified SGLang sources from the frozen
+PPU qualification checkout in dpskv4_sglang, collected 2026-09-08:
+/tmp/dsv4-prefill-stage1-20260907/source/sglang/jit_kernel/
+
+Copyright SGLang contributors. Licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).
+Original copyright and license notices are retained in the source files.
+source-manifest.json records the upstream snapshot and SHA-256 of every
+original file and retained runtime header. Adapted headers have one runtime
+copy; patches/ records changes against the original hashes.
+
+RTP-LLM adapters are outside this directory. They translate native resource
+layouts and launch the original Q FP4, C4 compression, FP4 Norm/RoPE/store,
+BF16 Prefill TopK, FP32 Decode TopK and masked SwiGLU/MXFP4 kernels without
+importing the SGLang Python package.
+
+compat/sgl_kernel/tensor.h adapts the host-only device-name lookup for the
+RTP PPU clang13/GCC10 toolchain, which crashes compiling the ranges projection.
+The maximum enumerator is explicit; tensor checks and device arithmetic are
+unchanged. The original hash and host adaptation patch are retained in the manifest.
+compat/fused_norm_rope_v2.cuh replaces five C++20 using-enum declarations
+with equivalent constexpr names for GCC10, including the two host wrappers.
+The manifest retains the original hash and the adaptation patch.
+compat/topk_prefill_bf16.cuh replaces the host kernel-pointer std::bit_cast
+with reinterpret_cast for GCC10; selection and tie handling are unchanged.
+compat/topk_decode_v1.cuh makes the same host kernel-pointer conversion for
+the FP32 Decode TopK. Selection and tie handling remain unchanged.
+compat/c4_decode_v2.cuh skips negative state-write slots used by RTP graph
+padding. compat/fused_norm_rope_v2.cuh also skips negative output slots.
+Valid rows retain the original arithmetic and cache layout.

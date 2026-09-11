@@ -45,6 +45,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )
+from rtp_llm.models_py.modules.dsv4.platform_provider import run_dsv4_fp8_mqa_logits
 
 try:
     import deep_gemm as _deep_gemm
@@ -156,6 +157,7 @@ def fp8_mqa_indexer_score(
     *,
     clean_logits: bool = False,
     max_seqlen_k: int = 0,
+    platform_provider=None,
 ) -> torch.Tensor:
     """One-shot non-paged FP8 indexer logits via DeepGEMM.
 
@@ -180,7 +182,8 @@ def fp8_mqa_indexer_score(
     assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
     assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
 
-    return _deep_gemm.fp8_mqa_logits(
+    return run_dsv4_fp8_mqa_logits(
+        _deep_gemm.fp8_mqa_logits,
         q_fp8.contiguous(),
         (k_quant.contiguous(), k_scale.contiguous()),
         w_fold.contiguous(),
@@ -188,4 +191,5 @@ def fp8_mqa_indexer_score(
         cu_seqlen_ke.contiguous(),
         clean_logits,
         max_seqlen_k,
+        platform_provider=platform_provider,
     )

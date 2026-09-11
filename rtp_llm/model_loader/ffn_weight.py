@@ -489,7 +489,10 @@ class MoeAtomicWeight(AtomicWeight):
         if not (load_config.moe_pure_tp_preshard and self.enable_pure_tp_preshard):
             return None
 
-        layout = _PURE_TP_LAYOUTS.get((self.name, self.process_fun, len(self.weights)))
+        key = (self.name, self.process_fun, len(self.weights))
+        layout = _PURE_TP_LAYOUTS.get(key)
+        if load_config.weight_preparation is not None:
+            layout = load_config.weight_preparation.preshard_layout(key, layout)
         database = (
             tensor_source.get_database()
             if isinstance(tensor_source, DatabaseTensorSource)
@@ -513,7 +516,7 @@ class MoeAtomicWeight(AtomicWeight):
             self.weights[0].tensor_name(layer_id)
         )
         if (requires_stacked and not is_stacked) or (
-            self._get_split_func() is not split_func
+            self._resolve_split_func(load_config) is not split_func
         ):
             logging.warning(f"{log_context} fallback: incompatible weight layout")
             return None

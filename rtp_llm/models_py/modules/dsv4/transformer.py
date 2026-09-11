@@ -13,13 +13,18 @@ from typing import Dict, List, Optional, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
+from rtp_llm.models_py.modules.dsv4.platform_provider import (
+    Dsv4PlatformProvider,
+    Dsv4ProviderCapability,
+    resolve_dsv4_platform_provider,
+)
+from rtp_llm.models_py.modules.dsv4.tp_norm import tp_gather_hidden, tp_rms_norm
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
@@ -171,23 +176,52 @@ def _build_block(
     layer_id: int,
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+    platform_provider: Optional[Dsv4PlatformProvider] = None,
+    module_build_context=None,
     commit_only: bool = False,
 ) -> Block:
-    return Block(
-        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+    if module_build_context is not None:
+        from rtp_llm.models.dsv4.specs import request_for
+
+        ctx = module_build_context
+        return ctx.factory.build(
+            request_for("block", ctx.selection, layer_id),
+            **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+            platform_provider=platform_provider,
+        )
+    if platform_provider is None:
+        provider = resolve_dsv4_platform_provider({Dsv4ProviderCapability.BLOCK})
+    else:
+        provider = platform_provider
+    return provider.build_block(
+        Block,
+        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+        platform_provider=provider,
     )
 
 
 class V4Transformer(nn.Module):
     """Standalone V4 forward. No TP/EP/PP sharding (world_size=1)."""
 
-    def __init__(self, args: V4Args, mw):
+    def __init__(
+        self,
+        args: V4Args,
+        mw,
+        platform_provider: Optional[Dsv4PlatformProvider] = None,
+        module_build_context=None,
+    ):
         """``mw`` is the framework's ``ModelWeights`` (with ``.global_weights``
         ``Dict[str, Tensor]`` keyed by ``W.*`` enum and ``.weights[layer_id]``
         per-layer dicts).  Required — every dsv4 sub-module reads its
         weights from ``mw`` at construction; there is no unit-test path
         that constructs the transformer with empty weights."""
         super().__init__()
+        if platform_provider is None:
+            self.platform_provider = resolve_dsv4_platform_provider(
+                {Dsv4ProviderCapability.BLOCK}
+            )
+        else:
+            self.platform_provider = platform_provider
         self.args = args
         self.max_seq_len = args.max_seq_len
         self.hc_mult = args.hc_mult
@@ -206,6 +240,8 @@ class V4Transformer(nn.Module):
                     i,
                     args,
                     layer_weights=mw.weights[i],
+                    platform_provider=self.platform_provider,
+                    module_build_context=module_build_context,
                     commit_only=self.commit_only,
                 )
                 for i in range(args.n_layers)
@@ -250,6 +286,9 @@ class V4Transformer(nn.Module):
                 hc_mult=args.hc_mult,
                 norm_eps=args.norm_eps,
                 hc_eps=args.hc_eps,
+                tp_size=args.tp_size,
+                tp_rank=args.tp_rank,
+                platform_provider=platform_provider,
             )
 
         self._dbg_step = 0
@@ -463,6 +502,32 @@ class V4Transformer(nn.Module):
         """Reduce the hc axis for ``[B, S, hc, d]`` or flat ``[T, hc, d]``."""
         return self.head_hc.head(x)
 
+    def _embed(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Embed tokens and restore the replicated global hidden dimension."""
+
+        hidden = self.embed(input_ids)
+        if self.args.tp_size > 1 and hidden.shape[-1] != self.args.dim:
+            hidden = tp_gather_hidden(hidden, tp_size=self.args.tp_size)
+        if hidden.shape[-1] != self.args.dim:
+            raise ValueError(
+                f"DSV4 embedding hidden size must be {self.args.dim}, "
+                f"got {hidden.shape[-1]}"
+            )
+        return hidden
+
+    def _norm(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply final global RMSNorm and restore the full hidden dimension."""
+
+        normalized = tp_rms_norm(
+            self.norm,
+            x,
+            tp_size=self.args.tp_size,
+            tp_rank=self.args.tp_rank,
+        )
+        if normalized.shape[-1] == self.args.dim:
+            return normalized
+        return tp_gather_hidden(normalized, tp_size=self.args.tp_size)
+
     @torch.inference_mode()
     def forward_decode(
         self,
@@ -481,14 +546,19 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids.view(B, q_len)
         else:
             input_ids_2d = input_ids
-        h = self.embed(input_ids_2d)  # [B, q_len, dim]
+        h = self._embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         for layer in self.layers:
-            h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
+            h = layer.forward_decode(
+                h,
+                attn_metadata,
+                input_ids_2d,
+                kv_cache=kv_cache,
+            )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
         # return that directly (the next reshape would no-op anyway).
-        return self.norm(h.reshape(B * q_len, self.args.dim))
+        return self._norm(h.reshape(B * q_len, h.shape[-1]))
 
     @torch.inference_mode()
     def forward(
@@ -570,7 +640,7 @@ class V4Transformer(nn.Module):
             # begin() may suppress this forward (MOEDBG_MAX_SEQ); honour it.
             if _rt._get_buf() is None:
                 _rt_on = False
-        h = self.embed(input_ids)  # [B, S, d]
+        h = self._embed(input_ids)  # [B, S, d]
         if _rt_on:
             _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]
@@ -617,7 +687,7 @@ class V4Transformer(nn.Module):
             _rt.record("hc_reduced", h)
         # Framework RMSNorm wants 2D; collapse [B, S, d] → [B*S, d] and view back.
         bsz, seq, dim_ = h.shape
-        h = self.norm(h.reshape(bsz * seq, dim_)).view(bsz, seq, dim_)
+        h = self._norm(h.reshape(bsz * seq, dim_)).view(bsz, seq, -1)
         if _rt_on:
             _rt.record("final_norm", h)
 

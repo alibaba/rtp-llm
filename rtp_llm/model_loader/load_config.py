@@ -6,6 +6,7 @@ from typing import Any, List, Optional, Union
 import torch
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from rtp_llm.model_loader.weight_preparation import WeightPreparation
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.util import check_with_info
@@ -61,6 +62,7 @@ class LoadConfig(BaseModel):
     use_swizzleA: bool = False
     force_cpu_load_weights: bool = False
     moe_pure_tp_preshard: bool = False
+    weight_preparation: Optional[WeightPreparation] = None
 
     @field_validator("database", "compute_dtype", "quant_algo")
     @classmethod

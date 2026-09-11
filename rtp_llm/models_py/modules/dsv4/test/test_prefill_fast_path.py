@@ -121,12 +121,13 @@ class _FakeV4:
         self._prefill_ws_idx_w = 0
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
-        self.norm = lambda h: h + 100
+        self.capture_aux_hidden_layer_ids = ()
+        self._norm = lambda h: h + 100
 
     def _propagate_cp_ctx(self, cp_ctx):
         self.cp_ctx = cp_ctx
 
-    def embed(self, input_ids):
+    def _embed(self, input_ids):
         return torch.stack((input_ids.float(), input_ids.float() + 0.5), dim=-1)
 
     def _hc_head_reduce(self, h):
@@ -166,7 +167,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
     def test_workspace_is_allocated_before_cp_setup_and_embedding(self):
         v4 = _FakeV4()
         events = []
-        original_embed = v4.embed
+        original_embed = v4._embed
 
         def make_workspace(*args, **kwargs):
             events.append("workspace")
@@ -184,7 +185,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         ), patch.object(
             v4, "_propagate_cp_ctx", side_effect=propagate_cp
         ), patch.object(
-            v4, "embed", side_effect=embed
+            v4, "_embed", side_effect=embed
         ), patch.object(
             prefill_forward, "build_and_propagate_prefill_meta_fp8"
         ), patch.object(
@@ -769,6 +770,76 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
 
         with self.assertRaisesRegex(RuntimeError, "no usable cu_seqlens"):
             self._run_forward_prefill_with(attn)
+
+    def test_prefill_cu_seqlens_uses_populated_host_boundaries(self):
+        host = torch.tensor([0, 2, 5], dtype=torch.int32)
+        device = torch.tensor([0, 1, 5], dtype=torch.int32)
+        attn = SimpleNamespace(cu_seqlens=host, cu_seqlens_device=device)
+
+        self.assertIs(prefill_forward._request_prefill_cu_seqlens(attn), host)
+
+    def test_prefill_cu_seqlens_falls_back_to_device_boundaries(self):
+        host = torch.empty(0, dtype=torch.int32)
+        device = torch.tensor([0, 2, 5], dtype=torch.int32)
+        attn = SimpleNamespace(cu_seqlens=host, cu_seqlens_device=device)
+
+        self.assertIs(prefill_forward._request_prefill_cu_seqlens(attn), device)
+
+    def test_cp_rebuilds_consumed_rank_local_varlen_metadata(self):
+        v4 = _FakeV4()
+        v4._cp_info = object()
+        v4._cp_size = 8
+        input_ids = torch.tensor([3, 4], dtype=torch.long)
+        positions = torch.empty(0, dtype=torch.long)
+        empty_i32 = torch.empty(0, dtype=torch.int32)
+        attn_inputs = SimpleNamespace(
+            input_lengths=empty_i32,
+            prefix_lengths=empty_i32,
+        )
+        cp_ctx = SimpleNamespace(
+            cp_size=8,
+            cp_rank=0,
+            chunk_length=2,
+            chunk_lengths_per_req=(2,),
+            global_positions=torch.tensor([0, 9], dtype=torch.long),
+            prefix_lengths=torch.tensor([0], dtype=torch.long),
+            req_id_per_token=torch.tensor([0, 0], dtype=torch.int32),
+        )
+
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(
+            prefill_forward._fwd_dbg, "enabled", lambda: False
+        ), patch.object(
+            prefill_forward, "build_cp_context_for_forward", return_value=cp_ctx
+        ), patch.object(
+            prefill_forward, "build_and_propagate_prefill_meta_fp8"
+        ) as build_meta, patch.object(
+            prefill_forward, "clear_prefill_meta_shared_fp8"
+        ):
+            prefill_forward.forward_layers(
+                v4,
+                kv_cache=None,
+                input_ids=input_ids,
+                positions=positions,
+                cu_seqlens=empty_i32,
+                block_tables_by_type=None,
+                attn_inputs=attn_inputs,
+            )
+
+        expected_cu = torch.tensor([0, 2], dtype=torch.int32)
+        torch.testing.assert_close(v4.calls[0][4], cp_ctx.global_positions)
+        torch.testing.assert_close(v4.calls[0][5], expected_cu)
+        kwargs = build_meta.call_args.kwargs
+        torch.testing.assert_close(kwargs["cu_seqlens"], expected_cu)
+        torch.testing.assert_close(
+            kwargs["input_lengths"], torch.tensor([2], dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            kwargs["prefix_lengths"], torch.tensor([0], dtype=torch.int32)
+        )
+        self.assertEqual(kwargs["batch_size"], 1)
+        self.assertEqual(kwargs["max_seqlen_q"], 2)
 
 
 if __name__ == "__main__":

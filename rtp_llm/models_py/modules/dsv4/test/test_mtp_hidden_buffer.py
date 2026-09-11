@@ -1,5 +1,7 @@
+import gc
 import types
 import unittest
+import weakref
 
 import torch
 
@@ -21,9 +23,51 @@ class _RuntimeModule(torch.nn.Module):
     """
 
     _bind_runtime_buffers = V4Transformer._bind_runtime_buffers
+    _bind_prefill_workspace_dims = V4Transformer._bind_prefill_workspace_dims
 
 
 class MtpHiddenBufferTest(unittest.TestCase):
+    @staticmethod
+    def _make_module_model():
+        return types.SimpleNamespace(
+            module_build_context=object(),
+            v4=_RuntimeModule(),
+            _shared_runtime_buffers=None,
+            _is_speculative=False,
+            _prefill_cp_size=1,
+            _capture_aux_hidden_layer_ids=(),
+            _v4_args=types.SimpleNamespace(dim=4, hc_mult=2),
+            _resolve_prefill_q_token_capacity=lambda: 8,
+            _resolve_prefill_q_dim=lambda: 16,
+            _resolve_mtp_hidden_token_capacity=lambda: 7,
+        )
+
+    def test_module_context_owns_store_and_ignores_legacy_mtp_request(self):
+        legacy = self._make_store(mtp=True)
+        first, second = self._make_module_model(), self._make_module_model()
+        for model in (first, second):
+            DeepSeekV4Model._bind_runtime_buffers(model, torch.device("cpu"))
+            self.assertIsNot(model._shared_runtime_buffers, legacy)
+            self.assertIsNone(model.v4._mtp_hidden_buffer)
+            self.assertEqual(model.v4._prefill_ws_q_rows, 8)
+        self.assertIsNot(first._shared_runtime_buffers, second._shared_runtime_buffers)
+        original = first._shared_runtime_buffers
+        DeepSeekV4Model._bind_runtime_buffers(first, torch.device("cpu"))
+        self.assertIs(first._shared_runtime_buffers, original)
+        self.assertEqual(legacy._subscribers, [])
+
+    def test_module_destruction_does_not_leave_weights_in_global_subscribers(self):
+        legacy = self._make_store()
+        model = self._make_module_model()
+        model.v4.register_parameter("weight", torch.nn.Parameter(torch.ones(2)))
+        DeepSeekV4Model._bind_runtime_buffers(model, torch.device("cpu"))
+        module_ref, weight_ref = weakref.ref(model.v4), weakref.ref(model.v4.weight)
+        del model
+        gc.collect()
+        self.assertIsNone(module_ref())
+        self.assertIsNone(weight_ref())
+        self.assertEqual(legacy._subscribers, [])
+
     def setUp(self) -> None:
         Dsv4SharedRuntimeBufferStore._reset_for_test()
 

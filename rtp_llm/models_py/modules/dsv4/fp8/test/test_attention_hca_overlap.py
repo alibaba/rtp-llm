@@ -828,11 +828,18 @@ class SwaStreamingOutputProjectionTest(unittest.TestCase):
 
 class PrefillOutputProjectionContractTest(unittest.TestCase):
     def test_out_is_2d_and_forwarded_to_wo_b(self) -> None:
+        self._exercise_projection(use_provider=False)
+
+    def test_provider_output_is_forwarded_without_cuda_quantization(self) -> None:
+        self._exercise_projection(use_provider=True)
+
+    def _exercise_projection(self, *, use_provider: bool) -> None:
         layer = AttentionFP8.__new__(AttentionFP8)
         torch.nn.Module.__init__(layer)
         layer.n_heads = 2
         layer.head_dim = 4
         layer.dim = 6
+        layer.wo_a = object() if use_provider else None
         layer.n_groups = 1
         layer.rope_head_dim = 2
 
@@ -850,6 +857,7 @@ class PrefillOutputProjectionContractTest(unittest.TestCase):
         layer._wo_a_einsum_from_fp8 = MagicMock(  # type: ignore[assignment]
             return_value=o_proj
         )
+        layer._wo_a_from_bf16 = MagicMock(return_value=o_proj)
         out = torch.empty(seqlen, layer.dim, dtype=torch.bfloat16, device=device)
         expected = (
             torch.arange(seqlen * layer.dim, dtype=torch.float32, device=device)
@@ -880,14 +888,24 @@ class PrefillOutputProjectionContractTest(unittest.TestCase):
 
         self.assertIsNone(ret)
         self.assertTrue(torch.equal(out, expected))
-        fused.assert_called_once()
-        fused_args, fused_kwargs = fused.call_args
-        self.assertEqual(tuple(fused_args[0].shape), (seqlen, 2, 4))
-        self.assertEqual(tuple(fused_args[1].shape), (seqlen, 2))
-        self.assertEqual(fused_kwargs["n_groups"], 1)
-        layer._wo_a_einsum_from_fp8.assert_called_once_with(
-            fused_ret[0], fused_ret[1], 1, seqlen
-        )
+        if use_provider:
+            fused.assert_not_called()
+            layer._wo_a_einsum_from_fp8.assert_not_called()
+            layer._wo_a_from_bf16.assert_called_once()
+            provider_args = layer._wo_a_from_bf16.call_args.args
+            self.assertEqual(tuple(provider_args[0].shape), (seqlen, 2, 4))
+            self.assertIs(provider_args[1], freqs_cis)
+            self.assertEqual(provider_args[2:], (1, seqlen))
+        else:
+            fused.assert_called_once()
+            fused_args, fused_kwargs = fused.call_args
+            self.assertEqual(tuple(fused_args[0].shape), (seqlen, 2, 4))
+            self.assertEqual(tuple(fused_args[1].shape), (seqlen, 2))
+            self.assertEqual(fused_kwargs["n_groups"], 1)
+            layer._wo_a_einsum_from_fp8.assert_called_once_with(
+                fused_ret[0], fused_ret[1], 1, seqlen
+            )
+            layer._wo_a_from_bf16.assert_not_called()
         self.assertEqual(len(wo_b_calls), 1)
         self.assertEqual(tuple(wo_b_calls[0][0].shape), (seqlen, 5))
         self.assertIs(wo_b_calls[0][1], out)

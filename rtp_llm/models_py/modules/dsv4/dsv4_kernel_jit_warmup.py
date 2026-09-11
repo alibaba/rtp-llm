@@ -91,9 +91,7 @@ def _cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
 def _batch_bucket_warmup_sizes(
     max_batch_size: int, *, max_supported_batch: int
 ) -> tuple[int, ...]:
-    max_supported = min(
-        max(int(max_batch_size), 1), int(max_supported_batch)
-    )
+    max_supported = min(max(int(max_batch_size), 1), int(max_supported_batch))
     max_bucket = 1 << (max_supported - 1).bit_length()
     sizes = []
     bucket = 1
@@ -905,11 +903,16 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
 
 
 def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
-    """Collect mHC DeepGEMM prenorm GEMM shapes from live TileLang HC units."""
+    """Collect mHC DeepGEMM prenorm GEMM shapes from live HC units."""
 
     shapes: Dict[tuple[int, int], dict] = {}
+    unit_classes = {"TileLangHCUnit", "HybridHCUnit"}
+    requested_backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+    if requested_backend in {"deepgemm", "dg"}:
+        unit_classes.add("FallbackHCUnit")
     for module_name, module in model.named_modules():
-        if module.__class__.__name__ != "TileLangHCUnit":
+        class_name = module.__class__.__name__
+        if class_name not in unit_classes:
             continue
         fn = getattr(module, "fn", None)
         if not isinstance(fn, torch.Tensor) or fn.dim() != 2:
@@ -936,6 +939,7 @@ def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
                 "hc_sinkhorn_iters": int(
                     getattr(module, "hc_sinkhorn_iters", 20) or 20
                 ),
+                "projection_only": class_name == "FallbackHCUnit",
             }
 
     logging.info(
@@ -1677,14 +1681,16 @@ def warmup_mhc_prenorm_gemm_jit(
     num_sms = _get_deep_gemm_num_sms(device)
     shape_keys = tuple(sorted(shapes.keys()))
     if deepgemm_enabled:
-        specs_by_shape = {
-            key: _generate_mhc_prenorm_warmup_specs(
+        specs_by_shape = {}
+        for key in shape_keys:
+            specs = _generate_mhc_prenorm_warmup_specs(
                 max_m=int(max_m),
                 k_value=int(key[1]),
                 num_sms=num_sms,
             )
-            for key in shape_keys
-        }
+            if bool(shapes[key].get("projection_only", False)):
+                specs = tuple((1, m_value) for _, m_value in specs)
+            specs_by_shape[key] = specs
     else:
         specs_by_shape = {key: ((1, 1),) for key in shape_keys if int(max_m) > 0}
     specs_by_shape = {key: specs for key, specs in specs_by_shape.items() if specs}
@@ -1736,19 +1742,20 @@ def warmup_mhc_prenorm_gemm_jit(
                         ),
                         device=device,
                     )
-                    _run_tilelang_warmup_launch_with_retry(
-                        "DSV4 mHC TileLangFuse",
-                        f"shape={key} num_splits={num_splits} m={m_value}",
-                        partial(
-                            _launch_dummy_mhc_pre_big_fuse,
-                            key=key,
-                            info=info,
-                            m_value=m_value,
-                            num_splits=num_splits,
+                    if not bool(info.get("projection_only", False)):
+                        _run_tilelang_warmup_launch_with_retry(
+                            "DSV4 mHC TileLangFuse",
+                            f"shape={key} num_splits={num_splits} m={m_value}",
+                            partial(
+                                _launch_dummy_mhc_pre_big_fuse,
+                                key=key,
+                                info=info,
+                                m_value=m_value,
+                                num_splits=num_splits,
+                                device=device,
+                            ),
                             device=device,
-                        ),
-                        device=device,
-                    )
+                        )
                 else:
                     _run_tilelang_warmup_launch_with_retry(
                         "DSV4 mHC TileLangPre",
@@ -1958,9 +1965,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         else ()
     )
     restore_batches = (
-        _cp_restore_batch_warmup_sizes(max_batch_size)
-        if direct_arch_supported
-        else ()
+        _cp_restore_batch_warmup_sizes(max_batch_size) if direct_arch_supported else ()
     )
     swa_slot_metadata_batches = _swa_slot_metadata_batch_warmup_sizes(max_batch_size)
     warmup_key = (
@@ -2002,9 +2007,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             dtype=torch.int32,
             device=device,
         )
-        swa_slot_prefixes = torch.zeros(
-            batch_size, dtype=torch.int32, device=device
-        )
+        swa_slot_prefixes = torch.zeros(batch_size, dtype=torch.int32, device=device)
 
         def _launch_swa_slot_metadata() -> None:
             compute_swa_slot_in_flat_from_cu(
@@ -2024,13 +2027,9 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         )
         del swa_slot_cu, swa_slot_prefixes
     if direct_scatter_enabled:
-        slot_mapping = torch.tensor(
-            [[0, 1], [1, -1]], dtype=torch.long, device=device
-        )
+        slot_mapping = torch.tensor([[0, 1], [1, -1]], dtype=torch.long, device=device)
         gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
-        workspace = torch.empty(
-            (2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device
-        )
+        workspace = torch.empty((2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device)
         direct_scatter = try_dequantize_and_gather_k_cache_slots_to_workspace(
             out=workspace,
             k_cache=full_view,
@@ -2054,9 +2053,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         )
         del slot_mapping, gather_lens, workspace
     if direct_gather_enabled:
-        pool_cache = torch.zeros(
-            (2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device
-        )
+        pool_cache = torch.zeros((2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device)
         for batch_size in direct_gather_batches:
             pool_block_table = torch.zeros(
                 (batch_size, 1), dtype=torch.int32, device=device
@@ -2064,9 +2061,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             pool_padded_lens = torch.full(
                 (batch_size,), 2, dtype=torch.int32, device=device
             )
-            pool_actual_lens = torch.ones(
-                batch_size, dtype=torch.int32, device=device
-            )
+            pool_actual_lens = torch.ones(batch_size, dtype=torch.int32, device=device)
             pool_local_flat = torch.empty(
                 (2 * batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
             )
@@ -2090,12 +2085,8 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         restore_gathered = torch.zeros(
             (batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
         )
-        restore_indices = torch.arange(
-            batch_size, dtype=torch.int64, device=device
-        )
-        restore_seq_lens = torch.ones(
-            batch_size, dtype=torch.int32, device=device
-        )
+        restore_indices = torch.arange(batch_size, dtype=torch.int64, device=device)
+        restore_seq_lens = torch.ones(batch_size, dtype=torch.int32, device=device)
         restore_workspace = torch.empty(
             (batch_size, 2, HEAD_DIM), dtype=torch.bfloat16, device=device
         )
@@ -2262,6 +2253,8 @@ def _launch_dummy_mhc_prenorm_gemm(
 
     n_value, k_value = key
     x = torch.zeros((m_value, k_value), dtype=torch.bfloat16, device=device)
+    # This launcher warms the CUDA wrapper: it produces one plane per split.
+    # PPU HC units own their reduced-output producer and warmup separately.
     out = torch.empty(
         (num_splits, m_value, n_value), dtype=torch.float32, device=device
     )
@@ -2293,6 +2286,7 @@ def _launch_dummy_mhc_pre_big_fuse(
     hc_eps = float(info.get("hc_eps", 1.0e-6))
     sinkhorn_iters = int(info.get("hc_sinkhorn_iters", 20) or 20)
 
+    # Match the partial planes produced by the CUDA prenorm launcher above.
     gemm_out_mul = torch.zeros(
         (num_splits, m_value, n_value), dtype=torch.float32, device=device
     )
@@ -2326,7 +2320,7 @@ def _launch_dummy_mhc_pre_big_fuse(
         hc_eps,
         2.0,
         sinkhorn_iters,
-        n_splits=int(num_splits),
+        n_splits=num_splits,
         mhc_mult=mhc_mult,
     )(
         gemm_out_mul,
@@ -2337,6 +2331,7 @@ def _launch_dummy_mhc_pre_big_fuse(
         post_mix,
         comb_mix,
         layer_input,
+        layer_input.view(-1)[:0],
     )
     del (
         gemm_out_mul,

@@ -100,7 +100,6 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
@@ -297,6 +296,62 @@ def _last_hidden_by_request(
     return flat[-1:].contiguous()
 
 
+def _request_prefill_cu_seqlens(attn: Any) -> Optional[torch.Tensor]:
+    """Return populated request boundaries from host or device input metadata."""
+    cu_seqlens = getattr(attn, "cu_seqlens", None)
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        return cu_seqlens
+    cu_seqlens_device = getattr(attn, "cu_seqlens_device", None)
+    if cu_seqlens_device is not None and cu_seqlens_device.numel() >= 2:
+        return cu_seqlens_device
+    return cu_seqlens
+
+
+def _cp_local_varlen_metadata(
+    cp_ctx: Any,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Rebuild rank-local varlen metadata from canonical CP context.
+
+    The production ZigZagProcessor may consume the framework-owned
+    ``attention_inputs.cu_seqlens`` and ``input_lengths`` while producing the
+    rank-local token slice.  DSV4 must not forward those now-empty tensors to
+    its varlen attention stack.  ``CPContext.chunk_lengths_per_req`` is the
+    canonical post-split layout and is available on every rank, so derive the
+    local cumulative lengths from it and retain the context's global prefix
+    lengths.
+    """
+    chunk_lengths = tuple(int(v) for v in cp_ctx.chunk_lengths_per_req or ())
+    if not chunk_lengths:
+        raise RuntimeError("CP context is missing rank-local request chunk lengths")
+    if any(v <= 0 for v in chunk_lengths):
+        raise RuntimeError(
+            f"CP rank-local chunk lengths must be positive: {chunk_lengths}"
+        )
+    if sum(chunk_lengths) != int(cp_ctx.chunk_length):
+        raise RuntimeError(
+            f"sum(CP rank-local chunk lengths)={sum(chunk_lengths)} != "
+            f"chunk_length={int(cp_ctx.chunk_length)}"
+        )
+
+    input_lengths = torch.tensor(chunk_lengths, dtype=torch.int32, device=device)
+    cu_seqlens = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int32, device=device),
+            torch.cumsum(input_lengths, dim=0).to(torch.int32),
+        ]
+    ).contiguous()
+    prefix_lengths = cp_ctx.prefix_lengths.to(
+        device=device, dtype=torch.int32
+    ).contiguous()
+    if prefix_lengths.numel() != input_lengths.numel():
+        raise RuntimeError(
+            f"CP prefix lengths has {prefix_lengths.numel()} entries, "
+            f"expected {input_lengths.numel()}"
+        )
+    return cu_seqlens, input_lengths, prefix_lengths, max(chunk_lengths)
+
+
 def set_cp_info(
     v4: V4Transformer,
     parallelism_config: Optional[ParallelismConfig],
@@ -399,6 +454,9 @@ def forward_layers(
     cp_size = getattr(v4, "_cp_size", 1)
     cp_rank = getattr(v4, "_cp_rank", 0)
     cp_ctx = None
+    cp_input_lengths: Optional[torch.Tensor] = None
+    cp_prefix_lengths: Optional[torch.Tensor] = None
+    cp_max_seqlen_q = 0
     if cp_info is not None and cp_size > 1:
         cp_ctx = build_cp_context_for_forward(
             cp_info,
@@ -409,6 +467,12 @@ def forward_layers(
             prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
+        (
+            cu_seqlens,
+            cp_input_lengths,
+            cp_prefix_lengths,
+            cp_max_seqlen_q,
+        ) = _cp_local_varlen_metadata(cp_ctx, input_ids.device)
     v4._propagate_cp_ctx(cp_ctx)
     if cp_ctx is not None:
         # The framework's fallback position_ids are rank-local contiguous
@@ -452,7 +516,7 @@ def forward_layers(
             )
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids)  # [T_total, dim]
+        h = v4._embed(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
@@ -489,8 +553,12 @@ def forward_layers(
             if attn_inputs is not None:
                 host_input_lengths = attn_inputs.input_lengths
                 host_prefix_lengths = attn_inputs.prefix_lengths
-                input_lengths_device = attn_inputs.input_lengths_device
-                prefix_lengths_device = attn_inputs.prefix_lengths_device
+                input_lengths_device = getattr(
+                    attn_inputs, "input_lengths_device", None
+                )
+                prefix_lengths_device = getattr(
+                    attn_inputs, "prefix_lengths_device", None
+                )
                 input_lengths_source = (
                     input_lengths_device
                     if input_lengths_device is not None
@@ -583,7 +651,11 @@ def forward_layers(
             if cu_seqlens is not None and cu_seqlens.numel() >= 2:
                 batch_size = int(cu_seqlens.numel() - 1)
             max_seqlen_q = int(h.size(0))
-            if (
+            if cp_ctx is not None:
+                input_lengths = cp_input_lengths
+                prefix_lengths = cp_prefix_lengths
+                max_seqlen_q = cp_max_seqlen_q
+            elif (
                 host_input_lengths is not None
                 and host_input_lengths.device.type == "cpu"
                 and host_input_lengths.numel() > 0
@@ -719,7 +791,8 @@ def forward_layers(
         h = v4._hc_head_reduce(h)  # [T, dim]
         if _rt_on:
             _rt.record("prefill_hc_reduced", h)
-        h = v4.norm(h)  # [T, dim]
+        h = v4._norm(h)  # [T, dim]
+
     if _rt_on:
         _rt.record("prefill_final_norm", h)
         if cp_ctx is None:
@@ -758,6 +831,21 @@ def forward_layers(
                     "seq_len_total": cp_ctx.seq_len_total,
                     "relative_positions": cp_ctx.relative_positions.detach().cpu(),
                     "global_positions": cp_ctx.global_positions.detach().cpu(),
+                    "req_id_per_token": (
+                        cp_ctx.req_id_per_token.detach().cpu()
+                        if cp_ctx.req_id_per_token is not None
+                        else None
+                    ),
+                    "input_lengths_global": (
+                        cp_ctx.input_lengths_global.detach().cpu()
+                        if cp_ctx.input_lengths_global is not None
+                        else None
+                    ),
+                    "prefix_lengths_global": (
+                        cp_ctx.prefix_lengths.detach().cpu()
+                        if cp_ctx.prefix_lengths is not None
+                        else None
+                    ),
                     "unpad_restore": cp_ctx.unpad_restore.detach().cpu(),
                     "local_is_real": cp_ctx.local_is_real.detach().cpu(),
                 }
@@ -851,10 +939,9 @@ def forward_prefill(
     # host residency. During CUDA Graph capture, however, keep an existing
     # device mirror on-device: replay refreshes that mirror, not the host
     # boundaries retained at capture time, and D2H copies are not capture-safe.
-    host_cu_seqlens = attn.cu_seqlens
     cu_seqlens_device = attn.cu_seqlens_device
     is_capturing = input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
-    framework_cu_seqlens = host_cu_seqlens
+    framework_cu_seqlens = _request_prefill_cu_seqlens(attn)
     if (
         is_capturing
         and cu_seqlens_device is not None

@@ -78,12 +78,28 @@ class BackendManager(object):
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
             vit_config=self.py_env_configs.vit_config,
+            module_dispatch_config=engine_config.module_dispatch,
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
         )
+
+        if engine_config.module_dispatch.mode != "legacy":
+            from rtp_llm.models_py.pluggable.worker import prepare_worker_model_context
+
+            engine_config.module_build_context = prepare_worker_model_context(
+                model_config,
+                engine_config,
+                self._distributed_server,
+                timeout_s=self.py_env_configs.distribute_config.dist_comm_timeout
+                or 300,
+            )
+
+        from rtp_llm.device import get_current_device
+
+        get_current_device().prepare_model_runtime(model_config, engine_config)
 
         # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
         if (

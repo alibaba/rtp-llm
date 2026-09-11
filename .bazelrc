@@ -447,5 +447,36 @@ test:cuda --test_env CUDA_HOME=/usr/local/cuda
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
 
 # internal source overrides (only loaded when internal_source symlink exists)
+
+# PPU SDK 2.1 / CUDA 13. Source the SDK envsetup.sh before invoking Bazel.
+build:ppu --copt -DENABLE_DEEP_EP=1
+build:ppu --copt -DUSE_ACCL_EP=0
+build:ppu --config=cuda
+build:ppu --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.9"
+build:ppu --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.9"
+build:ppu --copt="-DENABLE_FP8=1"
+build:ppu --define=using_cuda12_9=false
+build:ppu --copt -w # too many warning by ppu compiler
+build:ppu --copt="-DUSE_PPU=1"
+build:ppu --copt="-DUSE_AIU=1"
+build:ppu --action_env TF_CUDA_VERSION="13.0"
+build:ppu --host_action_env TF_CUDA_VERSION="13.0"
+build:ppu --repo_env=TF_CUDA_VERSION=13.0
+build:ppu --copt="-DFMHA_SUPPORT_SPLIT=1"
+build:ppu --define=use_ppu=true
+build:ppu --copt="-DENABLE_TRITON=1"
+build:ppu --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
+build:ppu --define=enable_triton=true
+build:ppu --define=NVSHMEM_DIR=/usr/local/PPU_SDK/sailSHMEM
+build:ppu --action_env CUDA_HOME="/usr/local/PPU_SDK/CUDA_SDK/"
+build:ppu --action_env CUDA_PATH="/usr/local/PPU_SDK/CUDA_SDK/"
+build:ppu --action_env PPU_SDK="/usr/local/PPU_SDK/"
+build:ppu --action_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+test:ppu --test_env PPU_HOME="/usr/local/PPU_SDK/"
+test:ppu --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+build:ppu --define=using_cuda12_9_x86=false
+build:ppu --define=using_cuda12_arm=false
+build:ppu --define=using_cuda13_x86=false
+
 try-import %workspace%/internal_source/.internal_bazelrc
 try-import %workspace%/internal_source/.cicd_bazelrc

@@ -39,9 +39,23 @@ the slot indices we produce here are ``r * stride + offset_in_request``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
+
+# FlashMLA's rich ABI has exactly three scheduler buckets.  Keep these
+# values local to this platform adapter: importing the model/provider registration
+# layer here would make the metadata builder non-standalone.
+RICH_SWA_BUCKET = None
+RICH_CSA_BUCKET = "csa_kv"
+RICH_HCA_BUCKET = "hca_kv"
+RICH_SCHED_BUCKETS = (RICH_SWA_BUCKET, RICH_CSA_BUCKET, RICH_HCA_BUCKET)
+RICH_SWA_PAGE = 128
+RICH_CSA_PAGE = 64
+RICH_HCA_PAGE = 2
+RICH_SWA_INDEX_WIDTH = 128
+RICH_CSA_INDEX_WIDTH = 512
+RICH_HCA_INDEX_WIDTH = 64
 
 
 @dataclass
@@ -196,7 +210,7 @@ class DSv4DecodeAttnMetadataFP8:
     # pool is bound.
     hca_cmp_global_slots: Optional[torch.Tensor] = None
 
-    # FlashMLA ``sched_meta`` cache — per-(batch_size, extra_attn_type).
+    # FlashMLA ``sched_meta`` cache — per-(batch_size, q_len, extra type, width).
     # Mirrors vLLM's ``swa_metadata.tile_sched_{swaonly,c4a,c128a}`` pattern:
     # the planner is called once per (mode, B) combination and the returned
     # ``sched_meta`` is reused across all layers of the same type in a decode
@@ -214,7 +228,9 @@ class DSv4DecodeAttnMetadataFP8:
     # pools have different page_block_size → separate cache keys.
     # ``extra_at`` is the cache tag of the compressed pool
     # (``CSA_KV`` / ``HCA_KV``) or ``None`` for single-pool SWA-only.
-    sched_meta_cache: Dict[Tuple[int, Optional[str]], Any] = field(default_factory=dict)
+    sched_meta_cache: Dict[Tuple[int, int, int, Optional[str], int], Any] = field(
+        default_factory=dict
+    )
 
     # opt_flash_mla: graph-stable per-request effective lengths fed to FlashMLA
     # sparse decode as ``topk_length`` / ``extra_topk_length``. Derived from the
@@ -238,6 +254,9 @@ class DSv4DecodeAttnMetadataFP8:
     compressed_topk_length_by_ratio: Dict[int, torch.Tensor] = field(
         default_factory=dict
     )  # ratio -> [B] int32
+    # Optional per-step RoPE rows, keyed by the source table's object identity.
+    # The metadata implementation retains the source tables and output storage.
+    rope_freqs_by_source: Dict[int, torch.Tensor] = field(default_factory=dict)
 
 
 def get_or_build_sched_meta(
@@ -248,6 +267,7 @@ def get_or_build_sched_meta(
     num_heads: int,
     topk: int,
     extra_attn_type: Optional[str] = None,
+    extra_index_width: Optional[int] = None,
 ) -> Any:
     """Lazy-build + cache FlashMLA ``sched_meta`` on the metadata object.
 
@@ -256,7 +276,7 @@ def get_or_build_sched_meta(
     ``DeepseekSparseSWAMetadataBuilder.build_tile_scheduler`` design —
     sched_meta lives on the per-step metadata object.
 
-    Cache key is ``(batch_size, extra_attn_type)``:
+    Cache key is ``(batch_size, q_len, topk, extra_attn_type, extra_index_width)``:
       * The FlashMLA wheel bakes ``config.b`` (batch size) and
         ``config.extra_page_block_size`` (extra_k_cache page size) into the
         sched_meta on the first ``flash_mla_with_kvcache`` call and asserts
@@ -267,8 +287,9 @@ def get_or_build_sched_meta(
       * CSA_KV and HCA_KV pools have different ``page_block_size``, so
         they MUST use separate sched_meta instances.
 
-    Within one (B, extra_attn_type) bucket ``q_len / num_heads / topk`` are
-    process-constants.
+    Only the three rich-ABI buckets (SWA-only, CSA, HCA) are accepted.  A
+    caller using a new geometry must add an explicit bucket instead of
+    silently reusing a scheduler with incompatible tile geometry.
 
     CUDA-graph + opt_flash_mla (effective ``topk_length``): FlashMLA builds its
     tile schedule (``tile_scheduler_metadata`` / ``num_splits``) lazily on the
@@ -302,7 +323,32 @@ def get_or_build_sched_meta(
     if getattr(metadata, "_sched_meta_capturing", False) != capturing:
         metadata._sched_meta_capturing = capturing
 
-    key = (batch_size, extra_attn_type)
+    if extra_attn_type not in RICH_SCHED_BUCKETS:
+        raise ValueError(
+            f"unsupported FlashMLA rich scheduler bucket: {extra_attn_type!r}"
+        )
+    if int(q_len) < 1:
+        raise ValueError(f"FlashMLA rich q_len must be positive: {q_len}")
+    if int(topk) <= 0 or int(topk) % 64:
+        raise ValueError(
+            "FlashMLA scheduler primary width must be positive and "
+            f"64-aligned: {topk}"
+        )
+
+    if extra_attn_type is None:
+        if extra_index_width not in (None, 0):
+            raise ValueError("SWA-only scheduler cannot carry extra index width")
+    elif extra_index_width is None or int(extra_index_width) <= 0:
+        raise ValueError("dual scheduler requires a positive extra index width")
+    elif extra_attn_type == RICH_CSA_BUCKET and int(extra_index_width) not in (
+        512,
+        1024,
+    ):
+        raise ValueError("CSA scheduler extra index width must be 512 or 1024")
+    elif extra_attn_type == RICH_HCA_BUCKET and int(extra_index_width) % 64:
+        raise ValueError("HCA scheduler extra index width must be 64-byte aligned")
+
+    key = (batch_size, q_len, int(topk), extra_attn_type, int(extra_index_width or 0))
     sched_meta = metadata.sched_meta_cache.get(key)
     if sched_meta is None:
         sched_meta, _ = get_mla_metadata(
@@ -366,9 +412,7 @@ def _resolve_paged_pool_tokens_per_block(
         raise ValueError("paged_pool_tokens_per_block is required for paged pools")
     for tag in entries_by_pool:
         if tag not in tokens_by_pool:
-            raise ValueError(
-                "paged_pool_tokens_per_block missing tag=%s" % (tag,)
-            )
+            raise ValueError("paged_pool_tokens_per_block missing tag=%s" % (tag,))
         tokens_per_block = int(tokens_by_pool[tag])
         if tokens_per_block <= 0:
             raise ValueError(
@@ -968,6 +1012,9 @@ def update_decode_metadata_in_place_fp8(
     paged_pool_entries_per_block: Optional[Dict[str, int]] = None,
     paged_pool_tokens_per_block: Optional[Dict[str, int]] = None,
     capture_full_width_lengths: bool = False,
+    compressor_state_slot_updater: Optional[
+        Callable[["DSv4DecodeAttnMetadataFP8", int, Dict[str, int]], None]
+    ] = None,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -993,6 +1040,10 @@ def update_decode_metadata_in_place_fp8(
             focused metadata tests.
         forbid_realloc: If True, asserts every write reuses the existing
             tensor storage (sanity check for the captured-graph path).
+        compressor_state_slot_updater: Optional platform implementation of
+            state-pool mapping. Called after normalized positions and paged
+            block tables are updated; must write the existing output prefix
+            without changing any tensor storage or other metadata fields.
     """
     q_len = meta.q_len_per_req
     window_size = meta.window_size
@@ -1108,7 +1159,10 @@ def update_decode_metadata_in_place_fp8(
             paged_pool_tokens_per_block,
         )
 
-        _update_compressor_state_slot_mappings(
+        state_slot_updater = (
+            compressor_state_slot_updater or _update_compressor_state_slot_mappings
+        )
+        state_slot_updater(
             meta,
             bs,
             paged_pool_entries_per_block,
@@ -1121,10 +1175,10 @@ def update_decode_metadata_in_place_fp8(
     # ``req_id_per_token`` is deterministic (``arange(B)``) so it was filled
     # at allocate time and stays stable.
     if paged_block_tables and paged_pool_entries_per_block:
-        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
             translate_local_to_global_slots,
         )
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
 
         T = bs * q_len
         req_id_bs = (
@@ -1380,14 +1434,14 @@ def build_decode_metadata_fp8(
     swa_global_slots: Optional[torch.Tensor] = None
     hca_cmp_global_slots: Optional[torch.Tensor] = None
     if paged_block_tables and paged_pool_entries_per_block:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
+            compute_kv_pool_slot_mapping,
+        )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
             HCA_KV,
             INDEXER_KV,
             SWA_KV,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
-            compute_kv_pool_slot_mapping,
         )
 
         # Snapshot block tables (clone so downstream writes can't surprise
@@ -1454,11 +1508,11 @@ def build_decode_metadata_fp8(
         torch.full_like(candidate, -1),
     )
     if paged_block_tables and paged_pool_entries_per_block:
-        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
             build_req_id_per_token,
             translate_local_to_global_slots,
         )
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, SWA_KV
 
         req_id_per_token = build_req_id_per_token(int(B), q_len, device)
         req_id_per_token_long = req_id_per_token.to(torch.long)
