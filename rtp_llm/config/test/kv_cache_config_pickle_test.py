@@ -1,0 +1,119 @@
+import pickle
+from unittest import TestCase, main
+
+from rtp_llm.config.test.kv_cache_event_test_values import (
+    KV_CACHE_EVENT_FIELD_VALUES,
+)
+from rtp_llm.ops import KVCacheConfig
+
+DISK_CACHE_FIELDS = (
+    "enable_memory_cache_disk",
+    "memory_cache_disk_paths",
+    "memory_cache_disk_size_mb",
+    "memory_cache_disk_buffered_io",
+    "memory_cache_disk_sync_timeout_ms",
+    "enable_gpu_prefix_tree",
+    "enable_prefix_tree_memory_cache",
+    "enable_legacy_memory_connector_fallback",
+    "prefix_tree_memory_state_swa_pool_ratio",
+    "enable_independent_group_eviction",
+    "load_cache_retry_times",
+)
+
+EVENT_PICKLE_FIELDS = (
+    "kv_cache_event_publisher_type",
+    "kv_cache_event_manager_endpoint",
+    "kv_cache_event_instance_group",
+    "kv_cache_event_instance_id",
+    "kv_cache_event_host_ip_port",
+)
+
+CURRENT_STATE_SIZE = 62
+EVENT_FIELD_OFFSET = 57
+
+
+class KVCacheConfigPickleTest(TestCase):
+    def test_event_fields_round_trip_in_current_state(self):
+        config = KVCacheConfig()
+        for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
+            setattr(config, name, value)
+
+        self.assertEqual(CURRENT_STATE_SIZE, len(config.__getstate__()))
+        restored = pickle.loads(pickle.dumps(config))
+
+        for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
+            self.assertEqual(value, getattr(restored, name), name)
+
+    def test_event_pickle_block_follows_declaration_order(self):
+        config = KVCacheConfig()
+        for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
+            setattr(config, name, value)
+
+        self.assertEqual(
+            tuple(KV_CACHE_EVENT_FIELD_VALUES[name] for name in EVENT_PICKLE_FIELDS),
+            config.__getstate__()[EVENT_FIELD_OFFSET:],
+        )
+
+    def test_legacy_54_element_state_uses_event_defaults(self):
+        source = KVCacheConfig()
+        source.enable_memory_cache_disk = True
+        source.memory_cache_disk_paths = "/tmp/cache"
+        source.load_cache_retry_times = 7
+        legacy_state = source.__getstate__()[:54]
+        self.assertEqual(54, len(legacy_state))
+
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(legacy_state)
+
+        self.assertTrue(restored.enable_memory_cache_disk)
+        self.assertEqual("/tmp/cache", restored.memory_cache_disk_paths)
+        self.assertEqual(7, restored.load_cache_retry_times)
+        defaults = KVCacheConfig()
+        for name in KV_CACHE_EVENT_FIELD_VALUES:
+            self.assertEqual(getattr(defaults, name), getattr(restored, name), name)
+
+    def test_legacy_43_element_state_uses_disk_and_event_defaults(self):
+        source = KVCacheConfig()
+        source.enable_memory_cache_disk = True
+        source.memory_cache_disk_paths = "/tmp/cache"
+        source.load_cache_retry_times = 7
+        source.kv_cache_event_publisher_type = "kvcm"
+        legacy_state = source.__getstate__()[:43]
+        self.assertEqual(43, len(legacy_state))
+
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(legacy_state)
+
+        defaults = KVCacheConfig()
+        for name in (*DISK_CACHE_FIELDS, *KV_CACHE_EVENT_FIELD_VALUES):
+            self.assertEqual(getattr(defaults, name), getattr(restored, name), name)
+
+    def test_legacy_57_element_state_uses_event_defaults(self):
+        source = KVCacheConfig()
+        source.dsv4_fixed_pool_blocks = 17
+        source.dsv4_hca_state_pool_blocks = 19
+        source.dsv4_fixed_pool_use_memory = True
+        legacy_state = source.__getstate__()[:EVENT_FIELD_OFFSET]
+
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(legacy_state)
+
+        self.assertEqual(17, restored.dsv4_fixed_pool_blocks)
+        self.assertEqual(19, restored.dsv4_hca_state_pool_blocks)
+        self.assertTrue(restored.dsv4_fixed_pool_use_memory)
+        defaults = KVCacheConfig()
+        for name in KV_CACHE_EVENT_FIELD_VALUES:
+            self.assertEqual(getattr(defaults, name), getattr(restored, name), name)
+
+    def test_unknown_state_sizes_are_rejected(self):
+        current_state = KVCacheConfig().__getstate__()
+        for size in (42, 44, 53, 55, 56, 58, CURRENT_STATE_SIZE - 1):
+            with self.subTest(size=size), self.assertRaisesRegex(
+                RuntimeError, "Invalid state"
+            ):
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(current_state[:size])
+
+
+if __name__ == "__main__":
+    main()

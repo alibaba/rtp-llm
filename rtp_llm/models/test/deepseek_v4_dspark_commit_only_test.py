@@ -30,9 +30,7 @@ def _fp8_descriptor(name: str, checkpoint_name: str) -> V4PerBlockFp8Weight:
 class DeepSeekV4DSparkCommitOnlyWeightTest(TestCase):
     def _full_info(self) -> ModelWeightInfo:
         wkv = _fp8_descriptor(W.v4_attn_wkv_w, "mtp.{i}.attn.wkv.weight")
-        main_proj = _fp8_descriptor(
-            W.v4_dspark_main_proj_w, "mtp.0.main_proj.weight"
-        )
+        main_proj = _fp8_descriptor(W.v4_dspark_main_proj_w, "mtp.0.main_proj.weight")
         return ModelWeightInfo(
             layer_weights=[
                 [
@@ -57,9 +55,7 @@ class DeepSeekV4DSparkCommitOnlyWeightTest(TestCase):
         descriptor.role_type = "PREFILL"
         full = self._full_info()
 
-        with mock.patch.object(
-            DeepSeekV4Weight, "get_weight_info", return_value=full
-        ):
+        with mock.patch.object(DeepSeekV4Weight, "get_weight_info", return_value=full):
             filtered = descriptor.get_weight_info()
 
         expected_layer_names = {W.v4_attn_wkv_w, W.v4_attn_kv_norm}
@@ -114,7 +110,9 @@ class DeepSeekV4DSparkCommitOnlyConstructionTest(TestCase):
             model = V4Transformer(args, weights)
 
         self.assertEqual(build.call_count, 3)
-        self.assertTrue(all(call.kwargs["commit_only"] for call in build.call_args_list))
+        self.assertTrue(
+            all(call.kwargs["commit_only"] for call in build.call_args_list)
+        )
         self.assertIsNone(model.embed)
         self.assertIsNone(model.norm)
         self.assertIsNone(model.head_weight)
@@ -126,7 +124,7 @@ class DeepSeekV4DSparkCommitOnlyConstructionTest(TestCase):
             block_module,
             "CommitOnlyAttentionFP8",
             return_value=nn.Identity(),
-        ) as attention, mock.patch.object(block_module, "MoE") as moe:
+        ) as attention, mock.patch.object(block_module, "ChunkedFp8Fp4MoeLayer") as moe:
             block = transformer_module._build_block(
                 0, args, layer_weights={}, commit_only=True
             )

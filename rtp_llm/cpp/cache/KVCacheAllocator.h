@@ -141,6 +141,11 @@ public:
     virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
     virtual std::vector<int>                        independentEvictionGroupIds() const;
+    // Groups whose prefix-reuse chains are densely materialized in
+    // SharedBlockCache (see cacheGroupPublishesPrefixChain); used as the
+    // completeness set for KV cache event publication. Tail-sparse groups
+    // (LINEAR/SWA) are excluded even when they participate in prefix reuse.
+    virtual std::vector<int> reuseParticipatingGroupIds() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
@@ -153,9 +158,9 @@ protected:
         TOTAL_AND_AVAILABLE,
     };
 
-    virtual bool         doInit() = 0;
-    virtual size_t       reservableAvailableBlocksNum() const;
-    MallocResult         initMalloc(const MallocInfo& malloc_info);
+    virtual bool   doInit() = 0;
+    virtual size_t reservableAvailableBlocksNum() const;
+    MallocResult   initMalloc(const MallocInfo& malloc_info);
     // Classifies an init-malloc shortfall: a total-capacity shortfall is
     // PERMANENT (the request can never fit), an available-capacity shortfall is
     // RETRYABLE (the pools are momentarily full) so the stream stays WAITING

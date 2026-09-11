@@ -95,10 +95,12 @@ def _build_real_layer(rank, parallelism_config, with_gate):
     config = ModelConfig()
     config.hidden_size = hidden_size
     config.inter_size = inter_size
+    config.moe_inter_size = inter_size
     config.expert_num = expert_num
     config.moe_k = 4
     config.activation_type = ActivationType.Swiglu
     config.moe_style = 2
+    config.n_shared_experts = 1
     config.quant_config = None
 
     # Give each rank a different routed-expert contribution so the test checks

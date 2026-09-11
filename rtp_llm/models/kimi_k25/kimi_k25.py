@@ -98,6 +98,7 @@ class KimiK25(DeepSeekV2):
             return
 
         config.inter_size = text_config["intermediate_size"]
+        config.dense_inter_size = config.inter_size
         config.attn_config.head_num = text_config["num_attention_heads"]
         config.attn_config.kv_head_num = text_config.get(
             "num_key_value_heads", config.attn_config.head_num
@@ -168,12 +169,14 @@ class KimiK25(DeepSeekV2):
         config.moe_k = text_config["num_experts_per_tok"]
         config.expert_num = text_config["n_routed_experts"]
         moe_intermediate_size = text_config["moe_intermediate_size"]
+        config.moe_inter_size = moe_intermediate_size
         config.moe_n_group = text_config.get("n_group", 1)
         config.moe_topk_group = text_config.get("topk_group", 1)
         n_shared_experts = text_config.get("n_shared_experts", 1)
+        config.n_shared_experts = n_shared_experts
         config.inter_size = n_shared_experts * moe_intermediate_size
         config.has_moe_norm = text_config.get("norm_topk_prob", False)
-        config.moe_style = 2  # shared + routed
+        config.moe_style = 2 if n_shared_experts > 0 else 1
 
         moe_step = text_config.get("moe_layer_freq", 1)
         first_k_dense_replace = text_config.get("first_k_dense_replace", 0)
