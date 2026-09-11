@@ -10,9 +10,10 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
-#include <memory>
 #include <vector>
 
 namespace kmonitor {
@@ -72,6 +73,10 @@ struct GptModelInitParams {
     // Final CUDA-graph kernel block-table width. Executors compute it from
     // the published model topology, actual reserve, and fake caller bounds.
     int64_t                                    kernel_block_table_width = 0;
+
+    std::vector<int64_t>    hidden_state_capture_layer_ids;
+    HiddenStateCaptureDtype hidden_state_capture_dtype     = HiddenStateCaptureDtype::BF16;
+    bool                    hidden_state_capture_fail_open = false;
 };
 
 enum GptModelInputIndex : size_t {
@@ -122,6 +127,10 @@ enum GptModelInputIndex : size_t {
     // [group, batch, blocks].
     kvCacheKernelBlockIdRank,
     kvCacheBlockIdRank,
+    // Root-owned execution flags used by target-prefill and hidden-state capture.
+    // Keep these at the end so existing shape-hint indices remain unchanged.
+    skipLmHead,
+    captureHiddenStates,
     gptModelInputLength,
 };
 
@@ -188,10 +197,13 @@ struct TokenSliceInfo {
 
 class ModelBase {
 public:
-    virtual ~ModelBase()                                          = default;
-    virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
-    virtual void            releaseBuffers() {}
-    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual ~ModelBase()                                                     = default;
+    virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
+    virtual void                       releaseBuffers() {}
+    virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
+        return std::nullopt;
+    }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).

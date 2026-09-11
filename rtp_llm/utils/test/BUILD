@@ -205,6 +205,17 @@ py_test(
 )
 
 py_test(
+    name = "grpc_util_test",
+    srcs = ["grpc_util_test.py"],
+    deps = [
+        ":protobuf",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
+py_test(
     name = "oom_diag_test",
     srcs = [
         "oom_diag_test.py",

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <sstream>
@@ -10,6 +11,11 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
+
+enum class HiddenStateCaptureDtype : int32_t {
+    BF16     = 0,
+    FP8_E4M3 = 1,
+};
 
 /** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {

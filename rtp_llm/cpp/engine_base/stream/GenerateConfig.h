@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -139,6 +140,64 @@ public:
     // 跨序列分叉起始商品位置：前 N 个商品所有序列保持 greedy 一致，
     // 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
     int cross_seq_diverge_start_combo = 0;
+
+    bool isPrefillOnly() const {
+        return max_new_tokens == 0;
+    }
+
+    void enforcePromptScoringConstraints() {
+        max_new_tokens        = 1;
+        is_streaming          = false;
+        reuse_cache           = false;
+        can_use_pd_separation = false;
+    }
+
+    void validatePrefillOnly() {
+        if (max_new_tokens < 0) {
+            throw std::invalid_argument("max_new_tokens must be greater than or equal to 0, got "
+                                        + std::to_string(max_new_tokens));
+        }
+        if (return_prompt_logits) {
+            enforcePromptScoringConstraints();
+        }
+        if (!isPrefillOnly()) {
+            return;
+        }
+        if (min_new_tokens > 0) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support min_new_tokens > 0");
+        }
+        if (num_beams > 1) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support num_beams > 1");
+        }
+        if (!variable_num_beams.empty()) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support non-empty variable_num_beams");
+        }
+        if (num_return_sequences > 1) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support num_return_sequences > 1");
+        }
+        if (return_logits) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_logits");
+        }
+        if (calculate_loss != 0) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support calculate_loss");
+        }
+
+        if (return_softmax_probs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_softmax_probs");
+        }
+        if (return_all_probs != ReturnAllProbsMode::NONE) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_all_probs");
+        }
+        if (return_cum_log_probs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_cum_log_probs");
+        }
+        if (return_hidden_states) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_hidden_states");
+        }
+        if (return_all_hidden_states) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_all_hidden_states");
+        }
+    }
 
     bool top1() const {
         return top_k == 1;
