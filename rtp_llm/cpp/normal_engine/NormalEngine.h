@@ -61,7 +61,7 @@ private:
     size_t                          getWarmUpInputLength() const;
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
-    void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
+    void initExecutor(const EngineInitParams& params);
 
     bool isMTPEagle() override;
     bool isEagle() override;

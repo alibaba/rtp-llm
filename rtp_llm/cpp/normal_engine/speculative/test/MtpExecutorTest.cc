@@ -291,9 +291,9 @@ class FakeSpeculativeSampler: public spec::SpeculativeSampler {
 public:
     FakeSpeculativeSampler(size_t propose_step): spec::SpeculativeSampler(torch::Tensor(), propose_step) {}
 
-    spec::SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
-                                           SamplerOutput&                      draft_sampler_output,
-                                           SamplerOutput&                      target_sampler_output) override {
+    spec::SpeculativeSamplerOutput forward(const spec::SpeculativeSamplingParams& params,
+                                           SamplerOutput&                         draft_sampler_output,
+                                           SamplerOutput&                         target_sampler_output) override {
         return output_holder.get();
     }
 
@@ -865,7 +865,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto stream1_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto stream1_draft_token_probs = torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}});
 
-    StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens, 1, 3, stream1_hidden_states, stream1_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info1{
+        stream1_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream1_hidden_states, stream1_draft_token_probs};
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info1);
@@ -1034,7 +1035,8 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{
+        stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
@@ -1422,7 +1424,8 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{
+        stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
@@ -1513,8 +1516,10 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto stream2_hidden_states     = torch::tensor({{2.1f, 2.12f}});
     auto stream2_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
 
-    StreamSpecUpdateInfo spec_update_info1{stream1_new_tokens, 1, 2, stream1_hidden_states, stream1_draft_token_probs};
-    StreamSpecUpdateInfo spec_update_info2{stream2_new_tokens, 1, 3, stream2_hidden_states, stream2_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info1{
+        stream1_new_tokens, 1, torch::tensor({2}, torch::kInt32), stream1_hidden_states, stream1_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info2{
+        stream2_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream2_hidden_states, stream2_draft_token_probs};
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, spec_update_info1);
@@ -1973,7 +1978,8 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
-    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    StreamSpecUpdateInfo spec_update_info{
+        stream_new_tokens, 1, torch::tensor({3}, torch::kInt32), stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
@@ -2033,6 +2039,139 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     auto status = components.executor->process({{stream}});
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(stream->hasError());
+}
+
+TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+
+    auto components = createMtpExecutorComponents(test_config);
+
+    GenerateStreamPtr stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto sp_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_buffer->propose_step = gamma;
+    sp_buffer->tokens       = torch::empty({1, 1}, torch::kInt32);
+    stream->setSPOutputBuffer(sp_buffer);
+
+    // Simulate the commit-only prefill handoff: append the first target token
+    // but leave proposal/probability/hidden state empty. The first decode
+    // round must produce its proposal at the round head.
+    StreamSpecUpdateInfo spec_update_info{torch::tensor({{2}}, torch::kInt32), 1, torch::Tensor(), {}, {}};
+    stream->specUpdate(spec_update_info);
+    EXPECT_TRUE(stream->getProposeToken().empty());
+    EXPECT_FALSE(stream->getProposeTokensGpu().defined());
+
+    auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
+    stream->sampling_state_.logits_processors.push_back(processor);
+    const auto main_thread_id = std::this_thread::get_id();
+
+    GptModelInputs target_input;
+    target_input.combo_tokens      = torch::tensor({2, 2, 1, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({gamma + 1}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    target_input.lm_output_indexes = torch::arange(0, gamma + 1, torch::kInt32);
+
+    GptModelOutputs target_output;
+    target_output.logits =
+        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.2f, 0.6f, 0.1f, 0.1f, 0.7f, 0.1f, 0.1f, 0.1f})
+            .reshape({gamma + 1, vocab_size})
+            .to(torch::kCUDA);
+    auto target_aux_features =
+        torch::arange(0, 2 * (gamma + 1), torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+            .reshape({gamma + 1, 2});
+    target_output.all_hidden_states = target_aux_features;
+    components.fake_target_model->setMtpTargetHiddenStates(target_aux_features);
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+
+    auto sampler_input         = SamplerInputs{target_output.logits.clone()};
+    sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
+    SamplerOutput target_sampler_output{torch::tensor({1, 2, 1, 0}, torch::kInt32).reshape({gamma + 1, 1})};
+    target_sampler_output.all_probs = torch::eye(vocab_size, torch::kFloat32).to(torch::kCUDA);
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({target_sampler_output});
+
+    speculative::SpeculativeSamplerOutput speculative_sampler_output;
+    speculative_sampler_output.accept_tokens_cpu = torch::tensor({{1, 0, 0, 0}}, torch::kInt32);
+    speculative_sampler_output.accept_tokens     = speculative_sampler_output.accept_tokens_cpu.to(torch::kCUDA);
+    speculative_sampler_output.accept_len_cpu    = torch::tensor({1}, torch::kInt32);
+    speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
+
+    // Round-head propose call: fixed-width block anchored on the stream's
+    // current last token at its own position (committed_end = seq_len - 1),
+    // no feature input.
+    GptModelInputs draft_input;
+    draft_input.combo_tokens      = torch::tensor({2, 0, 0}, torch::kInt32);
+    draft_input.input_lengths     = torch::tensor({gamma}, torch::kInt32);
+    draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    draft_input.lm_output_indexes = torch::tensor({0}, torch::kInt32);
+
+    // Commit call: dense verify rows at the old prefix (accept-independent).
+    GptModelInputs commit_input;
+    commit_input.combo_tokens       = target_input.combo_tokens;
+    commit_input.input_lengths      = torch::tensor({gamma + 1}, torch::kInt32);
+    commit_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
+    commit_input.lm_output_indexes  = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    commit_input.last_hidden_states = target_aux_features;
+
+    GptModelOutputs commit_output;
+    commit_output.hidden_states = torch::zeros({gamma + 1, 2}, torch::kFloat32).to(torch::kCUDA);
+
+    GptModelOutputs draft_output;
+    draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);
+    components.fake_draft_model->setInputs({draft_input, commit_input});
+    components.fake_draft_model->setOutputs({draft_output, commit_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    auto status = components.executor->process(ScheduleOutput{{stream}});
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_NE(std::thread::id(), processor->invocationThreadId());
+    EXPECT_NE(main_thread_id, processor->invocationThreadId());
+    EXPECT_EQ((std::vector<int32_t>{2, 1, 3}), processor->observedDraftTokens());
+}
+
+TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 16;
+
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len = 64;
+    model_config.vocab_size  = vocab_size;
+    model_config.hidden_size = 8;
+    model_config.data_type   = TYPE_FP16;
+
+    auto stream =
+        MtpExecutor::createMinFakeDecodeStream(gamma, model_config, runtime_config, resource_context, vocab_size, true);
+    auto sp_buffer = stream->getSPOutputBuffer();
+    ASSERT_NE(sp_buffer, nullptr);
+    EXPECT_EQ((std::vector<int64_t>{1, 1}), sp_buffer->tokens.sizes().vec());
+    EXPECT_FALSE(sp_buffer->all_probs.defined());
+    EXPECT_FALSE(sp_buffer->hidden_states.defined());
+    EXPECT_FALSE(stream->getProposeTokensGpu().defined());
+
+    StreamSpecUpdateInfo update_info{
+        torch::tensor({7}, torch::kInt32).reshape({1, 1}), 1, torch::Tensor(), torch::Tensor(), torch::Tensor()};
+    stream->specUpdate(update_info);
+
+    EXPECT_EQ((std::vector<int32_t>{7}), toVec<int32_t>(sp_buffer->tokens));
+    EXPECT_TRUE(stream->getProposeToken().empty());
 }
 
 }  // namespace rtp_llm
