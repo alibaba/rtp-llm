@@ -9,8 +9,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-
 from rtp_llm.models_py.modules.dsv41.block import V41Block
 from rtp_llm.models_py.modules.dsv41.engram import (
     Engram,
@@ -20,6 +18,7 @@ from rtp_llm.models_py.modules.dsv41.engram import (
 from rtp_llm.models_py.modules.dsv41.inputs import V41ModelRows
 from rtp_llm.models_py.modules.dsv41.linear import V41Block32Linear
 from rtp_llm.models_py.modules.dsv41.math import hc_pre, identity_pre_mix, rms_norm
+from torch import nn
 
 
 @dataclass(frozen=True)
@@ -198,6 +197,65 @@ class V41TargetModel(nn.Module):
         self.aux_layer_ids = tuple(t["dspark_target_layer_ids"])
         if self.aux_layer_ids != (37, 38, 39):
             raise ValueError("V4.1 target auxiliary inputs must come from L37/L38/L39")
+
+    @classmethod
+    def from_distributed_weights(
+        cls,
+        config,
+        weights,
+        *,
+        layout,
+        ep_size,
+        ep_rank,
+        max_tokens_per_rank,
+        shared_lookup,
+        tokenizer,
+        head_tp_size=1,
+        head_tp_rank=0,
+    ):
+        """Install the actual target attention and shared32 expert implementations.
+
+        The caller initializes and certifies the role's WORLD group, supplies
+        complete rank-local checkpoint weights, and owns shared Engram lifetime.
+        CP page assembly and engine scheduling are not inferred by this binding.
+        """
+        import torch.distributed as dist
+        from rtp_llm.models_py.modules.dsv41.attention import V41Attention
+        from rtp_llm.models_py.modules.dsv41.moe import V41MoE
+
+        if (
+            type(ep_size) is not int
+            or ep_size not in (8, 16)
+            or type(ep_rank) is not int
+            or not 0 <= ep_rank < ep_size
+            or not dist.is_initialized()
+            or dist.get_world_size() != ep_size
+            or dist.get_rank() != ep_rank
+        ):
+            raise ValueError("V4.1 target binding requires the actual EP8/EP16 WORLD")
+        if layout.cp_size != 8:
+            raise ValueError("distributed V4.1 target requires the CP8 cache layout")
+        if head_tp_size == 8 and (ep_size != 8 or head_tp_rank != ep_rank):
+            raise ValueError("V4.1 P head must match its CP8/EP8 role rank")
+        return cls.from_model_weights(
+            config,
+            weights,
+            attention_factory=lambda layer, local: V41Attention.from_weights(
+                layer, local, layout=layout
+            ),
+            moe_factory=lambda layer, local: V41MoE.from_weights(
+                config,
+                layer,
+                local,
+                ep_size=ep_size,
+                ep_rank=ep_rank,
+                max_tokens_per_rank=max_tokens_per_rank,
+            ),
+            shared_lookup=shared_lookup,
+            tokenizer=tokenizer,
+            head_tp_size=head_tp_size,
+            head_tp_rank=head_tp_rank,
+        )
 
     @classmethod
     def from_model_weights(

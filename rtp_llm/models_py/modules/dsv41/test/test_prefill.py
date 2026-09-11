@@ -7,13 +7,12 @@ import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import test_attention as attention_fixture
 import test_transformer as target_fixture
 import torch
 from fixture import flash_config
-from torch import nn
-
 from rtp_llm.models.multimodal.deepseek_v41_processor import (
     V41ImageInput,
     V41PreparedInputs,
@@ -27,11 +26,17 @@ from rtp_llm.models_py.modules.dsv41.ced import (
     RowRange,
     build_prefill_plan,
 )
+from rtp_llm.models_py.modules.dsv41.compressor import PairCarry
 from rtp_llm.models_py.modules.dsv41.draft import V41PrefillDraftCommit
 from rtp_llm.models_py.modules.dsv41.engram import Engram
 from rtp_llm.models_py.modules.dsv41.inputs import V41ModelRows
-from rtp_llm.models_py.modules.dsv41.prefill import V41L20Tail, V41PrefillExecutor
+from rtp_llm.models_py.modules.dsv41.prefill import (
+    V41L20Tail,
+    V41LocalSnapshot,
+    V41PrefillExecutor,
+)
 from rtp_llm.models_py.modules.dsv41.transformer import V41ImageFeatures, V41TargetModel
+from torch import nn
 
 
 class ZeroMoe(nn.Module):
@@ -468,6 +473,250 @@ class PrefillGpuTest(unittest.TestCase):
                     else:
                         self.equal(a.view(torch.uint8), b.view(torch.uint8))
         return hashes
+
+    def snapshot_payload_fixture(self, mode=ReplayMode.BOUNDED):
+        end = self.layout.reuse_unit
+        source = self.cache(end + 1, mode)
+        floor = end - 128 if mode == ReplayMode.BOUNDED else 0
+        for layer, binding in source.swa.items():
+            binding.pages.data[1:].fill_(layer + 1)
+            first = (
+                end - source.layout.swa_entries
+                if mode == ReplayMode.BOUNDED and layer <= 20
+                else end - 128
+            )
+            binding.valid_starts.fill_(first)
+            binding.valid_ends.fill_(end)
+            source.swa_ends[layer] = end
+        for layer, owner in source.owners.items():
+            owner.global_kv.pages.data[1:].fill_(layer * 3 + 1)
+            owner.index_pages.data[1:].fill_(layer * 3 + 2)
+            owner.materialized_end = end
+            if owner.global_kv.compress_ratio == 2:
+                owner.pair = PairCarry.empty(
+                    layer, source.request_id, source.identity, end
+                )
+        rows, _ = self.rows(end - 3, end)
+        snapshot = V41LocalSnapshot.protect(
+            source, end=end, replay_floor=floor, history_rows=rows
+        )
+        return source, snapshot
+
+    def assert_unpublished_restore(self, cache):
+        self.assertEqual(cache.swa_ends, {})
+        self.assertEqual(
+            {owner.materialized_end for owner in cache.owners.values()}, {0}
+        )
+        self.assertTrue(all(owner.pair is None for owner in cache.owners.values()))
+
+    @torch.inference_mode()
+    def test_snapshot_rejects_missing_actual_payload_before_any_copy(self):
+        for mode in (ReplayMode.FULL, ReplayMode.BOUNDED):
+            source, snapshot = self.snapshot_payload_fixture(mode)
+            corruptions = []
+            for owner in (2, 20):
+                for region in (0, 1):
+                    for missing in (1, snapshot.owners[owner][region].shape[0]):
+                        values = list(snapshot.owners[owner])
+                        values[region] = values[region][:-missing]
+                        owners = {**snapshot.owners, owner: tuple(values)}
+                        corruptions.append(
+                            (
+                                f"owner{owner}-region{region}-missing{missing}",
+                                dataclasses.replace(snapshot, owners=owners),
+                            )
+                        )
+            for layer in (0, 42):
+                data, first, end = snapshot.swa[layer]
+                for name, payload in (
+                    ("missing-ring", (data[:0], first, end)),
+                    ("short-stride", (data[:, :-1], first, end)),
+                    ("missing-history", (data, end - 127, end)),
+                    ("old-end", (data, first, end - 1)),
+                ):
+                    corruptions.append(
+                        (
+                            f"swa{layer}-{name}",
+                            dataclasses.replace(
+                                snapshot, swa={**snapshot.swa, layer: payload}
+                            ),
+                        )
+                    )
+            for name in ("target_swa_start", "draft_swa_start"):
+                checkpoint = dataclasses.replace(
+                    snapshot.checkpoint,
+                    replay_floor=0,
+                    **{name: snapshot.checkpoint.materialized_end - 129},
+                )
+                self.assertTrue(checkpoint.is_complete(source.layout, source.identity))
+                corruptions.append(
+                    (name, dataclasses.replace(snapshot, checkpoint=checkpoint))
+                )
+            for name, corrupted in corruptions:
+                with self.subTest(mode=mode.value, corruption=name):
+                    destination = self.cache(
+                        source.max_tokens, mode, request="receiver"
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError, "snapshot.*(payload|ranges)"
+                    ):
+                        corrupted.restore(destination)
+                    self.assert_unpublished_restore(destination)
+                    self.assertFalse(destination.poisoned)
+                    for binding in destination.swa.values():
+                        self.assertEqual(
+                            int(torch.count_nonzero(binding.pages.data)), 0
+                        )
+                        self.assertEqual(int(binding.valid_starts[0]), 0)
+                        self.assertEqual(int(binding.valid_ends[0]), 0)
+                    for owner in destination.owners.values():
+                        self.assertEqual(
+                            int(torch.count_nonzero(owner.global_kv.pages.data)), 0
+                        )
+                        self.assertEqual(
+                            int(torch.count_nonzero(owner.index_pages.data)), 0
+                        )
+            self.records.append(
+                {
+                    "test": self.id(),
+                    "scope": "actual CUDA initialized payload copy validation, not model quality",
+                    "mode": mode.value,
+                    "rejected_corruptions": [name for name, _ in corruptions],
+                }
+            )
+
+    @torch.inference_mode()
+    def test_snapshot_rejects_unmapped_and_aliased_destination_pages(self):
+        source, snapshot = self.snapshot_payload_fixture()
+        for region in ("swa", "global", "index"):
+            for problem in ("missing", "out-of-range", "duplicate"):
+                if region == "swa" and problem == "duplicate":
+                    continue
+                with self.subTest(region=region, problem=problem):
+                    destination = self.cache(source.max_tokens, request="receiver")
+                    if region == "swa":
+                        pages = destination.swa[42].pages
+                        ids = destination.swa[42].page_ids
+                    elif region == "global":
+                        owner = destination.owners[20]
+                        pages, ids = (
+                            owner.global_kv.pages,
+                            owner.global_kv.page_table[0],
+                        )
+                    else:
+                        owner = destination.owners[20]
+                        pages, ids = owner.index_pages, owner.index_table[0]
+                    if problem == "missing":
+                        ids[0] = 0
+                    elif problem == "out-of-range":
+                        ids[0] = pages.data.shape[0]
+                    else:
+                        ids[1] = ids[0]
+                    with self.assertRaisesRegex(ValueError, "missing or aliased pages"):
+                        snapshot.restore(destination)
+                    self.assert_unpublished_restore(destination)
+                    self.assertFalse(destination.poisoned)
+                    for binding in destination.swa.values():
+                        self.assertEqual(
+                            int(torch.count_nonzero(binding.pages.data)), 0
+                        )
+
+    @torch.inference_mode()
+    def test_snapshot_copy_failure_never_publishes_partial_owner_state(self):
+        source, snapshot = self.snapshot_payload_fixture()
+        destination = self.cache(source.max_tokens, request="receiver")
+        copy = torch.Tensor.index_copy_
+        copied = []
+
+        def fail_after_first_owner(tensor, *args, **kwargs):
+            if len(copied) == len(snapshot.swa) + 2:
+                raise RuntimeError("injected local checkpoint copy failure")
+            copied.append(tensor)
+            return copy(tensor, *args, **kwargs)
+
+        with mock.patch.object(torch.Tensor, "index_copy_", fail_after_first_owner):
+            with self.assertRaisesRegex(RuntimeError, "injected local checkpoint"):
+                snapshot.restore(destination)
+        self.assertEqual(len(copied), 45)
+        self.assertTrue(destination.poisoned)
+        self.assert_unpublished_restore(destination)
+        self.assertGreater(int(torch.count_nonzero(destination.swa[0].pages.data)), 0)
+        with self.assertRaisesRegex(RuntimeError, "discarded or restored"):
+            destination.begin_forward(
+                epoch=0, start=source.layout.reuse_unit, end=source.max_tokens
+            )
+        fresh = self.cache(source.max_tokens, request="retry")
+        snapshot.restore(fresh)
+        self.assertEqual(
+            set(fresh.swa_ends.values()), {snapshot.checkpoint.materialized_end}
+        )
+        self.assertEqual(
+            {owner.materialized_end for owner in fresh.owners.values()},
+            {snapshot.checkpoint.materialized_end},
+        )
+
+    @torch.inference_mode()
+    def test_snapshot_restore_on_copy_stream_is_complete_before_return(self):
+        for mode in (ReplayMode.FULL, ReplayMode.BOUNDED):
+            with self.subTest(mode=mode.value):
+                source, snapshot = self.snapshot_payload_fixture(mode)
+                if mode == ReplayMode.BOUNDED:
+                    end = snapshot.checkpoint.materialized_end
+                    self.assertEqual(snapshot.checkpoint.replay_floor, end - 128)
+                    self.assertEqual(
+                        snapshot.swa[0][1], end - source.layout.swa_entries
+                    )
+                    self.assertEqual(snapshot.swa[21][1], end - 128)
+                    self.assertEqual(snapshot.swa[42][1], end - 128)
+                    self.assertLess(
+                        snapshot.swa[0][1], snapshot.checkpoint.replay_floor
+                    )
+                destination = self.cache(source.max_tokens, mode, request="receiver")
+                self.remap(destination)
+                ready = torch.cuda.Event()
+                ready.record()
+                stream = torch.cuda.Stream()
+                with torch.cuda.stream(stream):
+                    stream.wait_event(ready)
+                    snapshot.restore(destination)
+                self.assertTrue(stream.query())
+                hashes = {}
+                for layer, (expected, first, end) in snapshot.swa.items():
+                    binding = destination.swa[layer]
+                    actual = binding.pages.data.index_select(0, binding.page_ids.long())
+                    self.equal(actual, expected)
+                    self.assertEqual(
+                        (int(binding.valid_starts[0]), int(binding.valid_ends[0])),
+                        (first, end),
+                    )
+                    hashes[f"swa_{layer}"] = hashlib.sha256(
+                        actual.cpu().numpy().tobytes()
+                    ).hexdigest()
+                for layer, payloads in snapshot.owners.items():
+                    owner = destination.owners[layer]
+                    for name, expected, pages, table in (
+                        (
+                            "global",
+                            payloads[0],
+                            owner.global_kv.pages,
+                            owner.global_kv.page_table,
+                        ),
+                        ("index", payloads[1], owner.index_pages, owner.index_table),
+                    ):
+                        actual = pages.data.index_select(
+                            0, table[0, : expected.shape[0]].long()
+                        )
+                        self.equal(actual, expected)
+                        hashes[f"{name}_{layer}"] = hashlib.sha256(
+                            actual.cpu().numpy().tobytes()
+                        ).hexdigest()
+                self.records.append(
+                    {
+                        "test": self.id(),
+                        "mode": mode.value,
+                        "restored_region_hashes": hashes,
+                    }
+                )
 
     @torch.inference_mode()
     def test_varied_suffix_restore_matches_uninterrupted_same_mode(self):

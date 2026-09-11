@@ -8,12 +8,16 @@ Snapshots stay in memory and retain every required region together.
 from dataclasses import dataclass, fields, replace
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.attention import (
     V41AttentionCache,
     V41AttentionContext,
 )
-from rtp_llm.models_py.modules.dsv41.cache_layout import SWA_WINDOW, MemoryCheckpoint
+from rtp_llm.models_py.modules.dsv41.cache_layout import (
+    SWA_WINDOW,
+    CacheRegion,
+    MemoryCheckpoint,
+    RegionSlot,
+)
 from rtp_llm.models_py.modules.dsv41.ced import (
     AuxRowMap,
     LateCompletion,
@@ -289,8 +293,14 @@ class V41LocalSnapshot:
     def restore(self, cache):
         """Restore into fresh page IDs without retaining old physical mappings."""
         c = self.checkpoint
+        expected_layers = {
+            slot.owner_layer
+            for slot in cache.layout.required_slots
+            if slot.region == CacheRegion.SWA
+        }
         if (
-            set(self.swa) != set(cache.swa)
+            set(self.swa) != expected_layers
+            or set(cache.swa) != expected_layers
             or set(self.owners) != {2, 8, 14, 20}
             or set(cache.owners) != set(self.owners)
         ):
@@ -315,27 +325,108 @@ class V41LocalSnapshot:
             != next(iter(cache.swa.values())).pages.data.device
         ):
             raise ValueError("local snapshot restore cannot cross devices")
+        self.history_rows.validate()
+        if not 0 < self.history_rows.token_ids.numel() <= 3:
+            raise ValueError("snapshot is missing its canonical tail history")
+        device = self.history_rows.token_ids.device
+        specs = {page.slot: page for page in cache.layout.pages}
+        copies, starts = [], {}
+
+        def prepare_copy(data, pages, ids, slot, count):
+            spec = specs[slot]
+            pages.validate(device)
+            if (
+                pages.region != slot.region
+                or pages.entries_per_page != spec.entries
+                or pages.data.shape[1] != spec.page_stride_bytes
+                or tuple(data.shape) != (count, spec.page_stride_bytes)
+                or data.dtype != torch.uint8
+                or data.device != device
+                or not data.is_contiguous()
+            ):
+                raise ValueError(
+                    "snapshot payload does not contain every declared page"
+                )
+            if (
+                ids.ndim != 1
+                or ids.numel() != count
+                or ids.dtype not in (torch.int32, torch.int64)
+                or ids.device != device
+                or not ids.is_contiguous()
+            ):
+                raise ValueError(
+                    "snapshot destination is missing its complete page map"
+                )
+            physical = ids.tolist()
+            if len(set(physical)) != count or any(
+                page <= 0 or page >= pages.data.shape[0] for page in physical
+            ):
+                raise ValueError(
+                    "snapshot destination contains missing or aliased pages"
+                )
+            copies.append((pages.data, ids.long(), data))
+
+        # Validate every payload before writing: a complete descriptor alone cannot
+        # prove that all global/index pages and target/draft rings were received.
+        for layer, (data, first, end) in self.swa.items():
+            binding = cache.swa[layer]
+            if binding.validate(device) != 1:
+                raise ValueError("local snapshot requires one complete request ring")
+            if end != c.materialized_end or not max(
+                0, end - cache.layout.swa_entries
+            ) <= first <= max(0, end - SWA_WINDOW):
+                raise ValueError("snapshot SWA payload does not cover its checkpoint")
+            starts[layer] = first
+            prepare_copy(
+                data,
+                binding.pages,
+                binding.page_ids,
+                RegionSlot(CacheRegion.SWA, layer),
+                1,
+            )
+        # Encoder rings can retain rows preceding the decoder replay floor.
+        # protect() records the common valid start across each complete layer set.
+        if max(starts[layer] for layer in range(40)) != c.target_swa_start or (
+            cache.layout.draft_enabled
+            and max(starts[layer] for layer in (40, 41, 42)) != c.draft_swa_start
+        ):
+            raise ValueError("snapshot SWA ranges disagree with checkpoint metadata")
+        page_count = c.materialized_end // cache.layout.token_block_size
+        for layer, (global_data, index_data) in self.owners.items():
+            owner = cache.owners[layer]
+            owner.global_kv.validate(1, device)
+            for data, pages, table, region in (
+                (
+                    global_data,
+                    owner.global_kv.pages,
+                    owner.global_kv.page_table,
+                    CacheRegion.GLOBAL,
+                ),
+                (index_data, owner.index_pages, owner.index_table, CacheRegion.INDEX_K),
+            ):
+                slot = RegionSlot(region, layer)
+                if table.ndim != 2 or table.shape[0] != 1:
+                    raise ValueError("local snapshot requires one request page table")
+                if owner.global_kv.compress_ratio != specs[slot].ratio:
+                    raise ValueError(
+                        "snapshot owner compression ratio differs from layout"
+                    )
+                prepare_copy(data, pages, table[0, :page_count], slot, page_count)
         try:
-            for layer, (data, first, end) in self.swa.items():
-                binding = cache.swa[layer]
-                binding.pages.data.index_copy_(0, binding.page_ids.long(), data)
-                binding.valid_starts.fill_(first)
-                binding.valid_ends.fill_(end)
-            for layer, (global_data, index_data) in self.owners.items():
-                owner = cache.owners[layer]
-                for data, pages, table in (
-                    (global_data, owner.global_kv.pages, owner.global_kv.page_table),
-                    (index_data, owner.index_pages, owner.index_table),
-                ):
-                    pages.data.index_copy_(0, table[0, : data.shape[0]].long(), data)
-                owner.materialized_end = c.materialized_end
+            for destination, ids, data in copies:
+                destination.index_copy_(0, ids, data)
+            for layer, (_, first, end) in self.swa.items():
+                cache.swa[layer].valid_starts.fill_(first)
+                cache.swa[layer].valid_ends.fill_(end)
+            event = torch.cuda.Event()
+            event.record(torch.cuda.current_stream(device))
+            event.synchronize()
+            for layer, owner in cache.owners.items():
                 if owner.global_kv.compress_ratio == 2:
                     owner.pair = PairCarry.empty(
                         layer, cache.request_id, cache.identity, c.materialized_end
                     )
-            event = torch.cuda.Event()
-            event.record(torch.cuda.current_stream(self.history_rows.token_ids.device))
-            event.synchronize()
+                owner.materialized_end = c.materialized_end
             cache.swa_ends.update({layer: c.materialized_end for layer in cache.swa})
         except Exception:
             cache.poisoned = True
