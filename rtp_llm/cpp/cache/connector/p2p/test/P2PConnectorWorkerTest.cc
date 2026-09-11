@@ -60,8 +60,10 @@ public:
                          int                /*block_id*/,
                          int                /*partition_count*/ = 1,
                          int                /*partition_id*/    = 0) const override {
+        static char mock_block[1024];
         BlockInfo info;
         info.is_cuda    = true;
+        info.addr       = mock_block;
         info.size_bytes = 1024;
         return {info};
     }
@@ -549,7 +551,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithTransf
     }
 }
 
-TEST_F(P2PConnectorWorkerTest, SendKVCache_ReadyEmptyLayersCompleteWithoutTransfer) {
+TEST_F(P2PConnectorWorkerTest, SendKVCache_ReadyEmptyLayersRejectsRequiredTransfer) {
     const int64_t request_id  = 2099;
     const int64_t deadline_ms = currentTimeMs() + 5000;
     computed_buffers_->registerRequestHorizon(request_id, deadline_ms, deadline_ms);
@@ -557,7 +559,9 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_ReadyEmptyLayersCompleteWithoutTransf
     computed_buffers_->addBuffer(request_id, std::make_shared<LayerCacheBuffer>(1, "group1"), deadline_ms);
 
     ErrorInfo result = prefill_->sendKVCache(request_id, "ready-empty-layers", deadline_ms, makeRoutePlan({{"127.0.0.1", 12345}}), deadline_ms);
-    EXPECT_TRUE(result.ok());
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_NE(result.ToString().find("route requires an empty layer buffer"), std::string::npos);
     EXPECT_TRUE(mock_sender_->getTransferCalls().empty());
     EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
 }

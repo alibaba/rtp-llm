@@ -299,11 +299,21 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
     int64_t                                          return_deadline_ms,
     const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
     const std::shared_ptr<SendTransferResult>&       transfer_result,
-    const std::set<std::string>&                     expected_buffer_keys,
-    std::set<std::string>&                           sent_buffer_keys,
-    int                                              total_transfers) {
+                                      const std::set<std::string>&                     expected_buffer_keys,
+                                      std::set<std::string>&                           sent_buffer_keys,
+                                      int                                              total_transfers) {
     int sent_count = 0;
-    while (sent_count < total_transfers && !cancel_flag->load() && currentTimeMs() < return_deadline_ms) {
+    auto mark_dispatch_failure = [transfer_result](ErrorCode error_code, const std::string& error_msg) {
+        if (!transfer_result->dispatch_failed.exchange(true)) {
+            std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+            transfer_result->all_success.store(false);
+            transfer_result->error_code = error_code;
+            transfer_result->error_msg  = error_msg;
+            transfer_result->result_cv.notify_all();
+        }
+    };
+    while (sent_count < total_transfers && !transfer_result->dispatch_failed.load() && !cancel_flag->load()
+           && currentTimeMs() < return_deadline_ms) {
         std::set<std::string> need_buffer_keys;
         for (const auto& key : expected_buffer_keys) {
             if (!sent_buffer_keys.count(key)) {
@@ -316,13 +326,34 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
 
         auto [total_layer_num, ready_layer_buffers] = computed_buffer->getBuffers(need_buffer_keys);
         for (const auto& layer_cache_buffer : ready_layer_buffers) {
+            if (!layer_cache_buffer) {
+                mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                      "sendKVCache: computed buffer is null, unique_key: " + unique_key);
+                break;
+            }
             const std::string buffer_key = layer_cache_buffer->bufferKey();
             if (sent_buffer_keys.count(buffer_key)) {
                 continue;
             }
+            if (!expected_buffer_keys.count(buffer_key)) {
+                mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                      "sendKVCache: unexpected computed buffer layer="
+                                          + std::to_string(layer_cache_buffer->getLayerId()) + " tag="
+                                          + layer_cache_buffer->cacheTag() + " unique_key: " + unique_key);
+                break;
+            }
             sent_buffer_keys.insert(buffer_key);
             if (layer_cache_buffer->blockIdMap().empty()) {
                 const int completed_partition_count = worker_plan.routeCountForTag(layer_cache_buffer->cacheTag());
+                if (completed_partition_count != 0) {
+                    mark_dispatch_failure(
+                        ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                        "sendKVCache: route requires an empty layer buffer, layer="
+                            + std::to_string(layer_cache_buffer->getLayerId()) + " tag="
+                            + layer_cache_buffer->cacheTag() + " route_count="
+                            + std::to_string(completed_partition_count) + " unique_key: " + unique_key);
+                    break;
+                }
                 sent_count += completed_partition_count;
                 transfer_result->done_count.fetch_add(completed_partition_count, std::memory_order_relaxed);
                 {
@@ -340,8 +371,14 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
                 outstandingSendBudget(worker_plan.maxRoutesPerTag()),
                 cancel_flag,
                 transfer_result);
+            if (transfer_result->dispatch_failed.load()) {
+                break;
+            }
         }
 
+        if (transfer_result->dispatch_failed.load()) {
+            break;
+        }
         if (ready_layer_buffers.empty()) {
             computed_buffer->waitChange(total_layer_num, 50);
         }
@@ -383,6 +420,15 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
             }
         };
     };
+    auto mark_dispatch_failure = [transfer_result](ErrorCode error_code, const std::string& error_msg) {
+        if (!transfer_result->dispatch_failed.exchange(true)) {
+            std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+            transfer_result->all_success.store(false);
+            transfer_result->error_code = error_code;
+            transfer_result->error_msg  = error_msg;
+            transfer_result->result_cv.notify_all();
+        }
+    };
 
     const size_t payload_bytes =
         config_.topology ? config_.topology->group(layer_cache_buffer->cacheTag()).spec->k_block_payload_bytes() : 0;
@@ -402,12 +448,26 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
 
         // partition / slice 均来自 route（本侧那一半）。§2.3 的修正就在这里生效：
         // NP1D 下 planner 给源端的是 {1,0}（整块），不再对本地 block 二次切分。
+        ErrorInfo conversion_error;
         auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
-                                                                            layer_cache_buffer,
-                                                                            route.partition.count,
-                                                                            route.partition.id,
-                                                                            route.slice,
-                                                                            payload_bytes);
+                                                                               layer_cache_buffer,
+                                                                               route.partition.count,
+                                                                               route.partition.id,
+                                                                               route.slice,
+                                                                               payload_bytes,
+                                                                               &conversion_error);
+        if (conversion_error.hasError() || key_block_infos.empty()
+            || key_block_infos.size() != layer_cache_buffer->blockIdMap().size()) {
+            const std::string conversion_message = conversion_error.hasError() ? conversion_error.ToString() :
+                "converted key count=" + std::to_string(key_block_infos.size()) + " differs from source key count="
+                    + std::to_string(layer_cache_buffer->blockIdMap().size());
+            mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                  "sendKVCache: route=" + std::to_string(route.route_id) + " layer="
+                                      + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
+                                      + " task registration failed, unique_key=" + unique_key + ": "
+                                      + conversion_message);
+            return count;
+        }
 
         std::string partition_layer_key = P2PKeyUtil::makeRouteLayerKey(
             unique_key, layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
@@ -856,6 +916,10 @@ P2PConnectorWorkerPrefill::determineSendResult(const std::shared_ptr<SendTransfe
         return {false,
                 ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED,
                 "sendKVCache cancelled, unique_key: " + unique_key};
+    }
+    if (transfer_result->dispatch_failed.load()) {
+        std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+        return {false, transfer_result->error_code, transfer_result->error_msg};
     }
     if (!all_callbacks_received) {
         return {false,

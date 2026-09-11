@@ -100,6 +100,19 @@ TEST_F(LayerCacheBufferUtilFilterTest, AllNullBlocksReturnsNullptr) {
     EXPECT_TRUE(results.empty());
 }
 
+TEST_F(LayerCacheBufferUtilFilterTest, RouteProjectionRejectsNullBlock) {
+    auto resource = makeResource(1, 1, {0}, {CacheGroupType::FULL}, {10, -1}, {100, 101});
+
+    ErrorInfo error_info;
+    auto results =
+        LayerCacheBufferUtil::convertTagForRoute(resource, *topology_, "group0", {0, 1}, 0, 1, &error_info);
+
+    EXPECT_TRUE(results.empty());
+    ASSERT_TRUE(error_info.hasError());
+    EXPECT_NE(error_info.ToString().find("layer=0 tag=group0"), std::string::npos);
+    EXPECT_NE(error_info.ToString().find("cache_key=101 block_id=-1"), std::string::npos);
+}
+
 TEST_F(LayerCacheBufferUtilFilterTest, ConvertWithLayerAttnTypes) {
     auto resource = makeTwoGroupResource({10, 11, 12},  // FULL group blocks
                                          {-1, -1, 25},  // LINEAR group blocks

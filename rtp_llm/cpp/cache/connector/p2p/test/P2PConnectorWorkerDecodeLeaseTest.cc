@@ -222,7 +222,11 @@ private:
 class LeaseTestMockLayerBlockConverter: public LayerBlockConverter {
 public:
     std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
-        return {};
+        static char mock_block[1024];
+        BlockInfo   info;
+        info.addr       = mock_block;
+        info.size_bytes = sizeof(mock_block);
+        return {info};
     }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};

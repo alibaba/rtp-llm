@@ -114,7 +114,8 @@ P2PBroadcastClient::RankRoutes
 P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        plan,
                                                    KVCacheResource&           resource,
                                                    const std::pair<int, int>& block_range,
-                                                   size_t                     worker_num) const {
+                                                   size_t                     worker_num,
+                                                   ErrorInfo*                 error_info) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
 
     // logical_count 必须是**全序列**的 cache_keys 数量，不是 block_range 窗口长度：
@@ -151,9 +152,23 @@ P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        pl
                                                                          route->cache_tag,
                                                                          positions,
                                                                          worker_cp_rank,
-                                                                         cp_size);
+                                                                         cp_size,
+                                                                         error_info);
+            if (error_info != nullptr && error_info->hasError()) {
+                *error_info = ErrorInfo(error_info->code(),
+                                        "decode route=" + std::to_string(route->route_id) + " worker_rank="
+                                            + std::to_string(worker_rank) + ": " + error_info->ToString());
+                return {};
+            }
             if (layer_buffers.empty()) {
-                continue;
+                if (error_info != nullptr) {
+                    *error_info = ErrorInfo(
+                        ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                        "decode route=" + std::to_string(route->route_id) + " worker_rank="
+                            + std::to_string(worker_rank) + " tag=" + route->cache_tag
+                            + ": non-empty key projection converted to no layer buffers");
+                }
+                return {};
             }
             TransferRoutePB pb;
             RouteCodec::encodeForDecode(*route, &pb);
@@ -270,7 +285,15 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
             return {nullptr, plan->error};
         }
         plan_digest = plan->plan.digest();
-        rank_routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num);
+        ErrorInfo route_error;
+        rank_routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num, &route_error);
+        if (route_error.hasError()) {
+            RTP_LLM_LOG_WARNING("asyncRead: route projection failed, unique_key=%s, error=%s",
+                                unique_key.c_str(),
+                                route_error.ToString().c_str());
+            collector->success = false;
+            return {nullptr, route_error};
+        }
 
         const bool all_routes_empty =
             std::all_of(rank_routes.begin(), rank_routes.end(), [](const auto& routes) { return routes.empty(); });

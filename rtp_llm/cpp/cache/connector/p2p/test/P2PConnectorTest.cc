@@ -30,8 +30,10 @@ public:
                                                 int /*block_id*/,
                                                 int /*partition_count*/,
                                                 int /*partition_id*/) const override {
+        static char mock_block[1024];
         BlockInfo info;
         info.is_cuda    = true;
+        info.addr       = mock_block;
         info.size_bytes = 1024;
         return {info};
     }

@@ -78,6 +78,7 @@ private:
     struct SendTransferResult {
         std::atomic<int>        done_count{0};
         std::atomic<bool>       all_success{true};
+        std::atomic<bool>       dispatch_failed{false};
         mutable std::mutex      result_mutex;
         std::condition_variable result_cv;
         ErrorCode               error_code{ErrorCode::NONE_ERROR};

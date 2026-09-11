@@ -42,22 +42,50 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
                                                    const std::shared_ptr<ReadTaskGroup>& task_group,
                                                    int&                                  total_block_count) const {
     for (const auto& route : worker_plan.routes) {
+        auto fail_registration = [&](const std::string& message) {
+            cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
+            RTP_LLM_LOG_WARNING("%s", message.c_str());
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message);
+        };
+        if (route.layer_buffers.empty()) {
+            return fail_registration("read: route=" + std::to_string(route.route_id) + " tag=" + route.cache_tag
+                                     + " has no layer buffers, unique_key=" + unique_key);
+        }
         const size_t payload_bytes =
             config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0;
 
         for (const auto& layer_cache_buffer : route.layer_buffers) {
             if (!layer_cache_buffer) {
-                continue;
+                return fail_registration("read: route=" + std::to_string(route.route_id) + " tag=" + route.cache_tag
+                                         + " has a null layer buffer, unique_key=" + unique_key);
             }
             const int layer_id = layer_cache_buffer->getLayerId();
+            if (layer_cache_buffer->blockIdMap().empty()) {
+                return fail_registration("read: route=" + std::to_string(route.route_id) + " layer="
+                                         + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
+                                         + " has no cache keys, unique_key=" + unique_key);
+            }
 
             // partition / slice 均来自 route（本侧那一半），worker 不再自行推导。
+            ErrorInfo conversion_error;
             auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
                                                                                  layer_cache_buffer,
                                                                                  route.partition.count,
                                                                                  route.partition.id,
                                                                                  route.slice,
-                                                                                 payload_bytes);
+                                                                                 payload_bytes,
+                                                                                 &conversion_error);
+            if (conversion_error.hasError()
+                || key_block_infos.empty()
+                || key_block_infos.size() != layer_cache_buffer->blockIdMap().size()) {
+                const std::string conversion_message = conversion_error.hasError() ? conversion_error.ToString() :
+                    "converted key count=" + std::to_string(key_block_infos.size()) + " differs from source key count="
+                        + std::to_string(layer_cache_buffer->blockIdMap().size());
+                return fail_registration("read: route=" + std::to_string(route.route_id) + " layer="
+                                         + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
+                                         + " task registration failed, unique_key=" + unique_key + ": "
+                                         + conversion_message);
+            }
 
             // key 由编排层签发的 route_id + plan digest 命名 —— 两侧不做任何独立推导。
             const std::string partition_layer_key = P2PKeyUtil::makeRouteLayerKey(
@@ -70,12 +98,10 @@ ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&    
 
             auto task = receiver_->recv(recv_req);
             if (!task) {
-                cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
                 const std::string error_msg = "read: create recv task failed for layer=" + std::to_string(layer_id)
-                                              + " route=" + std::to_string(route.route_id)
-                                              + " unique_key=" + unique_key;
-                RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
-                return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, error_msg);
+                                              + " tag=" + layer_cache_buffer->cacheTag()
+                                              + " route=" + std::to_string(route.route_id) + " unique_key=" + unique_key;
+                return fail_registration(error_msg);
             }
             task_group->lease->onTransferStarted();
             task_group->partition_keys.push_back(partition_layer_key);

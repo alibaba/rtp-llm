@@ -89,7 +89,8 @@ private:
     P2PBroadcastClient::RankRoutes buildDecodeRankRoutes(const TransferPlan&        plan,
                                                         KVCacheResource&           resource,
                                                         const std::pair<int, int>& block_range,
-                                                        size_t                     worker_num) const;
+                                                        size_t                     worker_num,
+                                                        ErrorInfo*                 error_info = nullptr) const;
 
 private:
     const P2PConnectorSchedulerConfig                    config_;
