@@ -1,7 +1,6 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,18 +8,20 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.input;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -110,6 +111,51 @@ class PrefillWaitingQueueCapTest {
         assertFalse(prefill.isLeakDetected());
     }
 
+    @Test
+    void queueRejectionReleasesPrefillAndDecodeReservations() throws Exception {
+        CountDownLatch blockersStarted = new CountDownLatch(4);
+        CountDownLatch releaseScheduler = new CountDownLatch(1);
+        for (int i = 0; i < 4; i++) {
+            scheduler.execute(() -> {
+                blockersStarted.countDown();
+                try {
+                    releaseScheduler.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+        }
+        assertTrue(blockersStarted.await(1, TimeUnit.SECONDS));
+
+        try {
+            MockPerformanceModel model = model("1", 1);
+            JavaMockEngineCluster.FastRpcService prefill = startPrefill(model);
+            JavaMockEngineCluster.FastRpcService decode = MockEngineTestSupport.decodeService(
+                    model, BASE_PORT + 1, services, scheduler, 1);
+
+            for (int i = 1; i <= 2; i++) {
+                EngineRpcService.EnqueueBatchResponsePB response = enqueue(
+                        prefill,
+                        batch(1500 + i, slot(0, inputWithDecode(i, 10, BASE_PORT + 1))));
+                assertEquals(1, response.getSuccessesCount());
+            }
+            long prefillOccupiedBefore = prefill.getOccupiedKvTokens();
+            long decodeOccupiedBefore = decode.getOccupiedKvTokens();
+            long decodeAvailableBefore = decode.getAvailableKvTokens();
+
+            EngineRpcService.EnqueueBatchResponsePB rejected = enqueue(
+                    prefill,
+                    batch(1503, slot(0, inputWithDecode(3, 10, BASE_PORT + 1))));
+
+            assertEquals(1, rejected.getErrorsCount());
+            assertEquals(prefillOccupiedBefore, prefill.getOccupiedKvTokens());
+            assertEquals(decodeOccupiedBefore, decode.getOccupiedKvTokens());
+            assertEquals(decodeAvailableBefore, decode.getAvailableKvTokens());
+        } finally {
+            releaseScheduler.countDown();
+        }
+    }
+
     // ──────────── Test 2: queue drains and accepts again after rejection ────────────
 
     @Test
@@ -171,19 +217,13 @@ class PrefillWaitingQueueCapTest {
 
     private MockPerformanceModel model(String prefillFormula, int maxWaitingBatches)
             throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0, "max_waiting_batches", maxWaitingBatches),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MAPPER.writeValue(master.toFile(), Map.of(
-                "zone_process_setting", Map.of(
-                        "process_info", Map.of(
-                                "envs", List.of(List.of("PREFILL_TIME_FORMULA", prefillFormula))))));
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockEngineTestSupport.performanceModel(
+                tempDir,
+                prefillFormula,
+                1.0,
+                1.0,
+                Map.of("max_waiting_batches", maxWaitingBatches),
+                Map.of());
     }
 
     private static void awaitInflightZero(JavaMockEngineCluster.FastRpcService service,
@@ -200,76 +240,4 @@ class PrefillWaitingQueueCapTest {
                 + " running=" + service.getRunningCount());
     }
 
-    // ──────────── Protobuf builders ────────────
-
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    // ──────────── RPC helpers ────────────
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        AtomicReference<EngineRpcService.EnqueueBatchResponsePB> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        service.enqueueBatch(request, new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.EnqueueBatchResponsePB value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("enqueue response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for enqueue response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "enqueue response");
-        return response.get();
-    }
 }

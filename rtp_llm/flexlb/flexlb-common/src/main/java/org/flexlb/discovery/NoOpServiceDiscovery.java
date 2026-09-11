@@ -71,7 +71,7 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
         } catch (Exception e) {
             // Propagate instead of returning an empty list: callers treat "empty" as a genuinely
             // empty fleet (embedding liveness mass-kills on it), while a malformed DOMAIN_ADDRESS
-            // is a lookup failure that must surface as ServiceDiscoveryException upstream.
+            // is a lookup failure that callers can distinguish from an empty result.
             throw new IllegalArgumentException(
                     "malformed hosts configuration for address " + address + ": " + hostsConfig, e);
         }

@@ -1,14 +1,14 @@
 # FlexLB - Intelligent Load Balancer for AI Model Inference
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Java](https://img.shields.io/badge/Java-21-red.svg)](https://www.oracle.com/java/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.18-brightgreen.svg)](https://spring.io/projects/spring-boot)
+[![Java](https://img.shields.io/badge/Java-8+-red.svg)](https://www.oracle.com/java/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.1-brightgreen.svg)](https://spring.io/projects/spring-boot)
 
 FlexLB is a high-performance, intelligent load balancer specifically designed for AI model inference workloads. It provides advanced load balancing strategies, request batching, caching mechanisms, and automatic failover to optimize the performance and reliability of AI service deployments.
 
 ## Features
 
-- **Smart Load Balancing**: Multiple strategies including round-robin, lowest concurrency, and shortest TTFT (Time to First Token)
+- **Smart Load Balancing**: Multiple strategies including cost-based routing, shortest TTFT, and cache affinity
 - **Request Batching**: Intelligent batching of inference requests to improve throughput
 - **Advanced Caching**: KV cache management for improved performance
 - **Health Monitoring**: Real-time worker health checking and automatic failover
@@ -16,7 +16,6 @@ FlexLB is a high-performance, intelligent load balancer specifically designed fo
 - **gRPC Support**: Native gRPC client implementation for backend services
 - **Metrics & Monitoring**: Prometheus metrics integration
 - **Master Election**: ZooKeeper-based master election for high availability
-- **Dispatcher Mode** (opt-in): Exposes `/dispatcher/*` on the master listener to split large batch requests across the FE pool, merging sub-batch responses with partial-failure semantics. Small or non-batch requests are passthrough-forwarded to one FE.
 
 ## Architecture
 
@@ -31,7 +30,7 @@ FlexLB consists of four main modules:
 
 ### Prerequisites
 
-- Java 21
+- Java 8 or higher
 - Maven 3.6+ (optional, project includes Maven Wrapper)
 - ZooKeeper (optional, for master election)
 
@@ -45,17 +44,6 @@ This project includes Maven Wrapper, so you don't need to install Maven separate
 ```bash
 ./mvnw clean package -DskipTests
 ```
-
-Before submitting a change that touches FlexLB, run the same public test gate used by pull
-requests (the explicit profile keeps local internal-source checkouts from changing coverage):
-
-```bash
-./mvnw -q -P '!internal' -pl flexlb-api -am \
-  -DexcludedGroups=performance-regression test
-```
-
-Host-capacity-tagged throughput benchmarks are intentionally separate from this functional gate;
-they are compiled here but should run on controlled performance hardware.
 
 **Windows:**
 ```bash
@@ -85,55 +73,150 @@ The following Maven Wrapper files are included in the project (do not delete):
 
 ### Configuration
 
-Configure the following environment variables:
+`FLEXLB_CONFIG` is the single public configuration document for FlexLB scheduling,
+dispatch, routing, worker-state synchronization, and observability. It is JSON carried
+directly in the environment variable; a file-path form is not supported.
+
+The parser is strict: duplicate keys, unknown fields, fields from inactive tagged
+variants, `null`, scalar coercion, numeric enum values, and trailing JSON are rejected at
+startup. Optional fields must be omitted rather than set to `null`. If the environment
+variable is absent, schema v2 defaults directly to
+`QUEUE + FIFO + FIXED_WINDOW + BATCH` and the remaining model defaults.
+
+The following example activates every major configuration section:
 
 ```bash
 export FLEXLB_CONFIG='{
-    "deploy":"DISAGGREGATED",
-    "loadBalanceStrategy":"ROUND_ROBIN_LOWEST_CONCURRENCY",
-    "prefillBatchWaitTimeMs":100,
-    "kvCache":"LOCAL_STATIC",
-    "staticCacheBlockSize":500,
-    "batchSize":1,
-    "prefillLbTimeoutMs":300,
-    "prefillGenerateTimeoutMs": 5000,
-    "enableGrpcPrefillMaster": false,
-    "decodeConcurrencyLimit": 32
-}'
-
-export TRAFFIC_POLICY_CONFIG='{
-    "rules": [
-        {
-            "name": "vip-api-key",
-            "api_keys": ["key-a", "key-b"],
-            "target_group": "vip-group"
-        },
-        {
-            "name": "long-context",
-            "min_seq_len": 8192,
-            "target_group": "long-context-group"
-        },
-        {
-            "name": "weighted-split",
-            "min_seq_len": 1,
-            "target_groups": [
-                {"group": "blue-group", "weight": 80},
-                {"group": "green-group", "weight": 20}
-            ]
+  "schemaVersion": 2,
+  "scheduler": {
+    "type": "QUEUE",
+    "queueTimeoutMs": 3600000,
+    "ordering": {
+      "type": "PRIORITY",
+      "defaultPriority": 50,
+      "preemption": {
+        "allowedVictimStages": [
+          "PREFILL_QUEUED",
+          "DECODE_RESERVED",
+          "DECODE_ENGINE_OWNED"
+        ],
+        "engineCancellation": {
+          "ackTimeoutMs": 50,
+          "completionTimeoutMs": 1000
         }
-    ]
-}'
-
-export STRATEGY_CONFIGS='{
-    "shortestTtft": {
-        "queueTimeWeight": 0.3,
-        "candidatePool": {
-            "mode": "FIXED",
-            "size": 1
-        }
+      }
+    },
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 8,
+      "maxCollectionWaitMs": 300,
+      "maxPredictedExecutionMs": 100
+    },
+    "capacity": {
+      "maxOutstandingRequestsGlobal": 100000,
+      "maxWaitingRequestsPerPrefillWorker": 1024
+    },
+    "lifecycle": {
+      "staleInflightTimeoutMs": 300000,
+      "deliveredNotAcceptedTimeoutMs": 30000,
+      "maxDeliveredNotAcceptedRequestsGlobal": 200
     }
+  },
+  "dispatcher": {
+    "type": "BATCH",
+    "maxInflightBatchesPerPrefillWorker": 2,
+    "enqueueRpcTimeoutMs": 5000
+  },
+  "router": {
+    "groupSelector": {
+      "defaultTargets": [
+        {"group": "default-group", "weight": 1}
+      ],
+      "rules": [
+        {
+          "name": "long-context",
+          "match": {"inputTokens": {"min": 8192}},
+          "targets": [
+            {"group": "long-context-group", "weight": 1}
+          ]
+        }
+      ]
+    },
+    "roles": {
+      "prefill": {
+        "executionTimeEstimator": {
+          "type": "FORMULA",
+          "expression": "sum(computeTokens) + 0.3*sum(hitCacheTokens)"
+        },
+        "candidateChoice": {
+          "type": "RANDOM_WITHIN_TOLERANCE",
+          "relativeTolerance": 0.1,
+          "minimumToleranceMs": 20,
+          "outlierRejection": {
+            "maxPendingVsAverageMultiplier": 3.0,
+            "maxProjectedDrainVsAverageMultiplier": 3.0
+          }
+        },
+        "cacheAffinity": {
+          "maxExtraTtftMs": 100,
+          "minPrefixHitPercent": 5
+        }
+      },
+      "decode": {
+        "availability": {
+          "maxKvUsagePercent": 90,
+          "maxEngineRequests": 128
+        },
+        "kvReservation": {
+          "maxOutputTokensForEstimate": 1000
+        },
+        "decayPerToken": 0.001,
+        "loadDecayPerRequest": 1.0,
+        "outlierRejection": {
+          "maxEngineLoadVsAverageMultiplier": 3.0,
+          "maxKvUsedVsAverageMultiplier": 3.0
+        }
+      }
+    }
+  },
+  "workerRegistry": {
+    "health": {
+      "statusPollIntervalMs": 20,
+      "statusRpcTimeoutMs": 5000,
+      "statusStaleAfterMs": 10000
+    },
+    "cacheStatus": {
+      "targetDiffSize": 30,
+      "minRefreshIntervalMs": 50,
+      "maxRefreshIntervalMs": 3000,
+      "fullSnapshotDebugMode": false
+    }
+  },
+  "observability": {
+    "cacheHit": {
+      "recentKeyWindow": {
+        "writeEnabled": true,
+        "durationMs": 1800000,
+        "maxKeyOccurrences": 10000000
+      },
+      "metricsEnabled": true,
+      "requestTraceLogEnabled": false,
+      "theoryLog": {
+        "path": "/home/admin/ai-whale/logs/master_theory_hit.log"
+      }
+    }
+  }
 }'
+```
 
+`maxProjectedDrainVsAverageMultiplier` limits estimated-TTFT outliers by the
+endpoint's known projected drain time. Candidates whose drain cannot be modeled
+are excluded from this particular outlier axis.
+
+`MODEL_SERVICE_CONFIG` still describes service discovery and endpoint topology; it is
+not a second FlexLB behavior configuration:
+
+```bash
 export MODEL_SERVICE_CONFIG='{
     "service_id": "model.service",
     "load_balance": true,
@@ -168,36 +251,124 @@ export MODEL_SERVICE_CONFIG='{
 }'
 ```
 
-Traffic routing is two-layered: `TRAFFIC_POLICY_CONFIG` selects the target `group`, then each role's load balancing strategy selects the final prefill/decode host inside that group. You can also set `TRAFFIC_POLICY_CONFIG_FILE` to a JSON file path. Standalone traffic policy config takes priority over `trafficPolicy` embedded in `FLEXLB_CONFIG`, and you can replace the active policy at runtime with `POST /rtp_llm/update_traffic_policy`. Dispatcher prompt batches automatically use per-item FE scheduling while a policy is active, so length-based and weighted rules are evaluated against each prompt rather than an aggregate token count.
+### Scheduler, ordering, decision, and dispatcher
 
-Set `decodeConcurrencyLimit` to a positive number to cap each decode worker's in-flight requests. FlexLB counts reported waiting/running tasks plus local in-transit selections, deduplicated by request id. When a decode worker reaches the limit, it is not considered serviceable; values <= 0 disable this FlexLB-side limit.
+Under `QUEUE`, ordering, decision formation, and delivery are three independent
+axes:
 
-To enable dispatcher batch fanout, configure its FE discovery pool:
+| Scheduler | Queue ordering | Decision | Dispatcher | Behavior |
+| --- | --- | --- | --- | --- |
+| `DIRECT` | not applicable | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
+| `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | Form singleton decisions; frontend sends |
+| `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | Master sends singleton `EnqueueBatch` calls |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | Form bounded groups; frontend sends each routed request |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | Form bounded groups; Master sends `EnqueueBatch` |
+
+`PRIORITY` can replace `FIFO` in all four QUEUE combinations. `DIRECT + BATCH`
+is invalid and DIRECT cannot configure `decision`. `FIFO`/`PRIORITY` choose which
+request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests form
+one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
+sends them.
+
+`FIXED_WINDOW` is bounded by `maxRequests` (1–1024),
+`maxCollectionWaitMs`, and the optional
+inclusive group-growth cap `maxPredictedExecutionMs`: reaching the cap dispatches
+the group without waiting for the collection window; another request is not
+added when it would exceed the cap, although an indivisible singleton may
+exceed it. A zero collection window skips waiting but still groups requests that
+are already available, so it is not equivalent to `SINGLE`.
+`SINGLE` has no collection parameters. In schema v2 every setting has one owner:
+decision-group limits live only under `scheduler.decision`, waiting-queue limits
+live only under `scheduler.capacity`, and `dispatcher` contains only delivery and
+delivery-backpressure settings. Omitting `scheduler.decision` uses
+`FIXED_WINDOW`; select `SINGLE` explicitly when that behavior is required.
+
+The online loader accepts only schema v2. Convert v1 documents offline with
+`org.flexlb.config.FlexlbConfigMigration` (its `main` method reads v1 JSON from
+standard input, writes v2 JSON to standard output, and reports behavior changes
+to standard error), review the output, and deploy the resulting v2 document. A
+v1 `NON_BATCH` queue with no decision becomes `SINGLE`; a v1 `BATCH` queue with
+no decision becomes `FIXED_WINDOW`. Its `maxRequests`, `maxCollectionWaitMs`,
+`earlyDispatchPredictedExecutionMs`, and
+`maxWaitingRequestsPerPrefillWorker` fields move to their v2 owners. The
+prediction threshold keeps its inclusive equality boundary during conversion.
+Fields that were not part of v1, including an explicit v1
+`maxPredictedExecutionMs`, are rejected rather than guessed. Omitting
+`schemaVersion` means v2; every explicit version other than 2 is rejected by the
+online loader.
+
+Former field-level FlexLB environment variables are not compatibility aliases.
+Their presence aborts startup with migration guidance instead of silently using
+v2 defaults; move those values into `FLEXLB_CONFIG`. Replace the removed
+`FLEXLB_MONITOR_MODE` with `FLEXLB_MONITOR_METRIC_WHITELIST`: use the default
+whitelist for the former `critical-only` behavior or the bare `flexlb_` prefix
+for the former `all` behavior.
+
+Production-style examples migrated from the former field-level environment variables:
+
+- [QUEUE + PRIORITY + NON_BATCH](docs/config-examples/flexlb-queue-priority-non-batch.json)
+- [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
+
+DIRECT uses the same role routing configuration as QUEUE. For example, a compact
+DIRECT configuration that selects only the best projected Prefill candidate is:
 
 ```bash
-export DISPATCH_FE_POOL_SERVICE_ID='frontend.service'
-export DISPATCH_CONFIG='{
-    "subBatch":"count:5",
-    "feAllocation":"master",
-    "preAssignBe":false,
-    "maxAggregateRequestBytes":134217728,
-    "maxAggregateResponseBytes":134217728,
-    "maxDryRunResponseBytes":67108864
+export FLEXLB_CONFIG='{
+  "schemaVersion": 2,
+  "scheduler": {"type": "DIRECT"},
+  "dispatcher": {"type": "NON_BATCH"},
+  "router": {
+    "roles": {
+      "prefill": {
+        "candidateChoice": {
+          "type": "BEST_ONLY",
+          "outlierRejection": {
+            "maxPendingVsAverageMultiplier": 3.0,
+            "maxProjectedDrainVsAverageMultiplier": 3.0
+          }
+        }
+      }
+    }
+  }
 }'
 ```
 
-`feAllocation=master` (default) coordinates FE assignment through the elected master's single
-cursor. `local` is the availability mode and uses each dispatcher's health-filtered local pool.
-`preAssignBe` defaults to `false` for rolling-upgrade safety; enable it only after every FE can
-deserialize dispatcher-provided `role_addrs`. An active traffic-group policy disables this
-optimization so token-length and tenant rules remain request-aware at FE. Registered dispatcher batch paths reject
-caller-supplied `generate_config.role_addrs` at their HTTP boundary because dispatcher placement
-is authoritative, including when the request shape would otherwise be forwarded whole. The two
-byte limits cap the retained fanout response and diagnostic dry-run response per request.
-Per-field `DISPATCH_*` variables override the JSON,
-for example `DISPATCH_FE_ALLOCATION=local` and `DISPATCH_PRE_ASSIGN_BE=true`. See
-[`docs/fe-allocation-via-master.md`](docs/fe-allocation-via-master.md) for the allocation matrix,
-failure semantics, and deployment guidance.
+PREFILL and PDFUSION share the Prefill routing policy. Execution-time estimator
+types are `FORMULA` and `LEARNING`. Candidate choice is tagged as `BEST_ONLY`,
+`RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL`. The candidate pool
+for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
+`{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
+`{"type":"FIXED","workers":2}`. Fields belonging to another estimator,
+candidate-choice, or pool variant are rejected.
+
+Projected Prefill TTFT is a deterministic frozen-snapshot projection, not a
+promise about future wall-clock latency. It inserts the incoming request using
+the live FIFO/PRIORITY order, reuses the production decision-group planner,
+overlaps collection deadlines with already committed work, and assumes no later
+arrivals, cancellations, predictor revisions, or resource changes. An exact
+admission block observed on the current head is represented as a structured
+blocked state. The model does not invent a release time for delivery capacity
+that is currently unobservable; otherwise its service timeline is conditional
+on later admission.
+
+Cache affinity is enabled by including `router.roles.prefill.cacheAffinity`. A
+cache leader is preferred only when its endpoint-specific reusable prefix meets
+`minPrefixHitPercent` and its frozen projected TTFT is no more than
+`maxExtraTtftMs` above the best candidate. The
+percentage uses predictor-effective reusable tokens (the final cache block remains
+compute work), not the raw routing-prefix match. Omit the object to disable it.
+Decode admission is controlled by the optional positive
+`router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
+request-count cap. The cap covers all Engine-facing ownership: engine-confirmed
+`KV_ALLOCATED` and `RUNNING` requests, dispatched shadows, and active dispatch
+permits. It is not the Engine's physical `RUNNING` concurrency. For example, an
+Engine running cap of 128 plus roughly one 128-request accepted pipeline buffer
+normally starts with `maxEngineRequests=256`; the split is observable through
+`/rtp_llm/inflight_status` and the `auto_tpm.decode.*` gauges.
+
+See [QUEUE ordering, decision, and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
+for the QUEUE lifecycle, accounting invariants, complete configuration parameter
+reference, and mode matrix.
 
 ### Run
 
@@ -240,34 +411,18 @@ Authorization: Bearer <token>
 }
 ```
 
-## Configuration
+## Configuration reference
 
-FlexLB supports various configuration options through environment variables and Spring Boot properties:
-
-- **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
-- **Strategy Parameters**: Configure strategy internals through `STRATEGY_CONFIGS`; `shortestTtft.queueTimeWeight` controls how strongly worker queue time affects scheduling (range `0.0-1.0`, default `1.0`), while `shortestTtft.candidatePool` controls the candidate pool. `mode=RATIO` uses `max(minSize, floor(workerCount * ratio))`, while `mode=FIXED` uses `size`.
-- **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
-- **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
-- **Dispatcher Mode**: Configure through `DISPATCH_CONFIG` (opt-in). When enabled, FlexLB exposes `/dispatcher/*` to split batch requests across the FE pool and merge with partial-failure semantics. See `CLAUDE.md` for the full reference (endpoint registry, failure shapes, timeouts).
-
-Worker expiry and VIT endpoint health use startup-only environment variables:
-
-| Variable | Default | Semantics |
-| --- | ---: | --- |
-| `TASK_TIMEOUT_US` | `3000000` | Maximum idle age of a tracked task before cleanup. |
-| `WORKER_TIMEOUT_US` | `3000000` | Maximum age of the last successful non-VIT worker status update before cleanup. |
-| `VIT_SYNC_REQUEST_TIMEOUT_MS` | `2000` | Minimum timeout for a FlexLB-to-VIT status request. A larger global sync timeout still applies. |
-| `VIT_WORKER_TIMEOUT_US` | `5000000` | Maximum age of the last successful VIT status update before FlexLB removes the endpoint. |
-| `VIT_RETAIN_ALIVE_ON_TIMEOUT` | `true` | Keep the last VIT alive state after a gRPC deadline. Boolean values accept `true/false`, `1/0`, `yes/no`, and `on/off`; use any false form for immediate fail-closed behavior. |
-
-Invalid or non-positive integer values fall back to the defaults. A proxy may reject an
-individual child worker before FlexLB removes the aggregate VIT endpoint; this
-intentional layering tolerates transient proxy status timeouts while preserving a
-bounded stale endpoint window. With the defaults, the worst-case stale window is
-approximately 8 seconds: the 5-second VIT expiry plus up to one 3-second cleaner interval.
-All worker deadline failures continue to emit one `3104` (`WORKER_STATUS_GRPC_TIMEOUT`)
-event for alert compatibility. The status-sync error log includes
-`retainLastAliveStatus=true` when a VIT endpoint keeps its previous state.
+- **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
+- **Prefill execution formula**:
+  `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
+  `FORMULA`. Omitting the estimator applies the code default:
+  `sum(computeTokens) + 0.3*sum(hitCacheTokens)`.
+- **Routing strategy parameters**: the tagged selector objects under
+  `router.roles.prefill` and `router.roles.decode`.
+- **Traffic group selection**: `router.groupSelector` inside the same document.
+- **Backend topology**: `MODEL_SERVICE_CONFIG`.
+- **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.
 
 ## Monitoring
 
@@ -284,3 +439,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+## HTTP dispatcher
+
+See [dispatcher batch fanout and configuration](docs/fe-allocation-via-master.md) for
+FE allocation, `/rtp_llm/batch_schedule`, embedding worker discovery, and leader election.

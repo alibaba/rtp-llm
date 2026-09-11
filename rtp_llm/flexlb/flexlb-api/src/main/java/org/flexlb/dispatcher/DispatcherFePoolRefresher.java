@@ -1,6 +1,5 @@
 package org.flexlb.dispatcher;
 
-import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.util.Logger;
@@ -67,8 +66,7 @@ public class DispatcherFePoolRefresher {
 
     /**
      * Fallback for the empty-discovery grace window when the configured value is absent or
-     * non-positive. Matches {@code FlexlbConfig#discoveryFailureGraceMs}'s own default so an
-     * unconfigured deployment behaves identically on both sides.
+     * non-positive. Matches {@code DispatchConfig.discoveryFailureGraceMs}.
      */
     private static final long DEFAULT_EMPTY_DISCOVERY_GRACE_NANOS = TimeUnit.MINUTES.toNanos(5);
 
@@ -78,9 +76,7 @@ public class DispatcherFePoolRefresher {
      * that swallows failures into an empty list) and the known FEs are kept; past it the empty
      * result is accepted as the truth — the fleet scaled to zero or was torn down — and
      * {@link FePool#next()} fails fast instead of timing out against removed hosts forever.
-     * Sourced from the same {@code FlexlbConfig#discoveryFailureGraceMs} the sync side reads
-     * (env override {@code DISCOVERY_FAILURE_GRACE_MS}), so one knob governs both discovery
-     * consumers; {@link #DEFAULT_EMPTY_DISCOVERY_GRACE_NANOS} when unset or non-positive.
+     * Configured by {@code DispatchConfig.discoveryFailureGraceMs}; {@link #DEFAULT_EMPTY_DISCOVERY_GRACE_NANOS} when unset or non-positive.
      */
     private final long emptyDiscoveryGraceNanos;
 
@@ -109,10 +105,9 @@ public class DispatcherFePoolRefresher {
     private final List<ExecutorService> retiredExecutors = new ArrayList<>();
 
     @Autowired
-    public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg,
-                                     ConfigService configService) {
+    public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg) {
         this(serviceDiscovery, cfg,
-                configService.loadBalanceConfig().getDiscoveryFailureGraceMs(), System::nanoTime,
+                cfg.getDiscoveryFailureGraceMs(), System::nanoTime,
                 DISCOVERY_TIMEOUT_MS);
     }
 
@@ -166,7 +161,7 @@ public class DispatcherFePoolRefresher {
     /**
      * A non-positive configured grace is a misconfiguration, not a request to drain instantly —
      * that would turn every discovery hiccup into a full FE-pool drop. Fall back to the 5-minute
-     * default the sync side also documents.
+     * default.
      */
     static long resolveGraceNanos(long graceMs) {
         return graceMs > 0 ? TimeUnit.MILLISECONDS.toNanos(graceMs) : DEFAULT_EMPTY_DISCOVERY_GRACE_NANOS;

@@ -134,7 +134,6 @@ class _FakeMasterClient:
         input,
         request_id,
         input_pb=None,
-        seq_len_hint=None,
     ):
         self.calls.append(
             {
@@ -142,7 +141,6 @@ class _FakeMasterClient:
                 "input": input,
                 "request_id": request_id,
                 "input_pb": input_pb,
-                "seq_len_hint": seq_len_hint,
             }
         )
         return FlexlbResponse.ok(["prefill-role"], enqueued_by_master=True)
@@ -206,14 +204,13 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
         ):
-            result = await visitor.get_master_route_addrs(input, seq_len_hint=456)
+            result = await visitor.get_master_route_addrs(input)
 
         self.assertIsNone(result)
         self.assertEqual(input.generate_config.role_addrs, ["prefill-role"])
         self.assertTrue(input.enqueued_by_master)
         self.assertEqual(visitor.master_client.calls[0]["block_cache_keys"], [11, 22])
         self.assertEqual(visitor.master_client.calls[0]["request_id"], 456)
-        self.assertEqual(visitor.master_client.calls[0]["seq_len_hint"], 456)
         self.assertEqual(
             visitor.master_client.calls[0]["input_pb"].SerializeToString(),
             b"serialized-input",
@@ -225,7 +222,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = ["PREFILL"]
 
-        async def get_master_route_addrs(_input, seq_len_hint=None):
+        async def get_master_route_addrs(_input):
             return FlexlbResponse.error_response(
                 int(ExceptionType.MASTER_NO_AVAILABLE_WORKER), "no worker"
             )
@@ -249,7 +246,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.backend_role_list = ["PREFILL"]
         domain_route_called = False
 
-        async def get_master_route_addrs(_input, seq_len_hint=None):
+        async def get_master_route_addrs(_input):
             return FlexlbResponse.connection_failed_response()
 
         async def get_domain_route_addrs(input):
@@ -274,7 +271,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.backend_role_list = ["PREFILL", "DECODE"]
         route_span = _FakeRouteSpan()
 
-        async def get_master_route_addrs(route_input, seq_len_hint=None):
+        async def get_master_route_addrs(route_input):
             route_input.generate_config.role_addrs.append(
                 RoleAddr(role=RoleType.PREFILL, ip="master", http_port=1, grpc_port=2)
             )
@@ -335,7 +332,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.backend_role_list = ["PREFILL"]
         route_span = _FakeRouteSpan()
 
-        async def get_master_route_addrs(_input, seq_len_hint=None):
+        async def get_master_route_addrs(_input):
             return FlexlbResponse.error_response(
                 int(ExceptionType.MASTER_NO_AVAILABLE_WORKER), "scheduler details"
             )
@@ -402,7 +399,7 @@ class TestBackendRouteTrace(unittest.TestCase):
         visitor.backend_role_list = ["PREFILL"]
         route_span = MagicMock()
 
-        async def cancel_master_route(_input, seq_len_hint=None):
+        async def cancel_master_route(_input):
             raise asyncio.CancelledError("request cancelled")
 
         visitor.get_master_route_addrs = cancel_master_route

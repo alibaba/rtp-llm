@@ -1,11 +1,11 @@
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <mutex>
-#include <optional>
-#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -46,17 +46,43 @@ public:
         return collectStreamOutput(nullptr, stream, nullptr, last_outputs);
     }
 
-    void setBatchRuntime(std::shared_ptr<EngineBase> engine, std::shared_ptr<RpcServerRuntimeMeta> meta) {
-        engine_ = std::move(engine);
-        meta_   = std::move(meta);
+    void configureAllocatorDump(bool enabled, std::string auth_token, double cooldown_seconds = 0.0) {
+        torch_allocator_dump_enabled_                = enabled;
+        torch_allocator_dump_auth_token_             = std::move(auth_token);
+        torch_allocator_dump_cooldown_seconds_       = cooldown_seconds;
+        maga_init_params_.parallelism_config.tp_rank = 0;
+        maga_init_params_.parallelism_config.tp_size = 1;
     }
 
-    void failPrepareFor(int64_t request_id, ErrorCode error_code) {
-        prepare_failure_ = std::make_pair(request_id, error_code);
+    void configureInternalAllocatorDumpPeer(bool allowed) {
+        internal_allocator_dump_peer_allowed_        = allowed;
+        maga_init_params_.parallelism_config.tp_size = 2;
     }
 
-    EngineScheduleInfo scheduleInfo(int64_t latest_finished_version = -1) {
-        return meta_->getEngineScheduleInfo(latest_finished_version);
+    grpc::Status authorizeAllocatorDump(const TorchAllocatorDumpRequestPB& request) const {
+        return authorizeTorchAllocatorDump(request);
+    }
+
+    grpc::Status beginAllocatorDump(const std::string& dump_id) {
+        return beginTorchAllocatorDump(dump_id);
+    }
+
+    void finishAllocatorDump() {
+        finishTorchAllocatorDump();
+    }
+
+    size_t allocatorDumpReplayHistorySize() const {
+        return torch_allocator_dump_ids_.size();
+    }
+
+    grpc::Status aggregateAllocatorDumpResults(const std::string&                             dump_id,
+                                               const std::vector<TorchAllocatorDumpResultPB>& results,
+                                               TorchAllocatorDumpResponsePB*                  response) const {
+        return aggregateTorchAllocatorDumpResults(dump_id, results, response);
+    }
+
+    void setAllocatorDumpCallback(std::function<TorchAllocatorDumpResultPB(const std::string&)> callback) {
+        allocator_dump_callback_ = std::move(callback);
     }
 
     std::future<void> cancellationChecked() {
@@ -66,69 +92,30 @@ public:
     std::atomic<bool> cancelled{false};
 
 protected:
-    ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) override {
-        if (prepare_failure_ && prepare_failure_->first == input_pb.request_id()) {
-            return ErrorInfo(prepare_failure_->second, "injected prepare failure");
-        }
-        return LocalRpcServer::prepareInput(input_pb, output);
-    }
-
     bool isCancelled(grpc::ServerContext*) const override {
         std::call_once(cancellation_check_once_, [this] { cancellation_checked_.set_value(); });
         return cancelled.load();
     }
 
-private:
-    mutable std::once_flag     cancellation_check_once_;
-    mutable std::promise<void> cancellation_checked_;
-    std::optional<std::pair<int64_t, ErrorCode>> prepare_failure_;
-};
-
-class FixedBatchEngine: public EngineBase {
-public:
-    explicit FixedBatchEngine(std::vector<GenerateStreamPtr> streams):
-        EngineBase(EngineInitParams()), streams_(std::move(streams)) {}
-
-    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
-        return nullptr;
+    bool isTorchAllocatorDumpInternalPeer(grpc::ServerContext*) const override {
+        return internal_allocator_dump_peer_allowed_;
     }
 
-    void enqueue(std::shared_ptr<GenerateStream>&) override {}
-
-    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
-    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
-        EXPECT_EQ(inputs.size(), streams_.size());
-        for (size_t i = 0; i < std::min(inputs.size(), streams_.size()); ++i) {
-            EXPECT_EQ(inputs[i]->request_id, streams_[i]->generateInput()->request_id);
-            EXPECT_EQ(inputs[i]->group_id, streams_[i]->generateInput()->group_id);
+    TorchAllocatorDumpResultPB dumpTorchAllocatorOnCurrentProcess(const std::string& dump_id) override {
+        if (allocator_dump_callback_) {
+            return allocator_dump_callback_(dump_id);
         }
-        return {std::vector<bool>(streams_.size(), true), streams_};
-    }
-
-    absl::Status stop() override {
-        return absl::OkStatus();
-    }
-
-    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
-        return absl::UnimplementedError("not used by LocalRpcServer batch tests");
-    }
-
-    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
-        return {};
+        TorchAllocatorDumpResultPB result;
+        result.set_dump_id(dump_id);
+        result.set_success(true);
+        return result;
     }
 
 private:
-    std::vector<GenerateStreamPtr> streams_;
-};
-
-class ThrowingBatchEngine: public FixedBatchEngine {
-public:
-    ThrowingBatchEngine(): FixedBatchEngine({}) {}
-
-    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
-    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&) override {
-        throw std::runtime_error("injected enqueue failure");
-    }
+    std::function<TorchAllocatorDumpResultPB(const std::string&)> allocator_dump_callback_;
+    bool                                                          internal_allocator_dump_peer_allowed_{false};
+    mutable std::once_flag                                        cancellation_check_once_;
+    mutable std::promise<void>                                    cancellation_checked_;
 };
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
@@ -158,27 +145,14 @@ enum class WakeReason {
     TIMEOUT
 };
 
-std::shared_ptr<MockGenerateStream> createMockStream(int64_t request_id = 0, int64_t group_id = -1) {
+std::shared_ptr<MockGenerateStream> createMockStream() {
     auto input             = std::make_shared<GenerateInput>();
     input->generate_config = std::make_shared<GenerateConfig>();
     input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
-    input->request_id      = request_id;
-    input->group_id        = group_id;
 
     ModelConfig model_config;
     model_config.max_seq_len = 3;
     return std::make_shared<MockGenerateStream>(input, model_config, RuntimeConfig{});
-}
-
-void addBatchInput(BatchGenerateInputPB& request, int64_t request_id, int64_t batch_id) {
-    auto* input = request.add_inputs();
-    input->set_request_id(request_id);
-    input->add_token_ids(1);
-    input->mutable_group_id()->set_value(batch_id);
-    auto* config = input->mutable_generate_config();
-    config->set_max_new_tokens(1);
-    config->set_num_beams(1);
-    config->set_num_return_sequences(1);
 }
 
 std::shared_ptr<NormalGenerateStream> createNormalStream() {
@@ -224,6 +198,262 @@ ErrorCode expectedStreamError(WakeReason reason) {
         return ErrorCode::GENERATE_TIMEOUT;
     }
     return ErrorCode::CANCELLED;
+}
+
+TEST(LocalRpcServerTest, AllocatorDumpAuthorizationRequiresEnablementAndSecret) {
+    TestLocalRpcServer          server;
+    TorchAllocatorDumpRequestPB request;
+    request.set_auth_token("secret");
+    request.set_dump_id("dump-123");
+
+    EXPECT_EQ(server.authorizeAllocatorDump(request).error_code(), grpc::StatusCode::PERMISSION_DENIED);
+
+    server.configureAllocatorDump(true, "expected-secret");
+    EXPECT_EQ(server.authorizeAllocatorDump(request).error_code(), grpc::StatusCode::UNAUTHENTICATED);
+
+    request.set_auth_token("expected-secret");
+    EXPECT_TRUE(server.authorizeAllocatorDump(request).ok());
+}
+
+TEST(LocalRpcServerTest, AllocatorDumpAuthorizationRejectsUnsafeCorrelationId) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "secret");
+    TorchAllocatorDumpRequestPB request;
+    request.set_auth_token("secret");
+    request.set_dump_id("../leak-path");
+
+    EXPECT_EQ(server.authorizeAllocatorDump(request).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(LocalRpcServerTest, RejectedAllocatorDumpRpcReturnsNoBackendDetails) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "expected-secret");
+    grpc::ServerContext          context;
+    TorchAllocatorDumpRequestPB  request;
+    TorchAllocatorDumpResponsePB response;
+    TorchAllocatorDumpResultPB   internal_response;
+    request.set_auth_token("wrong-secret");
+    request.set_dump_id("dump-123");
+    response.add_results()->set_file_path("/stale/private/path");
+    internal_response.set_file_path("/stale/private/path");
+    internal_response.set_pid(1234);
+
+    const auto status          = server.DumpTorchAllocator(&context, &request, &response);
+    const auto internal_status = server.DumpTorchAllocatorInternal(&context, &request, &internal_response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAUTHENTICATED);
+    EXPECT_EQ(internal_status.error_code(), grpc::StatusCode::UNAUTHENTICATED);
+    EXPECT_EQ(response.results_size(), 0);
+    EXPECT_TRUE(internal_response.file_path().empty());
+    EXPECT_EQ(internal_response.pid(), 0);
+}
+
+TEST(LocalRpcServerTest, DirectAllocatorDumpRpcRejectsReplayAndCooldown) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "secret", 60.0);
+    grpc::ServerContext          context;
+    TorchAllocatorDumpRequestPB  request;
+    TorchAllocatorDumpResponsePB response;
+    request.set_auth_token("secret");
+    request.set_dump_id("dump-first");
+
+    EXPECT_TRUE(server.DumpTorchAllocator(&context, &request, &response).ok());
+    ASSERT_EQ(response.results_size(), 1);
+    EXPECT_EQ(response.results(0).dump_id(), "dump-first");
+
+    EXPECT_EQ(server.DumpTorchAllocator(&context, &request, &response).error_code(), grpc::StatusCode::ALREADY_EXISTS);
+    EXPECT_EQ(response.results_size(), 0);
+
+    request.set_dump_id("dump-second");
+    EXPECT_EQ(server.DumpTorchAllocator(&context, &request, &response).error_code(),
+              grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(response.results_size(), 0);
+}
+
+TEST(LocalRpcServerTest, DirectAllocatorDumpRpcIsSingleFlight) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "secret");
+    std::promise<void> dump_started;
+    std::promise<void> release_dump;
+    auto               release_future = release_dump.get_future().share();
+    std::atomic<int>   dump_calls{0};
+    server.setAllocatorDumpCallback([&](const std::string& dump_id) {
+        if (dump_calls.fetch_add(1) == 0) {
+            dump_started.set_value();
+            release_future.wait();
+        }
+        TorchAllocatorDumpResultPB result;
+        result.set_dump_id(dump_id);
+        result.set_success(true);
+        return result;
+    });
+
+    TorchAllocatorDumpRequestPB first_request;
+    first_request.set_auth_token("secret");
+    first_request.set_dump_id("dump-in-flight");
+    grpc::ServerContext          first_context;
+    TorchAllocatorDumpResponsePB first_response;
+    auto                         first_call = std::async(
+        std::launch::async, [&] { return server.DumpTorchAllocator(&first_context, &first_request, &first_response); });
+    const auto dump_started_status = dump_started.get_future().wait_for(std::chrono::seconds(5));
+    if (dump_started_status != std::future_status::ready) {
+        release_dump.set_value();
+        first_call.wait();
+        ADD_FAILURE() << "first allocator dump did not start";
+        return;
+    }
+
+    TorchAllocatorDumpRequestPB second_request;
+    second_request.set_auth_token("secret");
+    second_request.set_dump_id("dump-concurrent");
+    grpc::ServerContext          second_context;
+    TorchAllocatorDumpResponsePB second_response;
+    EXPECT_EQ(server.DumpTorchAllocator(&second_context, &second_request, &second_response).error_code(),
+              grpc::StatusCode::ABORTED);
+
+    release_dump.set_value();
+    ASSERT_EQ(first_call.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(first_call.get().ok());
+    EXPECT_EQ(dump_calls.load(), 1);
+}
+
+TEST(LocalRpcServerTest, InternalAllocatorDumpRequiresTrustedTpPeer) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "secret");
+    server.configureInternalAllocatorDumpPeer(false);
+    TorchAllocatorDumpRequestPB request;
+    request.set_auth_token("secret");
+    request.set_dump_id("dump-internal");
+    grpc::ServerContext        context;
+    TorchAllocatorDumpResultPB response;
+
+    const auto status = server.DumpTorchAllocatorInternal(&context, &request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+    EXPECT_TRUE(response.dump_id().empty());
+}
+
+TEST(LocalRpcServerTest, InternalAllocatorDumpEnforcesAdmissionAndReplayProtection) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "secret");
+    server.configureInternalAllocatorDumpPeer(true);
+    std::promise<void> dump_started;
+    std::promise<void> release_dump;
+    auto               release_future = release_dump.get_future().share();
+    server.setAllocatorDumpCallback([&](const std::string& dump_id) {
+        dump_started.set_value();
+        release_future.wait();
+        TorchAllocatorDumpResultPB result;
+        result.set_dump_id(dump_id);
+        result.set_success(true);
+        return result;
+    });
+
+    TorchAllocatorDumpRequestPB first_request;
+    first_request.set_auth_token("secret");
+    first_request.set_dump_id("dump-internal-first");
+    grpc::ServerContext        first_context;
+    TorchAllocatorDumpResultPB first_response;
+    auto                       first_call          = std::async(std::launch::async, [&] {
+        return server.DumpTorchAllocatorInternal(&first_context, &first_request, &first_response);
+    });
+    const auto                 dump_started_status = dump_started.get_future().wait_for(std::chrono::seconds(5));
+    if (dump_started_status != std::future_status::ready) {
+        release_dump.set_value();
+        first_call.wait();
+        ADD_FAILURE() << "internal allocator dump did not start";
+        return;
+    }
+
+    TorchAllocatorDumpRequestPB second_request;
+    second_request.set_auth_token("secret");
+    second_request.set_dump_id("dump-internal-second");
+    grpc::ServerContext        second_context;
+    TorchAllocatorDumpResultPB second_response;
+    EXPECT_EQ(server.DumpTorchAllocatorInternal(&second_context, &second_request, &second_response).error_code(),
+              grpc::StatusCode::ABORTED);
+
+    release_dump.set_value();
+    ASSERT_EQ(first_call.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(first_call.get().ok());
+    EXPECT_EQ(first_response.dump_id(), first_request.dump_id());
+
+    grpc::ServerContext        replay_context;
+    TorchAllocatorDumpResultPB replay_response;
+    EXPECT_EQ(server.DumpTorchAllocatorInternal(&replay_context, &first_request, &replay_response).error_code(),
+              grpc::StatusCode::ALREADY_EXISTS);
+}
+
+TEST(LocalRpcServerTest, InternalAllocatorDumpEnforcesCooldownOnEachRank) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "secret", 60.0);
+    server.configureInternalAllocatorDumpPeer(true);
+    TorchAllocatorDumpRequestPB request;
+    request.set_auth_token("secret");
+    request.set_dump_id("dump-internal-first");
+    grpc::ServerContext        first_context;
+    TorchAllocatorDumpResultPB first_response;
+    ASSERT_TRUE(server.DumpTorchAllocatorInternal(&first_context, &request, &first_response).ok());
+
+    request.set_dump_id("dump-internal-second");
+    grpc::ServerContext        second_context;
+    TorchAllocatorDumpResultPB second_response;
+    EXPECT_EQ(server.DumpTorchAllocatorInternal(&second_context, &request, &second_response).error_code(),
+              grpc::StatusCode::RESOURCE_EXHAUSTED);
+}
+
+TEST(LocalRpcServerTest, LeaderAdmissionAllowsExactlyOneMatchingInternalFanout) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "secret");
+    server.configureInternalAllocatorDumpPeer(true);
+    ASSERT_TRUE(server.beginAllocatorDump("dump-fanout").ok());
+
+    TorchAllocatorDumpRequestPB request;
+    request.set_auth_token("secret");
+    request.set_dump_id("dump-fanout");
+    grpc::ServerContext        context;
+    TorchAllocatorDumpResultPB response;
+    EXPECT_TRUE(server.DumpTorchAllocatorInternal(&context, &request, &response).ok());
+    EXPECT_EQ(response.dump_id(), request.dump_id());
+
+    grpc::ServerContext        replay_context;
+    TorchAllocatorDumpResultPB replay_response;
+    EXPECT_EQ(server.DumpTorchAllocatorInternal(&replay_context, &request, &replay_response).error_code(),
+              grpc::StatusCode::ALREADY_EXISTS);
+
+    EXPECT_EQ(server.beginAllocatorDump("dump-other").error_code(), grpc::StatusCode::ABORTED);
+    server.finishAllocatorDump();
+}
+
+TEST(LocalRpcServerTest, AllocatorDumpReplayHistoryIsBounded) {
+    TestLocalRpcServer server;
+    server.configureAllocatorDump(true, "secret");
+    for (int index = 0; index <= 1024; ++index) {
+        ASSERT_TRUE(server.beginAllocatorDump("dump-" + std::to_string(index)).ok());
+        server.finishAllocatorDump();
+    }
+
+    EXPECT_EQ(server.allocatorDumpReplayHistorySize(), 1024);
+    EXPECT_TRUE(server.beginAllocatorDump("dump-0").ok());
+    server.finishAllocatorDump();
+    EXPECT_EQ(server.allocatorDumpReplayHistorySize(), 1024);
+}
+
+TEST(LocalRpcServerTest, AllocatorDumpAggregationRejectsMismatchedIds) {
+    TestLocalRpcServer         server;
+    TorchAllocatorDumpResultPB matching;
+    matching.set_dump_id("expected-id");
+    matching.set_world_rank(0);
+    TorchAllocatorDumpResultPB mismatched;
+    mismatched.set_dump_id("other-id");
+    mismatched.set_world_rank(1);
+    TorchAllocatorDumpResponsePB response;
+    response.add_results()->set_dump_id("stale-id");
+
+    const auto status = server.aggregateAllocatorDumpResults("expected-id", {matching, mismatched}, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::DATA_LOSS);
+    EXPECT_EQ(response.results_size(), 0);
 }
 
 TEST(LocalRpcServerTest, PollChecksCancellationBeforeHandlingEveryWakeReason) {
@@ -346,142 +576,6 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(normal_stream->stream_cache_resource_->isResourceReleased());
     EXPECT_FALSE(normal_stream->hasOutput());
-}
-
-TEST(LocalRpcServerTest, BatchGeneratePublishesEveryMemberLifecycle) {
-    constexpr int64_t  batch_id = 900;
-    TestLocalRpcServer server;
-    auto               first  = createMockStream(101, batch_id);
-    auto               second = createMockStream(102, batch_id);
-    auto               meta   = std::make_shared<RpcServerRuntimeMeta>();
-    server.setBatchRuntime(std::make_shared<FixedBatchEngine>(std::vector<GenerateStreamPtr>{first, second}), meta);
-
-    EXPECT_CALL(*first, nextOutput(_))
-        .WillOnce(InvokeWithoutArgs([&server] {
-            const auto info = server.scheduleInfo();
-            EXPECT_EQ(info.running_task_info_list.size(), 2);
-            EXPECT_TRUE(info.finished_task_info_list.empty());
-            GenerateOutputs outputs;
-            outputs.request_id = 101;
-            return ErrorResult<GenerateOutputs>(std::move(outputs));
-        }))
-        .WillOnce(InvokeWithoutArgs([] { return wakeResult(WakeReason::FINISHED); }));
-    EXPECT_CALL(*second, nextOutput(_))
-        .WillOnce(InvokeWithoutArgs([&server, batch_id] {
-            const auto info = server.scheduleInfo();
-            EXPECT_EQ(info.running_task_info_list.size(), 1);
-            EXPECT_EQ(info.finished_task_info_list.size(), 1);
-            if (!info.finished_task_info_list.empty()) {
-                EXPECT_EQ(info.finished_task_info_list[0].request_id, 101);
-                EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
-            }
-            GenerateOutputs outputs;
-            outputs.request_id = 102;
-            return ErrorResult<GenerateOutputs>(std::move(outputs));
-        }))
-        .WillOnce(InvokeWithoutArgs([] { return wakeResult(WakeReason::FINISHED); }));
-
-    BatchGenerateInputPB request;
-    for (const auto request_id : {101, 102}) {
-        auto* input = request.add_inputs();
-        input->set_request_id(request_id);
-        input->add_token_ids(1);
-        input->mutable_group_id()->set_value(batch_id);
-        auto* config = input->mutable_generate_config();
-        config->set_max_new_tokens(1);
-        config->set_num_beams(1);
-        config->set_num_return_sequences(1);
-    }
-    BatchGenerateOutputsPB response;
-
-    const auto status = server.BatchGenerateCall(nullptr, &request, &response);
-
-    EXPECT_TRUE(status.ok());
-    EXPECT_EQ(response.results_size(), 2);
-    EXPECT_TRUE(response.results(0).has_final_output());
-    EXPECT_TRUE(response.results(1).has_final_output());
-    const auto info = server.scheduleInfo();
-    EXPECT_TRUE(info.running_task_info_list.empty());
-    ASSERT_EQ(info.finished_task_info_list.size(), 2);
-    EXPECT_EQ(info.finished_task_info_list[0].request_id, 101);
-    EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
-    EXPECT_EQ(info.finished_task_info_list[1].request_id, 102);
-    EXPECT_EQ(info.finished_task_info_list[1].batch_id, batch_id);
-}
-
-TEST(LocalRpcServerTest, BatchGeneratePublishesEveryMemberWhenInputPreparationFails) {
-    constexpr int64_t  batch_id = 901;
-    TestLocalRpcServer server;
-    auto               meta = std::make_shared<RpcServerRuntimeMeta>();
-    server.setBatchRuntime(nullptr, meta);
-    server.failPrepareFor(102, ErrorCode::LOAD_CACHE_TIMEOUT);
-    BatchGenerateInputPB request;
-    addBatchInput(request, 101, batch_id);
-    addBatchInput(request, 102, batch_id);
-    BatchGenerateOutputsPB response;
-
-    const auto status = server.BatchGenerateCall(nullptr, &request, &response);
-
-    EXPECT_TRUE(status.ok());
-    ASSERT_EQ(response.results_size(), 2);
-    EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::CANCELLED);
-    EXPECT_EQ(response.results(1).error_info().error_code(), ErrorCodePB::LOAD_CACHE_TIMEOUT);
-    const auto info = server.scheduleInfo();
-    EXPECT_TRUE(info.running_task_info_list.empty());
-    ASSERT_EQ(info.finished_task_info_list.size(), 2);
-    EXPECT_EQ(info.finished_task_info_list[0].request_id, 101);
-    EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
-    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::CANCELLED));
-    EXPECT_EQ(info.finished_task_info_list[1].request_id, 102);
-    EXPECT_EQ(info.finished_task_info_list[1].batch_id, batch_id);
-    EXPECT_EQ(info.finished_task_info_list[1].error_code,
-              static_cast<int64_t>(ErrorCode::LOAD_CACHE_TIMEOUT));
-}
-
-TEST(LocalRpcServerTest, BatchGeneratePublishesEveryMemberWhenEngineEnqueueThrows) {
-    constexpr int64_t  batch_id = 902;
-    TestLocalRpcServer server;
-    auto               meta = std::make_shared<RpcServerRuntimeMeta>();
-    server.setBatchRuntime(std::make_shared<ThrowingBatchEngine>(), meta);
-    BatchGenerateInputPB request;
-    addBatchInput(request, 201, batch_id);
-    addBatchInput(request, 202, batch_id);
-    BatchGenerateOutputsPB response;
-
-    EXPECT_THROW(server.BatchGenerateCall(nullptr, &request, &response), std::runtime_error);
-
-    const auto info = server.scheduleInfo();
-    EXPECT_TRUE(info.running_task_info_list.empty());
-    ASSERT_EQ(info.finished_task_info_list.size(), 2);
-    for (const auto& task : info.finished_task_info_list) {
-        EXPECT_EQ(task.batch_id, batch_id);
-        EXPECT_EQ(task.error_code, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION));
-    }
-}
-
-TEST(LocalRpcServerTest, BatchGeneratePreservesTypedPerItemErrorCode) {
-    constexpr int64_t  batch_id = 903;
-    TestLocalRpcServer server;
-    auto               stream = createMockStream(301, batch_id);
-    auto               meta   = std::make_shared<RpcServerRuntimeMeta>();
-    server.setBatchRuntime(std::make_shared<FixedBatchEngine>(std::vector<GenerateStreamPtr>{stream}), meta);
-    EXPECT_CALL(*stream, nextOutput(_)).WillOnce(InvokeWithoutArgs([] {
-        return ErrorResult<GenerateOutputs>(ErrorCode::LOAD_CACHE_TIMEOUT, "load cache timed out");
-    }));
-    BatchGenerateInputPB request;
-    addBatchInput(request, 301, batch_id);
-    BatchGenerateOutputsPB response;
-
-    const auto status = server.BatchGenerateCall(nullptr, &request, &response);
-
-    EXPECT_TRUE(status.ok());
-    ASSERT_EQ(response.results_size(), 1);
-    EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::LOAD_CACHE_TIMEOUT);
-    const auto info = server.scheduleInfo();
-    ASSERT_EQ(info.finished_task_info_list.size(), 1);
-    EXPECT_EQ(info.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::LOAD_CACHE_TIMEOUT));
-    EXPECT_EQ(info.finished_task_info_list[0].batch_id, batch_id);
 }
 
 }  // namespace rtp_llm

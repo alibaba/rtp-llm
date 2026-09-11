@@ -1,4 +1,13 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+    return parsed
 
 
 def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
@@ -28,23 +37,48 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         env_name="GRAMMAR_NUM_WORKERS",
         bind_to=(grammar_config, "num_workers"),
         type=int,
-        default=8,
+        default=0,
         help=(
-            "Forwarded to the grammar compiler as max_compiler_threads, "
-            "which parallelizes FSM construction (NFA->DFA) within a single "
-            "compile. This knob affects intra-compile parallelism, not request-level "
-            "concurrency. Raise "
-            "for large/complex schemas; C++ clamps invalid values to at least 1."
+            "Threads one grammar compile fans out over. <=0 derives the value from "
+            "the process CPU affinity split across ranks on this node."
         ),
+    )
+    grammar_group.add_argument(
+        "--grammar_compile_timeout_ms",
+        env_name="GRAMMAR_COMPILE_TIMEOUT_MS",
+        bind_to=(grammar_config, "compile_timeout_ms"),
+        type=_positive_int,
+        default=2000,
+        help=(
+            "Positive engine-side wait budget for one grammar compile. A timed-out "
+            "compile continues and may warm the cache; non-positive values are rejected."
+        ),
+    )
+    grammar_group.add_argument(
+        "--grammar_compile_concurrency",
+        env_name="GRAMMAR_COMPILE_CONCURRENCY",
+        bind_to=(grammar_config, "compile_concurrency"),
+        type=_positive_int,
+        default=1,
+        help="Positive maximum number of engine-side grammar compiles running concurrently.",
+    )
+    grammar_group.add_argument(
+        "--grammar_compile_queue_size",
+        env_name="GRAMMAR_COMPILE_QUEUE_SIZE",
+        bind_to=(grammar_config, "compile_queue_size"),
+        type=_positive_int,
+        default=2,
+        help="Positive maximum number of queued engine-side compiles before overload rejection.",
     )
     grammar_group.add_argument(
         "--grammar_compiler_cache_bytes",
         env_name="GRAMMAR_COMPILER_CACHE_BYTES",
         bind_to=(grammar_config, "compiler_cache_bytes"),
         type=int,
-        default=512 * 1024 * 1024,
+        default=2 * 1024 * 1024 * 1024,
         help=(
-            "Byte cap on the internal compiled-grammar cache. Set <=0 " "for unlimited."
+            "Total byte cap shared by xgrammar's compiler cache and the engine verdict "
+            "LRU (split evenly between them); <=0 makes both caches unlimited."
         ),
     )
     grammar_group.add_argument(

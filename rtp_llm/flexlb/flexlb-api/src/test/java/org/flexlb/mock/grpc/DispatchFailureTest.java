@@ -29,13 +29,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
 
     @Override
     protected FlexlbConfig createConfig() {
-        FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchSizeMax(1);
-        cfg.setFlexlbBatchWindowMs(300);
-        cfg.setCostSloMs(50_000L);
-        cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
-        return cfg;
+        return super.createConfig();
     }
 
     @Test
@@ -45,12 +39,9 @@ class DispatchFailureTest extends FlexLBMockTestBase {
 
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch returns error");
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
-        assertEquals(1, mockPrefillWorker.getEnqueueCount(),
-                "unexpected terminal before EnqueueBatch: " + response.getErrorMessage());
+        assertEquals(1, mockPrefillWorker.getEnqueueCount(), response.getErrorMessage());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
-        InflightAssertions.assertSchedulerInflightEmptyWithin(scheduler, 5_000);
-        InflightAssertions.assertResourcesReleasedWithin(
-                getPrefillEndpoint(), getDecodeEndpoint(), 5_000);
+        InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         Response recovered = submitRequest(7002).get(5, TimeUnit.SECONDS);

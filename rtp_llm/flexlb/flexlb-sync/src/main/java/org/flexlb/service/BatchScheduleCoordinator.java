@@ -1,10 +1,12 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.strategy.RoundRobinLoadBalancer;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.exception.EngineReadTimeoutException;
+import org.flexlb.exception.FlexLBException;
 import org.flexlb.exception.HttpErrorResponseException;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
@@ -31,18 +33,18 @@ public class BatchScheduleCoordinator {
 
     private static final int MAX_FORWARD_HOPS = 1;
 
-    private final RouteService routeService;
+    private final RoundRobinLoadBalancer batchScheduler;
     private final LBStatusConsistencyService consistency;
     private final GeneralHttpNettyService httpNettyService;
     private final EngineHealthReporter engineHealthReporter;
     /** A dead/unknown master fails every forwarded batch request; cap the ERROR stream at 1/s. */
     private final RateLimitedWarn masterUnreachableWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
 
-    public BatchScheduleCoordinator(RouteService routeService,
+    public BatchScheduleCoordinator(RoundRobinLoadBalancer batchScheduler,
                                     LBStatusConsistencyService consistency,
                                     GeneralHttpNettyService httpNettyService,
                                     EngineHealthReporter engineHealthReporter) {
-        this.routeService = routeService;
+        this.batchScheduler = batchScheduler;
         this.consistency = consistency;
         this.httpNettyService = httpNettyService;
         this.engineHealthReporter = engineHealthReporter;
@@ -94,26 +96,17 @@ public class BatchScheduleCoordinator {
                     }
                     String errorCode;
                     if (e instanceof HttpErrorResponseException httpError) {
-                        if (isUnsupportedBatchEndpoint(httpError.getStatusCode())) {
-                            // Rolling upgrade: an older elected master does not expose the new
-                            // endpoint yet. The follower has the replicated routing view, so use
-                            // the explicit local compatibility path until leadership/version
-                            // converges. Other HTTP/transport failures remain fail-closed.
-                            String compatibilityCode =
-                                    "BATCH_ENDPOINT_UNSUPPORTED_" + httpError.getStatusCode();
-                            masterUnreachableWarn.warn("[BatchSchedule] Master {} lacks batch endpoint "
-                                            + "(HTTP {}); resolving locally for rolling-upgrade compatibility",
-                                    master, httpError.getStatusCode());
-                            engineHealthReporter.reportForwardToMasterResult(
-                                    uri.getHost(), compatibilityCode);
-                            return resolveLocally(request, master);
-                        }
-                        BatchScheduleResponse businessFailure =
-                                JsonUtils.toObjectOrNull(httpError.getBody(), BatchScheduleResponse.class);
-                        if (businessFailure != null) {
-                            engineHealthReporter.reportForwardToMasterResult(
-                                    uri.getHost(), String.valueOf(businessFailure.getCode()));
-                            return Mono.just(businessFailure);
+                        try {
+                            BatchScheduleResponse businessFailure =
+                                    JsonUtils.toObject(httpError.getBody(), BatchScheduleResponse.class);
+                            if (businessFailure != null && !businessFailure.isSuccess()
+                                    && businessFailure.getErrorMessage() != null) {
+                                engineHealthReporter.reportForwardToMasterResult(
+                                        uri.getHost(), String.valueOf(businessFailure.getCode()));
+                                return Mono.just(businessFailure);
+                            }
+                        } catch (FlexLBException invalidBody) {
+                            // A non-JSON error is a transport failure, not a scheduling response.
                         }
                         // The connection succeeded — master answered with an HTTP error whose
                         // body isn't a business response. Tagging it CONNECT_FAILED would send
@@ -132,14 +125,11 @@ public class BatchScheduleCoordinator {
 
     private Mono<BatchScheduleResponse> resolveLocally(BatchScheduleRequest request,
                                                        String electedMaster) {
-        return routeService.batchSchedule(request)
+        return batchScheduler.schedule(request)
                 .doOnNext(response -> {
                     response.setRealMasterHost(electedMaster);
                     response.setResolvedLocally(true);
                 });
     }
 
-    private static boolean isUnsupportedBatchEndpoint(int statusCode) {
-        return statusCode == 404 || statusCode == 405 || statusCode == 501;
-    }
 }

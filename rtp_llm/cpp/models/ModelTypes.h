@@ -14,6 +14,10 @@
 #include <utility>
 #include <memory>
 
+namespace kmonitor {
+class MetricsReporter;
+}
+
 namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
@@ -60,7 +64,8 @@ struct GptModelInitParams {
     // is the contract between target and draft for MTP — see
     // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
     // input_hiddens.
-    int64_t hc_mult = 1;
+    int64_t                                    hc_mult = 1;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
 };
 
 enum GptModelInputIndex : size_t {
@@ -148,6 +153,13 @@ public:
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
     // No-op when no attention inputs have been prepared yet.
     virtual void updateKVCacheKernelBlockId(const GptModelInputs& inputs) {}
+
+    // Optional DSpark PD-prefill barrier. Implementations return an error string
+    // after draining actual CacheStore publication; models without deferred
+    // publication have nothing to wait for.
+    virtual std::string waitCacheStorePublication() {
+        return {};
+    }
 
     // Optional spec-decode hand-off: target model exposes the pre-output-projection
     // residual buffer (DSv4: pre-``hc_head`` ``[T, hc*D]``) so MtpExecutor can

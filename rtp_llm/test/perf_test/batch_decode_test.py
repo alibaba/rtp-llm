@@ -13,16 +13,24 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
+from rtp_llm.test.perf_test.cache_grid_runner import CacheGridRunner
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
 from rtp_llm.test.perf_test.grid_runner import GridRunner
-from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.perf_config import (
+    _apply_engine_env,
+    _apply_run_overrides,
+    _engine_arg_argv,
+    _parse_name_value,
     parse_args,
     prepare_config,
     resolve_perf_engine_paths,
 )
 from rtp_llm.test.perf_test.perf_utils import (
+    _is_sensitive_name,
+    _redact_argv,
+    _sanitize_provenance_value,
     collect_timeline_files,
     filter_bs_by_kvcache,
     print_config_table,
@@ -33,6 +41,15 @@ from rtp_llm.test.perf_test.server import EngineServer
 from rtp_llm.test.perf_test.test_util import create_query
 from rtp_llm.test.perf_test.tps_runner import TpsBinarySearchRunner
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
+
+__all__ = [
+    "_engine_arg_argv",
+    "_parse_name_value",
+    "_redact_argv",
+    "main",
+    "parse_args",
+    "run_single",
+]
 
 # ---------------------------------------------------------------------------
 #  Backward-compatible wrapper (used by external callers)
@@ -70,6 +87,117 @@ def run_single(
 # ---------------------------------------------------------------------------
 
 
+def _load_cache_grid_cases(path: str) -> List[Dict[str, int]]:
+    """Load and validate an explicit total-sequence × cache-length grid."""
+    with open(path, encoding="utf-8") as stream:
+        config = json.load(stream)
+    if not isinstance(config, dict):
+        raise ValueError("cache grid must be a JSON object")
+
+    explicit_cases = "cases" in config
+    if explicit_cases:
+        raw_cases = config["cases"]
+    else:
+        seq_lens = config.get("seq_lens")
+        if seq_lens is None:
+            generation = config.get("seq_generation", {})
+            if generation.get("kind") != "linear_with_dense_prefix":
+                raise ValueError(
+                    "cache grid requires cases, seq_lens, or "
+                    "seq_generation.kind=linear_with_dense_prefix"
+                )
+            count = int(generation.get("count", 489))
+            max_seq_len = int(generation.get("max_seq_len", 1048575))
+            seq_block = int(config.get("seq_block_size", 256))
+            if count < 2 or max_seq_len <= seq_block:
+                raise ValueError("invalid seq_generation bounds")
+            values = set(range(seq_block, min(16384, max_seq_len), seq_block))
+            target_nonmax = count - 1
+            i = 0
+            while len(values) < target_nonmax:
+                raw = seq_block + round(
+                    i * (max_seq_len - 2 * seq_block) / max(1, target_nonmax - 1)
+                )
+                aligned = max(
+                    seq_block,
+                    min(
+                        max_seq_len - seq_block,
+                        round(raw / seq_block) * seq_block,
+                    ),
+                )
+                values.add(aligned)
+                i += 1
+                if i > target_nonmax * 20:
+                    raise ValueError("unable to generate unique seq lengths")
+            seq_lens = sorted(values)[:target_nonmax] + [max_seq_len]
+            if len(seq_lens) != count or len(set(seq_lens)) != count:
+                raise ValueError("generated sequence lengths are not unique")
+        ratios = [
+            float(x)
+            for x in config.get(
+                "cache_ratios",
+                [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 0.95],
+            )
+        ]
+        block = int(config.get("cache_block_size", 4096))
+        if block <= 0 or any(ratio < 0.0 or ratio >= 1.0 for ratio in ratios):
+            raise ValueError("cache_ratios must be in [0, 1) and block must be positive")
+        raw_cases = []
+        case_id = 0
+        for seq_len in seq_lens:
+            seq_len = int(seq_len)
+            max_cache_len = max(0, ((seq_len - block) // block) * block)
+            for ratio in ratios:
+                cache_len = int((max(0, seq_len - 1) * ratio) // block) * block
+                raw_cases.append(
+                    {
+                        "case_id": case_id,
+                        "batch_size": 1,
+                        "input_len": seq_len,
+                        "cache_len": min(cache_len, max_cache_len),
+                    }
+                )
+                case_id += 1
+            if max_cache_len > 0:
+                raw_cases.append(
+                    {
+                        "case_id": case_id,
+                        "batch_size": 1,
+                        "input_len": seq_len,
+                        "cache_len": max_cache_len,
+                    }
+                )
+                case_id += 1
+
+    if not isinstance(raw_cases, list):
+        raise ValueError("cache grid cases must be a list")
+    cases: List[Dict[str, int]] = []
+    seen = set()
+    for index, raw in enumerate(raw_cases):
+        if not isinstance(raw, dict):
+            raise ValueError(f"cache grid case {index} must be an object")
+        case = {
+            "case_id": int(raw.get("case_id", index)),
+            "batch_size": int(raw.get("batch_size", 1)),
+            "input_len": int(raw["input_len"]),
+            "cache_len": int(raw.get("cache_len", 0)),
+        }
+        if case["batch_size"] != 1:
+            raise ValueError("cache grid currently requires batch_size=1")
+        if case["input_len"] <= 0 or not 0 <= case["cache_len"] < case["input_len"]:
+            raise ValueError(f"invalid cache grid case: {case}")
+        key = (case["batch_size"], case["input_len"], case["cache_len"])
+        if key in seen:
+            if not explicit_cases:
+                continue
+            raise ValueError(f"duplicate cache grid case: {case}")
+        seen.add(key)
+        cases.append(case)
+    if not cases:
+        raise ValueError(f"cache grid {path} contains no cases")
+    return cases
+
+
 def _effective_grid_max_seq_len(
     args: argparse.Namespace, input_len_list: List[int]
 ) -> int:
@@ -84,11 +212,186 @@ def _effective_grid_max_seq_len(
     return max(needed_seq_len, args.max_seq_len)
 
 
+def _require_cache_grid_success(metrics: List[Dict[str, Any]]) -> None:
+    """Fail the command after the runner has checkpointed every non-ok case."""
+    failed = [metric for metric in metrics if metric.get("status") != "ok"]
+    if not failed:
+        return
+    counts: Dict[str, int] = {}
+    for metric in failed:
+        status = str(metric.get("status", "missing"))
+        counts[status] = counts.get(status, 0) + 1
+    summary = ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
+    raise RuntimeError(
+        f"cache grid failed {len(failed)}/{len(metrics)} cases ({summary}); "
+        "see cache_grid_results.json"
+    )
+
+
 def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
     """--batch_size as given on the command line, or None when it was defaulted."""
-    if not any(a.startswith("--batch_size") for a in sys.argv[1:]):
+    batch_size_explicit = getattr(
+        args,
+        "batch_size_explicit",
+        any(a.startswith("--batch_size") for a in sys.argv[1:]),
+    )
+    if not batch_size_explicit:
         return None
     return [int(x) for x in args.batch_size.split(",")]
+
+
+_PERFORMANCE_ENV_NAMES = {
+    "ACT_TYPE",
+    "CACHE_CONFIG",
+    "CACHE_STORE_TYPE",
+    "CHECKPOINT_PATH",
+    "CONCURRENCY_LIMIT",
+    "CP_ROTATE_METHOD",
+    "DEVICE_NAME",
+    "DEVICE_RESERVE_MEMORY_BYTES",
+    "DP_SIZE",
+    "DSV4_CHUNK_TOKENS",
+    "DSV4_FIXED_POOL_BLOCKS",
+    "ENABLE_CUDA_GRAPH",
+    "EP_SIZE",
+    "FP8_KV_CACHE",
+    "GEN_NUM_PER_CYCLE",
+    "INT8_MODE",
+    "KV_CACHE_MEM_BYTES",
+    "KV_CACHE_MEM_MB",
+    "LOAD_METHOD",
+    "LOCAL_WORLD_SIZE",
+    "MAX_BATCH_SIZE",
+    "MAX_BATCH_TOKENS_SIZE",
+    "MAX_CONTEXT_BATCH_SIZE",
+    "MAX_SEQ_LEN",
+    "MODEL_TYPE",
+    "PREFILL_CP_KV_CACHE_SHARDED",
+    "QUANTIZATION",
+    "RESERVER_RUNTIME_MEM_MB",
+    "SEQ_SIZE_PER_BLOCK",
+    "SP_ACT_TYPE",
+    "SP_CHECKPOINT_PATH",
+    "SP_MODEL_TYPE",
+    "SP_TYPE",
+    "TOKENIZER_PATH",
+    "TP_SIZE",
+    "USE_DEEPEP_LOW_LATENCY",
+    "USE_DEEPEP_MOE",
+    "WORLD_SIZE",
+}
+_PERFORMANCE_ENV_PREFIXES = (
+    "CACHE_",
+    "CUDA_",
+    "DEEP_EP_",
+    "DG_JIT_",
+    "DSV4_",
+    "ENABLE_",
+    "FP8_",
+    "GEN_TIMELINE_",
+    "INT8_",
+    "KV_CACHE_",
+    "LOAD_",
+    "MODEL_",
+    "MOE_",
+    "NCCL_",
+    "PERF_",
+    "PREFILL_",
+    "QUANTIZATION_",
+    "RTP_LLM_",
+    "SP_",
+    "TORCH_",
+    "USE_DEEP",
+)
+
+
+def _is_performance_runtime_name(name: str, explicit_names: set[str]) -> bool:
+    return (
+        name in explicit_names
+        or name in _PERFORMANCE_ENV_NAMES
+        or name.startswith(_PERFORMANCE_ENV_PREFIXES)
+    )
+
+
+def _fingerprint_engine_env(names: List[str]) -> Dict[str, str]:
+    """Capture runtime env with plaintext limited to the reviewed safe allowlist."""
+    explicit_names = set(names)
+    relevant_names = {
+        name
+        for name in os.environ
+        if _is_performance_runtime_name(name, explicit_names)
+        and not _is_sensitive_name(name)
+    }
+    return {
+        name: str(
+            _sanitize_provenance_value(
+                name,
+                os.environ[name],
+                allow_plaintext=name in _PERFORMANCE_ENV_NAMES,
+            )
+        )
+        for name in sorted(relevant_names)
+    }
+
+
+def _effective_performance_config(
+    engine_args: List[str],
+    engine_env_names: List[str],
+    cli_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, str]]:
+    """Resolve effective runtime values with CLI taking precedence over env."""
+    values = _fingerprint_engine_env(engine_env_names)
+    explicit_names = set(engine_env_names)
+    sources = {
+        name: "engine_env" if name in explicit_names else "environment"
+        for name in values
+    }
+    index = 0
+    while index < len(engine_args):
+        argument = engine_args[index]
+        index += 1
+        if not argument.startswith("--"):
+            continue
+        option = argument[2:]
+        if "=" in option:
+            option, value = option.split("=", 1)
+        elif index < len(engine_args) and not engine_args[index].startswith("--"):
+            value = engine_args[index]
+            index += 1
+        else:
+            value = "1"
+        name = option.replace("-", "_").upper()
+        if not _is_performance_runtime_name(name, explicit_names):
+            continue
+        if _is_sensitive_name(name):
+            values.pop(name, None)
+            sources.pop(name, None)
+            continue
+        values[name] = str(
+            _sanitize_provenance_value(
+                name,
+                value,
+                allow_plaintext=name in _PERFORMANCE_ENV_NAMES,
+            )
+        )
+        sources[name] = "cli"
+
+    for name, value in (cli_overrides or {}).items():
+        normalized = name.replace("-", "_").upper()
+        if _is_sensitive_name(normalized):
+            continue
+        values[normalized] = str(
+            _sanitize_provenance_value(
+                normalized,
+                value,
+                allow_plaintext=normalized in _PERFORMANCE_ENV_NAMES,
+            )
+        )
+        sources[normalized] = "cli"
+    return {
+        "values": dict(sorted(values.items())),
+        "sources": dict(sorted(sources.items())),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +503,9 @@ def main() -> str:
     setup_logging()
 
     args, remaining = parse_args()
+    engine_env_names = _apply_engine_env(args.engine_env)
+    _apply_run_overrides(args)
+    remaining.extend(_engine_arg_argv(args.engine_arg))
     remaining = resolve_perf_engine_paths(remaining)
     # batch_decode_test always needs BatchDecodeScheduler
     if extract_arg(remaining, "use_batch_decode_scheduler") is None:
@@ -209,12 +515,151 @@ def main() -> str:
     EngineServer.propagate_engine_env(remaining)
 
     logging.info(f"Result directory: {args.result_dir}")
-    logging.info(f"Engine args forwarded to server: {remaining}")
+    logging.info(f"Engine args forwarded to server: {_redact_argv(remaining)}")
+
+    if args.cache_grid_json:
+        if args.partial != 2:
+            raise ValueError("--cache_grid_json is prefill-only; use --partial=2")
+        if args.cache_measure_runs <= 0:
+            raise ValueError("--cache_measure_runs must be positive")
+        if args.cache_request_timeout <= 0:
+            raise ValueError("--cache_request_timeout must be positive")
+        if args.cache_commit_tail_tokens <= 0:
+            raise ValueError("--cache_commit_tail_tokens must be positive")
+
+        cases = _load_cache_grid_cases(args.cache_grid_json)
+        for case in cases:
+            cache_len = int(case["cache_len"])
+            input_len = int(case["input_len"])
+            if cache_len and cache_len % args.cache_commit_tail_tokens:
+                raise ValueError(
+                    "cache-grid cache_len must align to "
+                    f"--cache_commit_tail_tokens={args.cache_commit_tail_tokens}: "
+                    f"{case}"
+                )
+            if cache_len and cache_len + args.cache_commit_tail_tokens > input_len:
+                raise ValueError(
+                    "cache-grid cache_len must leave one commit tail before "
+                    f"server startup: {case}"
+                )
+        max_input_len = max(int(case["input_len"]) for case in cases)
+        max_batch_size = max(int(case["batch_size"]) for case in cases)
+        effective_max_seq_len = max(
+            max_input_len + args.decode_test_length, args.max_seq_len
+        )
+        tokenizer_path = (
+            extract_arg(remaining, "tokenizer_path")
+            or extract_arg(remaining, "checkpoint_path")
+            or os.environ.get("TOKENIZER_PATH", "")
+        )
+        if not tokenizer_path:
+            raise ValueError(
+                "cache-grid mode requires --tokenizer_path or --checkpoint_path"
+            )
+        effective_runtime_config = _effective_performance_config(
+            remaining,
+            engine_env_names,
+            {
+                "DP_SIZE": args.dp_size,
+                "MAX_SEQ_LEN": effective_max_seq_len,
+                "CONCURRENCY_LIMIT": max_batch_size,
+            },
+        )
+        write_test_info(
+            args,
+            remaining,
+            engine_env_names,
+            status="running",
+            effective_max_seq_len=effective_max_seq_len,
+            service_concurrency_limit=max_batch_size,
+            effective_runtime_config=effective_runtime_config,
+        )
+
+        server = EngineServer(args, remaining)
+        try:
+            server.start(
+                max_seq_len=effective_max_seq_len,
+                max_concurrency=max_batch_size,
+                use_batch_decode_scheduler=True,
+            )
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_path, trust_remote_code=True
+            )
+            metrics = CacheGridRunner(
+                server.port,
+                tokenizer,
+                cases,
+                args.result_dir,
+                request_timeout=args.cache_request_timeout,
+                measure_runs=args.cache_measure_runs,
+                cache_commit_tail_tokens=args.cache_commit_tail_tokens,
+                run_config={
+                    "model_type": _sanitize_provenance_value(
+                        "model_type",
+                        extract_arg(remaining, "model_type")
+                        or os.environ.get("MODEL_TYPE"),
+                        allow_plaintext=True,
+                    ),
+                    "checkpoint_path": _sanitize_provenance_value(
+                        "checkpoint_path",
+                        extract_arg(remaining, "checkpoint_path")
+                        or os.environ.get("CHECKPOINT_PATH"),
+                        allow_plaintext=True,
+                    ),
+                    "tokenizer_path": _sanitize_provenance_value(
+                        "tokenizer_path", tokenizer_path, allow_plaintext=True
+                    ),
+                    "requested_max_seq_len": int(args.max_seq_len),
+                    "effective_max_seq_len": effective_max_seq_len,
+                    "requested_concurrency_limit": int(args.concurrency_limit),
+                    "service_concurrency_limit": max_batch_size,
+                    "dp_size": int(args.dp_size),
+                    "engine_args": _redact_argv(remaining),
+                    "engine_env": _fingerprint_engine_env(engine_env_names),
+                    "effective_runtime_config": effective_runtime_config,
+                },
+            ).run()
+            collect_timeline_files(args.result_dir)
+            failed = any(metric.get("status") != "ok" for metric in metrics)
+            write_test_info(
+                args,
+                remaining,
+                engine_env_names,
+                status="failed" if failed else "completed",
+                effective_max_seq_len=effective_max_seq_len,
+                service_concurrency_limit=max_batch_size,
+                effective_runtime_config=effective_runtime_config,
+            )
+            _require_cache_grid_success(metrics)
+        finally:
+            server.stop()
+            summarize_and_cleanup_coredumps(args.result_dir)
+        return args.result_dir
 
     # Phase 1: Configure
     config = prepare_config(args, remaining)
     if not config.is_distribution:
         config.max_seq_len = _effective_grid_max_seq_len(args, config.input_len_list)
+    effective_runtime_config = _effective_performance_config(
+        remaining,
+        engine_env_names,
+        {
+            "DP_SIZE": args.dp_size,
+            "MAX_SEQ_LEN": config.max_seq_len,
+            "CONCURRENCY_LIMIT": config.max_concurrency,
+        },
+    )
+    write_test_info(
+        args,
+        remaining,
+        engine_env_names,
+        status="running",
+        effective_max_seq_len=config.max_seq_len,
+        service_concurrency_limit=config.max_concurrency,
+        effective_runtime_config=effective_runtime_config,
+    )
 
     # Phase 2: Serve
     server = EngineServer(args, remaining)
@@ -260,7 +705,15 @@ def main() -> str:
         # Cleanup
         collect_timeline_files(args.result_dir)
         server.stop()
-        write_test_info(args, remaining)
+        write_test_info(
+            args,
+            remaining,
+            engine_env_names,
+            status="completed",
+            effective_max_seq_len=config.max_seq_len,
+            service_concurrency_limit=config.max_concurrency,
+            effective_runtime_config=effective_runtime_config,
+        )
 
         if args.partial != 2:
             from rtp_llm.test.perf_test.visualization import plot_decode_results

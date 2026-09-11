@@ -9,10 +9,8 @@ import java.io.ByteArrayOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FlexlbScheduleProtocolTest {
 
@@ -47,26 +45,6 @@ class FlexlbScheduleProtocolTest {
         assertEquals(Descriptors.FieldDescriptor.Type.STRING,
                 EngineRpcService.WorkerStatusPB.getDescriptor().findFieldByNumber(1).getType());
         assertNull(FlexlbScheduleProtocol.FlexlbServerStatusPB.getDescriptor().findFieldByNumber(5));
-        Descriptors.FieldDescriptor aggregateDemand =
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDescriptor()
-                        .findFieldByNumber(16);
-        assertNotNull(aggregateDemand);
-        assertEquals("aggregate_demand", aggregateDemand.getName());
-        assertEquals(Descriptors.FieldDescriptor.Type.BOOL, aggregateDemand.getType());
-        Descriptors.FieldDescriptor batchSeqLens =
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDescriptor()
-                        .findFieldByNumber(17);
-        assertNotNull(batchSeqLens);
-        assertEquals("batch_seq_lens", batchSeqLens.getName());
-        assertEquals(Descriptors.FieldDescriptor.Type.INT64, batchSeqLens.getType());
-        assertTrue(batchSeqLens.isRepeated());
-        Descriptors.FieldDescriptor batchRequestIds =
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDescriptor()
-                        .findFieldByNumber(18);
-        assertNotNull(batchRequestIds);
-        assertEquals("batch_request_ids", batchRequestIds.getName());
-        assertEquals(Descriptors.FieldDescriptor.Type.INT64, batchRequestIds.getType());
-        assertTrue(batchRequestIds.isRepeated());
     }
 
     @Test
@@ -88,9 +66,6 @@ class FlexlbScheduleProtocolTest {
 
         assertEquals(123L, parsed.getRequestId());
         assertArrayEquals(input.toByteArray(), parsed.getGenerateInput().toByteArray());
-        assertFalse(parsed.getAggregateDemand());
-        assertTrue(parsed.getBatchSeqLensList().isEmpty());
-        assertTrue(parsed.getBatchRequestIdsList().isEmpty());
     }
 
 }

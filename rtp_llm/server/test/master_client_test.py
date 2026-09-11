@@ -121,18 +121,6 @@ class _RejectingMasterClient(MasterClient):
         return SimpleNamespace(**fields)
 
 
-class _CancelCaptureMasterClient(MasterClient):
-    def __init__(self):
-        super().__init__(
-            host_service=_FakeHostServiceWithSlave(),
-            master_config=_FakeMasterConfig(),
-        )
-        self.cancelled = []
-
-    async def _cancel_placement_at(self, addr, request_id):
-        self.cancelled.append((addr, request_id))
-
-
 class _FakeInputPB:
     def SerializeToString(self):
         return b"serialized-input"
@@ -155,15 +143,6 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             int(AdmissionRejectReason.RESOURCE_EXHAUSTED),
             RESOURCE_EXHAUSTED,
-        )
-
-    async def test_cancel_placement_contacts_both_discovered_peers(self):
-        client = _CancelCaptureMasterClient()
-
-        await client.cancel_placement(991)
-
-        self.assertCountEqual(
-            [("master:1234", 991), ("slave:1234", 991)], client.cancelled
         )
 
     async def test_schedule_payload_contains_batch_fields_and_pb(self):
@@ -196,29 +175,6 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_pb.generate_input, b"serialized-input")
         self.assertEqual(request_pb.cache_key_block_size, 1024)
         self.assertEqual(request_pb.priority, 50)
-        self.assertFalse(request_pb.aggregate_demand)
-
-    async def test_schedule_payload_marks_aggregate_demand_explicitly(self):
-        client = _CaptureMasterClient()
-
-        await client.get_backend_role_addrs(
-            block_cache_keys=[],
-            cache_key_block_size=1024,
-            input=_FakeInput(),
-            request_id=100,
-            input_pb=None,
-            seq_len_hint=1000,
-            max_new_tokens_hint=2000,
-            aggregate_demand=True,
-            batch_seq_lens=[100, 300, 600],
-            batch_request_ids=[100, 101, 102],
-        )
-
-        request_pb = client.calls[0]["request_pb"]
-        self.assertTrue(request_pb.aggregate_demand)
-        self.assertEqual(b"", request_pb.generate_input)
-        self.assertEqual([100, 300, 600], list(request_pb.batch_seq_lens))
-        self.assertEqual([100, 101, 102], list(request_pb.batch_request_ids))
 
     async def test_schedule_payload_priority_from_qos_header(self):
         client = _CaptureMasterClient()

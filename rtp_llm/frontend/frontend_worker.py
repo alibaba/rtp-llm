@@ -247,24 +247,29 @@ class FrontendWorker:
     def _can_use_atomic_batch_rpc(self, request: Request) -> bool:
         """Use BatchGenerateCall only when every item targets single-stage PDFUSION."""
         visitor = self.backend_rpc_server_visitor
-        pd_role = getattr(getattr(visitor, "pd_sep_config", None), "role_type", None)
-        if pd_role not in (RoleType.PDFUSION, RoleType.FRONTEND):
+        if visitor.pd_sep_config.role_type not in (
+            RoleType.PDFUSION,
+            RoleType.FRONTEND,
+        ):
             return False
-
         item_role_addrs = [config.role_addrs for config in request.generate_configs]
         if any(item_role_addrs):
-            return all(
-                role_addrs
-                and all(addr.role == RoleType.PDFUSION for addr in role_addrs)
-                for role_addrs in item_role_addrs
+            return (
+                all(
+                    len(role_addrs) == 1 and role_addrs[0].role == RoleType.PDFUSION
+                    for role_addrs in item_role_addrs
+                )
+                and len(
+                    {
+                        (role_addrs[0].ip, role_addrs[0].grpc_port)
+                        for role_addrs in item_role_addrs
+                    }
+                )
+                == 1
             )
-
-        if pd_role == RoleType.PDFUSION:
-            return True
-
-        backend_roles = tuple(getattr(visitor, "backend_role_list", ()))
-        return bool(backend_roles) and all(
-            role == RoleType.PDFUSION for role in backend_roles
+        return (
+            visitor.pd_sep_config.role_type == RoleType.PDFUSION
+            and not visitor.host_service.service_available
         )
 
     async def _yield_batch_generate(

@@ -56,7 +56,7 @@ public class FeHealthChecker {
     // scheduleAtFixedRate's "runs never overlap" guarantee does not bound the async probes. Without
     // this, a slow round can still be in flight when the next tick fires, and a stale late 2xx
     // (getAndSet(0)) could reset a failure counter the newer round just incremented — corrupting the
-    // one signal this component produces. Mirrors the sync side's SingleFlightGate.
+    // one signal this component produces.
     private final AtomicBoolean roundInFlight = new AtomicBoolean(false);
     private ScheduledExecutorService scheduler;
 

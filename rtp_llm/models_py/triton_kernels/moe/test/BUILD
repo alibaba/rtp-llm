@@ -1,3 +1,5 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+
 load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement(["triton", "torch", "numpy"])
@@ -44,4 +46,57 @@ py_test(
     # TestEpScatter1Correctness rather than the poison class. Candidate for A10 once
     # someone confirms a clean sm86 run with the diagnostic gated.
     exec_properties = {'gpu':'H20'},
+)
+
+py_test(
+    name = "test_mega_moe_gate_pack",
+    srcs = ["test_mega_moe_gate_pack.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ] + [":triton", ":torch"],
+    visibility = ["//visibility:public"],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+cuda13_sm100_py_test(
+    name = "test_gate_fused",
+    srcs = ["test_gate_fused.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+cuda13_sm100_py_test(
+    name = "test_silu_mul_split",
+    srcs = ["test_silu_mul_split.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+cuda13_sm100_py_test(
+    name = "test_silu_mul_fp8_quant",
+    srcs = ["test_silu_mul_fp8_quant.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+cuda13_sm100_py_test(
+    name = "test_mega_moe_se_input_pack",
+    srcs = ["test_mega_moe_se_input_pack.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+cuda13_sm100_py_test(
+    name = "test_mega_moe_input_packer_perf",
+    srcs = ["test_mega_moe_input_packer_perf.py"],
+    deps = ["//rtp_llm/models_py/triton_kernels:moe"],
 )

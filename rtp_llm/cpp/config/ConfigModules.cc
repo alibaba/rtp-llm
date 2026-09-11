@@ -149,7 +149,12 @@ std::string KVCacheConfig::to_string() const {
         << "load_cache_retry_times: " << load_cache_retry_times << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
-        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n";
+        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n"
+        << "kv_cache_event_publisher_type: " << kv_cache_event_publisher_type << "\n"
+        << "kv_cache_event_manager_endpoint: " << kv_cache_event_manager_endpoint << "\n"
+        << "kv_cache_event_instance_group: " << kv_cache_event_instance_group << "\n"
+        << "kv_cache_event_instance_id: " << kv_cache_event_instance_id << "\n"
+        << "kv_cache_event_host_ip_port: " << kv_cache_event_host_ip_port << "\n";
     return oss.str();
 }
 
@@ -403,6 +408,9 @@ std::string GrammarConfig::to_string() const {
     oss << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
         << "terminate_without_stop_token: " << terminate_without_stop_token << "\n"
         << "num_workers: " << num_workers << "\n"
+        << "compile_timeout_ms: " << compile_timeout_ms << "\n"
+        << "compile_concurrency: " << compile_concurrency << "\n"
+        << "compile_queue_size: " << compile_queue_size << "\n"
         << "compiler_cache_bytes: " << compiler_cache_bytes << "\n"
         << "tokenizer_info_json_size: " << tokenizer_info_json.size();
     return oss.str();

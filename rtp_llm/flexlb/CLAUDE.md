@@ -22,7 +22,6 @@ Key classes:
 
 New HTTP endpoints in `HttpLoadBalanceServer`:
 - `POST /rtp_llm/schedule`: Main load balance endpoint
-- `POST /rtp_llm/batch_schedule`: Resolve N assignment slots in one shot (`{"batch_count": N, "assign_be": true, "assign_fe": true}` → `{"server_status": [...]}`); `assign_be`/`assign_fe` default to true for wire compatibility, BE assignment is single-role only, is rejected while an effective traffic-group policy is active, and count is capped by `batchScheduleMaxCount`
 - `POST /rtp_llm/master/info`: Get master info
 - `POST /rtp_llm/schedule_snapshot`: Dump LB status
 - `POST /rtp_llm/notify_master`: Notify participant of master change
@@ -35,15 +34,15 @@ Shared utilities, data models, exception handling, and common configurations use
 Key classes:
 - `ServerStatus`: Worker node status representation
 - `Request`/`Response`: API request/response models
-- `RoleType`: Enum defining worker roles (PREFILL, DECODE, PDFUSION, VIT) with resourceMeasureIndicator field
-- `LoadBalanceStrategyEnum`: Available load balancing strategies
-- `ConfigService`: Configuration interface for environment variables
+- `RoleType`: Enum defining worker roles (PREFILL, DECODE, PDFUSION, VIT, FRONTEND)
+- `RoutingConfig`: Role-specific Prefill/Decode selection configuration
+- `ConfigService`: Strict schema-v2 configuration loader and validator
 
-RoleType enhancements:
-- `resourceMeasureIndicator`: Field for resource availability tracking (WAIT_TIME, REMAINING_KV_CACHE)
-- `getStrategy()`: Per-role strategy selection
-- `getErrorType()`: Role-specific error mapping
-- `ResourceMeasureIndicatorEnum`: WAIT_TIME, REMAINING_KV_CACHE
+Role-derived routing policy lives in `RoutingConfig.PrefillConfig` and
+`RoutingConfig.DecodeConfig`. Their selection pipelines read role-specific availability
+thresholds directly, evaluate coherent endpoint snapshots, and leave authoritative capacity
+acquisition to endpoint admission or dispatch.
+`RoleType` remains an identity enum and does not own mutable routing policy.
 
 ### flexlb-grpc
 gRPC client implementation for model service communication. Contains protocol buffer definitions and generated stubs for communicating with backend AI worker nodes.
@@ -52,34 +51,23 @@ gRPC client implementation for model service communication. Contains protocol bu
 Core load balancing logic, scheduling strategies, and worker status synchronization. This is the heart of the load balancing system.
 
 Key concepts:
-- **Router pattern**: `Router` interface + `DefaultRouter` implementation for multi-role request routing
-- **LoadBalanceStrategy pattern**: Strategy interface for worker selection (Random, WeightedCache, ShortestTTFT)
-- **Queue-based scheduling**: `QueueManager` + `RequestScheduler` for async request processing
-- **Dynamic resource management**: `DynamicWorkerManager` for adaptive capacity control
+- **Routing**: `DefaultRouter` composes the cost-based Prefill/Decode selectors and the VIT random selector for multi-role requests
+- **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
+- **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
 - **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
-- **Graceful lifecycle**: Hook-based online/shutdown management
+- **Graceful lifecycle**: `ApplicationLifecycle` owns the fixed online, health, and shutdown workflow
 
 Queue scheduling components:
-- `QueueManager`: Manages request queue with configurable capacity, timeout handling, and request cancellation
-- `RequestScheduler`: Worker thread pool that consumes queue and routes requests (configurable pool size)
-- `RouteService`: High-level routing service supporting queue/direct routing modes
+- `RequestScheduler`: Public QUEUE submission/cancellation/query facade with no request-state ownership
+- `GlobalQueueCoordinator`: One ordered placement owner per model; bounded planning and endpoint-conflict-aware commit
+- `RequestRegistry`: Canonical owner of request generations, deadlines, cancellation, delivery claims, and publication
+- `WorkerBatcher`: Endpoint-facing decision-window and delivery runtime after placement
+- `RouteService`: High-level service that delegates queued work to `RequestScheduler`
 
-Resource management components:
-- `DynamicWorkerManager`: Adjusts worker capacity based on resource water levels
-- `ResourceMeasure`: Interface for resource availability abstraction (PrefillResourceMeasure, DecodeResourceMeasure)
-- `ResourceMeasureFactory`: Factory for creating resource measures
-- `ReducibleSemaphore`: Semaphore that supports reducing permits
-
-Lifecycle hook interfaces:
-- `AppOnlineHooker`: Online service hooks (replaces OnlineListener)
-- `AppShutDownHooker`: Shutdown service hooks (replaces ShutdownListener)
-
-Hook implementations:
-- `ActiveRequestShutdownHooker`: Waits for active requests to complete
-- `HealthCheckHooker`: Manages health check state during lifecycle
-- `LbConsistencyHooker`: Manages ZooKeeper consistency during lifecycle
-- `QueryWarmerHooker`: Warms up routing cache on startup
+Capacity management components:
+- Prefill and Decode selection pipelines evaluate immutable full-fleet snapshots.
+- Endpoint admission and dispatch own exact capacity, one-shot permits, and capacity-change signals.
 
 See flexlb-sync/CLAUDE.md for detailed module-specific guidance.
 
@@ -89,7 +77,8 @@ KV cache management for improving inference performance by tracking and matching
 Key classes:
 - `KvCacheManager`: High-level cache management API
 - `GlobalCacheIndex`: Global hash table for cache block tracking
-- `EngineLocalView`: Per-worker cache state tracking
+- `EngineGeneration`: Exact worker-address and generation identity
+- `CacheMatch`: Immutable prefix-match result returned by cache lookup
 
 ## Development Commands
 
@@ -121,8 +110,14 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 
 ### Testing
 ```bash
-# Run all tests
+# Run all functional tests (performance regressions are excluded)
 ./mvnw test
+
+# Run FlexLB Sync performance regressions in a dedicated Maven invocation
+./mvnw -Psync-performance-regression -pl flexlb-sync -am test
+
+# Run the FlexLB API end-to-end performance regression separately
+./mvnw -Papi-performance-regression -pl flexlb-api -am test
 
 # Run tests for specific module
 ./mvnw test -pl flexlb-sync
@@ -167,87 +162,38 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 
 ### Load Balancing Strategies
 
-Five strategies are available (registered with `LoadBalanceStrategyFactory`):
-
-- **RANDOM**: Random worker selection
-- **COST_BASED_PREFILL**: Select worker with lowest cost for prefill requests
-- **COST_BASED_DECODE**: Select worker with lowest cost for decode requests
-- **SHORTEST_TTFT**: Select worker with lowest predicted TTFT (prefill time + queue time) using candidate pool mechanism (RATIO/FIXED modes) with CAS fairness
-- **ROUND_ROBIN**: Cursor-based round-robin with an O(alive) liveness filter and per-`(role, group)` cursors. It supports both single selection and batch-aware `selectBatch`, trading load-skew awareness for a very cheap selection path.
-
-Each `RoleType` can use a different registered strategy. `WEIGHTED_CACHE` is currently only a
-reserved enum value and has no `LoadBalanceStrategyFactory` registration, so it is not deployable.
-See `LoadBalanceStrategyEnum` in flexlb-common.
+`DefaultRouter` uses explicit role selectors: `CostBasedPrefillStrategy` for
+PREFILL/PDFUSION, `CostBasedDecodeStrategy` for DECODE, and `RandomStrategy`
+for VIT. Both cost-based selectors evaluate the complete live fleet before
+reducing to one configured-policy winner. Prefill candidate choice controls
+best-only, TTFT tolerance, or LRU within the shortest-TTFT pool. Optional cache
+affinity is configured with `router.roles.prefill.cacheAffinity`.
 
 ### Queue-Based Request Scheduling
 
-FlexLB supports two routing modes controlled by `FLEXLB_CONFIG.enableQueueing`:
+Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
-**Direct Mode** (queue disabled): Requests route directly to workers, returning immediate success/failure.
+- `scheduler.type=DIRECT`: Routes immediately through `DefaultRouter`.
+- `scheduler.type=QUEUE`: Uses `RequestScheduler` and `GlobalQueueCoordinator` for ordered placement; `RequestRegistry` owns capacity, cancellation, and timeout lifecycle. Queue ordering is `FIFO` or `PRIORITY`.
+- `scheduler.decision.type=SINGLE`: Forms one-request decision groups.
+- `scheduler.decision.type=FIXED_WINDOW`: Forms groups bounded by request count, collection window, and an optional predicted-execution cap.
+- `dispatcher.type=NON_BATCH`: The frontend delivers requests from the formed group.
+- `dispatcher.type=BATCH`: Master delivers the formed group with `EnqueueBatch`.
 
-**Queue Mode** (queue enabled): Requests enter a blocking queue and are processed asynchronously by worker threads:
-
-- `QueueManager`:
-  - Manages `BlockingDeque<BalanceContext>` with max capacity `FLEXLB_CONFIG.maxQueueSize`
-  - `tryRouteAsync()`: Non-blocking attempt to enqueue with timeout
-  - `offerToHead()`: Priority insertion for retries (e.g., DECODE retry after PREFILL success)
-  - `takeRequest()`: Worker thread consumption
-  - `snapshotQueue()`: Debugging snapshot of queue state
-  - Handles request cancellation and timeout
-
-- `RequestScheduler`:
-  - Fixed worker thread pool (size: `FLEXLB_CONFIG.scheduleWorkerSize`)
-  - Polls queue and calls `RouteService.routeRequest()`
-  - Retry mechanism for resource-unavailable errors (NO_X_WORKER)
-  - Graceful shutdown with 10-second timeout
-
-- `RouteService`:
-  - `routeRequest()`: Main routing entry point
-  - Supports queue mode (async) and direct mode (sync)
-  - `cancelRequest()`: Request cancellation via sequence ID
-
-**Request Lifecycle in Queue Mode**:
-1. Client submits request → `QueueManager.tryRouteAsync()`
-2. Request enqueued with `enqueueTime` and `sequenceId`
-3. Worker thread dequeues → `RequestScheduler` processes
-4. Routes through `DefaultRouter`
-5. If resource unavailable → retry via `offerToHead()`
-6. Response completes the `CompletableFuture<BalanceContext>`
-
-### Dynamic Resource Management
-
-FlexLB dynamically adjusts worker capacity based on resource availability:
-
-- `DynamicWorkerManager`:
-  - Periodically recalculates capacity (interval: `FLEXLB_CONFIG.resourceCheckIntervalMs`)
-  - Uses `ReducibleSemaphore` for dynamic permit management
-  - Gradual adjustment (step size = 1) to avoid oscillation
-  - Water level calculation determines when to increase/decrease capacity
-
-- `ResourceMeasure` interface:
-  - `PrefillResourceMeasure`: Uses `WAIT_TIME` indicator for resource calculation
-  - `DecodeResourceMeasure`: Uses `REMAINING_KV_CACHE` indicator
-  - `getWaterLevel()`: Returns 0-100% based on worker resource metrics
-
-- `ReducibleSemaphore`:
-  - Extends standard semaphore with permit reduction capability
-  - Used by `DynamicWorkerManager` to adjust capacity atomically
-
-- `ResourceMeasureFactory`:
-  - Creates appropriate `ResourceMeasure` based on `RoleType.resourceMeasureIndicator`
-
-**Capacity Adjustment Logic**:
-1. Calculate water level across all workers of a role
-2. If water level < threshold → increase capacity
-3. If water level > threshold → decrease capacity
-4. Apply changes via `ReducibleSemaphore.reducePermits()` / `release()`
+Every QUEUE combination follows the same lifecycle: `RouteService` submits to
+`RequestScheduler`, `GlobalQueueCoordinator` selects and commits all required
+endpoints once, and the selected Prefill `WorkerBatcher` performs the configured
+  decision-window and delivery. There is no secondary routing queue, earlier-entry
+  scan, or multi-stage placement retry loop. The global decision thread waits only
+on an exact capacity event or queue mutation; endpoint workers independently wait
+on their delivery-capacity, window, and deadline predicates.
 
 ### Worker Status Synchronization
 
 Worker health and capacity information is synchronized asynchronously:
 
 - `GrpcWorkerStatusRunner`: Periodically fetches worker status via gRPC
-- `EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP`: Shared concurrent map of worker states
+- `EndpointRegistry`: Generation-fenced endpoint owner; `WorkerDirectory` exposes immutable routing snapshots and exact captures
 - `GrpcCacheStatusCheckRunner`: Syncs KV cache information with `KvCacheManager`
 
 Routing reads from these shared data structures which are concurrently updated by background threads.
@@ -261,30 +207,12 @@ The flexlb-cache module maintains a two-level hash table:
 
 During routing, the system queries matching cache blocks to prefer workers with relevant cached data, reducing computation overhead.
 
-### Graceful Lifecycle Hooks
+### Graceful Lifecycle
 
-FlexLB provides a hook-based system for managing application lifecycle events gracefully:
-
-- **Lifecycle interfaces**:
-  - `AppOnlineHooker`: Hooks executed during online phase
-  - `AppShutDownHooker`: Hooks executed during shutdown phase
-
-- **Lifecycle services**:
-  - `GracefulLifecycleReporter`: Reports lifecycle events to metrics
-  - `GracefulOnlineService`: Manages online phase with priority-ordered hook listeners
-  - `GracefulShutdownService`: Manages shutdown phase with hook listeners
-
-- **Hook implementations** (executed in priority order):
-  - `ActiveRequestShutdownHooker`: Waits for active requests to complete before shutdown
-  - `HealthCheckHooker`: Manages health check state during lifecycle transitions
-  - `LbConsistencyHooker`: Manages ZooKeeper consistency during lifecycle
-  - `QueryWarmerHooker`: Warms up routing cache on startup
-
-**Lifecycle Flow**:
-1. **Online phase**: `GracefulOnlineService` executes `AppOnlineHooker` implementations
-2. **Shutdown phase**: `GracefulShutdownService` executes `AppShutDownHooker` implementations
-3. Each hook reports status via `GracefulLifecycleReporter`
-4. Hooks execute in priority order; a failed hook may prevent subsequent hooks
+`ApplicationLifecycle` owns the fixed online/offline state machine. It starts
+and stops consistency registration, exposes health state, waits for the active
+request counter to remain quiet, and reports each phase through
+`GracefulLifecycleReporter`. There is no dynamic hook registry.
 
 ### Master Election and Consistency
 
@@ -298,40 +226,21 @@ For high availability, FlexLB uses ZooKeeper-based master election:
 
 FlexLB reads configuration from environment variables:
 
-### FLEXLB_CONFIG (required)
+### FLEXLB_CONFIG (single public behavior document)
 ```json
 {
-  "deploy": "DISAGGREGATED",
-  "loadBalanceStrategy": "SHORTEST_TTFT",
-  "prefillBatchWaitTimeMs": 100,
-  "kvCache": "LOCAL_STATIC",
-  "staticCacheBlockSize": 500,
-  "batchSize": 1,
-  "prefillLbTimeoutMs": 300,
-  "prefillGenerateTimeoutMs": 5000,
-  "enableGrpcPrefillMaster": false,
-  "enableQueueing": true,
-  "maxQueueSize": 1000,
-  "scheduleWorkerSize": 10,
-  "resourceCheckIntervalMs": 5000
+  "schemaVersion": 2,
+  "scheduler": {
+    "type": "QUEUE",
+    "ordering": {"type": "FIFO"},
+    "decision": {"type": "SINGLE"}
+  },
+  "dispatcher": {"type": "NON_BATCH"}
 }
 ```
 
-New configuration fields:
-- `enableQueueing`: Enable/disable queue-based routing (default: true)
-- `maxQueueSize`: Maximum queue capacity for `QueueManager`
-- `scheduleWorkerSize`: Worker thread pool size for `RequestScheduler`
-- `resourceCheckIntervalMs`: Resource check interval for `DynamicWorkerManager`
-- `batchLoadBalanceStrategy`: Strategy for `/batch_schedule`, decoupled from `/schedule`'s (default: `ROUND_ROBIN`, the only batch-capable strategy today)
-- `batchScheduleMaxCount`: Upper bound accepted for `batch_count` on `/batch_schedule` (default: 1000)
-- `engineType`: `LLM` (default) or `EMBEDDING`. EMBEDDING flips three behaviors at once: liveness trusts the service-discovery host list instead of gRPC probing (embedding engines expose no `GetWorkerStatus`), `/batch_schedule` targets carry `arpc_port` instead of `grpc_port`, and the single-call `/schedule` path is refused (batch-only). EMBEDDING requires load-unaware strategies (`ROUND_ROBIN`/`RANDOM`) for all deployed roles — boot fails otherwise (`validateEngineTypeConfig`)
-- `discoveryFailureGraceMs`: How long a service-discovery outage may keep already-known workers in the roster before they age out (default: 300000). An **empty** result from a lookup that otherwise "succeeded" counts as an outage, not as an empty fleet: a discovery client that swallows a failed lookup reports it exactly like a fleet that scaled to zero, so an empty list never overwrites non-empty known state — it rides this same grace window. Partial shrinkage (a non-empty list that dropped some hosts) is unambiguous and still takes effect immediately.
-
-  What the window governs differs by `engineType`, because the two engines learn liveness differently:
-  - **LLM**: *within* the window the window governs membership, and liveness stays probe-driven. Discovery never was the liveness signal here — gRPC probing is — so during the outage the known workers keep being probed and their staleness clocks are refreshed by probe success alone. A worker that dies mid-outage fails its probe, is marked dead, stops being refreshed, and ages out on the normal `ExpirationCleaner` schedule (~3 s), **not** at the end of the grace window; a fleet that genuinely scaled to zero therefore drains at probe speed. Past the window the probing stops as well (`rideOutDiscoveryGap` returns before submitting any), so the clocks go stale and the roster drains whether or not the workers are healthy: the window bounds how long an outage can be ridden out at all, not merely how long membership additions/removals stay frozen. A discovery outage that outlives the window takes a healthy LLM fleet out of rotation.
-  - **EMBEDDING**: the window governs *routability*, because discovery presence is the only liveness signal (no `GetWorkerStatus` to probe). During the outage the staleness clocks of workers still marked alive are refreshed so they survive; workers a previous authoritative round already marked dead are left to age out. Here a fleet that scaled to zero does drain only after the window.
-
-Env override semantics (applies to every field above via `FIELD_NAME_UPPER_SNAKE` env vars — e.g. `BATCH_SCHEDULE_MAX_COUNT`): enum values are case-sensitive Java constant names. Invalid values for startup-critical fields, including `ENGINE_TYPE`, abort startup; noncritical parse failures are logged and retain the existing/default value. Boolean aliases keep the existing `ConfigService` parsing contract. Audit lingering env vars after an upgrade because an ignored noncritical override can otherwise look like an applied setting.
+The parser is strict: fields belonging to an inactive scheduler, ordering, or dispatcher
+variant are rejected instead of being silently ignored.
 
 ### MODEL_SERVICE_CONFIG (required)
 ```json
@@ -349,102 +258,37 @@ Env override semantics (applies to every field above via `FIELD_NAME_UPPER_SNAKE
 ### FLEXLB_SYNC_CONSISTENCY_CONFIG (optional, for master election)
 ZooKeeper connection configuration for distributed coordination.
 
-### DISPATCH_CONFIG (optional, opt-in)
-
-A non-blank `fePoolServiceId` is the enable signal (there is no separate `enabled` flag): every dispatcher bean is gated on `dispatch.fe-pool-service-id`. Either style sets it — the `DISPATCH_FE_POOL_SERVICE_ID` env (Spring relaxed binding) or a `fePoolServiceId` inside the `DISPATCH_CONFIG` JSON (expanded into the property at startup by `DispatchConfigEnvironmentPostProcessor`), so configuring everything through `DISPATCH_CONFIG` alone enables the dispatcher too. When enabled, FlexLB serves `/dispatcher/<original_fe_path>` on its 7001 listener. Requests are matched against the hard-coded **batch endpoint registry** (`BatchEndpointSpec.SPECS`); registered paths whose array field is present (as a JSON array) are split across the FE pool and merged; any other JSON-object body on a registered path — and every unregistered path — is passthrough-forwarded verbatim to one FE. For `/v1/embeddings` the array only counts as a batch when every element is a string (`splitRequiresStringItems`); a single multimodal input expressed as `List[ContentPart]`/`List[ChatMessage]` is passthrough-forwarded whole, not split per element. `/v1/reranker` similarly splits only a string-list `documents`; child requests force `sorted=false` and omit `top_k`, then the dispatcher rebases result indices, performs one stable global sort, applies the original `top_k`, and sums `total_tokens`. For the `prompt_batch` endpoints (`/`, `/batch_infer`) a body that carries a companion field FE positionally aligns to the prompt count but the dispatcher does not slice — top-level `images`/`urls` (each `list[list]`) or any non-null `adapter_name` at the request root or inside `generate_config`/`generation_config` — is likewise passthrough-forwarded whole (`requiresWholeBody`). FE promotes top-level config fields after nested config (including an explicit null override); generation fanout writes nulls so that precedence survives chunk serialization, avoiding both list misalignment and changed scalar validation. Root-batch streaming forms (`stream`, `yield_generator`, or `is_streaming`, including either nested config spelling) are also passthrough-only because FE returns SSE while fanout merges bounded JSON bodies. On a split generation request, the legacy `generation_config` alias is normalized to canonical `generate_config` before dispatcher fields are stamped, preserving all caller settings. Rejected with 400 on registered paths: non-JSON-object bodies (empty, malformed, top-level array), either generation-config spelling when present but not a JSON object, caller-supplied `role_addrs` at the request root or inside either config spelling (dispatcher placement is authoritative), and invalid reranker fields consumed by dispatcher (`query`, `sorted`, or `top_k`).
-
-```json
-{
-  "fePoolServiceId": "rtp_llm.frontend.service",
-  "subBatch": "count:5",
-  "batchTimeoutMs": 30000,
-  "probePath": "/frontend_health",
-  "feAllocation": "master",
-  "preAssignBe": false,
-  "maxAggregateRequestBytes": 134217728,
-  "maxAggregateResponseBytes": 134217728,
-  "maxDryRunResponseBytes": 67108864
-}
-```
-
-- `subBatch`: chunk-splitting DSL — `count:N` (exactly N chunks, default), `size:N` (≤N items per chunk), bare integer = `size:N`.
-- `batchTimeoutMs`: per sub-call wait for FE response headers (default 30000). For non-streaming generation endpoints FE sends headers only after the whole chunk finishes generating, so this must cover one chunk's full generation time; tune down for embedding-only deployments. The body read is separately capped at `batchTimeoutMs + bodyReadMarginMs`, and the passthrough path bounds its headers wait with the same knob (its body stream has its own 10-min inactivity cap). The headers window starts at subscribe, so it also includes connection acquisition and inbound request-body upload time — relevant on the passthrough path, whose catch-all traffic can carry large bodies. A non-streaming passthrough request whose TTFB exceeds `batchTimeoutMs` (e.g. a single long generation) gets a 502: deployments with such traffic must raise `batchTimeoutMs` or have those clients hit FE directly. For the same reason, before tuning down for an embedding-only deployment, verify the passthrough traffic's TTFB also fits the lower value.
-- `bodyReadMarginMs`: extra budget past `batchTimeoutMs` for reading the FE response body (default 30000). `batchTimeoutMs` only bounds time-to-headers; this caps the whole call so an FE that sends headers and then stalls mid-body cannot pin the request and its pooled connection forever. Raise it for FE fleets on slow links.
-- `probePath`: FE liveness probe path (`/frontend_health` for rtp_llm, `/health` for vLLM).
-- `feAllocation`: FE assignment source. `master` (default) asks the elected master's single cursor for index-aligned `fe_url` values; `local` reserves one contiguous range from the serving dispatcher's health-filtered `FePool`. The request never falls back across these sources implicitly.
-- `preAssignBe`: BE pre-assignment toggle, default `false` for rolling-upgrade safety (see Known limits below). Note `/dispatcher/_dryrun` ignores this default and never pre-assigns unless called with `?pre_assign=true`: resolving BE targets advances master's round-robin cursor, and a diagnostic must not perturb live distribution.
-- `maxAggregateRequestBytes`: maximum total serialized bytes sent across all FE chunks for one request (default 128 MiB). The dispatcher preflights repeated-envelope amplification before target resolution and enforces the exact shared budget during serialization; crossing it returns 413.
-- `maxAggregateResponseBytes`: maximum bytes retained across all successful FE chunk responses for one request (default 128 MiB). Crossing it cancels sibling calls and returns 413.
-- `maxDryRunResponseBytes`: maximum serialized dry-run response (default 64 MiB). Dry-run preflights envelope amplification before constructing chunks and verifies the exact serialized size before returning.
-
-**FE pool and empty discovery:** an empty discovery snapshot rides a bounded grace window measured from the last non-empty snapshot. Within the window it is treated as suspect — indistinguishable from a swallowed lookup failure — and the known FEs are kept; liveness is not discovery's job here: `FeHealthChecker` probes the known FEs directly, so hosts that are genuinely gone still leave rotation via the probe. Past the window the empty result is accepted as the truth (the fleet scaled to zero): the pool drains and `FePool.next()` fails fast until discovery reports hosts again. The window follows the same `FlexlbConfig.discoveryFailureGraceMs` the sync side reads (default 5 min; an absent or non-positive value falls back to 5 min). Lookup FAILURES throw and never touch the pool — only a lookup that succeeded with an empty list enters the grace logic. A cold pool (nothing known yet) still accepts an empty snapshot, and any non-empty answer replaces the retained one and resets the grace clock.
-
-Loading order: defaults → `DISPATCH_CONFIG` JSON → per-field `DISPATCH_*` env overrides (e.g. `DISPATCH_BATCH_TIMEOUT_MS`, `DISPATCH_PROBE_PATH`), matching the `FLEXLB_CONFIG` contract. Connection-pool/timeout knobs that are never operator-tuned (connect timeout, max connections, pending acquire, stream duration cap, per-FE max response bytes) are constants in `DispatcherConfiguration` / `FeClient` / `PassthroughClient`; aggregate fanout request/response and dry-run response budgets are configurable because they scale with batch shape.
-
-**Batch endpoint registry (built-in):**
-
-| Path under `/dispatcher/` | Request array field | Response array field | Failure shape | Cross-chunk aggregation |
-|---|---|---|---|---|
-| `/` | `prompt_batch` | `response_batch` | `null` | — |
-| `/batch_infer` | `prompt_batch` | `response_batch` | `null` | — |
-| `/v1/batch/chat/completions` | `requests` | `responses` | `{index, error: {code, message}}` | — |
-| `/v1/embeddings` | `input` (when list) | `data` | `{index, embedding: null, error: <reason>}` | `data[i].index` renumbered to absolute offset; `usage.{prompt_tokens, total_tokens}` summed across successful sub-bodies |
-| `/v1/reranker` | `documents` | `results` | Any failed chunk fails the whole request | Local indices rebased; stable global `sorted` and `top_k`; `total_tokens` summed |
-
-An empty batch array on a registered path is short-circuited locally by the dispatcher: it answers 200 with an empty response array and never reaches an FE. Reranker additionally returns `total_tokens: 0` so its empty response remains schema-complete.
-
-**Header & query relay:** both paths relay the caller's end-to-end headers (hop-by-hop filtered per RFC 7230 §6.1, shared via `DispatcherHeaders`) and the original query string, so a request does not lose its `Authorization`/tenant/tracing context merely because it was batch-shaped and took the split path. The fanout path additionally drops `accept-encoding` (it parses each FE body, so a gzipped response would break the parse) and `content-type` (each chunk body is re-serialized as JSON).
-
-**Client-facing error text:** failure reasons in the response body are a bounded set — `fe_client_error`, `fe_server_error`, `fe_unavailable`, `malformed_sub_batch` — never the raw exception text, which embeds the FE address. Full detail goes to the rate-limited WARN and `pv.log`.
-
-**Request observability:** every dispatcher PV record identifies the endpoint in `path`. Batch records also carry bounded scalar `model`/`callerRequestId` values plus `splitPolicy`, `totalItems`, `chunkCount`, `minChunkItems`, and `maxChunkItems`, so a reranker request can be diagnosed as e.g. 100 items → 40/40/20 without logging documents or FE topology. The Python inference access log independently records its actual HTTP `path` (for example `/v1/reranker`) at the top level; callers without an HTTP path retain the older schema.
-
-**Partial-failure contract:**
-- HTTP 200 on full success or any partial success, except `/v1/reranker`: ranking is fail-closed because an unavailable chunk may contain the global best item, so any failed chunk returns 500.
-- HTTP 500 only when **every** sub-batch failed — except when every FE-reachable sub-batch failed with the *same* FE 4xx (a client error), in which case that shared 4xx is returned instead of masking it as 500. Transport/pick failures carry no HTTP status and don't vote, so they can't hide a 4xx the reachable chunks agreed on.
-- On partial success, the response body contains an extra top-level object: `_partial_failure: { failed_count: N, total_count: M, failed_indices: [...] }`.
-- Failed positions in the response array are filled in-place by the per-endpoint failure factory (see table). **Indices are preserved** so callers can correlate failures back to input positions.
-
-**Migration:**
-- **Service-discovery empty-vs-failure contract (behavior change):** `ServiceDiscovery.getHosts` now means "empty list = empty fleet, failed lookup = throw". `NoOpServiceDiscovery` accordingly **throws** on a malformed `DOMAIN_ADDRESS:<addr>` value (e.g. `ip` with no port) instead of the older return-empty; the internal `VipServerDiscovery` likewise propagates a failed VipServer lookup instead of swallowing it into an empty list. Audit `DOMAIN_ADDRESS` values before upgrading — a value that used to be silently ignored now fails the lookup (which the engine rides out via `discoveryFailureGraceMs`, then ages the workers out). A genuinely empty fleet is unaffected.
-- Pre-dispatcher clients calling `<fe>/batch_infer` keep working — they hit FE directly. To opt in, change the URL to `<master>:7001/dispatcher/batch_infer` (everything else stays the same; the registered field names match FE's existing wire format). Dispatcher prompt chunks default `generate_config.force_batch` to true. Both FE prompt-batch entry points share the same topology guard: a single-stage PDFUSION FE sends the chunk through one `BatchGenerateCall`; PREFILL/DECODE, unknown, or other multi-stage routing transparently retains the historical per-item RPC path because the current batch RPC has no PD handoff. An explicitly supplied false also keeps the per-item path. An active traffic policy makes the dispatcher force this false even if the caller requested true, because each tokenized prompt must be routed independently. An atomic batch routed through the master is ONE scheduling unit: FE's `/schedule` call omits `generate_input`, sets the wire-level `aggregate_demand` marker, and reports aggregate prompt/output demand (`seq_len_hint` = sum of `prompt_length`; output includes beams/return sequences), the per-item prompt shape in `batch_seq_lens`, and aligned identities in `batch_request_ids`. Cost-based prefill predictors use the shape for nonlinear/batch-size formulas, while the identities keep completion accounting member-granular when Engine reports no batch id. Missing or inconsistent lists retain the aggregate/legacy predictor and reservation fallback during rolling upgrades; when traffic policy is active, the master instead rejects incomplete routing metadata. It evaluates every valid member independently, accepts a uniform group, and rejects a mixed-group atomic batch rather than silently routing by aggregate length. The explicit marker keeps ordinary placement-only `/schedule` callers on single-request reservation semantics. The master honors it independently of BATCH/DIRECT/QUEUE mode, so cost-based prefill load and local decode KV are reserved immediately for the whole batch, without applying the single-request output cap.
-- Streaming endpoints (e.g. `/v1/chat/completions` with `stream=true`) work through the passthrough as long as `PassthroughClient.STREAM_TIMEOUT_MS` (10 min) exceeds the longest expected response time.
-- Direct-to-FE remains the bypass for any client that can't change URLs.
-
-**Known limits (deferred):**
-- Bare `POST /` aliases `/batch_infer`: it batches only when the body carries `prompt_batch` (rtp_llm FE historically exposes batch generation on the root path with the same wire shape). The `prompt: [...]` variant is NOT batched (known FE-side footgun) — such requests fall through to passthrough-forward to a single FE.
-- `request_id` set by `frontend_server.py` overwrites any upstream id — dispatcher to FE trace linkage is broken. Tracked in `project_frontend_request_id_overwrite.md`.
-- BE pre-assignment is disabled by default (`DISPATCH_PRE_ASSIGN_BE=false`) for rolling-upgrade safety and applies **only to the `prompt_batch` endpoints** (`/`, `/batch_infer`): FE's pydantic models for `/v1/batch/chat/completions`, `/v1/embeddings`, and `/v1/reranker` do not consume dispatcher-stamped BE `role_addrs`, so those endpoints get no BE stamping. It is also automatically disabled while an effective `trafficPolicy` is active: the dispatcher cannot evaluate token-length rules before FE tokenization, so it additionally forces `generate_config.force_batch=false`; FE preserves the caller headers and performs request-aware `/schedule` routing for every prompt. Direct `/batch_schedule assign_be=true` calls are rejected in that state. Otherwise, when enabled, the dispatcher resolves N BE targets through master `/rtp_llm/batch_schedule` and stamps each chunk's `generate_config.role_addrs` with `{role, ip, http_port, grpc_port}` so FE skips its own master round-trip (existing FE path: `backend_rpc_server_visitor.route_ips` honors non-empty `role_addrs`). **FE version precondition**: the FE build must include `RoleAddr.validate_role` (`@field_validator("role", mode="before")` in `rtp_llm/config/generate_config.py`, on main since `53dc319bd`); older FE builds leave `role_addrs` as `list[dict]` and 500 every stamped request at `model_rpc_client`'s `addr.role` — the dispatcher is the first caller to deliver `role_addrs` via the HTTP body, so the latent FE bug only fires with this toggle on. Enable `DISPATCH_PRE_ASSIGN_BE=true` only after the FE fleet satisfies that contract. `/batch_schedule`'s strategy is decoupled from `/schedule`'s via `FlexlbConfig.batchLoadBalanceStrategy` (default `ROUND_ROBIN`). The FE establishes gRPC channel readiness before invoking `BatchGenerateCall`; only a failure on that pre-invocation barrier may trigger one replacement `/schedule` decision. Readiness, replacement routing, and the unary retry share one absolute deadline; an exhausted budget stops before another dispatch. Any transport error after invocation is terminal even when translated to `CONNECT_FAILED`/`CONNECT_TIMEOUT`, preserving both bounded latency and at-most-once batch execution. A `None` per-item timeout remains unspecified in Python and is encoded as protobuf zero before the shared effective deadline is applied.
-- FE assignment has one authoritative source per request. `DISPATCH_FE_ALLOCATION=master` (default) asks `/batch_schedule` for `fe_url` values even when BE pre-assignment is off; a missing master assignment fails that chunk with `CHUNK_NO_FE`. `local` does not consume the master's FE cursor: it reserves the whole chunk vector from the serving dispatcher's `FePool`, and an empty/unhealthy local pool likewise fails affected chunks. There is no implicit master↔local fallback, because crossing sources would make placement and failure behavior topology-dependent. During a master outage, switching explicitly to `local` (and disabling BE pre-assignment) removes the master dependency after restart.
-- Embedding variants (`/v1/embeddings/{dense,sparse,colbert,similarity}`, `/v1/classifier`) — not in the registry yet; add one row each after verifying wire shape.
-
 ## Important Implementation Details
 
-### LoadBalanceStrategy Registration
-All `LoadBalanceStrategy` implementations must register with `LoadBalanceStrategyFactory` during Spring initialization. Use `@DependsOn` annotation to ensure proper initialization order (see `DefaultRouter`).
+### Endpoint Selection
+`DefaultRouter` calls the explicit selector for each required role. Prefill and
+Decode selectors consume complete immutable fleet snapshots and return an exact
+generation capability; do not add a second selector pass or endpoint fallback
+after ordered QUEUE commit begins.
 
 ### Rollback Mechanism
-When multi-stage routing partially fails, the system must rollback local state updates. See `DefaultRouter.roolBackRoutingFailure()` which calls `LoadBalanceStrategy.rollBack()` for each successfully routed stage.
+When multi-stage routing partially fails, `DefaultRouter` closes the exact
+`SelectedRole` capabilities that were already selected. Direct-placement owners
+also roll back their exact endpoint reservations before returning the failure.
 
 ### Concurrent Data Access
-`EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP` is shared between routing threads (reading) and sync threads (writing). Updates are performed atomically using proper synchronization.
+`EndpointRegistry` owns endpoint publication and replacement across sync and
+routing threads. Readers use immutable snapshots and exact generation-fenced
+captures; writers publish status through the endpoint lifecycle transaction.
 
 ### Queue Concurrency
-The request queue is a `BlockingDeque<BalanceContext>` accessed by both HTTP request threads (for enqueueing) and worker scheduler threads (for dequeueing). Use non-blocking operations (`offer()`, `poll()`) for thread-safe access.
+`RequestRegistry` owns request lifecycle and global capacity. Each prefill
+generation owns a bounded `WorkerBatcher` delivery runtime. Reservation and release paths must remain idempotent across
+completion, timeout, and cancellation races.
 
 ### BalanceContext Extensions
 `BalanceContext` (request state) includes queue-related fields:
-- `future`: `CompletableFuture<BalanceContext>` for async response
-- `cancelled`: AtomicBoolean for request cancellation
-- `retryCount`: Number of retry attempts
+- `future`: `CompletableFuture<Response>` for async response
 - `enqueueTime`: Timestamp when request entered queue
-- `dequeueTime`: Timestamp when request left queue
-- `sequenceId`: Unique request identifier for cancellation
+- `schedulingMetadata`: Immutable request id, priority, and absolute expiration metadata
 
 Methods:
-- `cancel()`: Mark request as cancelled
-- `isCancelled()`: Check if request is cancelled
-- `incrementRetryCount()`: Increment retry counter
+- Cancellation and lifecycle state are owned by `RequestRegistry`, keyed by exact request generation rather than request id alone.
 
 ### Reactive Programming
 The flexlb-api module uses Spring WebFlux for non-blocking reactive request handling. All HTTP endpoints return `Mono` or `Flux` types.
@@ -467,8 +311,8 @@ FlexLB provides comprehensive monitoring through Spring Boot Actuator:
 OpenTelemetry integration for distributed tracing (configured via `OTEL_EXPORTER_OTLP_ENDPOINT`).
 
 Monitoring enhancements:
-- `RoutingQueueReporter`: Reports queue size, wait time, execution time metrics
-- `ResourceMonitorReporter`: Reports resource utilization metrics
+- `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics
+- `RequestSchedulerReporter`: Reports admission and lifecycle metrics
 - `ActiveRequestCounter`: Tracks concurrent active requests
 
 ## Error Types
@@ -484,7 +328,11 @@ Monitoring enhancements:
 - `NO_PDFUSION_WORKER`: No available Pdfusion workers
 - `NO_VIT_WORKER`: No available Vit workers
 
-Worker errors can trigger retry logic in the queue scheduler when resource-unavailable conditions occur.
+When a hard resource is unavailable, only the unchanged `ACTIVE` head waits for
+that exact resource event and attempts admission again. An admitted callback is
+never retried, and an admitted request never returns to the queue. Structural
+admission/publication failure terminalizes the exact reserved prefix once; it is
+not represented as capacity pressure and is never converted into a retry.
 
 ## Commit Message Format
 
@@ -503,7 +351,7 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 Examples:
 - `feat(router): add cache-aware routing strategy`
 - `fix(grpc): handle connection timeout gracefully`
-- `refactor(LoadBalanceStrategy): rename method getLoadBalanceStrategy to getLoadBalancer`
+- `refactor(router): simplify role selection`
 
 ## Java Version and Dependencies
 

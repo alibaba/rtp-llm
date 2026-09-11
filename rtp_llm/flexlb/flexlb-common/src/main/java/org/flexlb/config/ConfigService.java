@@ -1,530 +1,183 @@
 package org.flexlb.config;
 
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
-import org.apache.commons.lang3.StringUtils;
-import org.flexlb.enums.EngineType;
-import org.flexlb.util.JsonUtils;
+import com.fasterxml.jackson.databind.MapperFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
-import java.lang.reflect.Field;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.HashSet;
-import java.util.List;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
-@Getter
+/** Loads the single, strict FLEXLB_CONFIG JSON document. */
 @Slf4j
 @Component
 public class ConfigService {
 
-    private static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
-    private static final String FLEXLB_ENGINE_TYPE_ENV = "FLEXLB_ENGINE_TYPE";
-    private static final String LEGACY_ENGINE_TYPE_ENV = "ENGINE_TYPE";
-    private static final String PREFILL_TIME_FORMULA_ENV = "PREFILL_TIME_FORMULA";
-    private static final String TRAFFIC_POLICY_CONFIG_ENV = "TRAFFIC_POLICY_CONFIG";
-    private static final String TRAFFIC_POLICY_CONFIG_FILE_ENV = "TRAFFIC_POLICY_CONFIG_FILE";
-    private static final String STRATEGY_CONFIGS_ENV = "STRATEGY_CONFIGS";
+    static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
 
-    /**
-     * Critical config fields whose parse failures must abort startup (fail-fast)
-     * instead of silently falling back to defaults.
-     *
-     * <p>F4 (P0-4): includes {@code autoTpmEnabled} / {@code flexlbBatchQueueMaxSize}
-     * (env parse failure aborts via the critical mechanism) and the two SLO spec
-     * strings {@code autoTpmSloLengthBuckets} / {@code autoTpmPrioritySloMultipliers}
-     * whose assignment never fails — those get a strict format pre-validation at
-     * startup instead (see {@link #validateSloPolicySpecs}).
-     */
-    private static final Set<String> CRITICAL_CONFIG_FIELDS = Set.of(
-            "defaultScheduleMode",
-            "flexlbBatchAlgorithm",
-            "flexlbBatchMaxCapacity",
-            "flexlbBatchMaxInflight",
-            "flexlbBatchFixedMaxInflightBatches",
-            "flexlbBatchSloMaxInflightBatches",
-            "costFormula",
-            "prefillPredictorType",
-            "engineType",
-            "autoTpmEnabled",
-            "flexlbBatchQueueMaxSize",
-            "autoTpmSloLengthBuckets",
-            "autoTpmPrioritySloMultipliers");
+    private static final Set<String> REMOVED_LEGACY_ENV_VARS = Set.copyOf(
+            java.util.Arrays.asList("""
+                    LOAD_BALANCE_STRATEGY DECODE_LOAD_BALANCE_STRATEGY VIT_LOAD_BALANCE_STRATEGY
+                    WEIGHTED_CACHE_DECAY_FACTOR CACHE_HIT_TIME_WINDOW_MS CACHE_HIT_MAX_CACHE_KEYS
+                    CACHE_HIT_WINDOW_WRITE_ENABLED CACHE_HIT_METRIC_REPORT_ENABLED
+                    CACHE_HIT_TRACE_LOG_ENABLED CACHE_HIT_THEORY_LOG_ENABLED MAX_QUEUE_SIZE
+                    MAX_RETRY_COUNT PREFILL_QUEUE_SIZE_THRESHOLD DECODE_AVAILABLE_MEMORY_THRESHOLD
+                    DECODE_CONCURRENCY_LIMIT HYSTERESIS_BIAS_PERCENT SCHEDULE_WORKER_SIZE
+                    RESOURCE_CHECK_INTERVAL_MS MAX_PREFILL_QUEUE_SIZE DECODE_FULL_SPEED_THRESHOLD
+                    DECODE_STOP_THRESHOLD NETTY_SELECT_THREAD_MULTIPLIER NETTY_WORKER_THREAD_MULTIPLIER
+                    GRPC_CLIENT_EXECUTOR_CORE_SIZE GRPC_CLIENT_EXECUTOR_MAX_SIZE
+                    GRPC_CLIENT_EXECUTOR_QUEUE_SIZE GRPC_CLIENT_EVENT_LOOP_THREADS
+                    GRPC_SERVER_WORKER_EVENT_LOOP_THREADS HTTP_NETTY_EVENT_LOOP_THREADS
+                    HTTP_NETTY_EVENT_EXECUTOR_THREADS HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE
+                    HTTP_REQUEST_EXECUTOR_CORE_SIZE HTTP_REQUEST_EXECUTOR_MAX_SIZE
+                    HTTP_REQUEST_EXECUTOR_QUEUE_SIZE ENGINE_SYNC_EXECUTOR_CORE_SIZE
+                    ENGINE_SYNC_EXECUTOR_MAX_SIZE STATUS_CHECK_EXECUTOR_CORE_SIZE
+                    STATUS_CHECK_EXECUTOR_MAX_SIZE SERVICE_DISCOVERY_MAX_SIZE TRAFFIC_POLICY
+                    TRAFFIC_POLICY_CONFIG TRAFFIC_POLICY_CONFIG_FILE STRATEGY_CONFIGS
+                    PREFILL_TIME_FORMULA DEFAULT_SCHEDULE_MODE FLEXLB_BATCH_ENABLED ENABLE_QUEUEING
+                    FLEXLB_BATCH_SIZE_MAX FLEXLB_BATCH_WINDOW_MS FLEXLB_BATCH_MIN_SIZE
+                    FLEXLB_BATCH_EMERGENCY_BUDGET_MS FLEXLB_BATCH_DISPATCH_GUARD_MS
+                    FLEXLB_BATCH_ARRIVAL_EMA_ALPHA FLEXLB_BATCH_ARRIVAL_WAIT_GUARD_MS
+                    FLEXLB_BATCH_SLO_MAX_INFLIGHT_BATCHES FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES
+                    FLEXLB_BATCH_ENQUEUE_DEADLINE_MS FLEXLB_INFLIGHT_TTL_MS
+                    FLEXLB_BATCH_DISPATCH_POOL_SIZE FLEXLB_BATCH_DISPATCH_QUEUE_SIZE
+                    FLEXLB_BATCH_MAX_CAPACITY FLEXLB_BATCH_SCAN_AHEAD FLEXLB_BATCH_QUEUE_MAX_SIZE
+                    FLEXLB_BATCH_MAX_INFLIGHT FLEXLB_BATCH_ALGORITHM FLEXLB_BATCH_FIXED_WAIT_MS
+                    FLEXLB_BATCH_PREDICT_THRESHOLD_MS COST_SLO_FILTER_ENABLED COST_SLO_MS
+                    COST_SLO_RISK_MARGIN_MS COST_SLO_BUCKETS COST_HOTSPOT_MULTIPLIER
+                    COST_IMBALANCE_MULTIPLIER COST_FORMULA SCORE_TIE_RANDOM_ENABLED
+                    SCORE_TIE_THRESHOLD_PCT SCORE_TIE_THRESHOLD_MS
+                    SHORTEST_TTFT_CANDIDATE_POOL_MODE SHORTEST_TTFT_CANDIDATE_POOL_RATIO
+                    SHORTEST_TTFT_CANDIDATE_POOL_MIN_SIZE SHORTEST_TTFT_CANDIDATE_POOL_SIZE
+                    CACHE_AFFINITY_ENABLED CACHE_AFFINITY_MAX_EXTRA_TTFT_MS
+                    CACHE_AFFINITY_MIN_HIT_RATE PREFILL_PREDICTOR_TYPE PREFILL_LB_TIMEOUT_MS
+                    DECODE_HOTSPOT_MULTIPLIER DECODE_IMBALANCE_MULTIPLIER MAX_NEW_TOKENS_CAP
+                    AUTO_TPM_ENABLED AUTO_TPM_DEFAULT_PRIORITY AUTO_TPM_SLO_LENGTH_BUCKETS
+                    AUTO_TPM_PRIORITY_SLO_MULTIPLIERS AUTO_TPM_PREFILL_QUEUE_EVICT_ENABLED
+                    AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED AUTO_TPM_PLAN_CACHE_HIT_BENEFIT_CAP
+                    AUTO_TPM_POST_SUCCESS_SOFT_TIMEOUT_MS AUTO_TPM_POST_SUCCESS_BACKPRESSURE_LIMIT
+                    AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED AUTO_TPM_CANCEL_ACK_TIMEOUT_MS
+                    AUTO_TPM_CANCEL_COMPLETION_TIMEOUT_MS AUTO_TPM_COMMIT_STRATEGY
+                    AUTO_TPM_VICTIM_GUARD_MODE WORKER_TIMEOUT_MS WORKER_TIMEOUT_US TASK_TIMEOUT_US
+                    CACHE_STATUS_DIFF_SIZE CACHE_STATUS_MIN_INTERVAL_MS CACHE_STATUS_MAX_INTERVAL_MS
+                    SYNC_STATUS_INTERVAL SYNC_REQUEST_TIMEOUT_MS WHALE_CACHE_DEBUG_MODE
+                    VIT_SYNC_REQUEST_TIMEOUT_MS VIT_WORKER_TIMEOUT_US VIT_RETAIN_ALIVE_ON_TIMEOUT
+                    FLEXLB_MONITOR_MODE ENGINE_TYPE FLEXLB_ENGINE_TYPE
+                    BATCH_SCHEDULE_MAX_COUNT FLEXLB_BATCH_SCHEDULE_MAX_COUNT
+                    BATCH_LOAD_BALANCE_STRATEGY FLEXLB_BATCH_LOAD_BALANCE_STRATEGY
+                    """.trim().split("\\s+")));
 
-    /** Env prefixes owned by FlexLB config; scanned for unmatched names (F3/P0-3). */
-    private static final List<String> SCANNED_ENV_PREFIXES = List.of("FLEXLB_", "AUTO_TPM_", "COST_", "WORKER_");
-
-    /** Deprecated env vars that already have dedicated warnings; excluded from the unmatched scan. */
-    private static final Set<String> DEPRECATED_ENV_VARS = Set.of("FLEXLB_BATCH_ENABLED", "ENABLE_QUEUEING");
+    private static final ObjectMapper STRICT_MAPPER = JsonMapper.builder()
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+            .enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
+            .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
+            .build();
 
     private final FlexlbConfig flexlbConfig;
-    private final StrategyConfigs strategyConfigs;
 
     public ConfigService() {
         this(System.getenv());
     }
 
     ConfigService(Map<String, String> environment) {
-        String lbConfigStr = environment.get(FLEXLB_CONFIG_ENV);
-        log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
-        FlexlbConfig config;
-        boolean jsonDefinesEngineType = false;
-        if (lbConfigStr != null) {
-            try {
-                JsonNode configJson = JsonUtils.toObject(lbConfigStr, JsonNode.class);
-                jsonDefinesEngineType = configJson.has("engineType");
-                config = JsonUtils.toObject(configJson, FlexlbConfig.class);
-            } catch (Exception e) {
-                throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
-                    "Failed to parse FLEXLB_CONFIG JSON: " + e.getMessage(), e);
-            }
-        } else {
-            config = new FlexlbConfig();
+        rejectRemovedLegacyEnvironment(environment);
+        String document = environment.get(FLEXLB_CONFIG_ENV);
+        this.flexlbConfig = document == null ? new FlexlbConfig() : parse(document);
+        FlexlbConfigValidator.validate(flexlbConfig);
+        logEffectiveConfig(flexlbConfig);
+    }
+
+    private static void rejectRemovedLegacyEnvironment(Map<String, String> environment) {
+        var removed = environment.keySet().stream()
+                .filter(REMOVED_LEGACY_ENV_VARS::contains)
+                .sorted()
+                .toList();
+        if (removed.isEmpty()) {
+            return;
         }
+        String monitorMigration = removed.contains("FLEXLB_MONITOR_MODE")
+                ? " Replace FLEXLB_MONITOR_MODE with FLEXLB_MONITOR_METRIC_WHITELIST"
+                        + " (the bare flexlb_ prefix exposes all FlexLB metrics)."
+                : "";
+        throw new ConfigValidationException(
+                "environment",
+                "Removed legacy FlexLB environment variables are no longer read: "
+                        + String.join(", ", removed)
+                        + ". Migrate scheduling behavior into FLEXLB_CONFIG with schemaVersion 2."
+                        + monitorMigration);
+    }
 
-        // If corresponding advanced environment variables exist, override and update
-        applyEnvironmentOverrides(config, environment);
-        applyEngineTypeOverride(config, environment, jsonDefinesEngineType);
-        applyTrafficPolicyOverride(config, environment);
-        applyPrefillFormulaOverride(config, environment);
-
-        this.strategyConfigs = loadStrategyConfigs(environment);
-
-        warnDeprecatedEnvVars(environment);
-        warnUnmatchedEnvVars(environment);
-
-        // Pre-validate critical parsed config at startup (fail-fast).
-        // If these throw, startup must abort rather than letting every
-        // per-request call fail with a 500.
-        // Note: getParsedSloBuckets() is private in FlexlbConfig and silently
-        // ignores parse errors, so it is not called here. getDefaultScheduleModeEnum()
-        // throws IllegalArgumentException for invalid schedule mode values.
-        config.getDefaultScheduleModeEnum();
-        if (config.getEngineType() == null) {
-            throw new ConfigValidationException(
-                    "engineType", "must not be null; expected LLM or EMBEDDING");
+    public static FlexlbConfig parse(String document) {
+        try {
+            JsonNode tree = STRICT_MAPPER.readTree(document);
+            rejectJsonNull(tree, "$");
+            FlexlbConfigValidator.validateDocumentShape(tree);
+            FlexlbConfig config = STRICT_MAPPER.treeToValue(
+                    tree, FlexlbConfig.class);
+            FlexlbConfigValidator.validate(config);
+            return config;
+        } catch (ConfigValidationException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
+                    "Invalid FLEXLB_CONFIG JSON: " + error.getMessage(), error);
         }
-        validateSloPolicySpecs(config);
-
-        dumpEffectiveConfig(config);
-        this.flexlbConfig = config;
     }
 
     public FlexlbConfig loadBalanceConfig() {
         return flexlbConfig;
     }
 
-    private StrategyConfigs loadStrategyConfigs(Map<String, String> environment) {
-        String strategyConfigsStr = environment.get(STRATEGY_CONFIGS_ENV);
-
-        StrategyConfigs configs;
-        if (StringUtils.isNotBlank(strategyConfigsStr)) {
-            log.warn("STRATEGY_CONFIGS = {}", strategyConfigsStr);
-            configs = JsonUtils.toObjectOrNull(strategyConfigsStr, StrategyConfigs.class);
-            if (configs == null) {
-                log.warn("Failed to parse STRATEGY_CONFIGS, use default strategy configs");
-                configs = new StrategyConfigs();
-            }
-        } else {
-            log.debug("STRATEGY_CONFIGS is not set, use default strategy configs");
-            configs = new StrategyConfigs();
+    public synchronized void updateTrafficPolicy(TrafficPolicyConfig groupSelector) {
+        if (groupSelector == null) {
+            throw new IllegalArgumentException("groupSelector cannot be null");
         }
-
-        configs.normalize();
-        return configs;
+        TrafficPolicyConfig.validate(groupSelector);
+        flexlbConfig.getRouter().setGroupSelector(groupSelector);
+        log.info("Group selector updated: rules={}", groupSelector.getRules().size());
     }
 
-    public synchronized void updateTrafficPolicy(TrafficPolicyConfig trafficPolicy) {
-        if (trafficPolicy == null) {
-            throw new IllegalArgumentException("trafficPolicy cannot be null");
+    private static void rejectJsonNull(JsonNode node, String path) {
+        if (node == null || node.isNull()) {
+            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
+                    "JSON null is not allowed at " + path);
         }
-        flexlbConfig.setTrafficPolicy(trafficPolicy);
-        log.warn("Traffic policy updated: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
-    }
-
-    /**
-     * Apply environment variable overrides to configuration
-     * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
-     * Example: defaultScheduleMode -> DEFAULT_SCHEDULE_MODE
-     */
-    private void applyEnvironmentOverrides(FlexlbConfig config, Map<String, String> environment) {
-        Field[] fields = FlexlbConfig.class.getDeclaredFields();
-        for (Field field : fields) {
-            // Only process primitive types and wrapper types
-            Class<?> fieldType = field.getType();
-            if (!isSupportedType(fieldType)) {
-                continue;
+        if (node.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                rejectJsonNull(field.getValue(), path + "." + field.getKey());
             }
-
-            // ENGINE_TYPE is unusually generic and commonly belongs to another process in a
-            // shared container. Resolve it through the namespaced compatibility policy below.
-            if ("engineType".equals(field.getName())) {
-                continue;
-            }
-
-            String envVarName = camelToUpperSnakeCase(field.getName());
-            String envValue = environment.get(envVarName);
-
-            if (envValue != null && !envValue.trim().isEmpty()) {
-                boolean isCritical = CRITICAL_CONFIG_FIELDS.contains(field.getName());
-                try {
-                    field.setAccessible(true);
-                    Object parsedValue = parseValue(envValue.trim(), fieldType, envVarName);
-                    Object oldValue = field.get(config);
-                    field.set(config, parsedValue);
-                    log.info(
-                            "Environment variable override: {} = {} (field: {}, old value: {})",
-                            envVarName,
-                            parsedValue,
-                            field.getName(),
-                            oldValue);
-                } catch (ConfigValidationException e) {
-                    if (isCritical) {
-                        throw e;
-                    }
-                    log.error(
-                            "Failed to apply environment variable {}: {}",
-                            envVarName,
-                            e.getMessage(),
-                            e);
-                } catch (Exception e) {
-                    if (isCritical) {
-                        throw new ConfigValidationException(envVarName, e.getMessage(), e);
-                    }
-                    log.error(
-                            "Failed to apply environment variable {}: {}",
-                            envVarName,
-                            e.getMessage(),
-                            e);
-                }
+        } else if (node.isArray()) {
+            for (int index = 0; index < node.size(); index++) {
+                rejectJsonNull(node.get(index), path + "[" + index + "]");
             }
         }
     }
 
-    /**
-     * Resolve engine type without letting an unrelated generic {@code ENGINE_TYPE} break startup.
-     * The namespaced form is authoritative and remains fail-fast; the bare name is retained only
-     * as a deprecated, best-effort migration fallback.
-     */
-    private void applyEngineTypeOverride(FlexlbConfig config, Map<String, String> environment,
-                                         boolean jsonDefinesEngineType) {
-        String namespaced = StringUtils.trimToNull(environment.get(FLEXLB_ENGINE_TYPE_ENV));
-        if (namespaced != null) {
-            config.setEngineType(parseEngineType(namespaced, FLEXLB_ENGINE_TYPE_ENV));
-            log.info("Environment variable override: {} = {} (field: engineType)",
-                    FLEXLB_ENGINE_TYPE_ENV, config.getEngineType());
-            return;
-        }
-
-        // ENGINE_TYPE predates FLEXLB_CONFIG and is intentionally only a migration fallback.
-        // An explicit JSON value (including null, which validation rejects below) is newer and
-        // must never be silently replaced by a generic process-wide variable.
-        if (jsonDefinesEngineType) {
-            return;
-        }
-
-        String legacy = StringUtils.trimToNull(environment.get(LEGACY_ENGINE_TYPE_ENV));
-        if (legacy == null) {
-            return;
-        }
-        try {
-            config.setEngineType(parseEngineType(legacy, LEGACY_ENGINE_TYPE_ENV));
-            log.warn("Environment variable {} is deprecated; use {} instead",
-                    LEGACY_ENGINE_TYPE_ENV, FLEXLB_ENGINE_TYPE_ENV);
-        } catch (ConfigValidationException invalidLegacyValue) {
-            log.warn("Ignoring unrelated or invalid deprecated {} value '{}'; use {} for FlexLB",
-                    LEGACY_ENGINE_TYPE_ENV, legacy, FLEXLB_ENGINE_TYPE_ENV);
-        }
-    }
-
-    private EngineType parseEngineType(String value, String envName) {
-        try {
-            return (EngineType) parseValue(value, EngineType.class, envName);
-        } catch (Exception e) {
-            throw new ConfigValidationException(envName,
-                    "Invalid engine type '" + value + "'. Expected: LLM or EMBEDDING", e);
-        }
-    }
-
-    /**
-     * Apply traffic policy from a standalone env var or file.
-     * Priority: TRAFFIC_POLICY_CONFIG > TRAFFIC_POLICY_CONFIG_FILE > FLEXLB_CONFIG.trafficPolicy.
-     */
-    private void applyTrafficPolicyOverride(FlexlbConfig config, Map<String, String> environment) {
-        String trafficPolicyConfig = environment.get(TRAFFIC_POLICY_CONFIG_ENV);
-        String trafficPolicyConfigFile = environment.get(TRAFFIC_POLICY_CONFIG_FILE_ENV);
-
-        if (StringUtils.isBlank(trafficPolicyConfig) && StringUtils.isNotBlank(trafficPolicyConfigFile)) {
-            trafficPolicyConfig = readConfigFile(trafficPolicyConfigFile);
-        }
-
-        if (StringUtils.isBlank(trafficPolicyConfig)) {
-            return;
-        }
-
-        try {
-            TrafficPolicyConfig trafficPolicy = JsonUtils.toObject(trafficPolicyConfig, TrafficPolicyConfig.class);
-            config.setTrafficPolicy(trafficPolicy);
-            log.warn("Traffic policy loaded from standalone config: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
-        } catch (Exception e) {
-            log.error("Failed to parse traffic policy config, skipping.", e);
-        }
-    }
-
-    private void applyPrefillFormulaOverride(FlexlbConfig config, Map<String, String> environment) {
-        String formula = environment.get(PREFILL_TIME_FORMULA_ENV);
-        if (StringUtils.isBlank(formula)) {
-            // Blank or unset formula means skip the override, preserving any formula
-            // set via FLEXLB_CONFIG or COST_FORMULA. This maintains backward
-            // compatibility with deployment scripts that set PREFILL_TIME_FORMULA=""
-            // to cancel a formula override without clearing existing config.
-            return;
-        }
-        config.setCostFormula(formula);
-        log.info("Prefill time formula loaded from {}", PREFILL_TIME_FORMULA_ENV);
-    }
-
-    private String readConfigFile(String filePath) {
-        try {
-            return Files.readString(Path.of(filePath), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new IllegalArgumentException("Failed to read config file: " + filePath, e);
-        }
-    }
-
-    /**
-     * Check if the type is supported
-     */
-    private boolean isSupportedType(Class<?> type) {
-        return type == int.class
-                || type == Integer.class
-                || type == long.class
-                || type == Long.class
-                || type == double.class
-                || type == Double.class
-                || type == boolean.class
-                || type == Boolean.class
-                || type == String.class
-                || type.isEnum();
-    }
-
-    /**
-     * Convert camel case to upper snake case
-     * Example: defaultScheduleMode -> DEFAULT_SCHEDULE_MODE
-     */
-    private static String camelToUpperSnakeCase(String camelCase) {
-        StringBuilder result = new StringBuilder();
-        for (int i = 0; i < camelCase.length(); i++) {
-            char c = camelCase.charAt(i);
-            if (Character.isUpperCase(c) && i > 0) {
-                result.append('_');
-            }
-            result.append(Character.toUpperCase(c));
-        }
-        return result.toString();
-    }
-
-    /**
-     * Parse string value based on target type
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private Object parseValue(String value, Class<?> targetType, String fieldName) {
-        if (targetType == String.class) {
-            return value;
-        } else if (targetType == int.class || targetType == Integer.class) {
-            return Integer.parseInt(value);
-        } else if (targetType == long.class || targetType == Long.class) {
-            return Long.parseLong(value);
-        } else if (targetType == double.class || targetType == Double.class) {
-            return Double.parseDouble(value);
-        } else if (targetType == boolean.class || targetType == Boolean.class) {
-            return parseStrictBoolean(value, fieldName);
-        } else if (targetType.isEnum()) {
-            return JsonUtils.toObject("\"" + value + "\"", targetType);
-        }
-        throw new IllegalArgumentException("Unsupported type: " + targetType);
-    }
-
-    /**
-     * Strictly parse a boolean value, rejecting unrecognized strings.
-     *
-     * @throws ConfigValidationException if the value is not a recognized boolean literal.
-     */
-    static boolean parseStrictBoolean(String value, String fieldName) {
-        String v = value.trim().toLowerCase();
-        if ("true".equals(v) || "1".equals(v) || "yes".equals(v) || "on".equals(v) || "enabled".equals(v)) return true;
-        if ("false".equals(v) || "0".equals(v) || "no".equals(v) || "off".equals(v) || "disabled".equals(v)) return false;
-        throw new ConfigValidationException(fieldName,
-            "Invalid boolean value '" + value + "'. Expected: true/false/1/0/yes/no/on/off/enabled/disabled");
-    }
-
-    /**
-     * Log the effective configuration after all overrides have been applied.
-     * Only dumps critical scheduling config — no sensitive information.
-     */
-    private void dumpEffectiveConfig(FlexlbConfig config) {
-        log.info("===== FlexLB Effective Configuration =====");
-        log.info("scheduleMode={}, batchAlgorithm={}",
-            config.getDefaultScheduleMode(), config.getFlexlbBatchAlgorithm());
-        log.info("batchMaxCapacity={}, batchMaxInflight={}",
-            config.getFlexlbBatchMaxCapacity(), config.getFlexlbBatchMaxInflight());
-        log.info("fixedMaxInflightBatches={}, sloMaxInflightBatches={}",
-            config.getFlexlbBatchFixedMaxInflightBatches(),
-            config.getFlexlbBatchSloMaxInflightBatches());
-        log.info("prefillPredictorType={}", config.getPrefillPredictorType());
-        log.info("autoTpmEnabled={}, autoTpmDefaultPriority={}",
-            config.isAutoTpmEnabled(), config.getAutoTpmDefaultPriority());
-        log.info("autoTpmSloLengthBuckets={}, autoTpmPrioritySloMultipliers={}",
-            config.getAutoTpmSloLengthBuckets(), config.getAutoTpmPrioritySloMultipliers());
-        log.info("autoTpmPrefillQueueEvictEnabled={}, autoTpmDecodeReservedEvictEnabled={}",
-            config.isAutoTpmPrefillQueueEvictEnabled(), config.isAutoTpmDecodeReservedEvictEnabled());
-        log.info("autoTpmPlanCacheHitBenefitCap={}", config.getAutoTpmPlanCacheHitBenefitCap());
-        log.info("autoTpmDecodeAcceptedEvictEnabled={}",
-            config.isAutoTpmDecodeAcceptedEvictEnabled());
-        log.info("autoTpmCancelAckTimeoutMs={}, autoTpmCancelCompletionTimeoutMs={}",
-            config.getAutoTpmCancelAckTimeoutMs(), config.getAutoTpmCancelCompletionTimeoutMs());
-        log.info("autoTpmCommitStrategy={}, autoTpmVictimGuardMode={}",
-            config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode());
-        log.info("maxNewTokensCap={}", config.getMaxNewTokensCap());
-        log.info("workerTimeoutMs={}",
-            config.getWorkerTimeoutMs());
-        log.info("==========================================");
-    }
-
-    private void warnDeprecatedEnvVars(Map<String, String> env) {
-        if (env.containsKey("FLEXLB_BATCH_ENABLED")) {
-            log.warn("Environment variable FLEXLB_BATCH_ENABLED is deprecated and ignored. Use DEFAULT_SCHEDULE_MODE=BATCH|DIRECT|QUEUE instead.");
-        }
-        if (env.containsKey("ENABLE_QUEUEING")) {
-            log.warn("Environment variable ENABLE_QUEUEING is deprecated and ignored. Use DEFAULT_SCHEDULE_MODE=BATCH|DIRECT|QUEUE instead.");
-        }
-    }
-
-    /**
-     * F4 (P0-4): the SLO bucket/multiplier specs are plain strings whose env
-     * assignment never fails, so strictly pre-validate the effective values at
-     * startup — an invalid spec aborts instead of silently falling back to the
-     * built-in defaults at runtime. Blank means "use built-in default" and is
-     * allowed. The lenient runtime fallback in {@link PrioritySloPolicy} itself
-     * is intentionally unchanged.
-     */
-    private static void validateSloPolicySpecs(FlexlbConfig config) {
-        String bucketSpec = config.getAutoTpmSloLengthBuckets();
-        String invalidBucket = PrioritySloPolicy.firstInvalidBucketEntry(bucketSpec);
-        if (invalidBucket != null) {
-            throw new ConfigValidationException("autoTpmSloLengthBuckets",
-                    "Invalid SLO length bucket fragment '" + invalidBucket + "' in '" + bucketSpec
-                            + "'. Expected format like '256:150,1024:300,*:2400'");
-        }
-        String multiplierSpec = config.getAutoTpmPrioritySloMultipliers();
-        String invalidMultiplier = PrioritySloPolicy.firstInvalidMultiplierEntry(multiplierSpec);
-        if (invalidMultiplier != null) {
-            throw new ConfigValidationException("autoTpmPrioritySloMultipliers",
-                    "Invalid priority SLO multiplier fragment '" + invalidMultiplier + "' in '" + multiplierSpec
-                            + "'. Expected format like '30:2.0,40:1.5,50:1.0'");
-        }
-    }
-
-    /**
-     * F3 (P0-3): after all overrides are applied, warn about every
-     * FLEXLB_/AUTO_TPM_/COST_-prefixed environment variable that matches no
-     * config field — previously such misspelled names were silently ignored
-     * (e.g. an intended queue-size override never taking effect). Warn-only by
-     * design: these prefixes may be shared by unrelated system variables, so
-     * aborting would be too aggressive.
-     */
-    private void warnUnmatchedEnvVars(Map<String, String> environment) {
-        Set<String> known = knownEnvVarNames();
-        for (String name : findUnmatchedEnvVars(environment)) {
-            String suggestion = nearestKnownEnvName(name, known);
-            log.warn("环境变量 {} 未匹配任何配置字段，将被忽略{}", name,
-                    suggestion == null ? "" : "（did-you-mean: " + suggestion + "？）");
-        }
-    }
-
-    /**
-     * Pure scan (package-private for tests): given an environment map, return
-     * the sorted FLEXLB_/AUTO_TPM_/COST_-prefixed variable names that neither
-     * map to any {@link FlexlbConfig} field (camelCase → UPPER_SNAKE_CASE) nor
-     * are special config entry points nor known deprecated names.
-     */
-    static List<String> findUnmatchedEnvVars(Map<String, String> environment) {
-        Set<String> known = knownEnvVarNames();
-        return environment.keySet().stream()
-                .filter(ConfigService::hasScannedPrefix)
-                .filter(name -> !known.contains(name))
-                .filter(name -> !DEPRECATED_ENV_VARS.contains(name))
-                .sorted()
-                .toList();
-    }
-
-    private static boolean hasScannedPrefix(String name) {
-        for (String prefix : SCANNED_ENV_PREFIXES) {
-            if (name.startsWith(prefix)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Full env-name mapping: every FlexlbConfig field plus the special config entry points. */
-    static Set<String> knownEnvVarNames() {
-        Set<String> names = new HashSet<>();
-        for (Field field : FlexlbConfig.class.getDeclaredFields()) {
-            names.add(camelToUpperSnakeCase(field.getName()));
-        }
-        names.add(FLEXLB_CONFIG_ENV);
-        names.add(FLEXLB_ENGINE_TYPE_ENV);
-        names.add(PREFILL_TIME_FORMULA_ENV);
-        names.add(TRAFFIC_POLICY_CONFIG_ENV);
-        names.add(TRAFFIC_POLICY_CONFIG_FILE_ENV);
-        return names;
-    }
-
-    /** Cheap did-you-mean: nearest known env name within edit distance 2, or null. */
-    static String nearestKnownEnvName(String name, Set<String> known) {
-        String best = null;
-        int bestDist = 3;
-        for (String candidate : known) {
-            int dist = boundedEditDistance(name, candidate, bestDist);
-            if (dist < bestDist) {
-                bestDist = dist;
-                best = candidate;
-            }
-        }
-        return best;
-    }
-
-    /** Levenshtein distance capped at {@code limit} (returns {@code limit} when exceeded). */
-    private static int boundedEditDistance(String a, String b, int limit) {
-        if (Math.abs(a.length() - b.length()) >= limit) {
-            return limit;
-        }
-        int[] prev = new int[b.length() + 1];
-        int[] curr = new int[b.length() + 1];
-        for (int j = 0; j <= b.length(); j++) {
-            prev[j] = j;
-        }
-        for (int i = 1; i <= a.length(); i++) {
-            curr[0] = i;
-            int rowMin = curr[0];
-            for (int j = 1; j <= b.length(); j++) {
-                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
-                curr[j] = Math.min(Math.min(curr[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
-                rowMin = Math.min(rowMin, curr[j]);
-            }
-            if (rowMin >= limit) {
-                return limit;
-            }
-            int[] tmp = prev;
-            prev = curr;
-            curr = tmp;
-        }
-        return Math.min(prev[b.length()], limit);
+    private static void logEffectiveConfig(FlexlbConfig config) {
+        String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
+        String ordering = config.isDirect() ? "N/A"
+                : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
+        String decision = config.isDirect() ? "N/A"
+                : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
+        String dispatcher = config.getDispatcher().typeName();
+        log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
+                        + "dispatcher={}, prefillCandidateChoice={}, groupRules={}",
+                config.getSchemaVersion(), scheduler, ordering, decision, dispatcher,
+                config.getRouter().getRoles().getPrefill()
+                        .getCandidateChoice().getType(),
+                config.getRouter().getGroupSelector() == null ? 0
+                        : config.getRouter().getGroupSelector().getRules().size());
     }
 }

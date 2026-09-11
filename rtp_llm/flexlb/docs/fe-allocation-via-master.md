@@ -1,160 +1,116 @@
-# Dispatcher FE allocation
+# Dispatcher batch fanout
 
-Status: implemented (updated 2026-09-01). Scope: dispatcher batch fanout
-(`flexlb-api/org.flexlb.dispatcher`) and the master `/batch_schedule` contract
-(`flexlb-sync` / `flexlb-common`).
+The dispatcher splits an HTTP batch into chunks, assigns frontends (FEs), and merges their
+responses in input order. `/rtp_llm/batch_schedule` can also assign backend (BE) addresses for
+callers that already split batches, including the BE-side `WhaleBertScoreOp` path.
 
-## Why allocation is explicit
+## Configuration
 
-A dispatcher splits one client batch into N chunks and sends one chunk to each frontend (FE).
-Independent per-dispatcher round-robin cursors can collide under load, while making every batch
-depend on the elected master reduces availability. The dispatcher therefore exposes the choice as
-an operator contract:
+FlexLB uses the mainline **schema version 2** configuration. Batch selection is round-robin;
+there is no separate strategy factory or `BATCH_LOAD_BALANCE_STRATEGY` setting.
 
-- `dispatch.fe-allocation=master` (default) uses the elected master's single FE cursor. Assignment
-  is fleet-wide and attributable; an absent master assignment fails visibly with no local fallback.
-- `dispatch.fe-allocation=local` uses this dispatcher's health-filtered `FePool`. It removes the
-  master from FE allocation, at the cost of independent cursors on different dispatcher instances.
+For an embedding worker fleet:
 
-`DISPATCH_FE_ALLOCATION` overrides the JSON field. Configuration is validated at startup and the
-mode is logged; changing it requires restarting/redeploying the dispatcher.
+```sh
+export FLEXLB_CONFIG='{
+  "schemaVersion": 2,
+  "workerRegistry": {"engineType": "EMBEDDING"},
+  "router": {"batchScheduleMaxCount": 1000}
+}'
+```
 
-Backend (BE) pre-assignment is a separate optimization. `dispatch.pre-assign-be` defaults to
-`false` for rolling-upgrade safety and should be enabled only after all FEs can deserialize the
-HTTP `role_addrs` payload. It is automatically disabled while an effective traffic-group policy
-is active, because dispatcher placement happens before FE tokenization and cannot evaluate every
-request-aware rule faithfully. Prompt chunks also carry `force_batch=false` in that state, making
-both FE prompt-batch endpoints route each tokenized item independently. The master defensively
-checks any direct aggregate request against its per-item lengths and request ids: a uniform group
-is accepted, while missing metadata or a batch spanning multiple groups is rejected instead of
-silently routing by the aggregate length. None of these safeguards changes the configured FE
-source.
+`workerRegistry.engineType` defaults to `LLM`. LLM workers must have a published, alive endpoint
+from the normal gRPC status synchronization. Embedding workers expose ARPC instead of that gRPC
+API, so their availability comes from service discovery. Discovery returning no workers makes
+embedding batch selection unavailable. Register the HTTP base port in an `http` endpoint;
+embedding targets return `arpc_port = http_port + 1`, while LLM targets return `grpc_port`.
+The existing `MODEL_SERVICE_CONFIG` supplies the model, role and discovery address.
+Startup also requires the deployment's `HIPPO_ROLE`, as on main, even when consistency is disabled.
 
-## Allocation matrix
+`router.batchScheduleMaxCount` defaults to 1000 and must be positive. Legacy top-level JSON fields
+and the old `ENGINE_TYPE`, `BATCH_SCHEDULE_MAX_COUNT`, and `BATCH_LOAD_BALANCE_STRATEGY` environment
+variables are rejected at startup; move the first two into the document above and remove the
+strategy setting.
 
-The dispatcher asks `/batch_schedule` only for values it will consume:
+To enable HTTP dispatcher routes, configure an FE pool:
 
-| FE mode | Endpoint consumes BE assignment | `preAssignBe` | Master request | FE source |
-| --- | --- | --- | --- | --- |
-| `master` | yes | `true` | `assign_be=true, assign_fe=true` | master response |
-| `master` | no, or toggle off | any / `false` | `assign_be=false, assign_fe=true` | master response |
-| `local` | yes | `true` | `assign_be=true, assign_fe=false` | local `FePool` |
-| `local` | no, or toggle off | any / `false` | no master call | local `FePool` |
+```sh
+export DISPATCH_CONFIG='{
+  "fePoolServiceId": "your-fe-discovery-service",
+  "subBatch": "count:5",
+  "feAllocation": "master",
+  "preAssignBe": false
+}'
+```
 
-This prevents an endpoint that ignores `role_addrs` from advancing the BE strategy cursor and
-prevents local FE mode from advancing the master's FE cursor.
+`subBatch` accepts `count:N` (N chunks) or `size:N` (at most N items per chunk). FE allocation is
+`master` by default; `local` assigns from each dispatcher's own healthy FE pool. Spring
+`dispatch.*` properties and `DISPATCH_*` environment overrides take precedence over the JSON
+(e.g. `DISPATCH_FE_ALLOCATION=local`). Invalid overrides fail at startup instead of being ignored.
+`DISPATCH_CONFIG.discoveryFailureGraceMs` controls how long an empty FE discovery result may
+retain the previous pool; the default is 300000 ms. FE health probes still filter that pool.
 
-## Wire contract
+BE pre-assignment is optional and defaults to false. To enable it, set `preAssignBe=true` and
+supply the same nonempty `DISPATCH_ROUTING_TOKEN` to the dispatcher and receiving RTP FEs. The
+FE validates that token before accepting HTTP `role_addrs`. Keep the token outside JSON config
+and obtain its value through the deployment's secret configuration.
 
-`BatchScheduleRequest` adds two boolean fields:
+For callers that split batches in BE and only need backend addresses, `DISPATCH_CONFIG` is
+unnecessary; send `assign_fe=false` to `/rtp_llm/batch_schedule`.
 
-- `assign_be`: return worker address/role/port fields.
-- `assign_fe`: stamp `fe_url` from the elected master's FE pool.
+## Leader election
 
-Both default to `true` when omitted, preserving the original `{\"batch_count\": N}` behavior.
-They are additive snake_case JSON fields, and request/response DTOs ignore unknown properties for
-mixed-version compatibility.
+Leader election uses mainline `LBStatusConsistencyService` unchanged. It is disabled by default.
+A deployment that needs one shared allocation cursor must explicitly supply its existing
+ZooKeeper configuration, for example:
 
-When `assign_be=false`, `DefaultRouter.batchSchedule` returns N index-preserving placeholder
-targets without consulting worker topology, role validation, or a BE strategy. The outer master
-handler can then stamp `fe_url` onto those placeholders. Consequently FE-only fanout remains
-available while the BE table is warming and in multi-role deployments.
+```sh
+export FLEXLB_SYNC_CONSISTENCY_CONFIG='{
+  "needConsistency": true,
+  "masterElectType": "ZOOKEEPER",
+  "zookeeperConfig": {"zkHost": "your-zookeeper:2181", "zkTimeoutMs": 10000}
+}'
+```
 
-A request with both flags false is invalid; the dispatcher avoids issuing it.
-Direct requests with `assign_be=true` are also rejected while traffic-group routing is active;
-the dispatcher converts its own request to FE-only allocation before reaching that guard.
+With consistency enabled, followers forward batch scheduling to the elected master. The HTTP
+path rejects self-forwarding and a second forwarding hop, matching the mainline gRPC guard.
+An unknown leader, failed forwarding request or missing batch endpoint fails the request; a
+follower does not allocate locally in these cases. Without consistency, each instance allocates
+locally and the cursors are independent.
 
-## Master mode flow
+## Allocation contract
 
-1. `BatchHandler` computes `assign_be` and `assign_fe` from the endpoint and configuration.
-2. `BatchScheduleClient` calls `BatchScheduleCoordinator` in-process on the master or forwards to
-   the elected master from a slave.
-3. If requested, `DefaultRouter` reserves BE targets once.
-4. If requested, `MasterFeAssigner` calls `FePool.nextBatch(N)` once and stamps the returned URLs
-   1:1 onto targets.
-5. `FanoutService` sends each chunk only to its stamped URL.
+```json
+{"batch_count": 5, "assign_be": true, "assign_fe": false}
+```
 
-`MasterFeAssigner` stamps only when the node resolved locally
-(`!isNeedConsistency() || isMaster()`). A slave therefore preserves the URLs already stamped by
-the master instead of consuming its own cursor. The in-process master path stamps in
-`BatchScheduleClient`; a forwarded request stamps in `HttpLoadBalanceServer`. Both use the same
-bean and cursor.
+Both assignment flags default to true. `batch_count` must be between 1 and the configured maximum;
+a request with both flags false is invalid. Successful responses contain exactly that many
+`server_status` entries, each with its requested BE fields and/or optional `fe_url`.
 
-Assignment is all-or-nothing per pool reservation. If the master has no FE view, a URL is blank,
-or assignment throws, affected chunks fail with `CHUNK_NO_FE`; master mode deliberately does not
-fall back to a local cursor.
+| FE mode | BE pre-assignment used | Master request | FE source |
+| --- | --- | --- | --- |
+| `master` | yes | `assign_be=true, assign_fe=true` | master response |
+| `master` | no | `assign_be=false, assign_fe=true` | master response |
+| `local` | yes | `assign_be=true, assign_fe=false` | local FE pool |
+| `local` | no | no scheduling call | local FE pool |
 
-## Local mode flow
+BE assignment supports a single configured role. It rejects active `router.groupSelector`
+rules or default targets because batch-count-only requests lack per-item routing information.
+The dispatcher automatically defers BE placement to the FEs when group routing is active.
+FE-only assignment works with multi-role deployments and during BE warm-up. Missing FE
+assignments produce visible chunk failures; master mode does not fall back to a local FE cursor.
 
-`BatchHandler` does not request master FE URLs. Immediately before constructing chunk plans,
-`FanoutService` calls the local `FePool.nextBatch(N)` once. One health snapshot and one contiguous
-cursor reservation keep URL-to-chunk mapping deterministic even though chunk calls run
-concurrently.
+## LLM execution follows mainline scheduling
 
-If local discovery is empty or unhealthy, affected chunks fail with `CHUNK_NO_FE`. Local mode does
-not fall back to the master: each mode has one explicit source, so failures and load attribution
-remain understandable.
+Unassigned LLM items use the normal per-request master scheduler, including its existing batching,
+admission and completion handling. The dispatcher does not add aggregate-demand protobuf fields,
+synthetic batch reservations or a second request lifecycle.
 
-## BE pre-assignment compatibility
+A chunk whose items all have the same preassigned PDFUSION backend can use `BatchGenerateCall`.
+A local/static PDFUSION deployment can also use it without master routing. Other topologies use
+per-item inference. Direct batch RPC validation rejects mixed destinations and non-PDFUSION
+assignments, preserves result order and item deadlines, and does not replay a failed RPC.
 
-When `preAssignBe=true` and an endpoint is pre-assignable, each selected target becomes a Python
-`RoleAddr` in that chunk's copied `generate_config.role_addrs`. The FE then skips its own master
-routing round-trip.
-
-The default is `false` because older FE builds may leave JSON role addresses as dictionaries and
-fail when model RPC code reads `addr.role`. Enable the optimization only after all FEs include the
-`RoleAddr.validate_role` conversion. Disabling it still permits master FE allocation through an
-FE-only request and does not move the BE cursor.
-
-BE batch selection currently uses its own round-robin batch strategy rather than the normal
-per-request pending-load ledger. Until the next worker-status synchronization, ordinary
-load-aware `/schedule` traffic can therefore underestimate a worker that just received a batch.
-This is an explicit, opt-in limitation: prefer a load-independent ordinary strategy when the two
-paths are mixed heavily, and observe the allocation-dimension tags and dispatcher PV records before
-enabling BE pre-assignment broadly.
-
-## Deployment behavior
-
-- Master FE mode requires the elected master to have a dispatcher `FePool`
-  (`dispatch.fe-pool-service-id`). Without one, master FE assignment is empty and chunks fail
-  visibly.
-- Multi-role deployments can use master FE-only mode (`preAssignBe=false`) or local FE mode.
-  BE pre-assignment still requires a topology supported by `DefaultRouter.batchSchedule`.
-- During a master outage, switching to `DISPATCH_FE_ALLOCATION=local` and restarting removes the
-  master dependency for FE selection. If BE pre-assignment is enabled, disable it as well to remove
-  the remaining master call.
-- Rolling upgrade is safe by default: BE stamping is off, old `batch_count` callers retain both
-  assignments, and unknown additive fields are ignored. A new dispatcher talking to an old master
-  may cause that old master to compute an unused BE target for an FE-only request, but service
-  correctness is preserved until the master upgrade completes.
-
-## Observability
-
-- `dispatcher.preassign.rt` is tagged with `result`, `assign_be`, and `assign_fe`, so an empty
-  FE-only result is distinguishable from a BE-only failure.
-- `dispatcher.fanout.rt` is tagged with `fe_allocation=master|local`.
-- Batch PV logs record `assignBe` and `assignFe`.
-- Master batch-schedule metrics carry the same allocation-dimension tags.
-- `CHUNK_NO_FE` is the primary failed-chunk signal for either source; use the allocation-mode tag
-  and startup config log to identify which pool to inspect.
-
-## Code map
-
-- `BatchScheduleRequest` — additive allocation flags with legacy defaults.
-- `DefaultRouter.batchSchedule` — BE selection or FE-only placeholders.
-- `MasterFeAssigner` — guarded master FE stamping.
-- `BatchScheduleClient` / `HttpLoadBalanceServer` — local and forwarded master entry points.
-- `BatchHandler` — computes requested dimensions and avoids unnecessary master calls.
-- `FanoutService` — reserves the configured FE vector and performs bounded-concurrency fanout.
-- `DispatchConfig` / `FeAllocationMode` — validated operator controls.
-
-## Contract tests
-
-- Legacy JSON defaults and explicit snake_case flags.
-- FE-only placeholders without role checks or BE strategy invocation.
-- Master stamping guards, one contiguous reservation, and `assign_fe=false` no-op.
-- Local allocation reserves once and ignores stale master URLs.
-- Non-pre-assignable endpoints request FE only; local/no-BE mode skips the master entirely.
-- Allocation dimensions appear in metrics and PV logs.
-- End-to-end fanout covers successful assignment, missing assignment, partial failure, timeouts,
-  malformed responses, cancellation, and header/query propagation.
+This BE pre-assignment path is stateless placement: it does not reserve LLM capacity. Keep
+`preAssignBe=false` when master-side LLM admission and accounting are required.

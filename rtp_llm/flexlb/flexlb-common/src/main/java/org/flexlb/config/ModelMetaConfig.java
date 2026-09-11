@@ -1,114 +1,81 @@
 package org.flexlb.config;
 
-import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.util.IdUtils;
+import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
-import java.util.HashSet;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
-import java.util.TreeSet;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class ModelMetaConfig {
 
-    /**
-     * Model metadata configuration
-     */
-    private static final ConcurrentHashMap<String/*serviceId*/, ServiceRoute> modelServiceRoute = new ConcurrentHashMap<>();
+    private static final List<RoleType> ROUTING_ORDER = List.of(
+            RoleType.PDFUSION,
+            RoleType.DECODE,
+            RoleType.PREFILL,
+            RoleType.VIT);
 
-    /** Immutable snapshot rebuilt atomically with every route-table mutation. */
-    private static volatile Set<String> loadBalanceSyncModels = Set.of();
+    private final ServiceRoute serviceRoute;
+    private final String modelName;
+    private final List<RoleType> requiredRoles;
 
-    /**
-     * Memoized {@link #getConfiguredRoleTypes()} result, tagged with the route-table version it
-     * was computed against. The route table only changes through
-     * {@link #putServiceRoute}/{@link #removeServiceRoute} (startup and tests), while the union
-     * is read per {@code /batch_schedule} request — recomputing the set walk per request is
-     * pure waste. The version tag keeps a computation that raced a table mutation from being
-     * published: it is only valid while the version it snapshotted is still current.
-     */
-    private static volatile VersionedRoleTypes configuredRoleTypesCache;
-
-    /** Bumped on every route-table mutation; see {@link #configuredRoleTypesCache}. */
-    private static final AtomicLong routeTableVersion = new AtomicLong();
-
-    private record VersionedRoleTypes(long version, List<RoleType> roleTypes) {
-    }
-
-    public static synchronized void putServiceRoute(String serviceId, ServiceRoute serviceRoute) {
-        modelServiceRoute.put(serviceId, serviceRoute);
-        routeTableVersion.incrementAndGet();
-        rebuildLoadBalanceSyncModels();
-    }
-
-    /** Removes a registered route. Lets tests undo a {@link #putServiceRoute} so the
-     *  process-wide route table stays free of cross-test residue. */
-    public static synchronized void removeServiceRoute(String serviceId) {
-        modelServiceRoute.remove(serviceId);
-        routeTableVersion.incrementAndGet();
-        rebuildLoadBalanceSyncModels();
-    }
-
-    public static Set<String> getLoadBalanceSyncModels() {
-        return loadBalanceSyncModels;
-    }
-
-    private static void rebuildLoadBalanceSyncModels() {
-        Set<String> rebuilt = new HashSet<>();
-        modelServiceRoute.values().stream()
-                .filter(route -> Boolean.TRUE.equals(route.getLoadBalance()))
-                .map(ServiceRoute::getServiceId)
-                .map(IdUtils::getModelNameByServiceId)
-                .forEach(rebuilt::add);
-        loadBalanceSyncModels = Set.copyOf(rebuilt);
-    }
-
-    public ServiceRoute getServiceRoute(String serviceId) {
-        return modelServiceRoute.get(serviceId);
-
-    }
-
-    /**
-     * Unique service-discovery addresses referenced by the registered route table. This is a
-     * diagnostics view, sorted so error messages and tests remain deterministic.
-     */
-    public List<String> getConfiguredDiscoveryAddresses() {
-        Set<String> addresses = new TreeSet<>();
-        for (ServiceRoute serviceRoute : modelServiceRoute.values()) {
-            for (Endpoint endpoint : serviceRoute.getAllEndpoints()) {
-                if (endpoint != null && StringUtils.isNotBlank(endpoint.getAddress())) {
-                    addresses.add(endpoint.getAddress());
-                }
-            }
+    public ModelMetaConfig() {
+        String document = System.getenv("MODEL_SERVICE_CONFIG");
+        if (document == null || document.isBlank()) {
+            throw new IllegalStateException(
+                    "master load balancer env MODEL_SERVICE_CONFIG is empty");
         }
-        return List.copyOf(addresses);
+        ServiceRoute parsed = JsonUtils.toObject(document, ServiceRoute.class);
+        if (parsed.getServiceId() == null || parsed.getServiceId().isBlank()) {
+            throw new IllegalStateException(
+                    "MODEL_SERVICE_CONFIG must declare service_id");
+        }
+        String servicePrefix = CommonConstants.FUNCTION + ".";
+        if (!parsed.getServiceId().startsWith(servicePrefix)
+                || parsed.getServiceId().length() == servicePrefix.length()) {
+            throw new IllegalStateException(
+                    "MODEL_SERVICE_CONFIG service_id must identify one model");
+        }
+        List<RoleType> parsedRoles = parsed.getAllRoleTypes();
+        Set<RoleType> configured = parsedRoles.isEmpty()
+                ? EnumSet.noneOf(RoleType.class)
+                : EnumSet.copyOf(parsedRoles);
+        List<RoleType> roles = ROUTING_ORDER.stream()
+                .filter(configured::contains)
+                .toList();
+        if (roles.isEmpty()) {
+            throw new IllegalStateException(
+                    "MODEL_SERVICE_CONFIG must declare at least one routable role");
+        }
+        this.serviceRoute = parsed;
+        this.modelName = IdUtils.getModelNameByServiceId(parsed.getServiceId());
+        this.requiredRoles = roles;
     }
 
-    /**
-     * Union of role types declared by all registered service routes. Unlike the
-     * runtime view in ModelWorkerStatus, this reflects deployment configuration and
-     * stays stable when a role's workers are temporarily down or not yet synced.
-     */
-    public List<RoleType> getConfiguredRoleTypes() {
-        long version = routeTableVersion.get();
-        VersionedRoleTypes cached = configuredRoleTypesCache;
-        if (cached != null && cached.version() == version) {
-            return cached.roleTypes();
+    /** Immutable request topology; live endpoint occupancy never changes it. */
+    public List<RoleType> requiredRoles() {
+        return requiredRoles;
+    }
+
+    public String modelName() {
+        return modelName;
+    }
+
+    /** Return a fresh structural list for the single configured service. */
+    public List<Pair<String, Endpoint>> endpointsWithGroup(
+            String requestedModelName,
+            RoleType role) {
+        if (!modelName.equals(requestedModelName)
+                || !requiredRoles.contains(role)) {
+            return List.of();
         }
-        Set<RoleType> roleTypes = new HashSet<>();
-        for (ServiceRoute serviceRoute : modelServiceRoute.values()) {
-            roleTypes.addAll(serviceRoute.getAllRoleTypes());
-        }
-        List<RoleType> computed = List.copyOf(roleTypes);
-        if (routeTableVersion.get() == version) {
-            configuredRoleTypesCache = new VersionedRoleTypes(version, computed);
-        }
-        return computed;
+        return serviceRoute.getAllEndpointsWithGroup(role);
     }
 }

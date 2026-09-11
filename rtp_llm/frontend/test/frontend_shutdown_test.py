@@ -1,7 +1,9 @@
 import asyncio
 import signal
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, create_autospec, patch
 
@@ -12,6 +14,7 @@ from uvicorn import Config, Server
 from rtp_llm.frontend.frontend_app import (
     FrontendApp,
     GracefulShutdownServer,
+    _AllocatorDumpRequestGuard,
     _pre_stop_drain_seconds,
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
@@ -59,15 +62,30 @@ class HangingFrontendServer(FakeFrontendServer):
 
 
 class FakeGrpcClient:
-    def __init__(self):
+    def __init__(self, response=None):
         self.calls = []
+        self.response = response or {"status": "ok"}
 
     async def post_request(self, endpoint, payload):
         self.calls.append((endpoint, payload))
-        return {"status": "ok"}
+        return self.response
 
 
 class FrontendShutdownManagerTest(unittest.TestCase):
+    _DUMP_TOKEN = "unit-test-dump-secret"
+    _DUMP_HEADER = "X-Test-Allocator-Dump-Token"
+
+    def setUp(self):
+        self._log_path = tempfile.TemporaryDirectory()
+        self._log_path_patch = patch.dict(
+            "os.environ", {"LOG_PATH": self._log_path.name}
+        )
+        self._log_path_patch.start()
+
+    def tearDown(self):
+        self._log_path_patch.stop()
+        self._log_path.cleanup()
+
     def wait_until(self, predicate, timeout=1.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -75,6 +93,18 @@ class FrontendShutdownManagerTest(unittest.TestCase):
                 return True
             time.sleep(0.01)
         return predicate()
+
+    def allocator_dump_config(self, cooldown: float = 0) -> SimpleNamespace:
+        return SimpleNamespace(
+            http_port=0,
+            enable_torch_allocator_dump=True,
+            torch_allocator_dump_auth_token=self._DUMP_TOKEN,
+            torch_allocator_dump_auth_header=self._DUMP_HEADER,
+            torch_allocator_dump_cooldown_seconds=cooldown,
+        )
+
+    def dump_headers(self):
+        return {self._DUMP_HEADER: self._DUMP_TOKEN}
 
     def test_draining_rejects_new_business_and_marks_health_unavailable(self):
         app_owner = FrontendApp.__new__(FrontendApp)
@@ -154,6 +184,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ("get", "/worker_status", None),
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
+            ("post", "/dump_torch_allocator", {}),
             ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
             ("post", "/tokenizer/encode", {"prompt": "hello"}),
@@ -187,6 +218,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ("get", "/worker_status", None),
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
+            ("post", "/dump_torch_allocator", {}),
             ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
             ("post", "/tokenizer/encode", {"prompt": "hello"}),
@@ -201,6 +233,170 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             self.assertEqual(response.headers.get("retry-after"), "1", path)
 
         self.assertEqual(app_owner.grpc_client.calls, [])
+
+    def test_dump_torch_allocator_is_disabled_by_default(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = FakeGrpcClient()
+
+        response = TestClient(app_owner.create_app()).post(
+            "/dump_torch_allocator", json={}
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(app_owner.grpc_client.calls, [])
+
+    def test_dump_torch_allocator_rejects_missing_or_wrong_auth_without_rpc(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = self.allocator_dump_config()
+        app_owner.grpc_client = FakeGrpcClient()
+        client = TestClient(app_owner.create_app())
+
+        missing = client.post("/dump_torch_allocator")
+        wrong = client.post(
+            "/dump_torch_allocator",
+            headers={self._DUMP_HEADER: "wrong-secret"},
+        )
+
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(wrong.status_code, 401)
+        self.assertEqual(app_owner.grpc_client.calls, [])
+        self.assertNotIn(self._DUMP_TOKEN, missing.text + wrong.text)
+
+    def test_dump_torch_allocator_rejects_enabled_config_without_secret(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(
+            http_port=0,
+            enable_torch_allocator_dump=True,
+            torch_allocator_dump_auth_token="",
+            torch_allocator_dump_cooldown_seconds=0,
+        )
+        app_owner.grpc_client = FakeGrpcClient()
+
+        with self.assertRaisesRegex(ValueError, "authentication token"):
+            app_owner.create_app()
+
+    def test_dump_torch_allocator_forwards_when_enabled_without_leaking_details(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = self.allocator_dump_config()
+        app_owner.grpc_client = FakeGrpcClient(
+            {
+                "status": "ok",
+                "backends": [
+                    {
+                        "pid": 123,
+                        "dp_address": "10.0.0.1:8089",
+                        "file_path": "/private/allocator.log",
+                    }
+                ],
+            }
+        )
+
+        response = TestClient(app_owner.create_app()).post(
+            "/dump_torch_allocator", json={}, headers=self.dump_headers()
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()), {"status", "dump_id"})
+        self.assertEqual(response.json()["status"], "ok")
+        dump_id = response.json()["dump_id"]
+        self.assertEqual(len(dump_id), 24)
+        self.assertEqual(
+            app_owner.grpc_client.calls,
+            [
+                (
+                    "dump_torch_allocator",
+                    {"auth_token": self._DUMP_TOKEN, "dump_id": dump_id},
+                )
+            ],
+        )
+
+    def test_dump_torch_allocator_returns_sanitized_backend_failure(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = self.allocator_dump_config()
+        app_owner.grpc_client = FakeGrpcClient(
+            {
+                "status": "error",
+                "backends": [{"pid": 123, "file_path": "/private/allocator.log"}],
+                "errors": ["10.0.0.1:8089: raw backend failure"],
+            }
+        )
+
+        response = TestClient(app_owner.create_app()).post(
+            "/dump_torch_allocator", json={}, headers=self.dump_headers()
+        )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(set(response.json()), {"status", "dump_id", "error"})
+        self.assertEqual(
+            response.json()["error"], "allocator dump failed; see server logs"
+        )
+        self.assertNotIn("10.0.0.1", response.text)
+        self.assertNotIn("/private", response.text)
+        self.assertNotIn("raw backend failure", response.text)
+
+    def test_dump_torch_allocator_endpoint_enforces_cooldown(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = self.allocator_dump_config(cooldown=60)
+        app_owner.grpc_client = FakeGrpcClient()
+        client = TestClient(app_owner.create_app())
+
+        self.assertEqual(
+            client.post(
+                "/dump_torch_allocator", headers=self.dump_headers()
+            ).status_code,
+            200,
+        )
+        response = client.post(
+            "/rtp_llm/dump_torch_allocator", headers=self.dump_headers()
+        )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertGreaterEqual(int(response.headers["retry-after"]), 1)
+        self.assertEqual(len(app_owner.grpc_client.calls), 1)
+
+    def test_allocator_dump_guard_shares_single_flight_and_cooldown(self):
+        now = [100.0]
+        runtime_dir = Path(self._log_path.name)
+        first_worker = _AllocatorDumpRequestGuard(
+            10.0, runtime_dir=runtime_dir, clock=lambda: now[0]
+        )
+        second_worker = _AllocatorDumpRequestGuard(
+            10.0, runtime_dir=runtime_dir, clock=lambda: now[0]
+        )
+
+        self.assertEqual(first_worker.try_begin(), ("ok", 0.0))
+        self.assertEqual(second_worker.try_begin(), ("in_flight", 0.0))
+        first_worker.finish()
+        now[0] = 105.0
+        self.assertEqual(second_worker.try_begin(), ("cooldown", 5.0))
+        now[0] = 110.0
+        self.assertEqual(second_worker.try_begin(), ("ok", 0.0))
+        second_worker.finish()
+
+    def test_allocator_dump_guard_rejects_invalid_cooldowns(self):
+        runtime_dir = Path(self._log_path.name)
+        for cooldown in (-1.0, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(cooldown=cooldown), self.assertRaises(ValueError):
+                _AllocatorDumpRequestGuard(cooldown, runtime_dir=runtime_dir)
 
     def test_streaming_request_is_counted_until_body_iterator_finishes(self):
         manager = FrontendShutdownManager()

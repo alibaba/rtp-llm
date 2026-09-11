@@ -36,12 +36,15 @@ public class HttpNettyConfig {
     @Bean(name = "nettyClient")
     public HttpNettyClientHandler createNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
-        EventLoopGroup group = new NioEventLoopGroup(config.getHttpNettyEventLoopThreads());
+        EventLoopGroup group = new NioEventLoopGroup(
+                config.getInternalRuntime().getHttpNettyEventLoopThreads());
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
-        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(config.getHttpNettyEventExecutorThreads(),
+        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(
+                config.getInternalRuntime().getHttpNettyEventExecutorThreads(),
                 new DefaultThreadFactory("default-custom-executor"),
                 // Use bounded queue with configurable capacity
-                config.getHttpNettyEventExecutorQueueSize(), RejectedExecutionHandlers.reject());
+                config.getInternalRuntime().getHttpNettyEventExecutorQueueCapacity(),
+                RejectedExecutionHandlers.reject());
         int requestTimeoutMillis = 500;
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
@@ -69,12 +72,15 @@ public class HttpNettyConfig {
     @Bean(name = "syncNettyClient")
     public HttpNettyClientHandler createSyncNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
-        EventLoopGroup group = new NioEventLoopGroup(config.getHttpNettyEventLoopThreads());
+        EventLoopGroup group = new NioEventLoopGroup(
+                config.getInternalRuntime().getHttpNettyEventLoopThreads());
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
-        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(config.getHttpNettyEventExecutorThreads(),
+        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(
+                config.getInternalRuntime().getHttpNettyEventExecutorThreads(),
                 new DefaultThreadFactory("default-custom-executor-sync"),
                 // Use bounded queue with configurable capacity
-                config.getHttpNettyEventExecutorQueueSize(), RejectedExecutionHandlers.reject());
+                config.getInternalRuntime().getHttpNettyEventExecutorQueueCapacity(),
+                RejectedExecutionHandlers.reject());
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1000)

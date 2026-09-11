@@ -412,10 +412,13 @@ class FIFOSchedulerConfig:
 
 
 class GrammarConfig:
+    compile_concurrency: int
+    compile_queue_size: int
+    compile_timeout_ms: int
+    compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
-    grammar_backend: str
     num_workers: int
-    override_stop_tokens: list[int]
+    terminate_without_stop_token: bool
     tokenizer_info_json: str
 
     def __getstate__(self) -> tuple:
@@ -568,9 +571,13 @@ class FfnDisAggregateConfig:
     def to_string(self) -> str:
         ...
 class GrammarConfig:
+    compile_concurrency: int
+    compile_queue_size: int
+    compile_timeout_ms: int
     compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
     num_workers: int
+    terminate_without_stop_token: bool
     tokenizer_info_json: str
     def __getstate__(self) -> tuple:
         ...
@@ -737,6 +744,11 @@ class KVCacheConfig:
     enable_independent_group_eviction: bool
     device_cache_min_free_blocks: int
     load_cache_retry_times: int
+    kv_cache_event_publisher_type: str
+    kv_cache_event_manager_endpoint: str
+    kv_cache_event_instance_group: str
+    kv_cache_event_instance_id: str
+    kv_cache_event_host_ip_port: str
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int

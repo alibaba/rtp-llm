@@ -21,6 +21,7 @@ What this class does NOT do — by design:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
@@ -56,7 +57,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     _CompressorPending,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
-from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -199,9 +199,7 @@ def _fp8_prefill_score_chunk_rows() -> int:
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     ws = _topk_v3_workspace_cache.get(device)
     if ws is None:
-        ws = torch.empty(
-            _TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device
-        )
+        ws = torch.empty(_TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
         _topk_v3_workspace_cache[device] = ws
     return ws
 
@@ -255,9 +253,9 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     seqlen: int
     M: int  # = bsz * seqlen  (= T_total for flat 2D)
     sp_int: int  # legacy compat: prefix_lengths[0] under varlen, sp_int otherwise
-    end_pos: int  # legacy compat: sp_per_req[0] + S_0 under varlen
+    end_pos: int  # legacy/diagnostics only; 0 during varlen graph capture
     is_fresh_prefill: bool  # legacy compat: any-cont negation under varlen
-    T: int  # compressed K count: total across batch (sum T_b) under varlen
+    T: int  # flat K capacity; actual lengths remain in cu_kv_seqlens
 
     # ── Q-side ──
     freqs_cis_slice: torch.Tensor  # self.freqs_cis[sp:sp+seqlen]; pre-sliced view
@@ -512,8 +510,7 @@ class IndexerFP8(PoolBackedModule):
                         stream=post_gather_stream,
                     )
                 except Exception:
-                    with suppress(Exception):
-                        asm.discard_assemble_indexer_k_async(pending)
+                    self._discard_prefill_k_cache_gather(pending)
                     raise
                 return pending
 
@@ -540,8 +537,13 @@ class IndexerFP8(PoolBackedModule):
             return
         from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
 
-        with suppress(Exception):
+        try:
             asm.discard_assemble_indexer_k_async(pending)
+        except Exception:
+            logging.exception(
+                "[IndexerFP8] Failed to discard pending CP indexer K gather; "
+                "communication state may be unusable"
+            )
 
     # --------------------------------------------------------------
     # Q-projection + RoPE helper (shared between prefill & decode)
@@ -801,7 +803,16 @@ class IndexerFP8(PoolBackedModule):
                 cu_kv_seqlens[1:] = torch.cumsum(T_per_req.to(torch.int64), dim=0).to(
                     torch.int32
                 )
-                T = int(cu_kv_seqlens[-1].item())  # total compressed K across batch
+                capturing = (
+                    device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+                )
+                # Graph shapes must not depend on request lengths. The score
+                # and gather kernels mask using device-side cu_kv_seqlens/ks/ke.
+                T = (
+                    self._kv_cache_t * batch_size
+                    if capturing
+                    else int(cu_kv_seqlens[-1].item())
+                )
                 M = int(position_ids.numel())  # T_total
 
                 positions_d = position_ids.to(
@@ -864,8 +875,9 @@ class IndexerFP8(PoolBackedModule):
             # native path drives off the per-request tensors); ``sp_int``
             # is still passed to ``self.compressor(x, sp, meta=...)`` but
             # is ignored there because ``meta.is_batched=True``. Keep the
-            # request-0 values for diagnostics / B==1 collapse equivalence.
-            end_pos = int(seq_total_per_req[0].item())
+            # request-0 value for eager diagnostics / B==1 equivalence; graph
+            # capture uses an unused sentinel without synchronizing the device.
+            end_pos = 0 if capturing else int(seq_total_per_req[0].item())
             is_fresh_prefill = sp_int == 0
         else:
             # Legacy B == 1 scalar path — unchanged, bit-equal to pre-Phase-3a.
@@ -1105,6 +1117,7 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
+            del q, weights, q_for_quant, w_for_quant
 
             assert (
                 has_fp8_mqa_logits()
@@ -1319,6 +1332,7 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
+            del q, weights, q_for_quant, w_for_quant
 
             assert (
                 has_fp8_mqa_logits()

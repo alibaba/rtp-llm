@@ -1,12 +1,14 @@
 package org.flexlb.service.grpc;
 
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatus.EngineObservation;
+import org.flexlb.dao.master.WorkerStatus.StatusObservation;
+import org.flexlb.dao.master.WorkerStatus.TaskObservation;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
-import org.flexlb.enums.TaskPhase;
 import org.flexlb.enums.PriorityPreemptionProgress;
+import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -19,38 +21,35 @@ import java.util.Set;
  */
 public class EngineStatusConverter {
 
-    /**
-     * Convert WorkerStatusPB to WorkerStatusResponse
-     */
-    public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
-        WorkerStatusResponse response = new WorkerStatusResponse();
-
-        response.setRole(RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB));
-        // Compatibility only: LocalRpcServer::GetWorkerStatus does not currently
-        // populate this field. Preserve it for protocol compatibility/telemetry,
-        // but do not use it as a scheduling or batching limit.
-        response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
-        response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
-        response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());
-        response.setStepLatencyMs(workerStatusPB.getStepLatencyMs());
-        response.setIterateCount(workerStatusPB.getIterateCount());
-        response.setDpSize(workerStatusPB.getDpSize());
-        response.setTpSize(workerStatusPB.getTpSize());
-        response.setDpRank(workerStatusPB.getDpRank());
-        response.setStatusVersion(workerStatusPB.getStatusVersion());
-        response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
-        response.setAlive(workerStatusPB.getAlive());
-        response.setAvailableKvCacheTokens(workerStatusPB.getAvailableKvCache());
-        response.setTotalKvCacheTokens(workerStatusPB.getTotalKvCache());
-        response.setMaxSeqLen(workerStatusPB.getMaxSeqLen());
-        response.setMaxBatchTokensSize(workerStatusPB.getMaxBatchTokensSize());
-
-        response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
-
-        // Convert finished task list
-        response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
-
-        return response;
+    /** Convert one protobuf response directly into the immutable status boundary. */
+    public static StatusObservation convertToStatusObservation(
+            WorkerStatus owner,
+            EngineRpcService.WorkerStatusPB workerStatusPB) {
+        Map<String, TaskObservation> runningTasks = convertTasks(
+                workerStatusPB.getRunningTaskInfoList());
+        Map<String, TaskObservation> finishedTasks = convertTasks(
+                workerStatusPB.getFinishedTaskListList());
+        EngineObservation engine = new EngineObservation(
+                RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB),
+                (long) workerStatusPB.getAvailableConcurrency(),
+                workerStatusPB.getAvailableKvCache(),
+                workerStatusPB.getTotalKvCache(),
+                runningTasks,
+                workerStatusPB.getStepLatencyMs(),
+                workerStatusPB.getIterateCount(),
+                workerStatusPB.getDpSize(),
+                workerStatusPB.getTpSize(),
+                workerStatusPB.getDpRank(),
+                workerStatusPB.getMaxSeqLen(),
+                workerStatusPB.getMaxBatchTokensSize(),
+                workerStatusPB.getRunningQueryLen(),
+                workerStatusPB.getWaitingQueryLen());
+        return owner.bindStatusObservation(
+                engine,
+                workerStatusPB.getAlive(),
+                workerStatusPB.getStatusVersion(),
+                workerStatusPB.getLatestFinishedVersion(),
+                finishedTasks);
     }
 
     /**
@@ -73,43 +72,46 @@ public class EngineStatusConverter {
     }
 
     /**
-     * Convert list of TaskInfoPB to list of TaskInfo
+     * Convert protobuf task values directly into immutable observations.
      */
-    private static Map<String, TaskInfo> convertToTaskInfoList(
+    private static Map<String, TaskObservation> convertTasks(
             List<EngineRpcService.TaskInfoPB> taskInfoPBList) {
-        if (taskInfoPBList == null) {
-            return null;
+        if (taskInfoPBList == null || taskInfoPBList.isEmpty()) {
+            return Map.of();
         }
-        Map<String, TaskInfo> taskInfoMap = new HashMap<>(taskInfoPBList.size());
+        Map<String, TaskObservation> tasks = new HashMap<>(
+                taskInfoPBList.size());
 
-        for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
-            TaskInfo taskInfo = new TaskInfo();
-            taskInfo.setRequestId(taskInfoPB.getRequestId());
-            taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
-            taskInfo.setInputLength(taskInfoPB.getInputLength());
-            taskInfo.setWaitingTime(taskInfoPB.getWaitingTimeMs());
-            taskInfo.setIterateCount(taskInfoPB.getIterateCount());
-            taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
-            taskInfo.setDpRank(taskInfoPB.getDpRank());
-            taskInfo.setBatchId(taskInfoPB.getBatchId());
-            taskInfo.setExecutionTimeMs(taskInfoPB.getExecutionTimeMs());
-            taskInfo.setPhase(resolvePhase(taskInfoPB));
-            taskInfo.setPriorityPreemptionProgress(switch (
-                    taskInfoPB.getPriorityPreemptionProgress()) {
-                case PRIORITY_PREEMPTION_CANCELING -> PriorityPreemptionProgress.CANCELING;
-                case PRIORITY_PREEMPTION_CANCELED -> PriorityPreemptionProgress.CANCELED;
-                case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
-                        PriorityPreemptionProgress.NONE;
-            });
-            if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
-                taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
-                taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());
-            }
-
-            taskInfoMap.put(String.valueOf(taskInfoPB.getRequestId()), taskInfo);
+        for (EngineRpcService.TaskInfoPB task : taskInfoPBList) {
+            long errorCode = task.hasErrorInfo()
+                    ? task.getErrorInfo().getErrorCode() : 0L;
+            String errorMessage = errorCode == 0L
+                    ? null : task.getErrorInfo().getErrorMessage();
+            TaskObservation observation = new TaskObservation(
+                    task.getRequestId(),
+                    task.getPrefixLength(),
+                    0L,
+                    task.getInputLength(),
+                    task.getWaitingTimeMs(),
+                    task.getIterateCount(),
+                    task.getEndTimeMs(),
+                    task.getDpRank(),
+                    errorCode,
+                    errorMessage,
+                    task.getBatchId(),
+                    resolvePhase(task),
+                    task.getExecutionTimeMs(),
+                    switch (task.getPriorityPreemptionProgress()) {
+                        case PRIORITY_PREEMPTION_CANCELING ->
+                                PriorityPreemptionProgress.CANCELING;
+                        case PRIORITY_PREEMPTION_CANCELED ->
+                                PriorityPreemptionProgress.CANCELED;
+                        case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
+                                PriorityPreemptionProgress.NONE;
+                    });
+            tasks.put(String.valueOf(task.getRequestId()), observation);
         }
-
-        return taskInfoMap;
+        return Map.copyOf(tasks);
     }
 
     private static TaskPhase resolvePhase(EngineRpcService.TaskInfoPB task) {

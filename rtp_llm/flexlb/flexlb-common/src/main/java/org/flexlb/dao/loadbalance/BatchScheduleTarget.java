@@ -7,8 +7,9 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
-import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.util.CommonUtils;
 
 /**
@@ -40,12 +41,7 @@ public class BatchScheduleTarget {
     @JsonProperty("arpc_port")
     private Integer arpcPort;
 
-    /**
-     * Role this target serves. Mirrors Python {@code RoleAddr.role} so the dispatcher can stamp
-     * {@code generate_config.role_addrs} 1:1 from {@link BatchScheduleTarget} without remapping.
-     * Carried per-target rather than at response level so a future multi-role batch_schedule
-     * (mixed PREFILL+DECODE in one response) needs no schema change.
-     */
+    /** Backend role consumed by the FE's role_addrs field. */
     @JsonProperty("role")
     private RoleType role;
 
@@ -59,20 +55,12 @@ public class BatchScheduleTarget {
     @JsonProperty("fe_url")
     private String feUrl;
 
-    /**
-     * Test-only convenience for a role-less gRPC target. Production builds targets via
-     * {@link #of(WorkerStatus, RoleType, boolean)} or the no-arg constructor plus setters.
-     */
     public BatchScheduleTarget(String serverIp, int httpPort, Integer grpcPort) {
         this.serverIp = serverIp;
         this.httpPort = httpPort;
         this.grpcPort = grpcPort;
     }
 
-    /**
-     * Test-only convenience for a role-tagged gRPC target. See
-     * {@link #of(WorkerStatus, RoleType, boolean)} for the production path.
-     */
     public BatchScheduleTarget(String serverIp, int httpPort, Integer grpcPort, RoleType role) {
         this.serverIp = serverIp;
         this.httpPort = httpPort;
@@ -80,22 +68,17 @@ public class BatchScheduleTarget {
         this.role = role;
     }
 
-    /**
-     * Build a target for {@code worker} in {@code roleType}, filling exactly the one port slot the
-     * engine speaks: ARPC for embedding engines, gRPC for LLM. This is the single home for the
-     * "registered port + 1, protocol by engine type" rule (mirroring {@link ServerStatus#ok}), so a
-     * selection strategy never has to re-derive it.
-     */
-    public static BatchScheduleTarget of(WorkerStatus worker, RoleType roleType, boolean embedding) {
+    /** The registered HTTP port determines the engine's RPC port and protocol. */
+    public static BatchScheduleTarget of(WorkerHost worker, RoleType role, EngineType engineType) {
         BatchScheduleTarget target = new BatchScheduleTarget();
         target.serverIp = worker.getIp();
-        target.httpPort = worker.getPort();
-        if (embedding) {
-            target.arpcPort = CommonUtils.toArpcPort(worker.getPort());
+        target.httpPort = worker.getHttpPort();
+        if (engineType == EngineType.EMBEDDING) {
+            target.arpcPort = CommonUtils.toArpcPort(worker.getHttpPort());
         } else {
-            target.grpcPort = CommonUtils.toGrpcPort(worker.getPort());
+            target.grpcPort = CommonUtils.toGrpcPort(worker.getHttpPort());
         }
-        target.role = roleType;
+        target.role = role;
         return target;
     }
 }

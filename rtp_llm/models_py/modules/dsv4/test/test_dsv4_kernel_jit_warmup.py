@@ -34,15 +34,18 @@ _stub_package(
     os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
 )
 
+import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
-    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_batched_fp8_einsum_shapes,
+    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_dense_gemm_shapes,
     _collect_dsv4_fp8_mqa_logits_shapes,
     _collect_dsv4_mhc_head_fused_shapes,
     _collect_dsv4_mhc_prenorm_shapes,
     _compute_mhc_prenorm_num_split,
+    _cp_direct_gather_batch_warmup_sizes,
     _cp_padded_tokens_per_rank_bound,
+    _cp_restore_batch_warmup_sizes,
     _dense_gemm_m_grid,
     _dist_rank,
     _generate_dense_gemm_warmup_m_grid,
@@ -52,7 +55,9 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _run_triton_warmup_launch_with_retry,
     _sm100_dense_layout_signature,
     _state_ring_entries_warmup_values,
+    _swa_slot_metadata_batch_warmup_sizes,
     _warmup_fused_kv_compress_norm_rope_insert,
+    resolve_dense_gemm_warmup_max_m,
     warmup_batched_fp8_einsum_jit,
     warmup_compressor_combine_branch_kernels,
     warmup_dense_gemm_jit,
@@ -60,12 +65,17 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     warmup_fp8_mqa_logits_jit,
     warmup_mhc_head_fused_jit,
     warmup_mhc_prenorm_gemm_jit,
-    resolve_dense_gemm_warmup_max_m,
 )
-import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4 import (
+    GroupedFp4Executor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    ChunkedFp8Fp4MoeLayer,
+)
 
 
 def _module_type(name, attrs):
+
     def __init__(self):
         nn.Module.__init__(self)
         for key, value in attrs.items():
@@ -263,6 +273,21 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             (16,),
         )
 
+    def test_swa_metadata_warmup_reaches_1024_but_direct_gather_caps_at_64(self):
+        self.assertEqual(
+            _swa_slot_metadata_batch_warmup_sizes(1024),
+            (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024),
+        )
+        self.assertEqual(
+            _cp_direct_gather_batch_warmup_sizes(1024),
+            (1, 2, 4, 8, 16, 32, 64),
+        )
+        for configured_max_batch in (1, 16, 1024):
+            self.assertEqual(
+                _cp_restore_batch_warmup_sizes(configured_max_batch),
+                (1, 2, 4, 8, 16, 32, 64),
+            )
+
     def test_compressor_warmup_launches_local_and_full_cp_ring_keys(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
 
@@ -332,16 +357,20 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
         root.add_module("fp4", Fp4Linear())
 
-        Grouped = _module_type(
-            "GroupedFP4Strategy",
-            {
-                "_w13": torch.empty((2, 10, 32), dtype=torch.int8),
-                "_s13_dense_t": torch.empty((2, 2, 10), dtype=torch.int32),
-                "_w2": torch.empty((2, 64, 5), dtype=torch.int8),
-                "_s2_dense_t": torch.empty((2, 1, 64), dtype=torch.int32),
-            },
-        )
-        root.add_module("grouped", Grouped())
+        grouped = GroupedFp4Executor.__new__(GroupedFp4Executor)
+        nn.Module.__init__(grouped)
+        grouped._w13 = torch.empty((2, 10, 32), dtype=torch.int8)
+        grouped._s13_dense_t = torch.empty((2, 2, 10), dtype=torch.int32)
+        grouped._w2 = torch.empty((2, 64, 5), dtype=torch.int8)
+        grouped._s2_dense_t = torch.empty((2, 1, 64), dtype=torch.int32)
+        fused_moe = nn.Module()
+        fused_moe.add_module("fused_experts", grouped)
+        common_moe = nn.Module()
+        common_moe.add_module("fused_moe", fused_moe)
+        dsv4_moe = ChunkedFp8Fp4MoeLayer.__new__(ChunkedFp8Fp4MoeLayer)
+        nn.Module.__init__(dsv4_moe)
+        dsv4_moe.add_module("_moe", common_moe)
+        root.add_module("moe", dsv4_moe)
 
         shapes = _collect_dsv4_dense_gemm_shapes(root)
         self.assertEqual(
@@ -797,9 +826,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             old_enabled = mhc_tilelang.tk_mhc_head_fused_enabled
             mhc_tilelang.tk_mhc_head_fused_enabled = lambda: True
             self.addCleanup(
-                lambda: setattr(
-                    mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled
-                )
+                lambda: setattr(mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled)
             )
 
             warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
@@ -861,8 +888,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
 
     def test_slot_dequant_warmup_uses_padded_cp_full_stride(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton
 
         calls = []
+        metadata_batches = []
+        restore_batches = []
         local_slice_bytes = 74880
         cp_size = 2
         expected_full_stride = local_slice_bytes * cp_size
@@ -881,6 +911,25 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 dtype=torch.bfloat16,
                 device=pool_3d.device,
             )
+
+        def fake_slot_metadata(cu_seqlens, prefixes, **kwargs):
+            del cu_seqlens, kwargs
+            metadata_batches.append(int(prefixes.numel()))
+            return torch.empty(0, dtype=torch.int64, device=prefixes.device)
+
+        def fake_restore(
+            out,
+            gathered,
+            restore_indices,
+            seq_lens,
+            offset,
+            *,
+            seq_lens_total,
+        ):
+            del gathered, restore_indices, seq_lens, offset
+            self.assertEqual(int(out.shape[0]), seq_lens_total)
+            restore_batches.append(seq_lens_total)
+            return True
 
         def with_patch(obj, name, value):
             old = getattr(obj, name)
@@ -939,13 +988,54 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     ),
                 )
             )
+            old_values.append(
+                (
+                    _swa_ops_triton,
+                    "compute_swa_slot_in_flat_from_cu",
+                    with_patch(
+                        _swa_ops_triton,
+                        "compute_swa_slot_in_flat_from_cu",
+                        fake_slot_metadata,
+                    ),
+                )
+            )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "direct_triton_fast_path_supported",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "direct_triton_fast_path_supported",
+                        lambda device: True,
+                    ),
+                )
+            )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "try_restore_dequantize_scatter_packed_k_cache_flat",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "try_restore_dequantize_scatter_packed_k_cache_flat",
+                        fake_restore,
+                    ),
+                )
+            )
             warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
 
-            warmup_module.warmup_dsv4_fp8_swa_slot_dequant_jit(
-                kv_cache=object(),
-                cp_size=cp_size,
-                device=torch.device("cpu"),
-            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "DSV4_CP_DIRECT_FLAT_PACK": "0",
+                    "DSV4_CP_SWA_DIRECT_DEQUANT_SCATTER": "0",
+                },
+            ):
+                warmup_module.warmup_dsv4_fp8_swa_slot_dequant_jit(
+                    kv_cache=object(),
+                    cp_size=cp_size,
+                    device=torch.device("cpu"),
+                    max_batch_size=1024,
+                )
         finally:
             for obj, name, value in old_values:
                 setattr(obj, name, value)
@@ -965,6 +1055,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 )
             ],
         )
+        self.assertEqual(
+            metadata_batches,
+            [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+        )
+        self.assertEqual(restore_batches, [1, 2, 4, 8, 16, 32, 64])
 
     def test_mhc_pre_big_fuse_warmup_initializes_tilelang_env_first(self):
         source = inspect.getsource(warmup_module._launch_dummy_mhc_pre_big_fuse)
@@ -976,9 +1071,12 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
 
     def test_jit_kernel_specialization_contracts(self):
-        from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_kv_insert_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _compressor_vllm_triton,
+            _swa_dequant_triton,
+            _swa_kv_insert_triton,
+            _swa_ops_triton,
+        )
 
         compress_src = inspect.getsource(
             _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_sparse_attn.fn
@@ -1028,6 +1126,13 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertNotIn("max_blocks_per_seq: tl.constexpr", gather_src)
         self.assertNotIn("block_stride: tl.constexpr", gather_src)
 
+        slot_src = inspect.getsource(
+            _swa_ops_triton._compute_swa_slot_in_flat_from_cu_kernel.fn
+        )
+        for runtime_scalar in ("window_size", "num_reqs"):
+            self.assertIn(f'"{runtime_scalar}"', slot_src)
+            self.assertNotIn(f"{runtime_scalar}: tl.constexpr", slot_src)
+
     def test_deepgemm_warmup_retry_handles_nvcc_compile_failure(self):
         calls = []
 
@@ -1064,7 +1169,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             calls.append(None)
             if len(calls) == 1:
                 raise RuntimeError(
-                    'Catastrophic error: cannot open source file '
+                    "Catastrophic error: cannot open source file "
                     '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
                 )
 
@@ -1084,7 +1189,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             calls.append(None)
             if len(calls) == 1:
                 cause = RuntimeError(
-                    'Catastrophic error: cannot open source file '
+                    "Catastrophic error: cannot open source file "
                     '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
                 )
                 raise RuntimeError("TileLang mhc_pre failed: shape=(1, 2)") from cause

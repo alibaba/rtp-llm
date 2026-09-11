@@ -1,90 +1,48 @@
 package org.flexlb.config;
 
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FlexlbConfigTest {
-
     @Test
-    void llm_engine_accepts_any_strategy() {
-        FlexlbConfig config = new FlexlbConfig();
-
-        assertDoesNotThrow(() -> config.validateEngineTypeConfig(List.of(RoleType.values())));
+    void batchOptionsUseSchemaVersionTwo() {
+        FlexlbConfig config = ConfigService.parse("""
+                {"schemaVersion":2,"router":{"batchScheduleMaxCount":32},
+                 "workerRegistry":{"engineType":"EMBEDDING"}}
+                """);
+        assertEquals(32, config.getRouter().getBatchScheduleMaxCount());
+        assertEquals(EngineType.EMBEDDING, config.getWorkerRegistry().getEngineType());
     }
 
     @Test
-    void embedding_engine_defaults_to_round_robin_when_strategy_unset() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.setEngineType(EngineType.EMBEDDING);
-
-        assertEquals(LoadBalanceStrategyEnum.ROUND_ROBIN, config.getStrategyForRoleType(RoleType.PDFUSION));
-        assertDoesNotThrow(() -> config.validateEngineTypeConfig(List.of(RoleType.PDFUSION)));
+    void defaultsPreserveMainlineScheduling() {
+        FlexlbConfig config = ConfigService.parse("{\"schemaVersion\":2}");
+        assertEquals(1000, config.getRouter().getBatchScheduleMaxCount());
+        assertEquals(EngineType.LLM, config.getWorkerRegistry().getEngineType());
+        assertTrue(config.isQueue());
+        assertEquals(DispatcherConfig.Type.BATCH, config.getDispatcher().getType());
     }
 
     @Test
-    void llm_engine_keeps_mainline_cost_based_prefill_default_when_strategy_unset() {
-        FlexlbConfig config = new FlexlbConfig();
-
-        assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL,
-                config.getStrategyForRoleType(RoleType.PDFUSION));
+    void oldBatchEnvironmentCannotSilentlySelectTheWrongEngineProtocol() {
+        for (String key : new String[]{"ENGINE_TYPE", "FLEXLB_ENGINE_TYPE",
+                "BATCH_SCHEDULE_MAX_COUNT", "BATCH_LOAD_BALANCE_STRATEGY"}) {
+            assertThrows(ConfigValidationException.class,
+                    () -> new ConfigService(java.util.Map.of(key, "EMBEDDING")));
+        }
     }
 
     @Test
-    void embedding_engine_rejects_explicit_load_aware_strategy() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.setEngineType(EngineType.EMBEDDING);
-        config.setLoadBalanceStrategy(LoadBalanceStrategyEnum.SHORTEST_TTFT);
-
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> config.validateEngineTypeConfig(List.of(RoleType.PDFUSION)));
-        assertTrue(e.getMessage().contains("SHORTEST_TTFT"));
-    }
-
-    @Test
-    void embedding_engine_accepts_round_robin() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.setEngineType(EngineType.EMBEDDING);
-        config.setLoadBalanceStrategy(LoadBalanceStrategyEnum.ROUND_ROBIN);
-
-        assertDoesNotThrow(() -> config.validateEngineTypeConfig(List.of(RoleType.PDFUSION)));
-    }
-
-    @Test
-    void batch_strategy_falls_back_to_round_robin_when_unset() {
-        FlexlbConfig config = new FlexlbConfig();
-
-        // Field starts null; the getter must never return null so /batch_schedule works out of the
-        // box. Without the fallback branch this would return null and the assertion would fail.
-        config.setBatchLoadBalanceStrategy(null);
-        assertEquals(LoadBalanceStrategyEnum.ROUND_ROBIN, config.getBatchLoadBalanceStrategy());
-    }
-
-    @Test
-    void batch_strategy_honours_explicit_value() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.setBatchLoadBalanceStrategy(LoadBalanceStrategyEnum.RANDOM);
-
-        assertEquals(LoadBalanceStrategyEnum.RANDOM, config.getBatchLoadBalanceStrategy());
-    }
-
-    @Test
-    void embedding_engine_ignores_undeployed_roles() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.setEngineType(EngineType.EMBEDDING);
-        config.setLoadBalanceStrategy(LoadBalanceStrategyEnum.ROUND_ROBIN);
-
-        // DECODE's COST_BASED_DECODE default is load-aware, but DECODE is not deployed.
-        assertDoesNotThrow(() -> config.validateEngineTypeConfig(List.of(RoleType.PDFUSION)));
-        assertThrows(IllegalStateException.class,
-                () -> config.validateEngineTypeConfig(List.of(RoleType.PDFUSION, RoleType.DECODE)));
+    void invalidBatchConfigurationFailsAtStartup() {
+        for (String document : new String[] {
+                "{\"schemaVersion\":2,\"router\":{\"batchScheduleMaxCount\":0}}",
+                "{\"schemaVersion\":2,\"workerRegistry\":{\"engineType\":\"UNKNOWN\"}}",
+                "{\"schemaVersion\":2,\"batchScheduleMaxCount\":32}"}) {
+            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(document));
+        }
     }
 }

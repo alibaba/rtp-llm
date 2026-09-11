@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional
 
 import grpc
 import grpc.aio
@@ -258,47 +258,6 @@ class MasterClient:
                 exc_info=True,
             )
 
-    async def cancel_placement(self, request_id: int) -> None:
-        """Release a scheduling reservation that will not be sent to an engine.
-
-        Master discovery can change between the Schedule response and this
-        cleanup call.  Send the idempotent cancellation to both discovered
-        control-plane peers so the node that owns the reservation observes it.
-        Each RPC is independently bounded by ``_best_effort_cancel``.
-        """
-        if self.host_service is None:
-            return
-        addrs = {
-            addr
-            for addr in (
-                self.host_service.get_master_addr(),
-                self.host_service.get_slave_addr(),
-            )
-            if addr
-        }
-        if not addrs:
-            return
-
-        results = await asyncio.gather(
-            *(self._cancel_placement_at(addr, request_id) for addr in addrs),
-            return_exceptions=True,
-        )
-        for addr, result in zip(addrs, results):
-            if isinstance(result, BaseException):
-                route_logger.warning(
-                    "best-effort placement cleanup failed, addr=%s, request_id=%s",
-                    addr,
-                    request_id,
-                    exc_info=result,
-                )
-
-    async def _cancel_placement_at(self, addr: str, request_id: int) -> None:
-        target = self._get_grpc_target(addr)
-        stub = FlexlbServiceStub(self._get_channel(target))
-        await self._best_effort_cancel(
-            stub, request_id, CANCEL_REASON_CLIENT_CANCELLED
-        )
-
     async def get_backend_role_addrs(
         self,
         block_cache_keys: list[int],
@@ -306,28 +265,12 @@ class MasterClient:
         input: GenerateInput,
         request_id: int,
         input_pb: Optional["GenerateInputPB"] = None,
-        seq_len_hint: Optional[int] = None,
-        *,
-        max_new_tokens_hint: Optional[int] = None,
-        generate_timeout_hint: Optional[int] = None,
-        aggregate_demand: bool = False,
-        batch_seq_lens: Optional[Sequence[int]] = None,
-        batch_request_ids: Optional[Sequence[int]] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
 
         request_id is frontend-generated and only used for logging.
         Only connection_failed triggers slave retry and domain fallback.
-        seq_len_hint overrides the reported seq_len when one routing call stands in for
-        more work than this single input — a batch routed as one scheduling unit reports
-        its aggregate prompt length so the master's load accounting sees the true weight.
-        max_new_tokens_hint and generate_timeout_hint likewise override the single input's
-        values when one placement represents the full batch.
-        aggregate_demand tells the master those hints are batch totals, rather than an ordinary
-        single-request placement that happens to omit generate_input.
-        batch_seq_lens preserves the per-item prompt shape for nonlinear prefill prediction.
-        batch_request_ids identifies those items for request-granular completion accounting.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
@@ -335,16 +278,11 @@ class MasterClient:
 
         slave_addr = None
         if self.host_service:
-            slave_addr = self.host_service.get_slave_addr()
+            slave_addr = getattr(self.host_service, "get_slave_addr", lambda: None)()
 
-        ttft_timeout_ms = (
-            generate_timeout_hint
-            if generate_timeout_hint is not None
-            else (
-                input.generate_config.ttft_timeout_ms
-                or input.generate_config.timeout_ms
-            )
-        )
+        ttft_timeout_ms = getattr(
+            input.generate_config, "ttft_timeout_ms", None
+        ) or getattr(input.generate_config, "timeout_ms", None)
         if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
         timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
@@ -355,23 +293,16 @@ class MasterClient:
         request_pb = FlexlbScheduleRequestPB(
             request_id=request_id,
             block_cache_keys=block_cache_keys,
-            seq_len=(seq_len_hint if seq_len_hint is not None else input.prompt_length),
+            seq_len=input.prompt_length,
             generate_timeout=ttft_timeout_ms,
             request_time_ms=int(time.time() * 1000),
-            max_new_tokens=(
-                max_new_tokens_hint
-                if max_new_tokens_hint is not None
-                else gc.max_new_tokens
-            ),
+            max_new_tokens=gc.max_new_tokens,
             num_beams=gc.num_beams,
             force_disable_sp_run=gc.force_disable_sp_run,
             model="engine_service",
             api_key=api_key,
             cache_key_block_size=cache_key_block_size,
             priority=priority,
-            aggregate_demand=aggregate_demand,
-            batch_seq_lens=batch_seq_lens or (),
-            batch_request_ids=batch_request_ids or (),
         )
         if input_pb is not None:
             request_pb.generate_input = input_pb.SerializeToString()

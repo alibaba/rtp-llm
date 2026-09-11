@@ -1,12 +1,13 @@
 package org.flexlb.dispatcher;
 
 import io.netty.channel.ChannelOption;
-import org.flexlb.config.EnvConfigOverrides;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.ConfigurableEnvironment;
@@ -14,16 +15,13 @@ import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerResponse;
-import reactor.netty.http.client.HttpClient;
-import reactor.netty.resources.ConnectionProvider;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
+import reactor.netty.http.client.HttpClient;
+import reactor.netty.resources.ConnectionProvider;
 
 import java.time.Duration;
-import java.util.AbstractMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 /**
  * Dispatcher infrastructure beans (config, connection provider, shared WebClient, route table).
@@ -97,62 +95,16 @@ public class DispatcherConfiguration {
         return Schedulers.newParallel("dispatcher-cpu", threads);
     }
 
-    /**
-     * Load + validate the dispatcher config from the given env map. Mirrors how
-     * {@link org.flexlb.config.ConfigService} loads {@code FlexlbConfig}: defaults → JSON from
-     * the {@code DISPATCH_CONFIG} env → per-field {@code DISPATCH_*} overrides. Validates and
-     * eagerly parses the sub-batch DSL so a bad value fails fast at boot rather than on the
-     * first request. Package-private so {@code DispatchConfigTest} can call it directly with
-     * a stubbed env.
-     */
-    static DispatchConfig loadAndValidate(Map<String, String> env) {
-        String json = env.get("DISPATCH_CONFIG");
-        DispatchConfig c = (json == null || json.isBlank())
+    /** JSON supplies defaults; Spring property sources supply explicit dispatch.* overrides. */
+    static DispatchConfig loadAndValidate(ConfigurableEnvironment environment) {
+        String json = environment.getProperty("DISPATCH_CONFIG");
+        DispatchConfig config = json == null || json.isBlank()
                 ? new DispatchConfig()
                 : JsonUtils.toObject(json, DispatchConfig.class);
-        EnvConfigOverrides.apply(c, "DISPATCH_", env);
-        String routingToken = env.get("DISPATCH_ROUTING_TOKEN");
-        c.setTrustedRoutingToken(routingToken == null ? "" : routingToken.trim());
-        validate(c);
-        return c;
-    }
-
-    /** Use the same resolved Spring property sources that activate the dispatcher beans. */
-    static DispatchConfig loadAndValidate(ConfigurableEnvironment environment) {
-        return loadAndValidate(new EnvironmentBackedMap(environment));
-    }
-
-    /**
-     * {@link EnvConfigOverrides} only needs {@link Map#get(Object)}. This adapter also maps the
-     * established {@code DISPATCH_FOO_BAR} names to Spring's relaxed
-     * {@code dispatch.foo-bar} form, so command-line, system-property and environment sources all
-     * produce the same effective config.
-     */
-    private static final class EnvironmentBackedMap extends AbstractMap<String, String> {
-        private final ConfigurableEnvironment environment;
-
-        private EnvironmentBackedMap(ConfigurableEnvironment environment) {
-            this.environment = environment;
-        }
-
-        @Override
-        public String get(Object key) {
-            if (!(key instanceof String name)) {
-                return null;
-            }
-            String value = environment.getProperty(name);
-            if (value != null || !name.startsWith("DISPATCH_")) {
-                return value;
-            }
-            String relaxed = name.substring("DISPATCH_".length())
-                    .toLowerCase(java.util.Locale.ROOT).replace('_', '-');
-            return environment.getProperty("dispatch." + relaxed);
-        }
-
-        @Override
-        public Set<Entry<String, String>> entrySet() {
-            return Set.of();
-        }
+        Binder.get(environment).bind("dispatch", Bindable.ofInstance(config));
+        config.setTrustedRoutingToken(environment.getProperty("DISPATCH_ROUTING_TOKEN", "").trim());
+        validate(config);
+        return config;
     }
 
     private static void validate(DispatchConfig c) {

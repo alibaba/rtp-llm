@@ -316,8 +316,11 @@ class DispatcherInspectionHandlerTest {
             cfg.setPreAssignBe(true);
             FlexlbConfig loadBalanceConfig = new FlexlbConfig();
             TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
-            trafficPolicy.setDefaultGroup("tenant-a");
-            loadBalanceConfig.setTrafficPolicy(trafficPolicy);
+            TrafficPolicyConfig.Target target = new TrafficPolicyConfig.Target();
+        target.setGroup("tenant-a");
+        target.setWeight(1);
+        trafficPolicy.setDefaultTargets(List.of(target));
+            loadBalanceConfig.getRouter().setGroupSelector(trafficPolicy);
             DispatcherInspectionHandler handler = new DispatcherInspectionHandler(
                     cfg, refresher(), mock(FeHealthChecker.class), client,
                     1000, loadBalanceConfig);

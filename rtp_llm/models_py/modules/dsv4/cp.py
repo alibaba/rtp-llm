@@ -238,18 +238,11 @@ class CudaAsyncCPGatherImpl:
         gather_stream = stream if stream is not None else current_stream
         if stream is not None:
             gather_stream.wait_stream(current_stream)
-        # ``local_2d`` is allocated on ``current_stream`` but read by the NCCL
-        # kernel on ``gather_stream``. Without ``record_stream`` the caching
-        # allocator can reuse its storage before NCCL finishes, corrupting the
-        # input. ``wait_stream`` above gives NCCL a happens-after edge but NOT
-        # allocator lifetime extension — that is what ``record_stream`` does.
-        #
-        # ``gathered`` does NOT need ``record_stream``: it's a view into the
-        # per-forward workspace (reused across layers, never recycled by the
-        # allocator). Cross-layer reuse of the same sub-region is ordered by
-        # the ``gather_stream.wait_stream(current_stream)`` edge above, which
-        # waits on the prior layer's restore (the consumer of ``gathered``).
-        local_2d.record_stream(gather_stream)
+        # The handle owns both the producer input and gathered workspace view
+        # until ``wait`` joins the collective on the compute stream. This avoids
+        # attaching allocator events to tensors through long-lived record_stream
+        # calls while still preventing premature input reclamation.
+        work = None
         try:
             with torch.cuda.stream(gather_stream):
                 with record_function_range(f"{profile_name}.launch"):
@@ -262,6 +255,12 @@ class CudaAsyncCPGatherImpl:
                     completion_event = torch.cuda.Event()
                     completion_event.record(gather_stream)
         except Exception as exc:
+            if work is not None:
+                try:
+                    with torch.cuda.stream(gather_stream):
+                        work.wait()
+                finally:
+                    current_stream.wait_stream(gather_stream)
             raise RuntimeError(
                 "failed to launch CUDA CP all_gather_into_tensor"
             ) from exc
@@ -1200,6 +1199,9 @@ def build_kv_allgather_restore_indices(
     cp_size: int,
     block_size: int,
     device: torch.device,
+    *,
+    total_kv_len: Optional[int] = None,
+    total_local_kv: Optional[int] = None,
 ) -> torch.Tensor:
     """Compute the per-iteration restore index tensor.
 
@@ -1226,6 +1228,8 @@ def build_kv_allgather_restore_indices(
             ``cache_config.seq_size_per_block`` for the relevant pool;
             CSA/HCA/INDEXER pool block_size is uniform per pool).
       device: target device.
+      total_kv_len: optional known host sum of ``per_req_total_kv_lens``.
+      total_local_kv: optional known host sum of padded per-rank lengths.
 
     Returns:
       ``restore_indices`` ``[total_kv_len]`` int64 — applied as
@@ -1246,51 +1250,108 @@ def build_kv_allgather_restore_indices(
     # Vectorized formulation (mirrors branch
     # ``flashmla_sparse_cp_impl.py:565-572`` plan()).
     total_kv_lens = per_req_total_kv_lens.to(dtype=torch.int64, device=device)
-    if int(total_kv_lens.numel()) == 0:
+    batch_size = int(total_kv_lens.numel())
+    if batch_size == 0:
         return torch.empty(0, dtype=torch.int64, device=device)
 
-    local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
-    cu_local_per_req = torch.zeros(
-        int(local_per_req.numel()) + 1, dtype=torch.int64, device=device
+    total_real = (
+        int(total_kv_len)
+        if total_kv_len is not None
+        else int(total_kv_lens.sum().item())
     )
-    cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
-    total_local_kv = int(cu_local_per_req[-1].item())  # per-rank padded local
-
-    total_real = int(total_kv_lens.sum().item())
+    if total_real < 0:
+        raise ValueError(f"total_kv_len must be non-negative, got {total_real}")
     if total_real == 0:
         return torch.empty(0, dtype=torch.int64, device=device)
+
+    if total_local_kv is None:
+        if batch_size == 1 and total_kv_len is not None:
+            total_local = cp_padded_local_kv_len(total_real, cp_size, block_size)
+        else:
+            local_per_req = cp_padded_local_kv_lens(
+                total_kv_lens, cp_size, block_size
+            )
+            total_local = int(local_per_req.sum().item())
+    else:
+        total_local = int(total_local_kv)
 
     # Flat ``[total_real]`` arange of "logical token position within request".
     # Fully vectorized: positions_flat[i] = i - cu_starts[req_ids[i]] where
     # cu_starts is the exclusive prefix-sum of per-request lengths. Replaces
     # a per-request Python loop + B .item() syncs with two GPU ops.
-    req_ids = torch.repeat_interleave(
-        torch.arange(int(total_kv_lens.numel()), dtype=torch.int64, device=device),
-        total_kv_lens,
-    )
-    cu_starts = torch.zeros(
-        int(total_kv_lens.numel()), dtype=torch.int64, device=device
-    )
-    cu_starts[1:] = torch.cumsum(total_kv_lens[:-1], dim=0)
-    positions_flat = (
-        torch.arange(total_real, dtype=torch.int64, device=device) - cu_starts[req_ids]
-    )
-    cu_offsets = cu_local_per_req[req_ids]  # per-token rank-local request base
+    positions_flat = torch.arange(total_real, dtype=torch.int64, device=device)
+    if batch_size == 1:
+        cu_offsets = None
+    else:
+        local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
+        cu_local_per_req = torch.zeros(
+            batch_size + 1, dtype=torch.int64, device=device
+        )
+        cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
+        req_ids = torch.repeat_interleave(
+            torch.arange(batch_size, dtype=torch.int64, device=device),
+            total_kv_lens,
+            output_size=total_real,
+        )
+        cu_starts = torch.zeros(batch_size, dtype=torch.int64, device=device)
+        cu_starts[1:] = torch.cumsum(total_kv_lens[:-1], dim=0)
+        positions_flat = positions_flat - cu_starts[req_ids]
+        cu_offsets = cu_local_per_req[req_ids]
     global_block_idx = positions_flat // block_size
     token_in_block = positions_flat % block_size
     owner = global_block_idx % cp_size
     local_block_idx = global_block_idx // cp_size
     local_pos_in_req = local_block_idx * block_size + token_in_block
     # rank-major flat index:
-    #   owner * total_local_kv + (cu_offset_of_request_for_this_rank + local_pos)
+    #   owner * total_local + (cu_offset_of_request_for_this_rank + local_pos)
     # The cu_offset is the same value for every rank because all ranks pad
     # to identical L_r per request.
-    restore = (owner * total_local_kv + cu_offsets + local_pos_in_req).contiguous()
+    restore = owner * total_local + local_pos_in_req
+    if cu_offsets is not None:
+        restore = restore + cu_offsets
+    restore = restore.contiguous()
     assert int(restore.numel()) == total_real, (
-        f"restore size {int(restore.numel())} != sum(per_req_total_kv_lens) "
+        f"restore size {int(restore.numel())} != expected total_kv_len "
         f"{total_real}"
     )
     return restore
+
+
+def cp_padded_local_kv_len(total_kv_len: int, cp_size: int, block_size: int) -> int:
+    """Scalar counterpart of :func:`cp_padded_local_kv_lens`."""
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    total_kv_len = int(total_kv_len)
+    if total_kv_len < 0:
+        raise ValueError(f"total_kv_len must be non-negative, got {total_kv_len}")
+    virtual_block_size = block_size * cp_size
+    return ((total_kv_len + virtual_block_size - 1) // virtual_block_size) * block_size
+
+
+def cp_actual_owned_kv_len(
+    total_kv_len: int,
+    cp_size: int,
+    block_size: int,
+    cp_rank: int,
+) -> int:
+    """Scalar counterpart of :func:`cp_actual_owned_kv_lens`."""
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if cp_rank < 0 or cp_rank >= cp_size:
+        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
+    total_kv_len = int(total_kv_len)
+    if total_kv_len < 0:
+        raise ValueError(f"total_kv_len must be non-negative, got {total_kv_len}")
+    full_blocks, tail = divmod(total_kv_len, block_size)
+    owned_full_blocks = (
+        (full_blocks - 1 - cp_rank) // cp_size + 1 if full_blocks > cp_rank else 0
+    )
+    owns_tail = tail > 0 and full_blocks % cp_size == cp_rank
+    return owned_full_blocks * block_size + (tail if owns_tail else 0)
 
 
 def cp_padded_local_kv_lens(

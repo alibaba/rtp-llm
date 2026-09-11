@@ -1,4 +1,5 @@
 import importlib
+import io
 import json
 import os
 import pickle
@@ -6,14 +7,90 @@ import sys
 from unittest import TestCase, main
 from unittest.mock import patch
 
-from rtp_llm.utils.backend_registry import (
-    register_backend_hook,
-    reset_backend_registrations,
+from rtp_llm.utils import backend_registry
+from rtp_llm.utils.backend_registry import register_backend_hook
+
+from rtp_llm.config.test.kv_cache_event_test_values import (
+    KV_CACHE_EVENT_ENV_CASES,
 )
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+    def test_dsv4_mega_moe_public_choices(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            nonse = server_args.setup_args(["--moe_strategy", "mega_moe"])
+            fused_se = server_args.setup_args(["--moe_strategy", "mega_moe_se"])
+            grouped = server_args.setup_args(["--moe_strategy", "grouped_fp4"])
+            local = server_args.setup_args(["--moe_strategy", "local_loop"])
+        self.assertEqual(nonse.moe_config.moe_strategy, "mega_moe")
+        self.assertEqual(fused_se.moe_config.moe_strategy, "mega_moe_se")
+        self.assertEqual(grouped.moe_config.moe_strategy, "grouped_fp4")
+        self.assertEqual(local.moe_config.moe_strategy, "local_loop")
+
+    def test_dsv4_single_card_strategy_from_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for strategy in ("grouped_fp4", "local_loop"):
+            with self.subTest(strategy=strategy), patch.dict(
+                os.environ, {"MOE_STRATEGY": strategy}, clear=True
+            ), patch.object(sys, "argv", ["rtp_llm_server"]):
+                configs = server_args.setup_args()
+                self.assertEqual(configs.moe_config.moe_strategy, strategy)
+
+    def test_public_no_quant_cpp_choice_uses_correct_spelling(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            configs = server_args.setup_args(["--moe_strategy", "no_quant_cpp"])
+            rocm_configs = server_args.setup_args(
+                ["--moe_strategy", "rocm_ep_low_latency"]
+            )
+        self.assertEqual(configs.moe_config.moe_strategy, "no_quant_cpp")
+        self.assertEqual(rocm_configs.moe_config.moe_strategy, "rocm_ep_low_latency")
+
+        for unsupported in ("no_auant_cpp",):
+            with self.subTest(unsupported=unsupported), patch.dict(
+                os.environ, {}, clear=True
+            ), patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args(["--moe_strategy", unsupported])
+
+    def test_dsv4_strategy_choices_reject_invalid_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for argv in (
+            ["rtp_llm_server"],
+            ["rtp_llm_server", "--tp_size", "1"],
+        ):
+            with self.subTest(argv=argv), patch.dict(
+                os.environ, {"MOE_STRATEGY": "not_a_strategy"}, clear=True
+            ), patch.object(sys, "argv", argv), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args()
+
+    def test_equal_form_cli_strategy_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env_value in ("mega_moe", "not_a_strategy"):
+            with self.subTest(env_value=env_value), patch.dict(
+                os.environ, {"MOE_STRATEGY": env_value}, clear=True
+            ):
+                configs = server_args.setup_args(["--moe_strategy=local_loop"])
+                self.assertEqual(configs.moe_config.moe_strategy, "local_loop")
+
+    def test_abbreviated_cli_option_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"MOE_STRATEGY": "mega_moe"}, clear=True):
+            configs = server_args.setup_args(["--moe_strat", "local_loop"])
+
+        self.assertEqual(configs.moe_config.moe_strategy, "local_loop")
 
     def test_internal_backend_registers_moe_choice_before_parser_initialization(self):
         from rtp_llm.server.server_args import server_args
@@ -34,34 +111,36 @@ class ServerArgsPyEnvConfigsTest(TestCase):
                 loaded = True
             return True
 
-        reset_backend_registrations()
-        try:
-            with (
-                patch.dict(os.environ, {}, clear=True),
-                patch.object(
-                    server_args,
-                    "ensure_backend_entrypoint_loaded",
-                    side_effect=load_backend,
-                ),
-                patch(
-                    "rtp_llm.utils.backend_registry.ensure_backend_entrypoint_loaded",
-                    return_value=True,
-                ),
-            ):
-                first_configs = server_args.setup_args(
-                    ["--moe_strategy", "external_test_strategy"]
-                )
-                second_configs = server_args.setup_args(
-                    ["--moe_strategy", "external_test_strategy"]
-                )
-            self.assertEqual(
-                first_configs.moe_config.moe_strategy, "external_test_strategy"
+        with (
+            patch.object(backend_registry, "_hooks", {}),
+            patch.object(backend_registry, "_started", set()),
+            patch.object(backend_registry, "_repeatable", set()),
+            patch.object(backend_registry, "_inflight", {}),
+            patch.object(backend_registry, "_failures", {}),
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                server_args,
+                "ensure_backend_entrypoint_loaded",
+                side_effect=load_backend,
+            ),
+            patch.object(
+                backend_registry,
+                "ensure_backend_entrypoint_loaded",
+                return_value=True,
+            ),
+        ):
+            first_configs = server_args.setup_args(
+                ["--moe_strategy", "external_test_strategy"]
             )
-            self.assertEqual(
-                second_configs.moe_config.moe_strategy, "external_test_strategy"
+            second_configs = server_args.setup_args(
+                ["--moe_strategy", "external_test_strategy"]
             )
-        finally:
-            reset_backend_registrations()
+        self.assertEqual(
+            first_configs.moe_config.moe_strategy, "external_test_strategy"
+        )
+        self.assertEqual(
+            second_configs.moe_config.moe_strategy, "external_test_strategy"
+        )
 
 
 class ServerArgsSetTest(TestCase):
@@ -74,6 +153,27 @@ class ServerArgsSetTest(TestCase):
         os.environ.clear()
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
+
+    def test_allocator_dump_config_requires_secret_and_valid_cooldown(self):
+        from rtp_llm.config.py_config_modules import ServerConfig
+
+        config = ServerConfig()
+        config.enable_torch_allocator_dump = True
+        with self.assertRaisesRegex(ValueError, "auth_token"):
+            config.validate_allocator_dump_config()
+
+        config.torch_allocator_dump_auth_token = "secret"
+        for cooldown in (-1.0, float("nan"), float("inf"), float("-inf")):
+            config.torch_allocator_dump_cooldown_seconds = cooldown
+            with self.subTest(cooldown=cooldown), self.assertRaisesRegex(
+                ValueError, "finite and non-negative"
+            ):
+                config.validate_allocator_dump_config()
+
+        config.torch_allocator_dump_cooldown_seconds = 0
+        config.torch_allocator_dump_auth_header = "bad header"
+        with self.assertRaisesRegex(ValueError, "valid HTTP header"):
+            config.validate_allocator_dump_config()
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
@@ -94,6 +194,10 @@ class ServerArgsSetTest(TestCase):
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
         os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
         os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
+        os.environ["RTP_LLM_ENABLE_TORCH_ALLOCATOR_DUMP"] = "true"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_AUTH_TOKEN"] = "test-secret"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_AUTH_HEADER"] = "X-Test-Dump-Token"
+        os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_COOLDOWN_SECONDS"] = "30"
         os.environ["LOADER_RECYCLE_HANDLES"] = "false"
         os.environ["MOE_PURE_TP_PRESHARD"] = "true"
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
@@ -166,6 +270,20 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.server_config.dash_sc_grpc_pre_stop_drain_seconds, 9.0
         )
+        self.assertTrue(py_env_configs.server_config.enable_torch_allocator_dump)
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_auth_token,
+            "test-secret",
+        )
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_auth_header,
+            "X-Test-Dump-Token",
+        )
+        self.assertEqual(
+            py_env_configs.server_config.torch_allocator_dump_cooldown_seconds,
+            30.0,
+        )
+        self.assertNotIn("test-secret", py_env_configs.server_config.to_string())
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
@@ -536,6 +654,58 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
 
+    def test_kv_cache_event_env_vars_bind_to_config(self):
+        for env_name, _, raw_value, _ in KV_CACHE_EVENT_ENV_CASES:
+            os.environ[env_name] = raw_value
+        # Exercise the mixed CLI + environment path rather than argparse's
+        # environment-to-argv fallback.
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        for _, field_name, _, expected_value in KV_CACHE_EVENT_ENV_CASES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(
+                    expected_value,
+                    getattr(py_env_configs.kv_cache_config, field_name),
+                )
+
+    def test_kv_cache_event_env_vars_bind_in_pure_env_mode(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        for case in KV_CACHE_EVENT_ENV_CASES:
+            os.environ[case.env_name] = case.raw_value
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        for case in KV_CACHE_EVENT_ENV_CASES:
+            with self.subTest(field_name=case.field_name):
+                self.assertEqual(
+                    case.expected_value,
+                    getattr(py_env_configs.kv_cache_config, case.field_name),
+                )
+
+    def test_kv_cache_event_cli_rejects_unknown_publisher_type(self):
+        sys.argv = [
+            "prog",
+            "--model_type",
+            "qwen",
+            "--kv_cache_event_publisher_type",
+            "KVCM",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
     def test_gpu_batch_vit_args_parse(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs
         from rtp_llm.server.server_args.server_args import (
@@ -572,6 +742,33 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.tool_call_loop_threshold, 7)
         self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
         self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
+
+    def test_output_repetition_max_period_cli_boundaries(self):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.repetition_detection_group_args import (
+            MAX_OUTPUT_REPETITION_PERIOD,
+            init_repetition_detection_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        def parse_period(value: int):
+            configs = PyEnvConfigs()
+            parser = EnvArgumentParser()
+            parser.set_root_config(configs)
+            init_repetition_detection_group_args(
+                parser, configs.repetition_detection_config
+            )
+            parser.parse_args(["--output_repetition_max_period", str(value)])
+            return configs.repetition_detection_config.output_repetition_max_period
+
+        self.assertEqual(parse_period(0), 1)
+        self.assertEqual(parse_period(-7), 1)
+        self.assertEqual(
+            parse_period(MAX_OUTPUT_REPETITION_PERIOD),
+            MAX_OUTPUT_REPETITION_PERIOD,
+        )
+        with self.assertRaises(SystemExit):
+            parse_period(MAX_OUTPUT_REPETITION_PERIOD + 1)
 
     def test_dash_sc_default_allows_large_requests_on_both_ends(self):
         from rtp_llm.server.server_args.grpc_group_args import (
@@ -624,8 +821,11 @@ class ServerArgsGrammarConfigTest(TestCase):
 
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
         self.assertEqual(g.terminate_without_stop_token, False)
-        self.assertEqual(g.num_workers, 8)
-        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+        self.assertEqual(g.num_workers, 0)
+        self.assertEqual(g.compile_timeout_ms, 2000)
+        self.assertEqual(g.compile_concurrency, 1)
+        self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
 
     def test_grammar_parser_defaults_override_config_initial_values(self):
         """The CLI declaration is the source of truth for grammar defaults."""
@@ -640,6 +840,9 @@ class ServerArgsGrammarConfigTest(TestCase):
         g.constrained_json_disable_any_whitespace = True
         g.terminate_without_stop_token = True
         g.num_workers = 17
+        g.compile_timeout_ms = 1
+        g.compile_concurrency = 2
+        g.compile_queue_size = 3
         g.compiler_cache_bytes = 1
 
         parser = EnvArgumentParser()
@@ -649,8 +852,11 @@ class ServerArgsGrammarConfigTest(TestCase):
 
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
         self.assertEqual(g.terminate_without_stop_token, False)
-        self.assertEqual(g.num_workers, 8)
-        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+        self.assertEqual(g.num_workers, 0)
+        self.assertEqual(g.compile_timeout_ms, 2000)
+        self.assertEqual(g.compile_concurrency, 1)
+        self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
 
     def test_grammar_cmd_args(self):
         """Every CLI flag binds to the right config field, with correct types."""
@@ -662,6 +868,12 @@ class ServerArgsGrammarConfigTest(TestCase):
             "1",
             "--grammar_num_workers",
             "7",
+            "--grammar_compile_timeout_ms",
+            "1234",
+            "--grammar_compile_concurrency",
+            "3",
+            "--grammar_compile_queue_size",
+            "5",
             "--grammar_compiler_cache_bytes",
             "67108864",
         ]
@@ -671,7 +883,39 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.constrained_json_disable_any_whitespace, True)
         self.assertEqual(g.terminate_without_stop_token, True)
         self.assertEqual(g.num_workers, 7)
+        self.assertEqual(g.compile_timeout_ms, 1234)
+        self.assertEqual(g.compile_concurrency, 3)
+        self.assertEqual(g.compile_queue_size, 5)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
+
+    def test_grammar_env_args(self):
+        os.environ.update(
+            {
+                "GRAMMAR_NUM_WORKERS": "9",
+                "GRAMMAR_COMPILE_TIMEOUT_MS": "3456",
+                "GRAMMAR_COMPILE_CONCURRENCY": "4",
+                "GRAMMAR_COMPILE_QUEUE_SIZE": "6",
+                "GRAMMAR_COMPILER_CACHE_BYTES": "33554432",
+            }
+        )
+
+        g = self._setup().grammar_config
+        self.assertEqual(g.num_workers, 9)
+        self.assertEqual(g.compile_timeout_ms, 3456)
+        self.assertEqual(g.compile_concurrency, 4)
+        self.assertEqual(g.compile_queue_size, 6)
+        self.assertEqual(g.compiler_cache_bytes, 33554432)
+
+    def test_non_positive_bounded_compile_args_are_rejected(self):
+        for flag in (
+            "--grammar_compile_timeout_ms",
+            "--grammar_compile_concurrency",
+            "--grammar_compile_queue_size",
+        ):
+            with self.subTest(flag=flag):
+                sys.argv = ["prog", flag, "0"]
+                with self.assertRaises(SystemExit):
+                    self._setup()
 
 
 if __name__ == "__main__":

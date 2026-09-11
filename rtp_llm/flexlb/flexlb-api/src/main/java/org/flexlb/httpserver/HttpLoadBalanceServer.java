@@ -3,8 +3,8 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
-import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -16,6 +16,7 @@ import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.pv.BatchPvLogData;
 import org.flexlb.dao.route.RoleType;
@@ -28,9 +29,9 @@ import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
+import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
@@ -41,47 +42,57 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
 @Component
 public class HttpLoadBalanceServer {
+    private static final Path SCHEDULER_SNAPSHOT_DIR =
+            Paths.get("/tmp/flexlb-scheduler-snapshots");
+    private static final String SCHEDULER_SNAPSHOT_PREFIX = "scheduler-snapshot-";
+    private static final int MAX_SNAPSHOT_FILES = 10;
+
     private final LBStatusConsistencyService lbStatusConsistencyService;
-    private final QueueManager queueManager;
     private final ConfigService configService;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final RequestScheduler requestScheduler;
     private final EndpointRegistry endpointRegistry;
+    private final WorkerDirectory workerDirectory;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
+
     private final ActiveRequestCounter activeRequestCounter;
     private final BatchScheduleCoordinator batchScheduleCoordinator;
     private final MasterFeAssigner masterFeAssigner;
     private final EngineHealthReporter engineHealthReporter;
 
-    public HttpLoadBalanceServer(
-            LBStatusConsistencyService lbStatusConsistencyService,
-            QueueManager queueManager,
-            ConfigService configService,
-            FlexlbBatchScheduler batchScheduler,
-            EndpointRegistry endpointRegistry,
-            @org.springframework.beans.factory.annotation.Autowired(required = false)
-            MasterEngineSynchronizer masterEngineSynchronizer,
-            ServerScheduleLatencyRecorder serverLatencyRecorder,
-            ActiveRequestCounter activeRequestCounter,
-            BatchScheduleCoordinator batchScheduleCoordinator,
-            MasterFeAssigner masterFeAssigner,
-            EngineHealthReporter engineHealthReporter) {
+    public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
+                                 ConfigService configService,
+                                 RequestScheduler requestScheduler,
+                                 EndpointRegistry endpointRegistry,
+                                 WorkerDirectory workerDirectory,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false)
+                                 MasterEngineSynchronizer masterEngineSynchronizer,
+                                 ServerScheduleLatencyRecorder serverLatencyRecorder,
+                                 ActiveRequestCounter activeRequestCounter,
+                                 BatchScheduleCoordinator batchScheduleCoordinator,
+                                 MasterFeAssigner masterFeAssigner,
+                                 EngineHealthReporter engineHealthReporter) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
-        this.queueManager = queueManager;
         this.configService = configService;
-        this.batchScheduler = batchScheduler;
+        this.requestScheduler = requestScheduler;
         this.endpointRegistry = endpointRegistry;
+        this.workerDirectory = workerDirectory;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
         this.activeRequestCounter = activeRequestCounter;
@@ -207,36 +218,37 @@ public class HttpLoadBalanceServer {
     }
 
     private Map<String, Response.WorkerRoleSummary> buildWorkerSummary() {
-        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
         for (RoleType role : RoleType.values()) {
-            Map<String, WorkerStatus> statusMap = modelStatus.getRoleStatusMap(role);
-            if (statusMap == null || statusMap.isEmpty()) {
+            Map<String, WorkerStatus> statusMap = workerDirectory.statusSnapshot(role);
+            int embeddingCount = masterEngineSynchronizer == null ? 0
+                    : masterEngineSynchronizer.embeddingWorkerSnapshot(role).size();
+            if (statusMap.isEmpty() && embeddingCount == 0) {
                 continue;
             }
-            Response.WorkerRoleSummary roleSummary = new Response.WorkerRoleSummary();
-            roleSummary.setDiscovered(statusMap.size());
-            for (WorkerStatus status : statusMap.values()) {
-                if (status.isAlive()) {
-                    roleSummary.setAlive(roleSummary.getAlive() + 1);
+            Response.WorkerRoleSummary rs = new Response.WorkerRoleSummary();
+            rs.setDiscovered(statusMap.size() + embeddingCount);
+            rs.setAlive(embeddingCount);
+            for (WorkerStatus ws : statusMap.values()) {
+                if (ws.pollHealth().reportedAlive()) {
+                    rs.setAlive(rs.getAlive() + 1);
                 }
             }
-            summary.put(role.getCode(), roleSummary);
+            summary.put(role.getCode(), rs);
         }
         return summary.isEmpty() ? null : summary;
     }
 
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
-                .flatMap((Function<Request, Mono<ServerResponse>>) ignored -> {
+                .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    result.setQueueLength(queueManager.queueSize());
+                    result.setQueueLength(requestScheduler.getQueuedRequestCount());
                     result.setCode(200);
                     result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());
-                    result.setReady(masterEngineSynchronizer == null
-                            || masterEngineSynchronizer.isReady());
+                    result.setReady(masterEngineSynchronizer == null || masterEngineSynchronizer.isReady());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(result), Response.class);
@@ -255,11 +267,10 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> notifyParticipant(ServerRequest request) {
         return request.bodyToMono(MasterChangeNotifyReq.class)
                 .flatMap(masterChangeNotifyReq -> {
-                    MasterChangeNotifyResp response =
-                            lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
+                    MasterChangeNotifyResp resp = lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(response), MasterChangeNotifyReq.class);
+                            .body(Mono.just(resp), MasterChangeNotifyResp.class);
                 }).onErrorResume((Function<Throwable, Mono<ServerResponse>>) e -> {
                     Logger.error("notifyParticipant error", e);
                     return ServerResponse.status(500)
@@ -270,11 +281,11 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> dumpLBStatus(ServerRequest request) {
         return request.bodyToMono(SyncLBStatusReq.class)
-                .flatMap(ignored -> {
-                    SyncLBStatusResp response = lbStatusConsistencyService.dumpLBStatus();
+                .flatMap(syncLBStatusReq -> {
+                    SyncLBStatusResp resp = lbStatusConsistencyService.dumpLBStatus();
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(response), SyncLBStatusResp.class);
+                            .body(Mono.just(resp), SyncLBStatusResp.class);
                 }).onErrorResume(e -> {
                     Logger.error("dumpLBStatus error", e);
                     return ServerResponse.status(500)
@@ -285,7 +296,9 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            QueueSnapshotResponse response = queueManager.snapshotQueue();
+            List<RequestState> snapshot =
+                    requestScheduler.snapshotActiveRequests();
+            QueueSnapshotResponse response = persistSchedulerSnapshot(snapshot);
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Mono.just(response), QueueSnapshotResponse.class);
@@ -297,28 +310,82 @@ public class HttpLoadBalanceServer {
         }
     }
 
+    private QueueSnapshotResponse persistSchedulerSnapshot(
+            List<RequestState> snapshot) throws IOException {
+        Files.createDirectories(SCHEDULER_SNAPSHOT_DIR);
+        cleanOldSchedulerSnapshots();
+
+        long timestamp = System.currentTimeMillis();
+        Path file = SCHEDULER_SNAPSHOT_DIR.resolve(
+                SCHEDULER_SNAPSHOT_PREFIX + timestamp + ".json");
+        Files.writeString(file, JsonUtils.toFormattedString(snapshot));
+        return new QueueSnapshotResponse(
+                file.toAbsolutePath().toString(), timestamp, snapshot.size());
+    }
+
+    private void cleanOldSchedulerSnapshots() throws IOException {
+        List<Path> files;
+        try (Stream<Path> entries = Files.list(SCHEDULER_SNAPSHOT_DIR)) {
+            files = entries
+                    .filter(path -> path.getFileName().toString()
+                            .startsWith(SCHEDULER_SNAPSHOT_PREFIX))
+                    .sorted()
+                    .toList();
+        }
+        for (int index = 0; index <= files.size() - MAX_SNAPSHOT_FILES; index++) {
+            Files.deleteIfExists(files.get(index));
+        }
+    }
+
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", batchScheduler.getInflightSize());
+            result.put("scheduler_inflight", requestScheduler.getInflightSize());
+            result.put("decode_max_engine_requests",
+                    configService.loadBalanceConfig().getRouter().getRoles()
+                            .getDecode().getAvailability().getMaxEngineRequests());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
             for (Map.Entry<String, PrefillEndpoint> entry
-                    : endpointRegistry.getPrefillEndpoints().entrySet()) {
-                Map<String, Object> endpoint = new LinkedHashMap<>();
-                endpoint.put("ip_port", entry.getKey());
-                endpoint.put("inflight_batches", entry.getValue().getInflightBatchCount());
-                prefillList.add(endpoint);
+                    : endpointRegistry.snapshotPrefillEndpoints().entrySet()) {
+                PrefillEndpoint endpoint = entry.getValue();
+                WorkerStatus.CacheIndexSnapshot cacheIndex =
+                        endpoint.getStatus().cacheIndexSnapshot();
+                CacheStatus cacheStatus = cacheIndex.cacheStatus();
+                Map<String, Object> ep = new LinkedHashMap<>();
+                ep.put("ip_port", entry.getKey());
+                ep.put("inflight_batches", endpoint.getInflightBatchCount());
+                ep.put("inflight_requests", endpoint.getLocallyOwnedRequestCount());
+                ep.put("inflight_route_requests",
+                        endpoint.getIndividuallyTrackedRequestCount());
+                ep.put("cache_version",
+                        cacheStatus == null ? -1L : cacheStatus.getVersion());
+                ep.put("cache_indexed", cacheIndex.indexInitialized());
+                ep.put("cache_indexed_version", cacheIndex.indexedVersion());
+                ep.put("cache_key_size",
+                        cacheStatus == null ? 0 : cacheStatus.getCacheKeySize());
+                prefillList.add(ep);
             }
             result.put("prefill_endpoints", prefillList);
 
             List<Map<String, Object>> decodeList = new ArrayList<>();
             for (Map.Entry<String, DecodeEndpoint> entry
-                    : endpointRegistry.getDecodeEndpoints().entrySet()) {
-                Map<String, Object> endpoint = new LinkedHashMap<>();
-                endpoint.put("ip_port", entry.getKey());
-                endpoint.put("inflight_requests", entry.getValue().getInflightCount());
-                decodeList.add(endpoint);
+                    : endpointRegistry.snapshotDecodeEndpoints().entrySet()) {
+                DecodeEndpoint.LayeredAdmissionView view =
+                        entry.getValue().layeredAdmissionView();
+                Map<String, Object> ep = new LinkedHashMap<>();
+                ep.put("ip_port", entry.getKey());
+                ep.put("reserved_total", view.reserved().size());
+                ep.put("master_queued", view.queuedCount());
+                ep.put("engine_may_have_seen",
+                        Math.max(0, view.reserved().size() - view.queuedCount()));
+                ep.put("confirmed_accepted", view.acceptedCount());
+                ep.put("confirmed_running", view.runningCount());
+                ep.put("total_load", view.routing().totalLoad());
+                ep.put("engine_load", view.routing().engineLoad());
+                ep.put("active_dispatch_permits", view.activeDispatchPermits());
+                ep.put("engine_capacity_used", view.engineCapacityUsed());
+                decodeList.add(ep);
             }
             result.put("decode_endpoints", decodeList);
 
@@ -345,7 +412,6 @@ public class HttpLoadBalanceServer {
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(Map.of("reset", true));
     }
-
     private Mono<ServerResponse> json(int status, Object body) {
         return ServerResponse.status(status)
                 .contentType(MediaType.APPLICATION_JSON)

@@ -298,9 +298,7 @@ class DispatcherFePoolRefresherTest {
 
     @Test
     void configuredGraceDrivesTheDrainPointInsteadOfTheHardcodedFiveMinutes() {
-        // The grace window follows FlexlbConfig.discoveryFailureGraceMs, the same knob the sync
-        // side reads — an operator who shortened it to 60s must see the FE pool drain on the
-        // same schedule as the worker side, not 4 minutes later.
+        // The configured FE discovery grace must replace the five-minute default.
         java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0);
         StubServiceDiscovery discovery = new StubServiceDiscovery(
                 "svc.fe", WorkerHost.of("10.0.0.1", 8088));
@@ -331,21 +329,13 @@ class DispatcherFePoolRefresherTest {
     }
 
     @Test
-    void springConstructorSourcesGraceFromTheSharedFlexlbConfig() {
-        // Plumbing guard: the @Autowired constructor must read discoveryFailureGraceMs off the
-        // same ConfigService/FlexlbConfig the sync side uses, so the two discovery consumers
-        // cannot drift apart on which knob governs the window.
+    void springConstructorUsesDispatcherDiscoveryGrace() {
         StubServiceDiscovery discovery = new StubServiceDiscovery(
                 "svc.fe", WorkerHost.of("10.0.0.1", 8088));
         DispatchConfig cfg = new DispatchConfig();
         cfg.setFePoolServiceId("svc.fe");
-        org.flexlb.config.FlexlbConfig flexlbConfig = new org.flexlb.config.FlexlbConfig();
-        flexlbConfig.setDiscoveryFailureGraceMs(60_000);
-        org.flexlb.config.ConfigService configService =
-                org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class);
-        org.mockito.Mockito.when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
-
-        DispatcherFePoolRefresher r = new DispatcherFePoolRefresher(discovery, cfg, configService);
+        cfg.setDiscoveryFailureGraceMs(60_000);
+        DispatcherFePoolRefresher r = new DispatcherFePoolRefresher(discovery, cfg);
 
         assertEquals(1, r.currentSize());
         // The resolved window, not the interaction: reading the config and then dropping the value

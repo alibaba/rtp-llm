@@ -1,10 +1,13 @@
-#include <memory>
+#include <algorithm>
 #include <chrono>
-#include <exception>
+#include <cmath>
+#include <memory>
+#include <unistd.h>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/multimodal_processor/MMProcessorConfig.h"
@@ -20,7 +23,42 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
-constexpr int64_t kRpcOutputWaitTimeoutMs = 500;
+constexpr int64_t kRpcOutputWaitTimeoutMs        = 500;
+constexpr size_t  kAllocatorDumpReplayHistoryMax = 1024;
+
+std::string endpointHost(std::string endpoint) {
+    const auto scheme_separator = endpoint.find(':');
+    if (endpoint.compare(0, scheme_separator, "ipv4") == 0 || endpoint.compare(0, scheme_separator, "ipv6") == 0) {
+        endpoint.erase(0, scheme_separator + 1);
+    }
+    if (!endpoint.empty() && endpoint.front() == '[') {
+        const auto closing_bracket = endpoint.find(']');
+        return closing_bracket == std::string::npos ? std::string() : endpoint.substr(1, closing_bracket - 1);
+    }
+    const auto port_separator = endpoint.rfind(':');
+    return port_separator == std::string::npos ? endpoint : endpoint.substr(0, port_separator);
+}
+
+bool constantTimeEquals(const std::string& lhs, const std::string& rhs) {
+    size_t       difference = lhs.size() ^ rhs.size();
+    const size_t length     = std::max(lhs.size(), rhs.size());
+    for (size_t index = 0; index < length; ++index) {
+        const unsigned char left  = index < lhs.size() ? static_cast<unsigned char>(lhs[index]) : 0;
+        const unsigned char right = index < rhs.size() ? static_cast<unsigned char>(rhs[index]) : 0;
+        difference |= left ^ right;
+    }
+    return difference == 0;
+}
+
+bool validAllocatorDumpId(const std::string& dump_id) {
+    if (dump_id.empty() || dump_id.size() > 64) {
+        return false;
+    }
+    return std::all_of(dump_id.begin(), dump_id.end(), [](unsigned char character) {
+        return (character >= '0' && character <= '9') || (character >= 'A' && character <= 'Z')
+               || (character >= 'a' && character <= 'z') || character == '-';
+    });
+}
 
 std::string formatRequestLogTag(const std::string& request_key, const RequestInfo& request_info) {
     std::string tag = "request [" + request_key + "]";
@@ -42,145 +80,58 @@ std::string formatRequestLogTag(const std::string& request_key, const RequestInf
     return tag;
 }
 
-// BatchGenerateCall does not use GenerateContext, whose setStream/stopStream pair normally
-// publishes worker lifecycle deltas. Own every raw member before conversion or enqueue so even an
-// early multimodal/engine failure produces one terminal delta per scheduling reservation.
-class BatchStreamRuntimeGuard {
-public:
-    BatchStreamRuntimeGuard(std::shared_ptr<RpcServerRuntimeMeta> meta, const BatchGenerateInputPB& request):
-        meta_(std::move(meta)) {
-        RTP_LLM_CHECK_WITH_INFO(meta_ != nullptr, "batch stream runtime metadata is not initialized");
-        entries_.reserve(request.inputs_size());
-        for (const auto& input : request.inputs()) {
-            entries_.push_back(Entry{input.request_id(),
-                                     input.has_group_id() ? input.group_id().value() : -1,
-                                     input.token_ids_size(),
-                                     nullptr,
-                                     ErrorCode::EXECUTION_EXCEPTION,
-                                     "batch RPC aborted before engine enqueue",
-                                     true,
-                                     false});
-        }
-    }
-
-    void registerStreams(const std::vector<GenerateStreamPtr>& streams) {
-        RTP_LLM_CHECK_WITH_INFO(streams.size() == entries_.size(),
-                                "enqueueMultiple returned a stream count that differs from the batch size");
-        try {
-            for (size_t i = 0; i < streams.size(); ++i) {
-                const auto& stream = streams[i];
-                RTP_LLM_CHECK_WITH_INFO(stream != nullptr, "enqueueMultiple returned a null stream");
-                const auto input = stream->generateInput();
-                RTP_LLM_CHECK_WITH_INFO(input != nullptr, "batch stream has no generate input");
-                RTP_LLM_CHECK_WITH_INFO(input->request_id == entries_[i].request_id,
-                                        "enqueueMultiple changed batch member ordering or identity");
-                entries_[i].stream = stream;
-                meta_->enqueue(TaskIdentity{entries_[i].request_id, entries_[i].batch_id}, stream);
-                entries_[i].registered = true;
-            }
-        } catch (...) {
-            finishRemaining();
-            throw;
-        }
-    }
-
-    BatchStreamRuntimeGuard(const BatchStreamRuntimeGuard&)            = delete;
-    BatchStreamRuntimeGuard& operator=(const BatchStreamRuntimeGuard&) = delete;
-
-    ~BatchStreamRuntimeGuard() {
-        finishRemaining();
-    }
-
-    void finish(size_t index, const ErrorInfo& error = ErrorInfo::OkStatus()) {
-        RTP_LLM_CHECK_WITH_INFO(index < entries_.size(), "batch stream runtime index out of range");
-        auto& entry = entries_[index];
-        if (!entry.active) {
-            return;
-        }
-        if (!error.ok()) {
-            entry.error_code    = error.code();
-            entry.error_message = error.ToString();
-        }
-        finishEntry(entry, error.ok());
-        entry.active = false;
-    }
-
-    void setFailure(size_t index, const ErrorInfo& error, const std::string& message = "") {
-        RTP_LLM_CHECK_WITH_INFO(index < entries_.size(), "batch stream runtime index out of range");
-        auto& entry          = entries_[index];
-        entry.error_code     = error.code();
-        entry.error_message  = message.empty() ? error.ToString() : message;
-    }
-
-private:
-    struct Entry {
-        int64_t           request_id;
-        int64_t           batch_id;
-        int64_t           input_length;
-        GenerateStreamPtr stream;
-        ErrorCode         error_code;
-        std::string       error_message;
-        bool              active;
-        bool              registered;
-    };
-
-    void finishEntry(Entry& entry, bool success) {
-        if (entry.registered) {
-            if (!success && entry.stream->getStatus() != StreamState::FINISHED && !entry.stream->hasError()) {
-                entry.stream->reportError(entry.error_code, entry.error_message);
-            }
-            meta_->dequeue(entry.request_id, entry.stream);
-            return;
-        }
-        meta_->finishTask(entry.request_id,
-                          entry.input_length,
-                          /*prefix_length=*/0,
-                          static_cast<int64_t>(entry.error_code),
-                          entry.error_message,
-                          entry.batch_id);
-    }
-
-    void finishRemaining() noexcept {
-        for (size_t i = 0; i < entries_.size(); ++i) {
-            auto& entry = entries_[i];
-            if (!entry.active) {
-                continue;
-            }
-            try {
-                finishEntry(entry, false);
-                entry.active = false;
-            } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR(
-                    "failed to finalize batch stream runtime request [%ld]: %s", entry.request_id, error.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("failed to finalize batch stream runtime request [%ld]: unknown error",
-                                  entry.request_id);
-            }
-        }
-    }
-
-private:
-    std::shared_ptr<RpcServerRuntimeMeta> meta_;
-    std::vector<Entry>                    entries_;
-};
-
 }  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                   py::object                                    mm_process_engine) {
     meta_.reset(new RpcServerRuntimeMeta());
-    maga_init_params_ = maga_init_params;
-    weight_manager_   = maga_init_params.weight_manager;
-    metrics_reporter_ = maga_init_params.metrics_reporter;
+    maga_init_params_                      = maga_init_params;
+    weight_manager_                        = maga_init_params.weight_manager;
+    metrics_reporter_                      = maga_init_params.metrics_reporter;
+    torch_allocator_dump_enabled_          = false;
+    torch_allocator_dump_auth_token_       = "";
+    torch_allocator_dump_cooldown_seconds_ = 60.0;
+    {
+        std::lock_guard<std::mutex> lock(torch_allocator_dump_mutex_);
+        torch_allocator_dump_in_progress_              = false;
+        torch_allocator_dump_has_completed_            = false;
+        torch_allocator_dump_active_started_by_public_ = false;
+        torch_allocator_dump_active_internal_started_  = false;
+        torch_allocator_dump_active_id_.clear();
+        torch_allocator_dump_ids_.clear();
+        torch_allocator_dump_id_order_.clear();
+    }
+    if (!maga_init_params_.server_config.is_none()) {
+        const auto& server_config = maga_init_params_.server_config;
+        if (py::hasattr(server_config, "enable_torch_allocator_dump")) {
+            torch_allocator_dump_enabled_ = server_config.attr("enable_torch_allocator_dump").cast<bool>();
+        }
+        if (py::hasattr(server_config, "torch_allocator_dump_auth_token")) {
+            torch_allocator_dump_auth_token_ =
+                server_config.attr("torch_allocator_dump_auth_token").cast<std::string>();
+        }
+        if (py::hasattr(server_config, "torch_allocator_dump_cooldown_seconds")) {
+            torch_allocator_dump_cooldown_seconds_ =
+                server_config.attr("torch_allocator_dump_cooldown_seconds").cast<double>();
+        }
+    }
+    if (!std::isfinite(torch_allocator_dump_cooldown_seconds_) || torch_allocator_dump_cooldown_seconds_ < 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "allocator dump cooldown must be finite and non-negative");
+    }
+    if (torch_allocator_dump_enabled_ && torch_allocator_dump_auth_token_.empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "allocator dump authentication token is required when enabled");
+    }
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
     propose_maga_init_params_ = propose_params.get();
     if (maga_init_params_.parallelism_config.tp_rank == 0
         && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
-        profile_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
-        if (!profile_broadcaster_->init()) {
-            RTP_LLM_LOG_WARNING("failed to init profile broadcaster");
-            profile_broadcaster_.reset();
+        tp_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
+        if (!tp_broadcaster_->init()) {
+            RTP_LLM_LOG_WARNING("failed to init TP broadcaster");
+            tp_broadcaster_.reset();
         }
     }
 
@@ -334,6 +285,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
+    generate_context.onflight_requests = &onflight_requests_;
     // gRPC SERVER span doubles as the request span on the fusion path; guard
     // destruction covers CHECK_ERROR_STATUS early returns.
     if (telemetry::TelemetryRuntime::isActive()) {
@@ -425,7 +377,6 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     if (batch_size == 0) {
         return grpc::Status::OK;
     }
-    BatchStreamRuntimeGuard stream_runtime(meta_, *request);
 
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     inputs.reserve(batch_size);
@@ -437,16 +388,11 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             for (int j = 0; j < batch_size; j++) {
                 auto* result = response->add_results();
                 auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(j == i ? transErrorCodeToRPC(err.code()) : ErrorCodePB::CANCELLED);
+                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
                 if (j == i) {
-                    const auto message = "multimodal processing failed: " + err.ToString();
-                    stream_runtime.setFailure(j, err, message);
-                    err_pb->set_error_message(message);
+                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
                 } else {
-                    const auto message =
-                        "batch aborted due to multimodal failure at index " + std::to_string(i);
-                    stream_runtime.setFailure(j, ErrorInfo(ErrorCode::CANCELLED, message));
-                    err_pb->set_error_message(message);
+                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
                 }
             }
             return grpc::Status::OK;
@@ -457,8 +403,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     // enqueueMultiple contract: the returned stream vector is 1:1 with `inputs` (same size, same
     // order). Streams that failed checkInputLength carry an error reported via reportError() and
     // surface it through collectStreamOutput → nextOutput → ErrorInfo path below.
-    auto                    streams = engine_->enqueueMultiple(inputs).second;
-    stream_runtime.registerStreams(streams);
+    auto streams = engine_->enqueueMultiple(inputs).second;
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
@@ -469,12 +414,11 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         GenerateOutputs last_outputs;
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
         if (!err.ok()) {
-            stream_runtime.finish(i, err);
             auto* err_pb = result->mutable_error_info();
-            err_pb->set_error_code(transErrorCodeToRPC(err.code()));
+            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
+                                                                        ErrorCodePB::UNKNOWN_ERROR);
             err_pb->set_error_message(err.ToString());
         } else {
-            stream_runtime.finish(i);
             auto* output_pb = result->mutable_final_output();
             QueryConverter::transResponse(output_pb,
                                           &last_outputs,
@@ -704,7 +648,7 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                             "enable_all_rank start_profile must be sent to tp_rank 0");
     }
-    if (!profile_broadcaster_) {
+    if (!tp_broadcaster_) {
         if (maga_init_params_.parallelism_config.tp_size <= 1) {
             RTP_LLM_LOG_INFO("start_profile enable_all_rank with tp_size=1, fallback to local start");
             engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
@@ -713,7 +657,7 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
         return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for enable_all_rank start_profile");
     }
 
-    std::vector<StartProfileInternalRequestPB> requests(profile_broadcaster_->workerNum());
+    std::vector<StartProfileInternalRequestPB> requests(tp_broadcaster_->workerNum());
     for (auto& internal_request : requests) {
         internal_request.set_trace_name(request->trace_name());
         internal_request.set_start_step(request->start_step());
@@ -725,8 +669,8 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncStartProfileInternal(context.get(), internal_request, completion_queue);
     };
-    auto broadcast_result = profile_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(
-        requests, /*timeout_ms=*/3000, rpc_call);
+    auto broadcast_result =
+        tp_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(requests, /*timeout_ms=*/3000, rpc_call);
     if (!broadcast_result) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast start_profile_internal to tp group");
     }
@@ -747,6 +691,227 @@ grpc::Status LocalRpcServer::StartProfileInternal(grpc::ServerContext*          
                      request->num_steps());
     engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
     return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::authorizeTorchAllocatorDump(const TorchAllocatorDumpRequestPB& request) const {
+    if (!torch_allocator_dump_enabled_) {
+        return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "allocator dump unavailable");
+    }
+    if (torch_allocator_dump_auth_token_.empty()
+        || !constantTimeEquals(request.auth_token(), torch_allocator_dump_auth_token_)) {
+        return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "allocator dump authentication failed");
+    }
+    if (!validAllocatorDumpId(request.dump_id())) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "invalid allocator dump id");
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::authorizeTorchAllocatorDumpInternal(grpc::ServerContext*               context,
+                                                                 const TorchAllocatorDumpRequestPB& request) const {
+    const auto authorization = authorizeTorchAllocatorDump(request);
+    if (!authorization.ok()) {
+        return authorization;
+    }
+    if (maga_init_params_.parallelism_config.tp_size <= 1 || !isTorchAllocatorDumpInternalPeer(context)) {
+        return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "allocator dump internal fanout denied");
+    }
+    return grpc::Status::OK;
+}
+
+bool LocalRpcServer::isTorchAllocatorDumpInternalPeer(grpc::ServerContext* context) const {
+    if (context == nullptr) {
+        return false;
+    }
+    const auto peer_host = endpointHost(context->peer());
+    if (peer_host.empty()) {
+        return false;
+    }
+    return std::any_of(maga_init_params_.runtime_config.worker_grpc_addrs.begin(),
+                       maga_init_params_.runtime_config.worker_grpc_addrs.end(),
+                       [&peer_host](const std::string& worker_addr) { return endpointHost(worker_addr) == peer_host; });
+}
+
+grpc::Status
+LocalRpcServer::beginTorchAllocatorDump(const std::string& dump_id, bool internal_fanout, bool* owns_admission) {
+    std::lock_guard<std::mutex> lock(torch_allocator_dump_mutex_);
+    if (owns_admission != nullptr) {
+        *owns_admission = false;
+    }
+    if (internal_fanout && torch_allocator_dump_in_progress_ && torch_allocator_dump_active_started_by_public_
+        && !torch_allocator_dump_active_internal_started_ && torch_allocator_dump_active_id_ == dump_id) {
+        torch_allocator_dump_active_internal_started_ = true;
+        return grpc::Status::OK;
+    }
+    if (torch_allocator_dump_ids_.count(dump_id) != 0) {
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "allocator dump id has already been used");
+    }
+    if (torch_allocator_dump_in_progress_) {
+        return grpc::Status(grpc::StatusCode::ABORTED, "allocator dump already in progress");
+    }
+    if (torch_allocator_dump_has_completed_) {
+        const auto elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - torch_allocator_dump_last_completed_at_)
+                .count();
+        if (elapsed < torch_allocator_dump_cooldown_seconds_) {
+            return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "allocator dump cooldown active");
+        }
+    }
+    if (torch_allocator_dump_id_order_.size() == kAllocatorDumpReplayHistoryMax) {
+        torch_allocator_dump_ids_.erase(torch_allocator_dump_id_order_.front());
+        torch_allocator_dump_id_order_.pop_front();
+    }
+    torch_allocator_dump_ids_.insert(dump_id);
+    torch_allocator_dump_id_order_.push_back(dump_id);
+    torch_allocator_dump_in_progress_              = true;
+    torch_allocator_dump_active_started_by_public_ = !internal_fanout;
+    torch_allocator_dump_active_internal_started_  = false;
+    torch_allocator_dump_active_id_                = dump_id;
+    if (owns_admission != nullptr) {
+        *owns_admission = true;
+    }
+    return grpc::Status::OK;
+}
+
+void LocalRpcServer::finishTorchAllocatorDump() {
+    std::lock_guard<std::mutex> lock(torch_allocator_dump_mutex_);
+    torch_allocator_dump_in_progress_              = false;
+    torch_allocator_dump_has_completed_            = true;
+    torch_allocator_dump_active_started_by_public_ = false;
+    torch_allocator_dump_active_internal_started_  = false;
+    torch_allocator_dump_active_id_.clear();
+    torch_allocator_dump_last_completed_at_ = std::chrono::steady_clock::now();
+}
+
+grpc::Status LocalRpcServer::aggregateTorchAllocatorDumpResults(const std::string&                             dump_id,
+                                                                const std::vector<TorchAllocatorDumpResultPB>& results,
+                                                                TorchAllocatorDumpResponsePB* response) const {
+    for (const auto& result : results) {
+        if (result.dump_id() != dump_id) {
+            response->Clear();
+            RTP_LLM_LOG_WARNING("allocator dump response id mismatch expected=%s actual=%s world_rank=%ld",
+                                dump_id.c_str(),
+                                result.dump_id().c_str(),
+                                result.world_rank());
+            return grpc::Status(grpc::StatusCode::DATA_LOSS, "allocator dump response id mismatch");
+        }
+    }
+    for (const auto& result : results) {
+        response->add_results()->CopyFrom(result);
+    }
+    return grpc::Status::OK;
+}
+
+TorchAllocatorDumpResultPB LocalRpcServer::dumpTorchAllocatorOnCurrentProcess(const std::string& dump_id) {
+    const auto&                parallelism_config = maga_init_params_.parallelism_config;
+    TorchAllocatorDumpResultPB result;
+    result.set_world_rank(parallelism_config.world_rank);
+    result.set_dp_rank(parallelism_config.dp_rank);
+    result.set_tp_rank(parallelism_config.tp_rank);
+    result.set_local_rank(parallelism_config.local_rank);
+    result.set_pid(getpid());
+    result.set_dump_id(dump_id);
+
+    auto output_path = dumpTorchCudaOomDiagnostics(parallelism_config.local_rank, dump_id);
+    result.set_success(!output_path.empty());
+    result.set_file_path(std::move(output_path));
+    if (!result.success()) {
+        result.set_error("allocator dump failed; see backend log");
+    }
+    return result;
+}
+
+grpc::Status LocalRpcServer::executeAdmittedTorchAllocatorDump(const TorchAllocatorDumpRequestPB& request,
+                                                               TorchAllocatorDumpResponsePB*      response) {
+    if (maga_init_params_.parallelism_config.tp_size <= 1) {
+        return aggregateTorchAllocatorDumpResults(
+            request.dump_id(), {dumpTorchAllocatorOnCurrentProcess(request.dump_id())}, response);
+    }
+    if (!tp_broadcaster_) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for allocator dump");
+    }
+
+    std::vector<TorchAllocatorDumpRequestPB> requests(tp_broadcaster_->workerNum(), request);
+    auto                                     rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const TorchAllocatorDumpRequestPB&          internal_request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncDumpTorchAllocatorInternal(context.get(), internal_request, completion_queue);
+    };
+    auto broadcast_result = tp_broadcaster_->broadcast<TorchAllocatorDumpRequestPB, TorchAllocatorDumpResultPB>(
+        requests, /*timeout_ms=*/60000, rpc_call);
+    if (!broadcast_result) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast allocator dump to tp group");
+    }
+    try {
+        broadcast_result->waitDone();
+    } catch (const std::exception& exception) {
+        RTP_LLM_LOG_WARNING(
+            "allocator dump broadcast failed dump_id=%s: %s", request.dump_id().c_str(), exception.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, "allocator dump broadcast failed");
+    }
+    if (!broadcast_result->success()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "allocator dump broadcast to tp group failed");
+    }
+    return aggregateTorchAllocatorDumpResults(request.dump_id(), broadcast_result->responses(), response);
+}
+
+grpc::Status LocalRpcServer::DumpTorchAllocator(grpc::ServerContext*               context,
+                                                const TorchAllocatorDumpRequestPB* request,
+                                                TorchAllocatorDumpResponsePB*      response) {
+    response->Clear();
+    const auto authorization = authorizeTorchAllocatorDump(*request);
+    if (!authorization.ok()) {
+        RTP_LLM_LOG_WARNING("rejected dump_torch_allocator from %s", context->peer().c_str());
+        return authorization;
+    }
+    RTP_LLM_LOG_INFO("dump_torch_allocator from %s dump_id=%s", context->peer().c_str(), request->dump_id().c_str());
+    if (maga_init_params_.parallelism_config.tp_rank != 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dump_torch_allocator must be sent to tp_rank 0");
+    }
+    const auto admission = beginTorchAllocatorDump(request->dump_id());
+    if (!admission.ok()) {
+        return admission;
+    }
+
+    try {
+        const auto result = executeAdmittedTorchAllocatorDump(*request, response);
+        finishTorchAllocatorDump();
+        return result;
+    } catch (...) {
+        finishTorchAllocatorDump();
+        throw;
+    }
+}
+
+grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*               context,
+                                                        const TorchAllocatorDumpRequestPB* request,
+                                                        TorchAllocatorDumpResultPB*        response) {
+    response->Clear();
+    const auto authorization = authorizeTorchAllocatorDumpInternal(context, *request);
+    if (!authorization.ok()) {
+        RTP_LLM_LOG_WARNING("rejected dump_torch_allocator_internal from %s", context->peer().c_str());
+        return authorization;
+    }
+    bool       owns_admission = false;
+    const auto admission      = beginTorchAllocatorDump(request->dump_id(), /*internal_fanout=*/true, &owns_admission);
+    if (!admission.ok()) {
+        return admission;
+    }
+    RTP_LLM_LOG_INFO(
+        "dump_torch_allocator_internal from %s dump_id=%s", context->peer().c_str(), request->dump_id().c_str());
+    try {
+        response->CopyFrom(dumpTorchAllocatorOnCurrentProcess(request->dump_id()));
+        if (owns_admission) {
+            finishTorchAllocatorDump();
+        }
+        return grpc::Status::OK;
+    } catch (...) {
+        if (owns_admission) {
+            finishTorchAllocatorDump();
+        }
+        throw;
+    }
 }
 
 grpc::Status

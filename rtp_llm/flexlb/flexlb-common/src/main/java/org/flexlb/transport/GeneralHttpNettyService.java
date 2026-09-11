@@ -64,10 +64,11 @@ public class GeneralHttpNettyService {
         this.maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES;
         FlexlbConfig config = configService.loadBalanceConfig();
         httpRequestExecutor = new ThreadPoolExecutor(
-                config.getHttpRequestExecutorCoreSize(),
-                config.getHttpRequestExecutorMaxSize(),
+                config.getInternalRuntime().getHttpRequestExecutorThreads(),
+                config.getInternalRuntime().getHttpRequestExecutorThreads(),
                 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(config.getHttpRequestExecutorQueueSize()),
+                new LinkedBlockingQueue<>(
+                        config.getInternalRuntime().getHttpRequestExecutorQueueCapacity()),
                 new NamedThreadFactory("req-thread"),
                 // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
                 new ThreadPoolExecutor.CallerRunsPolicy());
@@ -216,7 +217,7 @@ public class GeneralHttpNettyService {
         request.content().writeBytes(body.getBytes(StandardCharsets.UTF_8));
         if (headers == null) {
 
-            request.headers().set(HttpHeaderNames.HOST, Objects.requireNonNull(uri).getHost());
+            request.headers().set(HttpHeaderNames.HOST, uri.getHost());
             request.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
             request.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
             request.headers().set(HttpHeaderNames.CONTENT_LENGTH, request.content().readableBytes());

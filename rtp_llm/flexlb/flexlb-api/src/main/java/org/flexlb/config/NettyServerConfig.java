@@ -11,8 +11,10 @@ public class NettyServerConfig {
 
     @Bean(destroyMethod = "dispose")
     public LoopResources loopResources(ConfigService configService) {
-        int selectCount = Runtime.getRuntime().availableProcessors() * configService.loadBalanceConfig().getNettySelectThreadMultiplier();
-        int workerCount = Runtime.getRuntime().availableProcessors() * configService.loadBalanceConfig().getNettyWorkerThreadMultiplier();
+        InternalRuntimeSettings runtime = configService.loadBalanceConfig().getInternalRuntime();
+        int processors = Runtime.getRuntime().availableProcessors();
+        int selectCount = processors * runtime.getNettySelectThreadMultiplier();
+        int workerCount = processors * runtime.getNettyWorkerThreadMultiplier();
         return LoopResources.create(
                 "reactor-netty-server",
                 selectCount,

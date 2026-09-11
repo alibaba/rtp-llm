@@ -703,19 +703,38 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int block_tokens     = reuseBlockTokens();
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
-    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
-    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
-    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
+    const auto& resource     = *read_context->resource();
+    const int   block_tokens = reuseBlockTokens();
+
+    // Reuse counters are expressed in canonical cache-key units. Cap them before token conversion so
+    // every reused key is complete while at least one prompt token remains executable. Under CP this
+    // preserves a complete virtual block even when the prompt ends in an incomplete next virtual block.
+    const int    reusable_tokens = std::max(stream_->seqLength() - 1, 0);
+    const size_t reusable_block_cap =
+        std::min(resource.reuseBlockNum(), static_cast<size_t>(reusable_tokens / block_tokens));
+
+    size_t     remaining_reuse_blocks = reusable_block_cap;
+    const auto take_reuse_blocks      = [&remaining_reuse_blocks](size_t block_count) {
+        const auto reused = std::min(block_count, remaining_reuse_blocks);
+        remaining_reuse_blocks -= reused;
+        return reused;
+    };
+    const size_t device_reuse_blocks = take_reuse_blocks(resource.deviceReuseBlockNum());
+    const size_t memory_reuse_blocks = take_reuse_blocks(resource.memoryReuseBlockNum());
+    const size_t remote_reuse_blocks = take_reuse_blocks(resource.remoteReuseBlockNum());
+
+    const int device_reuse_len = device_reuse_blocks * block_tokens;
+    const int memory_reuse_len = memory_reuse_blocks * block_tokens;
+    const int remote_reuse_len = remote_reuse_blocks * block_tokens;
+    const int total_reuse_len  = device_reuse_len + memory_reuse_len + remote_reuse_len;
     RTP_LLM_LOG_DEBUG("CACHE_REUSE_BLOCK_CONVERSION stream_id=%ld block_tokens=%d total_blocks=%zu device_blocks=%zu "
                       "memory_blocks=%zu remote_blocks=%zu total_tokens=%d",
                       stream_->streamId(),
                       block_tokens,
-                      read_context->resource()->reuseBlockNum(),
-                      read_context->resource()->deviceReuseBlockNum(),
-                      read_context->resource()->memoryReuseBlockNum(),
-                      read_context->resource()->remoteReuseBlockNum(),
+                      device_reuse_blocks + memory_reuse_blocks + remote_reuse_blocks,
+                      device_reuse_blocks,
+                      memory_reuse_blocks,
+                      remote_reuse_blocks,
                       total_reuse_len);
     if (total_reuse_len > 0) {
         stream_->setInitialReuseLength(total_reuse_len);

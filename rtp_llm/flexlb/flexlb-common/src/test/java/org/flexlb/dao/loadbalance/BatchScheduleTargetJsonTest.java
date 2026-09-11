@@ -1,7 +1,8 @@
 package org.flexlb.dao.loadbalance;
 
-import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 
@@ -67,12 +68,10 @@ class BatchScheduleTargetJsonTest {
 
     @Test
     void embeddingTargetRoundTripsOnlyArpcPort() {
-        WorkerStatus worker = new WorkerStatus();
-        worker.setIp("10.0.0.7");
-        worker.setPort(23840);
+        WorkerHost worker = new WorkerHost("10.0.0.7", 23840);
 
         BatchScheduleTarget target = BatchScheduleTarget.of(
-                worker, RoleType.PREFILL, true);
+                worker, RoleType.PREFILL, EngineType.EMBEDDING);
         String json = JsonUtils.toString(target);
 
         assertTrue(json.contains("\"arpc_port\":23841"),

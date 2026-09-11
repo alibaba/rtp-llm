@@ -15,6 +15,33 @@ from .defs.strategy_base import MoeStrategy
 logger = logging.getLogger(__name__)
 
 
+def _supports_quant_method(strategy: MoeStrategy, quant_method: str | None) -> bool:
+    supported = getattr(strategy, "supported_moe_quant_method", None)
+    if supported is not None:
+        if isinstance(supported, (list, tuple, set, frozenset)):
+            return quant_method in supported
+        return supported == quant_method
+    # In-tree MoeStrategy implementations without an FP8/FP4 declaration use
+    # older quantization contracts and must not consume FP8/FP4 weights. A
+    # legacy out-of-tree strategy object has no such declaration or base class;
+    # defer to its can_handle() method to preserve that extension contract.
+    return quant_method != "FP8_FP4" or not isinstance(strategy, MoeStrategy)
+
+
+def _requested_strategy_context(config: MoEConfigAdapter) -> str:
+    requested = getattr(config, "moe_strategy", "auto") or "auto"
+    model_config = getattr(config, "model_config", None)
+    model_scope = getattr(model_config, "model_type", None)
+    if not model_scope:
+        model_scope = type(
+            model_config if model_config is not None else config
+        ).__name__
+    return (
+        f"Requested MOE_STRATEGY={requested!r} for model scope "
+        f"{model_scope!r} in the generic fused-MoE factory."
+    )
+
+
 class StrategyRegistry:
     """Strategy registry
 
@@ -40,7 +67,11 @@ class StrategyRegistry:
         Returns:
             List of strategies sorted by priority (highest first)
         """
-        return sorted(self._strategies, key=lambda s: s.priority, reverse=True)
+        return sorted(
+            self._strategies,
+            key=lambda s: getattr(s, "priority", 0),
+            reverse=True,
+        )
 
     def clear(self) -> None:
         """Clear all registered strategies"""
@@ -65,51 +96,84 @@ class StrategyRegistry:
         logger.debug(
             f"[StrategyRegistry] Evaluating {len(self._strategies)} strategies..."
         )
+        quant_method = getattr(config, "moe_quant_method", None)
+        strategies = [
+            strategy
+            for strategy in self._strategies
+            if _supports_quant_method(strategy, quant_method)
+        ]
+        requested = getattr(config, "moe_strategy", "auto") or "auto"
+        if requested != "auto":
+            strategies = [
+                strategy
+                for strategy in strategies
+                if getattr(strategy, "strategy_name", None) == requested
+            ]
         candidates = [
-            strategy for strategy in self._strategies if strategy.can_handle(config)
+            strategy for strategy in strategies if strategy.can_handle(config)
         ]
         logger.debug(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
 
         if not candidates:
-            quant_method = (
-                config.model_config.quant_config.get_method()
-                if config.model_config.quant_config is not None
-                else None
-            )
+            quant_method = getattr(config, "moe_quant_method", None)
+            model_config = getattr(config, "model_config", None)
+            quant_config = getattr(model_config, "quant_config", None)
+            if quant_method is None:
+                quant_method = (
+                    quant_config.get_method() if quant_config is not None else None
+                )
             # Strategies dropped by can_handle() for an unimportable router or
             # executor record why. Surface it: otherwise this reads as a config
             # problem when the real cause is a missing dependency.
             skipped = [
                 f"{s.__class__.__name__}: {s.skip_reason}"
-                for s in self._strategies
+                for s in strategies
                 if getattr(s, "skip_reason", None)
             ]
             logger.error(
-                f"No suitable MOE strategy found. Config details: "
-                f"quant_config={config.model_config.quant_config}, "
-                f"ep_size={config.ep_size}, "
-                f"world_size={config.world_size}, "
-                f"tp_size={config.tp_size}, "
-                f"use_deepep_low_latency={config.moe_config.use_deepep_low_latency if config.moe_config else False}"
-                + (f", skipped_for_missing_deps={skipped}" if skipped else "")
+                "No suitable MOE strategy found. Config details: "
+                "quant_config=%r, ep_size=%r, world_size=%r, tp_size=%r, "
+                "use_deepep_low_latency=%r, skipped_for_missing_deps=%r",
+                quant_config,
+                getattr(config, "ep_size", None),
+                getattr(config, "world_size", None),
+                getattr(config, "tp_size", None),
+                getattr(
+                    getattr(config, "moe_config", None),
+                    "use_deepep_low_latency",
+                    False,
+                ),
+                skipped,
             )
             if quant_method == "W8A8_INT8_PER_CHANNEL_COMPRESSED":
                 raise ValueError(
                     "W8A8_INT8_PER_CHANNEL_COMPRESSED weights were loaded, but "
                     "no registered MOE compute backend can consume them; install "
                     "or register a backend with W8A8 INT8 per-channel execution "
-                    "support"
+                    f"support. {_requested_strategy_context(config)}"
+                )
+            if quant_method == "FP8_FP4" and getattr(
+                config, "has_redundant_experts", False
+            ):
+                raise ValueError(
+                    "FP8/FP4 MOE strategies do not support EPLB redundant "
+                    "experts; disable EPLB or register an EPLB-aware backend "
+                    f"(logical_experts={getattr(config, 'expert_num', None)}, "
+                    "physical_experts="
+                    f"{getattr(config, 'physical_expert_num', None)}). "
+                    f"{_requested_strategy_context(config)}"
                 )
             if skipped:
                 raise ValueError(
                     "No suitable MOE strategy found: every candidate was skipped "
                     "because its router/executor could not be imported, so this is "
                     "a missing-dependency problem rather than a configuration one. "
-                    f"Skipped: {skipped}"
+                    f"Skipped: {skipped}. {_requested_strategy_context(config)}"
                 )
             raise ValueError(
-                f"No suitable MOE strategy found for configuration. "
-                f"Please check quant_config, ep_size, and parallelism settings."
+                "No suitable MOE strategy found for configuration. "
+                "Please check quant_config, ep_size, and parallelism settings. "
+                f"{_requested_strategy_context(config)}"
             )
 
         # get_attributes() is not a plain accessor -- it does lazy imports and

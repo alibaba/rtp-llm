@@ -74,7 +74,7 @@ public class DispatcherInspectionHandler {
                                         FlexlbConfig loadBalanceConfig,
                                         Scheduler cpuScheduler) {
         this(cfg, refresher, healthChecker, batchScheduleClient,
-                loadBalanceConfig.getBatchScheduleMaxCount(), loadBalanceConfig, cpuScheduler);
+                loadBalanceConfig.getRouter().getBatchScheduleMaxCount(), loadBalanceConfig, cpuScheduler);
     }
 
     /** Package-private convenience for focused tests; mirrors the production default. */
@@ -190,7 +190,7 @@ public class DispatcherInspectionHandler {
             if (chunkCount > maxChunkCount) {
                 return DispatcherResponses.error(413, "too_many_sub_batches",
                         "batch produces " + chunkCount + " sub-batches; maximum is "
-                                + maxChunkCount + " (BATCH_SCHEDULE_MAX_COUNT)");
+                                + maxChunkCount + " (router.batchScheduleMaxCount)");
             }
             // Reject request-controlled envelope amplification before target resolution (which can
             // advance master's BE cursor) and before allocating any chunk arrays/bodies.
@@ -235,8 +235,8 @@ public class DispatcherInspectionHandler {
 
     private boolean hasActiveTrafficPolicy() {
         TrafficPolicyConfig policy = loadBalanceConfig == null
-                ? null : loadBalanceConfig.getTrafficPolicy();
-        return policy != null && policy.hasActiveRoutingRules();
+                ? null : loadBalanceConfig.getRouter().getGroupSelector();
+        return policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty());
     }
 
     private Mono<ServerResponse> buildDryRunResponse(BatchEndpointSpec spec, JSONObject envelope,

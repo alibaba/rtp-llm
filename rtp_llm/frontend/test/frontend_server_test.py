@@ -146,6 +146,7 @@ class ForceBatchFrontendWorkerTest(TestCase):
         worker = FrontendWorker.__new__(FrontendWorker)
         worker.backend_rpc_server_visitor = MagicMock()
         worker.backend_rpc_server_visitor.pd_sep_config.role_type = RoleType.PDFUSION
+        worker.backend_rpc_server_visitor.host_service.service_available = False
         worker.backend_rpc_server_visitor.backend_role_list = []
         batch_generator = object()
         worker._yield_batch_generate = MagicMock(return_value=batch_generator)
@@ -153,6 +154,39 @@ class ForceBatchFrontendWorkerTest(TestCase):
         selected = worker._inference(self._request(True), headers={"x-request-id": "r"})
 
         self.assertIs(batch_generator, selected)
+        worker._yield_batch_generate.assert_called_once()
+
+    def test_unassigned_llm_batch_uses_mainline_per_item_scheduler(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker.backend_rpc_server_visitor = MagicMock()
+        worker.backend_rpc_server_visitor.pd_sep_config.role_type = RoleType.PDFUSION
+        worker.backend_rpc_server_visitor.host_service.service_available = True
+        worker._yield_batch_generate = MagicMock()
+        worker._yield_generate = MagicMock(side_effect=[object(), object()])
+        per_item = object()
+        worker._parallel_batch_async_generators = MagicMock(return_value=per_item)
+        self.assertIs(per_item, worker._inference(self._request(True)))
+        worker._yield_batch_generate.assert_not_called()
+        self.assertEqual(2, worker._yield_generate.call_count)
+
+    def test_preassigned_pdfusion_batch_uses_one_native_rpc(self):
+        worker = FrontendWorker.__new__(FrontendWorker)
+        worker.backend_rpc_server_visitor = MagicMock()
+        worker.backend_rpc_server_visitor.pd_sep_config.role_type = RoleType.FRONTEND
+        worker.backend_rpc_server_visitor.host_service.service_available = True
+        request = self._request(True)
+        for config in request.generate_configs:
+            config.role_addrs = [
+                RoleAddr(
+                    role=RoleType.PDFUSION,
+                    ip="10.0.0.1",
+                    http_port=8080,
+                    grpc_port=8081,
+                )
+            ]
+        batch = object()
+        worker._yield_batch_generate = MagicMock(return_value=batch)
+        self.assertIs(batch, worker._inference(request))
         worker._yield_batch_generate.assert_called_once()
 
     def test_explicit_false_keeps_legacy_per_item_generators(self):
@@ -381,9 +415,7 @@ class FrontendServerTest(TestCase):
         }
 
         with self.assertRaises(FtRuntimeException) as raised:
-            asyncio.run(
-                self.frontend_server.batch_infer(request, FakeRawRequest())
-            )
+            asyncio.run(self.frontend_server.batch_infer(request, FakeRawRequest()))
 
         self.assertEqual(ExceptionType.INVALID_PARAMS, raised.exception.exception_type)
         self.assertEqual([], self.frontend_server._frontend_worker.batch_calls)
@@ -409,8 +441,11 @@ class FrontendServerTest(TestCase):
         )
 
         payload = json.loads(response.body)
-        self.assertEqual("INVALID_PARAMS", payload["error_code_str"])
+        self.assertEqual(int(ExceptionType.INVALID_PARAMS), payload["error_code"])
         self.assertIn("authenticated dispatcher", payload["message"])
+        self.assertEqual(
+            0, self.frontend_server._global_controller.current_concurrency.value
+        )
 
     def test_authenticated_dispatcher_can_supply_preassigned_backend(self):
         self.frontend_server._dispatcher_routing_token = "trusted-secret"

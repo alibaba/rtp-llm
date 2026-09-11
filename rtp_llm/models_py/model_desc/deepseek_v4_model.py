@@ -41,23 +41,23 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
+    chunked_moe_enabled,
     dsv4_global_chunk_tokens_configured,
+    moe_chunk_tokens_from_env,
 )
 from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
-from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
-    chunked_moe_enabled,
-    cp_padded_tokens_per_rank_bound,
-    moe_chunk_tokens_from_env,
-    resolve_moe_max_tokens_per_rank,
-)
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    cp_padded_tokens_per_rank_bound,
+    resolve_moe_max_tokens_per_rank,
+)
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -225,8 +225,54 @@ class Dsv4SharedRuntimeBufferStore:
             module._bind_runtime_buffers(mtp_hidden_buffer)
 
 
+def _resolve_dsv4_moe_strategy(moe_config) -> str:
+    """Forward the public MoE strategy to the generic strategy registry."""
+    if moe_config is None:
+        return "auto"
+    requested = str(moe_config.moe_strategy or "auto").strip()
+    return requested or "auto"
+
+
+def _resolve_dsv4_moe_inter_dim(model_config: ModelConfig) -> int:
+    """Resolve one routed expert's width and validate shared-expert metadata."""
+    n_shared_experts = int(model_config.n_shared_experts)
+    if n_shared_experts < 0:
+        raise ValueError(
+            "DeepSeek-V4 n_shared_experts must be non-negative, got "
+            f"{n_shared_experts}"
+        )
+
+    moe_inter_dim = int(model_config.moe_inter_size)
+    shared_inter_dim = int(model_config.inter_size)
+    if moe_inter_dim <= 0:
+        if (
+            n_shared_experts > 0
+            and shared_inter_dim > 0
+            and shared_inter_dim % n_shared_experts == 0
+        ):
+            moe_inter_dim = shared_inter_dim // n_shared_experts
+        else:
+            raise ValueError(
+                "DeepSeek-V4 moe_inter_size must resolve to a positive routed "
+                f"expert width, got moe_inter_size={model_config.moe_inter_size}, "
+                f"inter_size={model_config.inter_size}, "
+                f"n_shared_experts={n_shared_experts}"
+            )
+
+    expected_shared_inter_dim = n_shared_experts * moe_inter_dim
+    if n_shared_experts > 0 and shared_inter_dim != expected_shared_inter_dim:
+        raise ValueError(
+            "DeepSeek-V4 shared-expert width is inconsistent with routed expert "
+            f"metadata: inter_size={shared_inter_dim}, expected "
+            f"n_shared_experts * moe_inter_size={expected_shared_inter_dim}"
+        )
+    return moe_inter_dim
+
+
 def _args_from_model_config(
-    model_config: ModelConfig, max_generate_batch_size: int = 4
+    model_config: ModelConfig,
+    max_generate_batch_size: int = 4,
+    moe_config=None,
 ) -> V4Args:
     from rtp_llm.ops import KvCacheDataType, RoleType
 
@@ -257,13 +303,13 @@ def _args_from_model_config(
         index_n_heads=attn_config.indexer_head_num,
         index_head_dim=attn_config.indexer_head_dim,
         index_topk=attn_config.indexer_topk,
-        moe_inter_dim=(
-            model_config.inter_size // max(1, model_config.moe_k or 1)
-            if False
-            else model_config.inter_size // 1
-        ),
+        moe_inter_dim=_resolve_dsv4_moe_inter_dim(model_config),
         n_routed_experts=model_config.expert_num,
-        n_shared_experts=1,
+        n_physical_experts=int(
+            model_config.eplb_config.phy_exp_num(model_config.expert_num)
+        ),
+        n_shared_experts=int(model_config.n_shared_experts),
+        moe_strategy=_resolve_dsv4_moe_strategy(moe_config),
         n_activated_experts=model_config.moe_k,
         score_func={0: "softmax", 1: "sigmoid", 2: "sqrtsoftplus"}[
             model_config.scoring_func
@@ -277,10 +323,13 @@ def _args_from_model_config(
         norm_eps=float(model_config.layernorm_eps),
         max_batch_size=max_generate_batch_size,  # from framework, supports concurrent requests
         max_seq_len=int(model_config.max_seq_len) or 4096,
-        # Mega MoE sizes its symm-mem dispatch buffer from this bound.
-        # max_seq_len is the safest per-rank upper bound (one long prefill
-        # fully on one rank) — the buffer is allocated once and reused.
-        max_tokens_per_rank=int(model_config.max_seq_len) or 4096,
+        # A scheduler-admitted prefill batch can exceed one request's max_seq_len.
+        # CP, decode and chunk limits are applied after this initial batch bound.
+        max_tokens_per_rank=int(
+            model_config.moe_prefill_max_tokens_per_rank
+            if model_config.moe_prefill_max_tokens_per_rank is not None
+            else (int(model_config.max_seq_len) or 4096)
+        ),
         fp8_kv_cache=fp8_kv_cache,
     )
 
@@ -315,7 +364,11 @@ class DeepSeekV4Model(GptModelBase):
         )
 
         # Build V4Transformer with matching args.
-        args = _args_from_model_config(model_config, max_generate_batch_size)
+        args = _args_from_model_config(
+            model_config,
+            max_generate_batch_size,
+            moe_config=moe_config,
+        )
         self._max_generate_batch_size = int(max_generate_batch_size)
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "
@@ -348,8 +401,7 @@ class DeepSeekV4Model(GptModelBase):
         ):
             args.moe_inter_dim = int(moe_config.moe_inter_padding_size)
         else:
-            # V4-Flash = 2048. config.inter_size = n_shared * 2048 = 2048 (since n_shared=1).
-            args.moe_inter_dim = int(model_config.inter_size) or args.moe_inter_dim
+            args.moe_inter_dim = _resolve_dsv4_moe_inter_dim(model_config)
 
         # S7 scaffold: thread the framework's parallelism config into V4Args.
         # No behavior change at TP=1; the fields are read by future patches
@@ -388,10 +440,8 @@ class DeepSeekV4Model(GptModelBase):
                 args.dp_size,
             )
 
-        # CP-aware Mega MoE buffer sizing.  CP first reduces the rank-local
-        # sequence bound, then chunked MoE caps the per-forward routed/shared
-        # expert workspace to a scheduler-style token chunk: allocate by max
-        # batched/chunked tokens, not by the full 1M context length.
+        # Resolve CP padding at initialize(), once the scheduler's maximum
+        # context batch size is available. Each request is padded separately.
         cp_size = 1
         if (
             parallelism_config is not None
@@ -402,23 +452,6 @@ class DeepSeekV4Model(GptModelBase):
                     cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
             except Exception:  # pyi-only stub or non-CP build
                 pass
-        if cp_size > 1:
-            cp_tokens_per_rank_bound = min(
-                args.max_tokens_per_rank,
-                max(
-                    cp_padded_tokens_per_rank_bound(args.max_seq_len, cp_size),
-                    4096,
-                ),
-            )
-            if cp_tokens_per_rank_bound != args.max_tokens_per_rank:
-                logging.info(
-                    "[DeepSeekV4Model] CP=%d: max_tokens_per_rank %d -> %d "
-                    "(Mega MoE per-rank symm-mem buffer)",
-                    cp_size,
-                    args.max_tokens_per_rank,
-                    cp_tokens_per_rank_bound,
-                )
-                args.max_tokens_per_rank = cp_tokens_per_rank_bound
         self._prefill_cp_size = int(cp_size)
         self._is_speculative = False
         self._is_decode_role = False
@@ -543,6 +576,33 @@ class DeepSeekV4Model(GptModelBase):
         idx_w = 2 * 2 * index_head_dim
         return main_w, idx_w
 
+    def _initialize_commit_only(
+        self, init_resource: PyModelInitResources, device_str: str
+    ) -> bool:
+        """Initialize an attention-only DSpARK PREFILL commit model."""
+        logging.info(
+            "[DeepSeekV4Model] building DSpARK commit-only transformer "
+            "(layers=%d, globals=%d)",
+            len(self.weight.weights),
+            len(self.weight.global_weights),
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+
+        for layer in self.v4.layers:
+            layer.attn.init_rope_cache(device=device_str)
+
+        self._load_extra_weights(self.weight)
+        del self.weight
+        self._bind_runtime_buffers(torch.device(device_str))
+        self._materialized = True
+        return True
+
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         assert self.v4 is not None
         mtp_hidden = None
@@ -615,11 +675,14 @@ class DeepSeekV4Model(GptModelBase):
         runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=int(self._v4_args.max_seq_len),
             current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
-            cp_size=1,
+            cp_size=self._prefill_cp_size,
             max_generate_batch_size=int(self._max_generate_batch_size),
+            max_context_batch_size=self._max_context_batch_size,
             is_decode_role=self._is_decode_role,
             is_speculative=self._is_speculative,
             gen_num_per_cycle=self._gen_num_per_cycle,
+            chunking_enabled=chunked_moe_enabled(),
+            chunk_tokens=moe_chunk_tokens_from_env(),
         )
         if runtime_resolved_max_tokens_per_rank != self._v4_args.max_tokens_per_rank:
             chunk_tokens_env_for_log = (
@@ -647,6 +710,9 @@ class DeepSeekV4Model(GptModelBase):
             )
             self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
 
+        if bool(getattr(self._v4_args, "commit_only", False)):
+            return self._initialize_commit_only(init_resource, device_str)
+
         # ``self.weight`` is a framework ``ModelWeights`` populated by the
         # ``DeepSeekV4Weight`` descriptor (see ``rtp_llm/models/deepseek_v4.py``)
         # via the fastsafetensors loader.  Each dsv4 sub-module's factory
@@ -673,10 +739,10 @@ class DeepSeekV4Model(GptModelBase):
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
 
-        # Recompute RoPE cache on real device (precompute_freqs_cis under
-        # meta context yields zeros; we need real values).
+        # Recompute RoPE on the real device and prebuild the compressors'
+        # shared cos_sin_cache before runtime memory allocation starts.
         for layer in self.v4.layers:
-            layer.attn.reset_rope_cache(device=device_str)
+            layer.attn.init_rope_cache(device=device_str)
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
@@ -825,11 +891,15 @@ class DeepSeekV4Model(GptModelBase):
             try:
                 import torch.distributed as _dist
 
-                _strategy = self.v4.layers[0].ffn._strategy
-                if getattr(_strategy, "name", "") in ("mega", "mega_se"):
+                _moe_layer = self.v4.layers[0].ffn
+                if getattr(_moe_layer, "strategy_name", None) in (
+                    "mega_moe",
+                    "mega_moe_se",
+                ):
+                    _executor = _moe_layer.fused_moe.fused_experts
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()
-                    _cfg = _strategy.cfg
+                    _cfg = _executor.cfg
                     _x_moe = _torch.zeros(
                         (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
                     )
@@ -850,7 +920,7 @@ class DeepSeekV4Model(GptModelBase):
                         % (_end - _start)
                     ) + _start
                     _idx_moe = _idx_vals.unsqueeze(0).contiguous()
-                    _strategy(_x_moe, _w_moe, _idx_moe)
+                    _executor(_x_moe, _w_moe, _idx_moe)
                     _torch.cuda.synchronize()
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()
@@ -997,6 +1067,11 @@ class DeepSeekV4Model(GptModelBase):
                         kv_cache=self.kv_cache,
                         cp_size=_prefill_cp_size,
                         device=_jit_device,
+                        max_batch_size=max(
+                            int(self._max_context_batch_size),
+                            int(self._max_generate_batch_size),
+                            1,
+                        ),
                     )
                 _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
                 warmup_fp8_mqa_logits_jit(

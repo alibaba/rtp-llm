@@ -1,34 +1,30 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.enums.EngineType;
-import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.util.RateLimitedWarn;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.OptionalLong;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -37,7 +33,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -48,7 +43,10 @@ class EngineSyncRunnerTest {
 
     private final String modelName = "test-model";
 
-    private Map<String, WorkerStatus> workerStatusMap;
+    @Mock
+    private EndpointRegistry endpointRegistry;
+
+    private WorkerDirectory workerDirectory;
 
     @Mock
     private WorkerAddressService workerAddressService;
@@ -62,10 +60,13 @@ class EngineSyncRunnerTest {
     @Mock
     private EngineGrpcService engineGrpcService;
 
-    private final RoleType roleType = RoleType.PDFUSION;
+    private final RoleType roleType = RoleType.PREFILL;
 
     @Mock
     private CacheAwareService localKvCacheAwareManager;
+
+    @Mock
+    private DynamicCacheIntervalService cacheIntervalService;
 
     private final long syncRequestTimeoutMs = 5000L;
 
@@ -73,48 +74,29 @@ class EngineSyncRunnerTest {
     private LongAdder syncCount;
 
     private final long syncEngineStatusInterval = 20L;
+    private static final long STATUS_STALE_AFTER_US = 10_000_000L;
 
     private EngineSyncRunner engineSyncRunner;
 
-    /** Fresh per test so the grace clock never leaks across methods (it used to be a static map). */
-    private Map<String, Long> lastDiscoverySuccessUs;
-
     @BeforeEach
     void setUp() {
-        workerStatusMap = new ConcurrentHashMap<>();
-        lastDiscoverySuccessUs = new ConcurrentHashMap<>();
-
-        engineSyncRunner = newRunner(EngineType.LLM);
-    }
-
-    private EngineSyncRunner newRunner(EngineType engineType) {
-        return newRunner(engineType, 300_000L);
-    }
-
-    private EngineSyncRunner newRunner(EngineType engineType, long discoveryFailureGraceMs) {
-        return new EngineSyncRunner(
+        workerDirectory = new WorkerDirectory(endpointRegistry);
+        engineSyncRunner = new EngineSyncRunner(
                 modelName,
-                workerStatusMap,
+                workerDirectory,
                 workerAddressService,
                 statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
                 localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
-                null,
-                null,
-                engineType,
-                discoveryFailureGraceMs,
-                lastDiscoverySuccessUs,
-                new RateLimitedWarn(1, TimeUnit.SECONDS)
+                false,
+                STATUS_STALE_AFTER_US
         );
-    }
-
-    private WorkerHost host(String ip, int port) {
-        return new WorkerHost(ip, port, port + 1, port + 5, "site-a", "group-a");
     }
 
     @Test
@@ -127,485 +109,325 @@ class EngineSyncRunnerTest {
     }
 
     @Test
-    void embedding_engine_marks_workers_alive_without_probing() {
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.1", 23950), host("10.0.0.2", 23950)));
-
-        newRunner(EngineType.EMBEDDING).run();
-
-        verify(statusCheckExecutor, never()).submit(any(Runnable.class));
-        assertEquals(2, workerStatusMap.size());
-        WorkerStatus status = workerStatusMap.get("10.0.0.1:23950");
-        assertNotNull(status);
-        assertTrue(status.isAlive());
-        assertEquals("group-a", status.getGroup());
-        assertEquals("site-a", status.getSite());
-        assertEquals(roleType, status.getRole());
-        assertTrue(status.getStatusLastUpdateTime().get() > 0);
-    }
-
-    @Test
-    void embedding_engine_removes_worker_dropped_by_discovery() {
-        WorkerStatus stale = new WorkerStatus();
-        stale.setIp("10.0.0.9");
-        stale.setPort(23950);
-        stale.setAlive(true);
-        stale.getStatusLastUpdateTime().set(1L);
-        workerStatusMap.put("10.0.0.9:23950", stale);
-
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.1", 23950)));
-
-        newRunner(EngineType.EMBEDDING).run();
-
-        assertFalse(workerStatusMap.containsKey("10.0.0.9:23950"));
-        assertTrue(workerStatusMap.containsKey("10.0.0.1:23950"));
-    }
-
-    @Test
-    void empty_discovery_result_never_wipes_a_known_fleet() {
-        WorkerStatus alive = new WorkerStatus();
-        alive.setIp("10.0.0.9");
-        alive.setPort(23950);
-        alive.setAlive(true);
-        alive.getStatusLastUpdateTime().set(1L);
-        workerStatusMap.put("10.0.0.9:23950", alive);
-
-        // A prior successful round establishes the discovery-grace baseline, then discovery hands
-        // back an empty list — which a client that swallows a failed lookup reports exactly like a
-        // fleet that scaled to zero. The known fleet must survive it.
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.9", 23950)))
-                .thenReturn(List.of());
-
-        EngineSyncRunner runner = newRunner(EngineType.EMBEDDING);
-        runner.run();
-        long beforeUs = System.nanoTime() / 1000;
-        runner.run();
-
-        assertTrue(alive.isAlive(),
-                "an empty discovery list is indistinguishable from a swallowed lookup failure, so it "
-                        + "must not mark a known embedding fleet dead");
-        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"),
-                "an empty discovery list must not physically remove known workers either");
-        assertTrue(alive.getStatusLastUpdateTime().get() >= beforeUs,
-                "within the grace window the retained workers' staleness clock is refreshed, so the "
-                        + "independent ExpirationCleaner does not evict a fleet discovery cannot confirm");
-    }
-
-    @Test
-    void empty_discovery_result_beyond_grace_lets_workers_age_out() {
-        EngineSyncRunner expiredGraceRunner = newRunner(EngineType.EMBEDDING, 1L);
-        WorkerStatus alive = new WorkerStatus();
-        alive.setIp("10.0.0.9");
-        alive.setPort(23950);
-        alive.setAlive(true);
-        alive.getStatusLastUpdateTime().set(1L);
-        workerStatusMap.put("10.0.0.9:23950", alive);
-
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.9", 23950)))
-                .thenReturn(List.of());
-
-        expiredGraceRunner.run();
-        // The successful round stamps the clock itself (embedding liveness comes from the discovery
-        // list); reset it so the assertion observes only what the empty round does.
-        alive.getStatusLastUpdateTime().set(1L);
-        lastDiscoverySuccessUs.put(modelName + "/" + roleType, 0L);
-        expiredGraceRunner.run();
-
-        assertEquals(1L, alive.getStatusLastUpdateTime().get(),
-                "once the empty results outlast the grace window the staleness clock stops being "
-                        + "refreshed, so a fleet that genuinely scaled to zero still ages out");
-    }
-
-    @Test
-    void embedding_engine_still_marks_dead_a_worker_dropped_from_a_non_empty_list() {
-        WorkerStatus dropped = new WorkerStatus();
-        dropped.setIp("10.0.0.9");
-        dropped.setPort(23950);
-        dropped.setAlive(true);
-        dropped.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
-        workerStatusMap.put("10.0.0.9:23950", dropped);
-
-        // Partial shrinkage is unambiguous — discovery answered, and this worker is not in the
-        // answer. Only the all-or-nothing empty result is treated as untrustworthy.
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.1", 23950)));
-
-        newRunner(EngineType.EMBEDDING).run();
-
-        assertFalse(dropped.isAlive(),
-                "embedding has no probe fallback: a worker gone from a non-empty discovery list must "
-                        + "stop being routable immediately");
-    }
-
-    @Test
-    void rejected_status_submit_resets_in_progress_flags() {
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.1", 23950)));
-        when(statusCheckExecutor.submit(any(Runnable.class)))
-                .thenThrow(new java.util.concurrent.RejectedExecutionException("queue full"));
-
-        newRunner(EngineType.LLM).run();
-
-        WorkerStatus ws = workerStatusMap.get("10.0.0.1:23950");
-        assertNotNull(ws);
-        assertFalse(ws.getStatusCheckInProgress().get(),
-                "a rejected submit must reset the in-progress flag so the worker is retried next round");
-        assertFalse(ws.getCacheCheckInProgress().get(),
-                "a rejected cache-check submit must also reset its flag");
-    }
-
-    @Test
-    void embedding_engine_marks_worker_dead_immediately_before_removal_threshold() {
-        WorkerStatus stale = new WorkerStatus();
-        stale.setIp("10.0.0.9");
-        stale.setPort(23950);
-        stale.setAlive(true);
-        // Fresh update time: within max(3 * interval, 1s), so physical removal must not
-        // trigger yet — but routability must drop right away.
-        stale.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
-        workerStatusMap.put("10.0.0.9:23950", stale);
-
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.1", 23950)));
-
-        newRunner(EngineType.EMBEDDING).run();
-
-        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"),
-                "physical removal stays thresholded to tolerate discovery flaps");
-        assertFalse(stale.isAlive(),
-                "a worker missing from discovery must be non-routable immediately, not after the removal threshold");
-        assertTrue(workerStatusMap.get("10.0.0.1:23950").isAlive());
-    }
-
-    @Test
-    void embedding_engine_keeps_workers_alive_when_discovery_fails() {
-        WorkerStatus alive = new WorkerStatus();
-        alive.setIp("10.0.0.9");
-        alive.setPort(23950);
-        alive.setAlive(true);
-        alive.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
-        workerStatusMap.put("10.0.0.9:23950", alive);
-
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenThrow(new ServiceDiscoveryException(
-                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
-
-        newRunner(EngineType.EMBEDDING).run();
-
-        assertTrue(alive.isAlive(),
-                "a failed discovery round must keep the previous alive state — only a successful "
-                        + "round may mark embedding workers dead");
-        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"));
-    }
-
-    @Test
-    void embedding_discovery_failure_within_grace_refreshes_staleness_clock_so_workers_survive_expiration() {
-        WorkerStatus alive = new WorkerStatus();
-        alive.setIp("10.0.0.9");
-        alive.setPort(23950);
-        alive.setAlive(true);
-        alive.getStatusLastUpdateTime().set(1L);
-        workerStatusMap.put("10.0.0.9:23950", alive);
-
-        // A prior successful round establishes the discovery-grace baseline; the immediately
-        // following failure is well within the grace window. Embedding workers have no probe, so
-        // the clock refresh is the only thing keeping ExpirationCleaner from evicting the fleet.
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.9", 23950)))
-                .thenThrow(new ServiceDiscoveryException(
-                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
-
-        EngineSyncRunner runner = newRunner(EngineType.EMBEDDING);
-        runner.run();
-        long beforeUs = System.nanoTime() / 1000;
-        runner.run();
-
-        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"));
-        assertTrue(alive.getStatusLastUpdateTime().get() >= beforeUs,
-                "a discovery failure within the grace window must refresh the retained embedding workers' "
-                        + "staleness clock so the independent ExpirationCleaner does not evict a healthy fleet");
-    }
-
-    @Test
-    void embedding_worker_already_marked_dead_is_not_kept_fresh_during_the_gap() {
-        WorkerStatus dead = new WorkerStatus();
-        dead.setIp("10.0.0.9");
-        dead.setPort(23950);
-        dead.setAlive(false);
-        // Fresh clock: round 1 drops it from discovery, and only a clock past the removal
-        // threshold would evict it there — this worker has to still be in the map for round 2's
-        // gap ride-out to have anything to decide about.
-        long deadClockUs = System.nanoTime() / 1000;
-        dead.getStatusLastUpdateTime().set(deadClockUs);
-        workerStatusMap.put("10.0.0.9:23950", dead);
-        WorkerStatus alive = new WorkerStatus();
-        alive.setIp("10.0.0.1");
-        alive.setPort(23950);
-        alive.setAlive(true);
-        alive.getStatusLastUpdateTime().set(1L);
-        workerStatusMap.put("10.0.0.1:23950", alive);
-
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.1", 23950)))
-                .thenThrow(new ServiceDiscoveryException(
-                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
-
-        EngineSyncRunner runner = newRunner(EngineType.EMBEDDING);
-        runner.run();
-        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"),
-                "the dead worker must survive round 1 — otherwise the gap round never sees it");
-        long beforeGapUs = System.nanoTime() / 1000;
-        runner.run();
-
-        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"));
-        assertEquals(deadClockUs, dead.getStatusLastUpdateTime().get(),
-                "a worker an earlier authoritative round already marked dead must age out normally — "
-                        + "the gap ride-out only protects workers that were alive when discovery broke");
-        assertTrue(alive.getStatusLastUpdateTime().get() >= beforeGapUs,
-                "the still-alive worker is the one the gap ride-out exists for and must be refreshed");
-    }
-
-    @Test
-    void empty_discovery_over_an_empty_fleet_does_not_stamp_the_grace_clock() {
-        // Cold start: discovery returns empty and nothing is known yet. That is a zero/absent fleet,
-        // not a success, so it must not seed lastDiscoverySuccessUs — otherwise a later genuine
-        // outage would measure its grace window from a fabricated "success".
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of());
-
-        engineSyncRunner.run();
-
-        assertTrue(workerStatusMap.isEmpty(), "nothing was discovered, so nothing is known");
-        assertNull(lastDiscoverySuccessUs.get(modelName + "/" + roleType),
-                "an empty discovery over an empty fleet is an outage, not a success — it must not "
-                        + "stamp the grace clock");
-    }
-
-    @Test
-    void llm_empty_discovery_list_within_grace_keeps_probing_known_workers_without_touching_membership() {
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.9", 23950)))
-                .thenReturn(List.of());
-
-        engineSyncRunner.run();
-        Long baselineUs = lastDiscoverySuccessUs.get(modelName + "/" + roleType);
-        assertNotNull(baselineUs, "the successful round must stamp the grace baseline");
-
-        WorkerStatus known = workerStatusMap.get("10.0.0.9:23950");
-        assertNotNull(known);
-        // The mocked executor never runs the probes, so complete them by hand — otherwise the
-        // in-progress flags from the first round would make the gap round skip its submissions.
-        known.getStatusCheckInProgress().set(false);
-        known.getCacheCheckInProgress().set(false);
-        known.getStatusLastUpdateTime().set(1L);
-
-        engineSyncRunner.run();
-
-        verify(statusCheckExecutor, org.mockito.Mockito.times(4)).submit(any(Runnable.class));
-        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"),
-                "membership stays frozen during the gap — no removals");
-        assertEquals(1, workerStatusMap.size(), "membership stays frozen during the gap — no additions");
-        assertEquals(baselineUs, lastDiscoverySuccessUs.get(modelName + "/" + roleType),
-                "an empty result is an outage, not a success — it must not restart the grace clock");
-        assertEquals(1L, known.getStatusLastUpdateTime().get(),
-                "LLM workers get no artificial clock refresh: the probes themselves refresh it on "
-                        + "success, so a worker that died mid-outage fails its probes and ages out");
-    }
-
-    @Test
-    void llm_discovery_failure_within_grace_keeps_probing_instead_of_refreshing_clocks() {
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.9", 23950)))
-                .thenThrow(new ServiceDiscoveryException(
-                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
-
-        engineSyncRunner.run();
-        WorkerStatus known = workerStatusMap.get("10.0.0.9:23950");
-        assertNotNull(known);
-        known.getStatusCheckInProgress().set(false);
-        known.getCacheCheckInProgress().set(false);
-        known.getStatusLastUpdateTime().set(1L);
-
-        engineSyncRunner.run();
-
-        verify(statusCheckExecutor, org.mockito.Mockito.times(4)).submit(any(Runnable.class));
-        assertEquals(1L, known.getStatusLastUpdateTime().get(),
-                "gRPC probing is the LLM health signal during a discovery gap — the sync loop must "
-                        + "not overwrite the staleness clock the probes maintain");
-    }
-
-    @Test
-    void llm_discovery_failure_beyond_grace_stops_probing_so_workers_can_age_out() {
-        EngineSyncRunner expiredGraceRunner = newRunner(EngineType.LLM, 1L);
-        WorkerStatus alive = new WorkerStatus();
-        alive.setIp("10.0.0.9");
-        alive.setPort(23950);
-        alive.setAlive(true);
-        alive.getStatusLastUpdateTime().set(1L);
-        workerStatusMap.put("10.0.0.9:23950", alive);
-
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.9", 23950)))
-                .thenThrow(new ServiceDiscoveryException(
-                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
-
-        expiredGraceRunner.run();
-        // The mocked executor never runs the probes, so complete them by hand — otherwise the
-        // in-progress flags alone would suppress the gap round's submissions and hide whether the
-        // grace window is what stopped them.
-        alive.getStatusCheckInProgress().set(false);
-        alive.getCacheCheckInProgress().set(false);
-        lastDiscoverySuccessUs.put(modelName + "/" + roleType, 0L);
-        expiredGraceRunner.run();
-
-        // Probing is the only thing an LLM gap round does, so it is the only way to tell a
-        // beyond-grace round from a within-grace one: the sibling test pins 4 submits over two
-        // rounds, this one pins that round 2 contributes none.
-        verify(statusCheckExecutor, org.mockito.Mockito.times(2)).submit(any(Runnable.class));
-        // The submit count above is what separates beyond-grace from within-grace. This clock is a
-        // corollary, not a second proof: the LLM path never writes it — only probe success does —
-        // so pinning it untouched says the round left nothing behind that could keep the worker
-        // alive, and ExpirationCleaner is free to evict one a broken discovery can no longer
-        // confirm.
-        assertEquals(1L, alive.getStatusLastUpdateTime().get(),
-                "no probe ran, so nothing can have refreshed the staleness clock");
-    }
-
-    @Test
-    void embedding_engine_skips_variance_reporting() {
-        // Embedding workers are never probed, so stepLatency/runningQueueTime stay 0 and
-        // the variance is identically 0 — reporting it would only pollute monitoring.
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.1", 23950), host("10.0.0.2", 23950)));
-
-        newRunner(EngineType.EMBEDDING).run();
-
-        verify(engineHealthReporter, never())
-                .reportLatencyMetric(any(), any(), org.mockito.Mockito.anyDouble(), org.mockito.Mockito.anyDouble());
-    }
-
-    @Test
-    void llm_engine_still_submits_probe_runners() {
-        when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(host("10.0.0.1", 23950)));
-
-        engineSyncRunner.run();
-
-        verify(statusCheckExecutor, org.mockito.Mockito.times(2)).submit(any(Runnable.class));
-        WorkerStatus status = workerStatusMap.get("10.0.0.1:23950");
-        assertNotNull(status);
-        assertTrue(status.isAlive(),
-                "discovery establishes current membership before asynchronous health probes run");
-    }
-
-    @Test
-    void vit_submits_only_the_worker_status_probe() {
-        WorkerHost discovered = new WorkerHost("127.0.0.1", 8080, "test-site");
-        when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
-                .thenReturn(List.of(discovered));
-
-        createRunner(RoleType.VIT, workerStatusMap, null).run();
-
-        ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
-        verify(statusCheckExecutor).submit(taskCaptor.capture());
-        assertTrue(taskCaptor.getValue() instanceof GrpcWorkerStatusRunner);
-        assertFalse(workerStatusMap.get(discovered.getIpPort())
-                .getCacheCheckInProgress().get());
-    }
-
-    @Test
-    void prefill_submits_worker_and_cache_status_probes() {
-        WorkerHost discovered = new WorkerHost("127.0.0.1", 8080, "test-site");
-        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
-                .thenReturn(List.of(discovered));
-
-        createRunner(RoleType.PREFILL, workerStatusMap, null).run();
-
-        ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
-        verify(statusCheckExecutor, times(2)).submit(taskCaptor.capture());
-        assertTrue(taskCaptor.getAllValues().stream()
-                .anyMatch(GrpcWorkerStatusRunner.class::isInstance));
-        assertTrue(taskCaptor.getAllValues().stream()
-                .anyMatch(GrpcCacheStatusCheckRunner.class::isInstance));
-    }
-
-    @Test
-    void rejected_vit_probe_resets_the_in_progress_flag() {
-        WorkerHost discovered = new WorkerHost("127.0.0.1", 8080, "test-site");
-        when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
-                .thenReturn(List.of(discovered));
-        doThrow(new RejectedExecutionException("executor stopped"))
-                .when(statusCheckExecutor).submit(any(Runnable.class));
-
-        createRunner(RoleType.VIT, workerStatusMap, null).run();
-
-        assertFalse(workerStatusMap.get(discovered.getIpPort())
-                .getStatusCheckInProgress().get());
-    }
-
-    @Test
-    void discovery_publishes_the_role_before_submitting_probes() {
-        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
-                .thenReturn(List.of(new WorkerHost("127.0.0.1", 61000)));
-
-        createRunner(RoleType.PREFILL, workerStatusMap, null).run();
-
-        assertEquals(RoleType.PREFILL,
-                workerStatusMap.get("127.0.0.1:61000").getRole());
-        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
-    }
-
-    @Test
-    void confirmed_fleet_change_removes_status_and_endpoint_together() {
-        ConfigService configService = Mockito.mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        EndpointRegistry registry = new EndpointRegistry(
-                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
-        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
-        String staleIpPort = "127.0.0.1:8080";
-        WorkerStatus stale = new WorkerStatus();
-        stale.setRole(RoleType.PREFILL);
-        stale.setIp("127.0.0.1");
-        stale.setPort(8080);
-        stale.setAlive(true);
-        stale.getStatusLastUpdateTime().set(System.nanoTime() / 1000 - 2_000_000L);
-        stale.getStatusUpdateIntervalUs().set(20_000L);
-        statuses.put(staleIpPort, stale);
-        registry.ensureEndpoint(RoleType.PREFILL, staleIpPort, stale);
-        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
-                .thenReturn(List.of(WorkerHost.of("127.0.0.2", 8080)));
-
-        createRunner(RoleType.PREFILL, statuses, registry).run();
-
-        assertFalse(statuses.containsKey(staleIpPort));
-        assertNull(registry.get(RoleType.PREFILL, staleIpPort));
-        registry.close();
-    }
-
-    private EngineSyncRunner createRunner(
-            RoleType actualRoleType,
-            Map<String, WorkerStatus> statuses,
-            EndpointRegistry endpointRegistry) {
-        return new EngineSyncRunner(
+    void should_handle_null_worker_status_gracefully() {
+        EngineSyncRunner runnerWithEmptyDirectory = new EngineSyncRunner(
                 modelName,
-                statuses,
+                new WorkerDirectory(endpointRegistry),
                 workerAddressService,
                 statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
-                actualRoleType,
+                roleType,
                 localKvCacheAwareManager,
+                cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
-                null,
-                endpointRegistry,
-                EngineType.LLM,
-                300_000L,
-                lastDiscoverySuccessUs,
-                new RateLimitedWarn(1, TimeUnit.SECONDS));
+                false,
+                STATUS_STALE_AFTER_US
+        );
+
+        // Execute
+        runnerWithEmptyDirectory.run();
+
+        // Verify
+        verify(statusCheckExecutor, never()).submit(any(Runnable.class));
+    }
+
+    @Test
+    void should_start_new_worker_expiration_window_at_discovery_time() {
+        String ipPort = "127.0.0.1:8080";
+        Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName, workerDirectory, workerAddressService, statusCheckExecutor,
+                engineHealthReporter, engineGrpcService, RoleType.VIT,
+                localKvCacheAwareManager,
+                cacheIntervalService,
+                syncRequestTimeoutMs, syncCount,
+                syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
+
+        runner.run();
+
+        assertTrue(workerDirectory.statusSnapshot(RoleType.VIT).get(ipPort)
+                .pollHealth().lastSuccessfulPollUs() > 0);
+    }
+
+    @Test
+    void executorRejectionReturnsBothExactPollLeases() {
+        String ipPort = "127.0.0.1:8080";
+        when(workerAddressService.getEngineWorkerList(
+                modelName, RoleType.PREFILL))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
+        when(statusCheckExecutor.submit(any(Runnable.class)))
+                .thenThrow(new RejectedExecutionException("full"));
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName, workerDirectory, workerAddressService,
+                statusCheckExecutor, engineHealthReporter, engineGrpcService,
+                RoleType.PREFILL, localKvCacheAwareManager,
+                cacheIntervalService, syncRequestTimeoutMs, syncCount,
+                syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
+
+        runner.run();
+
+        WorkerStatus status = workerDirectory.statusSnapshot(
+                RoleType.PREFILL).get(ipPort);
+        WorkerStatus.PollLease statusLease = status.tryBeginStatusPoll();
+        WorkerStatus.PollLease cacheLease = status.tryBeginCachePoll();
+        assertNotNull(statusLease);
+        assertNotNull(cacheLease);
+        statusLease.close();
+        cacheLease.close();
+    }
+
+    @Test
+    void should_remove_status_and_endpoint_when_service_discovery_is_empty() {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus status = Mockito.spy(RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1",
+                8080, 8081, "test-site"));
+        when(status.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
+                System.nanoTime() / 1_000 - 2_000_000L,
+                20_000L, 0L, true));
+        discover(directory, status);
+        RunnerTestSupport.publishEndpoint(
+                registry, RoleType.PREFILL, ipPort, status);
+        Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of());
+
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName, directory, workerAddressService, statusCheckExecutor,
+                engineHealthReporter, engineGrpcService, RoleType.PREFILL,
+                localKvCacheAwareManager,
+                cacheIntervalService,
+                syncRequestTimeoutMs, syncCount,
+                syncEngineStatusInterval, false,
+                1_000_000L);
+        runner.run();
+
+        assertFalse(status.isActiveGeneration());
+        assertFalse(directory.statusSnapshot(RoleType.PREFILL)
+                .containsKey(ipPort));
+        assertNull(registry.get(RoleType.PREFILL, ipPort));
+        registry.close();
+    }
+
+    @Test
+    void discoveryPublishesOnlyInactiveStatusUntilFirstResponseCommits() {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        // Discovery alone never publishes an endpoint, so the registry never
+        // resolves the load-balance config in this scenario. Keep the stub
+        // lenient so strict stubbing does not flag it as unnecessary.
+        Mockito.lenient().when(configService.loadBalanceConfig())
+                .thenReturn(new FlexlbConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName,
+                directory,
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                RoleType.PREFILL,
+                localKvCacheAwareManager,
+                cacheIntervalService,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                false,
+                STATUS_STALE_AFTER_US
+        );
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(new WorkerHost("127.0.0.1", 61000)));
+
+        try {
+            runner.run();
+
+            WorkerStatus discovered = directory.statusSnapshot(RoleType.PREFILL)
+                    .get("127.0.0.1:61000");
+            assertEquals(RoleType.PREFILL, discovered.getRole());
+            assertFalse(discovered.pollHealth().reportedAlive(),
+                    "service discovery alone must not make a worker routable");
+            assertNull(registry.get(RoleType.PREFILL, "127.0.0.1:61000"),
+                    "an endpoint is published only by a committed status response");
+            verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void groupChangeReplacesGenerationEvenWhileOldStatusRpcIsHung() {
+        assertTopologyReplacement("group-a", "group-b");
+    }
+
+    @Test
+    void assigningPreviouslyUnscopedWorkerReplacesGeneration() {
+        assertTopologyReplacement(null, "group-b");
+    }
+
+    @Test
+    void should_not_publish_running_load_variance_from_one_observation() {
+        EndpointRegistry registry = Mockito.mock(EndpointRegistry.class);
+        WorkerEndpoint firstEndpoint = Mockito.mock(WorkerEndpoint.class);
+        WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
+        WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
+        WorkerStatus second = varianceStatus("127.0.0.2", 61002, 20.0);
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        discover(directory, first);
+        discover(directory, second);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(
+                        WorkerHost.of(first.getIp(), first.getPort()),
+                        WorkerHost.of(second.getIp(), second.getPort())));
+        when(registry.get(RoleType.PREFILL, first.getIpPort(), first))
+                .thenReturn(firstEndpoint);
+        when(registry.get(RoleType.PREFILL, second.getIpPort(), second))
+                .thenReturn(secondEndpoint);
+        when(firstEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(10L));
+        when(secondEndpoint.getLoadMetric()).thenReturn(OptionalLong.empty());
+
+        EngineSyncRunner runner = varianceRunner(directory);
+
+        runner.run();
+
+        verify(engineHealthReporter).reportStepLatencyVariance(
+                modelName, RoleType.PREFILL.toString(), 50.0);
+        verify(engineHealthReporter, never()).reportRunningLoadVariance(
+                any(), any(), Mockito.anyDouble());
+    }
+
+    @Test
+    void should_publish_running_load_variance_from_two_observations() {
+        EndpointRegistry registry = Mockito.mock(EndpointRegistry.class);
+        WorkerEndpoint firstEndpoint = Mockito.mock(WorkerEndpoint.class);
+        WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
+        WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
+        WorkerStatus second = varianceStatus("127.0.0.2", 61002, 20.0);
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        discover(directory, first);
+        discover(directory, second);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(
+                        WorkerHost.of(first.getIp(), first.getPort()),
+                        WorkerHost.of(second.getIp(), second.getPort())));
+        when(registry.get(RoleType.PREFILL, first.getIpPort(), first))
+                .thenReturn(firstEndpoint);
+        when(registry.get(RoleType.PREFILL, second.getIpPort(), second))
+                .thenReturn(secondEndpoint);
+        when(firstEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(10L));
+        when(secondEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(30L));
+
+        EngineSyncRunner runner = varianceRunner(directory);
+
+        runner.run();
+
+        verify(engineHealthReporter).reportRunningLoadVariance(
+                modelName, RoleType.PREFILL.toString(), 200.0);
+    }
+
+    private EngineSyncRunner varianceRunner(WorkerDirectory directory) {
+        return new EngineSyncRunner(
+                modelName, directory, workerAddressService,
+                statusCheckExecutor, engineHealthReporter, engineGrpcService,
+                RoleType.PREFILL, localKvCacheAwareManager,
+                cacheIntervalService,
+                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                false, STATUS_STALE_AFTER_US);
+    }
+
+    private void assertTopologyReplacement(
+            String oldGroup, String newGroup) {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig())
+                .thenReturn(new FlexlbConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        String ipPort = "127.0.0.1:61000";
+        WorkerStatus oldStatus = RunnerTestSupport.discovered(
+                RoleType.PREFILL, oldGroup, "127.0.0.1",
+                61000, 61001, "site-a");
+        assertNotNull(oldStatus.tryBeginStatusPoll());
+        discover(directory, oldStatus);
+        RunnerTestSupport.publishEndpoint(registry,
+                RoleType.PREFILL, ipPort, oldStatus);
+        WorkerHost replacement = new WorkerHost(
+                "127.0.0.1",
+                61000,
+                61001,
+                61005,
+                "site-b",
+                newGroup);
+        when(workerAddressService.getEngineWorkerList(
+                modelName, RoleType.PREFILL))
+                .thenReturn(List.of(replacement));
+
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName,
+                directory,
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                RoleType.PREFILL,
+                localKvCacheAwareManager,
+                cacheIntervalService,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                false, STATUS_STALE_AFTER_US);
+        try {
+            // First discovery pass retires the old topology generation: it
+            // detaches the endpoint, marks the status RETIRING, and removes the
+            // business identity from the map. The replacement generation is
+            // deliberately deferred until real endpoint retirement has removed
+            // the RETIRING holder, so no routable identity exists yet.
+            runner.run();
+
+            assertFalse(directory.statusSnapshot(RoleType.PREFILL)
+                            .containsKey(ipPort),
+                    "old generation is retired and removed; replacement is deferred");
+            assertNull(registry.get(RoleType.PREFILL, ipPort),
+                    "old endpoint is detached immediately and replacement is unpublished");
+            // A subsequent discovery pass publishes the replacement generation
+            // for the same address under the new topology group.
+            runner.run();
+
+            WorkerStatus current = directory.statusSnapshot(
+                    RoleType.PREFILL).get(ipPort);
+            assertTrue(current != oldStatus);
+            assertTrue(current.getGenerationId()
+                    > oldStatus.getGenerationId());
+            assertEquals(newGroup, current.getGroup());
+            assertFalse(current.pollHealth().reportedAlive(),
+                    "replacement is not routable before its first status commit");
+            assertNull(registry.get(RoleType.PREFILL, ipPort),
+                    "replacement endpoint is unpublished before its first status commit");
+        } finally {
+            registry.close();
+        }
+    }
+
+    private static WorkerStatus varianceStatus(
+            String ip, int port, double stepLatencyMs) {
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.PREFILL, "", ip, port, port + 1, "");
+        RunnerTestSupport.publish(status, RunnerTestSupport.response(
+                status, true, 1L, 0L, 0L,
+                stepLatencyMs, Map.of()));
+        assertNotNull(status.tryBeginStatusPoll());
+        assertNotNull(status.tryBeginCachePoll());
+        return status;
+    }
+
+    private static void discover(
+            WorkerDirectory directory, WorkerStatus status) {
+        directory.currentOrDiscover(
+                status.getRole(), status.getIpPort(), () -> status);
     }
 }

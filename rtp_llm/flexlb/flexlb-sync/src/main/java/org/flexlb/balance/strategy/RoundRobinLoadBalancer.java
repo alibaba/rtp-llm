@@ -2,125 +2,117 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.TrafficPolicyConfig;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
-import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Cursor-based round-robin load balancer.
- *
- * <p>Intentionally load-unaware: each call advances a per-role atomic cursor and returns
- * the next alive worker. No queue time, cache hit, or resource-availability gating.
- *
- * <p>Trade-offs vs {@link ShortestTTFTStrategy}:
- * <ul>
- *   <li>Far cheaper schedule cost: no resource scan, no scoring, no sort — selection is a
- *       cursor bump plus an O(alive) liveness filter over the role's worker map</li>
- *   <li>Will hit hot workers proportionally under load skew (no avoidance)</li>
- *   <li>Does not consult {@link org.flexlb.balance.resource.ResourceMeasure};
- *       resource-availability gating is intentionally skipped.</li>
- * </ul>
- *
- * <p>Batch behavior ({@link BatchLoadBalancer}):
- * <ul>
- *   <li>{@link #selectBatch(int, RoleType, String)} advances the per-role cursor {@code count} times.</li>
- *   <li>Cursors are keyed by {@code (role, group)}, so each group filter rotates evenly over
- *       its own subset instead of sampling a shared cursor.</li>
- *   <li>Cursor wraps naturally; when {@code count > alive.size()} one worker receives multiple
- *       assignments (e.g. 20 over 10 workers -&gt; each worker gets 2).</li>
- *   <li>The role cursor is shared with {@link #select}, so single-call and batch-call interleave.</li>
- *   <li>If no workers are alive, returns an empty list.</li>
- *   <li><strong>No bookkeeping</strong>: batch path skips {@code localTaskMap} entirely. Reconciliation
- *       and lost-task detection are not provided for batch dispatches.</li>
- * </ul>
- */
-@Component("roundRobinStrategy")
-public class RoundRobinLoadBalancer implements BatchLoadBalancer {
+/** Stateless batch placement for a single-role deployment; no LLM admission or reservations. */
+@Component
+public final class RoundRobinLoadBalancer {
 
-    private final EngineWorkerStatus engineWorkerStatus;
-    /** Engine type is fixed at boot; resolved once instead of a config lookup per selection. */
-    private final boolean embeddingEngine;
-    /**
-     * Per-(role, group) rotation cursors. Each is a {@code long} (not {@code int}) so it never wraps
-     * at any realistic QPS (2^63 picks), mirroring {@link org.flexlb.dispatcher.FePool}: an {@code int}
-     * cursor wrapped every ~2^32 picks and, because 2^32 is not a multiple of the pool size, produced
-     * a one-off RR discontinuity at the wrap point. {@link Math#floorMod(long, int)} keeps the index
-     * non-negative regardless.
-     */
-    private final Map<String, AtomicLong> cursors = new ConcurrentHashMap<>();
+    private final WorkerDirectory workerDirectory;
+    private final MasterEngineSynchronizer synchronizer;
+    private final ModelMetaConfig modelMetaConfig;
+    private final FlexlbConfig config;
+    private final AtomicLong cursor = new AtomicLong();
 
-    public RoundRobinLoadBalancer(EngineWorkerStatus engineWorkerStatus, ConfigService configService) {
-        this.engineWorkerStatus = engineWorkerStatus;
-        this.embeddingEngine = configService.loadBalanceConfig().getEngineType() == EngineType.EMBEDDING;
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.ROUND_ROBIN, this);
+    public RoundRobinLoadBalancer(WorkerDirectory workerDirectory,
+                                  MasterEngineSynchronizer synchronizer,
+                                  ModelMetaConfig modelMetaConfig,
+                                  ConfigService configService) {
+        this.workerDirectory = workerDirectory;
+        this.synchronizer = synchronizer;
+        this.modelMetaConfig = modelMetaConfig;
+        this.config = configService.loadBalanceConfig();
     }
 
-    private AtomicLong cursor(RoleType roleType, String group) {
-        String key = group == null ? roleType.name() : roleType.name() + '|' + group;
-        return cursors.computeIfAbsent(key, k -> new AtomicLong(0));
+    public Mono<BatchScheduleResponse> schedule(BatchScheduleRequest request) {
+        return Mono.fromCallable(() -> scheduleBatch(request))
+                .subscribeOn(Schedulers.parallel());
     }
 
-    @Override
-    public ServerStatus select(BalanceContext context, RoleType roleType, String group) {
-        List<WorkerEndpoint> alive = aliveWorkers(roleType, group);
-        if (alive.isEmpty()) {
-            return ServerStatus.code(roleType.getErrorType());
+    private BatchScheduleResponse scheduleBatch(BatchScheduleRequest request) {
+        int maxCount = config.getRouter().getBatchScheduleMaxCount();
+        if (request == null || request.getBatchCount() < 1 || request.getBatchCount() > maxCount) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_count must be in [1, " + maxCount + "]");
         }
-        WorkerEndpoint selected = alive.get(
-                Math.floorMod(cursor(roleType, group).getAndIncrement(), alive.size()));
-        long requestId = context.getRequestId();
-        return ServerStatus.ok(selected.getStatus(), roleType, requestId);
-    }
-
-    @Override
-    public List<BatchScheduleTarget> selectBatch(int count, RoleType roleType, String group) {
-        List<WorkerEndpoint> alive = aliveWorkers(roleType, group);
-        if (alive.isEmpty()) {
-            return new ArrayList<>();
+        if (!request.isAssignBe() && !request.isAssignFe()) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule must request at least one of assign_be or assign_fe");
         }
-        int aliveSize = alive.size();
-        long start = cursor(roleType, group).getAndAdd(count);
+        int count = request.getBatchCount();
+        if (!request.isAssignBe()) {
+            List<BatchScheduleTarget> targets = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                targets.add(new BatchScheduleTarget());
+            }
+            return BatchScheduleResponse.success(targets);
+        }
+        TrafficPolicyConfig policy = config.getRouter().getGroupSelector();
+        if (policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty())) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule assign_be is unavailable while traffic policy routing is "
+                            + "active; defer backend placement to request-aware /schedule");
+        }
+        List<RoleType> roles = modelMetaConfig.requiredRoles();
+        if (roles.size() != 1) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule supports single-role deployments only; use /schedule "
+                            + "for multi-role routing. Configured roles: " + roles);
+        }
+        RoleType role = roles.getFirst();
+        EngineType engineType = config.getWorkerRegistry().getEngineType();
+        List<WorkerHost> candidates = candidates(role, engineType);
+        if (candidates.isEmpty()) {
+            return BatchScheduleResponse.error(role.getErrorType());
+        }
+        // Registry iteration order may change between snapshots. A stable order keeps rotation fair.
+        candidates.sort(Comparator.comparing(WorkerHost::getIp)
+                .thenComparingInt(WorkerHost::getHttpPort));
+        long start = cursor.getAndAdd(count);
         List<BatchScheduleTarget> targets = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            int idx = Math.floorMod(start + i, aliveSize);
-            targets.add(BatchScheduleTarget.of(
-                    alive.get(idx).getStatus(), roleType, embeddingEngine));
+            WorkerHost candidate = candidates.get(Math.floorMod(start + i, candidates.size()));
+            targets.add(BatchScheduleTarget.of(candidate, role, engineType));
         }
-        return targets;
+        return BatchScheduleResponse.success(targets);
     }
 
-    @Override
-    public void rollBack(WorkerEndpoint endpoint, long requestId) {
-        // Round-robin selection is stateless. Role-specific reservation belongs
-        // to admission-aware strategies and Endpoint implementations.
-    }
-
-    private List<WorkerEndpoint> aliveWorkers(RoleType roleType, String group) {
-        Map<String, WorkerEndpoint> map =
-                engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        List<WorkerEndpoint> alive = new ArrayList<>();
-        if (map == null) {
-            return alive;
+    private List<WorkerHost> candidates(RoleType role, EngineType engineType) {
+        if (engineType == EngineType.EMBEDDING) {
+            return new ArrayList<>(synchronizer.embeddingWorkerSnapshot(role));
         }
-        for (WorkerEndpoint endpoint : map.values()) {
-            if (endpoint != null
-                    && endpoint.getStatus() != null
-                    && endpoint.getStatus().isAlive()) {
-                alive.add(endpoint);
+        List<WorkerHost> candidates = new ArrayList<>();
+        for (String address : workerDirectory.endpointAddressSnapshot(role)) {
+            try (WorkerEndpoint.GenerationPin pin = workerDirectory.captureEndpoint(role, address)) {
+                if (pin == null) {
+                    continue;
+                }
+                WorkerStatus status = pin.endpoint().getStatus();
+                if (status.pollHealth().reportedAlive()) {
+                    candidates.add(new WorkerHost(status.getIp(), status.getPort()));
+                }
             }
         }
-        return alive;
+        return candidates;
     }
-
 }

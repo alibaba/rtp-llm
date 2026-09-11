@@ -189,6 +189,7 @@ def _build_suffix_pool_slot_mapping(
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
     ring_entries: int,
+    max_gather: Optional[int] = None,
 ) -> torch.Tensor:
     """Build request-major flat slots for a suffix gather.
 
@@ -208,7 +209,8 @@ def _build_suffix_pool_slot_mapping(
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
     assert int(gather_lens_l.numel()) == B
-    max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
+    if max_gather is None:
+        max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
     if max_gather <= 0:
         return torch.empty((B, 0), dtype=torch.long, device=device)
 
@@ -317,6 +319,8 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
         attn._kv_cache = prev_kv
         attn._block_tables_by_type = prev_bt
         attn._cp_ctx = prev_cp
+
+
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
@@ -964,7 +968,7 @@ class AttentionFP8(nn.Module):
         # the ``fp8_einsum`` production path uses the pre-stacked
         # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
         # fallback path inline-dequants from these via
-        # ``_fp8_dequant_to_fp32``.
+        # ``dequantize_fp8_weight``.
         assert (n_heads * head_dim) % o_groups == 0
         wo_a_w = layer_weights[W.v4_attn_wo_a_w]
         wo_a_s = layer_weights[W.v4_attn_wo_a_s]
@@ -1109,7 +1113,7 @@ class AttentionFP8(nn.Module):
             beta_fast,
             beta_slow,
         )
-        # Phase G: plain attr (not register_buffer).  `reset_rope_cache(device)`
+        # Phase G: plain attr (not register_buffer).  `init_rope_cache(device)`
         # recomputes + moves to the real device after meta-to-device
         # materialization — that's the authoritative placement path; no
         # automatic `.to(device)` semantics needed.
@@ -1492,9 +1496,7 @@ class AttentionFP8(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if pool_view is None or eb <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         win = self.window_size
         if win <= 0:
@@ -1576,9 +1578,7 @@ class AttentionFP8(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if pool_view is None or eb <= 0 or dense_len <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         device = pool_view.device
         dtype = torch.bfloat16
@@ -1710,12 +1710,8 @@ class AttentionFP8(nn.Module):
             state_bt = bt_by_type.get(INDEXER_STATE) if bt_by_type is not None else None
             state_eb = self._pool_entries_per_block(INDEXER_STATE)
             kv_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=INDEXER_KV)
-            kv_owner_tpb = _dsv4_pool_owner_tokens_per_block(
-                self._kv_cache, INDEXER_KV
-            )
-            state_tpb = _dsv4_pool_tokens_per_block(
-                self._kv_cache, tag=INDEXER_STATE
-            )
+            kv_owner_tpb = _dsv4_pool_owner_tokens_per_block(self._kv_cache, INDEXER_KV)
+            state_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=INDEXER_STATE)
             self.indexer.set_pool_context(
                 kv_view,
                 kv_bt,
@@ -1864,13 +1860,13 @@ class AttentionFP8(nn.Module):
             return None
         return torch.cat([swa_dense, cmp_dense], dim=1)
 
-    def reset_rope_cache(self, device=None):
+    def init_rope_cache(self, device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
         `model.to_empty(device=...)` since meta-tensor construction leaves the
         cached freqs as zeros. Pass ``device`` so the memoized
         ``precompute_freqs_cis`` returns the shared (params, device) tensor;
         all layers with identical rope params now point at the same object,
-        which lets the downstream cos_sin_cache dedupe by ``id()``."""
+        which lets compressors share one prebuilt cos_sin_cache."""
         freqs_cis = precompute_freqs_cis(
             self._rope_dim,
             self._rope_max_seq_len,
@@ -1883,19 +1879,12 @@ class AttentionFP8(nn.Module):
         )
         self.freqs_cis = freqs_cis
 
-        # Clear compressor / indexer bound references so they rebind on next forward.
-        def clear_compressor_rope_cache(compressor: Any) -> None:
-            compressor.freqs_cis = None
-            compressor._cos_sin_cache = None
-            compressor._cos_sin_cache_device = None
-            compressor._cos_sin_cache_key = None
-
         if self.compressor is not None:
-            clear_compressor_rope_cache(self.compressor)
+            self.compressor.init_rope_cache(freqs_cis)
         if self.indexer is not None:
-            self.indexer.freqs_cis = None
+            self.indexer.freqs_cis = freqs_cis
             if self.indexer.compressor is not None:
-                clear_compressor_rope_cache(self.indexer.compressor)
+                self.indexer.compressor.init_rope_cache(freqs_cis)
 
     def _get_fp8_decode_op(self):
         """Lazy-build the persistent ``SparseAttnV4DecodeFp8Op`` so its
@@ -2518,6 +2507,8 @@ class AttentionFP8(nn.Module):
         assert (
             x.dim() == 2
         ), f"DSv4 Attention prefill expects flat [T, dim]; got shape {tuple(x.shape)}"
+        if x.size(0) == 0:
+            return x
         # Prefill is FP8-only on this branch — every downstream helper
         # (``_prefill_write_swa_fp8_paged``, ``_attn_fp8_swa_via_kv_full``,
         # ``_attn_via_workspace``) hard-assumes FP8 KV-cache pools. Hoist
@@ -2551,6 +2542,8 @@ class AttentionFP8(nn.Module):
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        if x.size(0) == 0:
+            return x
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
         if kv_cache is not None:
@@ -3835,6 +3828,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        any_cont: Optional[bool] = None,
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -3899,6 +3893,14 @@ class AttentionFP8(nn.Module):
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         sp_per_req = _flat_1d(sp_per_req)
+        if any_cont is None:
+            if prefix_lengths.is_cuda and torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "CUDA Graph prefill metadata requires host-derived any_cont"
+                )
+            any_cont = bool((prefix_lengths > 0).any().item())
+        else:
+            any_cont = bool(any_cont)
         assert (
             position_ids.numel() == seqlen
         ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
@@ -3948,8 +3950,6 @@ class AttentionFP8(nn.Module):
                     req_id_per_token,
                 )
             )
-            any_cont = bool((prefix_lengths > 0).any().item())
-
         with record_function_range("dsv4.fp8.meta.swa_varlen"):
             swa_meta = self._build_swa_prefill_meta_varlen(
                 seqlen=seqlen,
@@ -3970,7 +3970,11 @@ class AttentionFP8(nn.Module):
 
         # row_seqlens_full: [1] long tensor. Reused by SWA pool read/write
         # helpers (BF16 path) — they refuse a None for the per-row seqlens.
-        row_seqlens_full = torch.tensor([seqlen_full], device=device, dtype=torch.long)
+        # ``torch.tensor([host_int], device="cuda")`` stages through CPU and is
+        # illegal during CUDA Graph capture. ``full`` emits a device-side fill.
+        row_seqlens_full = torch.full(
+            (1,), seqlen_full, device=device, dtype=torch.long
+        )
 
         # ``use_varlen`` stays explicit because lower builders share one
         # metadata contract.
@@ -4325,9 +4329,7 @@ class AttentionFP8(nn.Module):
         cmp_eb = self._pool_entries_per_block(cmp_at)
         if swa_eb <= 0 or cmp_eb <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         win = self.window_size
         # ``use_varlen`` is required — set by ``_build_shared_prefill_meta``
@@ -4427,9 +4429,25 @@ class AttentionFP8(nn.Module):
             P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
             gather_len_per_req = S_i32 + P_per_req  # [B]
 
-            # Single .item() sync — stack two scalars then one D2H tolist().
-            maxes = torch.stack([N_per_req.max(), gather_len_per_req.max()])
-            N_max, gather_len_max = (int(v) for v in maxes.tolist())
+            if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+                # Replay can change device lengths/prefixes. Size from the
+                # fixed block-table/token capacities, not capture-time values.
+                N_max = (
+                    int(cmp_bt.shape[1])
+                    * _dsv4_pool_tokens_per_block(self._kv_cache, tag=cmp_at)
+                    // ratio
+                )
+                gather_len_max = (seq_len_full if cp_active else seqlen) + win - 1
+                total_cmp_tokens = None
+            else:
+                # Fold the compressed-token total into the existing metadata D2H
+                # so the reader does not add a per-layer synchronization.
+                host_geometry = torch.stack(
+                    [N_per_req.max(), gather_len_per_req.max(), N_per_req.sum()]
+                )
+                N_max, gather_len_max, total_cmp_tokens = (
+                    int(v) for v in host_geometry.tolist()
+                )
             N = N_max
             M = N_max + gather_len_max
 
@@ -4525,6 +4543,9 @@ class AttentionFP8(nn.Module):
             per_req_total_kv_lens=per_req_total_kv_lens,
             block_size=cmp_eb if cmp_eb > 0 else None,
             owner_block_size=cmp_owner_block_size,
+            total_kv_len=(
+                total_cmp_tokens if per_req_total_kv_lens is not None else None
+            ),
         )
 
         # Layer-invariant gate for the raw-q-merge alternative path. Compute
@@ -4589,6 +4610,11 @@ class AttentionFP8(nn.Module):
             entries_per_block=swa_eb,
             tokens_per_block_for_block_table=swa_tokens_per_block,
             ring_entries=swa_eb,
+            max_gather=(
+                win - 1
+                if device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+                else None
+            ),
         )
         swa_cache_compaction = self._build_swa_cp_byte_compaction(
             swa_cache_slot_mapping,
@@ -4795,9 +4821,7 @@ class AttentionFP8(nn.Module):
                 slot_in_flat=None,
                 cache_slot_mapping=None,
             )
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         # Group-1 (every pool-bound FP8 layer): SWA pool write meta.
         #
@@ -4903,10 +4927,12 @@ class AttentionFP8(nn.Module):
             num_decodes=0,
             window_size=win,
         )
-        # Single .item() sync per forward — ``combined_gather_lens`` already
-        # encodes ``input_lengths[b] + min(prefix_lengths[b], win-1)`` per
-        # request; its max is exactly ``combined_gather_len_max``.
-        combined_gather_len_max = int(combined_gather_lens.max().item())
+        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            # Every request has at most write_num_tokens new tokens and
+            # win-1 cached tokens. Keep this bound valid across graph replays.
+            combined_gather_len_max = write_num_tokens + (win - 1 if any_cont else 0)
+        else:
+            combined_gather_len_max = int(combined_gather_lens.max().item())
         M = max(combined_gather_len_max, 1)
 
         # cache_* + combined_* only populated on continuation (via_concat).
@@ -4936,6 +4962,12 @@ class AttentionFP8(nn.Module):
                 entries_per_block=eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
                 ring_entries=eb,
+                max_gather=(
+                    win - 1
+                    if device.type == "cuda"
+                    and torch.cuda.is_current_stream_capturing()
+                    else None
+                ),
             )
             cache_compaction = self._build_swa_cp_byte_compaction(
                 cache_slot_mapping,
@@ -4955,7 +4987,8 @@ class AttentionFP8(nn.Module):
                 combined_indices, combined_lens = _swa_ops.combine_topk_swa_indices_cp(
                     topk_indices=topk_indices_empty,
                     global_positions=_flat_1d(cp_ctx.global_positions),
-                    sp_int=int(prefix_lengths[0].item()),
+                    # Varlen consumes prefix_lengths on device, not sp_int.
+                    sp_int=0,
                     window_size=win,
                     compress_ratio=1,
                     topk=0,
@@ -5471,7 +5504,9 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
         with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
-            all_reduce(out, Group.TP)
+            reduced = all_reduce(out, Group.TP, inplace=True)
+            if reduced is not out:
+                out.copy_(reduced)
 
     def _prefill_output_proj(
         self,
@@ -5513,3 +5548,134 @@ class AttentionFP8(nn.Module):
         with record_function_range("dsv4.fp8.attn.out.wo_b"):
             wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
             self.wo_b(wo_b_in, out=out)
+
+
+class CommitOnlyAttentionFP8(AttentionFP8):
+    """Minimal SWA attention state required by DSpARK's commit path."""
+
+    def __init__(
+        self,
+        layer_id: int,
+        dim: int,
+        n_heads: int,
+        q_lora_rank: int,
+        head_dim: int,
+        rope_head_dim: int,
+        o_lora_rank: int,
+        o_groups: int,
+        window_size: int,
+        compress_ratio: int,
+        compress_rope_theta: float,
+        rope_theta: float,
+        rope_factor: float,
+        beta_fast: int,
+        beta_slow: int,
+        original_seq_len: int,
+        max_batch_size: int,
+        max_seq_len: int,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        norm_eps: float = 1e-6,
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+    ):
+        del compress_rope_theta, original_seq_len, max_batch_size, index_topk
+        if layer_weights is None:
+            raise ValueError("commit-only DSpARK attention requires layer weights")
+        if int(compress_ratio) != 0:
+            raise ValueError(
+                "commit-only DSpARK attention supports SWA layers only, got "
+                f"compress_ratio={compress_ratio}"
+            )
+
+        # Avoid the full constructor: proposal Q/O projections, compressor,
+        # indexer, and their caches are unreachable from forward_commit.
+        nn.Module.__init__(self)
+        self.layer_id = int(layer_id)
+        self.dim = int(dim)
+        self.q_lora_rank = int(q_lora_rank)
+        self.o_lora_rank = int(o_lora_rank)
+        self.head_dim = int(head_dim)
+        self.rope_head_dim = int(rope_head_dim)
+        self.window_size = int(window_size)
+        self.compress_ratio = 0
+        self.eps = float(norm_eps)
+        self.softmax_scale = self.head_dim**-0.5
+        self.tp_size = int(tp_size)
+        self.tp_rank = int(tp_rank)
+        if self.tp_size <= 0:
+            raise ValueError(f"invalid attention tp_size={self.tp_size}")
+        if int(n_heads) % self.tp_size:
+            raise ValueError(
+                f"n_heads={n_heads} is not divisible by tp_size={self.tp_size}"
+            )
+        if int(o_groups) % self.tp_size:
+            raise ValueError(
+                f"o_groups={o_groups} is not divisible by tp_size={self.tp_size}"
+            )
+        self.n_heads = int(n_heads) // self.tp_size
+        self.n_groups = int(o_groups) // self.tp_size
+
+        from rtp_llm.utils.model_weight import W
+
+        self.wkv = _v4_fp8_linear(
+            layer_weights[W.v4_attn_wkv_w], layer_weights[W.v4_attn_wkv_s]
+        )
+        self.kv_norm = layer_weights[W.v4_attn_kv_norm]
+
+        self.attn_sink = None
+        self.wq_a = None
+        self.wq_b = None
+        self.wo_a_w = None
+        self.wo_a_s = None
+        self.wo_b = None
+        self.q_norm = None
+        self.compressor = None
+        self.indexer = None
+
+        self._rope_base = float(rope_theta)
+        self._rope_o_seq_len = 0
+        self._rope_factor = float(rope_factor)
+        self._rope_beta_fast = int(beta_fast)
+        self._rope_beta_slow = int(beta_slow)
+        self._rope_dim = int(rope_head_dim)
+        self._rope_max_seq_len = int(max_seq_len)
+        self.freqs_cis = precompute_freqs_cis(
+            self._rope_dim,
+            self._rope_max_seq_len,
+            self._rope_o_seq_len,
+            self._rope_base,
+            self._rope_factor,
+            self._rope_beta_fast,
+            self._rope_beta_slow,
+        )
+        self._fp8_decode_op: Optional[Any] = None
+        self._cp_ctx: Optional[CPContext] = None
+        self._prefill_meta_shared: Optional["PrefillMeta"] = None
+        self._kv_cache: Optional[Any] = None
+        self._block_tables_by_type: Optional[Dict[str, torch.Tensor]] = None
+
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            CSA_KV,
+            CSA_STATE,
+            HCA_KV,
+            HCA_STATE,
+            INDEXER_KV,
+            INDEXER_STATE,
+            SWA_KV,
+        )
+
+        idx_hd = int(index_head_dim)
+        kv_spec = (torch.uint8, _DSV4_FP8_KV_ENTRY_BYTES)
+        indexer_kv_spec = (torch.uint8, _DSV4_FP8_INDEXER_ENTRY_BYTES)
+        self._pool_spec: Dict[str, tuple] = {
+            SWA_KV: kv_spec,
+            CSA_KV: kv_spec,
+            HCA_KV: kv_spec,
+            INDEXER_KV: indexer_kv_spec,
+            CSA_STATE: (torch.float32, 4 * self.head_dim),
+            HCA_STATE: (torch.float32, 2 * self.head_dim),
+            INDEXER_STATE: (torch.float32, 4 * idx_hd),
+        }

@@ -2,9 +2,6 @@ package org.flexlb.mock;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
-
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -89,23 +86,5 @@ public final class InflightAssertions {
                 "Inflight resources not released within " + timeoutMs + "ms"
                         + " (prefill batches=" + (prefillEp != null ? prefillEp.getInflightBatchCount() : "null")
                         + ", decode inflight=" + (decodeEp != null ? decodeEp.getInflightCount() : "null") + ")");
-    }
-
-    /**
-     * Assert that scheduler lifecycle ownership is released within the given timeout.
-     */
-    public static void assertSchedulerInflightEmptyWithin(FlexlbBatchScheduler scheduler,
-                                                           long timeoutMs) {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (scheduler.getInflightSize() != 0 && System.nanoTime() < deadline) {
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-        }
-        assertEquals(0, scheduler.getInflightSize(),
-                "Scheduler inflight entries not released within " + timeoutMs + "ms");
     }
 }

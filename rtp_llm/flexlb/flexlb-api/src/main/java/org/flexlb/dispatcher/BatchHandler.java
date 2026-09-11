@@ -78,7 +78,7 @@ public class BatchHandler {
                          long maxAggregateRequestBytes,
                          Scheduler cpuScheduler) {
         this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
-                loadBalanceConfig.getBatchScheduleMaxCount(), maxAggregateRequestBytes,
+                loadBalanceConfig.getRouter().getBatchScheduleMaxCount(), maxAggregateRequestBytes,
                 loadBalanceConfig, cpuScheduler);
     }
 
@@ -249,7 +249,7 @@ public class BatchHandler {
             if (chunkCount > maxChunkCount) {
                 return DispatcherResponses.error(413, "too_many_sub_batches",
                         "batch produces " + chunkCount + " sub-batches; maximum is "
-                                + maxChunkCount + " (BATCH_SCHEDULE_MAX_COUNT)");
+                                + maxChunkCount + " (router.batchScheduleMaxCount)");
             }
             boolean trafficPolicyActive = hasActiveTrafficPolicy();
             boolean atomicBatchAllowed = !trafficPolicyActive;
@@ -334,8 +334,8 @@ public class BatchHandler {
 
     private boolean hasActiveTrafficPolicy() {
         TrafficPolicyConfig policy = loadBalanceConfig == null
-                ? null : loadBalanceConfig.getTrafficPolicy();
-        return policy != null && policy.hasActiveRoutingRules();
+                ? null : loadBalanceConfig.getRouter().getGroupSelector();
+        return policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty());
     }
 
     private record PreparedBatch(List<JSONObject> chunkBodies) {}

@@ -64,17 +64,6 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
-    // True when seq_len/max_new_tokens describe one aggregate batch placement rather than one
-    // generation. The master uses this only for reservation accounting; generate_input remains
-    // independently optional so legacy placement-only callers keep single-request semantics.
-    bool aggregate_demand = 16;
-    // Per-item prompt lengths for an aggregate batch placement. The sum must equal seq_len.
-    // Empty means the sender does not support shape-aware prediction, so the master falls back
-    // to the aggregate estimate for rolling-upgrade compatibility.
-    repeated int64 batch_seq_lens = 17;
-    // Request ids aligned with batch_seq_lens. The first id is request_id, which is also the
-    // aggregate reservation key. Empty means the sender predates member-aware accounting.
-    repeated int64 batch_request_ids = 18;
 }
 
 message FlexlbServerStatusPB {
@@ -111,6 +100,9 @@ message FlexlbCancelRequestPB {
     int64 request_id = 1;
     int64 batch_id = 2;
     CancelReasonPB reason = 3;
+    // Single-hop guard only. Every receiver checks local lifecycle ownership;
+    // only a hop-zero miss on a follower may be forwarded to the current master.
+    int32 forward_hop = 4;
 }
 
 message FlexlbCancelResponsePB {

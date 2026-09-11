@@ -335,6 +335,38 @@ TEST(PrefillBatchRpcServerTest, ContextCapturesAdmittedEnvelopeBeforeQueryConver
               PriorityPreemptionProgress::CANCELING);
 }
 
+TEST(PrefillBatchRpcServerTest, PrepareRetryInitializesAbsoluteDeadlineBeforeAttempts) {
+    TestPrefillBatchRpcServer server;
+    auto                      deferred = makeDeferred(server, 64);
+    ASSERT_EQ(deferred->context->requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+
+    const auto result = server.prepareSlotWithRetry(*deferred->context,
+                                                    /*max_retry_times=*/10,
+                                                    /*max_retry_timeout_ms=*/100,
+                                                    /*retry_interval_ms=*/1);
+
+    EXPECT_FALSE(result.prepared);
+    EXPECT_FALSE(result.stage_status.ok());
+    EXPECT_EQ(deferred->context->retry_times, 0);
+    EXPECT_TRUE(deferred->context->retry_deadline.has_value());
+}
+
+TEST(PrefillBatchRpcServerTest, PrepareRetryStartsNoAttemptForExpiredRequest) {
+    TestPrefillBatchRpcServer server;
+    auto                      deferred = makeDeferred(server, 65);
+    deferred->context->request_deadline = std::chrono::system_clock::now() - std::chrono::milliseconds(1);
+
+    const auto result = server.prepareSlotWithRetry(*deferred->context,
+                                                    /*max_retry_times=*/10,
+                                                    /*max_retry_timeout_ms=*/30,
+                                                    /*retry_interval_ms=*/200);
+
+    EXPECT_FALSE(result.prepared);
+    EXPECT_FALSE(result.stage_status.ok());
+    EXPECT_EQ(deferred->context->error_info.code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(deferred->context->retry_times, 0);
+}
+
 TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillResources) {
     PrefillBatchRpcServer server;
     server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
@@ -364,7 +396,7 @@ TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillRe
     EXPECT_EQ(engine->streams[1]->statusInfo().code(), ErrorCode::MALLOC_FAILED);
     ASSERT_EQ(response.errors_size(), 1);
     EXPECT_EQ(response.errors(0).request_id(), 1002);
-    EXPECT_EQ(response.errors(0).error_info().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::MALLOC_FAILED));
 
     auto schedule_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(schedule_info.running_task_info_list.size(), 1);
@@ -375,6 +407,30 @@ TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillRe
 
     accepted_deferred->context->cancel_state->store(true);
     accepted_deferred.reset();
+}
+
+TEST(PrefillBatchRpcServerTest, SchedulerRejectionPreservesGrammarOverloadCode) {
+    PrefillBatchRpcServer server;
+    server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
+    auto engine    = std::make_shared<PartialEnqueueEngine>();
+    server.engine_ = engine;
+
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
+    buildReadySlots(server, {1012}, slots, ready_slots);
+
+    engine->streams = {makeGenerateStream(ready_slots[0].deferred->context->generate_input)};
+    engine->streams[0]->reportError(ErrorCode::GRAMMAR_COMPILE_OVERLOADED, "grammar queue full");
+    engine->enqueue_successes = {false};
+
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.enqueueGroupStreams(ready_slots, &response).ok());
+
+    EXPECT_TRUE(ready_slots.empty());
+    ASSERT_EQ(response.errors_size(), 1);
+    EXPECT_EQ(response.errors(0).request_id(), 1012);
+    EXPECT_EQ(response.errors(0).error_info().error_code(),
+              static_cast<int64_t>(ErrorCode::GRAMMAR_COMPILE_OVERLOADED));
 }
 
 TEST(PrefillBatchRpcServerTest, LatchedPriorityCancelBeforeEnqueuePreservesRaw8429) {

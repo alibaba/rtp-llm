@@ -1,242 +1,176 @@
 package org.flexlb.sync.synchronizer;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
-import org.apache.commons.lang3.StringUtils;
-import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.Endpoint;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.enums.EngineType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.EngineSyncRunner;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
-import org.flexlb.util.EnvUtils;
-import org.flexlb.util.IdUtils;
-import org.flexlb.util.JsonUtils;
-import org.flexlb.util.Logger;
-import org.flexlb.util.RateLimitedWarn;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.flexlb.sync.status.WorkerDirectory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
+import javax.annotation.PreDestroy;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Consumer;
 
-/** Master engine-status synchronizer. */
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
+
+/**
+ * Master engine status synchronizer
+ */
 @Component
-public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
+public final class MasterEngineSynchronizer {
 
-    private final List<String> modelNames = new ArrayList<>();
-    private final Map<String, Long> lastDiscoverySuccessUs = new ConcurrentHashMap<>();
-    private final SingleFlightGate syncGate = new SingleFlightGate();
-    private final Map<String, RateLimitedWarn> slowRoundWarns = new ConcurrentHashMap<>();
-    private final Map<String, RateLimitedWarn> discoveryGapWarns = new ConcurrentHashMap<>();
+    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+
+    // Embedding workers expose ARPC, so discovery is their availability source.
+    private volatile Map<RoleType, List<WorkerHost>> embeddingWorkers = Map.of();
+
+    private final String modelName;
+    private final List<RoleType> requiredRoles;
+    private final WorkerAddressService workerAddressService;
+    private final WorkerDirectory workerDirectory;
+    private final EngineHealthReporter engineHealthReporter;
+    private final FlexlbConfig flexlbConfig;
     private final EngineGrpcService engineGrpcService;
-    private final CacheAwareService localKvCacheAwareManager;
-    private final FlexlbBatchScheduler batchScheduler;
-    private final EndpointRegistry endpointRegistry;
+    private final CacheAwareService cacheAwareService;
+    private final DynamicCacheIntervalService cacheIntervalService;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
-    private final long syncEngineStatusInterval;
-    private volatile int completedSyncCount;
+    private final Long syncEngineStatusInterval;
+    private final long statusStaleAfterUs;
+    private final ScheduledThreadPoolExecutor scheduler;
+    private final ThreadPoolExecutor statusCheckExecutor;
+    private final ThreadPoolExecutor engineSyncExecutor;
 
-    @Autowired
-    public MasterEngineSynchronizer(
-            WorkerAddressService workerAddressService,
-            EngineHealthReporter engineHealthReporter,
-            EngineWorkerStatus engineWorkerStatus,
-            EngineGrpcService engineGrpcService,
-            ModelMetaConfig modelMetaConfig,
-            CacheAwareService localKvCacheAwareManager,
-            @Autowired(required = false) FlexlbBatchScheduler batchScheduler,
-            EndpointRegistry endpointRegistry,
-            ConfigService configService) {
-        this(
-                workerAddressService,
-                engineHealthReporter,
-                engineWorkerStatus,
-                engineGrpcService,
-                modelMetaConfig,
-                localKvCacheAwareManager,
-                batchScheduler,
-                endpointRegistry,
-                configService,
-                System.getenv("MODEL_SERVICE_CONFIG"),
-                MasterEngineSynchronizer::startPeriodicSync);
-    }
+    public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
+                                    EngineHealthReporter engineHealthReporter,
+                                    WorkerDirectory workerDirectory,
+                                    EngineGrpcService engineGrpcService,
+                                    ModelMetaConfig modelMetaConfig,
+                                    CacheAwareService cacheAwareService,
+                                    DynamicCacheIntervalService cacheIntervalService,
+                                    ConfigService configService) {
 
-    MasterEngineSynchronizer(
-            WorkerAddressService workerAddressService,
-            EngineHealthReporter engineHealthReporter,
-            EngineWorkerStatus engineWorkerStatus,
-            EngineGrpcService engineGrpcService,
-            ModelMetaConfig modelMetaConfig,
-            CacheAwareService localKvCacheAwareManager,
-            FlexlbBatchScheduler batchScheduler,
-            EndpointRegistry endpointRegistry,
-            ConfigService configService,
-            String modelConfig,
-            Consumer<MasterEngineSynchronizer> schedulerStarter) {
-        super(
-                workerAddressService,
-                engineHealthReporter,
-                engineWorkerStatus,
-                modelMetaConfig,
-                configService);
+        this.workerAddressService = workerAddressService;
+        this.engineHealthReporter = engineHealthReporter;
+        this.workerDirectory = workerDirectory;
+        this.flexlbConfig = configService.loadBalanceConfig();
         this.engineGrpcService = engineGrpcService;
-        this.localKvCacheAwareManager = localKvCacheAwareManager;
-        this.batchScheduler = batchScheduler;
-        this.endpointRegistry = endpointRegistry;
-        this.syncEngineStatusInterval =
-                EnvUtils.readPositiveLong("SYNC_STATUS_INTERVAL", 20L);
-        this.syncRequestTimeoutMs =
-                EnvUtils.readPositiveLong("SYNC_REQUEST_TIMEOUT_MS", 5000L);
+        this.cacheAwareService = cacheAwareService;
+        this.cacheIntervalService = cacheIntervalService;
+        this.modelName = modelMetaConfig.modelName();
+        this.requiredRoles = modelMetaConfig.requiredRoles();
 
-        if (StringUtils.isEmpty(modelConfig)) {
-            Logger.warn("master load balancer env MODEL_SERVICE_CONFIG is empty");
-            throw new IllegalStateException(
-                    "master load balancer env MODEL_SERVICE_CONFIG is empty");
-        }
-        ServiceRoute serviceRoute = JsonUtils.toObject(
-                modelConfig, new TypeReference<>() { });
-        ModelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
-        modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
-
-        flexlbConfig.validateEngineTypeConfig(serviceRoute.getAllRoleTypes());
-        Logger.info("engine type: {}", flexlbConfig.getEngineType());
-        schedulerStarter.accept(this);
-    }
-
-    /** Compatibility seam retained for focused tests that do not exercise endpoint calibration. */
-    MasterEngineSynchronizer(
-            WorkerAddressService workerAddressService,
-            EngineHealthReporter engineHealthReporter,
-            EngineWorkerStatus engineWorkerStatus,
-            EngineGrpcService engineGrpcService,
-            ModelMetaConfig modelMetaConfig,
-            CacheAwareService localKvCacheAwareManager,
-            ConfigService configService,
-            String modelConfig,
-            Consumer<MasterEngineSynchronizer> schedulerStarter) {
-        this(
-                workerAddressService,
-                engineHealthReporter,
-                engineWorkerStatus,
-                engineGrpcService,
-                modelMetaConfig,
-                localKvCacheAwareManager,
-                null,
-                null,
-                configService,
-                modelConfig,
-                schedulerStarter);
-    }
-
-    private void startPeriodicSync() {
-        this.scheduler = new ScheduledThreadPoolExecutor(
-                5,
-                new NamedThreadFactory("sync-status-scheduler"),
+        this.syncEngineStatusInterval = flexlbConfig.getWorkerRegistry().getHealth()
+                .getStatusPollIntervalMs();
+        this.syncRequestTimeoutMs = flexlbConfig.getWorkerRegistry().getHealth()
+                .getStatusRpcTimeoutMs();
+        this.statusStaleAfterUs = flexlbConfig.getWorkerRegistry().getHealth()
+                .getStatusStaleAfterMs() * 1000L;
+        int engineThreads = flexlbConfig.getInternalRuntime()
+                .getEngineSyncExecutorThreads();
+        engineSyncExecutor = executor(engineThreads, "engine-sync-executor");
+        int statusThreads = flexlbConfig.getInternalRuntime()
+                .getStatusCheckExecutorThreads();
+        statusCheckExecutor = executor(statusThreads, "status-checker-executor");
+        this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(
                 this::syncEngineStatus,
                 0,
                 syncEngineStatusInterval,
                 TimeUnit.MILLISECONDS);
+        this.scheduler.scheduleAtFixedRate(
+                this::reportExecutorMetrics, 2, 2, TimeUnit.SECONDS);
     }
 
-    @Override
+    private static ThreadPoolExecutor executor(int threads, String name) {
+        return new ThreadPoolExecutor(
+                threads, threads, 60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(15_000),
+                new NamedThreadFactory(name),
+                new ThreadPoolExecutor.CallerRunsPolicy());
+    }
+
+    private void reportExecutorMetrics() {
+        try {
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "engineSyncExecutor", engineSyncExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusCheckExecutor", statusCheckExecutor);
+        } catch (Throwable failure) {
+            logger.warn("Failed to report worker sync executor metrics", failure);
+        }
+    }
+
     public void syncEngineStatus() {
         syncCount.increment();
-        logger.debug("sync engine status start, times:{}, modelNames:{}",
-                syncCount.longValue(), modelNames);
+        logger.debug("sync engine status start, times:{}, modelName:{}",
+                syncCount.longValue(), modelName);
         try {
-            for (String modelName : modelNames) {
-                ModelWorkerStatus modelWorkerStatus =
-                        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-                String serviceId = IdUtils.getServiceIdByModelName(modelName);
-                if (serviceId.isEmpty()) {
-                    logger.error("serviceId not found for model:{}", modelName);
-                    continue;
+            if (flexlbConfig.getWorkerRegistry().getEngineType() == EngineType.EMBEDDING) {
+                Map<RoleType, List<WorkerHost>> discovered = new EnumMap<>(RoleType.class);
+                for (RoleType role : requiredRoles) {
+                    discovered.put(role, List.copyOf(
+                            workerAddressService.getEngineWorkerList(modelName, role)));
                 }
-                ServiceRoute serviceRoute = modelMetaConfig.getServiceRoute(serviceId);
-                if (serviceRoute == null) {
-                    logger.error("serviceRoute not found for serviceId:{}", serviceId);
-                    continue;
-                }
-
-                for (RoleType roleType : serviceRoute.getAllRoleTypes()) {
-                    List<Endpoint> roleEndpoints = serviceRoute.getRoleEndpoints(roleType);
-                    if (roleEndpoints == null) {
-                        logger.error("roleEndpoints is null, roleType:{}", roleType);
-                        continue;
-                    }
-                    try {
-                        submitRound(
-                                modelName,
-                                roleType,
-                                modelWorkerStatus.getRoleStatusMap(roleType));
-                    } catch (Throwable error) {
-                        logger.error(
-                                "submit sync round failed, model={}, role={}",
-                                modelName, roleType, error);
-                    }
-                }
+                embeddingWorkers = Map.copyOf(discovered);
+                return;
             }
-            completedSyncCount++;
-        } catch (Throwable error) {
-            // An Error escaping scheduleAtFixedRate silently suppresses every future tick.
-            logger.error("sync engine status error", error);
+            for (RoleType roleType : requiredRoles) {
+                engineSyncExecutor.submit(new EngineSyncRunner(
+                        modelName, workerDirectory,
+                        workerAddressService, statusCheckExecutor, engineHealthReporter,
+                        engineGrpcService, roleType, cacheAwareService,
+                        cacheIntervalService,
+                        syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                        flexlbConfig.getWorkerRegistry().getCacheStatus()
+                                .isFullSnapshotDebugMode(),
+                        statusStaleAfterUs
+                ));
+            }
+        } catch (Exception e) {
+            logger.error("sync engine prefill status error", e);
         }
     }
 
-    void submitRound(
-            String modelName,
-            RoleType roleType,
-            Map<String, WorkerStatus> roleStatusMap) {
-        String key = modelName + "/" + roleType;
-        boolean submitted = syncGate.submit(key, engineSyncExecutor, () ->
-                new EngineSyncRunner(
-                        modelName,
-                        roleStatusMap,
-                        workerAddressService,
-                        statusCheckExecutor,
-                        engineHealthReporter,
-                        engineGrpcService,
-                        roleType,
-                        localKvCacheAwareManager,
-                        syncRequestTimeoutMs,
-                        syncCount,
-                        syncEngineStatusInterval,
-                        batchScheduler,
-                        endpointRegistry,
-                        flexlbConfig.getEngineType(),
-                        flexlbConfig.getDiscoveryFailureGraceMs(),
-                        lastDiscoverySuccessUs,
-                        discoveryGapWarns.computeIfAbsent(
-                                key, ignored -> new RateLimitedWarn(1, TimeUnit.SECONDS)))
-                        .run());
-        if (!submitted) {
-            slowRoundWarns.computeIfAbsent(
-                            key, ignored -> new RateLimitedWarn(1, TimeUnit.SECONDS))
-                    .warn("sync round still in flight, skipping tick: key={}", key);
-        }
+    public List<WorkerHost> embeddingWorkerSnapshot(RoleType role) {
+        return embeddingWorkers.getOrDefault(role, List.of());
     }
 
     public boolean isReady() {
-        return completedSyncCount > 0;
+        if (flexlbConfig.getWorkerRegistry().getEngineType() == EngineType.EMBEDDING) {
+            Map<RoleType, List<WorkerHost>> snapshot = embeddingWorkers;
+            return requiredRoles.stream().allMatch(
+                    role -> !snapshot.getOrDefault(role, List.of()).isEmpty());
+        }
+        return requiredRoles.stream()
+                .allMatch(role -> workerDirectory.routingCapacity(role) > 0);
     }
+
+    @PreDestroy
+    public void destroy() {
+        scheduler.shutdown();
+        engineSyncExecutor.shutdown();
+        statusCheckExecutor.shutdown();
+    }
+
 }

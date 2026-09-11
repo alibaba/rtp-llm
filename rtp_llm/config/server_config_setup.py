@@ -619,6 +619,44 @@ def setup_cuda_device_and_accl_env(local_rank: int) -> None:
             )
 
 
+def configure_kv_cache_event_host_ip_port(py_env_configs: PyEnvConfigs) -> None:
+    """Resolve the KVCM host identity after this backend rank is known."""
+    kv_cache_config = py_env_configs.kv_cache_config
+    parallelism_config = py_env_configs.parallelism_config
+    if (
+        kv_cache_config.kv_cache_event_publisher_type != "kvcm"
+        or parallelism_config.tp_rank != 0
+    ):
+        return
+
+    server_config = py_env_configs.server_config
+    derived = not kv_cache_config.kv_cache_event_host_ip_port
+    if derived:
+        server_ip = server_config.ip or socket.gethostbyname(socket.gethostname())
+        kv_cache_config.kv_cache_event_host_ip_port = (
+            f"{server_ip}:{server_config.server_port}"
+        )
+        logging.info(
+            "KV_CACHE_EVENT_HOST_IP_PORT was empty; derived per-rank endpoint "
+            "%s from start_port=%s rank_id=%s worker_info_port_num=%s",
+            kv_cache_config.kv_cache_event_host_ip_port,
+            server_config.start_port,
+            server_config.rank_id,
+            server_config.worker_info_port_num,
+        )
+
+    if parallelism_config.dp_size > 1:
+        logging.warning(
+            "dp_size=%s requires a distinct KV_CACHE_EVENT_HOST_IP_PORT for every DP replica; "
+            "using %s value %s for dp_rank=%s. Sharing this value lets KVCM snapshots "
+            "overwrite another replica's host state.",
+            parallelism_config.dp_size,
+            "auto-derived" if derived else "explicit",
+            kv_cache_config.kv_cache_event_host_ip_port,
+            parallelism_config.dp_rank,
+        )
+
+
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
     Build parallelism_config from env and run auto_configure_deepep.

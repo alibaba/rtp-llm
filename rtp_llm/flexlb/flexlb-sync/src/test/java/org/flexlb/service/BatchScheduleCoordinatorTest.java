@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.strategy.RoundRobinLoadBalancer;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -35,7 +36,7 @@ import static org.mockito.Mockito.when;
 class BatchScheduleCoordinatorTest {
 
     @Mock
-    private RouteService routeService;
+    private RoundRobinLoadBalancer batchScheduler;
     @Mock
     private LBStatusConsistencyService consistency;
     @Mock
@@ -48,7 +49,7 @@ class BatchScheduleCoordinatorTest {
     @BeforeEach
     void setUp() {
         coordinator = new BatchScheduleCoordinator(
-                routeService, consistency, httpNettyService, engineHealthReporter);
+                batchScheduler, consistency, httpNettyService, engineHealthReporter);
     }
 
     @Test
@@ -58,7 +59,7 @@ class BatchScheduleCoordinatorTest {
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
 
         BatchScheduleResponse response = BatchScheduleResponse.success(null);
-        when(routeService.batchSchedule(any())).thenReturn(Mono.just(response));
+        when(batchScheduler.schedule(any())).thenReturn(Mono.just(response));
 
         BatchScheduleRequest forwarded = new BatchScheduleRequest();
         forwarded.setForwardHop(1);
@@ -75,7 +76,7 @@ class BatchScheduleCoordinatorTest {
         when(consistency.isNeedConsistency()).thenReturn(false);
 
         BatchScheduleResponse response = BatchScheduleResponse.success(null);
-        when(routeService.batchSchedule(any())).thenReturn(Mono.just(response));
+        when(batchScheduler.schedule(any())).thenReturn(Mono.just(response));
 
         BatchScheduleResponse returned =
                 coordinator.schedule(new BatchScheduleRequest()).block();
@@ -109,7 +110,7 @@ class BatchScheduleCoordinatorTest {
         assertSame(response, returned);
         assertFalse(returned.isResolvedLocally());
         verify(engineHealthReporter).reportForwardToMasterResult("10.0.0.2", "200");
-        verifyNoInteractions(routeService);
+        verifyNoInteractions(batchScheduler);
         ArgumentCaptor<BatchScheduleRequest> forwarded = ArgumentCaptor.forClass(BatchScheduleRequest.class);
         verify(httpNettyService).request(forwarded.capture(), eq(URI.create("http://10.0.0.2:7001")),
                 eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class));
@@ -133,7 +134,7 @@ class BatchScheduleCoordinatorTest {
 
         assertEquals("SELF_FORWARD_BLOCKED", ex.getErrorCode());
         verify(engineHealthReporter).reportForwardToMasterResult("10.0.0.1", "SELF_FORWARD_BLOCKED");
-        verifyNoInteractions(routeService, httpNettyService);
+        verifyNoInteractions(batchScheduler, httpNettyService);
     }
 
     @ParameterizedTest
@@ -151,7 +152,7 @@ class BatchScheduleCoordinatorTest {
 
         assertEquals("FORWARD_HOP_LIMIT", ex.getErrorCode());
         verify(engineHealthReporter).reportForwardToMasterResult("10.0.0.2", "FORWARD_HOP_LIMIT");
-        verifyNoInteractions(routeService, httpNettyService);
+        verifyNoInteractions(batchScheduler, httpNettyService);
     }
 
     @Test
@@ -162,7 +163,7 @@ class BatchScheduleCoordinatorTest {
         when(consistency.isMaster()).thenAnswer(ignored -> master.get());
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
         BatchScheduleResponse response = BatchScheduleResponse.success(null);
-        when(routeService.batchSchedule(any())).thenReturn(Mono.just(response));
+        when(batchScheduler.schedule(any())).thenReturn(Mono.just(response));
 
         Mono<BatchScheduleResponse> scheduled =
                 coordinator.schedule(new BatchScheduleRequest());
@@ -207,7 +208,7 @@ class BatchScheduleCoordinatorTest {
 
         assertEquals("MASTER_NULL", ex.getErrorCode());
         verify(engineHealthReporter).reportForwardToMasterResult("LOCAL", "MASTER_NULL");
-        verifyNoInteractions(routeService, httpNettyService);
+        verifyNoInteractions(batchScheduler, httpNettyService);
     }
 
     @Test
@@ -271,7 +272,7 @@ class BatchScheduleCoordinatorTest {
     }
 
     @Test
-    void schedule_slave_oldMasterWithoutBatchEndpoint_resolvesLocally() {
+    void schedule_slave_missingMasterEndpoint_doesNotScheduleOnFollower() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
@@ -279,28 +280,21 @@ class BatchScheduleCoordinatorTest {
                 eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
                 .thenReturn(Mono.error(new org.flexlb.exception.HttpErrorResponseException(
                         404, "{\"timestamp\":1,\"status\":404,\"path\":\"/rtp_llm/batch_schedule\"}")));
-        BatchScheduleResponse local = BatchScheduleResponse.success(null);
-        when(routeService.batchSchedule(any())).thenReturn(Mono.just(local));
-
-        BatchScheduleResponse returned =
-                coordinator.schedule(new BatchScheduleRequest()).block();
-
-        assertSame(local, returned);
-        assertTrue(returned.isResolvedLocally());
-        assertEquals("10.0.0.2:7001", returned.getRealMasterHost());
-        verify(engineHealthReporter).reportForwardToMasterResult(
-                "10.0.0.2", "BATCH_ENDPOINT_UNSUPPORTED_404");
-        verify(routeService).batchSchedule(any());
+        BatchScheduleTransportException error = assertThrows(BatchScheduleTransportException.class,
+                () -> coordinator.schedule(new BatchScheduleRequest()).block());
+        assertEquals("HTTP_ERROR", error.getErrorCode());
+        verifyNoInteractions(batchScheduler);
     }
 
-    @Test
-    void schedule_slave_http500WithUnparseableBody_throwsHttpError() {
+    @ParameterizedTest
+    @ValueSource(strings = {"Bad Gateway", "null", "{}"})
+    void schedule_slave_http500WithoutBusinessResponse_throwsHttpError(String body) {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
         when(httpNettyService.request(any(BatchScheduleRequest.class), any(URI.class),
                 eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
-                .thenReturn(Mono.error(new org.flexlb.exception.HttpErrorResponseException(502, "Bad Gateway")));
+                .thenReturn(Mono.error(new org.flexlb.exception.HttpErrorResponseException(502, body)));
 
         BatchScheduleTransportException ex = assertThrows(
                 BatchScheduleTransportException.class,

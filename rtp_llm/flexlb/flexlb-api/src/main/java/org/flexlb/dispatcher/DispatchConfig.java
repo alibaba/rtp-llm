@@ -6,17 +6,11 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * Operator-facing tuning surface for the dispatcher. Pure POJO — loading and validation live in
- * {@link DispatcherConfiguration#dispatchConfig()}, mirroring how {@code ConfigService} loads
- * {@code FlexlbConfig}. Every timeout/safety knob that "no one actually tunes" lives as a
- * constant inside {@code DispatcherConfiguration} / {@code PassthroughClient} / {@code FeClient}
- * (see those classes for FE_CONNECT_TIMEOUT_MS / FE_PENDING_ACQUIRE_TIMEOUT_MS /
- * STREAM_TIMEOUT_MS / the per-FE MAX_RESPONSE_BYTES). Request-level aggregate response budgets
- * remain operator-configurable here because they scale with the deployment's batch shape.
+ * Dispatcher settings loaded and validated by {@link DispatcherConfiguration}.
  *
  * <p>Loading order: defaults → JSON from {@code DISPATCH_CONFIG} env → per-field env overrides
  * (e.g. {@code DISPATCH_BATCH_TIMEOUT_MS}, {@code DISPATCH_PROBE_PATH}). The per-field env wins,
- * matching the {@code FLEXLB_CONFIG} contract operators already know.
+ * using Spring property binding. Invalid overrides fail at startup.
  *
  * <p>Unknown JSON properties are ignored so a stale {@code DISPATCH_CONFIG} carrying old field
  * names (subBatchSize, feRequestTimeoutMs, …) still boots — they just have no effect.
@@ -25,6 +19,9 @@ import lombok.Setter;
 @Setter
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class DispatchConfig {
+
+    /** How long an empty discovery result may retain the last FE pool. */
+    private long discoveryFailureGraceMs = 300_000;
 
     /**
      * Chunk splitting DSL. {@code count:N} → exactly N chunks (default). {@code size:N} →
@@ -82,9 +79,8 @@ public class DispatchConfig {
      * outage or on a multi-role deployment whose master cannot serve {@code /batch_schedule};
      * restore {@code master} after the incident to regain the global cursor.
      *
-     * <p>This is a string at the external-config boundary so the shared env-reflection helper does
-     * not need to change enum parsing semantics. {@link DispatcherConfiguration} validates and
-     * normalizes it once at startup through {@link FeAllocationMode#parse(String)}.
+     * {@link DispatcherConfiguration} validates the value at startup through
+     * {@link FeAllocationMode#parse(String)}.
      */
     private String feAllocation = FeAllocationMode.MASTER.configValue();
 
@@ -95,24 +91,12 @@ public class DispatchConfig {
      * {@code rtp_llm.config.generate_config.RoleAddr}: {@code {role, ip, http_port, grpc_port}})
      * so the receiving FE skips its own master round-trip.
      *
-     * <p>Defaults to {@code false}: this optimization crosses an HTTP/JSON version boundary, and
-     * mixed-version FE fleets must keep serving correctly on first rollout. Enable it explicitly
-     * only after every FE build satisfies the version precondition below.
-     *
-     * <p><strong>FE version precondition when enabled:</strong> the FE build must include
-     * {@code RoleAddr.validate_role} (the {@code @field_validator("role", mode="before")} in
-     * {@code rtp_llm/config/generate_config.py}, on main since commit {@code 53dc319bd}).
-     * Older FE builds leave {@code role_addrs} as {@code list[dict]} and fail every stamped
-     * request with HTTP 500 at {@code model_rpc_client}'s {@code addr.role} access — the
-     * dispatcher is the first caller to deliver {@code role_addrs} via the HTTP body, so the
-     * latent FE bug only fires with this toggle on.
+     * <p>Defaults to {@code false}, preserving request-aware LLM scheduling and admission.
+     * Preassignment is stateless and supports a single backend role without traffic policies.
+     * Receiving FEs must support the typed {@code role_addrs} request field.
      * The dispatcher and every receiving FE must also share the same non-blank
      * {@code DISPATCH_ROUTING_TOKEN}; unauthenticated HTTP clients are forbidden from choosing
      * internal gRPC targets through {@code role_addrs}.
-     *
-     * <p>Operators can keep/flip {@code DISPATCH_PRE_ASSIGN_BE=false} (or set
-     * {@code preAssignBe: false} in {@code DISPATCH_CONFIG}) to opt out for diagnostics or
-     * staged rollback.
      *
      * <p>Disabling this flag does not disable master FE allocation. It changes a master request to
      * FE-only, so no unused BE target is selected and no BE round-robin cursor is advanced.

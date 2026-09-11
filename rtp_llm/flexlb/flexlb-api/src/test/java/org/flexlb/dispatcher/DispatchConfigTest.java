@@ -94,7 +94,7 @@ class DispatchConfigTest {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":5000}",
                 "DISPATCH_BATCH_TIMEOUT_MS", "8000");
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
+        DispatchConfig c = loadEnvironment(env);
         assertEquals(8000, c.getBatchTimeoutMs(), "env wins over JSON");
     }
 
@@ -106,7 +106,7 @@ class DispatchConfigTest {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"bodyReadMarginMs\":12000}",
                 "DISPATCH_BODY_READ_MARGIN_MS", "45000");
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
+        DispatchConfig c = loadEnvironment(env);
         assertEquals(45000L, c.getBodyReadMarginMs(), "DISPATCH_BODY_READ_MARGIN_MS env must win over JSON");
     }
 
@@ -141,7 +141,7 @@ class DispatchConfigTest {
                 "DISPATCH_MAX_AGGREGATE_REQUEST_BYTES", "2097152",
                 "DISPATCH_MAX_AGGREGATE_RESPONSE_BYTES", "1048576",
                 "DISPATCH_MAX_DRY_RUN_RESPONSE_BYTES", "524288");
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
+        DispatchConfig c = loadEnvironment(env);
         assertEquals(2097152L, c.getMaxAggregateRequestBytes());
         assertEquals(1048576L, c.getMaxAggregateResponseBytes());
         assertEquals(524288L, c.getMaxDryRunResponseBytes());
@@ -159,7 +159,7 @@ class DispatchConfigTest {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_FE_POOL_SERVICE_ID", "from.env",
                 "DISPATCH_SUB_BATCH", "count:10");
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
+        DispatchConfig c = loadEnvironment(env);
         assertEquals("from.env", c.getFePoolServiceId());
         assertEquals("count:10", c.getSubBatch());
     }
@@ -191,7 +191,7 @@ class DispatchConfigTest {
                 "DISPATCH_CONFIG",
                 "{\"fePoolServiceId\":\"x\",\"probePath\":\"/frontend_health\"}",
                 "DISPATCH_PROBE_PATH", "/health");
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
+        DispatchConfig c = loadEnvironment(env);
         assertEquals("/health", c.getProbePath(), "DISPATCH_PROBE_PATH must beat the JSON value");
     }
 
@@ -204,7 +204,7 @@ class DispatchConfigTest {
 
     @Test
     void preAssignBeJsonExplicitTrueEnables() {
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(mutableEnv(
+        DispatchConfig c = loadEnvironment(mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"preAssignBe\":true}",
                 "DISPATCH_ROUTING_TOKEN", "shared-secret"));
         assertTrue(c.isPreAssignBe(),
@@ -217,30 +217,30 @@ class DispatchConfigTest {
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
                 "DISPATCH_PRE_ASSIGN_BE", "true",
                 "DISPATCH_ROUTING_TOKEN", "shared-secret");
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
+        DispatchConfig c = loadEnvironment(env);
         assertTrue(c.isPreAssignBe(),
                 "DISPATCH_PRE_ASSIGN_BE=true must opt into the optimization without code change");
     }
 
     @Test
-    void booleanAliasEnablesPreAssignBeAndTypoPreservesDefault() {
-        DispatchConfig enabled = DispatcherConfiguration.loadAndValidate(mutableEnv(
+    void booleanAliasEnablesPreAssignBeAndTypoFailsAtStartup() {
+        DispatchConfig enabled = loadEnvironment(mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
                 "DISPATCH_PRE_ASSIGN_BE", "1",
                 "DISPATCH_ROUTING_TOKEN", "shared-secret"));
         assertTrue(enabled.isPreAssignBe());
 
-        DispatchConfig typo = DispatcherConfiguration.loadAndValidate(mutableEnv(
-                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
-                "DISPATCH_PRE_ASSIGN_BE", "treu"));
-        assertFalse(typo.isPreAssignBe(), "invalid boolean must leave the default unchanged");
+        assertThrows(org.springframework.boot.context.properties.bind.BindException.class,
+                () -> loadEnvironment(mutableEnv(
+                        "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
+                        "DISPATCH_PRE_ASSIGN_BE", "treu")));
     }
 
     @Test
     void preAssignmentRequiresASecretNotStoredInJson() {
         assertThrows(IllegalArgumentException.class,
                 () -> load("{\"fePoolServiceId\":\"x\",\"preAssignBe\":true}"));
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(mutableEnv(
+        DispatchConfig c = loadEnvironment(mutableEnv(
                 "DISPATCH_FE_POOL_SERVICE_ID", "x",
                 "DISPATCH_PRE_ASSIGN_BE", "true",
                 "DISPATCH_ROUTING_TOKEN", "shared-secret"));
@@ -255,7 +255,7 @@ class DispatchConfigTest {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"feAllocation\":\"master\"}",
                 "DISPATCH_FE_ALLOCATION", "local");
-        assertEquals("local", DispatcherConfiguration.loadAndValidate(env).getFeAllocation(),
+        assertEquals("local", loadEnvironment(env).getFeAllocation(),
                 "the incident escape hatch must be selectable through a per-field env override");
     }
 
@@ -268,17 +268,22 @@ class DispatchConfigTest {
 
     @Test
     void blankProbePathFailsValidation() {
-        // Blank env is treated as "not set" by EnvConfigOverrides, so default sticks here.
+        // Spring binds an explicit blank value; validation rejects it at startup.
         Map<String, String> env = mutableEnv(
                 "DISPATCH_FE_POOL_SERVICE_ID", "x",
                 "DISPATCH_PROBE_PATH", "");
-        DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
-        assertEquals("/frontend_health", c.getProbePath(),
-                "blank env value is ignored; default kept (matches existing FLEXLB_CONFIG semantics)");
+        assertThrows(IllegalArgumentException.class, () -> loadEnvironment(env));
 
         // But an explicit blank in JSON is a config error — must throw to surface the typo.
         assertThrows(IllegalArgumentException.class,
                 () -> load("{\"fePoolServiceId\":\"x\",\"probePath\":\"  \"}"));
+    }
+
+    private static DispatchConfig loadEnvironment(Map<String, String> values) {
+        org.springframework.mock.env.MockEnvironment environment = new org.springframework.mock.env.MockEnvironment();
+        environment.getPropertySources().addFirst(
+                new org.springframework.core.env.SystemEnvironmentPropertySource("testEnvironment", new HashMap<>(values)));
+        return DispatcherConfiguration.loadAndValidate(environment);
     }
 
     /** Test seam: load with the given JSON as DISPATCH_CONFIG, no other env overrides. */
@@ -287,7 +292,7 @@ class DispatchConfigTest {
         if (json != null) {
             env.put("DISPATCH_CONFIG", json);
         }
-        return DispatcherConfiguration.loadAndValidate(env);
+        return loadEnvironment(env);
     }
 
     /** Mutable env map (Map.of is immutable; tests need to add multiple entries flexibly). */

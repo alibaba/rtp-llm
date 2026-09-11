@@ -12,9 +12,12 @@ py_library(
     srcs = [
         "batch_decode_test.py",
         "batch_perf_impl.py",
+        "cache_grid_runner.py",
         "dataclass.py",
         "dataset.py",
+        "deepseek_v4_prefill_formula_fit.py",
         "distribution_runner.py",
+        "generate_prefill_3d_chart.py",
         "grid_runner.py",
         "hub_download.py",
         "offline_bench_test.py",
@@ -144,6 +147,40 @@ py_test(
     tags = ["manual"],
 )
 
+# Prefix-cache mode: measures an explicit total-sequence × cache-length grid.
+# Invoke with --test_arg=--cache_grid_json=<file> and --test_arg=--partial=2.
+# The runner seeds each requested prefix and verifies reuse_len on every
+# measured request; cache_len is a workload dimension, not an engine argument.
+py_test(
+    name = "cache_grid_perf_test",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    tags = ["manual"],
+)
+
+# Generic model-agnostic entrypoint. It intentionally has no model-specific
+# defaults; pass model/workload/engine settings with --test_arg at invocation.
+py_test(
+    name = "model_perf_test",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    tags = ["manual"],
+)
+
 # V4-Flash CP=4 + EP=4 prefill profile sweep from 64k to 1M input.
 # Manual-only — drives batch_size=1 prefill requests through the perf
 # test framework so per-input_len timeline JSONs land in TEST_UNDECLARED_
@@ -199,7 +236,7 @@ py_test(
         "PERF_FORMAL_WARMUP_RUNS": "1",
         "PERF_MEASURE_RUNS": "3",
         "PERF_PROFILE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
         "ENABLE_FP32_LM_HEAD": "0",
         "RTP_LLM_STREAM_ASYNC": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -272,7 +309,7 @@ py_test(
         "PERF_MEASURE_RUNS": "3",
         "PERF_PROFILE_RUNS": "1",
         "PREFILL_CP_KV_CACHE_SHARDED": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
         "ENABLE_FP32_LM_HEAD": "0",
         "RTP_LLM_STREAM_ASYNC": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -329,13 +366,13 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
     },
     tags = ["manual"],
 )
 
 # V4-Flash CP=4 + EP=4 + Mega MoE prefill profile.  Same topology as
-# the baseline above but with DSV4_USE_MEGA_MOE=1 + DG_JIT_CPP_STANDARD=20.
+# the baseline above but with MOE_STRATEGY=mega_moe_se + DG_JIT_CPP_STANDARD=20.
 # Smaller input (8k vs baseline 64k) because Mega MoE's symm-mem buffer
 # allocation is sized from max_tokens_per_rank=max_seq_len; at 64k the
 # symm allocation aborts in CUDASymmetricMemory destructor during warmup.
@@ -386,7 +423,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
     },
     tags = ["manual"],
 )
@@ -443,7 +480,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
     },
     # TODO(dsv4-merge): these 4-GPU DSV4-Flash perf targets are referenced by
     # //internal_source/rtp_llm/test/smoke:smoke_sm100_dsv4 (member of the CI
@@ -526,7 +563,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
         "ENABLE_FP32_LM_HEAD": "0",
         "RTP_LLM_STREAM_ASYNC": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -596,7 +633,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
     },
     tags = ["manual"],
 )
@@ -649,7 +686,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
         "CUDA_LAUNCH_BLOCKING": "1",
         "TORCH_USE_CUDA_DSA": "1",
     },
@@ -701,7 +738,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
     },
     tags = ["manual"],
 )
@@ -762,7 +799,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_STREAM_ASYNC": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
         "RTP_LLM_DEVICE_INPUT": "1"
@@ -816,7 +853,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
         "DSV4_CHUNK_TOKENS": "8192",
     },
     tags = ["manual"],
@@ -867,7 +904,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
     },
     tags = ["manual"],
 )
@@ -919,7 +956,7 @@ py_test(
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
         "PERF_MEASURE_RUNS": "1",
-        "DSV4_USE_MEGA_MOE": "1",
+        "MOE_STRATEGY": "mega_moe_se",
         "ENABLE_FP32_LM_HEAD": "0",
     },
     tags = ["manual"],

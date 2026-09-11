@@ -1,3 +1,5 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+
 # DSV4 python tests target the CUDA13/Blackwell stack (deep_gemm >= 2.6, dsv4
 # kernels, pytest closure). They are skipped as incompatible on other platforms
 # instead of failing on pools that can never satisfy those dependencies.
@@ -176,32 +178,22 @@ py_test(
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 
+
+cuda13_sm100_py_test(
+    name = "test_prefill_fast_path_cuda",
+    srcs = ["test_prefill_fast_path_cuda.py", "test_prefill_fast_path.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
 py_test(
     name = "test_hc_impl",
     srcs = ["test_hc_impl.py"],
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm/models_py:tile_kernels_mhc",
-        "//rtp_llm:testlib",
-    ],
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
-    name = "test_strategy_select",
-    srcs = ["test_strategy_select.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
-    name = "test_chunked_moe",
-    srcs = ["test_chunked_moe.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
     target_compatible_with = _DSV4_CUDA13_ONLY,
@@ -220,76 +212,12 @@ py_test(
 )
 
 py_test(
-    name = "test_shared_expert_executor",
-    srcs = ["test_shared_expert_executor.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
-    name = "test_mega_moe_input_packer",
-    srcs = ["test_mega_moe_input_packer.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
-    name = "test_mega_moe_se_input_pack",
-    srcs = ["test_mega_moe_se_input_pack.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
-    name = "test_mega_moe_gate_pack",
-    srcs = ["test_mega_moe_gate_pack.py"],
-    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
     name = "test_dsv4_kernel_jit_warmup",
     srcs = ["test_dsv4_kernel_jit_warmup.py"],
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
-    name = "test_mega_moe_input_packer_perf",
-    srcs = ["test_mega_moe_input_packer_perf.py"],
-    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
-    name = "test_grouped_fp4_strategy_perf",
-    srcs = ["test_grouped_fp4_strategy_perf.py"],
-    deps = [
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:testlib",
-    ],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 

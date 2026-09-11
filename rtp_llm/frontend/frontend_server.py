@@ -13,8 +13,8 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
@@ -404,7 +404,6 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            self._validate_dispatcher_routing_context(req, raw_request)
             sequence = self._global_controller.increment() % 4096  # 12 bits
             req[request_id_field_name] = generate_request_id(
                 self.py_env_configs.server_config.ip,
@@ -419,6 +418,7 @@ class FrontendServer(object):
             return self._handle_exception(req, e)
 
         def generate_call():
+            self._validate_dispatcher_routing_context(req, raw_request)
             assert self._frontend_worker is not None
             if request_headers:
                 return self._frontend_worker.inference(**req, headers=request_headers)

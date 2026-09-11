@@ -20,6 +20,9 @@ from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    synchronized_moe_chunk_plan,
+)
 
 
 @dataclass
@@ -54,7 +57,9 @@ class V4Args:
     # moe
     moe_inter_dim: int = 2048
     n_routed_experts: int = 256
+    n_physical_experts: Optional[int] = None
     n_shared_experts: int = 1
+    moe_strategy: str = "auto"
     n_activated_experts: int = 6
     score_func: str = "sqrtsoftplus"
     route_scale: float = 1.5
@@ -87,6 +92,9 @@ class V4Args:
     world_size: int = 1
     world_rank: int = 0
     is_decode_role: bool = False
+    # Dedicated DSpARK prefill workers only project target features into the
+    # draft SWA pools; they do not construct proposal, FFN, or mHC modules.
+    commit_only: bool = False
     # KV-cache dtype switch.  True selects ``AttentionFP8`` (paged 584B
     # SWA/CSA/HCA pools, FlashMLA dual-pool decode); False keeps the BF16
     # ``Attention`` path. Resolved from
@@ -101,6 +109,7 @@ def _block_kwargs(
     layer_id: int,
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]],
+    commit_only: bool = False,
 ) -> Dict:
     """Kwargs common to Block construction.
 
@@ -131,8 +140,10 @@ def _block_kwargs(
         index_topk=args.index_topk,
         moe_inter_dim=args.moe_inter_dim,
         n_routed_experts=args.n_routed_experts,
+        n_physical_experts=args.n_physical_experts,
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
+        moe_strategy=args.moe_strategy,
         score_func=args.score_func,
         route_scale=args.route_scale,
         swiglu_limit=args.swiglu_limit,
@@ -147,9 +158,12 @@ def _block_kwargs(
         tp_rank=args.tp_rank,
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
+        world_size=args.world_size,
+        world_rank=args.world_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,
+        commit_only=commit_only,
     )
 
 
@@ -157,8 +171,11 @@ def _build_block(
     layer_id: int,
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+    commit_only: bool = False,
 ) -> Block:
-    return Block(**_block_kwargs(layer_id, args, layer_weights))
+    return Block(
+        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+    )
 
 
 class V4Transformer(nn.Module):
@@ -174,6 +191,7 @@ class V4Transformer(nn.Module):
         self.args = args
         self.max_seq_len = args.max_seq_len
         self.hc_mult = args.hc_mult
+        self.commit_only = bool(getattr(args, "commit_only", False))
         # Surface ``fp8_kv_cache`` as a top-level attr so
         # ``prefill/forward.py`` and ``DeepSeekV4Model.prepare_fmha_impl``
         # can dispatch via ``v4.fp8_kv_cache`` without reading args.
@@ -182,17 +200,17 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
-        # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
-        # ``nn.Parameter``); the framework dict supplies the real tensor.
-        self.embed = EmbeddingTorch(gw[W.embedding])
-
         self.layers = nn.ModuleList(
             [
-                _build_block(i, args, layer_weights=mw.weights[i])
+                _build_block(
+                    i,
+                    args,
+                    layer_weights=mw.weights[i],
+                    commit_only=self.commit_only,
+                )
                 for i in range(args.n_layers)
             ]
         )
-        self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
         # MTP draft is a separate model (``DeepSeekV4MtpModel``) that
         # holds its own V4Transformer — no MTP layers live on the main
@@ -203,28 +221,36 @@ class V4Transformer(nn.Module):
             "separate DeepSeekV4MtpModel instance."
         )
 
-        # LM head — plain weight matrix [vocab_size, dim].  Accept either
-        # BF16 (ckpt-native, used when ``enable_fp32_lm_head=False``) or
-        # FP32 (legacy path).  Production inference never applies this
-        # weight in Python — the hot-path mm lives in C++ at
-        # ``PyWrappedModel::forwardPostLayers``.  The ``_rt.ENABLED`` debug
-        # path and the standalone ``forward`` (B==1) path below call
-        # ``F.linear`` / ``torch.mm`` with the input cast to
-        # ``self.head_weight.dtype`` so both dtypes work there too.
-        self.head_weight = gw[W.lm_head]
-        if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
-            raise TypeError(
-                f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
+        if self.commit_only:
+            # The commit path neither embeds tokens nor runs the final norm,
+            # LM head, or mHC head. None-valued members make accidental use of
+            # the ordinary transformer path fail at its call site.
+            self.embed = None
+            self.norm = None
+            self.head_weight = None
+            self.head_hc = None
+        else:
+            # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
+            # ``nn.Parameter``); the framework dict supplies the real tensor.
+            self.embed = EmbeddingTorch(gw[W.embedding])
+            self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
+
+            # LM head — plain weight matrix [vocab_size, dim].  Accept either
+            # BF16 (ckpt-native) or FP32 (legacy path).
+            self.head_weight = gw[W.lm_head]
+            if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
+                raise TypeError(
+                    f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
+                )
+            self.head_hc = build_hc_head(
+                gw[W.v4_hc_head_fn],
+                gw[W.v4_hc_head_base],
+                gw[W.v4_hc_head_scale],
+                dim=args.dim,
+                hc_mult=args.hc_mult,
+                norm_eps=args.norm_eps,
+                hc_eps=args.hc_eps,
             )
-        self.head_hc = build_hc_head(
-            gw[W.v4_hc_head_fn],
-            gw[W.v4_hc_head_base],
-            gw[W.v4_hc_head_scale],
-            dim=args.dim,
-            hc_mult=args.hc_mult,
-            norm_eps=args.norm_eps,
-            hc_eps=args.hc_eps,
-        )
 
         self._dbg_step = 0
         self.register_buffer("_mtp_hidden_buffer", None, persistent=False)
@@ -573,17 +599,18 @@ class V4Transformer(nn.Module):
         cu_seqlens = torch.tensor(
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
-        for li, layer in enumerate(self.layers):
-            h_flat = layer(
-                h_flat,
-                input_ids_flat,
-                positions,
-                cu_seqlens,
-                kv_cache=kv_cache,
-                block_tables_by_type=block_tables_by_type,
-            )
-            if _rt_on:
-                _rt.record(f"layer{li:02d}_out", h_flat)
+        with synchronized_moe_chunk_plan(self.layers, S, input_ids.device):
+            for li, layer in enumerate(self.layers):
+                h_flat = layer(
+                    h_flat,
+                    input_ids_flat,
+                    positions,
+                    cu_seqlens,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+                if _rt_on:
+                    _rt.record(f"layer{li:02d}_out", h_flat)
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]
         if _rt_on:
