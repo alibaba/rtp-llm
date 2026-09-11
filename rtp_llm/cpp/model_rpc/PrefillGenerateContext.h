@@ -149,6 +149,7 @@ public:
     std::shared_ptr<ClientStream>        client_stream;
     std::shared_ptr<std::atomic<bool>>   cancel_state;
     bool                                 grpc_stream_closed             = false;
+    bool                                 supports_prefill_completion    = false;
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
     PrefillStatInfo                      stat_info;
     const std::atomic<size_t>*           loading_cache_requests               = nullptr;
