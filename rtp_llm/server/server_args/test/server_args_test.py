@@ -20,6 +20,41 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_vit_cache_capacity_defaults_env_and_cli_override(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        sys.argv = ["prog"]
+        config = setup_args().vit_config
+        self.assertEqual(config.mm_cache_gpu_max_bytes, 20 * 1024**3)
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 200 * 1024**3)
+        self.assertEqual(
+            config.mm_hash_key_cache_max_bytes,
+            VitConfig.DEFAULT_MM_HASH_KEY_CACHE_MAX_BYTES,
+        )
+        # The legacy internal cache count does not size the shared caches.
+        os.environ["MM_CACHE_ITEM_NUM"] = "0"
+        os.environ["MM_CACHE_GPU_MAX_BYTES"] = "2147483648"
+        os.environ["MM_CACHE_CPU_MAX_BYTES"] = "4294967296"
+        os.environ["MM_HASH_KEY_CACHE_MAX_BYTES"] = "134217728"
+        config = setup_args().vit_config
+        self.assertEqual(config.mm_cache_gpu_max_bytes, 2147483648)
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 4294967296)
+        self.assertEqual(config.mm_hash_key_cache_max_bytes, 134217728)
+        sys.argv = [
+            "prog",
+            "--mm_cache_gpu_max_bytes",
+            "0",
+            "--mm_cache_cpu_max_bytes",
+            "1024",
+            "--mm_hash_key_cache_max_bytes",
+            "67108864",
+        ]
+        config = setup_args().vit_config
+        self.assertEqual(config.mm_cache_gpu_max_bytes, 0)
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 1024)
+        self.assertEqual(config.mm_hash_key_cache_max_bytes, 67108864)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

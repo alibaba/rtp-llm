@@ -208,6 +208,8 @@ class MMProcessEngineTest(TestCase):
         vit_config.use_gpu_batch = True
         vit_config.gpu_batch_wait_ms = 100
         vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -245,6 +247,8 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceSlow())
         vit_config = VitConfig()
         vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -266,6 +270,8 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterfacePreprocessException())
         vit_config = VitConfig()
         vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         mm_process_engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -290,6 +296,8 @@ class MMProcessEngineTest(TestCase):
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
         vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -389,7 +397,11 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceSlowEmbedding())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True  # fast preprocess; isolate embedding
-        vit_config.mm_cache_item_num = 0  # no cache hit to short-circuit the forward
+        vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = (
+            0  # no cache hit to short-circuit the forward
+        )
+        vit_config.mm_cache_gpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -434,6 +446,8 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceProcessCrash())
         vit_config = VitConfig()
         vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -475,6 +489,8 @@ class MMProcessEngineTest(TestCase):
         vit_config = VitConfig()
         vit_config.mm_preprocess_max_workers = 2
         vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -609,8 +625,8 @@ class MMEmbeddingCacheEntryTest(TestCase):
 
 class MMEmbeddingAsyncCacheTest(TestCase):
     def test_metadata_is_read_only_and_tracks_eviction(self):
-        cache = MMEmbeddingAsyncCache(max_size=2)
-        hash_cache = MMHashKeyCache(max_size=2)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=48)
+        hash_cache = MMHashKeyCache(max_bytes=4096)
         _, first = cache.try_acquire("a")
         _, second = cache.try_acquire("b")
         hashes = [torch.tensor([-1, 2147483647], dtype=torch.int32)]
@@ -629,7 +645,8 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         # Feature hashes live in the routing-key sidecar and are not charged
         # to the embedding tensor budget.
         self.assertEqual(before["resident_bytes"], 2 * 4 * 4 + 1 * 4 * 4)
-        cache.try_acquire("c")
+        _, third = cache.try_acquire("c")
+        third.complete((torch.ones(2, 4), None))
         self.assertIsNone(cache.peek("a"))
         self.assertEqual(hash_cache.keys(), ["a", "b"])
         self.assertFalse(hash_cache.metadata(["a"], cache)["entries"][0]["hit"])
@@ -637,7 +654,7 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertEqual(hash_cache.keys(), ["a", "b"])
 
     def test_hash_key_cache_is_generation_aware(self):
-        cache = MMHashKeyCache(max_size=2)
+        cache = MMHashKeyCache(max_bytes=4096)
         hashes = [torch.tensor([-1, 2147483647], dtype=torch.int32)]
         cache.put("key", hashes, "generation-1")
         self.assertTrue(cache.contains("key"))
@@ -652,8 +669,8 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         )
 
     def test_embedding_eviction_keeps_hash_key(self):
-        hash_keys = MMHashKeyCache(max_size=10)
-        cache = MMEmbeddingAsyncCache(max_size=1)
+        hash_keys = MMHashKeyCache(max_bytes=4096)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=16)
         _, first = cache.try_acquire("first")
         first.complete((torch.ones(1, 4), None), [torch.tensor([1])])
         hash_keys.put("first", [torch.tensor([1], dtype=torch.int32)], first.generation)
@@ -675,7 +692,7 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertFalse(metadata["entries"][0]["hit"])
 
     def test_failed_and_legacy_results_have_no_metadata(self):
-        cache = MMEmbeddingAsyncCache(max_size=4)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=4096)
         _, error = cache.try_acquire("error")
         error.fail(ValueError("failed"))
         _, legacy = cache.try_acquire("legacy")
@@ -686,7 +703,7 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         )
 
     def test_miss_then_complete_then_hit(self):
-        cache = MMEmbeddingAsyncCache(max_size=10)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=4096)
         state, entry = cache.try_acquire("key1")
         self.assertEqual(state, "miss")
         self.assertFalse(entry.is_done)
@@ -699,7 +716,7 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertEqual(entry2.wait(), "val1")
 
     def test_in_progress_state(self):
-        cache = MMEmbeddingAsyncCache(max_size=10)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=4096)
         state, entry = cache.try_acquire("key1")
         self.assertEqual(state, "miss")
 
@@ -708,7 +725,7 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertIs(entry2, entry)
 
     def test_remove(self):
-        cache = MMEmbeddingAsyncCache(max_size=10)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=4096)
         _, entry = cache.try_acquire("key1")
         entry.complete("v")
         cache.remove("key1")
@@ -718,33 +735,41 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertIsNot(entry2, entry)
 
     def test_eviction(self):
-        cache = MMEmbeddingAsyncCache(max_size=2)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=8)
         _, e1 = cache.try_acquire("k1")
-        e1.complete("v1")
+        e1.complete(torch.tensor([1.0]))
         _, e2 = cache.try_acquire("k2")
-        e2.complete("v2")
+        e2.complete(torch.tensor([2.0]))
         _, e3 = cache.try_acquire("k3")
 
-        # Eviction ran when k3 was inserted (3 > max_size=2),
-        # removing k1 (oldest done entry). k3 is in_progress.
-        self.assertEqual(len(cache._entries), 2)
+        # Pending entries do not consume tensor bytes or evict completed work.
+        self.assertEqual(cache.stats()["resident_bytes"], 8)
+        self.assertEqual(cache.try_acquire("k3")[0], "in_progress")
+        e3.complete(torch.tensor([3.0]))
         self.assertNotIn("k1", cache._entries)
-        state_k3, _ = cache.try_acquire("k3")
-        self.assertEqual(state_k3, "in_progress")
+        self.assertEqual(cache.stats()["resident_entries"], 2)
+        self.assertEqual(cache.stats()["resident_bytes"], 8)
+        self.assertEqual(e1.wait().item(), 1.0)
 
     def test_resize(self):
-        cache = MMEmbeddingAsyncCache(max_size=5)
-        cache.resize(20)
-        self.assertEqual(cache._max_size, 20)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=32)
+        _, first = cache.try_acquire("first")
+        first.complete(torch.ones(4))
+        _, second = cache.try_acquire("second")
+        second.complete(torch.ones(4))
+        cache.resize(0, 16)
+        self.assertIsNone(cache.peek("first"))
+        self.assertIs(cache.peek("second"), second)
+        self.assertEqual(cache.stats()["resident_bytes"], 16)
 
     def test_weighted_lru_evicts_by_actual_tensor_bytes(self):
-        cache = MMEmbeddingAsyncCache(max_size=1, max_bytes=32)
+        cache = MMEmbeddingAsyncCache(gpu_max_bytes=0, cpu_max_bytes=32)
         _, e1 = cache.try_acquire("k1")
         e1.complete((torch.zeros((2, 2)), None))  # 16 bytes
         _, e2 = cache.try_acquire("k2")
         e2.complete((torch.zeros((2, 2)), None))  # 16 bytes
 
-        # Weighted mode can retain more entries than the legacy count cap.
+        # Both entries fit within the byte budget.
         self.assertEqual(cache.stats()["resident_entries"], 2)
         self.assertEqual(cache.try_acquire("k1")[0], "complete")
 
@@ -773,13 +798,16 @@ class MMEmbeddingAsyncCacheTest(TestCase):
             1,
         )
 
-        cache = MMEmbeddingAsyncCache(max_size=1, report_metrics=True)
+        cache = MMEmbeddingAsyncCache(
+            gpu_max_bytes=0, cpu_max_bytes=32, report_metrics=True
+        )
         _, first = cache.try_acquire("first")
         first.complete((torch.zeros((2, 4)), None))
 
-        # Inserting a pending entry evicts the completed entry. The resident
-        # gauge must drop immediately instead of waiting for the next result.
+        # Disabling the cache drops the resident gauge immediately. A pending
+        # entry is still allowed to finish for existing waiters.
         cache.try_acquire("second")
+        cache.resize(0, 0)
         token_values = [
             call.args[1]
             for call in report.call_args_list
@@ -1554,6 +1582,8 @@ class MMProcessEngineGpuBatchTest(TestCase):
         vit_config.use_local_preprocess = True
         # Cache off by default; the cache test opts in explicitly.
         vit_config.mm_cache_item_num = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
+        vit_config.mm_cache_gpu_max_bytes = 0
         for key, value in vit_overrides.items():
             setattr(vit_config, key, value)
         engine = MMProcessEngine(
@@ -1604,9 +1634,91 @@ class MMProcessEngineGpuBatchTest(TestCase):
         # The wait window should let at least one forward serve >1 request.
         self.assertGreaterEqual(max(part.batch_sizes), 2)
 
+    def test_embedding_byte_budget_is_independent_of_legacy_item_count(self):
+        engine, part = self._make_engine(
+            mm_cache_item_num=0,
+            mm_cache_cpu_max_bytes=12,
+            mm_hash_key_cache_max_bytes=4096,
+        )
+        # FakeBatchMMPart returns embedding, position and extra: 3 float32s.
+        first = self._embed(engine, ["fake://1"])
+        cached = self._embed(engine, ["fake://1"])
+        self.assertEqual(part.embedding_calls, 1)
+        self.assertTrue(torch.equal(first.feature_hashes[0], cached.feature_hashes[0]))
+        self._embed(engine, ["fake://2"])
+        self.assertEqual(engine._embedding_cache.stats()["resident_bytes"], 12)
+        recomputed = self._embed(engine, ["fake://1"])
+        self.assertEqual(part.embedding_calls, 3)
+        self.assertEqual(recomputed.embeddings[0].item(), 1)
+        self.assertTrue(
+            torch.equal(first.feature_hashes[0], recomputed.feature_hashes[0])
+        )
+
+    def test_sync_and_async_cpu_hits_restore_gpu_outputs_without_recompute(self):
+        if not torch.cuda.is_available():
+            self.skipTest("requires CUDA for engine cache round trip")
+        engine, part = self._make_engine(
+            mm_cache_gpu_max_bytes=8,
+            mm_cache_cpu_max_bytes=64,
+            mm_hash_key_cache_max_bytes=4096,
+        )
+        embedding = part.embedding
+
+        def gpu_embedding(data, **kwargs):
+            emb, pos, extra = embedding(data, **kwargs)
+            return emb.cuda(), pos, extra.cuda()
+
+        part.embedding = gpu_embedding
+        first = self._embed(engine, ["fake://1"])
+        # Use the same preprocess configuration as the sync C++ entry point.
+        inp = MultimodalInput(
+            "fake://1",
+            MMUrlType.IMAGE,
+            torch.empty(0),
+            MMPreprocessConfig(*_DEFAULT_CONFIG),
+        )
+        key = inp.cache_key()
+        cached_entry = engine._embedding_cache.peek(key)
+        generation = cached_entry.generation
+        self._embed(engine, ["fake://2"])
+        self.assertEqual(cached_entry.tier, "cpu")
+        self.assertTrue(
+            engine._hash_key_cache.metadata([key], engine._embedding_cache)["entries"][
+                0
+            ]["hit"]
+        )
+        sync_hit = self._embed(engine, ["fake://1"])
+        self.assertEqual(part.embedding_calls, 2)
+        self.assertEqual(cached_entry.tier, "gpu")
+        self._embed(engine, ["fake://2"])
+        self.assertEqual(cached_entry.tier, "cpu")
+        async_hit = engine.get_embedding_result([inp])[0]
+        self.assertEqual(part.embedding_calls, 2)
+        self.assertEqual(cached_entry.generation, generation)
+        for actual in (sync_hit, async_hit):
+            self.assertEqual(actual.embeddings[0].device.type, "cuda")
+            self.assertEqual(actual.position_ids[0].device.type, "cpu")
+            self.assertEqual(actual.extra_input[0].device.type, "cuda")
+            self.assertTrue(torch.equal(actual.embeddings[0], first.embeddings[0]))
+            self.assertTrue(torch.equal(actual.position_ids[0], first.position_ids[0]))
+            self.assertTrue(torch.equal(actual.extra_input[0], first.extra_input[0]))
+            self.assertTrue(
+                torch.equal(actual.feature_hashes[0], first.feature_hashes[0])
+            )
+
+    def test_hash_cache_can_be_disabled_independently(self):
+        engine, part = self._make_engine(
+            mm_cache_cpu_max_bytes=4096, mm_hash_key_cache_max_bytes=0
+        )
+        first = self._embed(engine, ["fake://1"])
+        cached = self._embed(engine, ["fake://1"])
+        self.assertEqual(part.embedding_calls, 1)
+        self.assertEqual(engine._hash_key_cache.keys(), [])
+        self.assertTrue(torch.equal(first.feature_hashes[0], cached.feature_hashes[0]))
+
     def test_gpu_batch_cache_hit(self):
         """A repeated url is served from cache without a second embedding call."""
-        engine, part = self._make_engine(mm_cache_item_num=10)
+        engine, part = self._make_engine(mm_cache_cpu_max_bytes=4096)
         # tearDown restores the global cache to disabled for other tests.
 
         url = "fake://7"
@@ -1637,7 +1749,7 @@ class MMProcessEngineGpuBatchTest(TestCase):
         from rtp_llm.server.vit_rpc_server import merge_embedding_results, trans_output
         from rtp_llm.utils.grpc_util import trans_tensor
 
-        engine, part = self._make_engine(mm_cache_item_num=10)
+        engine, part = self._make_engine(mm_cache_cpu_max_bytes=4096)
         urls = ["fake://7", "fake://9"]
         self._embed(engine, urls)
         inputs = [

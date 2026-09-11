@@ -28,6 +28,8 @@ from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import RoleType
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
 
+MM_CACHE_SNAPSHOT_MAX_KEYS = 100000
+
 
 class MMCacheMetadataRequest(BaseModel):
     keys: List[str] = Field(max_length=256)
@@ -51,9 +53,9 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
             keys = cache.metadata_keys()
             worker_instance = cache.instance_id
         else:
-            keys = hash_key_cache.keys()
+            keys = hash_key_cache.keys(limit=MM_CACHE_SNAPSHOT_MAX_KEYS)
             worker_instance = hash_key_cache.instance_id
-        if len(keys) > 100000:
+        if len(keys) > MM_CACHE_SNAPSHOT_MAX_KEYS:
             raise HTTPException(status_code=413, detail="cache key snapshot too large")
         return {
             "worker_instance": worker_instance,

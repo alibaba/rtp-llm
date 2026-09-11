@@ -29,9 +29,18 @@ py_test(
         ":testdata",
     ],
     env = {
-        "MM_CACHE_ITEM_NUM": "0"
+        "MM_CACHE_ITEM_NUM": "0",
+        "MM_CACHE_GPU_MAX_BYTES": "0",
+        "MM_CACHE_CPU_MAX_BYTES": "0",
     },
     exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "mm_embedding_cache_test",
+    srcs = ["mm_embedding_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(

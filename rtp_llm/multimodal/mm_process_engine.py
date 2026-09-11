@@ -487,44 +487,6 @@ class _AsyncComputeTask:
         self.future: Optional[concurrent.futures.Future] = None
 
 
-def _derive_embedding_cache_max_bytes(
-    mm_part: MultiModalEmbeddingInterface,
-    model_config: ModelConfig,
-    max_items: int,
-) -> Optional[int]:
-    """Translate the existing item limit into a model-derived byte budget."""
-
-    if max_items <= 0:
-        return 0
-    budget = mm_part.get_batch_work_budget(1)
-    if budget is None:
-        return None
-    if not isinstance(budget, MMWorkEstimate):
-        raise TypeError(
-            "get_batch_work_budget must return MMWorkEstimate or None, got "
-            f"{type(budget).__name__}"
-        )
-    if budget.output_tokens <= 0:
-        return None
-
-    hidden_size = int(getattr(model_config, "hidden_size", 0) or 0)
-    if hidden_size <= 0:
-        word_embeddings = getattr(mm_part, "word_embedding_weight", None)
-        if isinstance(word_embeddings, torch.Tensor) and word_embeddings.ndim >= 2:
-            hidden_size = int(word_embeddings.shape[-1])
-    if hidden_size <= 0:
-        visual = getattr(mm_part, "visual", None)
-        hidden_size = int(getattr(visual, "out_hidden_size", 0) or 0)
-    if hidden_size <= 0:
-        return None
-
-    try:
-        dtype_bytes = torch.empty((), dtype=mm_part._data_type).element_size()
-    except (AttributeError, NotImplementedError, TypeError):
-        return None
-    return max_items * budget.output_tokens * hidden_size * dtype_bytes
-
-
 class MMWorkItem:
     """Represents a work item for processing multimodal inputs."""
 
@@ -744,33 +706,25 @@ class MMProcessEngine:
         # it, but its existing operator-controlled capacity must be preserved.
         vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
 
-        cache_max_bytes = _derive_embedding_cache_max_bytes(
-            self.mm_part,
-            model_config,
-            self.vit_config.mm_cache_item_num,
+        # Both caches have explicit byte budgets, independent of model shape
+        # estimates and the legacy model-internal item-count cache above.
+        self._hash_key_cache = MMHashKeyCache(
+            max_bytes=self.vit_config.mm_hash_key_cache_max_bytes
         )
-        hash_key_cache_size = int(
-            getattr(self.vit_config, "mm_hash_key_cache_item_num", 100000)
-        )
-        # Keep the routing-key index independent from the tensor cache. It stores
-        # only cache keys and feature-hash token ids, so embedding eviction does
-        # not discard affinity history; the metadata endpoint still verifies
-        # that the corresponding embedding is resident before reporting a hit.
-        self._hash_key_cache = MMHashKeyCache(max_size=hash_key_cache_size)
         self._embedding_cache = MMEmbeddingCache(
-            max_size=self.vit_config.mm_cache_item_num,
-            max_bytes=cache_max_bytes,
+            gpu_max_bytes=self.vit_config.mm_cache_gpu_max_bytes,
+            cpu_max_bytes=self.vit_config.mm_cache_cpu_max_bytes,
             report_metrics=True,
         )
         # Keep the old private name as an alias for callers/tests that inspect
         # async submission state. Both paths now use the same cache instance.
         self._async_cache = self._embedding_cache
         logging.info(
-            "MMProcessEngine: embedding cache max_items=%d max_bytes=%s; "
-            "hash-key cache max_items=%d",
-            self.vit_config.mm_cache_item_num,
-            cache_max_bytes if cache_max_bytes is not None else "count-fallback",
-            hash_key_cache_size,
+            "MMProcessEngine: embedding cache gpu_max_bytes=%d cpu_max_bytes=%d; "
+            "hash-key cache max_bytes=%d",
+            self.vit_config.mm_cache_gpu_max_bytes,
+            self.vit_config.mm_cache_cpu_max_bytes,
+            self.vit_config.mm_hash_key_cache_max_bytes,
         )
 
         # GreenNet (content safety) integration. The provider is a no-op when

@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import torch
 
@@ -310,13 +310,13 @@ class MMCacheApiTest(unittest.TestCase):
         )
         from rtp_llm.server.vit_app import register_mm_cache_routes
 
-        cache = MMEmbeddingCache(max_size=4)
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=4096)
         _, pending = cache.try_acquire("pending")
         _, ready = cache.try_acquire("ready")
         ready.complete(
             (torch.ones(2, 4), None), [torch.tensor([-11, 12], dtype=torch.int32)]
         )
-        hash_keys = MMHashKeyCache(max_size=4)
+        hash_keys = MMHashKeyCache(max_bytes=4096)
         hash_keys.put(
             "ready", [torch.tensor([-11, 12], dtype=torch.int32)], ready.generation
         )
@@ -341,6 +341,14 @@ class MMCacheApiTest(unittest.TestCase):
             self.assertEqual([e["hit"] for e in entries], [True, False, False])
             self.assertFalse(pending.is_done)
             self.assertIsNone(cache.peek("absent"))
+            # A byte-bounded index can outgrow the directory response limit.
+            # Publish a bounded recent snapshot without evicting cached keys.
+            hash_keys.put("recent", [torch.tensor([42], dtype=torch.int32)])
+            with patch("rtp_llm.server.vit_app.MM_CACHE_SNAPSHOT_MAX_KEYS", 1):
+                snapshot = client.get("/mm_cache/keys")
+            self.assertEqual(snapshot.status_code, 200)
+            self.assertEqual(snapshot.json()["keys"], ["recent"])
+            self.assertEqual(hash_keys.keys(), ["ready", "recent"])
             self.assertEqual(
                 client.post(
                     "/mm_cache/metadata", json={"keys": ["x"] * 257}
