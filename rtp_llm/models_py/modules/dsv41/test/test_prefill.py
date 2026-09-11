@@ -4,16 +4,21 @@ import dataclasses
 import hashlib
 import json
 import os
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 
 import test_attention as attention_fixture
 import test_transformer as target_fixture
-from fixture import flash_config
 import torch
+from fixture import flash_config
 from torch import nn
 
+from rtp_llm.models.multimodal.deepseek_v41_processor import (
+    V41ImageInput,
+    V41PreparedInputs,
+    image_token_types,
+)
 from rtp_llm.models_py.modules.dsv41.attention import V41AttentionCache
 from rtp_llm.models_py.modules.dsv41.block import V41Block
 from rtp_llm.models_py.modules.dsv41.ced import (
@@ -218,6 +223,189 @@ class PrefillGpuTest(unittest.TestCase):
 
     def equal(self, actual, expected):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def prepared(self, tokens=1057, image_starts=(392, 1000)):
+        ids = [7 + pos % 5 for pos in range(tokens)]
+        types = [-1] * tokens
+        images = []
+        for start in image_starts:
+            kinds = image_token_types(1, 1)
+            ids[start : start + len(kinds)] = [129264] * len(kinds)
+            types[start : start + len(kinds)] = kinds.tolist()
+            images.append(
+                V41ImageInput(
+                    start,
+                    torch.ones((9, 3, 14, 14), dtype=torch.bfloat16),
+                    3,
+                    3,
+                    kinds,
+                    "a" * 64,
+                    "b" * 64,
+                )
+            )
+        return V41PreparedInputs("", tuple(ids), tuple(types), tuple(images))
+
+    @torch.inference_mode()
+    def test_canonical_request_maps_later_images_and_history_before_ced_tail(self):
+        class RecordingVision(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.processor_config = SimpleNamespace(image_token_id=129264)
+                self._device = torch.device("cuda")
+                self.calls = []
+
+            def encode_image(self, image):
+                self.calls.append(image.start)
+                return torch.full(
+                    (image.length, 5120),
+                    2 + len(self.calls),
+                    dtype=torch.bfloat16,
+                    device=self._device,
+                )
+
+        prepared = self.prepared()
+        vision, previous = RecordingVision(), self.target.vision
+        self.target.vision = vision
+        try:
+            runner = V41PrefillExecutor.from_prepared(
+                self.target,
+                self.cache(len(prepared.token_ids)),
+                prepared,
+                config=ReplayConfig(ReplayMode.BOUNDED),
+                chunk_tokens=192,
+                draft_commit=self.draft,
+            )
+            self.assertEqual(vision.calls, [392, 1000])
+            for epoch, extend in enumerate(runner.plan.extends):
+                start, end = extend.encoder_rows.start, extend.encoder_rows.end
+                rows = runner.canonical.rows(start, end, device="cuda")
+                expected_history, expected_valid = [], []
+                for pos in range(start, end):
+                    prior = list(range(pos - 3, pos))
+                    expected_history.append(
+                        [0 if p < 0 else prepared.token_ids[p] for p in prior]
+                    )
+                    expected_valid.append(
+                        [p >= 0 and prepared.token_types[p] == -1 for p in prior]
+                    )
+                self.equal(
+                    rows.history_ids,
+                    torch.tensor(expected_history, dtype=torch.int32, device="cuda"),
+                )
+                self.equal(
+                    rows.history_valid,
+                    torch.tensor(expected_valid, dtype=torch.bool, device="cuda"),
+                )
+                features = runner.image_features.for_extend(start, end)
+                features.validate(rows, 5120)
+                hidden, _ = self.target._embed_rows(rows, features)
+                for index, image in enumerate(prepared.images):
+                    if start <= image.start < end:
+                        offset = image.start - start
+                        self.equal(
+                            hidden[offset : offset + image.length],
+                            torch.full_like(
+                                hidden[offset : offset + image.length], 3 + index
+                            ),
+                        )
+                runner.run_next(epoch=epoch)
+            self.assertEqual(vision.calls, [392, 1000])
+            self.assertEqual(runner.progress.decoder_checkpoint_end, 1057)
+            self.assertEqual(runner.protected.checkpoint.materialized_end, 1024)
+            self.assertEqual(
+                runner.protected.canonical_prefix_sha256,
+                runner.canonical.prefix_fingerprint(1024),
+            )
+            other_image = dataclasses.replace(
+                prepared.images[0], content_sha256="c" * 64
+            )
+            changed_image = dataclasses.replace(
+                prepared, images=(other_image, prepared.images[1])
+            )
+            with self.assertRaisesRegex(ValueError, "different canonical prefix"):
+                V41PrefillExecutor.from_prepared(
+                    self.target,
+                    self.cache(1057),
+                    changed_image,
+                    config=ReplayConfig(ReplayMode.BOUNDED),
+                    chunk_tokens=192,
+                    draft_commit=self.draft,
+                    restored=runner.protected,
+                )
+            tail_image = runner.tail.l20.rows.image_mask.nonzero().flatten()
+            self.equal(
+                tail_image + runner.tail.positions.start,
+                torch.arange(1000, 1004, device="cuda"),
+            )
+            self.records.append(
+                {
+                    "test": self.id(),
+                    "scope": "initialized LM execution with recorded vision fixture",
+                    "image_encode_calls": vision.calls,
+                    "checkpoint_prefix_sha256": runner.protected.canonical_prefix_sha256,
+                    "extends": runner.observations,
+                }
+            )
+        finally:
+            self.target.vision = previous
+
+    @torch.inference_mode()
+    def test_canonical_checkpoint_rejects_changed_prefix_before_restore(self):
+        prepared = self.prepared(image_starts=())
+        runner = V41PrefillExecutor.from_prepared(
+            self.target,
+            self.cache(1057),
+            prepared,
+            config=ReplayConfig(ReplayMode.BOUNDED),
+            chunk_tokens=192,
+            draft_commit=self.draft,
+        )
+        first = runner.plan.extends[0].encoder_rows
+        wrong_rows = runner.canonical.rows(first.start, first.end, device="cuda")
+        wrong_rows.token_ids[0] += 1
+        with self.assertRaisesRegex(ValueError, "disagree with the canonical"):
+            runner.run_extend(wrong_rows, epoch=0)
+        self.assertEqual(runner.next_extend, 0)
+        self.assertEqual(runner.cache.active_epoch, -1)
+        for epoch in range(len(runner.plan.extends)):
+            final_result = runner.run_next(epoch=epoch)
+        restored = runner.protected
+        changed = list(prepared.token_ids)
+        changed[10] += 1
+        other = dataclasses.replace(prepared, token_ids=tuple(changed))
+        destination = self.cache(1057, request="other")
+        with self.assertRaisesRegex(ValueError, "different canonical prefix"):
+            V41PrefillExecutor.from_prepared(
+                self.target,
+                destination,
+                other,
+                config=ReplayConfig(ReplayMode.BOUNDED),
+                chunk_tokens=192,
+                draft_commit=self.draft,
+                restored=restored,
+            )
+        self.assertEqual(destination.swa_ends, {})
+        self.assertFalse(destination.poisoned)
+        resumed = V41PrefillExecutor.from_prepared(
+            self.target,
+            destination,
+            prepared,
+            config=ReplayConfig(ReplayMode.BOUNDED),
+            chunk_tokens=192,
+            draft_commit=self.draft,
+            restored=restored,
+        )
+        output = resumed.run_next(epoch=0)
+        self.assertEqual(output.context.start, 1024)
+        self.assertEqual(output.context.end, 1057)
+        self.assertEqual(output.context.replay_floor, 896)
+        self.equal(output.output.hidden_states, final_result.output.hidden_states)
+        self.equal(
+            output.output.aux_hidden_states, final_result.output.aux_hidden_states
+        )
+        self.records.append(
+            {"test": self.id(), "resumed_extends": resumed.observations}
+        )
 
     def remap(self, cache):
         for layer, binding in cache.swa.items():

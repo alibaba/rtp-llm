@@ -1,8 +1,74 @@
 """Canonical model-input views and fixed graph buffers for V4.1 components."""
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 import torch
+
+
+class V41CanonicalInputs:
+    """Retain canonical CPU IDs; transfer only an extend and its three predecessors."""
+
+    def __init__(self, prepared):
+        prepared.validate()
+        self.token_ids = torch.tensor(prepared.token_ids, dtype=torch.int32)
+        self.token_types = torch.tensor(prepared.token_types, dtype=torch.int32)
+        self.images = tuple(
+            (
+                image.start,
+                image.start + image.length,
+                image.content_sha256,
+                image.processor_identity,
+                image.n_vit_h,
+                image.n_vit_w,
+            )
+            for image in prepared.images
+        )
+
+    def _range(self, start, end):
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or not 0 <= start <= end <= self.token_ids.numel()
+        ):
+            raise ValueError("canonical extend must stay within the complete request")
+
+    def prefix_fingerprint(self, end):
+        self._range(0, end)
+        if any(start < end < stop for start, stop, *_ in self.images):
+            raise ValueError("canonical checkpoint cannot split an image span")
+        digest = hashlib.sha256(b"dsv41-canonical-prefix-v1\0")
+        for tensor in (self.token_ids, self.token_types):
+            digest.update(tensor[:end].numpy().astype("<i4", copy=False).tobytes())
+        digest.update(
+            json.dumps(
+                [image for image in self.images if image[1] <= end],
+                separators=(",", ":"),
+            ).encode("ascii")
+        )
+        return digest.hexdigest()
+
+    def rows(self, start, end, *, device):
+        self._range(start, end)
+        predecessors = torch.arange(start, end)[:, None] + torch.arange(-3, 0)
+        present = predecessors >= 0
+        indices = predecessors.clamp_min(0)
+        if self.token_ids.numel():
+            history = self.token_ids[indices].masked_fill(~present, 0)
+            history_valid = present & (self.token_types[indices] == -1)
+        else:
+            history = torch.zeros((0, 3), dtype=torch.int32)
+            history_valid = torch.zeros((0, 3), dtype=torch.bool)
+        result = V41ModelRows(
+            self.token_ids[start:end].to(device=device, copy=True),
+            self.token_types[start:end].to(device=device, copy=True),
+            torch.ones(end - start, dtype=torch.bool, device=device),
+            history.to(device=device),
+            history_valid.to(device=device),
+        )
+        result.validate()
+        return result
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
+
 from rtp_llm.utils import deep_gemm_compat as compat
 
 
@@ -86,6 +87,27 @@ class DeepGemmCompatTest(unittest.TestCase):
         self.assertFalse(compat.mega_moe_uses_shared32(old))
         with self.assertRaisesRegex(RuntimeError, "no fused shared"):
             compat.mega_moe_shared_kwargs(old, 128)
+
+    def test_combine_compatibility_is_explicit_and_keeps_old_modules_unchanged(self):
+        def patched_mega(*arguments, torch_sum_combine=False):
+            return torch_sum_combine
+
+        patched = self.module()
+        patched.fp8_fp4_mega_moe = patched_mega
+        self.assertFalse(patched_mega())
+        for block_size in (32, 128):
+            with self.subTest(block_size=block_size):
+                kwargs = compat.mega_moe_combine_kwargs(patched, block_size)
+                self.assertEqual(kwargs, {"torch_sum_combine": True})
+                self.assertTrue(patched_mega(**kwargs))
+                self.assertEqual(
+                    compat.mega_moe_combine_kwargs(self.module(), block_size), {}
+                )
+                self.assertEqual(
+                    compat.mega_moe_combine_kwargs(self.module(False), block_size), {}
+                )
+        with self.assertRaisesRegex(ValueError, "unsupported shared"):
+            compat.mega_moe_combine_kwargs(patched, 64)
 
     def test_modern_sizing_uses_string_shared_count_and_actual_alignment(self):
         module = self.module()

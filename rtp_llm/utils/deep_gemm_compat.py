@@ -48,6 +48,15 @@ def mega_moe_activation_kwargs(deep_gemm, block_size: int) -> dict:
     return {"round_swiglu_to_bf16": True}
 
 
+def mega_moe_combine_kwargs(deep_gemm, block_size: int) -> dict:
+    if block_size not in (32, 128):
+        raise ValueError(f"unsupported shared FP8 block size: {block_size}")
+    parameters = inspect.signature(deep_gemm.fp8_fp4_mega_moe).parameters
+    if "torch_sum_combine" in parameters:
+        return {"torch_sum_combine": True}
+    return {}
+
+
 def mega_moe_dispatch_kwargs(deep_gemm, use_fp8_dispatch: bool) -> dict:
     parameters = inspect.signature(deep_gemm.get_symm_buffer_for_mega_moe).parameters
     if "mma_type" in parameters:

@@ -5,7 +5,7 @@ distributed CP row assembly, PD transport or the engine's CPU offload adapter.
 Snapshots stay in memory and retain every required region together.
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 
 import torch
 
@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules.dsv41.attention import (
     V41AttentionCache,
     V41AttentionContext,
 )
-from rtp_llm.models_py.modules.dsv41.cache_layout import MemoryCheckpoint, SWA_WINDOW
+from rtp_llm.models_py.modules.dsv41.cache_layout import SWA_WINDOW, MemoryCheckpoint
 from rtp_llm.models_py.modules.dsv41.ced import (
     AuxRowMap,
     LateCompletion,
@@ -22,10 +22,11 @@ from rtp_llm.models_py.modules.dsv41.ced import (
     ReplayConfig,
     ReplayMode,
     RowRange,
+    build_prefill_plan,
 )
 from rtp_llm.models_py.modules.dsv41.compressor import PairCarry
 from rtp_llm.models_py.modules.dsv41.indexer import IndexSelection
-from rtp_llm.models_py.modules.dsv41.inputs import V41ModelRows
+from rtp_llm.models_py.modules.dsv41.inputs import V41CanonicalInputs, V41ModelRows
 from rtp_llm.models_py.modules.dsv41.transformer import V41L20Output, V41TargetOutput
 
 
@@ -197,6 +198,7 @@ class V41LocalSnapshot:
     swa: dict
     owners: dict
     history_rows: V41ModelRows
+    canonical_prefix_sha256: str | None = None
 
     @classmethod
     @torch.inference_mode()
@@ -265,9 +267,11 @@ class V41LocalSnapshot:
             cache.identity,
             cache.layout.required_slots,
             max(starts[layer] for layer in range(40)),
-            max(starts[layer] for layer in (40, 41, 42))
-            if cache.layout.draft_enabled
-            else None,
+            (
+                max(starts[layer] for layer in (40, 41, 42))
+                if cache.layout.draft_enabled
+                else None
+            ),
             replay_floor,
             history_ready=True,
             copy_complete=True,
@@ -345,6 +349,49 @@ class V41PrefillResult:
 
 
 class V41PrefillExecutor:
+    @classmethod
+    def from_prepared(
+        cls,
+        target,
+        cache,
+        prepared,
+        *,
+        config,
+        chunk_tokens,
+        draft_commit,
+        restored=None,
+        **plan_options,
+    ):
+        """Connect validated request IDs/images to local CED execution.
+
+        Image encoding runs once per image. Global LM boundaries still come
+        from the image-aware plan; selecting a retained L20 tail never reruns ViT.
+        CP assembly and engine checkpoint transport remain separate integrations.
+        """
+        canonical = V41CanonicalInputs(prepared)
+        if restored is not None and restored.canonical_prefix_sha256 != (
+            canonical.prefix_fingerprint(restored.checkpoint.materialized_end)
+        ):
+            raise ValueError("restored checkpoint has a different canonical prefix")
+        plan = build_prefill_plan(
+            total_tokens=len(prepared.token_ids),
+            chunk_tokens=chunk_tokens,
+            layout=cache.layout,
+            model_revision=cache.identity.model_revision,
+            config=config,
+            restored_checkpoint=None if restored is None else restored.checkpoint,
+            images=tuple(
+                RowRange(image.start, image.start + image.length)
+                for image in prepared.images
+            ),
+            **plan_options,
+        )
+        features = target.prepare_images(prepared) if prepared.images else None
+        result = cls(target, cache, plan, draft_commit=draft_commit, restored=restored)
+        result.canonical = canonical
+        result.image_features = features
+        return result
+
     def __init__(
         self,
         target,
@@ -384,6 +431,26 @@ class V41PrefillExecutor:
         self.tail = None
         self.protected = restored
         self.observations = []
+        self.canonical = None
+        self.image_features = None
+
+    def run_next(self, *, epoch, lookup_outputs=None):
+        if self.canonical is None:
+            raise ValueError("automatic extends require a validated canonical request")
+        if self.next_extend >= len(self.plan.extends):
+            raise ValueError("all planned prefill extends already completed")
+        selected = self.plan.extends[self.next_extend].encoder_rows
+        rows = self.canonical.rows(
+            selected.start, selected.end, device=self.target.embedding.device
+        )
+        features = (
+            None
+            if self.image_features is None
+            else self.image_features.for_extend(selected.start, selected.end)
+        )
+        return self.run_extend(
+            rows, epoch=epoch, image_features=features, lookup_outputs=lookup_outputs
+        )
 
     def _commit_draft(self, output, aux_map, context):
         first = max(context.start, context.end - SWA_WINDOW)
@@ -440,6 +507,34 @@ class V41PrefillExecutor:
                 "local prefill input must contain every planned encoder row"
             )
         rows.validate()
+        if self.canonical is not None:
+            expected_rows = self.canonical.rows(
+                extend.encoder_rows.start,
+                extend.encoder_rows.end,
+                device=rows.token_ids.device,
+            )
+            if any(
+                not torch.equal(getattr(rows, f.name), getattr(expected_rows, f.name))
+                for f in fields(V41ModelRows)
+            ):
+                raise ValueError("prefill rows disagree with the canonical request")
+            expected_features = (
+                None
+                if self.image_features is None
+                else self.image_features.for_extend(
+                    extend.encoder_rows.start, extend.encoder_rows.end
+                )
+            )
+            if (image_features is None) != (expected_features is None) or (
+                expected_features is not None
+                and any(
+                    not torch.equal(
+                        getattr(image_features, name), getattr(expected_features, name)
+                    )
+                    for name in ("row_indices", "token_types", "values")
+                )
+            ):
+                raise ValueError("prefill features disagree with the canonical images")
         torch._assert_async(
             rows.valid.all(), "local prefill cannot substitute padded rows"
         )
@@ -496,6 +591,13 @@ class V41PrefillExecutor:
                         replay_floor=extend.replay_floor,
                         history_rows=_copy_rows(l20.rows, slice(-SWA_WINDOW, None)),
                     )
+                    if self.canonical is not None:
+                        checkpoint = replace(
+                            checkpoint,
+                            canonical_prefix_sha256=self.canonical.prefix_fingerprint(
+                                extend.checkpoint_end
+                            ),
+                        )
                     progress = progress.checkpoint_protected(
                         checkpoint.checkpoint, self.cache.layout, self.cache.identity
                     )
@@ -515,16 +617,18 @@ class V41PrefillExecutor:
                         extend.encoder_rows.start,
                         extend.encoder_rows.end,
                     ),
-                    "decoder_range": None
-                    if extend.decoder_rows is None
-                    else (context.start, context.end),
+                    "decoder_range": (
+                        None
+                        if extend.decoder_rows is None
+                        else (context.start, context.end)
+                    ),
                     "encoder_layers": encoder_observations,
                     "decoder_layers": [
                         o for o in context.observations if o["layer"] > 20
                     ],
-                    "retained_bytes": 0
-                    if self.tail is None
-                    else self.tail.storage_bytes,
+                    "retained_bytes": (
+                        0 if self.tail is None else self.tail.storage_bytes
+                    ),
                     "protected_end": progress.protected_checkpoint_end,
                     "draft_rows": draft_rows,
                 }

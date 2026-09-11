@@ -28,8 +28,20 @@ class V41ImageFeatures:
     token_types: torch.Tensor
     values: torch.Tensor
 
+    def for_extend(self, start: int, end: int):
+        """Rebase already computed global feature rows to a local LM extend."""
+        if type(start) is not int or type(end) is not int or not 0 <= start <= end:
+            raise ValueError("image feature extend requires ordered canonical bounds")
+        selected = (self.row_indices >= start) & (self.row_indices < end)
+        return V41ImageFeatures(
+            (self.row_indices[selected] - start).contiguous(),
+            self.token_types[selected].contiguous(),
+            self.values[selected].contiguous(),
+        )
+
     @classmethod
     def from_prepared(cls, vision, prepared):
+        prepared.validate()
         positions, types, features = [], [], []
         previous_end = 0
         for image in prepared.images:

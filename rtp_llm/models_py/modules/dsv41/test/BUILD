@@ -1,7 +1,10 @@
 py_test(
     name = "test_prefill",
     srcs = ["test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
-    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:models",
+    ],
     env = {
         "DSV41_ATTENTION": "1",
         "DSV41_OWNER_COMPRESSOR": "1",
@@ -120,6 +123,14 @@ py_test(
     srcs = ["test_linear.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {"DSV41_BLOCK32_LINEAR": "1"},
+)
+
+py_test(
+    name = "test_moe",
+    srcs = ["test_moe.py", "fixture.py", "official_compressor.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"DSV41_MOE": "1"},
+    tags = ["requires-dsv41-component-inputs"],
 )
 
 py_test(
