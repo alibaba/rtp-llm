@@ -81,3 +81,28 @@ py_test(
     tags = ["rocm"],
     exec_properties = {'gpu': 'MI308X-ROCM7', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "glm4_moe_mtp_test",
+    srcs = ["glm4_moe_mtp_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "glm4_moe_mtp_test_rocm",
+    srcs = ["glm4_moe_mtp_test.py"],
+    main = "glm4_moe_mtp_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {'gpu': 'MI308X-ROCM7', 'gpu_count': '1'},
+)

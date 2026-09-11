@@ -19,14 +19,15 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1777443818,
+                "created": 1788415138,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "当然可以！以下是围绕“英语听力方法”主题提出的几个有深度、启发性的问题，适合用于课堂讨论、自我反思或教学研究：\n\n---\n\n### 一、方法类问题\n1. **你通常如何训练英语听力？你觉得自己最有效的方法是什么？为什么？**  \n2. **你是否尝试过“精听”和“泛听”结合的方法？你觉得哪种对你帮助更大？**  \n3. **你是否使用过“听写”或“跟读”练习？这些方法",
+                            "content": "当然可以！以下是围绕“英语听力方法”主题提出的几个有深度、启发性的问题，适合用于课堂讨论、自我反思或教学研究：\n\n---\n\n### **1. 输入与理解的关系**\n> “在英语听力中，‘听懂’是否一定意味着‘理解’？请结合你的学习经验，谈谈你对‘可理解输入（comprehensible input）’这一概念的理解。”\n\n---\n\n### **2. 精听与泛听的平衡**\n> “你认为精听",
+                            "name": null,
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null,
@@ -46,14 +47,14 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 7077.067,
+                    "cost_time": 5150.872,
                     "iter_count": 100,
                     "prefix_len": 0,
                     "input_len": 14,
                     "output_len": 100,
                     "step_output_len": 99,
-                    "first_token_cost_time": 2216.145,
-                    "wait_time": 0.0,
+                    "first_token_cost_time": 653.824,
+                    "wait_time": 0.09,
                     "pd_sep": true,
                     "cum_log_probs": [],
                     "beam_responses": [],
@@ -70,17 +71,21 @@
                     "decode_local_reuse_len": 0,
                     "decode_remote_reuse_len": 0,
                     "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "speculative_draft_rounds": 0,
+                    "speculative_accepted_tokens_per_pos": [],
                     "role_addrs": [
                         {
                             "role": "DECODE",
                             "ip": "127.0.0.1",
-                            "http_port": 10615,
-                            "grpc_port": 10616
+                            "http_port": 18821,
+                            "grpc_port": 18822
                         }
                     ],
                     "aux_string": ""
                 },
-                "extra_outputs": null
+                "extra_outputs": null,
+                "prompt_logprobs": null
             }
         },
         {
@@ -99,7 +104,7 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": "\n\nCAP theorem states that a distributed system can only",
+                        "response": "\n\nCAP theorem states that any distributed system can guarantee",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
@@ -128,10 +133,11 @@
                             "beam_responses": [],
                             "pd_sep": true,
                             "softmax_probs": []
-                        }
+                        },
+                        "prompt_logprobs": null
                     },
                     {
-                        "response": "\n\nCAP theorem states that a distributed system can only",
+                        "response": "\n\nCAP theorem states that any distributed system can guarantee",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
@@ -160,10 +166,11 @@
                             "beam_responses": [],
                             "pd_sep": true,
                             "softmax_probs": []
-                        }
+                        },
+                        "prompt_logprobs": null
                     },
                     {
-                        "response": "\n\nCAP theorem states that a distributed system can only",
+                        "response": "\n\nCAP theorem states that any distributed system can guarantee",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
@@ -192,7 +199,8 @@
                             "beam_responses": [],
                             "pd_sep": true,
                             "softmax_probs": []
-                        }
+                        },
+                        "prompt_logprobs": null
                     }
                 ]
             }

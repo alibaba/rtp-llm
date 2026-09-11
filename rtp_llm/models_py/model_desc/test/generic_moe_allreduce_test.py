@@ -21,6 +21,8 @@ def _make_layer(
     ep_size=1,
     moe_style=2,
     with_shared_expert_gate=False,
+    router_logits_fp32=False,
+    use_swizzleA=None,
 ):
     config = SimpleNamespace(
         hidden_size=8,
@@ -31,6 +33,7 @@ def _make_layer(
         activation_type="SiGLU",
         moe_style=moe_style,
         eplb_config=SimpleNamespace(phy_exp_num=lambda count: count),
+        router_logits_fp32=router_logits_fp32,
     )
     parallelism_config = SimpleNamespace(
         ep_size=ep_size,
@@ -43,9 +46,14 @@ def _make_layer(
     weights = {
         W.moe_w1: torch.empty(4, 2, 8),
         W.moe_w2: torch.empty(4, 8, 2),
+        # Stored input-major, [hidden, expert_num], the way the loader leaves it.
+        W.moe_gate: torch.randn(8, 4),
     }
     if with_shared_expert_gate:
         weights[W.shared_expert_gate] = torch.empty(8, 1)
+    hw_kernel_config = (
+        None if use_swizzleA is None else SimpleNamespace(use_swizzleA=use_swizzleA)
+    )
     fused_moe = SimpleNamespace(
         includes_shared_expert=False,
         topk_ids_dtype=torch.int32,
@@ -74,7 +82,13 @@ def _make_layer(
         ) as fused_moe_factory,
     ):
         fused_moe_factory.return_value.create_fused_moe.return_value = fused_moe
-        return GenericMoeLayer(config, parallelism_config, weights, moe_config)
+        return GenericMoeLayer(
+            config,
+            parallelism_config,
+            weights,
+            moe_config,
+            hw_kernel_config=hw_kernel_config,
+        )
 
 
 def _configure_forward(layer, *, gate_enabled=False):
@@ -112,10 +126,18 @@ class GenericMoeInitializationTest(TestCase):
     def test_unified_decision_covers_all_predicate_terms(self):
         cases = (
             ("pure_tp_shared_supported", True, 2, 1, 2, True),
+            # ep_size == tp_size is a pure-TP layout too: whole experts per rank
+            # and a partial routed output that finalize() reduces.  The fold
+            # applies, which is what the router capability -- not ep_size --
+            # decides.
+            ("pure_tp_router_ep_equals_tp", True, 2, 2, 2, True),
             ("ffn_tp_one", True, 1, 1, 2, False),
-            ("ep_mode", True, 2, 2, 2, False),
             ("no_shared_expert", True, 2, 1, 1, False),
             ("unsupported_router", False, 2, 1, 2, False),
+            # An EP router's combine has already completed the routed output, so
+            # folding a partial shared output into it would be wrong.  It does not
+            # advertise the capability and must keep the shared-only reduce.
+            ("ep_router_in_ep_mode", False, 2, 2, 2, False),
         )
         for name, supports, ffn_tp, ep_size, moe_style, expected in cases:
             with self.subTest(name=name):
@@ -126,6 +148,21 @@ class GenericMoeInitializationTest(TestCase):
                     moe_style=moe_style,
                 )
                 self.assertEqual(layer.use_unified_tp_allreduce, expected)
+
+    def test_the_two_shared_expert_strategies_are_mutually_exclusive(self):
+        for name, supports, ep_size in (
+            ("pure_tp_router_ep_equals_tp", True, 2),
+            ("ep_router_in_ep_mode", False, 2),
+            ("pure_tp_router_ep_one", True, 1),
+        ):
+            with self.subTest(name=name):
+                layer = _make_layer(
+                    supports_skip_tp_allreduce=supports, ep_size=ep_size
+                )
+                self.assertFalse(
+                    layer.use_unified_tp_allreduce and layer.use_ep_shared_allreduce,
+                    "forward() would silently pick one and the other flag would be a lie",
+                )
 
     def test_router_tp_size_is_part_of_the_constructor_contract(self):
         self.assertFalse(
@@ -185,8 +222,53 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         self.assertTrue(fused_moe.call_args.kwargs["skip_tp_allreduce"])
 
     @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
-    def test_ep_reduces_shared_output_only(self, mock_all_reduce):
+    def test_ep_equal_tp_fold_matches_the_two_reduce_path_with_one_collective(
+        self, mock_all_reduce
+    ):
+        """The widened gate must not change the result, only the collective count.
+
+        A TP all-reduce is linear, so two identical ranks are modelled exactly by
+        doubling.  An affine stub (tensor + c) is not a reduce and would make the
+        comparison meaningless.
+        """
+        collectives = []
+
+        def reduce_stub(tensor, group=None):
+            collectives.append(group)
+            return tensor * 2
+
+        mock_all_reduce.side_effect = reduce_stub
+
         layer = _make_layer(ep_size=2)
+        self.assertTrue(layer.use_unified_tp_allreduce)
+        hidden_states, routed_output, shared_output, _, fused_moe = _configure_forward(
+            layer
+        )
+        # The router reduces its own routed output unless told to skip, so the
+        # stub has to do it too -- otherwise the control below compares the fold
+        # against a path that never reduced the routed half at all.
+        fused_moe.side_effect = lambda **kwargs: (
+            routed_output
+            if kwargs["skip_tp_allreduce"]
+            else reduce_stub(routed_output, Group.TP)
+        )
+
+        folded = layer(hidden_states)
+        folded_collectives = len(collectives)
+
+        collectives.clear()
+        # The path this replaces: the pre-change flags for the same layout.
+        layer.use_unified_tp_allreduce = False
+        layer.use_ep_shared_allreduce = True
+        unfolded = layer(hidden_states)
+
+        torch.testing.assert_close(folded, unfolded)
+        self.assertEqual(folded_collectives, 1)
+        self.assertEqual(len(collectives), 2)
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_ep_reduces_shared_output_only(self, mock_all_reduce):
+        layer = _make_layer(ep_size=2, supports_skip_tp_allreduce=False)
         hidden_states, routed_output, shared_output, _, fused_moe = _configure_forward(
             layer
         )
@@ -202,7 +284,7 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
 
     @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
     def test_ep_gate_is_applied_before_shared_reduce(self, mock_all_reduce):
-        layer = _make_layer(ep_size=2)
+        layer = _make_layer(ep_size=2, supports_skip_tp_allreduce=False)
         hidden_states, routed_output, shared_output, gate_output, fused_moe = (
             _configure_forward(layer, gate_enabled=True)
         )
@@ -230,6 +312,63 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         torch.testing.assert_close(result, routed_output + shared_output)
         self.assertFalse(fused_moe.call_args.kwargs["skip_tp_allreduce"])
         self.assertFalse(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+
+
+class GenericMoeFp32RouterTest(TestCase):
+    """The opt-in fp32 router projection and its ROCm SwizzleA guard.
+
+    The projection bypasses self.gate and reads W.moe_gate directly. That is
+    only sound while the stored tensor is in its canonical layout: ROCm permutes
+    W.moe_gate under use_swizzleA and the permutation preserves shape, so
+    nothing downstream could notice a wrong read.
+    """
+
+    def test_swizzle_disables_the_fp32_projection(self):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=True)
+        self.assertFalse(layer.router_logits_fp32)
+        self.assertIsNone(layer._gate_weight_src)
+
+    def test_fp32_projection_survives_without_swizzle(self):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=False)
+        self.assertTrue(layer.router_logits_fp32)
+        self.assertIsNotNone(layer._gate_weight_src)
+
+    def test_absent_hw_kernel_config_leaves_the_projection_on(self):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=None)
+        self.assertTrue(layer.router_logits_fp32)
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_swizzled_layer_routes_through_the_gate_module(self, mock_all_reduce):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=True)
+        _configure_forward(layer)
+        mock_all_reduce.side_effect = lambda tensor, group: tensor
+        hidden_states = torch.randn(4, 8)
+
+        layer(hidden_states)
+
+        # The fallback is the point: the swizzled weight must never reach F.linear.
+        layer.gate.assert_called_once()
+        torch.testing.assert_close(
+            layer.select_topk.call_args.args[0], torch.zeros(4, 4)
+        )
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_fp32_projection_computes_in_fp32(self, mock_all_reduce):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=False)
+        _configure_forward(layer)
+        mock_all_reduce.side_effect = lambda tensor, group: tensor
+        # bf16 activations are what makes the option worth having: the reference
+        # implementation keeps this projection in fp32 so near-ties in the
+        # top-k selection are not reordered by the narrower accumulate.
+        hidden_states = torch.randn(4, 8, dtype=torch.bfloat16)
+        expected = hidden_states.float() @ layer._gate_weight_src.float()
+
+        layer(hidden_states)
+
+        layer.gate.assert_not_called()
+        logits = layer.select_topk.call_args.args[0]
+        self.assertEqual(logits.dtype, torch.float32)
+        torch.testing.assert_close(logits, expected)
 
 
 if __name__ == "__main__":
