@@ -19,67 +19,68 @@ class _Attention(nn.Module):
 
 
 class KimiK3MtpContractTest(unittest.TestCase):
-    def test_page_rr_swa_rejected_before_weight_loading(self):
-        from rtp_llm.config.model_config import ModelConfig
+    def test_swa_page_limit_is_checked_before_model_creation(self):
         from rtp_llm.model_factory import ModelFactory
-        from rtp_llm.ops import HybridAttentionType, ParallelismConfig, SpeculativeType
+        from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3, KimiK3ModelConfig
+        from rtp_llm.ops import HybridAttentionType, ParallelismConfig, RoleType
 
-        # name, TP, Prefill sharding, Decode sharding, remote CP, model, SWA, reject
-        cases = (
-            ("prefill", 8, True, False, 0, "kimi_k3", "draft", True),
-            ("decode", 8, False, True, 0, "kimi_k3", "draft", True),
-            ("fusion", 8, True, True, 0, "kimi_k3", "draft", True),
-            ("p8_d1", 1, True, False, 8, "kimi_k3", "draft", True),
-            ("target_swa", 8, True, False, 0, "kimi_k3", "target", True),
-            ("plain_tp8", 8, False, False, 0, "kimi_k3", "draft", False),
-            ("c1", 1, True, True, 1, "kimi_k3", "draft", False),
-            ("remote_flag_off", 1, False, False, 8, "kimi_k3", "draft", False),
-            ("mtp", 8, True, True, 8, "kimi_k3", "none", False),
-            ("target_only", 8, True, True, 8, "kimi_k3", "no_draft", False),
-            ("dsv4", 8, True, True, 8, "deepseek_v4", "target", False),
-        )
-        for name, tp, prefill, decode, remote_cp, model_type, swa, reject in cases:
-            with self.subTest(name=name):
-                target = ModelConfig()
-                target.model_type = model_type
-                target.hybrid_attention_config.hybrid_attention_types = [
-                    HybridAttentionType.LINEAR, HybridAttentionType.NONE
-                ]
-                draft = None
-                if swa != "no_draft":
-                    draft = ModelConfig()
-                    draft.model_type = "kimi_k3_mtp"
-                    draft.hybrid_attention_config.hybrid_attention_types = [
-                        HybridAttentionType.NONE
-                    ]
-                if swa in ("target", "draft"):
-                    config = target if swa == "target" else draft
-                    config.hybrid_attention_config.hybrid_attention_types = [
-                        HybridAttentionType.SLIDING_WINDOW
-                    ]
-                parallelism = ParallelismConfig()
-                parallelism.tp_size = tp
-                parallelism.prefill_cp_config.kv_cache_sharded = prefill
-                parallelism.decode_cp_kv_cache_sharded = decode
-                parallelism.prefill_cp_config.prefill_cp_size = remote_cp
-                engine = SimpleNamespace(
-                    parallelism_config=parallelism,
-                    sp_config=SimpleNamespace(type=SpeculativeType.MTP, gen_num_per_cycle=3),
-                )
-                with patch.object(
-                    ModelFactory, "_create_model", side_effect=RuntimeError("weight loading reached")
-                ) as create_model:
-                    error = ValueError if reject else RuntimeError
-                    message = "Page-RR CP does not support SWA" if reject else "weight loading reached"
-                    with self.assertRaisesRegex(error, message):
-                        ModelFactory.from_model_configs(
-                            model_config=target, engine_config=engine,
-                            world_info=None, vit_config=None, propose_model_config=draft,
-                        )
-                    if reject:
-                        create_model.assert_not_called()
-                    else:
-                        create_model.assert_called_once()
+        class ModelCreationReached(Exception):
+            pass
+
+        target = KimiK3ModelConfig()
+        target.model_type = "kimi_k3"
+        target.hybrid_attention_config.hybrid_attention_types = [HybridAttentionType.NONE]
+        draft = KimiK3ModelConfig()
+        draft.model_type = "kimi_k3_mla_swa_eagle3"
+        draft.hybrid_attention_config.hybrid_attention_types = [HybridAttentionType.SLIDING_WINDOW]
+        draft.attn_config.kernel_tokens_per_block = 128
+        for role in (RoleType.PREFILL, RoleType.DECODE):
+            for prefill_cp in (False, True):
+                for decode_cp in (False, True):
+                    parallel = ParallelismConfig()
+                    parallel.tp_size = 8
+                    parallel.role_type = role
+                    parallel.prefill_cp_config.kv_cache_sharded = prefill_cp
+                    parallel.decode_cp_kv_cache_sharded = decode_cp
+                    engine = SimpleNamespace(
+                        parallelism_config=parallel,
+                        sp_config=SimpleNamespace(gen_num_per_cycle=7),
+                    )
+                    for page, window in ((4096, 2048), (2048, 2048), (1024, 2048), (4096, 0)):
+                        with self.subTest(role=role, p_cp=prefill_cp, d_cp=decode_cp,
+                                          page=page, window=window):
+                            draft.attn_config.tokens_per_block = page
+                            draft.attn_config.sliding_window = window
+                            with patch.object(ModelFactory, "get_model_cls", return_value=KimiK3), patch.object(
+                                ModelFactory, "_create_model", side_effect=ModelCreationReached
+                            ) as create_model:
+                                if window > 0 and page >= window:
+                                    with self.assertRaises(ModelCreationReached):
+                                        ModelFactory.from_model_configs(target, engine, None, propose_model_config=draft)
+                                    create_model.assert_called_once()
+                                else:
+                                    with self.assertRaisesRegex(ValueError, rf"P={page}, W={window}.*model=kimi_k3_mla_swa_eagle3"):
+                                        ModelFactory.from_model_configs(target, engine, None, propose_model_config=draft)
+                                    create_model.assert_not_called()
+        # FULL MTP and target-only configurations do not acquire an SWA limit.
+        draft.model_type = "kimi_k3_mtp"
+        draft.hybrid_attention_config.hybrid_attention_types = [HybridAttentionType.NONE]
+        KimiK3.validate_swa_pd_config(target, draft)
+        KimiK3.validate_swa_pd_config(target, None)
+        target.hybrid_attention_config.hybrid_attention_types = [HybridAttentionType.SLIDING_WINDOW]
+        target.attn_config.tokens_per_block = 1024
+        target.attn_config.sliding_window = 2048
+        for propose in (None, draft):
+            with patch.object(ModelFactory, "get_model_cls", return_value=KimiK3), patch.object(
+                ModelFactory, "_create_model"
+            ) as create_model:
+                with self.assertRaisesRegex(ValueError, "P=1024, W=2048, model=kimi_k3"):
+                    ModelFactory.from_model_configs(target, engine, None, propose_model_config=propose)
+                create_model.assert_not_called()
+        target.attn_config.tokens_per_block = 2048
+        draft.hybrid_attention_config.hybrid_attention_types = [HybridAttentionType.SLIDING_WINDOW]
+        draft.attn_config.tokens_per_block = draft.attn_config.sliding_window = 2048
+        KimiK3.validate_swa_pd_config(target, draft)
 
     def test_weight_manifest_uses_config_source_layer_for_every_tp_rank(self):
         from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3Mtp

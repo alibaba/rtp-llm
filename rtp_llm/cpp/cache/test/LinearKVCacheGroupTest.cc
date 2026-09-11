@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
@@ -28,10 +29,8 @@ static std::shared_ptr<LinearKVCacheSpec> makeLinearSpec(uint32_t seq_size_per_b
 class LinearKVCacheGroupTest: public ::testing::Test {};
 
 TEST_F(LinearKVCacheGroupTest, PartitionEightSlicesEveryKdaHeadSegment) {
-    auto block_pool = createBlockPool();
-    ASSERT_TRUE(block_pool->init());
-
     auto spec                 = makeLinearSpec(/*seq_size_per_block=*/4);
+    spec->layer_num           = 1;
     spec->local_num_k_heads   = 8;
     spec->local_num_v_heads   = 8;
     spec->local_head_num_kv   = 8;
@@ -41,12 +40,16 @@ TEST_F(LinearKVCacheGroupTest, PartitionEightSlicesEveryKdaHeadSegment) {
     spec->ssm_state_dtype     = rtp_llm::DataType::TYPE_FP32;
     spec->conv_state_dtype    = rtp_llm::DataType::TYPE_FP16;
 
-    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    auto pool_config = BlockPoolConfigHelper::createConfig(
+        /*layer_num=*/1, /*block_num=*/2, spec->block_size_bytes(), DataType::TYPE_FP16);
+    auto block_pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+    ASSERT_TRUE(block_pool->init());
+    LinearKVCacheGroup group(/*layer_ids=*/{0}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
     auto allocated = block_pool->malloc(1);
     ASSERT_EQ(allocated.size(), 1u);
 
-    auto whole = group.convertIndexToBuffer(/*layer_id=*/0, allocated[0]);
+    auto whole = block_pool->convertIndexToBuffer(/*layer_id=*/0, allocated[0]);
     ASSERT_EQ(whole.size(), 1u);
     auto* base = static_cast<char*>(whole[0].addr);
 

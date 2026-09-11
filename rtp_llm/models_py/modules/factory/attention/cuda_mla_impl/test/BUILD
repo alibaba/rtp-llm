@@ -73,6 +73,7 @@ py_test(
 
 py_test(
     name = "tokenspeed_mla_decode_op_test",
+    data = ["//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner"],
     srcs = ["tokenspeed_mla_decode_op_test.py"],
     deps = [
         "//rtp_llm:apache-tvm-ffi",

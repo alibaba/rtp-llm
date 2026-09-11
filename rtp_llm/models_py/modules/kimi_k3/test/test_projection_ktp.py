@@ -30,6 +30,29 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
 
 
 class KtpStepPlanTest(unittest.TestCase):
+    def test_draft_parallelism_copy_preserves_cache_cp(self):
+        from rtp_llm.model_factory import ModelFactory
+        from rtp_llm.ops import ParallelismConfig, RoleType
+
+        for role in (RoleType.PREFILL, RoleType.DECODE):
+            for prefill_cp, decode_cp in ((False, False), (True, False), (False, True), (True, True)):
+                with self.subTest(role=role, prefill=prefill_cp, decode=decode_cp):
+                    target = ParallelismConfig()
+                    target.tp_size = 8
+                    target.tp_rank = 3
+                    target.ktp_size = 8
+                    target.ktp_rank = 5
+                    target.role_type = role
+                    target.prefill_cp_config.kv_cache_sharded = prefill_cp
+                    target.decode_cp_kv_cache_sharded = decode_cp
+                    draft = ModelFactory._propose_parallelism_config(target)
+                    self.assertEqual((draft.ktp_size, draft.ktp_rank), (1, 0))
+                    self.assertEqual((target.ktp_size, target.ktp_rank), (8, 5))
+                    self.assertEqual((draft.tp_size, draft.tp_rank), (8, 3))
+                    self.assertEqual(draft.role_type, role)
+                    self.assertEqual(draft.prefill_cp_config.kv_cache_sharded, prefill_cp)
+                    self.assertEqual(draft.decode_cp_kv_cache_sharded, decode_cp)
+
     def test_mega_moe_accepts_projection_ktp_and_ktp1_draft_layouts(self):
         for ktp_size in (8, 1):
             with self.subTest(ktp_size=ktp_size):

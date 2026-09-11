@@ -29,10 +29,10 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/distributed:collective_torch",
     ],
-    timeout = 'moderate',
-    env = {"GPU_COUNT": "4"},
+    timeout = 'long',
+    env = {"GPU_COUNT": "8"},
     tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
+    exec_properties = {'gpu':'H20', 'gpu_count':'8'},
 )
 
 py_test(

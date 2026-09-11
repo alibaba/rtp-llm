@@ -20,7 +20,9 @@ public:
                       int64_t          tokens_per_block,
                       int64_t          kernel_tokens_per_block,
                       std::vector<int> prefill_capture_seq_lens,
-                      int64_t          hidden_size) {
+                      int64_t          hidden_size,
+                      int64_t          num_tokens_per_bs,
+                      bool             is_mtp_draft_update) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = true;
@@ -28,7 +30,8 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
+        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs == 0 ? max_seq_len : num_tokens_per_bs);
+        params.is_mtp_draft_update          = is_mtp_draft_update;
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
@@ -115,7 +118,9 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
-             py::arg("hidden_size"))
+             py::arg("hidden_size"),
+             py::arg("num_tokens_per_bs") = 0,
+             py::arg("is_mtp_draft_update") = false)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),

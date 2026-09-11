@@ -108,6 +108,32 @@ def get_mla_impl(
         if attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
         else DECODE_MLA_IMPS
     )
+    if (
+        hybrid_attention_config is not None
+        and not attn_configs.is_sparse
+        and hybrid_attention_config.enable_hybrid_attention
+        and hybrid_attention_config.hybrid_attention_types
+        and all(kind == HybridAttentionType.SLIDING_WINDOW
+                for kind in hybrid_attention_config.hybrid_attention_types)
+    ):
+        if mla_impls is PREFILL_MLA_IMPS:
+            from .cuda_mla_impl.sliding_window_mla_prefill import SlidingWindowMlaPrefillImpl
+
+            swa_impl = SlidingWindowMlaPrefillImpl
+        else:
+            from .cuda_mla_impl.sliding_window_mla_decode import SlidingWindowMlaDecodeImpl
+
+            swa_impl = SlidingWindowMlaDecodeImpl
+        instance = swa_impl(
+            attn_configs, attn_inputs, weight.weights,
+            weight.get_global_weight(W.rope_cos_sin_cache),
+            fmha_config=fmha_config, quant_config=quant_config,
+            max_seq_len=max_seq_len, is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
+        )
+        if is_cuda_graph and not instance.support_cuda_graph():
+            raise RuntimeError("can not find mla type supporting SWA Prefill CUDA Graph")
+        return instance
     cache_group_id = _page_rr_cache_group(
         attn_inputs, parallelism_config, hybrid_attention_config
     )

@@ -1132,6 +1132,275 @@ class TokenSpeedMlaDecodeSupportTest(TestCase):
         self.assertEqual(decode_op_cls.call_args.kwargs["max_q_len"], 4)
 
 
+    @skipUnless(RUN_KERNEL, SKIP_REASON)
+    def test_swa_draft_factory_keeps_compute_parallelism(self):
+        from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.model_loader.model_weight_info import ModelWeights
+        from rtp_llm.models_py.model_desc.module_base import GptModelBase
+        from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.sliding_window_mla_decode import (
+            SlidingWindowMlaDecodeImpl,
+        )
+        from rtp_llm.ops import CPRotateMethod, HybridAttentionType, ParallelismConfig, RoleType
+        from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs
+
+        torch.manual_seed(73)
+        page, window, batch_capacity = 4096, 2048, 8
+        config = ModelConfig()
+        config.num_layers, config.max_seq_len = 1, page * 2
+        config.quant_config = None
+        config.attn_config = self._configs()
+        config.attn_config.head_num = 96
+        config.attn_config.kv_head_num = 1
+        config.attn_config.nope_head_dim = 128
+        config.attn_config.tokens_per_block = page
+        config.attn_config.kernel_tokens_per_block = 128
+        config.attn_config.sliding_window = window
+        config.hybrid_attention_config.enable_hybrid_attention = True
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
+        config.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.SLIDING_WINDOW
+        ]
+        parallel = ParallelismConfig()
+        parallel.tp_size = parallel.world_size = 8
+        parallel.role_type = RoleType.DECODE
+        parallel.decode_cp_kv_cache_sharded = True
+        for queries in (1, 7):
+            for method in (CPRotateMethod.DISABLED, CPRotateMethod.ALL_GATHER):
+                with self.subTest(queries=queries, method=method):
+                    parallel.prefill_cp_config.method = method
+                    heads = 96 // parallel.get_attn_tp_size()
+                    weights = ModelWeights(2, "cuda", torch.bfloat16)
+                    kc = torch.randn(heads, 128, 512, device="cuda", dtype=torch.bfloat16) * .02
+                    vc = torch.randn(heads, 512, 128, device="cuda", dtype=torch.bfloat16) * .02
+                    weights.weights[0] = {W.mla_kc: kc, W.mla_vc: vc}
+                    weights.weights[1] = {W.mla_kc: kc, W.mla_vc: vc}
+                    # Identity RoPE still executes the real kernel; this test's
+                    # independent oracle concerns physical pages and the window.
+                    rope = torch.zeros(page * 2, 64, device="cuda")
+                    rope[:, :32] = 1
+                    weights.set_global_weight(W.rope_cos_sin_cache, rope)
+                    inputs = PyAttentionInputs()
+                    inputs.is_prefill = inputs.is_mtp_draft_update = queries > 1
+                    inputs.total_tokens = queries
+                    inputs.input_lengths_host = torch.tensor([queries], dtype=torch.int32)
+                    inputs.input_lengths = inputs.input_lengths_host.cuda()
+                    inputs.prefix_lengths_host = torch.tensor(
+                        [17] if queries > 1 else [], dtype=torch.int32
+                    )
+                    inputs.prefix_lengths = inputs.prefix_lengths_host.cuda()
+                    inputs.sequence_lengths_host = torch.tensor(
+                        [17] if queries == 1 else [], dtype=torch.int32
+                    )
+                    inputs.sequence_lengths = inputs.sequence_lengths_host.cuda()
+                    table = torch.zeros((1, 32), dtype=torch.int32)
+                    table[0, :2] = torch.tensor([3, 1])
+                    inputs.kv_cache_kernel_block_id_host = table
+                    inputs.kv_cache_kernel_block_id_device = table.cuda()
+                    cache = LayerKVCache()
+                    cache.kv_cache_base = torch.empty(
+                        ((2 * batch_capacity + 3) * 32, 128, 576), dtype=torch.bfloat16, device="cuda"
+                    )
+                    q = torch.empty(queries, heads, 192, dtype=torch.bfloat16, device="cuda")
+                    appended = torch.empty(queries, 512, dtype=torch.bfloat16, device="cuda")
+                    # Eagle3 leaves k_pe as a slice of fused Q/K/V+gate output.
+                    fused = torch.empty(
+                        queries, 2112 + heads * 128, dtype=torch.bfloat16, device="cuda"
+                    )
+                    kpe = fused[:, 2048:2112]
+
+                    def reference(query, new_kv, new_kpe, start, physical):
+                        flat = cache.kv_cache_base.view(-1, 576)
+                        # Oracle walks physical P pages without using the tested
+                        # sparse index converter or the native planner's slots.
+                        ordered = torch.cat([
+                            flat[p * page : (p + 1) * page] for p in physical
+                        ])
+                        ordered[start : start + queries, :512] = new_kv
+                        ordered[start : start + queries, 512:] = new_kpe
+                        absorbed = torch.bmm(query[..., :128].transpose(0, 1), kc).transpose(0, 1)
+                        projected = torch.cat((absorbed, query[..., 128:]), -1).float()
+                        expected = []
+                        for j in range(queries):
+                            end = start + j + 1
+                            values = ordered[max(0, end - window) : end].float()
+                            score = projected[j] @ values.T * (192 ** -.5)
+                            expected.append(score.softmax(-1) @ values[:, :512])
+                        expected = torch.stack(expected).to(torch.bfloat16)
+                        output = torch.bmm(expected.transpose(0, 1), vc).transpose(0, 1)
+                        return output, ordered, start, physical
+
+                    def prepare(step):
+                        start = (17, page - 3, page + 19, page * 2 - queries)[step]
+                        physical = (3, 1) if step != 1 else (1, 3)
+                        inputs.prefix_lengths_host.fill_(start)
+                        inputs.sequence_lengths_host.fill_(start)
+                        inputs.prefix_lengths.copy_(inputs.prefix_lengths_host)
+                        inputs.sequence_lengths.copy_(inputs.sequence_lengths_host)
+                        table[0, :2] = torch.tensor(physical)
+                        inputs.kv_cache_kernel_block_id_device.copy_(table)
+                        cache.kv_cache_base.normal_()
+                        q.normal_()
+                        appended.normal_()
+                        kpe.normal_()
+                        return reference(q, appended, kpe, start, physical)
+
+                    # Match native draft/verify capture: reserve the largest
+                    # legal prefix before replaying shorter live histories.
+                    expected = prepare(3)
+                    impl = AttnImplFactory.get_fmha_impl(
+                        config, parallel, weights, inputs, is_cuda_graph=True
+                    )
+                    self.assertIsInstance(impl, SlidingWindowMlaDecodeImpl)
+                    self.assertEqual(impl.fmha_impl.num_heads, heads)
+
+                    def invoke():
+                        return impl.forward(q, appended, kpe, cache, 0)
+
+                    def check(output, reference):
+                        expected_output, ordered, start, physical = reference
+                        torch.testing.assert_close(output, expected_output, atol=.015, rtol=.03)
+                        normalized_error = (
+                            (output.float() - expected_output.float()).abs().max()
+                            / expected_output.float().abs().max()
+                        )
+                        self.assertLess(normalized_error.item(), .02)
+                        positions = torch.arange(start, start + queries, device="cuda")
+                        pages = torch.tensor(physical, device="cuda")
+                        slots = pages[positions // page] * page + positions % page
+                        torch.testing.assert_close(
+                            cache.kv_cache_base.view(-1, 576)[slots],
+                            ordered[start : start + queries],
+                            atol=0,
+                            rtol=0,
+                        )
+
+                    # A shared Impl must select the requested layer's group for
+                    # both the KV writer and the attention reader.
+                    actual_table = inputs.kv_cache_kernel_block_id_device
+                    wrong_table = torch.zeros_like(actual_table)
+                    inputs.kv_cache_kernel_block_id_device_by_group = [wrong_table, actual_table]
+                    inputs.kv_cache_layer_to_group_host = torch.tensor([0, 1], dtype=torch.int32)
+                    inputs.kv_cache_kernel_block_id_device = wrong_table
+                    check(impl.forward(q, appended, kpe, cache, 1), expected)
+                    self.assertEqual(impl.fmha_params.block_table.data_ptr(), actual_table.data_ptr())
+                    inputs.kv_cache_kernel_block_id_device_by_group = []
+                    inputs.kv_cache_layer_to_group_host = torch.empty(0, dtype=torch.int32)
+
+                    check(invoke(), expected)
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        invoke()
+                    torch.cuda.current_stream().wait_stream(stream)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        captured = invoke()
+                    positions_ptr = impl.fmha_params.positions_d.data_ptr()
+                    slots_ptr = impl.fmha_params.slot_mapping.data_ptr()
+                    for step in range(3):
+                        expected = prepare(step)
+                        impl.prepare_cuda_graph(inputs)
+                        self.assertEqual(impl.fmha_params.positions_d.data_ptr(), positions_ptr)
+                        self.assertEqual(impl.fmha_params.slot_mapping.data_ptr(), slots_ptr)
+                        graph.replay()
+                        check(captured, expected)
+                    graph.reset()
+
+                    query_width = heads * 192
+                    hidden_width = query_width + 576
+
+                    class RunnerModel(GptModelBase):
+                        def forward(self, model_inputs, fmha_impl=None):
+                            if fmha_impl is None:
+                                fmha_impl = self.prepare_fmha_impl(model_inputs)
+                            hidden = model_inputs.input_hiddens.to(torch.bfloat16)
+                            graph_q = hidden[:, :query_width].contiguous().view(-1, heads, 192)
+                            graph_ckv = hidden[:, query_width : query_width + 512].contiguous()
+                            graph_fused = torch.empty(
+                                hidden.shape[0], 2112 + heads * 128,
+                                dtype=torch.bfloat16, device=hidden.device,
+                            )
+                            graph_kpe = graph_fused[:, 2048:2112]
+                            graph_kpe.copy_(hidden[:, query_width + 512 :])
+                            output = fmha_impl.forward(graph_q, graph_ckv, graph_kpe, cache, 0)
+                            return PyModelOutputs(
+                                torch.nn.functional.pad(output.flatten(1), (0, hidden_width - heads * 128)),
+                                fmha_impl.fmha_params,
+                            )
+
+                    runner_model = RunnerModel(config, parallel, weights, max_generate_batch_size=batch_capacity)
+                    runner = CudaGraphRunner()
+                    try:
+                        if queries == 1:
+                            runner.init_decode(
+                                runner_model, hidden_size=hidden_width,
+                                max_seq_len=page * 2, tokens_per_block=page,
+                                kernel_tokens_per_block=128, decode_capture_batch_sizes=[1, batch_capacity],
+                                max_context_batch_size=batch_capacity,
+                            )
+                        else:
+                            runner.init_prefill(
+                                runner_model, hidden_size=hidden_width,
+                                max_context_batch_size=batch_capacity, max_seq_len=page * 2,
+                                tokens_per_block=page, kernel_tokens_per_block=128,
+                                prefill_capture_seq_lens=[], num_tokens_per_bs=queries,
+                                is_mtp_draft_update=True,
+                            )
+                        for step in range(3):
+                            expected = prepare(step)
+                            batch = 1 if step == 1 else batch_capacity
+                            expected_batch = [expected]
+                            hidden_batch = [torch.cat((q.flatten(1), appended, kpe), -1)]
+                            for request in range(1, batch):
+                                scale = -0.5 if request % 2 else 0.5
+                                expected_batch.append(reference(
+                                    q * scale, appended * scale, kpe * scale,
+                                    page + 103 + 17 * request, (2 * request + 3, 2 * request + 2),
+                                ))
+                                hidden_batch.append(hidden_batch[0] * scale)
+                            starts = [item[2] for item in expected_batch]
+                            native_table = torch.zeros(batch, table.shape[1], dtype=torch.int32)
+                            for request, item in enumerate(expected_batch):
+                                native_table[request, :2] = torch.tensor(item[3])
+                            inputs.total_tokens = batch * queries
+                            inputs.input_lengths_host = torch.full((batch,), queries, dtype=torch.int32).pin_memory()
+                            inputs.prefix_lengths_host = torch.tensor(starts if queries > 1 else [], dtype=torch.int32).pin_memory()
+                            inputs.sequence_lengths_host = torch.tensor(starts if queries == 1 else [], dtype=torch.int32).pin_memory()
+                            inputs.input_lengths = inputs.input_lengths_host.cuda()
+                            inputs.prefix_lengths = inputs.prefix_lengths_host.cuda()
+                            inputs.sequence_lengths = inputs.sequence_lengths_host.cuda()
+                            inputs.sequence_lengths_plus_1_d = torch.tensor(
+                                [start + 1 for start in starts], dtype=torch.int32, device="cuda"
+                            )
+                            inputs.cu_seqlens = torch.arange(batch + 1, dtype=torch.int32, device="cuda") * queries
+                            inputs.cu_seqlens_host = inputs.cu_seqlens.cpu().pin_memory()
+                            inputs.decode_cu_seqlens_d = inputs.cu_seqlens
+                            inputs.cu_kv_seqlens = torch.tensor(
+                                [0] + [start + queries for start in starts], dtype=torch.int32, device="cuda"
+                            ).cumsum(0, dtype=torch.int32)
+                            inputs.kv_cache_kernel_block_id_host = native_table.pin_memory()
+                            inputs.kv_cache_kernel_block_id_device = native_table.cuda()
+                            replay = PyModelInputs()
+                            replay.input_ids = torch.arange(batch * queries, dtype=torch.int32, device="cuda")
+                            replay.input_hiddens = torch.cat(hidden_batch, 0).to(
+                                torch.float16 if queries == 1 else torch.bfloat16
+                            )
+                            replay.attention_inputs = inputs
+                            padding_page = cache.kv_cache_base[:32].clone() if queries > 1 else None
+                            self.assertTrue(runner.canRun(replay))
+                            if step == 1:
+                                runner.prepareAttentionInputs(replay)
+                            output = runner.forward(replay).hidden_states
+                            if padding_page is not None:
+                                torch.testing.assert_close(cache.kv_cache_base[:32], padding_page, atol=0, rtol=0)
+                            for request, expected in enumerate(expected_batch):
+                                check(output[request * queries : (request + 1) * queries, :heads * 128].view(queries, heads, 128).to(torch.bfloat16), expected)
+                    finally:
+                        del runner
+
+
 @skipUnless(RUN_KERNEL, SKIP_REASON)
 class TokenSpeedPageRrKernelTest(TestCase):
     def _run_history(self, batch, queries, dtype, pdl, head_major=False):

@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <cstring>
 #include <memory>
 #include <numeric>
@@ -120,6 +121,9 @@ public:
                 LoadContext::CheckCancelFunc                            check_cancel_func,
                 int                                                     partition_count,
                 int                                                     partition_id) override {
+        if (!request_block_buffers.empty()) {
+            load_peer_ips_.push_back(ip);
+        }
         load_buffer_requests_.insert(
             load_buffer_requests_.end(), request_block_buffers.begin(), request_block_buffers.end());
         auto context = std::make_shared<LoadContext>(shared_from_this(), false);
@@ -132,6 +136,7 @@ public:
     std::unordered_map<std::string, std::shared_ptr<MemoryBackedCacheStore>> peer_stores_;
     std::vector<std::string>                              store_request_keys_;
     std::vector<std::string>                              load_request_keys_;
+    std::vector<std::string>                              load_peer_ips_;
     std::vector<std::shared_ptr<RequestBlockBuffer>>      store_buffer_requests_;
     std::vector<std::shared_ptr<RequestBlockBuffer>>      load_buffer_requests_;
 };
@@ -427,6 +432,55 @@ protected:
     std::shared_ptr<KVCacheManager>       cache_manager_;
     size_t                                initial_free_blocks_ = 0;
 };
+
+TEST_F(PdSepKVCacheReleaseTest, testConnectFailureWaitsForOtherPeerBeforeReturning) {
+    class DeferredPeerStore: public MemoryBackedCacheStore {
+    public:
+        void load(const std::shared_ptr<RequestBlockBuffer>&,
+                  CacheStoreLoadDoneCallback callback,
+                  const std::string& ip,
+                  uint32_t, uint32_t, uint32_t, int, int) override {
+            if (ip == "127.0.0.1") {
+                callback(false, CacheStoreErrorCode::LoadConnectFailed);
+                return;
+            }
+            callbacks.push_back(std::move(callback));
+            if (callbacks.size() == 3) {
+                pending.set_value();
+            }
+        }
+        std::promise<void> pending;
+        std::vector<CacheStoreLoadDoneCallback> callbacks;
+    };
+
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    allocateAndFinish();
+    auto store = std::make_shared<DeferredPeerStore>();
+    auto pending = store->pending.get_future();
+    EngineInitParams params;
+    params.model_config_.num_layers = 3;
+    DecodeRpcServer server;
+    server.engine_ = std::make_shared<MinimalEngine>(params, cache_manager_);
+    server.maga_init_params_ = params;
+    server.resource_.cache_store = store;
+    grpc::ServerContext context;
+    const std::string request_key = "connect-retry-drain";
+    const std::vector<std::string> peers{"127.0.0.1:12345:12346", "127.0.0.2:12345:12346"};
+    const std::vector<CacheKeyType> keys{100, 101};
+    DecodeRpcServer::LoadKVCacheContext load_context(
+        9020, request_key, peers, keys, stream_->kvCache().groupBlocks(), 0, 1000, 1, 0, &context, 2);
+    auto result = std::async(std::launch::async, [&] { return server.loadCache(load_context); });
+    const auto started = pending.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(started, std::future_status::ready);
+    if (started == std::future_status::ready) {
+        EXPECT_EQ(result.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+        for (auto& callback : store->callbacks) {
+            callback(true, CacheStoreErrorCode::None);
+        }
+    }
+    EXPECT_EQ(result.get().code(), ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED);
+    stream_->releaseResource();
+}
 
 // =============================================================================
 // Test 1: Normal release without PD sep hold
@@ -951,7 +1005,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     }
 }
 
-using EagleDraftTransferCase = std::tuple<bool, int, int, int, int, int, int, int, int>;
+using EagleDraftTransferCase = std::tuple<bool, int, int, int, int, int, int, int, int, int>;
 
 class EagleDraftTransferTest: public PdSepKVCacheReleaseTest,
                               public testing::WithParamInterface<EagleDraftTransferCase> {};
@@ -960,21 +1014,26 @@ class EagleDraftTransferTest: public PdSepKVCacheReleaseTest,
 // distinguish source/destination ranks, P/K views, partial pages and reserve.
 INSTANTIATE_TEST_SUITE_P(CacheView, EagleDraftTransferTest,
     testing::ValuesIn([] {
-        std::vector<EagleDraftTransferCase> cases{{false, 1, 4, 1, 3, 0, 0, 0, 16}};
+        std::vector<EagleDraftTransferCase> cases{{false, 1, 4, 1, 3, 0, 0, 0, 16, 0}};
         for (int source_cp : {1, 8}) {
             for (int destination_cp : {1, 8}) {
                 for (int kernel_page : {2, 4}) {
                     for (int rank : {0, 3, 7}) {
                         for (int length : {15, 16}) {
                             cases.emplace_back(true, source_cp, kernel_page, destination_cp,
-                                               3, 5, rank, rank == 3 ? 7 : (rank == 7 ? 3 : 0), length);
+                                               3, 5, rank, rank == 3 ? 7 : (rank == 7 ? 3 : 0), length, 0);
                         }
                     }
                 }
             }
         }
-        cases.emplace_back(true, 8, 2, 1, 4, 5, 7, 3, 16);
-        cases.emplace_back(true, 8, 2, 8, 1, 5, 3, 7, 15);
+        cases.emplace_back(true, 8, 2, 1, 4, 5, 7, 3, 16, 0);
+        cases.emplace_back(true, 8, 2, 8, 1, 5, 3, 7, 15, 0);
+        for (int prefill_peers : {8, 16}) {
+            for (int dp_rank : {3, 7}) {
+                cases.emplace_back(true, 1, 2, 1, 3, 5, dp_rank, dp_rank, 16, prefill_peers);
+            }
+        }
         return cases;
     }()));
 
@@ -983,9 +1042,11 @@ TEST_P(EagleDraftTransferTest, testEagleDraftLoadUsesIndependentPhysicalGroup) {
     const size_t  draft_model_id = 1;
     const int     block_num      = 4;
 
-    const auto [use_mla, cp_size, kernel_tokens, decode_cp_size, window, reserve, source_rank, destination_rank, token_count] = GetParam();
-    auto config = makeIndependentHybridEagleConfig(use_mla, cp_size, kernel_tokens, window, false, 8);
-    auto decode_config = makeIndependentHybridEagleConfig(use_mla, decode_cp_size, kernel_tokens, window, true, 8);
+    const auto [use_mla, cp_size, kernel_tokens, decode_cp_size, window, reserve, source_rank, destination_rank, token_count, ktp_prefill_peers] = GetParam();
+    const int source_tp = ktp_prefill_peers ? ktp_prefill_peers : 8;
+    const int decode_tp = ktp_prefill_peers ? 1 : 8;
+    auto config = makeIndependentHybridEagleConfig(use_mla, cp_size, kernel_tokens, window, false, source_tp);
+    auto decode_config = makeIndependentHybridEagleConfig(use_mla, decode_cp_size, kernel_tokens, window, true, decode_tp);
     const size_t tail_blocks = 2;
     ASSERT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.group_types,
@@ -1016,11 +1077,16 @@ TEST_P(EagleDraftTransferTest, testEagleDraftLoadUsesIndependentPhysicalGroup) {
     };
 
     ParallelismConfig source_parallel, destination_parallel;
-    source_parallel.tp_size = destination_parallel.tp_size = 8;
+    source_parallel.tp_size = source_tp;
+    destination_parallel.tp_size = decode_tp;
     source_parallel.tp_rank = source_rank;
     source_parallel.role_type = RoleType::PREFILL;
     source_parallel.prefill_cp_config.kv_cache_sharded = cp_size > 1;
-    destination_parallel.tp_rank = destination_rank;
+    destination_parallel.tp_rank = ktp_prefill_peers ? 0 : destination_rank;
+    if (ktp_prefill_peers) {
+        destination_parallel.ktp_size = destination_parallel.dp_size = 8;
+        destination_parallel.ktp_rank = destination_parallel.dp_rank = destination_rank;
+    }
     destination_parallel.role_type = RoleType::DECODE;
     destination_parallel.decode_cp_kv_cache_sharded = decode_cp_size > 1;
     auto prefill_manager = std::make_shared<KVCacheManager>(config, true, nullptr, KVCacheConfig{}, source_parallel);
@@ -1157,11 +1223,11 @@ TEST_P(EagleDraftTransferTest, testEagleDraftLoadUsesIndependentPhysicalGroup) {
     server.resource_.cache_store     = cache_store;
 
     std::vector<std::string> peer_addrs;
-    for (int peer = 0; peer < cp_size; ++peer) {
+    for (int peer = 0; peer < (ktp_prefill_peers ? ktp_prefill_peers : cp_size); ++peer) {
         const auto ip = "127.0.0." + std::to_string(peer + 1);
         peer_addrs.push_back(ip + ":12345:12346");
         auto peer_store = std::make_shared<MemoryBackedCacheStore>();
-        if (peer == 0) {
+        if (peer == (ktp_prefill_peers ? destination_rank : 0)) {
             peer_store->stored_blocks_ = cache_store->stored_blocks_;
         }
         // Other peers deliberately lack the keys: replicated SWA must not fan
@@ -1169,8 +1235,9 @@ TEST_P(EagleDraftTransferTest, testEagleDraftLoadUsesIndependentPhysicalGroup) {
         cache_store->peer_stores_[ip] = std::move(peer_store);
     }
     grpc::ServerContext                 server_context;
+    const std::string request_key = "eagle-independent-draft-pd";
     DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "eagle-independent-draft-pd",
+                                                     request_key,
                                                      peer_addrs,
                                                      cache_keys,
                                                      decode_resource->groupBlocks(),
@@ -1184,6 +1251,10 @@ TEST_P(EagleDraftTransferTest, testEagleDraftLoadUsesIndependentPhysicalGroup) {
     ASSERT_EQ(cache_store->load_buffer_requests_.size(), 1u);
     EXPECT_EQ(cache_store->load_buffer_requests_[0]->getBlocks().size(), tail_blocks * parts_per_block);
     EXPECT_EQ(cache_store->load_request_keys_.size(), 1u);
+    if (ktp_prefill_peers) {
+        EXPECT_EQ(cache_store->load_peer_ips_,
+                  std::vector<std::string>({"127.0.0." + std::to_string(destination_rank + 1)}));
+    }
 
     std::unordered_set<void*> expected_destination_addrs;
     const auto&               decode_draft_blocks = decode_resource->blocks(0, physical_draft_gid);

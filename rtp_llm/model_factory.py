@@ -131,6 +131,7 @@ class ModelFactory:
             "role_type",
             "ffn_disaggregate_config",
             "prefill_cp_config",
+            "decode_cp_kv_cache_sharded",
         ):
             setattr(result, name, getattr(parallelism_config, name))
         result.ktp_size = 1
@@ -303,8 +304,8 @@ class ModelFactory:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
         if model_config.model_type == "kimi_k3":
-            ModelFactory.get_model_cls(model_config.model_type).validate_page_rr_config(
-                model_config, propose_model_config, engine_config.parallelism_config
+            ModelFactory.get_model_cls(model_config.model_type).validate_swa_pd_config(
+                model_config, propose_model_config
             )
 
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs

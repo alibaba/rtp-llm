@@ -1,36 +1,13 @@
-import importlib.util
 import os
-from pathlib import Path
-import sys
-import types
 import unittest
 from unittest import mock
 
-
-compute_ops = types.ModuleType("rtp_llm.ops.compute_ops")
-compute_ops.PyAttentionInputs = type("PyAttentionInputs", (), {})
-compute_ops.PyCacheStorePublishPlan = type("PyCacheStorePublishPlan", (), {})
-compute_ops.PyModelInputs = type("PyModelInputs", (), {})
-rtp_llm_package = types.ModuleType("rtp_llm")
-rtp_llm_package.__path__ = [str(Path(__file__).resolve().parents[4])]
-ops_package = types.ModuleType("rtp_llm.ops")
-ops_package.__path__ = []
-ops_package.CPRotateMethod = type("CPRotateMethod", (), {})
-sys.modules.setdefault("rtp_llm", rtp_llm_package)
-sys.modules.setdefault("rtp_llm.ops", ops_package)
-sys.modules.setdefault("rtp_llm.ops.compute_ops", compute_ops)
-
-module_path = Path(__file__).resolve().parents[1] / "chunk_prefill.py"
-spec = importlib.util.spec_from_file_location("kimi_k3_chunk_prefill_tested", module_path)
-assert spec is not None and spec.loader is not None
-chunk_prefill = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = chunk_prefill
-spec.loader.exec_module(chunk_prefill)
-
-KimiK3ChunkRdmaPublisher = chunk_prefill.KimiK3ChunkRdmaPublisher
-KimiK3ChunkCachePublisher = chunk_prefill.KimiK3ChunkCachePublisher
-chunkwise_rdma_enabled = chunk_prefill.chunkwise_rdma_enabled
-plan_kimi_k3_chunk_rounds = chunk_prefill.plan_kimi_k3_chunk_rounds
+from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
+    KimiK3ChunkRdmaPublisher,
+    KimiK3ChunkCachePublisher,
+    chunkwise_rdma_enabled,
+    plan_kimi_k3_chunk_rounds,
+)
 
 
 def _publish_all(

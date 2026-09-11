@@ -14,7 +14,6 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3MtpWeight, KimiK3Weight
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType, QuantAlgo
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
-from rtp_llm.ops import ParallelismConfig
 
 _MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV = (
     "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES"
@@ -158,33 +157,23 @@ class KimiK3(BaseModel):
     WEIGHT_PREFIX = "language_model."
 
     @staticmethod
-    def validate_page_rr_config(
+    def validate_swa_pd_config(
         model_config: ModelConfig,
         propose_model_config: Optional[ModelConfig],
-        parallelism: ParallelismConfig,
     ) -> None:
-        prefill_cp = parallelism.prefill_cp_config
-        local_page_rr = parallelism.tp_size > 1 and (
-            prefill_cp.kv_cache_sharded
-            or parallelism.decode_cp_kv_cache_sharded
-        )
-        # Decode can receive Page-RR caches even when its own CP size is 1.
-        remote_prefill_page_rr = (
-            prefill_cp.kv_cache_sharded and prefill_cp.prefill_cp_size > 1
-        )
-        if local_page_rr or remote_prefill_page_rr:
-            has_swa = any(
-                HybridAttentionType.SLIDING_WINDOW
-                in config.hybrid_attention_config.hybrid_attention_types
-                for config in (model_config, propose_model_config)
-                if config is not None
-            )
-            if has_swa:
+        for config in (model_config, propose_model_config):
+            if config is None or HybridAttentionType.SLIDING_WINDOW not in (
+                config.hybrid_attention_config.hybrid_attention_types
+            ):
+                continue
+            page_size = config.attn_config.tokens_per_block
+            window = config.attn_config.sliding_window
+            if window <= 0 or page_size < window:
                 raise ValueError(
-                    "Kimi K3 Page-RR CP does not support SWA layers, including "
-                    "SWA Eagle3 drafts. The current draft attention uses the dense "
-                    "MLA path; SWA Page-RR storage and PD transfer semantics "
-                    "are not supported together yet."
+                    "Kimi K3 SWA requires 0 < sliding_window W <= physical page size P "
+                    f"(P={page_size}, W={window}, model={config.model_type}). "
+                    "The current RTP-LLM SWA PD KV-cache transfer mechanism "
+                    "does not support this configuration."
                 )
 
     @staticmethod

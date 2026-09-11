@@ -168,6 +168,14 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_test(
+    name = "kimi_k3_eagle3_cache_integration_test",
+    srcs = ["kimi_k3_eagle3_cache_integration_test.py"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    timeout = "moderate",
+    exec_properties = {"gpu": "B300"},
+    tags = ["B300"],
+)
 
 py_test(
     name = "kimi_k3_fp8_nccl_test",

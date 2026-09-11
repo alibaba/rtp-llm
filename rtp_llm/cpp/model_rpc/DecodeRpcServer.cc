@@ -897,11 +897,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
     const auto destination_cp_mapper = cache_manager->cpSlotMapper();
-    // Receive-side fan-in.  This is deliberately kept even though the P8->D1
-    // sender path is gone: it is still the live path for CP-sharded prefill,
-    // where constructRemoteLoadRequest* adds every peer and peer_cnt stays > 1.
-    // For equal-TP non-CP K3 the sender now adds exactly one peer, so peer_cnt is
-    // 1 and this is unreachable — do not "clean it up" without checking CP.
+    // Equal-TP loads select one peer. Projection-KTP receives all head shards
+    // and chooses a single replicated MLA source for its Decode DP rank.
     const bool hybrid_linear_fan_in =
         use_mla && !is_page_level_rr && peer_cnt > 1 && hasSegmentedLinearCacheGroup(cache_config);
     const bool projection_ktp = hybrid_linear_fan_in
@@ -909,6 +906,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 && maga_init_params_.parallelism_config.get_attn_tp_size() == 1;
     const int mla_source_peer =
         projection_ktp ? static_cast<int>(maga_init_params_.parallelism_config.dp_rank % peer_cnt) : 0;
+    if (projection_ktp) {
+        RTP_LLM_CHECK_WITH_INFO(!destination_cp_mapper || destination_cp_mapper->cpSize() == 1,
+                                "Projection-KTP requires replicated Decode cache placement");
+        RTP_LLM_LOG_INFO("[K3_PD_FAN_IN] request_id=%d peers=%d decode_dp_rank=%ld mla_source_peer=%d "
+                         "kda_partition_count=%d",
+                         load_context.request_id,
+                         peer_cnt,
+                         maga_init_params_.parallelism_config.dp_rank,
+                         mla_source_peer,
+                         peer_cnt);
+    }
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
         if (use_hybrid && layer_id < cfg.layer_to_group_ids.size() && !cfg.layer_to_group_ids[layer_id].empty()) {
@@ -1083,9 +1091,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             return false;
         }
         cache_key_index = block_pos;
-        if (cfg.group_types[gid] == CacheGroupType::FULL && destination_cp_mapper) {
+        const auto group_type = groupType(cfg, gid);
+        if (group_type == CacheGroupType::FULL && destination_cp_mapper) {
             cache_key_index = block_pos * destination_cp_mapper->cpSize() + destination_cp_mapper->cpRank();
-        } else if (cfg.group_types[gid] == CacheGroupType::LINEAR) {
+        } else if (group_type == CacheGroupType::LINEAR) {
             cache_key_index = std::min(
                 (block_pos + 1) * cfg.cache_specs[gid]->seq_size_per_block / cfg.seq_size_per_block - 1,
                 cache_key_count - 1);
@@ -1304,6 +1313,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                                 continue;
                             }
+                            if (projection_ktp && mtp_cache_cfg.use_mla && i != mla_source_peer) {
+                                continue;
+                            }
                             for (size_t block_pos : block_pos_list) {
                                 auto block_id = block_ids[block_pos];
                                 if (isNullBlockIdx(block_id)) {
@@ -1326,8 +1338,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                               layer_id,
                                                               region_name);
                                 const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
-                                const int  local_part_cnt = is_page_level_rr ? 1 : peer_cnt;
-                                const int  local_part_id  = is_page_level_rr ? 0 : i;
+                                const int  local_part_cnt = is_page_level_rr || projection_ktp ? 1 : peer_cnt;
+                                const int  local_part_id  = is_page_level_rr || projection_ktp ? 0 : i;
                                 auto       parts =
                                     (region_name != KVCacheRegionName::DEFAULT) ?
                                               cache_manager->convertIndexToBuffer(
@@ -1398,6 +1410,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         load_contexts.push_back(layer_cache_load_context);
     }
 
+    ErrorInfo aggregate_error = ErrorInfo::OkStatus();
     for (auto& layer_cache_load_context : load_contexts) {
         layer_cache_load_context->waitDone();
         if (layer_cache_load_context->success()) {
@@ -1409,11 +1422,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 request_key.c_str(),
                                 layer_cache_load_context->getErrorInfoString().c_str(),
                                 (load_done_time_us - start_load_time_us) / 1000);
-            return layer_cache_load_context->getErrorInfo();
+            auto error = layer_cache_load_context->getErrorInfo();
+            // A connect retry must not overlap another peer's unfinished load.
+            // Preserve non-retryable errors from any peer while draining the plan.
+            if (aggregate_error.ok() || !isRetryableCacheStoreConnectError(error.code())) {
+                aggregate_error = error;
+            }
         }
     }
 
-    return ErrorInfo::OkStatus();
+    return aggregate_error;
 }
 
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,
