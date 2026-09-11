@@ -1968,6 +1968,20 @@ public final class JavaMockEngineCluster {
         /** Wire the cluster-shared engine_events.jsonl writer (null disables). */
         void setEngineEventLog(EngineEventLog engineEventLog) {
             this.engineEventLog = engineEventLog;
+            cache.setEvictionListener(event -> {
+                if (engineEventLog == null) return;
+                ObjectNode row = OBJECT_MAPPER.createObjectNode();
+                row.put("event", "evict_chain");
+                row.put("engine_name", engineName);
+                row.put("engine_incarnation", engineIncarnation);
+                row.put("engine_address", host + ":" + grpcPort);
+                row.put("timestamp_ms", System.currentTimeMillis());
+                row.put("leaf_key", event.leafKey());
+                for (Long key : event.chainKeys()) row.withArray("chain_keys").add(key);
+                row.put("blocks_freed", event.blocksFreed());
+                row.put("reason", event.reason());
+                engineEventLog.write(row);
+            });
         }
 
         /**

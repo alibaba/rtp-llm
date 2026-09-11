@@ -343,6 +343,7 @@ ok_input_tokens = 0  # is_ok 行 Σinput_len（input_token_tps 分子，完成�
 ok_output_tokens = 0  # is_ok 行 Σoutput_len（output_token_tps 分子，同口径）
 wall_clock_vals = []  # wall_clock_ts（秒）——elapsed_s 主口径窗口
 
+
 # ---- engine per-rid terminal rows: full_e2e + birth-axis exec join ----
 # JavaMockEngineCluster streams one JSONL row per engine-side terminal into
 # engine_events.jsonl (run root, plain or gzip, ONE shared file for all
@@ -375,6 +376,30 @@ wall_clock_vals = []  # wall_clock_ts（秒）——elapsed_s 主口径窗口
 # terminal ts / exec_ms is a hard error, never a silent empty full_e2e
 # column (no-backward-compat: legacy grep-the-stdout runs are no longer
 # supported).
+def validate_eviction_event(event):
+    """Validate cache evidence without treating it as a request completion."""
+    keys = event.get("chain_keys")
+    if (
+        not isinstance(keys, list)
+        or not keys
+        or any(type(key) is not int or not -(2**63) <= key < 2**63 for key in keys)
+        or len(set(keys)) != len(keys)
+        or type(event.get("leaf_key")) is not int
+        or event["leaf_key"] != keys[0]
+        or type(event.get("blocks_freed")) is not int
+        or not 0 < event["blocks_freed"] <= len(keys)
+        or type(event.get("timestamp_ms")) is not int
+        or event["timestamp_ms"] <= 0
+        or event.get("reason")
+        not in {"admission", "growth", "completion", "insertion", "retention"}
+        or any(
+            not isinstance(event.get(key), str) or not event[key]
+            for key in ("engine_name", "engine_incarnation", "engine_address")
+        )
+    ):
+        raise ValueError("invalid evict_chain fields")
+
+
 decode_done_map = {}
 prefill_done_map = {}
 full_e2e_join_miss = 0
@@ -400,6 +425,15 @@ for _evf in _engine_events_candidates:
                 ev = json.loads(line)
             except ValueError:
                 sys.exit(f"ERROR: malformed JSON row in {_evf}: {line[:200]!r}")
+            if isinstance(ev, dict) and ev.get("event") == "evict_chain":
+                try:
+                    validate_eviction_event(ev)
+                except ValueError:
+                    sys.exit(
+                        f"ERROR: invalid evict_chain row in {_evf}: {line[:200]!r}"
+                    )
+                # Pool events have no request ID and must not enter latency joins.
+                continue
             try:
                 _ev_rid = int(ev["rid"])
             except (KeyError, TypeError, ValueError):

@@ -22,9 +22,10 @@ class CacheRetentionQuotaTest {
         MockLruBlockCache.BlockLease lease = cache.acquire(8, keys);
         assertNotNull(lease);
         assertTrue(cache.admit(lease, keys));
-        assertEquals(4, cache.snapshotKeys().size());
-        assertEquals(4, cache.retentionEvictions());
-        assertEquals(4, cache.evictions());
+        // Retention is an upper bound: one eight-block chain is indivisible.
+        assertEquals(0, cache.snapshotKeys().size());
+        assertEquals(8, cache.retentionEvictions());
+        assertEquals(8, cache.evictions());
         assertEquals(12, cache.availableBlocks());
         assertEquals(0, cache.prefixHitBlocks(keys));
     }
