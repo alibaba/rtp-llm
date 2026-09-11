@@ -26,79 +26,26 @@ bool P2PBroadcastClient::init() {
     return true;
 }
 
-std::shared_ptr<P2PBroadcastClient::Result>
-P2PBroadcastClient::broadcast(int64_t                                               request_id,
-                              const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                              const std::vector<std::pair<std::string, uint32_t>>&  decode_transfer_servers,
-                              const std::string&                                    unique_key,
-                              int64_t                                               deadline_ms,
-                              P2PConnectorBroadcastType                             type,
-                              int64_t                                               request_deadline_ms) {
-    // 构建 FunctionRequestPB
-    std::vector<FunctionRequestPB> requests;
-    size_t                         worker_num = tp_broadcast_manager_->workerNum();
-    requests.reserve(worker_num);
-
-    for (size_t i = 0; i < worker_num; ++i) {
-        FunctionRequestPB request;
-        genBroadcastRequest(request,
-                            request_id,
-                            layer_cache_buffers,
-                            decode_transfer_servers,
-                            unique_key,
-                            deadline_ms,
-                            type,
-                            request_deadline_ms);
-        requests.push_back(std::move(request));
-    }
-
-    return broadcastRequests(std::move(requests), unique_key, deadline_ms);
-}
-
-std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::broadcastPerRank(
-    int64_t                                              request_id,
-    const RankLayerCacheBuffers&                         rank_layer_cache_buffers,
-    const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
-    const std::string&                                   unique_key,
-    int64_t                                              deadline_ms,
-    P2PConnectorBroadcastType                            type,
-    int64_t                                              request_deadline_ms,
-    const RankRoutes&                                    rank_routes,
-    uint64_t                                             plan_digest) {
+std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::broadcast(BroadcastParams params) {
     const size_t worker_num = tp_broadcast_manager_->workerNum();
-    if (!rank_routes.empty() && rank_routes.size() != worker_num) {
-        RTP_LLM_LOG_WARNING("broadcastPerRank route count %zu does not match worker count %zu, unique_key=%s",
-                            rank_routes.size(),
+    if (!params.routes.empty() && params.routes.size() != worker_num) {
+        RTP_LLM_LOG_WARNING("broadcast route count %zu does not match worker count %zu, unique_key=%s",
+                            params.routes.size(),
                             worker_num,
-                            unique_key.c_str());
-        return nullptr;
-    }
-    if (rank_layer_cache_buffers.size() != worker_num) {
-        RTP_LLM_LOG_WARNING("broadcastPerRank buffer count %zu does not match worker count %zu, unique_key=%s",
-                            rank_layer_cache_buffers.size(),
-                            worker_num,
-                            unique_key.c_str());
+                            params.unique_key.c_str());
         return nullptr;
     }
 
+    const bool                     per_rank_plan = !params.routes.empty();
     std::vector<FunctionRequestPB> requests;
     requests.reserve(worker_num);
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
         FunctionRequestPB request;
-        genBroadcastRequest(request,
-                            request_id,
-                            rank_layer_cache_buffers[worker_rank],
-                            decode_transfer_servers,
-                            unique_key,
-                            deadline_ms,
-                            type,
-                            request_deadline_ms,
-                            rank_routes.empty() ? std::vector<TransferRoutePB>{} : rank_routes[worker_rank],
-                            plan_digest);
+        genBroadcastRequest(request, params, per_rank_plan ? &params.routes[worker_rank] : nullptr);
         requests.push_back(std::move(request));
     }
 
-    return broadcastRequests(std::move(requests), unique_key, deadline_ms);
+    return broadcastRequests(std::move(requests), params.unique_key, params.deadline_ms);
 }
 
 std::shared_ptr<P2PBroadcastClient::Result>
@@ -146,49 +93,33 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
     return std::make_shared<Result>(unique_key, result);
 }
 
-void P2PBroadcastClient::genBroadcastRequest(
-    FunctionRequestPB&                                    request,
-    int64_t                                               request_id,
-    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-    const std::vector<std::pair<std::string, uint32_t>>&  decode_transfer_servers,
-    const std::string&                                    unique_key,
-    int64_t                                               deadline_ms,
-    P2PConnectorBroadcastType                             type,
-    int64_t                                               request_deadline_ms,
-    const std::vector<TransferRoutePB>&                   routes,
-    uint64_t                                              plan_digest) {
+void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                  request,
+                                             const BroadcastParams&              params,
+                                             const std::vector<TransferRoutePB>* routes_of_worker) {
     auto p2p_request = request.mutable_p2p_request();
 
-    // 设置 layer_blocks
-    for (const auto& layer_cache_buffer : layer_cache_buffers) {
-        auto layer_block = p2p_request->add_layer_blocks();
-        layer_block->set_layer_id(layer_cache_buffer->getLayerId());
-        layer_block->set_cache_tag(layer_cache_buffer->cacheTag());
-        for (const auto& [key, block_id] : layer_cache_buffer->blockIdMap()) {
-            layer_block->add_cache_keys(key);
-            layer_block->add_block_ids(block_id);
-        }
-    }
-
-    // 设置 peer_workers
-    for (const auto& [ip, port] : decode_transfer_servers) {
+    // 传输端点索引表：route 里的 peer_index 在 worker 侧解析成具体端点。
+    for (const auto& [ip, port] : params.peer_workers) {
         auto tp_worker = p2p_request->add_peer_workers();
         tp_worker->set_ip(ip);
         tp_worker->set_cache_store_port(port);
     }
 
-    p2p_request->set_unique_key(unique_key);
-    p2p_request->set_request_id(request_id);
-    p2p_request->set_deadline_ms(deadline_ms);
-    p2p_request->set_request_deadline_ms(request_deadline_ms);
-    p2p_request->set_type(type);
+    p2p_request->set_unique_key(params.unique_key);
+    p2p_request->set_request_id(params.request_id);
+    p2p_request->set_deadline_ms(params.deadline_ms);
+    p2p_request->set_request_deadline_ms(params.request_deadline_ms);
+    p2p_request->set_type(params.type);
 
     // 本 worker 那一份传输计划。为空即「该 worker 无任务」—— 这取代了
     // allow_empty_projection 作为空投影的权威信号。
-    for (const auto& route : routes) {
+    if (routes_of_worker == nullptr) {
+        return;
+    }
+    for (const auto& route : *routes_of_worker) {
         p2p_request->add_routes()->CopyFrom(route);
     }
-    p2p_request->set_plan_digest(plan_digest);
+    p2p_request->set_plan_digest(params.plan_digest);
 }
 
 bool P2PBroadcastClient::Result::success() const {

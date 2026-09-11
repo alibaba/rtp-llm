@@ -1,7 +1,6 @@
 #pragma once
 
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
-#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -15,9 +14,7 @@ namespace rtp_llm {
 /// @brief P2PBroadcastClient 在 rank0 上向所有 TP worker 广播 P2P 传输请求
 class P2PBroadcastClient {
 public:
-    using TpBroadcastResult    = ::rtp_llm::BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
-    using LayerCacheBuffers    = std::vector<std::shared_ptr<LayerCacheBuffer>>;
-    using RankLayerCacheBuffers = std::vector<LayerCacheBuffers>;
+    using TpBroadcastResult = ::rtp_llm::BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
     /// 每个 worker 一份 route 列表，顺序与 worker_addrs 一致。空表示该 worker 无任务。
     using RankRoutes = std::vector<std::vector<TransferRoutePB>>;
 
@@ -61,27 +58,26 @@ public:
         bool                               locally_completed_{false};
     };
 
-    /// @brief 向所有 TP worker 广播 KV cache 传输请求
-    std::shared_ptr<Result> broadcast(int64_t                                               request_id,
-                                      const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                      const std::vector<std::pair<std::string, uint32_t>>&  decode_transfer_servers,
-                                      const std::string&                                    unique_key,
-                                      int64_t                                               deadline_ms,
-                                      P2PConnectorBroadcastType                             type,
-                                      int64_t                                               request_deadline_ms = 0);
+    /// @brief 向所有 TP worker 广播一次 P2P 传输请求。
+    ///
+    /// routes 为空 ⇒ 所有 worker 收到同一份不带传输计划的请求；
+    /// routes 非空 ⇒ 必须与 worker 数等长，第 i 项即第 i 个 worker 的那份计划。
+    /// 「该 worker 无任务」由它自己的 routes[i] 为空表达，worker 侧以此为准。
+    struct BroadcastParams {
+        int64_t     request_id{0};
+        std::string unique_key;
+        /// 物理传输 deadline，同时作为本次广播的 gRPC deadline。
+        int64_t deadline_ms{0};
+        /// 原始用户请求 deadline，必须 > 0 且不早于 deadline_ms。
+        int64_t                   request_deadline_ms{0};
+        P2PConnectorBroadcastType type;
+        /// 传输端点索引表，route 里的 peer_index 指向它。
+        std::vector<std::pair<std::string, uint32_t>> peer_workers;
+        RankRoutes                                    routes;
+        uint64_t                                      plan_digest{0};
+    };
 
-    /// @brief 向每个 worker 发送与其 CP rank 对应的 KV cache block 视图
-    /// rank_layer_cache_buffers 的顺序必须与 worker_addrs 一致。
-    std::shared_ptr<Result>
-    broadcastPerRank(int64_t                                              request_id,
-                     const RankLayerCacheBuffers&                         rank_layer_cache_buffers,
-                     const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
-                     const std::string&                                   unique_key,
-                     int64_t                                              deadline_ms,
-                     P2PConnectorBroadcastType                            type,
-                     int64_t                                              request_deadline_ms = 0,
-                     const RankRoutes&                                    rank_routes = {},
-                     uint64_t                                             plan_digest = 0);
+    std::shared_ptr<Result> broadcast(BroadcastParams params);
 
     /// @brief 向所有 TP worker 广播 cancel 请求
     std::shared_ptr<Result>
@@ -125,16 +121,9 @@ private:
                                               const std::string&             unique_key,
                                               int64_t                        deadline_ms);
 
-    void genBroadcastRequest(FunctionRequestPB&                                    request,
-                             int64_t                                               request_id,
-                             const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                             const std::vector<std::pair<std::string, uint32_t>>&  decode_transfer_servers,
-                             const std::string&                                    unique_key,
-                             int64_t                                               deadline_ms,
-                             P2PConnectorBroadcastType                             type,
-                             int64_t                                               request_deadline_ms,
-                             const std::vector<TransferRoutePB>&                   routes = {},
-                             uint64_t                                              plan_digest = 0);
+    void genBroadcastRequest(FunctionRequestPB&                  request,
+                             const BroadcastParams&              params,
+                             const std::vector<TransferRoutePB>* routes_of_worker);
 
 private:
     std::vector<std::string>          worker_addrs_;

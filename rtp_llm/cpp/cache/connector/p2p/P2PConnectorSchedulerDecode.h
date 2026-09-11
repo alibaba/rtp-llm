@@ -57,19 +57,18 @@ private:
     };
 
     std::optional<AsyncReadCallResults>
-    startAsyncReadCalls(int64_t                                                  request_id,
-                        const std::string&                                       prefill_ip,
-                        uint32_t                                                 prefill_port,
-                        const std::string&                                       unique_key,
-                        int64_t                                                  request_deadline_ms,
-                        int64_t                                                  transfer_deadline_ms,
-                        const P2PBroadcastClient::RankLayerCacheBuffers&         rank_layer_cache_buffers,
+    startAsyncReadCalls(int64_t                                                 request_id,
+                        const std::string&                                      prefill_ip,
+                        uint32_t                                                prefill_port,
+                        const std::string&                                      unique_key,
+                        int64_t                                                 request_deadline_ms,
+                        int64_t                                                 transfer_deadline_ms,
                         const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
-                        ErrorInfo&                                               out_error,
-                        int                                                      prefill_tp_size = 0,
-                        bool                                                     no_transfer = false,
-                        const P2PBroadcastClient::RankRoutes&                    rank_routes = {},
-                        uint64_t                                                 plan_digest = 0);
+                        ErrorInfo&                                              out_error,
+                        int                                                     prefill_tp_size = 0,
+                        bool                                                    no_transfer     = false,
+                        P2PBroadcastClient::RankRoutes                          rank_routes     = {},
+                        uint64_t                                                plan_digest     = 0);
 
     /// @brief 校验对端上报的 CP 片数与本端配置推导出的值一致（设计文档 §3.2.4）。
     ///

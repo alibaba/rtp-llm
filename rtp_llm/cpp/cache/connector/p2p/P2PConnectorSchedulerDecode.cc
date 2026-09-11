@@ -283,10 +283,6 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
                               "transfer plan resolved to no routes")};
         }
     }
-    // layer_blocks 已随 route 逐条下发（TransferRoutePB::layer_blocks），此处只留一个
-    // 与 worker 数等长的空壳以满足 broadcastPerRank 的形状校验。旧的 per-rank 投影
-    // （worker_rank % cp_size）连同 LayerCacheBufferUtil::convert 的调用一并退场。
-    P2PBroadcastClient::RankLayerCacheBuffers rank_layer_cache_buffers(no_transfer ? 0 : worker_num);
 
     auto async_context = std::make_shared<P2PConnectorAsyncReadContext>(resource,
                                                                         unique_key,
@@ -299,12 +295,11 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     auto submit_result = async_read_pool_->pushTask(
         [this,
          request_id,
-         prefill_ip = prefill_addr.first,
+         prefill_ip   = prefill_addr.first,
          prefill_port = prefill_addr.second,
          unique_key,
          request_deadline_ms,
          transfer_deadline_ms,
-         rank_layer_cache_buffers = std::move(rank_layer_cache_buffers),
          rank_routes = std::move(rank_routes),
          plan_digest,
          collector,
@@ -317,18 +312,17 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
 
             ErrorInfo start_error;
             auto      async_calls = startAsyncReadCalls(request_id,
-                                                        prefill_ip,
-                                                        prefill_port,
-                                                        unique_key,
-                                                        request_deadline_ms,
-                                                        transfer_deadline_ms,
-                                                        rank_layer_cache_buffers,
-                                                        collector,
-                                                        start_error,
-                                                        prefill_tp_size,
-                                                        no_transfer,
-                                                        rank_routes,
-                                                        plan_digest);
+                                                   prefill_ip,
+                                                   prefill_port,
+                                                   unique_key,
+                                                   request_deadline_ms,
+                                                   transfer_deadline_ms,
+                                                   collector,
+                                                   start_error,
+                                                   prefill_tp_size,
+                                                   no_transfer,
+                                                   std::move(rank_routes),
+                                                   plan_digest);
             if (!async_calls) {
                 async_context->markStartFailed(start_error);
                 return;
@@ -363,20 +357,19 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     return {async_context, ErrorInfo::OkStatus()};
 }
 
-std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSchedulerDecode::startAsyncReadCalls(
-    int64_t                                                 request_id,
-    const std::string&                                      prefill_ip,
-    uint32_t                                                prefill_port,
-    const std::string&                                      unique_key,
-    int64_t                                                 request_deadline_ms,
-    int64_t                                                 transfer_deadline_ms,
-    const P2PBroadcastClient::RankLayerCacheBuffers&        rank_layer_cache_buffers,
-    const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
-    ErrorInfo&                                              out_error,
-    int                                                     prefill_tp_size,
-    bool                                                    no_transfer,
-    const P2PBroadcastClient::RankRoutes&                   rank_routes,
-    uint64_t                                                plan_digest) {
+std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults>
+P2PConnectorSchedulerDecode::startAsyncReadCalls(int64_t            request_id,
+                                                 const std::string& prefill_ip,
+                                                 uint32_t           prefill_port,
+                                                 const std::string& unique_key,
+                                                 int64_t            request_deadline_ms,
+                                                 int64_t            transfer_deadline_ms,
+                                                 const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
+                                                 ErrorInfo&                                              out_error,
+                                                 int                            prefill_tp_size,
+                                                 bool                           no_transfer,
+                                                 P2PBroadcastClient::RankRoutes rank_routes,
+                                                 uint64_t                       plan_digest) {
 
     const int64_t entry_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("[PD-DIAG] startAsyncReadCalls entry, unique_key=%s, prefill=%s:%u, timestamp_us=%ld",
@@ -420,15 +413,15 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     if (no_transfer) {
         tp_sync_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
     } else {
-        tp_sync_result = tp_broadcast_client_->broadcastPerRank(request_id,
-                                                                rank_layer_cache_buffers,
-                                                                {},
-                                                                unique_key,
-                                                                transfer_deadline_ms,
-                                                                P2PConnectorBroadcastType::READ,
-                                                                request_deadline_ms,
-                                                                rank_routes,
-                                                                plan_digest);
+        P2PBroadcastClient::BroadcastParams params;
+        params.request_id          = request_id;
+        params.unique_key          = unique_key;
+        params.deadline_ms         = transfer_deadline_ms;
+        params.request_deadline_ms = request_deadline_ms;
+        params.type                = P2PConnectorBroadcastType::READ;
+        params.routes              = std::move(rank_routes);
+        params.plan_digest         = plan_digest;
+        tp_sync_result             = tp_broadcast_client_->broadcast(std::move(params));
     }
     const int64_t broadcast_cost_us = currentTimeUs() - broadcast_start_us;
     if (broadcast_cost_us >= 100000) {

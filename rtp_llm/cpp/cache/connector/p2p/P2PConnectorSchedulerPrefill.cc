@@ -105,25 +105,18 @@ P2PConnectorSchedulerPrefill::sendKVCache(const std::string&                    
         rank_routes = buildPrefillRankRoutes(plan->plan, worker_num);
     }
 
-    // broadcastPerRank 要求 buffer 数组与 worker 数等长；prefill 侧的 layer_blocks 不上线
-    // （worker 用自身投影），故只传等长空壳。
-    P2PBroadcastClient::RankLayerCacheBuffers rank_layer_cache_buffers(no_transfer ? 0 : worker_num);
-    auto result = no_transfer ? tp_broadcast_client_->broadcast(request_id,
-                                                               {},
-                                                               decode_transfer_servers,
-                                                               unique_key,
-                                                               deadline_ms,
-                                                               broadcast_type,
-                                                               request_deadline_ms) :
-                                tp_broadcast_client_->broadcastPerRank(request_id,
-                                                                      rank_layer_cache_buffers,
-                                                                      decode_transfer_servers,
-                                                                      unique_key,
-                                                                      deadline_ms,
-                                                                      broadcast_type,
-                                                                      request_deadline_ms,
-                                                                      rank_routes,
-                                                                      plan_digest);
+    P2PBroadcastClient::BroadcastParams params;
+    params.request_id          = request_id;
+    params.unique_key          = unique_key;
+    params.deadline_ms         = deadline_ms;
+    params.request_deadline_ms = request_deadline_ms;
+    params.type                = broadcast_type;
+    params.peer_workers        = decode_transfer_servers;
+    // no_transfer 时 rank_routes 为空 ⇒ 所有 worker 收到同一份不带传输计划的请求。
+    params.routes      = std::move(rank_routes);
+    params.plan_digest = plan_digest;
+
+    auto result = tp_broadcast_client_->broadcast(std::move(params));
     if (!result) {
         std::string error_msg = "sendKVCache: broadcast failed, request_id: " + std::to_string(request_id);
         RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
