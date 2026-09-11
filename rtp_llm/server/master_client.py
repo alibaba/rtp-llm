@@ -215,9 +215,10 @@ class MasterClient:
                 elapsed,
             )
             if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                await self._best_effort_cancel(
-                    stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
-                )
+                if not request_pb.vit_only:
+                    await self._best_effort_cancel(
+                        stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
+                    )
                 await self._close_channel(target)
                 raise FtRuntimeException(
                     exception_type=ExceptionType.DEADLINE_EXCEEDED,
@@ -226,7 +227,7 @@ class MasterClient:
             await self._close_channel(target)
             return None
         except asyncio.CancelledError:
-            if "stub" in locals():
+            if "stub" in locals() and not request_pb.vit_only:
                 await self._best_effort_cancel(
                     stub, request_id, CANCEL_REASON_CLIENT_CANCELLED
                 )
@@ -264,6 +265,8 @@ class MasterClient:
         input: GenerateInput,
         request_id: int,
         input_pb: Optional["GenerateInputPB"] = None,
+        vit_only: bool = False,
+        timeout_s: Optional[float] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -284,7 +287,10 @@ class MasterClient:
         ) or getattr(input.generate_config, "timeout_ms", None)
         if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
-        timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+        if timeout_s is None:
+            timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+        else:
+            ttft_timeout_ms = max(1, int(timeout_s * 1000))
 
         gc = input.generate_config
         api_key = self._extract_api_key(input)
@@ -302,8 +308,9 @@ class MasterClient:
             api_key=api_key,
             cache_key_block_size=cache_key_block_size,
             priority=priority,
+            vit_only=vit_only,
         )
-        if input_pb is not None:
+        if input_pb is not None and not vit_only:
             request_pb.generate_input = input_pb.SerializeToString()
 
         response = await self._send_schedule_request(
@@ -323,7 +330,8 @@ class MasterClient:
         if response is None:
             return FlexlbResponse.connection_failed_response()
 
-        self.latest_queue_length = response.queue_length
+        if not vit_only:
+            self.latest_queue_length = response.queue_length
 
         if response.code != SUCCESS_CODE:
             admission_reject_reason = _admission_reject_reason_from_response(response)
@@ -355,6 +363,15 @@ class MasterClient:
             )
             for s in response.server_status
         ]
+        if vit_only and (
+            len(role_addrs) != 1
+            or role_addrs[0].role != RoleType.VIT
+            or response.enqueued_by_master
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "ViT-only Schedule must return one VIT worker without enqueue",
+            )
         return FlexlbResponse.ok(
             role_addrs,
             enqueued_by_master=response.enqueued_by_master,

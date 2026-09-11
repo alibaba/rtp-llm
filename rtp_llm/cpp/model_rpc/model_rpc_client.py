@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import os
 import time
 from typing import AsyncGenerator
 
@@ -514,6 +515,15 @@ class ModelRpcClient(object):
 
             grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
             if use_fetch_response:
+                if os.environ.get("FLEXLB_EXPECT_FETCH_RESPONSE", "").lower() in (
+                    "1",
+                    "true",
+                ):
+                    logging.info(
+                        "FLEXLB_EXPECT_FETCH_RESPONSE request_id=%s target=%s",
+                        input_pb.request_id,
+                        target_address,
+                    )
                 response_iterator = stub.FetchResponse(
                     FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
                 )

@@ -72,6 +72,37 @@ def init_vit_group_args(parser, vit_config):
             default=default,
             help=description,
         )
+    for name, description in (
+        (
+            "mm_transport_mode",
+            "ViT embedding transport: grpc (default), auto, or rdma (requires provider)",
+        ),
+        (
+            "mm_rdma_bind_ip",
+            "Routable ViT RDMA address; empty uses the host bind address",
+        ),
+        ("mm_rdma_port", "ViT RDMA listen port; 0 selects a port"),
+        ("mm_rdma_connect_timeout_ms", "RDMA connection timeout in milliseconds"),
+        (
+            "mm_rdma_read_timeout_ms",
+            "RDMA READ timeout, also capped by the RPC deadline",
+        ),
+        ("mm_rdma_release_timeout_ms", "Best-effort slot release RPC timeout"),
+        (
+            "mm_rdma_max_inflight_bytes",
+            "Hard per-process registered GPU or pinned CPU pool cap",
+        ),
+        ("mm_rdma_max_slot_bytes", "Maximum bytes per image RDMA slot"),
+    ):
+        default = getattr(vit_config, name)
+        vit_group.add_argument(
+            "--" + name,
+            env_name=name.upper(),
+            bind_to=(vit_config, name),
+            type=type(default),
+            default=default,
+            help=description,
+        )
     vit_group.add_argument(
         "--vit_separation",
         env_name="VIT_SEPARATION",

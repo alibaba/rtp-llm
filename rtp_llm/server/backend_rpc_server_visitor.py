@@ -11,6 +11,10 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+)
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
@@ -28,6 +32,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     RequestInfo,
 )
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.time_util import Timer
 
 if TYPE_CHECKING:
@@ -72,6 +77,7 @@ class BackendRPCServerVisitor:
         parallelism_config=None,
         prefill_cp_config=None,
         source_role: str = "frontend",
+        dsv4_image_token_id: Optional[int] = None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -94,6 +100,11 @@ class BackendRPCServerVisitor:
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
         self.source_role = source_role
+        self.dsv4_image_token_id = (
+            dsv4_image_token_id
+            if vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
+            else None
+        )
         self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
@@ -112,6 +123,9 @@ class BackendRPCServerVisitor:
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
+        )
+        self._vit_channel_pool = GrpcHostChannelPool(
+            options=list(client_config.items())
         )
 
         host_args = HostServiceArgs.create_from_env()
@@ -147,6 +161,7 @@ class BackendRPCServerVisitor:
     async def close(self):
         await self.model_rpc_client.close()
         await self.master_client.close()
+        await self._vit_channel_pool.close()
 
     def set_request_id_factory(self, factory: Callable[[], int]) -> None:
         self.request_id_factory = factory
@@ -247,21 +262,109 @@ class BackendRPCServerVisitor:
             if len(input.token_ids.shape) == 2
             else input.token_ids.tolist()
         )
-        # Keep hash generation at the physical KV block granularity. Page-RR
-        # routing samples canonical keys from this full logical-block key list;
-        # it must not recompute request hashes with the virtual block size.
-        full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
-        block_cache_keys = self._route_cache_keys(full_block_cache_keys)
-        self._report_recent_cache_key_metrics(block_cache_keys)
-        input_pb = trans_input(input)
-
+        selected_vit = None
+        routing_input = input
+        schedule_kwargs = {}
         try:
+            image_token_id = getattr(self, "dsv4_image_token_id", None)
+            if image_token_id is not None and input.mm_inputs:
+                timeout_ms = input.generate_config.ttft_timeout_ms
+                if timeout_ms is None or timeout_ms <= 0:
+                    timeout_ms = input.generate_config.timeout_ms
+                if timeout_ms is None or timeout_ms <= 0:
+                    timeout_ms = (
+                        self.master_client.master_config.master_default_timeout_ms
+                    )
+                deadline = time.monotonic() + timeout_ms / 1000.0
+
+                def remaining_timeout():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise FtRuntimeException(
+                            ExceptionType.DEADLINE_EXCEEDED,
+                            "ViT and P/D routing deadline exceeded",
+                        )
+                    return remaining
+
+                image_locs = [
+                    i
+                    for i, token_id in enumerate(token_ids)
+                    if token_id == image_token_id
+                ]
+                if len(image_locs) != len(input.mm_inputs):
+                    raise FtRuntimeException(
+                        ExceptionType.INVALID_PARAMS,
+                        "DeepSeek image placeholders and inputs must match",
+                    )
+                for i, (loc, mm_input) in enumerate(zip(image_locs, input.mm_inputs)):
+                    phase = loc if i == 0 else 1 + loc - (image_locs[i - 1] + 1)
+                    mm_input.config = replace(
+                        mm_input.config, image_block_start_mod4=phase % 4
+                    )
+
+                vit_route = await self.master_client.get_backend_role_addrs(
+                    block_cache_keys=[],
+                    cache_key_block_size=self._cache_key_block_size(),
+                    input=input,
+                    request_id=input.request_id,
+                    vit_only=True,
+                    timeout_s=remaining_timeout(),
+                )
+                if not vit_route.is_ok:
+                    return vit_route
+                selected_vit = vit_route.role_addrs[0]
+                raw_input = replace(
+                    input,
+                    generate_config=input.generate_config.model_copy(
+                        update={"role_addrs": [selected_vit]}
+                    ),
+                )
+                input_pb = trans_input(raw_input)
+                image_token_ids = await self._get_vit_token_ids(
+                    selected_vit, input_pb, remaining_timeout()
+                )
+                expanded = []
+                previous_end = 0
+                for loc, image_ids in zip(image_locs, image_token_ids):
+                    expanded.extend(token_ids[previous_end:loc])
+                    expanded.extend(image_ids)
+                    previous_end = loc + 1
+                expanded.extend(token_ids[previous_end:])
+                if len(expanded) >= self.max_seq_len:
+                    raise FtRuntimeException(
+                        ExceptionType.LONG_PROMPT_ERROR,
+                        "DeepSeek image routing length exceeds max_seq_len",
+                    )
+                # Only the routing estimate uses these IDs. Enqueue receives
+                # raw tokens/URLs and the selected ViT; P hashes actual features.
+                routing_input = replace(
+                    raw_input, token_ids=torch.tensor(expanded, dtype=torch.int32)
+                )
+                token_ids = expanded
+                route_logger.info(
+                    "ViT routing metadata request_id=%s vit=%s raw_tokens=%s routing_tokens=%s",
+                    input.request_id,
+                    selected_vit.ip,
+                    raw_input.prompt_length,
+                    len(expanded),
+                )
+                schedule_kwargs["timeout_s"] = remaining_timeout()
+            else:
+                input_pb = trans_input(input)
+
+            # Hash physical blocks before page-RR samples canonical route keys.
+            full_block_cache_keys = get_block_cache_keys(
+                token_ids, self.seq_size_per_block
+            )
+            block_cache_keys = self._route_cache_keys(full_block_cache_keys)
+            self._report_recent_cache_key_metrics(block_cache_keys)
             route_result = await self.master_client.get_backend_role_addrs(
                 block_cache_keys=block_cache_keys,
                 cache_key_block_size=self._cache_key_block_size(),
-                input=input,
+                input=routing_input,
                 request_id=input.request_id,
                 input_pb=input_pb,
+                **schedule_kwargs,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -273,8 +376,24 @@ class BackendRPCServerVisitor:
             raise
 
         if route_result.is_ok:
-            input.generate_config.role_addrs = route_result.role_addrs
+            input.generate_config.role_addrs = (
+                [selected_vit]
+                + [
+                    addr
+                    for addr in route_result.role_addrs
+                    if addr.role != RoleType.VIT
+                ]
+                if selected_vit is not None
+                else route_result.role_addrs
+            )
             input.enqueued_by_master = route_result.enqueued_by_master
+            if selected_vit is not None:
+                route_logger.info(
+                    "ViT routing P/D scheduled request_id=%s vit=%s enqueued_by_master=%s",
+                    input.request_id,
+                    selected_vit.ip,
+                    input.enqueued_by_master,
+                )
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,
@@ -317,6 +436,23 @@ class BackendRPCServerVisitor:
             {"error_code": error_code},
         )
         return route_result
+
+    async def _get_vit_token_ids(self, vit: RoleAddr, input_pb, timeout_s: float):
+        request = MultimodalInputsPB(metadata_only=True)
+        request.multimodal_inputs.extend(input_pb.multimodal_inputs)
+        channel = await self._vit_channel_pool.get(f"{vit.ip}:{vit.grpc_port}")
+        response = await MultimodalRpcServiceStub(channel).RemoteMultimodalEmbedding(
+            request, timeout=timeout_s
+        )
+        outputs = response.multimodal_outputs
+        if len(outputs) != len(request.multimodal_inputs) or any(
+            not output.token_ids for output in outputs
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "ViT metadata must contain non-empty token IDs for every image",
+            )
+        return [list(output.token_ids) for output in outputs]
 
     def _report_recent_cache_key_metrics(self, block_cache_keys: List[int]) -> None:
         try:
@@ -705,6 +841,12 @@ def create_backend_rpc_server_visitor(
     if py_env_configs.vit_config:
         vit_separation = py_env_configs.vit_config.vit_separation
 
+    dsv4_image_token_id = None
+    if getattr(model_config, "model_type", None) == "deepseek_v4":
+        mm_params = model_config.mm_related_params
+        if mm_params.config.get("vision_n_layers", 0) > 0:
+            dsv4_image_token_id = mm_params.special_token_ids["image_token_id"]
+
     return BackendRPCServerVisitor(
         max_seq_len=model_config.max_seq_len,
         seq_size_per_block=model_config.attn_config.tokens_per_block,
@@ -718,4 +860,5 @@ def create_backend_rpc_server_visitor(
         parallelism_config=engine_config.parallelism_config,
         prefill_cp_config=py_env_configs.prefill_cp_config,
         source_role=source_role,
+        dsv4_image_token_id=dsv4_image_token_id,
     )

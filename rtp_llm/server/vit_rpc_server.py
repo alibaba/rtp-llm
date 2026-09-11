@@ -12,7 +12,9 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ROLE_TYPE_VIT,
     CacheStatusPB,
+    EmptyPB,
     MMPreprocessConfigPB,
+    MMRdmaDescPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     MultimodalOutputsPB,
@@ -24,7 +26,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.ops import VitSeparation, get_multimodal_feature_hash
+from rtp_llm.ops import MMRdmaEncoderOp, VitSeparation, get_multimodal_feature_hash
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
@@ -62,30 +64,62 @@ def trans_input(mutlimodal_inputs_pb: MultimodalInputsPB):
     return urls, types, tensors, configs
 
 
-def trans_output(res: MMEmbeddingRes, metadata_only=False):
+def trans_output(res: MMEmbeddingRes, metadata_only=False, rdma_encoder=None):
     output_pb = MultimodalOutputsPB()
+    handles = []
     if res.position_ids is not None and len(res.position_ids) != len(res.embeddings):
         raise ValueError("ViT embedding/position counts do not match")
-    for i in range(len(res.embeddings)):
-        if metadata_only:
-            output_pb.multimodal_outputs.add(
-                token_ids=get_multimodal_feature_hash(res.embeddings[i]).tolist()
+    try:
+        for i, embedding in enumerate(res.embeddings):
+            if metadata_only:
+                output_pb.multimodal_outputs.add(
+                    token_ids=get_multimodal_feature_hash(embedding).tolist()
+                )
+                continue
+            output = output_pb.multimodal_outputs.add()
+            descriptor = (
+                rdma_encoder.export_embedding(embedding) if rdma_encoder else b""
             )
-            continue
-        output = MultimodalOutputPB(
-            multimodal_embedding=trans_from_tensor(res.embeddings[i]),
-        )
-        if res.position_ids is not None and res.position_ids[i] is not None:
-            output.multimodal_pos_id.CopyFrom(trans_from_tensor(res.position_ids[i]))
-        output_pb.multimodal_outputs.append(output)
-    return output_pb
+            if descriptor:
+                output.output_rdma.CopyFrom(MMRdmaDescPB.FromString(descriptor))
+                handles.append(output.output_rdma.handle)
+            else:
+                output.multimodal_embedding.CopyFrom(trans_from_tensor(embedding))
+            if res.position_ids is not None and res.position_ids[i] is not None:
+                output.multimodal_pos_id.CopyFrom(
+                    trans_from_tensor(res.position_ids[i])
+                )
+        return output_pb
+    except BaseException:
+        if handles:
+            rdma_encoder.release(handles)
+        raise
 
 
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
-    def __init__(self, mm_process_engine: MMProcessEngine):
+    def __init__(self, mm_process_engine: MMProcessEngine, rdma_encoder=None):
         self.engine = mm_process_engine
         self._status_lock = threading.Lock()
         self._active = 0
+        self.rdma_encoder = rdma_encoder
+        config = getattr(mm_process_engine, "vit_config", None)
+        self.max_requests = (
+            getattr(config, "vit_max_concurrent_requests", 32)
+            if getattr(mm_process_engine, "_scheduler", None) is not None
+            else 1
+        )
+        if (
+            rdma_encoder is None
+            and getattr(config, "mm_transport_mode", "grpc") != "grpc"
+        ):
+            self.rdma_encoder = MMRdmaEncoderOp(config)
+            if not self.rdma_encoder.enabled():
+                self.rdma_encoder = None
+
+    def ReleaseEmbedding(self, request, context):
+        if self.rdma_encoder is not None:
+            self.rdma_encoder.release(list(request.handle))
+        return EmptyPB()
 
     def GetWorkerStatus(self, request, context):
         with self._status_lock:
@@ -111,7 +145,11 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         remaining = context.time_remaining()
         deadline = time.monotonic() + remaining if remaining is not None else None
         with self._status_lock:
+            if self._active >= self.max_requests:
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "ViT worker is busy")
             self._active += 1
+        output = None
+        returned = False
         try:
             urls, types, tensors, configs = trans_input(multimodal_inputs)
             res: MMEmbeddingRes = self.engine.submit(
@@ -134,7 +172,11 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 ):
                     raise ValueError("ViT returned an invalid embedding shape or dtype")
             self.engine._check_request(deadline, cancelled)
-            output = trans_output(res, multimodal_inputs.metadata_only)
+            output = trans_output(
+                res,
+                multimodal_inputs.metadata_only,
+                self.rdma_encoder if multimodal_inputs.support_rdma else None,
+            )
             self.engine._check_request(deadline, cancelled)
             context.set_trailing_metadata(
                 (
@@ -142,6 +184,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     ("vit-gpu-forwards", str(res.gpu_forwards)),
                 )
             )
+            logging.info(
+                "ViT RPC completed: metadata_only=%s images=%d max_gpu_batch_images=%d",
+                multimodal_inputs.metadata_only,
+                len(res.embeddings),
+                res.max_batch_size,
+            )
+            returned = True
             return output
         except futures.CancelledError as error:
             context.abort(grpc.StatusCode.CANCELLED, str(error))
@@ -153,13 +202,24 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             logging.exception("ViT request failed")
             context.abort(grpc.StatusCode.INTERNAL, str(error))
         finally:
+            # Before returning the response no consumer can have issued a READ.
+            # After return, lost responses remain bounded in the pool until restart.
+            if output is not None and not returned and self.rdma_encoder is not None:
+                self.rdma_encoder.release(
+                    [
+                        item.output_rdma.handle
+                        for item in output.multimodal_outputs
+                        if item.HasField("output_rdma")
+                    ]
+                )
             with self._status_lock:
                 self._active -= 1
 
 
-def vit_start_server():
-    py_env_configs = setup_args()
-    setup_and_configure_server(py_env_configs)
+def vit_start_server(py_env_configs=None):
+    if py_env_configs is None:
+        py_env_configs = setup_args()
+        setup_and_configure_server(py_env_configs)
     if py_env_configs.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
         raise ValueError("The standalone ViT server requires VIT_SEPARATION=1")
     if (
@@ -216,16 +276,19 @@ def vit_start_server():
     if concurrency <= 0:
         engine.stop()
         raise ValueError("vit_max_concurrent_requests must be positive")
-    executor = futures.ThreadPoolExecutor(max_workers=concurrency)
+    service = MultimodalRpcServer(engine)
+    # A full embedding queue must leave room for releasing registered slots.
+    rpc_concurrency = concurrency + (2 if service.rdma_encoder is not None else 0)
+    executor = futures.ThreadPoolExecutor(max_workers=rpc_concurrency)
     server = grpc.server(
         executor,
-        maximum_concurrent_rpcs=concurrency,
+        maximum_concurrent_rpcs=rpc_concurrency,
         options=[
             ("grpc.max_send_message_length", 1024 * 1024 * 1024),
             ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
         ],
     )
-    add_MultimodalRpcServiceServicer_to_server(MultimodalRpcServer(engine), server)
+    add_MultimodalRpcServiceServicer_to_server(service, server)
     logging.info(f"rpc_server_port: {py_env_configs.server_config.rpc_server_port}")
     server.add_insecure_port(f"0.0.0.0:{py_env_configs.server_config.rpc_server_port}")
     server.start()

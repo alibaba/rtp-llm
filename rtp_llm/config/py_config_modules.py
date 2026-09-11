@@ -244,6 +244,14 @@ class VitConfig:
         self.vit_max_batch_images: int = 8
         self.vit_max_batch_patches: int = 32768
         self.vit_max_concurrent_requests: int = 32
+        self.mm_transport_mode: str = "grpc"
+        self.mm_rdma_bind_ip: str = ""
+        self.mm_rdma_port: int = 0
+        self.mm_rdma_connect_timeout_ms: int = 250
+        self.mm_rdma_read_timeout_ms: int = 30000
+        self.mm_rdma_release_timeout_ms: int = 1000
+        self.mm_rdma_max_inflight_bytes: int = 1 << 30
+        self.mm_rdma_max_slot_bytes: int = 1 << 30
         self.use_igraph_cache: bool = True
         self.igraph_search_dom: str = "com.taobao.search.igraph.common"
         self.igraph_vipserver: int = 0
@@ -263,6 +271,14 @@ class VitConfig:
             f"vit_max_batch_images: {self.vit_max_batch_images}\n"
             f"vit_max_batch_patches: {self.vit_max_batch_patches}\n"
             f"vit_max_concurrent_requests: {self.vit_max_concurrent_requests}\n"
+            f"mm_transport_mode: {self.mm_transport_mode}\n"
+            f"mm_rdma_bind_ip: {self.mm_rdma_bind_ip}\n"
+            f"mm_rdma_port: {self.mm_rdma_port}\n"
+            f"mm_rdma_connect_timeout_ms: {self.mm_rdma_connect_timeout_ms}\n"
+            f"mm_rdma_read_timeout_ms: {self.mm_rdma_read_timeout_ms}\n"
+            f"mm_rdma_release_timeout_ms: {self.mm_rdma_release_timeout_ms}\n"
+            f"mm_rdma_max_inflight_bytes: {self.mm_rdma_max_inflight_bytes}\n"
+            f"mm_rdma_max_slot_bytes: {self.mm_rdma_max_slot_bytes}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"

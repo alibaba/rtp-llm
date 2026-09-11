@@ -64,6 +64,9 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
+    // Select only a vision worker without admission, enqueue or KV reservation.
+    // The same request_id may then be used for the normal P/D schedule.
+    bool vit_only = 16;
 }
 
 message FlexlbServerStatusPB {

@@ -325,8 +325,8 @@ struct SpeculativeExecutionConfig {
     std::string     checkpoint_path               = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
-    int64_t         sp_dspark_mask_token_id       = -1;
-    std::string     to_string() const;
+    int64_t     sp_dspark_mask_token_id = -1;
+    std::string to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -334,8 +334,17 @@ struct SpeculativeExecutionConfig {
 };
 
 struct VitConfig {
-    VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
-    std::string   to_string() const;
+    VitSeparation vit_separation             = VitSeparation::VIT_SEPARATION_LOCAL;
+    std::string   mm_transport_mode          = "grpc";
+    std::string   mm_rdma_bind_ip            = "";
+    int           mm_rdma_port               = 0;
+    int           mm_rdma_connect_timeout_ms = 250;
+    int64_t       mm_rdma_read_timeout_ms    = 30000;
+    int64_t       mm_rdma_release_timeout_ms = 1000;
+    int64_t       mm_rdma_max_inflight_bytes = 1 << 30;
+    int64_t       mm_rdma_max_slot_bytes     = 1 << 30;
+
+    std::string to_string() const;
 };
 
 struct CacheStoreConfig {

@@ -286,6 +286,8 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
     }
     auto prepared_request = std::make_unique<GenerateInputPB>(*prefill_context.rpc_context.request);
+    // Decode consumes the expanded IDs and transferred KV, not image inputs.
+    prepared_request->clear_multimodal_inputs();
     prepared_request->clear_token_ids();
     auto* ids_ptr = input->input_ids.data_ptr<int32_t>();
     for (int64_t i = 0; i < input->input_ids.numel(); i++) {

@@ -391,7 +391,11 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
         }
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
+        List<EngineRpcService.RoleAddrPB> visionAddrs = config.getRoleAddrsList().stream()
+                .filter(addr -> RoleTypeProtoConverter.fromRoleAddr(addr) == RoleType.VIT)
+                .toList();
         config.clearRoleAddrs();
+        config.addAllRoleAddrs(visionAddrs);
         addRoleAddr(config, item.prefill());
         addRoleAddr(config, item.decode());
         // Pass the normalized Auto-TPM priority through to the engine

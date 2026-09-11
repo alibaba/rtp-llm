@@ -35,6 +35,7 @@ import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -137,6 +138,23 @@ class DefaultRouterTest {
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
+    }
+
+    @Test
+    void vitOnlyDoesNotSelectOrReserveLanguageModelWorkers() {
+        when(request.isVitOnly()).thenReturn(true);
+        ServerStatus vision = new ServerStatus();
+        vision.setSuccess(true);
+        vision.setRole(RoleType.VIT);
+        when(vitStrategy.select(eq(balanceContext), eq(RoleType.VIT), isNull()))
+                .thenReturn(vision);
+
+        Response response = defaultRouter.route(balanceContext);
+
+        assertEquals(java.util.List.of(vision), response.getServerStatus());
+        verify(prefillStrategy, never()).select(any(), any(), any());
+        verify(decodeStrategy, never()).select(any(), any(), any());
+        verify(fusionStrategy, never()).select(any(), any(), any());
     }
 
     @Test

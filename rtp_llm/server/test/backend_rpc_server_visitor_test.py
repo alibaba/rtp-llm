@@ -3,12 +3,19 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import torch
+
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    GenerateInputPB,
+    MultimodalOutputPB,
+    MultimodalOutputsPB,
+)
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
@@ -16,6 +23,8 @@ from rtp_llm.server.backend_rpc_server_visitor import (
 )
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
+from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.utils.multimodal_util import MultimodalInput
 
 
 class _FakeTokenIds:
@@ -60,6 +69,11 @@ class _FakeInput:
     prompt_length: int = 17
 
     def __init__(self, is_streaming=False, **generate_config_kwargs):
+        input_kwargs = {
+            name: generate_config_kwargs.pop(name)
+            for name in tuple(generate_config_kwargs)
+            if name in self.__dataclass_fields__
+        }
         if isinstance(is_streaming, _FakeGenerateConfig):
             self.generate_config = is_streaming
         else:
@@ -71,6 +85,8 @@ class _FakeInput:
         self.headers = None
         self.enqueued_by_master = False
         self.prompt_length = 17
+        for name, value in input_kwargs.items():
+            setattr(self, name, value)
 
 
 class _FakeRouteTokenIds:
@@ -83,6 +99,7 @@ class _FakeRouteTokenIds:
 class _FakeRouteInput:
     request_id = 456
     token_ids = _FakeRouteTokenIds()
+    prompt_length = 3
 
     def __init__(self):
         self.generate_config = _FakeGenerateConfig()
@@ -701,6 +718,120 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
             ExceptionType.PRIORITY_PREEMPTED,
         )
         self.assertEqual(client.attempts, 2)
+
+
+class DeepSeekVisionMasterRoutingTest(unittest.IsolatedAsyncioTestCase):
+    def make_visitor(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.dsv4_image_token_id = 99
+        visitor.max_seq_len = 100
+        visitor.seq_size_per_block = 4
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
+        visitor._report_recent_cache_key_metrics = Mock()
+        self.vit = RoleAddr(
+            role=RoleType.VIT, ip="chosen-vit", http_port=81, grpc_port=82
+        )
+        self.prefill = RoleAddr(
+            role=RoleType.PREFILL, ip="prefill", http_port=91, grpc_port=92
+        )
+        other_vit = self.vit.model_copy(update={"ip": "other-vit"})
+        visitor.master_client = SimpleNamespace(
+            master_config=SimpleNamespace(master_default_timeout_ms=1000),
+            get_backend_role_addrs=AsyncMock(
+                side_effect=[
+                    FlexlbResponse.ok([self.vit]),
+                    FlexlbResponse.ok(
+                        [self.prefill, other_vit], enqueued_by_master=True
+                    ),
+                ]
+            ),
+        )
+        visitor._get_vit_token_ids = AsyncMock(
+            return_value=[[41, 42, 43, 44], [51, 52, 53, 54, 55, 56]]
+        )
+        return visitor
+
+    def make_input(self):
+        return GenerateInput(
+            request_id=88,
+            token_ids=torch.tensor([7, 99, 8, 9, 99, 10], dtype=torch.int32),
+            mm_inputs=[MultimodalInput("first.png"), MultimodalInput("second.png")],
+            generate_config=GenerateConfig(timeout_ms=1000, ttft_timeout_ms=1000),
+        )
+
+    async def test_two_stage_hint_keeps_raw_enqueue_and_selected_vit(self):
+        visitor = self.make_visitor()
+        request = self.make_input()
+        raw_ids = request.token_ids.clone()
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor.report"):
+            self.assertIsNone(await visitor.get_master_route_addrs(request))
+
+        calls = visitor.master_client.get_backend_role_addrs.await_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].kwargs["vit_only"])
+        self.assertEqual(calls[0].kwargs["request_id"], calls[1].kwargs["request_id"])
+        second = calls[1].kwargs
+        self.assertEqual(second["input"].prompt_length, 14)
+        self.assertEqual(
+            second["input"].token_ids.tolist(),
+            [7, 41, 42, 43, 44, 8, 9, 51, 52, 53, 54, 55, 56, 10],
+        )
+        self.assertEqual(list(second["input_pb"].token_ids), raw_ids.tolist())
+        self.assertTrue(torch.equal(request.token_ids, raw_ids))
+        self.assertEqual(
+            [
+                item.mm_preprocess_config.image_block_start_mod4
+                for item in second["input_pb"].multimodal_inputs
+            ],
+            [1, 3],
+        )
+        self.assertIsNot(request.mm_inputs[0].config, request.mm_inputs[1].config)
+        self.assertEqual(
+            second["input_pb"].generate_config.role_addrs[0].ip, "chosen-vit"
+        )
+        self.assertEqual(request.generate_config.role_addrs, [self.vit, self.prefill])
+        self.assertTrue(request.enqueued_by_master)
+        self.assertLessEqual(second["timeout_s"], calls[0].kwargs["timeout_s"])
+
+    async def test_vit_failure_never_schedules_pd(self):
+        visitor = self.make_visitor()
+        request = self.make_input()
+        visitor._get_vit_token_ids.side_effect = RuntimeError("vit unavailable")
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor.report"):
+            with self.assertRaisesRegex(RuntimeError, "vit unavailable"):
+                await visitor.get_master_route_addrs(request)
+        self.assertEqual(visitor.master_client.get_backend_role_addrs.await_count, 1)
+        self.assertEqual(request.generate_config.role_addrs, [])
+        self.assertFalse(request.enqueued_by_master)
+
+    async def test_metadata_rpc_requests_no_features_and_checks_image_count(self):
+        visitor = self.make_visitor()
+        visitor._vit_channel_pool = SimpleNamespace(
+            get=AsyncMock(return_value=object())
+        )
+        input_pb = GenerateInputPB()
+        input_pb.multimodal_inputs.add(multimodal_url="first.png")
+        rpc = AsyncMock(
+            return_value=MultimodalOutputsPB(
+                multimodal_outputs=[MultimodalOutputPB(token_ids=[41, 42])]
+            )
+        )
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.MultimodalRpcServiceStub",
+            return_value=SimpleNamespace(RemoteMultimodalEmbedding=rpc),
+        ):
+            result = await BackendRPCServerVisitor._get_vit_token_ids(
+                visitor, self.vit, input_pb, 0.5
+            )
+            self.assertEqual(result, [[41, 42]])
+            self.assertTrue(rpc.await_args.args[0].metadata_only)
+            self.assertEqual(rpc.await_args.kwargs["timeout"], 0.5)
+            input_pb.multimodal_inputs.add(multimodal_url="second.png")
+            with self.assertRaises(FtRuntimeException):
+                await BackendRPCServerVisitor._get_vit_token_ids(
+                    visitor, self.vit, input_pb, 0.5
+                )
 
 
 if __name__ == "__main__":

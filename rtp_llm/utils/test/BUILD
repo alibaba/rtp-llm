@@ -13,7 +13,7 @@ py_test(
 py_test(
     name = "mm_process_engine_batch_test",
     srcs = ["mm_process_engine_batch_test.py"],
-    deps = ["//rtp_llm:utils", "//rtp_llm:config_ops", "//rtp_llm:torch"],
+    deps = ["//rtp_llm:utils", "//rtp_llm:config_ops", "//rtp_llm:torch", "//rtp_llm/metrics:metrics"],
 )
 
 filegroup(

@@ -473,10 +473,9 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.mm_model_config.is_multimodal = test_config.is_multimodal;
-        model_config.max_seq_len                   = test_config.max_seq_len;
-        model_config.vocab_size                    = test_config.vocab_size;
-        model_config.num_layers                    = test_config.num_layers;
+        model_config.max_seq_len = test_config.max_seq_len;
+        model_config.vocab_size  = test_config.vocab_size;
+        model_config.num_layers  = test_config.num_layers;
 
         sp_config.type                    = test_config.sp_type;
         sp_config.gen_num_per_cycle       = test_config.gen_num_per_cycle;
@@ -506,7 +505,10 @@ public:
         cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(mtp_config));
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-        params.sp_config        = sp_config;
+        // The shared mock builder resets MMModelConfig; apply the test setting to both config copies afterwards.
+        params.model_config_.mm_model_config.is_multimodal = test_config.is_multimodal;
+        model_config.mm_model_config                       = params.model_config_.mm_model_config;
+        params.sp_config                                   = sp_config;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }

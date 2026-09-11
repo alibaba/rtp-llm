@@ -212,6 +212,7 @@ _ENGINE_SYMBOLS = {
     "EmbeddingCppOutput",
     "MultimodalInputCpp",
     "get_multimodal_feature_hash",
+    "MMRdmaEncoderOp",
     "RtpEmbeddingOp",
     "RtpLLMOp",
     "build_xgrammar_tokenizer_info_json",
@@ -272,6 +273,7 @@ def _load_compute_ops(required: bool = False) -> None:
 
 def _set_engine_fallbacks() -> None:
     globals()["get_multimodal_feature_hash"] = EmptyClass
+    globals()["MMRdmaEncoderOp"] = EmptyClass
     globals()["MultimodalInputCpp"] = EmptyClass
     globals()["EmbeddingCppOutput"] = EmptyClass
     globals()["build_xgrammar_tokenizer_info_json"] = EmptyClass
@@ -291,7 +293,7 @@ def _load_engine_ops(required: bool = False) -> None:
         # process teardown in the current binary build.
         _load_compute_ops(required=required)
         try:
-            from libth_transformer import EmbeddingCppOutput
+            from libth_transformer import EmbeddingCppOutput, MMRdmaEncoderOp
             from libth_transformer import MultimodalInput as MultimodalInputCpp
             from libth_transformer import (
                 RtpEmbeddingOp,
@@ -301,6 +303,7 @@ def _load_engine_ops(required: bool = False) -> None:
             )
 
             globals()["get_multimodal_feature_hash"] = get_multimodal_feature_hash
+            globals()["MMRdmaEncoderOp"] = MMRdmaEncoderOp
             globals()["EmbeddingCppOutput"] = EmbeddingCppOutput
             globals()["MultimodalInputCpp"] = MultimodalInputCpp
             globals()["RtpEmbeddingOp"] = RtpEmbeddingOp

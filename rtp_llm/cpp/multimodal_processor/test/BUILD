@@ -39,3 +39,14 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "mm_rdma_transport_test",
+    srcs = ["MMRdmaTransportTest.cc"],
+    copts = test_copts,
+    deps = torch_deps() + [
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "//rtp_llm/cpp/multimodal_processor:mm_rdma_transport",
+    ] + cuda13_torch_link_deps,
+)

@@ -210,3 +210,12 @@ def no_block_copy_link_deps():
             "//rtp_llm/models_py/bindings:no_block_copy_default",
         ],
     })
+
+def mm_rdma_deps():
+    native.alias(
+        name = "mm_rdma_arch_select_impl",
+        actual = select({
+            "//conditions:default": "//rtp_llm/cpp/multimodal_processor:mm_rdma_no_impl",
+        }),
+        visibility = ["//visibility:public"],
+    )

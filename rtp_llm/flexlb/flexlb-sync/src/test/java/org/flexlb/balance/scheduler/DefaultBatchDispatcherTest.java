@@ -479,6 +479,36 @@ class DefaultBatchDispatcherTest {
         return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
     }
 
+    @Test
+    void dispatchPreservesSelectedVisionWorkerAndRawImageTokens() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        EngineRpcService.RoleAddrPB vision = EngineRpcService.RoleAddrPB.newBuilder()
+                .setRole(EngineRpcService.RoleAddrPB.RoleType.VIT)
+                .setRoleStr("VIT").setIp("127.0.0.9")
+                .setHttpPort(9100).setGrpcPort(9101).build();
+        EngineRpcService.GenerateInputPB raw = EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(1L).addAllTokenIds(List.of(10, 129264, 11))
+                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().addRoleAddrs(vision))
+                .build();
+        item.ctx().setGenerateInputPbBytes(raw.toByteArray());
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    sent.add(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                });
+
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "vision_route", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        EngineRpcService.GenerateInputPB actual = sentInput(sent.getFirst());
+        assertEquals(raw.getTokenIdsList(), actual.getTokenIdsList());
+        assertEquals(vision, actual.getGenerateConfig().getRoleAddrs(0));
+        assertTrue(actual.getGenerateConfig().getRoleAddrsList().stream()
+                .anyMatch(addr -> RoleTypeProtoConverter.fromRoleAddr(addr) == RoleType.PREFILL));
+    }
+
     // ---- helpers ----
 
     private PrefillEndpoint createPrefillEndpoint() {

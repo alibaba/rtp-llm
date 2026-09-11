@@ -21,7 +21,7 @@ py_test(
 py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm:models"],
     tags = ["H20"],
     exec_properties = {
         'gpu': 'H20',

@@ -70,7 +70,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
             mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
                                                               maga_init_params.model_config_.mm_model_config,
-                                                              maga_init_params.model_config_.max_seq_len));
+                                                              maga_init_params.model_config_.max_seq_len,
+                                                              maga_init_params.vit_config));
         } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                              maga_init_params.model_config_.mm_model_config,

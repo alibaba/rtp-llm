@@ -15,7 +15,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.ops import RoleType, SpeculativeType
+from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import (
@@ -463,6 +463,10 @@ def main():
 
 
 def start_server(py_env_configs: PyEnvConfigs):
+    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+        from rtp_llm.server.vit_rpc_server import vit_start_server
+
+        return vit_start_server(py_env_configs)
     logging.info(f"[PROCESS_START]Start server")
     configure_warmup(
         py_env_configs.runtime_config.warm_up,
