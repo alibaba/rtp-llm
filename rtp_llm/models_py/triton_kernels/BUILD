@@ -22,7 +22,7 @@ py_library(
     visibility = ["//visibility:public"]
 )
 
-# Include the patched source in the RTP wheel, not just Bazel's external tree.
+# Package the pinned native source for padding-store provenance verification.
 genrule(
     name = "aiter_gdr_decode_padding_source",
     srcs = ["@aiter//:gdr_decode_source"],

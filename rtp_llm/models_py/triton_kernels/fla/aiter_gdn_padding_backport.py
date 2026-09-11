@@ -1,22 +1,18 @@
-"""Use the pinned padding-store backport without rewriting installed AITER.
+"""Verify the pinned AITER kernel's native padding-store implementation.
 
-Bazel generates the kernel source from the checksummed AITER archive plus
-patches/aiter/0001-gdr-decode-zero-padding.patch and packages it in RTP's wheel.
-Unknown/missing sources retain the original backend and RTP output zeros.
+The new wheel includes the fix; no dependency patch is applied. Bazel packages
+a source copy as provenance. Unknown/missing sources retain RTP output zeros.
 """
 
 import hashlib
-import importlib.util
 import logging
-import sys
-import types
 from functools import lru_cache
 from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
-_KERNEL_SHA = "6905ceae8fbd0e9aef664ac31cd8a07b03c4dc6c79c37234ccead26c0313d0c3"
-_WRAPPER_SHA = "cc69290bb8319e693950a809ba951259f94bf16912f1cd45eed8d6e50c3f596b"
-_PATCHED_SHA = "876bda2db7fe07a654e7647daaf7de3749b38e0eb73c00a671adb9b1dd0c32fe"
+_KERNEL_SHA = "e61b398bbae88466ba3d50cf1ed807530fd3005edf21239184a77810ef7b878c"
+_WRAPPER_SHA = "f130878fddb28cac46ef5be9bfca4bdf42c1d848ca44e07de1341dbc19e2f636"
+_PATCHED_SHA = _KERNEL_SHA
 
 
 def _matches(path: Path, expected: str) -> bool:
@@ -25,7 +21,7 @@ def _matches(path: Path, expected: str) -> bool:
 
 @lru_cache(maxsize=1)
 def padding_safe_backend():
-    """Return a private wrapper only when all three source hashes match."""
+    """Return the native wrapper only when all three source hashes match."""
     try:
         from aiter.ops.flydsl import linear_attention_kernels as backend
         from aiter.ops.flydsl.kernels import gdr_decode
@@ -36,34 +32,12 @@ def padding_safe_backend():
             and _matches(Path(gdr_decode.__file__), _KERNEL_SHA)
             and _matches(source, _PATCHED_SHA)
         ):
-            _LOGGER.warning("GDN padding backport source mismatch; retaining RTP zeros")
+            _LOGGER.warning(
+                "GDN native padding-store source mismatch; retaining RTP zeros"
+            )
             return None
-        name = "aiter.ops.flydsl.kernels._rtp_gdr_decode_padding_backport"
-        spec = importlib.util.spec_from_file_location(name, source)
-        module = importlib.util.module_from_spec(spec)
-        # The AITER package context preserves its relative tensor_shim import.
-        # A distinct source/module keeps the original factory/cache untouched.
-        sys.modules[name] = module
-        try:
-            spec.loader.exec_module(module)
-        except Exception:
-            if sys.modules.get(name) is module:
-                del sys.modules[name]
-            raise
-        original = backend.flydsl_gdr_decode
-        globals_copy = dict(original.__globals__)
-        globals_copy["create_vk_gdr_decode_kernel"] = module.create_vk_gdr_decode_kernel
-        private = types.FunctionType(
-            original.__code__,
-            globals_copy,
-            original.__name__,
-            original.__defaults__,
-            original.__closure__,
-        )
-        private.__kwdefaults__ = original.__kwdefaults__
-        private.__annotations__ = original.__annotations__
-        _LOGGER.info("Using packaged AITER GDN padding-store backport: %s", source)
-        return private
+        _LOGGER.info("Using verified native AITER GDN padding-store kernel: %s", source)
+        return backend.flydsl_gdr_decode
     except (
         ImportError,
         OSError,
@@ -74,7 +48,8 @@ def padding_safe_backend():
         SyntaxError,
     ) as error:
         _LOGGER.warning(
-            "GDN padding backport unavailable; retaining RTP zeros: %s", error
+            "GDN native padding-store verification unavailable; retaining RTP zeros: %s",
+            error,
         )
         return None
 
