@@ -3,6 +3,12 @@ load(
     "rocm_default_copts",
 )
 
+filegroup(
+    name = "gdr_decode_source",
+    srcs = ["aiter/ops/flydsl/kernels/gdr_decode.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "aiter_py",
     srcs = glob([
