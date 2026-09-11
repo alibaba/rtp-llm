@@ -55,8 +55,7 @@ public class RequestBlockHashService {
 
         TokenIds inputIds = request.getInputIds();
         if (inputIds == null || inputIds.size() == 0) {
-            return Mono.error(new IllegalArgumentException(
-                    "block_cache_keys and input_ids must not both be empty"));
+            return Mono.empty();
         }
 
         BlockHashConfig hashConfig = blockHashConfigResolver.resolve();

@@ -106,7 +106,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         try {
             context = buildContext(request);
             BalanceContext requestContext = context;
-            validateCacheIdentity(requestContext.getRequest());
             boolean consistencyEnabled = masterElectService.isNeedConsistency();
             boolean masterAtEntry = consistencyEnabled
                     && masterElectService.isMaster();
@@ -628,17 +627,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private CompletableFuture<Void> prepareBlockCacheKeys(BalanceContext context) {
         return cacheAwareService.prepareBlockCacheKeys(context);
-    }
-
-    private void validateCacheIdentity(Request request) {
-        boolean hasBlockCacheKeys = request.getBlockCacheKeys() != null
-                && !request.getBlockCacheKeys().isEmpty();
-        boolean hasInputIds = request.getInputIds() != null
-                && request.getInputIds().size() > 0;
-        if (!hasBlockCacheKeys && !hasInputIds) {
-            throw new IllegalArgumentException(
-                    "block_cache_keys and input_ids must not both be empty");
-        }
     }
 
     private void completeSchedule(BalanceContext ctx,
