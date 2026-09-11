@@ -70,6 +70,17 @@ def init_model_group_args(parser, model_args):
         help="A dictionary in JSON string format used to override default model configurations.",
     )
     model_group.add_argument(
+        "--hidden_state_capture_fail_open",
+        env_name="RTP_LLM_HIDDEN_STATE_CAPTURE_FAIL_OPEN",
+        bind_to=(model_args, "hidden_state_capture_fail_open"),
+        type=str2bool,
+        default=None,
+        help=(
+            "Fail open only for operational hidden-state publisher failures; "
+            "hard capture or publish contract violations remain failures."
+        ),
+    )
+    model_group.add_argument(
         "--max_seq_len",
         env_name="MAX_SEQ_LEN",
         bind_to=(model_args, "max_seq_len"),

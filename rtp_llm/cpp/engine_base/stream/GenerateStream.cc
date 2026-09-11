@@ -76,6 +76,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
     stream_async_reserve_ = useStreamAsyncReserveTokens();
+    generate_input_->generate_config->validatePrefillOnly();
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -107,7 +108,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -674,6 +675,12 @@ int64_t GenerateStream::getTimeoutMs() const {
     return generate_input_->generate_config->timeout_ms;
 }
 
+bool GenerateStream::checkTimeoutAndHasError() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    return hasErrorWithoutLock();
+}
+
 void GenerateStream::checkTimeoutWithoutLock() {
     // Consumer-visible events and timeout publication share mutex_. Once a
     // consumer-ready event has linearized, a later scheduler timeout must not
@@ -1206,24 +1213,35 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
+    const auto& new_tokens          = update_info.new_tokens;
+    auto        num_new_tokens      = update_info.num_new_tokens;
+    const bool  prefill_only_update = num_new_tokens == 0 && generate_input_->generate_config->isPrefillOnly();
 
-    int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     usesBeamSearchTokenLayoutForCurrentStep(),
-                                     streamId(),
-                                     error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
+    if (prefill_only_update && generate_status_->checkFinished() && !update_info.force_update_info) {
         return;
+    }
+
+    if (prefill_only_update) {
+        RTP_LLM_CHECK(new_tokens.dim() == 2);
+        RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
+        RTP_LLM_CHECK(new_tokens.size(1) == 0);
+    } else {
+        int error_token_id = 0;
+        if (!complete_token_ids_->update(new_tokens,
+                                         begin_time_us_,
+                                         num_new_tokens,
+                                         generate_input_->inputLength(),
+                                         maxTokenNum(),
+                                         vocab_size_,
+                                         usesBeamSearchTokenLayoutForCurrentStep(),
+                                         streamId(),
+                                         error_token_id)) {
+            reportEventWithoutLock(StreamEvents::Error,
+                                   ErrorCode::OUT_OF_VOCAB_RANGE,
+                                   "output token id:" + std::to_string(error_token_id)
+                                       + " out of vocab size: " + std::to_string(vocab_size_));
+            return;
+        }
     }
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));

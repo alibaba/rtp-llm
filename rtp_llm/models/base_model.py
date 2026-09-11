@@ -155,10 +155,16 @@ class BaseModel(object):
             return
         generation_config_path = generate_env_config.generation_config_path
         if generation_config_path:
+            generate_config = json.load(
+                open(os.path.join(generation_config_path, "generation_config.json"))
+            )
+            # Checkpoint null means unspecified; request updates remain strict.
             self.default_generate_config.update(
-                json.load(
-                    open(os.path.join(generation_config_path, "generation_config.json"))
-                )
+                {
+                    key: value
+                    for key, value in generate_config.items()
+                    if key != "max_new_tokens" or value is not None
+                }
             )
             logging.info(
                 f"load generate config:{generation_config_path}/generation_config.json: \n\

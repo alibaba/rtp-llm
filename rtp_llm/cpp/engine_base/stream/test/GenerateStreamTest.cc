@@ -258,6 +258,82 @@ TEST_F(GenerateStreamTest, mtpCpuProposalClearsStaleGpuMirror) {
     EXPECT_EQ(stream->getSPOutputBuffer()->tokens[0][1].item<int32_t>(), 11);
 }
 
+TEST_F(GenerateStreamTest, prefillOnlyValidationPreservesCacheSetting) {
+    GenerateConfig config;
+    config.max_new_tokens = 0;
+    config.reuse_cache    = true;
+
+    EXPECT_NO_THROW(config.validatePrefillOnly());
+    EXPECT_TRUE(config.reuse_cache);
+}
+
+TEST_F(GenerateStreamTest, promptScoringNormalizesGenerationSettingsDuringConstruction) {
+    for (const int initial_max_new_tokens : {0, 7}) {
+        SCOPED_TRACE(initial_max_new_tokens);
+        auto input                                    = std::make_shared<GenerateInput>();
+        input->generate_config                        = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens        = initial_max_new_tokens;
+        input->generate_config->return_prompt_logits  = true;
+        input->generate_config->is_streaming          = true;
+        input->generate_config->reuse_cache           = true;
+        input->generate_config->can_use_pd_separation = true;
+        input->begin_time_us                          = autil::TimeUtility::currentTimeInMicroSeconds();
+        input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+        ModelConfig model_config;
+        model_config.max_seq_len = 2048;
+        model_config.vocab_size  = 1024;
+        RuntimeConfig   runtime_config;
+        ResourceContext resource_context;
+
+        GenerateStreamPtr stream;
+        EXPECT_NO_THROW(stream = std::make_shared<NormalGenerateStream>(
+                            input, model_config, runtime_config, resource_context, nullptr));
+        ASSERT_NE(stream, nullptr);
+        EXPECT_EQ(stream->generateConfig()->max_new_tokens, 1);
+        EXPECT_TRUE(stream->generateConfig()->return_prompt_logits);
+        EXPECT_FALSE(stream->generateConfig()->isPrefillOnly());
+        EXPECT_FALSE(stream->generateConfig()->is_streaming);
+        EXPECT_FALSE(stream->generateConfig()->reuse_cache);
+        EXPECT_FALSE(stream->generateConfig()->can_use_pd_separation);
+    }
+}
+
+TEST_F(GenerateStreamTest, prefillOnlyValidationRejectsUnsupportedConfigWithoutMutation) {
+    struct UnsupportedConfig {
+        const char* name;
+        void (*set)(GenerateConfig&);
+    };
+    constexpr UnsupportedConfig fields[] = {
+        {"min_new_tokens", +[](GenerateConfig& config) { config.min_new_tokens = 1; }},
+        {"num_beams", +[](GenerateConfig& config) { config.num_beams = 2; }},
+        {"variable_num_beams", +[](GenerateConfig& config) { config.variable_num_beams = {1}; }},
+        {"num_return_sequences", +[](GenerateConfig& config) { config.num_return_sequences = 2; }},
+        {"return_logits", +[](GenerateConfig& config) { config.return_logits = true; }},
+        {"calculate_loss", +[](GenerateConfig& config) { config.calculate_loss = 1; }},
+        {"return_softmax_probs", +[](GenerateConfig& config) { config.return_softmax_probs = true; }},
+        {"return_all_probs", +[](GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"return_cum_log_probs", +[](GenerateConfig& config) { config.return_cum_log_probs = true; }},
+        {"return_hidden_states", +[](GenerateConfig& config) { config.return_hidden_states = true; }},
+        {"return_all_hidden_states", +[](GenerateConfig& config) { config.return_all_hidden_states = true; }},
+    };
+    for (const auto& field : fields) {
+        SCOPED_TRACE(field.name);
+        GenerateConfig config;
+        config.max_new_tokens = 0;
+        config.reuse_cache    = true;
+        field.set(config);
+
+        try {
+            config.validatePrefillOnly();
+            FAIL() << field.name << " should be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(field.name), std::string::npos);
+        }
+        EXPECT_TRUE(config.reuse_cache);
+    }
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
@@ -271,6 +347,15 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
 
     // flip back to true and verify
     stream->generate_input_->generate_config->reuse_cache = true;
+    ASSERT_TRUE(stream->reuseCache());
+
+    // prefill-only disables effective reuse without mutating the requested setting
+    stream->generate_input_->generate_config->max_new_tokens = 0;
+    ASSERT_TRUE(stream->generate_input_->generate_config->reuse_cache);
+    ASSERT_FALSE(stream->reuseCache());
+
+    // the same config object restores effective reuse for positive generation
+    stream->generate_input_->generate_config->max_new_tokens = 1;
     ASSERT_TRUE(stream->reuseCache());
 }
 
@@ -350,7 +435,7 @@ TEST_F(GenerateStreamTest, finishOrCancelPreservesPendingSuccessfulCompletion) {
     stream->reportEvent(StreamEvents::GenerateDone);
 
     std::promise<void> stop_started;
-    auto               stop_ready = stop_started.get_future();
+    auto               stop_ready  = stop_started.get_future();
     auto               stop_result = std::async(std::launch::async, [stream, &stop_started] {
         stop_started.set_value();
         return stream->finishOrCancel(1000, "cancel stream");
@@ -372,7 +457,7 @@ TEST_F(GenerateStreamTest, finishOrCancelCancelsIncompleteStreamAndWaitsForCommi
     stream->generate_status_->status.store(StreamState::RUNNING);
 
     std::promise<void> stop_started;
-    auto               stop_ready = stop_started.get_future();
+    auto               stop_ready  = stop_started.get_future();
     auto               stop_result = std::async(std::launch::async, [stream, &stop_started] {
         stop_started.set_value();
         return stream->finishOrCancel(1000, "client closed");
@@ -572,6 +657,42 @@ TEST_F(GenerateStreamTest, queuedOutputWinsOverExpiredDeadline) {
     EXPECT_EQ(timeout_result.status().code(), ErrorCode::GENERATE_TIMEOUT);
 }
 
+TEST_F(GenerateStreamTest, checkTimeoutAndHasErrorDoesNotAdvanceWaitingStream) {
+    const struct {
+        const char* name;
+        int64_t     timeout_ms;
+        int64_t     elapsed_ms;
+        bool        has_existing_error;
+        ErrorCode   expected_error;
+    } cases[] = {
+        {"disabled", 0, 100, false, ErrorCode::NONE_ERROR},
+        {"not expired", 60000, 0, false, ErrorCode::NONE_ERROR},
+        {"expired", 10, 100, false, ErrorCode::GENERATE_TIMEOUT},
+        {"existing error", 10, 100, true, ErrorCode::CANCELLED},
+    };
+    auto builder = GenerateStreamBuilder();
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto stream                          = builder.createContextStream({1, 2, 3});
+        stream->generateConfig()->timeout_ms = test_case.timeout_ms;
+        stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - test_case.elapsed_ms * 1000);
+        stream->reportEvent(StreamEvents::CanRun);
+        if (test_case.has_existing_error) {
+            stream->reportError(ErrorCode::CANCELLED, "cancelled before timeout maintenance");
+        }
+
+        EXPECT_EQ(stream->checkTimeoutAndHasError(), test_case.expected_error != ErrorCode::NONE_ERROR);
+        EXPECT_EQ(stream->statusInfo().code(), test_case.expected_error);
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::CanRun));
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::LoadInitiated));
+        EXPECT_FALSE(stream->getTimeInfo().running_started);
+        if (test_case.has_existing_error) {
+            EXPECT_EQ(stream->stopReason(), "cancelled before timeout maintenance");
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideQueuedOutput) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
@@ -584,6 +705,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideQueuedOutput) {
         std::lock_guard<std::mutex> lock(*stream->mutex_);
         stream->enqueueGenerateOutput(std::move(outputs));
     }
+    EXPECT_FALSE(stream->checkTimeoutAndHasError());
     EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
     EXPECT_TRUE(stream->statusInfo().ok());
 
@@ -602,6 +724,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverridePendingCompletion) {
 
     stream->reportEvent(StreamEvents::GenerateDone);
 
+    EXPECT_FALSE(stream->checkTimeoutAndHasError());
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
     EXPECT_TRUE(stream->statusInfo().ok());
 
@@ -618,6 +741,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideRemoteHandoff) {
 
     stream->reportEvent(StreamEvents::NeedRemoteGenerate);
 
+    EXPECT_FALSE(stream->checkTimeoutAndHasError());
     EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
     EXPECT_TRUE(stream->statusInfo().ok());
 
@@ -777,10 +901,10 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStatePublishesCoherentConcurrentSna
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
-    constexpr int       publishes_per_writer = 1000;
-    std::atomic<bool>   start{false};
-    std::atomic<bool>   writers_done{false};
-    std::atomic<bool>   incoherent_snapshot{false};
+    constexpr int            publishes_per_writer = 1000;
+    std::atomic<bool>        start{false};
+    std::atomic<bool>        writers_done{false};
+    std::atomic<bool>        incoherent_snapshot{false};
     std::vector<std::thread> writers;
     for (int writer_id = 0; writer_id < 2; ++writer_id) {
         writers.emplace_back([&, writer_id] {
@@ -788,7 +912,7 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStatePublishesCoherentConcurrentSna
                 std::this_thread::yield();
             }
             for (int i = 1; i <= publishes_per_writer; ++i) {
-                const int marker = writer_id * publishes_per_writer + i;
+                const int                           marker = writer_id * publishes_per_writer + i;
                 GenerateStream::MtpAsyncDeviceState state;
                 state.previous_seq_len_upper_bound = marker;
                 state.next_seq_len_upper_bound     = marker;

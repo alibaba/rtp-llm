@@ -1526,6 +1526,23 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        # A combined boundary can be shared with the legacy DSpARK capture.
+        return hidden_states if residual is None else hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual finalization requires a residual tensor")
+        return self.norm(hidden_states, residual)[0]
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
@@ -1643,6 +1660,7 @@ class Qwen3NextModel(GptModelBase):
         ):
             fmha_impl.bind_graph_inputs(inputs)
         hidden_states = self.word_embedding(inputs)
+        capture = self.capture_context(inputs.capture_hidden_states)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
@@ -1771,16 +1789,26 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
-            if i in self._mtp_aux_capture_layer_id_set:
-                self.capture_aux_hidden(i, hidden_states, residual)
+            if capture_aux_hidden and i in self._mtp_aux_capture_layer_id_set:
+                if capture.wants_layer(i):
+                    # Share the fused residual boundary between both transports;
+                    # neither capture recomputes hidden_states + residual.
+                    fused_hidden_states = hidden_states + residual
+                    self.capture_aux_hidden(i, fused_hidden_states)
+                    capture.capture_layer(i, fused_hidden_states)
+                else:
+                    self.capture_aux_hidden(i, hidden_states, residual)
+            else:
+                capture.capture_layer(i, hidden_states, residual)
+
         if capture_aux_hidden:
             self.finish_aux_hidden_capture()
-
-        hidden_states, residual = self.norm(hidden_states, residual)
+        outputs = capture.finalize(hidden_states, residual)
         if capture_aux_hidden:
-            assert self._mtp_target_hidden_states is not None
-            return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
-        return PyModelOutputs(hidden_states)
+            mtp_target_hidden_states = self.get_mtp_target_hidden_states(-1)
+            if mtp_target_hidden_states is not None:
+                outputs.mtp_target_hidden_states = mtp_target_hidden_states
+        return outputs
 
 
 class Qwen35Model(Qwen3NextModel):

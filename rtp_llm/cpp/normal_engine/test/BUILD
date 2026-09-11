@@ -65,6 +65,7 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
         "@com_google_googletest//:gtest",
@@ -87,6 +88,7 @@ cc_test(
     copts = test_copts,
     deps =  [
         ":mock_engine",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
     ] + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
