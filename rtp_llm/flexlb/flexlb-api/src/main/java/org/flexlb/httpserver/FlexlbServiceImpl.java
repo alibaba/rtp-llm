@@ -492,7 +492,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return routeService.route(ctx).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                     toProtoResponse(response).toBuilder();
-            RequestLifecycleSnapshot lifecycle = routeService.getRequestState(ctx.getRequestId(), 0);
+            RequestLifecycleSnapshot lifecycle = ctx.getRequest().isVitOnly() ? null
+                    : routeService.getRequestState(ctx.getRequestId(), 0);
             if (lifecycle != null) {
                 builder.setLifecycle(toLifecycleProto(lifecycle));
             }
@@ -539,7 +540,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
         if (ctx != null) {
             engineHealthReporter.reportBalancingService(ctx);
-            reportPrioritySchedule(ctx, response);
+            if (!ctx.getRequest().isVitOnly()) {
+                reportPrioritySchedule(ctx, response);
+            }
         }
     }
 
@@ -679,6 +682,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setMaxNewTokens(pb.getMaxNewTokens());
         request.setNumBeams(pb.getNumBeams());
         request.setForceDisableSpRun(pb.getForceDisableSpRun());
+        request.setVitOnly(pb.getVitOnly());
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
@@ -701,7 +705,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setPriority(schedulingMetadata.priority());
         ctx.setRequest(request);
         ctx.setSchedulingMetadata(schedulingMetadata);
-        prioritySchedulerReporter.reportRequest(schedulingMetadata.priority());
+        if (!pb.getVitOnly()) {
+            prioritySchedulerReporter.reportRequest(schedulingMetadata.priority());
+        }
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());

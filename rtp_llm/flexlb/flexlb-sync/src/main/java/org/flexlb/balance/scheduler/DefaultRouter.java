@@ -77,7 +77,8 @@ public class DefaultRouter implements Router {
 
         // 2. Get routing configuration
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-        List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
+        List<RoleType> roleTypeList = balanceContext.getRequest().isVitOnly()
+                ? List.of(RoleType.VIT) : workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
             Logger.debug("No worker roles registered yet (total workers: {})", workerStatus.getWorkerTotalCount());
             return Response.error(NO_AVAILABLE_WORKER);

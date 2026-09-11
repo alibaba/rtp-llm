@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/multimodal_processor/MMRdmaVitConfig.h"
 #include <cstddef>
 #include <memory>
 #include <tuple>
@@ -60,34 +61,34 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     size_t     gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
 
     // Get py_eplb if available (from model)
-        py::object py_eplb    = py::none();
-        if (py::hasattr(sp_model, "py_eplb")) {
-            py_eplb = sp_model.attr("py_eplb");
-        }
+    py::object py_eplb = py::none();
+    if (py::hasattr(sp_model, "py_eplb")) {
+        py_eplb = sp_model.attr("py_eplb");
+    }
 
     auto make_engine_params = [&](size_t id, const ModelConfig& cfg, auto gpt_weight) {
         return std::make_unique<EngineInitParams>(id,
                                                   cfg,
-                                                                 base_params.parallelism_config,
-                                                                 base_params.runtime_config,
-                                                                 base_params.pd_sep_config,
-                                                                 base_params.concurrency_config,
-                                                                 base_params.fmha_config,
-                                                                 base_params.kv_cache_config,
-                                                                 base_params.profiling_debug_logging_config,
-                                                                 base_params.hw_kernel_config,
-                                                                 base_params.device_resource_config,
-                                                                 base_params.moe_config,
-                                                                 base_params.model_specific_config,
-                                                                 base_params.sp_config,
-                                                                 base_params.cache_store_config,
-                                                                 base_params.misc_config,
-                                                                 base_params.arpc_config,
-                                                                 base_params.grpc_config,
-                                                                 base_params.ffn_disaggregate_config,
-                                                                 base_params.vit_config,
-                                                                 std::move(*gpt_weight),
-                                                                 py::none(),
+                                                  base_params.parallelism_config,
+                                                  base_params.runtime_config,
+                                                  base_params.pd_sep_config,
+                                                  base_params.concurrency_config,
+                                                  base_params.fmha_config,
+                                                  base_params.kv_cache_config,
+                                                  base_params.profiling_debug_logging_config,
+                                                  base_params.hw_kernel_config,
+                                                  base_params.device_resource_config,
+                                                  base_params.moe_config,
+                                                  base_params.model_specific_config,
+                                                  base_params.sp_config,
+                                                  base_params.cache_store_config,
+                                                  base_params.misc_config,
+                                                  base_params.arpc_config,
+                                                  base_params.grpc_config,
+                                                  base_params.ffn_disaggregate_config,
+                                                  base_params.vit_config,
+                                                  std::move(*gpt_weight),
+                                                  py::none(),
                                                   py_eplb);
     };
 
@@ -196,6 +197,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
             vit_config_cpp.vit_separation = vit_config.attr("vit_separation").cast<VitSeparation>();
+            extractMMRdmaVitConfig(vit_config, vit_config_cpp);
         }
 
         py::object py_layers_weights = model.attr("weight").attr("weights");

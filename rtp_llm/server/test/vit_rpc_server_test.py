@@ -1,15 +1,28 @@
+import threading
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import grpc
 import torch
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CacheVersionPB,
+    MMRdmaDescPB,
     MultimodalInputPB,
     MultimodalInputsPB,
+    ReleaseEmbeddingPB,
+    StatusVersionPB,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
 )
 from rtp_llm.ops import get_multimodal_feature_hash
-from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, trans_output
+from rtp_llm.server.vit_rpc_server import (
+    MultimodalRpcServer,
+    _create_rpc_server,
+    trans_output,
+)
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 
 
@@ -32,6 +45,20 @@ class Context:
         raise Aborted(details)
 
 
+class FakeRdmaEncoder:
+    def __init__(self, descriptors):
+        self.descriptors = iter(descriptors)
+        self.released = []
+        self.exports = 0
+
+    def export_embedding(self, embedding):
+        self.exports += 1
+        return next(self.descriptors)
+
+    def release(self, handles):
+        self.released.extend(handles)
+
+
 class VitRpcServerTest(unittest.TestCase):
     def test_positionless_images_roundtrip_without_synthetic_positions(self):
         result = MMEmbeddingRes([torch.ones((2, 4)), torch.zeros((3, 4))])
@@ -43,7 +70,9 @@ class VitRpcServerTest(unittest.TestCase):
 
     def server(self, result):
         model = SimpleNamespace(
-            model_config=SimpleNamespace(hidden_size=4, compute_dtype=torch.float32)
+            model_config=SimpleNamespace(
+                hidden_size=4, compute_dtype=torch.float32, max_seq_len=8192
+            )
         )
         return MultimodalRpcServer(
             SimpleNamespace(
@@ -57,6 +86,75 @@ class VitRpcServerTest(unittest.TestCase):
         return MultimodalInputsPB(
             multimodal_inputs=[MultimodalInputPB(multimodal_url="image")]
         )
+
+    def test_worker_status_has_a_positive_increasing_version(self):
+        server = self.server(MMEmbeddingRes([]))
+        with mock.patch(
+            "rtp_llm.server.vit_rpc_server.time.time_ns", return_value=123000
+        ):
+            first = server.GetWorkerStatus(None, None)
+            second = server.GetWorkerStatus(None, None)
+        self.assertTrue(first.alive)
+        self.assertEqual(first.role, "VIT")
+        self.assertEqual(first.max_seq_len, 8192)
+        self.assertGreater(first.status_version, 0)
+        self.assertGreater(second.status_version, first.status_version)
+
+    def test_status_and_cache_rpc_remain_available_at_embedding_limit(self):
+        entered = threading.Event()
+        release = threading.Event()
+        result = MMEmbeddingRes([torch.ones((2, 4))])
+        service = self.server(result)
+        self.assertIsNone(service.rdma_encoder)
+
+        def blocked_submit(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("test did not release the embedding request")
+            return result
+
+        service.engine.submit = mock.Mock(side_effect=blocked_submit)
+        # Legacy engines remain serial even if their configured RPC limit was larger.
+        service.max_requests = 32
+        server, executor = _create_rpc_server(service, concurrency=1)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        try:
+            with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+                stub = MultimodalRpcServiceStub(channel)
+                embedding = stub.RemoteMultimodalEmbedding.future(
+                    self.request(), timeout=10
+                )
+                self.assertTrue(entered.wait(5))
+                status = stub.GetWorkerStatus(StatusVersionPB(), timeout=2)
+                self.assertTrue(status.alive)
+                self.assertGreater(status.status_version, 0)
+                self.assertEqual(status.running_query_len, 1)
+                cache = stub.GetCacheStatus(CacheVersionPB(), timeout=2)
+                self.assertFalse(cache.cache_keys)
+                # The reserved RPC slots do not increase embedding admission.
+                with self.assertRaises(grpc.RpcError) as error:
+                    stub.RemoteMultimodalEmbedding(self.request(), timeout=2)
+                self.assertEqual(
+                    error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED
+                )
+                self.assertEqual(service.engine.submit.call_count, 1)
+                release.set()
+                output = embedding.result(timeout=5)
+                self.assertEqual(
+                    list(output.multimodal_outputs[0].multimodal_embedding.shape),
+                    [2, 4],
+                )
+                self.assertEqual(
+                    stub.GetWorkerStatus(
+                        StatusVersionPB(), timeout=2
+                    ).running_query_len,
+                    0,
+                )
+        finally:
+            release.set()
+            server.stop(0).wait()
+            executor.shutdown(wait=True)
 
     def test_returns_batch_metrics_without_proto_changes(self):
         server = self.server(
@@ -88,6 +186,113 @@ class VitRpcServerTest(unittest.TestCase):
             list(output.token_ids), get_multimodal_feature_hash(features).tolist()
         )
         self.assertEqual(server._active, 0)
+
+    def test_rdma_opt_in_falls_back_per_image_and_releases_explicitly(self):
+        descriptor = MMRdmaDescPB(handle="first").SerializeToString()
+        encoder = FakeRdmaEncoder([descriptor, b""])
+        result = MMEmbeddingRes([torch.ones((2, 4)), torch.ones((3, 4))])
+        output = trans_output(result, rdma_encoder=encoder)
+        self.assertTrue(output.multimodal_outputs[0].HasField("output_rdma"))
+        self.assertFalse(output.multimodal_outputs[0].HasField("multimodal_embedding"))
+        self.assertTrue(output.multimodal_outputs[1].HasField("multimodal_embedding"))
+        server = self.server(result)
+        server.rdma_encoder = encoder
+        server.ReleaseEmbedding(ReleaseEmbeddingPB(handle=["first"]), Context())
+        self.assertEqual(encoder.released, ["first"])
+
+    def test_metadata_and_old_clients_do_not_export_rdma_slots(self):
+        encoder = FakeRdmaEncoder([])
+        server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))
+        server.rdma_encoder = encoder
+        request = self.request()
+        result = server.RemoteMultimodalEmbedding(request, Context())
+        self.assertTrue(result.multimodal_outputs[0].HasField("multimodal_embedding"))
+        request.metadata_only = True
+        request.support_rdma = True
+        server.RemoteMultimodalEmbedding(request, Context())
+        self.assertEqual(encoder.exports, 0)
+
+    def test_strict_rdma_requires_opt_in_but_allows_metadata(self):
+        server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))
+        server.require_rdma = True
+        server.engine.submit = mock.Mock(
+            return_value=MMEmbeddingRes([torch.ones((2, 4))])
+        )
+        context = Context()
+        with self.assertRaisesRegex(Aborted, "support_rdma"):
+            server.RemoteMultimodalEmbedding(self.request(), context)
+        self.assertEqual(context.code, grpc.StatusCode.FAILED_PRECONDITION)
+        server.engine.submit.assert_not_called()
+        request = self.request()
+        request.metadata_only = True
+        output = server.RemoteMultimodalEmbedding(request, Context())
+        self.assertTrue(output.multimodal_outputs[0].token_ids)
+        self.assertFalse(output.multimodal_outputs[0].HasField("multimodal_embedding"))
+
+    def test_strict_export_failure_releases_prior_slots_and_never_sends_bytes(self):
+        descriptor = MMRdmaDescPB(handle="first").SerializeToString()
+        encoder = FakeRdmaEncoder([descriptor, b""])
+        with self.assertRaisesRegex(RuntimeError, "inline features are disabled"):
+            trans_output(
+                MMEmbeddingRes([torch.ones((2, 4)), torch.ones((3, 4))]),
+                rdma_encoder=encoder,
+                require_rdma=True,
+            )
+        self.assertEqual(encoder.released, ["first"])
+
+    def test_strict_export_success_has_descriptors_only(self):
+        descriptor = MMRdmaDescPB(handle="first").SerializeToString()
+        output = trans_output(
+            MMEmbeddingRes([torch.ones((2, 4))]),
+            rdma_encoder=FakeRdmaEncoder([descriptor]),
+            require_rdma=True,
+        ).multimodal_outputs[0]
+        self.assertTrue(output.HasField("output_rdma"))
+        self.assertFalse(output.HasField("multimodal_embedding"))
+
+    def test_embedding_limit_keeps_release_handler_available(self):
+        encoder = FakeRdmaEncoder([])
+        server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))
+        server.rdma_encoder = encoder
+        server._active = server.max_requests
+        context = Context()
+        with self.assertRaisesRegex(Aborted, "busy"):
+            server.RemoteMultimodalEmbedding(self.request(), context)
+        self.assertEqual(context.code, grpc.StatusCode.RESOURCE_EXHAUSTED)
+        server.ReleaseEmbedding(ReleaseEmbeddingPB(handle=["done"]), Context())
+        self.assertEqual(encoder.released, ["done"])
+        self.assertEqual(server._active, server.max_requests)
+
+    def test_expiration_after_export_releases_unpublished_slots(self):
+        descriptor = MMRdmaDescPB(handle="first").SerializeToString()
+        encoder = FakeRdmaEncoder([descriptor])
+        server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))
+        server.rdma_encoder = encoder
+        checks = iter([False, True])
+
+        def check_request(deadline, cancelled):
+            if next(checks):
+                raise TimeoutError("expired after export")
+
+        server.engine._check_request = check_request
+        request = self.request()
+        request.support_rdma = True
+        context = Context()
+        with self.assertRaisesRegex(Aborted, "expired"):
+            server.RemoteMultimodalEmbedding(request, context)
+        self.assertEqual(encoder.released, ["first"])
+        self.assertEqual(context.code, grpc.StatusCode.DEADLINE_EXCEEDED)
+        self.assertEqual(server._active, 0)
+
+    def test_unpublished_slots_are_released_on_serialization_failure(self):
+        descriptor = MMRdmaDescPB(handle="first").SerializeToString()
+        encoder = FakeRdmaEncoder([descriptor, b"malformed protobuf"])
+        with self.assertRaises(Exception):
+            trans_output(
+                MMEmbeddingRes([torch.ones((2, 4)), torch.ones((3, 4))]),
+                rdma_encoder=encoder,
+            )
+        self.assertEqual(encoder.released, ["first"])
 
 
 if __name__ == "__main__":

@@ -92,6 +92,29 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void vitOnlyIsForwardedToRoutingWithoutPdLifecycleLookup() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response result = new Response();
+        result.setSuccess(true);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(result));
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(918L).setVitOnly(true).build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertTrue(context.getValue().getRequest().isVitOnly());
+        verify(routeService, never()).getRequestState(anyLong(), anyLong());
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        assertFalse(response.getValue().hasLifecycle());
+        assertFalse(response.getValue().getEnqueuedByMaster());
+    }
+
+    @Test
     void testSchedule_localRouting() {
         // Given: not master, no consistency needed
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);

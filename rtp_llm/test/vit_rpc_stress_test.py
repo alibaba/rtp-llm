@@ -41,7 +41,7 @@ class VitRpcStressTest(TestCase):
             command = [
                 sys.executable,
                 "-m",
-                "rtp_llm.server.vit_rpc_server",
+                "rtp_llm.start_server",
                 "--model_type",
                 "deepseek_v4",
                 "--checkpoint_path",
@@ -96,13 +96,13 @@ class VitRpcStressTest(TestCase):
                     address,
                     [image_url((384, 512), "blue")],
                     processes=8,
-                    requests_per_process=8,
+                    requests_per_process=128,
                 )
                 report["mixed_images"] = benchmark(
                     address,
                     [image_url((384, 512), "blue"), image_url((512, 384), "red")],
                     processes=4,
-                    requests_per_process=4,
+                    requests_per_process=32,
                 )
                 (outputs / "vit_rpc_benchmark.json").write_text(
                     json.dumps(report, indent=2)

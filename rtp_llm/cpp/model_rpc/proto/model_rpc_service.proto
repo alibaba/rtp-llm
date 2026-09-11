@@ -138,12 +138,48 @@ message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
     // Routing asks for token IDs; Prefill obtains features via the same RPC.
     bool metadata_only = 2;
+    // Opt in to registered GPU slots read into the consumer pinned CPU pool.
+    bool support_rdma = 10;
+}
+
+// RDMA descriptors are additive; the existing embedding RPC wire format is retained.
+message MMRdmaNicRKeyPB {
+    uint32 nicid = 1;
+    uint32 rkey = 2;
+}
+
+message MMRdmaTensorPB {
+    enum Role {
+        EMBEDDING = 0;
+    }
+    Role role = 1;
+    repeated int64 shape = 2;
+    TensorPB.DataType data_type = 3;
+    uint64 offset = 4;
+    uint64 nbytes = 5;
+}
+
+message MMRdmaDescPB {
+    reserved 1, 2, 3;
+    uint64 addr = 4;
+    repeated MMRdmaNicRKeyPB nic_rkeys = 5;
+    string handle = 6;
+    string rdma_ip = 7;
+    uint32 rdma_port = 8;
+    uint64 nbytes = 9;
+    repeated MMRdmaTensorPB tensors = 10;
+}
+
+message ReleaseEmbeddingPB {
+    repeated string handle = 1;
 }
 
 message MultimodalOutputPB {
     TensorPB multimodal_embedding = 1;
     TensorPB multimodal_pos_id = 2;
     repeated int32 token_ids = 3;
+    // One image embedding only; position IDs remain inline.
+    MMRdmaDescPB output_rdma = 10;
 }
 
 message MultimodalOutputsPB {
@@ -796,6 +832,7 @@ service RpcService {
 }
 
 service MultimodalRpcService {
+    rpc ReleaseEmbedding(ReleaseEmbeddingPB) returns (EmptyPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);

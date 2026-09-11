@@ -1,5 +1,7 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -11,6 +13,7 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     RESOURCE_EXHAUSTED,
     SAME_PRIORITY_AHEAD,
     SCHEDULE_FAILURE_REASON_UNSPECIFIED,
+    FlexlbScheduleRequestPB,
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
 )
@@ -127,6 +130,68 @@ class _FakeInputPB:
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
+    async def test_vit_selection_has_no_enqueue_payload_or_pd_queue_state(self):
+        client = _CaptureMasterClient()
+        client.latest_queue_length = 9
+        client._send_schedule_request = AsyncMock(
+            return_value=FlexlbScheduleResponsePB(
+                code=200,
+                server_status=[
+                    FlexlbServerStatusPB(role="VIT", server_ip="vit", grpc_port=8011)
+                ],
+            )
+        )
+        response = await client.get_backend_role_addrs(
+            [],
+            256,
+            _FakeInput(),
+            101,
+            input_pb=_FakeInputPB(),
+            vit_only=True,
+            timeout_s=0.25,
+        )
+        self.assertTrue(response.is_ok)
+        request = client._send_schedule_request.await_args.args[1]
+        self.assertTrue(request.vit_only)
+        self.assertFalse(request.generate_input)
+        self.assertEqual(request.request_id, 101)
+        self.assertEqual(request.generate_timeout, 250)
+        self.assertEqual(client.latest_queue_length, 9)
+
+    async def test_vit_cancellation_does_not_cancel_later_pd_schedule(self):
+        client = _CaptureMasterClient()
+        stub = SimpleNamespace(
+            Schedule=AsyncMock(side_effect=asyncio.CancelledError()),
+            Cancel=AsyncMock(),
+        )
+        client._get_channel = Mock()
+        with patch("rtp_llm.server.master_client.FlexlbServiceStub", return_value=stub):
+            with self.assertRaises(asyncio.CancelledError):
+                await MasterClient._send_schedule_request(
+                    client,
+                    "master:1234",
+                    FlexlbScheduleRequestPB(request_id=101, vit_only=True),
+                    1.0,
+                    101,
+                )
+            stub.Cancel.assert_not_awaited()
+            with self.assertRaises(asyncio.CancelledError):
+                await MasterClient._send_schedule_request(
+                    client,
+                    "master:1234",
+                    FlexlbScheduleRequestPB(request_id=101),
+                    1.0,
+                    101,
+                )
+            stub.Cancel.assert_awaited_once()
+
+    async def test_vit_selection_rejects_master_enqueue_response(self):
+        client = _CaptureMasterClient()
+        with self.assertRaises(FtRuntimeException):
+            await client.get_backend_role_addrs(
+                [], 256, _FakeInput(), 101, vit_only=True
+            )
+
     def test_python_reason_enum_matches_schedule_wire_values(self):
         self.assertEqual(
             int(AdmissionRejectReason.UNSPECIFIED),

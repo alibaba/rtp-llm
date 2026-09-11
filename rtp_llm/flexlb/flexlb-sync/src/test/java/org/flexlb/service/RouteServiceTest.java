@@ -11,6 +11,7 @@ import org.flexlb.config.PriorityOrderingConfig;
 import org.flexlb.config.QueueSchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -58,6 +59,29 @@ class RouteServiceTest {
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
         routeService = new RouteService(configService, defaultRouter,
                 priorityScheduler, recentCacheKeyTraceReporter);
+    }
+
+    @Test
+    void vitOnlyBypassesBatchAdmissionAndDoesNotConsumeTheRequestId() {
+        usePriorityBatch();
+        Request request = new Request();
+        request.setRequestId(71L);
+        request.setVitOnly(true);
+        when(balanceContext.getRequest()).thenReturn(request);
+        Response response = successResponse();
+        when(defaultRouter.route(balanceContext)).thenReturn(response);
+
+        assertSame(response, routeService.route(balanceContext).join());
+        verify(priorityScheduler, never()).submit(any());
+        verify(balanceContext, never()).getGenerateInputPbBytes();
+        verify(recentCacheKeyTraceReporter, never()).report(any());
+
+        request.setVitOnly(false);
+        when(balanceContext.getGenerateInputPbBytes()).thenReturn(new byte[]{1});
+        when(priorityScheduler.submit(balanceContext))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        assertSame(response, routeService.route(balanceContext).join());
+        verify(priorityScheduler).submit(balanceContext);
     }
 
     @Test
