@@ -1,0 +1,724 @@
+{
+  "samples": 1422,
+  "top_stacks": [
+    [
+      "org/flexlb/balance/scheduler/DefaultRouter.selectRole",
+      705
+    ],
+    [
+      "org/flexlb/balance/strategy/CostBasedPrefillStrategy.select",
+      592
+    ],
+    [
+      "org/flexlb/balance/strategy/CostBasedPrefillStrategy.evaluateCandidates",
+      546
+    ],
+    [
+      "org/flexlb/balance/scheduler/DefaultRouter.selectAll",
+      534
+    ],
+    [
+      "org/flexlb/balance/scheduler/DefaultRouter.select",
+      495
+    ],
+    [
+      "org/flexlb/engine/grpc/EngineRpcService$GenerateInputPB.writeTo",
+      231
+    ],
+    [
+      "org/flexlb/balance/strategy/DecodeSelector.select",
+      163
+    ],
+    [
+      "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.scheduleRequest",
+      138
+    ],
+    [
+      "com/google/protobuf/AbstractMessageLite.toByteArray",
+      136
+    ],
+    [
+      "org.flexlb.balance.strategy.CostBasedPrefillStrategy$$Lambda+0x0000008801505fd8/1089804739.apply",
+      118
+    ],
+    [
+      "org/flexlb/balance/strategy/EndpointRoundRobin.next",
+      118
+    ],
+    [
+      "org/flexlb/balance/strategy/PrefillCandidateSet.endpointAddress",
+      118
+    ],
+    [
+      "com/google/protobuf/CodedOutputStream$OutputStreamEncoder.writeMessageNoTag",
+      111
+    ],
+    [
+      "org/flexlb/balance/projection/RouteTimelineProjector.projectWithPredictions",
+      102
+    ],
+    [
+      "org/flexlb/balance/strategy/CostBasedPrefillStrategy.selectBaselineCandidate",
+      84
+    ],
+    [
+      "org/flexlb/balance/strategy/CostBasedPrefillStrategy.selectBestCandidate",
+      84
+    ],
+    [
+      "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.runTraffic",
+      81
+    ],
+    [
+      "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix",
+      73
+    ],
+    [
+      "org/flexlb/balance/strategy/PrefillCandidateSet.addCandidate",
+      73
+    ],
+    [
+      "org/flexlb/balance/strategy/PrefillCandidateSet.ensureCapacity",
+      73
+    ]
+  ],
+  "top_threads": [
+    [
+      "flexlb-global-planner-1",
+      321
+    ],
+    [
+      "flexlb-global-planner-2",
+      268
+    ],
+    [
+      "flexlb-global-planner-3",
+      232
+    ],
+    [
+      "flexlb-global-planner-4",
+      201
+    ],
+    [
+      "main",
+      188
+    ],
+    [
+      "flexlb-dispatch-executor-7",
+      9
+    ],
+    [
+      "flexlb-dispatch-executor-12",
+      9
+    ],
+    [
+      "grpc-nio-worker-ELG-3-14",
+      8
+    ],
+    [
+      "flexlb-perf-engine-status",
+      7
+    ],
+    [
+      "flexlb-dispatch-executor-8",
+      7
+    ],
+    [
+      "flexlb-dispatch-executor-5",
+      7
+    ],
+    [
+      "flexlb-dispatch-executor",
+      7
+    ],
+    [
+      "flexlb-dispatch-executor-11",
+      6
+    ],
+    [
+      "flexlb-dispatch-executor-3",
+      6
+    ],
+    [
+      "flexlb-dispatch-executor-6",
+      6
+    ]
+  ],
+  "sampled_allocations_gb": [
+    [
+      "org/flexlb/engine/grpc/EngineRpcService$GenerateInputPB$Builder.mergeFrom",
+      37.664
+    ],
+    [
+      "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.runTraffic",
+      14.827
+    ],
+    [
+      "org/flexlb/balance/planner/GroupPlanner.select",
+      10.52
+    ],
+    [
+      "org/flexlb/balance/strategy/DecodeSelector.select",
+      7.98
+    ],
+    [
+      "java/lang/invoke/MethodHandleImpl$1.newMemberName",
+      2.685
+    ],
+    [
+      "java/util/Arrays.copyOfRangeByte",
+      2.379
+    ],
+    [
+      "org/flexlb/balance/prediction/PrefillBatchFeatures.from",
+      1.97
+    ],
+    [
+      "java/util/Arrays.copyOf",
+      1.86
+    ],
+    [
+      "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.scheduleRequest",
+      1.618
+    ],
+    [
+      "io/grpc/protobuf/lite/ProtoLiteUtils$MessageMarshaller.parse",
+      1.439
+    ],
+    [
+      "io/grpc/internal/ServerImpl$ServerTransportListenerImpl$1MethodLookup.maySwitchExecutor",
+      1.303
+    ],
+    [
+      "com/google/protobuf/CodedOutputStream$AbstractBufferedEncoder.<init>",
+      1.216
+    ],
+    [
+      "org/flexlb/balance/endpoint/PrefillState.batchReductionsUnderLock",
+      1.154
+    ],
+    [
+      "org/flexlb/balance/planner/GroupPlanner$Selection.<init>",
+      1.018
+    ],
+    [
+      "io/grpc/internal/MessageDeframer.readRequiredBytes",
+      0.937
+    ]
+  ],
+  "sampled_allocation_classes_gb": [
+    [
+      "[I",
+      37.666
+    ],
+    [
+      "[B",
+      22.373
+    ],
+    [
+      "[Ljava/lang/Object;",
+      11.702
+    ],
+    [
+      "[D",
+      7.98
+    ],
+    [
+      "org/flexlb/balance/planner/GroupPlanner$Shape",
+      5.459
+    ],
+    [
+      "java/lang/invoke/MemberName",
+      2.685
+    ],
+    [
+      "io/grpc/internal/ServerCallImpl",
+      1.303
+    ],
+    [
+      "java/lang/Long",
+      0.991
+    ],
+    [
+      "java/util/concurrent/locks/AbstractQueuedSynchronizer$ConditionNode",
+      0.974
+    ],
+    [
+      "java/util/ImmutableCollections$ListItr",
+      0.957
+    ]
+  ],
+  "cpu_samples": [
+    {
+      "startTime": "2026-09-11T17:06:04.729533250+08:00",
+      "jvmUser": 0.15,
+      "jvmSystem": 0.004,
+      "machineTotal": 0.43536505
+    },
+    {
+      "startTime": "2026-09-11T17:06:05.730762917+08:00",
+      "jvmUser": 0.31749174,
+      "jvmSystem": 0.10033003,
+      "machineTotal": 0.7989276
+    },
+    {
+      "startTime": "2026-09-11T17:06:06.737295750+08:00",
+      "jvmUser": 0.348,
+      "jvmSystem": 0.22866666,
+      "machineTotal": 0.9352902
+    },
+    {
+      "startTime": "2026-09-11T17:06:07.739409625+08:00",
+      "jvmUser": 0.35066667,
+      "jvmSystem": 0.23466666,
+      "machineTotal": 0.916276
+    },
+    {
+      "startTime": "2026-09-11T17:06:08.745737958+08:00",
+      "jvmUser": 0.36831683,
+      "jvmSystem": 0.25148514,
+      "machineTotal": 0.9361277
+    },
+    {
+      "startTime": "2026-09-11T17:06:09.749340583+08:00",
+      "jvmUser": 0.438,
+      "jvmSystem": 0.228,
+      "machineTotal": 0.9799733
+    },
+    {
+      "startTime": "2026-09-11T17:06:10.753012417+08:00",
+      "jvmUser": 0.50825083,
+      "jvmSystem": 0.20792079,
+      "machineTotal": 0.97873753
+    },
+    {
+      "startTime": "2026-09-11T17:06:11.756072375+08:00",
+      "jvmUser": 0.392,
+      "jvmSystem": 0.248,
+      "machineTotal": 0.91778076
+    },
+    {
+      "startTime": "2026-09-11T17:06:12.761582083+08:00",
+      "jvmUser": 0.5122112,
+      "jvmSystem": 0.20660067,
+      "machineTotal": 0.95672435
+    },
+    {
+      "startTime": "2026-09-11T17:06:13.767133958+08:00",
+      "jvmUser": 0.458,
+      "jvmSystem": 0.22466667,
+      "machineTotal": 0.88093644
+    },
+    {
+      "startTime": "2026-09-11T17:06:14.769324667+08:00",
+      "jvmUser": 0.41266668,
+      "jvmSystem": 0.18733333,
+      "machineTotal": 0.7989167
+    },
+    {
+      "startTime": "2026-09-11T17:06:15.772015333+08:00",
+      "jvmUser": 0.47722772,
+      "jvmSystem": 0.17755775,
+      "machineTotal": 0.90434784
+    },
+    {
+      "startTime": "2026-09-11T17:06:16.773729+08:00",
+      "jvmUser": 0.41533333,
+      "jvmSystem": 0.204,
+      "machineTotal": 0.83546007
+    },
+    {
+      "startTime": "2026-09-11T17:06:17.775082333+08:00",
+      "jvmUser": 0.402,
+      "jvmSystem": 0.218,
+      "machineTotal": 0.82594085
+    },
+    {
+      "startTime": "2026-09-11T17:06:18.776983375+08:00",
+      "jvmUser": 0.36533332,
+      "jvmSystem": 0.22933333,
+      "machineTotal": 0.82289565
+    },
+    {
+      "startTime": "2026-09-11T17:06:19.778314125+08:00",
+      "jvmUser": 0.42266667,
+      "jvmSystem": 0.188,
+      "machineTotal": 0.8663533
+    },
+    {
+      "startTime": "2026-09-11T17:06:20.781736333+08:00",
+      "jvmUser": 0.118151814,
+      "jvmSystem": 0.072607264,
+      "machineTotal": 0.42818972
+    },
+    {
+      "startTime": "2026-09-11T17:06:21.782848625+08:00",
+      "jvmUser": 0.00066666666,
+      "jvmSystem": 0.0,
+      "machineTotal": 0.14084508
+    }
+  ],
+  "gc": [
+    {
+      "name": "G1New",
+      "duration": "PT0.012253167S",
+      "sumOfPauses": "PT0.012253167S",
+      "longestPause": "PT0.012253167S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.009181667S",
+      "sumOfPauses": "PT0.009181667S",
+      "longestPause": "PT0.009181667S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.009068958S",
+      "sumOfPauses": "PT0.009068958S",
+      "longestPause": "PT0.009068958S"
+    },
+    {
+      "name": "G1Old",
+      "duration": "PT0.894390667S",
+      "sumOfPauses": "PT0.002523125S",
+      "longestPause": "PT0.0021925S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.024461875S",
+      "sumOfPauses": "PT0.024461875S",
+      "longestPause": "PT0.024461875S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.017288292S",
+      "sumOfPauses": "PT0.017288292S",
+      "longestPause": "PT0.017288292S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.029384375S",
+      "sumOfPauses": "PT0.029384375S",
+      "longestPause": "PT0.029384375S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.057177625S",
+      "sumOfPauses": "PT0.057177625S",
+      "longestPause": "PT0.057177625S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.037794584S",
+      "sumOfPauses": "PT0.037794584S",
+      "longestPause": "PT0.037794584S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.027847542S",
+      "sumOfPauses": "PT0.027847542S",
+      "longestPause": "PT0.027847542S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.038351292S",
+      "sumOfPauses": "PT0.038351292S",
+      "longestPause": "PT0.038351292S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.022465625S",
+      "sumOfPauses": "PT0.022465625S",
+      "longestPause": "PT0.022465625S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.019400542S",
+      "sumOfPauses": "PT0.019400542S",
+      "longestPause": "PT0.019400542S"
+    },
+    {
+      "name": "G1Old",
+      "duration": "PT1.336231209S",
+      "sumOfPauses": "PT0.002587542S",
+      "longestPause": "PT0.002244S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.019068458S",
+      "sumOfPauses": "PT0.019068458S",
+      "longestPause": "PT0.019068458S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.022418417S",
+      "sumOfPauses": "PT0.022418417S",
+      "longestPause": "PT0.022418417S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.014407417S",
+      "sumOfPauses": "PT0.014407417S",
+      "longestPause": "PT0.014407417S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.015421041S",
+      "sumOfPauses": "PT0.015421041S",
+      "longestPause": "PT0.015421041S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.013141291S",
+      "sumOfPauses": "PT0.013141291S",
+      "longestPause": "PT0.013141291S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.014026833S",
+      "sumOfPauses": "PT0.014026833S",
+      "longestPause": "PT0.014026833S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.011263708S",
+      "sumOfPauses": "PT0.011263708S",
+      "longestPause": "PT0.011263708S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.011605417S",
+      "sumOfPauses": "PT0.011605417S",
+      "longestPause": "PT0.011605417S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.010968583S",
+      "sumOfPauses": "PT0.010968583S",
+      "longestPause": "PT0.010968583S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.012951333S",
+      "sumOfPauses": "PT0.012951333S",
+      "longestPause": "PT0.012951333S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.012468209S",
+      "sumOfPauses": "PT0.012468209S",
+      "longestPause": "PT0.012468209S"
+    },
+    {
+      "name": "G1Old",
+      "duration": "PT1.717764125S",
+      "sumOfPauses": "PT0.002430959S",
+      "longestPause": "PT0.002083125S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.011942709S",
+      "sumOfPauses": "PT0.011942709S",
+      "longestPause": "PT0.011942709S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.013685375S",
+      "sumOfPauses": "PT0.013685375S",
+      "longestPause": "PT0.013685375S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.00636225S",
+      "sumOfPauses": "PT0.00636225S",
+      "longestPause": "PT0.00636225S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.005978125S",
+      "sumOfPauses": "PT0.005978125S",
+      "longestPause": "PT0.005978125S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.006345083S",
+      "sumOfPauses": "PT0.006345083S",
+      "longestPause": "PT0.006345083S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.007222209S",
+      "sumOfPauses": "PT0.007222209S",
+      "longestPause": "PT0.007222209S"
+    },
+    {
+      "name": "G1Full",
+      "duration": "PT0.549874S",
+      "sumOfPauses": "PT0.549874S",
+      "longestPause": "PT0.549874S"
+    },
+    {
+      "name": "G1Old",
+      "duration": "PT0.957994416S",
+      "sumOfPauses": "PT0S",
+      "longestPause": "PT0S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.0199205S",
+      "sumOfPauses": "PT0.0199205S",
+      "longestPause": "PT0.0199205S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.0161415S",
+      "sumOfPauses": "PT0.0161415S",
+      "longestPause": "PT0.0161415S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.008713833S",
+      "sumOfPauses": "PT0.008713833S",
+      "longestPause": "PT0.008713833S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.008576667S",
+      "sumOfPauses": "PT0.008576667S",
+      "longestPause": "PT0.008576667S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.006434625S",
+      "sumOfPauses": "PT0.006434625S",
+      "longestPause": "PT0.006434625S"
+    },
+    {
+      "name": "G1Old",
+      "duration": "PT1.139438084S",
+      "sumOfPauses": "PT0.002533625S",
+      "longestPause": "PT0.00233925S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.005836875S",
+      "sumOfPauses": "PT0.005836875S",
+      "longestPause": "PT0.005836875S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.005932709S",
+      "sumOfPauses": "PT0.005932709S",
+      "longestPause": "PT0.005932709S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.004976S",
+      "sumOfPauses": "PT0.004976S",
+      "longestPause": "PT0.004976S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.004606917S",
+      "sumOfPauses": "PT0.004606917S",
+      "longestPause": "PT0.004606917S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.004592375S",
+      "sumOfPauses": "PT0.004592375S",
+      "longestPause": "PT0.004592375S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.005006083S",
+      "sumOfPauses": "PT0.005006083S",
+      "longestPause": "PT0.005006083S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.0050065S",
+      "sumOfPauses": "PT0.0050065S",
+      "longestPause": "PT0.0050065S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.004956792S",
+      "sumOfPauses": "PT0.004956792S",
+      "longestPause": "PT0.004956792S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.005624958S",
+      "sumOfPauses": "PT0.005624958S",
+      "longestPause": "PT0.005624958S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.005327625S",
+      "sumOfPauses": "PT0.005327625S",
+      "longestPause": "PT0.005327625S"
+    },
+    {
+      "name": "G1Old",
+      "duration": "PT1.185032083S",
+      "sumOfPauses": "PT0.00265025S",
+      "longestPause": "PT0.0023025S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.009500958S",
+      "sumOfPauses": "PT0.009500958S",
+      "longestPause": "PT0.009500958S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.00866725S",
+      "sumOfPauses": "PT0.00866725S",
+      "longestPause": "PT0.00866725S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.012427833S",
+      "sumOfPauses": "PT0.012427833S",
+      "longestPause": "PT0.012427833S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.012074542S",
+      "sumOfPauses": "PT0.012074542S",
+      "longestPause": "PT0.012074542S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.015407125S",
+      "sumOfPauses": "PT0.015407125S",
+      "longestPause": "PT0.015407125S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.013644208S",
+      "sumOfPauses": "PT0.013644208S",
+      "longestPause": "PT0.013644208S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.012823292S",
+      "sumOfPauses": "PT0.012823292S",
+      "longestPause": "PT0.012823292S"
+    },
+    {
+      "name": "G1Old",
+      "duration": "PT1.339219208S",
+      "sumOfPauses": "PT0.002581625S",
+      "longestPause": "PT0.002218292S"
+    },
+    {
+      "name": "G1New",
+      "duration": "PT0.009331625S",
+      "sumOfPauses": "PT0.009331625S",
+      "longestPause": "PT0.009331625S"
+    }
+  ],
+  "note": "Diagnostic with 4 planners; not the default-15-planner performance result. JFR samples include setup/serialization and measurement. Allocation weights are sampling estimates."
+}
