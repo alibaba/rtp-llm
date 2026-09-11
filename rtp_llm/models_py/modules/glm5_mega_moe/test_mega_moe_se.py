@@ -54,6 +54,7 @@ def _config():
         expert_num=2,
         moe_k=1,
         moe_inter_size=4,
+        inter_size=4,
         max_seq_len=16,
         gen_num_per_cycle=0,
         swiglu_limit=10.0,
@@ -71,6 +72,12 @@ def _parallelism():
 
 class MegaMoeSEWrapperTest(unittest.TestCase):
     def test_fp4_routed_and_fp8_shared_weights_are_consumed(self):
+        self._check_full_weights(1)
+
+    def test_attention_tp8_keeps_full_shared_weights(self):
+        self._check_full_weights(8)
+
+    def _check_full_weights(self, tp_size):
         routed_up = torch.full((2, 4, 4), 3, dtype=torch.int8)
         routed_gate = torch.full((2, 4, 4), 7, dtype=torch.int8)
         routed_up_sf = torch.full((2, 4, 2), 5, dtype=torch.float32)
@@ -89,15 +96,21 @@ class MegaMoeSEWrapperTest(unittest.TestCase):
         }
 
         with patch.object(mega_moe_se_wrapper, "GLM5MegaMoESE", _FakeMegaMoESE):
+            parallelism = _parallelism()
+            parallelism.tp_size = tp_size
+            parallelism.get_ffn_tp_size = lambda: tp_size
             mega_moe_se_wrapper.MegaMoeSEWrapper(
-                _config(), _parallelism(), weights, layer_idx=3
+                _config(), parallelism, weights, layer_idx=3
             )
 
         captured = _FakeMegaMoESE.instance
-        torch.testing.assert_close(captured.routed["w1_w"][:, :4], routed_gate)
-        torch.testing.assert_close(captured.routed["w1_w"][:, 4:], routed_up)
-        torch.testing.assert_close(captured.routed["w1_s"][:, :4], routed_gate_sf)
-        torch.testing.assert_close(captured.routed["w1_s"][:, 4:], routed_up_sf)
+        # The wrapper now passes the loader's up/gate layout explicitly; the
+        # real consumer performs the layout transform, not this wrapper.
+        self.assertEqual(captured.routed["w1_layout"], "up_gate")
+        torch.testing.assert_close(captured.routed["w1_w"][:, :4], routed_up)
+        torch.testing.assert_close(captured.routed["w1_w"][:, 4:], routed_gate)
+        torch.testing.assert_close(captured.routed["w1_s"][:, :4], routed_up_sf)
+        torch.testing.assert_close(captured.routed["w1_s"][:, 4:], routed_gate_sf)
         torch.testing.assert_close(captured.shared["w1_w"], shared_w13)
         torch.testing.assert_close(captured.shared["w2_w"], shared_w2)
         self.assertTrue(captured.warmed)
@@ -114,13 +127,22 @@ class MegaMoeSEWrapperTest(unittest.TestCase):
         ):
             self.assertNotIn(key, weights)
 
-    def test_shared_ffn_tp_is_rejected(self):
+    def test_sharded_shared_weights_are_rejected_before_consuming_weights(self):
         parallelism = _parallelism()
-        parallelism.get_ffn_tp_size = lambda: 2
-        with self.assertRaisesRegex(ValueError, "ffn_tp_size == 1"):
+        parallelism.get_ffn_tp_size = lambda: 8
+        weights = {
+            W.ffn_w13: torch.empty((2, 8)),
+            W.ffn_w2: torch.empty((8, 1)),
+            W.moe_w1: torch.empty((2, 8, 4)),
+        }
+        before = dict(weights)
+        with self.assertRaisesRegex(ValueError, "full shared-expert weights"):
             mega_moe_se_wrapper.MegaMoeSEWrapper(
-                _config(), parallelism, {}, layer_idx=0
+                _config(), parallelism, weights, layer_idx=0
             )
+        self.assertEqual(weights.keys(), before.keys())
+        for key in before:
+            self.assertIs(weights[key], before[key])
 
 
 class MegaMoeSEBufferCompatibilityTest(unittest.TestCase):

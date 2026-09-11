@@ -1,3 +1,20 @@
+exports_files(
+    ["trtllm_sparse_decode_test.py"],
+    visibility = ["//rtp_llm/models_py/modules/hybrid/test:__pkg__"],
+)
+
+py_test(
+    name = "glm5_cmp_q_rope_test",
+    srcs = ["glm5_cmp_q_rope_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+        "//rtp_llm/models_py/triton_kernels:sparse_mla",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV"},
+)
+
 py_test(
     name = "trtllm_kv_compat_test",
     srcs = ["trtllm_kv_compat_test.py"],
@@ -31,6 +48,24 @@ py_test(
 py_test(
     name = "trtllm_pinned_indices_test",
     srcs = ["trtllm_pinned_indices_test.py", "trtllm_sparse_decode_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:flashinfer-cubin",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "trtllm_cmp_prepare_test",
+    srcs = ["trtllm_cmp_prepare_test.py", "trtllm_sparse_integration_test.py"],
+    data = ["//rtp_llm/models_py:modules"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
+    name = "trtllm_prepared_inputs_test",
+    srcs = ["trtllm_prepared_inputs_test.py", "trtllm_sparse_decode_test.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm:flashinfer-python",

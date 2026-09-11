@@ -93,7 +93,7 @@ def test_parallelism_ignores_prefill_cp_metadata_on_decode() -> None:
     assert bridge._unsupported_parallelism_reason(decode_parallelism) is None
     assert (
         bridge._unsupported_parallelism_reason(prefill_parallelism)
-        == "GLM5 CMP requires TP=1"
+        == "GLM5 CMP requires TP=1 or non-CP TP=8"
     )
 
 

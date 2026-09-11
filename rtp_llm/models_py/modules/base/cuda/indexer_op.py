@@ -724,7 +724,6 @@ class IndexerOp(nn.Module):
         )
 
         block_table = _physical_block_table(attention_inputs)
-        cu_seqlens_q = attention_inputs.decode_cu_seqlens_d
         lengths = fmha_params.expanded_seq_lens
 
         if is_multi_token_decode:
@@ -745,9 +744,6 @@ class IndexerOp(nn.Module):
             )
             lengths = fmha_params.expanded_seq_lens
             kvlen_2d = lengths.reshape(-1, 1)
-            cu_seqlens_q = torch.arange(
-                0, num_tokens + 1, 1, dtype=torch.int32, device=q_fp8.device
-            )
         else:
             # deep_gemm 2.5.0 expects context_lens as [batch_size, next_n].
             # fmha_params.kvlen_d is 1D [B]; unsqueeze(1) -> [B, 1] for next_n=1.

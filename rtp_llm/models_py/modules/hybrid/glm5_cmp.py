@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.utils.model_weight import W
 
 _ENABLE_ENV = "RTP_LLM_GLM5_CMP"
@@ -86,11 +87,19 @@ def _tokens_per_request(
 def _unsupported_parallelism_reason(parallelism: Any) -> str | None:
     raw_tp = int(getattr(parallelism, "tp_size", 1) or 1)
     attn_tp = int(parallelism.get_attn_tp_size())
-    # Decode carries the prefill CP width and sharded-cache metadata so that it
-    # can read P->D KV cache correctly, but it does not run context parallelism.
-    # Active prefill CP repurposes the raw TP group and therefore has raw_tp > 1.
+    if raw_tp == attn_tp == 8:
+        cp = getattr(parallelism, "prefill_cp_config", None)
+        # PREFILL_CP metadata alone does not run CP on Decode. A rank-sharded
+        # block table, however, is not supported by the local TRT cache reader.
+        if bool(getattr(cp, "kv_cache_sharded", False)) or (
+            cp is not None and cp.is_enabled()
+        ):
+            return "TP8 CMP requires inactive CP and non-sharded KV caches"
+        return None
+    # Keep TP1/DP unchanged, including metadata carried from the prefill side.
+    # Active CP repurposes TP and must not be treated as attention TP8.
     if raw_tp != 1 or attn_tp != 1:
-        return "GLM5 CMP requires TP=1"
+        return "GLM5 CMP requires TP=1 or non-CP TP=8"
     return None
 
 
@@ -141,6 +150,7 @@ class Glm5Cmp:
         self._disabled_reason = self._static_disabled_reason()
         self._moe_prepack_disabled_reason = None
         self._moe_prepack_abi_validated = False
+        self._router_pack_disabled_reason = "CMP is not initialized"
         # Merely setting RTP_LLM_GLM5_CMP must not import RTP-kernel. These fields
         # are initialized only
         # after the current model call has passed the CMP capability checks.
@@ -170,6 +180,9 @@ class Glm5Cmp:
             return "attention is not MLA"
         if int(getattr(attn, "kernel_tokens_per_block", 0)) != 64:
             return "GLM5 CMP requires 64-token KV pages"
+        if self.parallelism_config.get_attn_tp_size() == 8:
+            if int(getattr(self.self_attn, "num_heads", 0)) != 8:
+                return "TP8 GLM5 CMP requires 8 local query heads"
         if not self.is_moe_layer:
             if not (
                 bool(getattr(self.mlp, "accepts_fp8_input", False))
@@ -227,6 +240,9 @@ class Glm5Cmp:
             self._router_weight = self._prepare_router_weight(self.mlp)
             self._moe_prepack_disabled_reason = (
                 self._static_moe_prepack_disabled_reason()
+            )
+            self._router_pack_disabled_reason = (
+                self._static_router_pack_disabled_reason()
             )
 
         qkv_projection = get_weight_and_scale_from_linear(
@@ -300,6 +316,125 @@ class Glm5Cmp:
             self._moe_prepack_abi_validated = True
         return tuple(views)
 
+    def _static_router_pack_disabled_reason(self) -> str | None:
+        """Limit ordinary-router packing to the verified TP8 MegaMoE ABI.
+
+        This is separate from native norm/router prepacking: its FP32 router
+        projection does not preserve the ordinary BF16 gate's rounding boundary.
+        """
+        parallelism, config, mlp = self.parallelism_config, self.config, self.mlp
+        if (
+            not self.is_moe_layer
+            or getattr(self, "disable_attention_post_moe_pre", False)
+            or str(getattr(config, "model_type", "")) not in _SUPPORTED_MODEL_TYPES
+            or int(getattr(parallelism, "tp_size", 0)) != 8
+            or int(getattr(parallelism, "ep_size", 0)) != 8
+            or int(parallelism.get_ffn_tp_size()) != 8
+            or _unsupported_parallelism_reason(parallelism) is not None
+            or int(getattr(mlp, "ep_size", 0)) != 8
+            or int(getattr(mlp, "ffn_tp_size", 0)) != 8
+            or getattr(mlp, "fake_balance_expert", None) is not None
+            or bool(getattr(mlp, "_use_mega_moe_fused_shared", False))
+            or getattr(mlp, "shared_expert", None) is None
+            or getattr(mlp, "shared_expert_gate", None) is not None
+            or (
+                int(getattr(config, "hidden_size", 0)),
+                int(getattr(config, "expert_num", 0)),
+                int(getattr(config, "moe_k", 0)),
+                int(getattr(config, "moe_n_group", 0)),
+                int(getattr(config, "moe_topk_group", 0)),
+                bool(getattr(config, "has_moe_norm", False)),
+                float(getattr(config, "routed_scaling_factor", 0.0)),
+                int(getattr(mlp, "hidden_dim", 0)),
+                int(getattr(mlp, "num_experts", 0)),
+                int(getattr(mlp, "top_k", 0)),
+            )
+            != (6144, 256, 8, 1, 1, True, 2.5, 6144, 256, 8)
+        ):
+            return "unsupported TP8 ordinary router/pack contract"
+        bias = getattr(mlp, "correction_bias", None)
+        if (
+            not isinstance(bias, torch.Tensor)
+            or bias.dtype != torch.float32
+            or tuple(bias.shape) != (256,)
+            or not bias.is_contiguous()
+        ):
+            return "ordinary router/pack requires contiguous FP32 correction bias"
+
+        from rtp_llm.models_py.modules.glm5_mega_moe.input_packer import (
+            FusedMegaMoeInputPacker,
+        )
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe import GLM5MegaMoE
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
+            MegaMoeWrapper,
+        )
+
+        wrapper = getattr(mlp, "fused_moe", None)
+        if (
+            type(wrapper) is not MegaMoeWrapper
+            or type(wrapper.mega_moe) is not GLM5MegaMoE
+        ):
+            return "ordinary router/pack requires the exact ordinary MegaMoE consumer"
+        if (
+            type(getattr(wrapper.mega_moe, "_input_packer", None))
+            is not FusedMegaMoeInputPacker
+        ):
+            # The explicit torch/debug packer has different NaN/clamp semantics.
+            # Preserve that choice instead of silently replacing its producer.
+            return "ordinary router/pack requires the exact fused input packer"
+        cfg = getattr(wrapper.mega_moe, "cfg", None)
+        if tuple(
+            getattr(cfg, field, None)
+            for field in ("dim", "n_routed_experts", "n_activated_experts", "ep_size")
+        ) != (6144, 256, 8, 8):
+            return "unsupported ordinary MegaMoE dimensions or parallelism"
+        try:
+            views = wrapper.prepacked_input_views(1)
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return "ordinary MegaMoE prepacked buffers are unavailable"
+        reason = self._moe_prepack_views_disabled_reason(views, 1)
+        if reason is not None:
+            return reason
+        if views[0].device != bias.device:
+            return "ordinary MegaMoE buffers and correction bias must share a device"
+        return None
+
+    def moe_router_pack_callback(self, rows: int) -> Any:
+        """Bind this invocation to this CMP clone's actual MegaMoE buffers."""
+        if (
+            getattr(self, "_router_pack_disabled_reason", "CMP is not initialized")
+            is not None
+        ):
+            return None
+        # Oversized calls retain ordinary MegaMoE's existing chunked path.
+        if not 1 <= rows <= 256:
+            return None
+        buf = self.mlp.fused_moe.mega_moe._mega_buf
+        if buf is None or rows > buf.num_max_tokens_per_rank:
+            return None
+        return self._pack_moe_router
+
+    def _pack_moe_router(
+        self, hidden: torch.Tensor, logits: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from rtp_llm.models_py.triton_kernels.sparse_mla.glm5_moe_router_pack import (
+            fused_router_pack,
+        )
+
+        activation, scale, indices, weights = self.mlp.fused_moe.prepacked_input_views(
+            int(hidden.size(0))
+        )
+        fused_router_pack(
+            hidden,
+            logits,
+            self.mlp.correction_bias,
+            activation_out=activation,
+            scales_out=scale,
+            topk_ids_out=indices,
+            topk_weights_out=weights,
+        )
+        return indices, weights
+
     @staticmethod
     def _prepare_router_weight(mlp: Any) -> torch.Tensor | None:
         weight = getattr(getattr(mlp, "gate", None), "weight", None)
@@ -338,6 +473,13 @@ class Glm5Cmp:
         clone._disabled_reason = self._disabled_reason
         clone._moe_prepack_disabled_reason = self._moe_prepack_disabled_reason
         clone._moe_prepack_abi_validated = False
+        # Re-evaluate the clone's real consumer/buffers; never copy a bound
+        # callback that could fill the base model's symmetric-memory views.
+        clone._router_pack_disabled_reason = (
+            clone._static_router_pack_disabled_reason()
+            if self.ops is not None
+            else "CMP is not initialized"
+        )
         clone.ops = self.ops
         clone._qkv_projection = self._qkv_projection
         clone._q_b_proj = self._q_b_proj
@@ -386,6 +528,15 @@ class Glm5Cmp:
         require_indexer_metadata: bool,
     ) -> str | None:
         implementation = self._attention_impl(fmha_impl)
+        parallelism = getattr(self, "parallelism_config", None)
+        if parallelism is not None and parallelism.get_attn_tp_size() == 8:
+            if (
+                getattr(
+                    getattr(implementation, "fmha_impl", None), "backend_name", None
+                )
+                != "trtllm_gen_656_compat"
+            ):
+                return "TP8 GLM5 CMP requires TRT sparse Decode"
         attn_inputs = implementation.attn_inputs
         params = implementation.fmha_params
         rows = int(hidden_states.size(0)) if hidden_states.dim() == 2 else 0
@@ -452,6 +603,67 @@ class Glm5Cmp:
             event.record()
         return events
 
+    def _prepare_sparse_mla_inputs(
+        self,
+        implementation: Any,
+        query: torch.Tensor,
+        cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+    ) -> Any:
+        # Only the selected TRT backend has this preparation contract. Keep
+        # FlashMLA's Tensor ABI and lazy imports unchanged. The returned token
+        # belongs to this call; no ready flag is retained across layers/steps.
+        op = getattr(implementation, "fmha_impl", None)
+        if getattr(op, "backend_name", None) == "trtllm_gen_656_compat":
+            return op.prepare(query, cache, topk_indices, layer_id=self.layer_idx)
+        return query
+
+    def _project_query(
+        self,
+        q_fp8: torch.Tensor,
+        q_scale: torch.Tensor,
+        implementation: Any,
+        *,
+        out: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        weight, scale = self._q_b_proj
+        local_heads = int(getattr(self.self_attn, "num_heads", 64))
+        if local_heads == 64:
+            # The fused RTP Q-B epilogue is specialized for 64 heads.
+            return self.ops.q_b_proj(
+                q_fp8,
+                q_scale,
+                weight,
+                scale,
+                implementation._cos_sin_cache,
+                implementation.fmha_params.positions_d,
+                **({"out": out} if out is not None else {}),
+            )
+        if local_heads != 8:
+            raise ValueError("GLM5 CMP requires 64 or 8 local query heads")
+
+        from rtp_llm.models_py.triton_kernels.sparse_mla.glm5_cmp_q_b import q_b_proj_h8
+
+        if out is None:
+            rows = q_fp8.size(0)
+            out = (
+                torch.empty((rows, 8, 192), device=q_fp8.device, dtype=torch.bfloat16),
+                torch.empty((rows, 8, 576), device=q_fp8.device, dtype=torch.bfloat16),
+            )
+        # Preserve the previous BF16 GEMM boundary and Q-only RoPE arithmetic.
+        # Fusing its epilogue removes the separate split kernel and restores
+        # the native PDL dependency into the following absorbed Wkc BMM.
+        return q_b_proj_h8(
+            q_fp8,
+            q_scale,
+            weight,
+            scale,
+            implementation._cos_sin_cache,
+            implementation.fmha_params.positions_d,
+            out=out,
+            is_neox_style=implementation._is_neox_style,
+        )
+
     def mla_prologue(
         self,
         hidden_states: torch.Tensor,
@@ -461,22 +673,33 @@ class Glm5Cmp:
         prev_topk_indices: torch.Tensor | None,
         *,
         reuse_topk_indices: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Prepare MLA inputs, optionally reusing the seed model's TopK indices."""
+    ) -> tuple[torch.Tensor, Any, torch.Tensor]:
+        """Prepare MLA inputs, optionally reusing the seed model's TopK indices.
+
+        The query slot holds either FlashMLA's BF16 query or an explicit TRT
+        prepared-input token consumed immediately by sparse_mla.
+        """
         implementation = self._attention_impl(fmha_impl)
         ops = self.ops
         rows = int(hidden_states.size(0))
         params = implementation.fmha_params
         attention = self.self_attn
         qkv_weight, qkv_scale = self._qkv_projection
-        q_b_weight, q_b_scale = self._q_b_proj
         mla_cache = kv_cache.kv_cache_base
         if mla_cache.dtype != torch.uint8:
             mla_cache = mla_cache.view(torch.uint8)
-        mla_cache = mla_cache.view(-1, 64, 656)
+        # The installed CMP producer uses 656 bytes. A separately constructed
+        # experimental producer can declare its own HBM-only native layout;
+        # this does not change the service cache allocator or factory policy.
+        cache_token_bytes = getattr(ops, "mla_cache_token_bytes", 656)
+        if cache_token_bytes not in (656, 576):
+            raise ValueError("Unsupported CMP KV producer layout")
+        mla_cache = mla_cache.view(-1, 64, cache_token_bytes)
         working_entry = getattr(implementation, "pinned_mla_groups", {}).get(
             self.layer_idx
         )
+        if working_entry is not None and cache_token_bytes != 656:
+            raise ValueError("Pinned CMP caches require the existing 656-byte layout")
         write_slots = params.slot_mapping
         if working_entry is not None:
             # Keep CMP's fused KV producer on HBM. Publish its rows to their
@@ -527,13 +750,10 @@ class Glm5Cmp:
             )
             # Project Q-LoRA into per-head [NoPE | PE], keep NoPE for the
             # absorbed BMM, and RoPE the PE suffix of the SparseMLA query.
-            q_nope, q_for_sparse_mla = ops.q_b_proj(
+            q_nope, q_for_sparse_mla = self._project_query(
                 q_fp8,
                 q_scale,
-                q_b_weight,
-                q_b_scale,
-                implementation._cos_sin_cache,
-                params.positions_d,
+                implementation,
             )
             # Apply the per-head absorbed Q-NoPE x W_KC BMM and fill the NoPE
             # prefix, completing the [absorbed NoPE | RoPE] SparseMLA query.
@@ -544,8 +764,15 @@ class Glm5Cmp:
             )
             if working_entry is not None:
                 working.write(
-                    group_layer, params.slot_mapping,
-                    mla_cache.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
+                    group_layer,
+                    params.slot_mapping,
+                    mla_cache.view(-1, 656)[:rows].view(
+                        working.backing[group_layer].dtype
+                    ),
+                )
+            else:
+                q_for_sparse_mla = self._prepare_sparse_mla_inputs(
+                    implementation, q_for_sparse_mla, mla_cache, prev_topk_indices
                 )
             return residual_out, q_for_sparse_mla, prev_topk_indices
 
@@ -599,13 +826,16 @@ class Glm5Cmp:
         q_scale = torch.empty(
             aligned_rows * 4, device=hidden_states.device, dtype=torch.int32
         ).as_strided((rows, 4), (1, aligned_rows))
+        local_heads = int(getattr(attention, "num_heads", 64))
         q_nope = torch.empty(
-            (rows, 64, 192), device=hidden_states.device, dtype=torch.bfloat16
+            (rows, local_heads, 192), device=hidden_states.device, dtype=torch.bfloat16
         )
-        # q_b_proj writes the RoPE suffix and absorbed_q_nope_bmm fills the NoPE
-        # prefix. Preserve the existing zero initialization for any padding bytes.
-        q_for_sparse_mla = torch.zeros(
-            (rows, 64, 576), device=hidden_states.device, dtype=torch.bfloat16
+        # H8 Q-B writes all 64 RoPE values and Wkc overwrites the entire 512
+        # latent prefix before consumption: no padding requires a zero kernel.
+        # Keep the existing H64 path unchanged.
+        query_allocator = torch.empty if local_heads == 8 else torch.zeros
+        q_for_sparse_mla = query_allocator(
+            (rows, local_heads, 576), device=hidden_states.device, dtype=torch.bfloat16
         )
         indexer_q = torch.empty(
             (rows, indexer_q_weight.size(0)),
@@ -665,13 +895,10 @@ class Glm5Cmp:
 
             # Project Q-LoRA into per-head [NoPE | PE], retain NoPE for the
             # absorbed BMM, and RoPE the PE suffix of the SparseMLA query.
-            q_nope, q_for_sparse_mla = ops.q_b_proj(
+            q_nope, q_for_sparse_mla = self._project_query(
                 q_fp8,
                 q_scale,
-                q_b_weight,
-                q_b_scale,
-                implementation._cos_sin_cache,
-                params.positions_d,
+                implementation,
                 out=(q_nope, q_for_sparse_mla),
             )
             # Apply Q-NoPE x W_KC per head and fill the query prefix, producing
@@ -742,25 +969,40 @@ class Glm5Cmp:
                 events.indexer_complete.record()
 
             events.indexer_complete.wait()
+            if working_entry is None:
+                # Q and this layer's KV writes precede us on main_stream;
+                # the existing wait makes the freshly selected TopK ready.
+                # Conversion joins through the existing completion event.
+                q_for_sparse_mla = self._prepare_sparse_mla_inputs(
+                    implementation, q_for_sparse_mla, mla_cache, topk_indices
+                )
             events.side_streams_complete.record()
         events.side_streams_complete.wait()
         if working_entry is not None:
             working.write(
-                group_layer, params.slot_mapping,
+                group_layer,
+                params.slot_mapping,
                 mla_cache.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
             )
         return residual_out, q_for_sparse_mla, topk_indices
 
     def sparse_mla(
         self,
-        query: torch.Tensor,
+        query: Any,
         topk_indices: torch.Tensor,
         fmha_impl: Any,
         kv_cache: Any,
     ) -> torch.Tensor:
-        # Keep CMP's BF16 absorbed query and original paged cache contract.
-        # Backend-specific temporary conversion belongs to the selected op.
         implementation = self._attention_impl(fmha_impl)
+        if not isinstance(query, torch.Tensor):
+            op = implementation.fmha_impl
+            if getattr(op, "backend_name", None) != "trtllm_gen_656_compat":
+                raise TypeError("prepared CMP inputs require the TRT sparse backend")
+            # The op validates token type, ownership, generation and one-time
+            # consumption. Do not convert again or infer readiness from an
+            # address/shape that is reused on subsequent graph replays.
+            return op.forward_prepared(query)
+        # FlashMLA and direct callers retain the original paged KV contract.
         cache = kv_cache.kv_cache_base
         attention_kwargs = {}
         working_entry = getattr(implementation, "pinned_mla_groups", {}).get(
@@ -775,6 +1017,28 @@ class Glm5Cmp:
             cache = cache.view(-1, 1, cache.size(-1))
         return implementation.fmha_impl.forward(
             query, cache, topk_indices, layer_id=self.layer_idx, **attention_kwargs
+        )
+
+    def _project_attention_output_local(
+        self, mla_output: torch.Tensor, fmha_impl: Any
+    ) -> torch.Tensor:
+        """Actual CMP Wvc/quant/O computation, before the required TP reduction."""
+        ops = self.ops
+        implementation = self._attention_impl(fmha_impl)
+        mla_weight = implementation.weights[self.layer_idx][W.mla_vc]
+        # Apply the per-head absorbed attention-output x W_VC BMM and quantize
+        # the expanded [M, local_heads * 256] activation for output projection.
+        quantized, quant_scale = ops.mla_absorbed_output_bmm_quant(
+            mla_output, mla_weight
+        )
+        output_weight, output_scale = self._output_projection
+        # FP8 output projection from the expanded local-head activation to the
+        # model hidden size, producing BF16 attention output [M, 6144].
+        return ops.project_attention_output(
+            quantized,
+            quant_scale,
+            output_weight,
+            output_scale,
         )
 
     def mla_post_moe_pre(
@@ -792,21 +1056,8 @@ class Glm5Cmp:
             return self._standard_mla_post(mla_output, fmha_impl), residual
 
         ops = self.ops
-        implementation = self._attention_impl(fmha_impl)
-        mla_weight = implementation.weights[self.layer_idx][W.mla_vc]
-        # Apply the per-head absorbed attention-output x W_VC BMM and quantize
-        # the expanded [M, 16384] activation for the output projection.
-        quantized, quant_scale = ops.mla_absorbed_output_bmm_quant(
-            mla_output, mla_weight
-        )
-        output_weight, output_scale = self._output_projection
-        # FP8 output projection from the expanded 64-head activation to the
-        # model hidden size, producing BF16 attention output [M, 6144].
-        attention_output = ops.project_attention_output(
-            quantized,
-            quant_scale,
-            output_weight,
-            output_scale,
+        attention_output = self._reduce_attention_output(
+            self._project_attention_output_local(mla_output, fmha_impl)
         )
 
         if self.is_moe_layer and moe_activation is not None:
@@ -847,7 +1098,15 @@ class Glm5Cmp:
         implementation = self._attention_impl(fmha_impl)
         attention_output = implementation._apply_output_bmm(mla_output, self.layer_idx)
         attention_output = attention_output.reshape(mla_output.size(0), -1).contiguous()
-        return self.self_attn.o_proj(attention_output)
+        return self._reduce_attention_output(self.self_attn.o_proj(attention_output))
+
+    def _reduce_attention_output(self, attention_output: torch.Tensor) -> torch.Tensor:
+        # Match MlaAttention.forward: reduce the row-parallel O projection,
+        # before residual/RMSNorm/router. Reuse its graph-safe TP collective.
+        parallelism = getattr(self, "parallelism_config", None)
+        if parallelism is not None and parallelism.get_attn_tp_size() > 1:
+            attention_output = all_reduce(attention_output, group=Group.TP)
+        return attention_output
 
 
 def should_enable_glm5_cmp(

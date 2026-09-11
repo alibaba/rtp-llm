@@ -267,15 +267,10 @@ class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
         }
 
     def _split(self, tensor, load_config: LoadConfig):
-        if load_config.tp_size != 1 or load_config.ffn_tp_size != 1:
-            raise ValueError(
-                "OfflineMegaMoeFp8SharedExpertWeight assumes tp_size="
-                f"ffn_tp_size=1, got tp_size={load_config.tp_size}, "
-                f"ffn_tp_size={load_config.ffn_tp_size}"
-            )
-        # The fused shared expert is replicated on every EP/DP rank.  Generic
-        # FfnAtomicWeight splitting keys off ep_size/dp_size too, and would run
-        # ffn_sp_neg1_w13 even though ffn_tp_size is one.  Besides needlessly
+        # The fused shared expert is replicated, including on attention TP
+        # ranks. Its parallelism is independent of the attention TP degree.
+        # Generic FfnAtomicWeight splitting keys off ep_size/dp_size too and
+        # can run ffn_sp_neg1_w13 even for a replicated shared expert. Besides
         # rebuilding an already-full tensor, that path calls torch.cat on the
         # UE8M0 scale, which CUDA does not implement.  Keep both tensors intact;
         # routed experts are still sharded by their separate MoE loader.

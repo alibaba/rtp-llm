@@ -3,6 +3,12 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "indexer_paged_unused_metadata_test",
+    srcs = ["indexer_paged_unused_metadata_test.py"],
+    deps = py_test_deps,
+)
+
 py_test (
     name = "norm_test",
     srcs = ["norm_test.py"],

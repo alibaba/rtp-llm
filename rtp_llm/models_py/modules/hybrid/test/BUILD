@@ -9,11 +9,68 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "glm53_tp8_mega_se_contract_test",
+    srcs = ["glm53_tp8_mega_se_contract_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "glm5_cmp_test",
     srcs = ["glm5_cmp_test.py"],
     deps = py_test_deps + [
         "//rtp_llm:testlib",
     ],
+)
+
+py_test(
+    name = "glm5_cmp_tp8_test",
+    srcs = ["glm5_cmp_tp8_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "glm5_cmp_router_pack_integration_test",
+    srcs = ["glm5_cmp_router_pack_integration_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "glm5_moe_router_pack_experimental_test",
+    srcs = ["glm5_moe_router_pack_experimental_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV"},
+)
+
+py_test(
+    name = "glm5_cmp_tp8_gpu_test",
+    srcs = ["glm5_cmp_tp8_gpu_test.py"],
+    data = ["//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:trtllm_sparse_decode_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:flashinfer-cubin",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV"},
+)
+
+py_test(
+    name = "glm5_cmp_q_b_h8_test",
+    srcs = [
+        "glm5_cmp_q_b_h8_test.py",
+        "glm5_cmp_tp8_gpu_test.py",
+    ],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV"},
+)
+
+py_test(
+    name = "glm5_cmp_tp8_distributed_test",
+    srcs = ["glm5_cmp_tp8_distributed_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["manual"],
 )
 
 # FlashInfer dependencies (包括 apache-tvm-ffi 用于 JIT 编译)

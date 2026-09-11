@@ -26,6 +26,10 @@ py_library(
 py_library(
     name = "sparse_mla",
     srcs = glob(["sparse_mla/*.py"]),
+    data = glob([
+        "sparse_mla/glm5_cmp_q_b_src/*",
+        "sparse_mla/glm5_moe_router_pack_src/*",
+    ]),
     visibility = ["//visibility:public"]
 )
 

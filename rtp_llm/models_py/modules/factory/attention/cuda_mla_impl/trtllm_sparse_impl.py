@@ -25,12 +25,33 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.trtllm_kv_compat import (
 from rtp_llm.ops import KvCacheDataType
 
 
+class TrtllmSparseMlaPreparedInputs:
+    """Single-use handle to one op's converted scratch, not a persistent cache.
+
+    CMP passes this directly from its prologue to attention on the joined
+    stream. A later prepare/plan or a different runner cannot consume it.
+    CUDA graph replay follows the captured producer/consumer order instead.
+    """
+
+    __slots__ = ("owner", "generation", "capturing", "inputs")
+
+    def __init__(self, owner, generation, inputs):
+        self.owner = owner
+        self.generation = generation
+        self.capturing = torch.cuda.is_current_stream_capturing()
+        # CMP allocates Q on the caller stream, then converts on its main
+        # stream. Retain producer storage through the existing side-to-caller
+        # join; replacing its Tensor with this token must not free Q early.
+        self.inputs = inputs
+
+
 class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
     """Same paged-input/prepare contract as FlashMLA, different inner kernel.
 
     One instance owns its scratch across sequential layers. Graph instances do
     not share writable buffers, including the TRT semaphore workspace. CMP
-    calls this very same forward after its existing side-stream join.
+    may prepare conversion in its prologue and consume the explicit handle
+    after its existing side-stream join, without converting twice.
     """
 
     WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -65,6 +86,7 @@ class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
         self._device: Optional[torch.device] = None
         self.workspace_buffer = None
         self._seq_lens = None
+        self._prepare_generation = 0
 
     def _reserve(self, tokens: int, device: torch.device) -> None:
         if self._capacity == tokens and self._device == device:
@@ -138,6 +160,8 @@ class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
         )
 
     def plan(self, mla_params, block_table, attn_inputs=None) -> None:
+        # Metadata or scratch may change even when the token count stays equal.
+        self._prepare_generation += 1
         # Do not call SparseMlaFp8Op.plan: its FlashMLA scheduler/gather are
         # unrelated to TRT. Keep the inherited type for device-only prepare.
         SparseMlaOp.plan(self, mla_params, block_table, attn_inputs)
@@ -176,6 +200,22 @@ class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
         All work stays on the caller's CUDA stream, including when called by
         CMP. No CPU reads of lengths/indices and no new synchronization.
         """
+        return self.forward_prepared(
+            self.prepare(
+                q,
+                kv,
+                topk_indices,
+                kv_scale,
+                layer_id,
+                physical_indices=physical_indices,
+            )
+        )
+
+    def prepare(
+        self, q, kv, topk_indices, kv_scale=None, layer_id=0, physical_indices=None
+    ):
+        """Convert ready Q/KV/TopK once; consume before reusing this op's scratch."""
+        self._prepare_generation += 1
         if self._capacity is None or self._seq_lens is None:
             raise RuntimeError("Call plan() before TRT sparse forward")
         if (
@@ -208,7 +248,9 @@ class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
                     "matching TopK"
                 )
         if self._capacity == 0:
-            return self.output
+            return TrtllmSparseMlaPreparedInputs(
+                self, self._prepare_generation, (q, kv, topk_indices, physical_indices)
+            )
         if kv.dtype not in (torch.uint8, torch.float8_e4m3fn):
             raise ValueError("TRT sparse expects the existing packed RTP FP8 KV")
         if (
@@ -236,6 +278,26 @@ class TrtllmSparseMlaFp8Op(SparseMlaFp8Op):
             lengths_out=self.trt_seq_lens,
             physical_indices=physical_indices,
         )
+        return TrtllmSparseMlaPreparedInputs(
+            self, self._prepare_generation, (q, kv, topk_indices, physical_indices)
+        )
+
+    def forward_prepared(self, prepared):
+        """Run only attention/masking, using the immediately preceding prepare."""
+        if (
+            not isinstance(prepared, TrtllmSparseMlaPreparedInputs)
+            or prepared.owner is not self
+            or prepared.generation != self._prepare_generation
+            or prepared.capturing != torch.cuda.is_current_stream_capturing()
+        ):
+            raise RuntimeError(
+                "TRT sparse prepared inputs are stale, belong to another op, "
+                "or cross a CUDA graph capture boundary"
+            )
+        # Invalidate before launching: failures must not leave a reusable token.
+        self._prepare_generation += 1
+        if self._capacity == 0:
+            return self.output
         self._decode(
             query=self._query_view,
             kv_cache=self._selected_paged,

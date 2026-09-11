@@ -79,7 +79,11 @@ def trt_namespace():
     compile_nodes(
         ATTENTION / "cuda_mla_impl/trtllm_sparse_impl.py",
         namespace,
-        {"TrtllmSparseMlaFp8Op", "TrtllmSparseMlaImpl"},
+        {
+            "TrtllmSparseMlaPreparedInputs",
+            "TrtllmSparseMlaFp8Op",
+            "TrtllmSparseMlaImpl",
+        },
     )
     return namespace
 
@@ -87,6 +91,11 @@ def trt_namespace():
 class CpuOnlyTest(unittest.TestCase):
     def setUp(self):
         super().setUp()
+        capture = patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        )
+        capture.start()
+        self.addCleanup(capture.stop)
         # An accidental CUDA allocation or stream operation must fail, not turn
         # this CPU test into a GPU test when run on a CUDA-enabled machine.
         for name in ("_lazy_init", "synchronize", "stream", "set_device"):
@@ -596,6 +605,7 @@ class ForwardCallContractTest(CpuOnlyTest):
     def make_forward_state(self, tokens=2):
         namespace = trt_namespace()
         op = object.__new__(namespace["TrtllmSparseMlaFp8Op"])
+        op._prepare_generation = 0
         op._capacity = tokens
         op._device = torch.device("cpu")
         op.num_heads, op.kv_lora_rank = 8, 512
@@ -718,6 +728,58 @@ class ForwardCallContractTest(CpuOnlyTest):
                     with self.assertRaisesRegex(ValueError, "physical_indices"):
                         op.forward(query, cache, topk, physical_indices=physical)
             self.assertEqual(calls.mock_calls, [])
+
+    def test_prepared_inputs_convert_once_and_are_single_use(self):
+        op, calls, query, cache, topk = self.make_forward_state()
+        prepared = op.prepare(query, cache, topk)
+        calls.convert.assert_called_once()
+        calls.decode.assert_not_called()
+        self.assertIs(op.forward_prepared(prepared), op.output)
+        self.assertEqual(
+            [call[0] for call in calls.mock_calls], ["convert", "decode", "mask"]
+        )
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            op.forward_prepared(prepared)
+        calls.decode.assert_called_once()
+
+    def test_overwrite_failed_prepare_and_foreign_owner_reject_old_handle(self):
+        op, calls, query, cache, topk = self.make_forward_state()
+        old = op.prepare(query, cache, topk)
+        new = op.prepare(query, cache, topk)
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            op.forward_prepared(old)
+        other, other_calls, *_ = self.make_forward_state()
+        with self.assertRaisesRegex(RuntimeError, "another op"):
+            other.forward_prepared(new)
+        other_calls.decode.assert_not_called()
+        with self.assertRaises(ValueError):
+            op.prepare(query.float(), cache, topk)
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            op.forward_prepared(new)
+        calls.decode.assert_not_called()
+
+    def test_plan_invalidates_prepared_handle_even_with_same_metadata(self):
+        op, calls, query, cache, topk = self.make_forward_state()
+        prepared = op.prepare(query, cache, topk)
+        op._reserve = Mock()
+        op.plan(op.mla_params, op.block_table)
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            op.forward_prepared(prepared)
+        calls.decode.assert_not_called()
+
+    def test_prepare_and_consume_cannot_cross_capture_boundary(self):
+        op, calls, query, cache, topk = self.make_forward_state()
+        for producer, consumer in ((False, True), (True, False)):
+            with patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=producer
+            ):
+                prepared = op.prepare(query, cache, topk)
+            with patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=consumer
+            ):
+                with self.assertRaisesRegex(RuntimeError, "capture boundary"):
+                    op.forward_prepared(prepared)
+        calls.decode.assert_not_called()
 
     def test_invalid_query_or_topk_shape_is_rejected_before_launch(self):
         op, calls, query, cache, topk = self.make_forward_state()

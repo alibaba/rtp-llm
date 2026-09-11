@@ -27,11 +27,25 @@ class MegaMoeSEWrapper(MegaMoeWrapper):
         layer_idx: int = 0,
         max_generate_batch_size: int = 0,
     ):
-        if parallelism_config.get_ffn_tp_size() != 1:
+        # Attention TP does not describe this strategy's shared weights.
+        # Reject sharded tensors before the parent consumes routed weights.
+        shared_w13 = weights.get(W.ffn_w13)
+        shared_w2 = weights.get(W.ffn_w2)
+        shared_inter = config.inter_size
+        expected = (
+            (2 * shared_inter, config.hidden_size),
+            (config.hidden_size, shared_inter),
+        )
+        if (
+            shared_w13 is None
+            or shared_w2 is None
+            or (tuple(shared_w13.shape), tuple(shared_w2.shape)) != expected
+        ):
             raise ValueError(
-                "mega_moe_se requires full shared-expert weights on every EP "
-                "rank (ffn_tp_size == 1)"
+                "mega_moe_se requires full shared-expert weights on every rank: "
+                f"expected w13/w2 shapes {expected}"
             )
+        del shared_w13, shared_w2
         super().__init__(
             config,
             parallelism_config,

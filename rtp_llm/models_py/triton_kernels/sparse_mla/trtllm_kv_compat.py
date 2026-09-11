@@ -75,66 +75,131 @@ def _compact_indices(
 
 
 @triton.jit
-def _convert_kv(KV, Sources, Counts, Out, K: tl.constexpr):
-    row = tl.program_id(0).to(tl.int64)
-    selected = tl.program_id(1).to(tl.int64)
-    count = tl.load(Counts + row)
-    # Do not clear the unused tail: indices/lengths make it unreachable.
-    if (selected < count) | ((count == 0) & (selected == 0)):
-        valid = selected < count
-        source = tl.load(Sources + row * K + selected, valid, other=0)
-        byte = tl.arange(0, 1024)
-        token = KV + source * 656
-        value = tl.load(
-            (token + byte).to(tl.pointer_type(tl.float8e4nv)),
-            valid & (byte < 512),
-            other=0.0,
-        ).to(tl.float32)
-        scale = (
-            tl.load(
-                (token + 512 + (byte // 128) * 4).to(tl.pointer_type(tl.float32)),
-                valid & (byte < 512),
-                other=0,
-            )
-            .to(tl.bfloat16)
-            .to(tl.float32)
-        )
-        # Keep both BF16 boundaries. Actual cb10b79 Decode probes distinguish
-        # BF16-scale multiplication from Prefill's original-FP32-scale path;
-        # folding the BF16 product directly into FP8 also changes halfway cases.
-        latent = (value * scale).to(tl.bfloat16).to(tl.float32)
-        rope = tl.load(
-            (token + 528 + (byte - 512) * 2).to(tl.pointer_type(tl.bfloat16)),
-            valid & (byte >= 512) & (byte < 576),
-            other=0,
-        ).to(tl.float32)
-        result = tl.where(byte < 512, latent, rope)
-        # SATFINITE clips infinities but must not hide NaNs in valid entries.
-        result = tl.minimum(
-            tl.maximum(result, -448.0, propagate_nan=tl.PropagateNan.ALL),
-            448.0,
-            propagate_nan=tl.PropagateNan.ALL,
-        )
-        result = result.to(tl.float8e4nv, fp_downcast_rounding="rtne")
-        tl.store(Out + (row * K + selected) * 576 + byte, result, byte < 576)
-
-
-@triton.jit
-def _convert_q(Q, Counts, Out, HEADS: tl.constexpr):
-    row = tl.program_id(0).to(tl.int64)
-    head = tl.program_id(1).to(tl.int64)
-    col = tl.arange(0, 1024)
-    valid = tl.load(Counts + row) > 0
-    value = tl.load(
-        Q + (row * HEADS + head) * 576 + col, valid & (col < 576), other=0
-    ).to(tl.float32)
+def _fp8_sat_rne(value):
     value = tl.minimum(
         tl.maximum(value, -448.0, propagate_nan=tl.PropagateNan.ALL),
         448.0,
         propagate_nan=tl.PropagateNan.ALL,
     )
-    value = value.to(tl.float8e4nv, fp_downcast_rounding="rtne")
-    tl.store(Out + (row * HEADS + head) * 576 + col, value, col < 576)
+    return value.to(tl.float8e4nv, fp_downcast_rounding="rtne")
+
+
+@triton.jit
+def _convert_group(
+    KV,
+    Sources,
+    Out,
+    Q,
+    QOut,
+    row,
+    tile,
+    count,
+    K: tl.constexpr,
+    HEADS: tl.constexpr,
+    GROUP: tl.constexpr,
+    LOAD_CACHE: tl.constexpr,
+):
+    selected = tile * GROUP + tl.arange(0, GROUP)
+    if tile * GROUP < tl.maximum(count, 1):
+        valid = (selected < count) & (selected < K)
+        active = valid | ((count == 0) & (selected == 0))
+        source = tl.load(Sources + row * K + selected, valid, other=0)
+        token = source * 656
+        scale_group = tl.arange(0, 4)
+        inner = tl.arange(0, 128)
+        # Load each scale once before introducing the 128-element axis.
+        scales = (
+            tl.load(
+                (KV + token[:, None] + 512 + scale_group[None, :] * 4).to(
+                    tl.pointer_type(tl.float32)
+                ),
+                valid[:, None],
+                other=0.0,
+                cache_modifier=LOAD_CACHE,
+            )
+            .to(tl.bfloat16)
+            .to(tl.float32)
+        )
+        offsets = (
+            token[:, None, None]
+            + scale_group[None, :, None] * 128
+            + inner[None, None, :]
+        )
+        value = tl.load(
+            (KV + offsets).to(tl.pointer_type(tl.float8e4nv)),
+            valid[:, None, None],
+            other=0.0,
+            cache_modifier=LOAD_CACHE,
+        ).to(tl.float32)
+        # Both BF16 boundaries are required by the actual FlashMLA Decode ABI.
+        latent = (value * scales[:, :, None]).to(tl.bfloat16).to(tl.float32)
+        destination = (row * K + selected) * 576
+        tl.store(
+            Out
+            + destination[:, None, None]
+            + scale_group[None, :, None] * 128
+            + inner[None, None, :],
+            _fp8_sat_rne(latent),
+            active[:, None, None],
+        )
+        rope_dim = tl.arange(0, 64)
+        rope = tl.load(
+            (KV + token[:, None] + 528 + rope_dim[None, :] * 2).to(
+                tl.pointer_type(tl.bfloat16)
+            ),
+            valid[:, None],
+            other=0.0,
+            cache_modifier=LOAD_CACHE,
+        ).to(tl.float32)
+        tl.store(
+            Out + destination[:, None] + 512 + rope_dim[None, :],
+            _fp8_sat_rne(rope),
+            active[:, None],
+        )
+    # Q must be overwritten for every head, including empty rows. This branch
+    # must never be nested under the selected-KV validity branch above.
+    if tile < HEADS:
+        column = tl.arange(0, 1024)
+        value = tl.load(
+            Q + (row * HEADS + tile) * 576 + column,
+            (count > 0) & (column < 576),
+            other=0.0,
+        ).to(tl.float32)
+        tl.store(
+            QOut + (row * HEADS + tile) * 576 + column,
+            _fp8_sat_rne(value),
+            column < 576,
+        )
+
+
+@triton.jit
+def _convert_qkv(
+    KV,
+    Sources,
+    Counts,
+    Out,
+    Q,
+    QOut,
+    K: tl.constexpr,
+    HEADS: tl.constexpr,
+    GROUP: tl.constexpr,
+    WORK_ITEMS: tl.constexpr,
+    PROGRAMS: tl.constexpr,
+    PERSISTENT: tl.constexpr,
+    LOAD_CACHE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    worker = tl.program_id(1).to(tl.int64)
+    count = tl.load(Counts + row)
+    if PERSISTENT:
+        for tile in range(worker, WORK_ITEMS, PROGRAMS):
+            _convert_group(
+                KV, Sources, Out, Q, QOut, row, tile, count, K, HEADS, GROUP, LOAD_CACHE
+            )
+    else:
+        _convert_group(
+            KV, Sources, Out, Q, QOut, row, worker, count, K, HEADS, GROUP, LOAD_CACHE
+        )
 
 
 @triton.jit
@@ -259,10 +324,28 @@ def convert_selected_kv(
         Physical=physical_indices,
         HAS_PHYSICAL=physical_indices is not None,
     )
-    _convert_kv[(rows, k)](
-        kv, source_indices, counts_out, kv_out, K=k, enable_fp_fusion=False
+    # Group four selected tokens per CTA and share the four scale loads.
+    # Fuse Q conversion into the same launch. Use only static shape metadata;
+    # counts/indices remain device-side and are refreshed on every execution.
+    group = 4
+    work_items = max(triton.cdiv(k, group), heads)
+    _convert_qkv[(rows, work_items)](
+        kv,
+        source_indices,
+        counts_out,
+        kv_out,
+        q,
+        q_out,
+        K=k,
+        HEADS=heads,
+        GROUP=group,
+        WORK_ITEMS=work_items,
+        PROGRAMS=work_items,
+        PERSISTENT=False,
+        LOAD_CACHE="",
+        num_warps=1,
+        enable_fp_fusion=False,
     )
-    _convert_q[(rows, heads)](q, counts_out, q_out, HEADS=heads)
 
 
 def mask_empty_output(out, counts):

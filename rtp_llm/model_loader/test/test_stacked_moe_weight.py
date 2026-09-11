@@ -230,15 +230,25 @@ class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
         )
         kernel = torch.empty((16, 8), dtype=torch.float8_e4m3fn)
         scale = torch.zeros((2, 1), dtype=torch.uint8).view(torch.float8_e8m0fnu)
-        load_config = MagicMock(tp_size=1, ffn_tp_size=1, ep_size=4, dp_size=1)
-
-        split = offline._split(
-            {offline.kernel.name: kernel, offline.scale.name: scale}, load_config
-        )
-
-        self.assertIs(split[offline.kernel.name], kernel)
-        self.assertIs(split[offline.scale.name], scale)
-        self.assertEqual(split[offline.scale.name].dtype, torch.float8_e8m0fnu)
+        for tp_size in (1, 8):
+            for tp_rank in range(tp_size):
+                with self.subTest(tp_size=tp_size, tp_rank=tp_rank):
+                    load_config = MagicMock(
+                        tp_size=tp_size,
+                        tp_rank=tp_rank,
+                        ffn_tp_size=tp_size,
+                        ep_size=8,
+                        dp_size=1,
+                    )
+                    split = offline._split(
+                        {offline.kernel.name: kernel, offline.scale.name: scale},
+                        load_config,
+                    )
+                    self.assertIs(split[offline.kernel.name], kernel)
+                    self.assertIs(split[offline.scale.name], scale)
+                    self.assertEqual(
+                        split[offline.scale.name].dtype, torch.float8_e8m0fnu
+                    )
 
 
 class TestStackSplitTensorSource(unittest.TestCase):

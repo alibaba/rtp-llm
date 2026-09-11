@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 from torch import nn
@@ -136,6 +136,10 @@ class GenericMoeLayer(nn.Module):
             self.fake_balance_expert = None
         self.add_shared_expert = config.moe_style == 2
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        if moe_config.moe_strategy == "mega_moe_se":
+            # This strategy loads a full shared expert on every rank. Only
+            # attention is TP-sharded; never reduce the complete MoE output.
+            self.ffn_tp_size = 1
         self.ep_size = parallelism_config.ep_size
         shared_expert_gate_weight = weights.get(W.shared_expert_gate, None)
         is_ep_mode = self.ep_size > 1
@@ -307,6 +311,10 @@ class GenericMoeLayer(nn.Module):
         hidden_states: torch.Tensor,
         x_fp8: "Optional[torch.Tensor]" = None,
         x_scale: "Optional[torch.Tensor]" = None,
+        *,
+        router_pack: Optional[
+            Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+        ] = None,
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         if self.gate_chunk_rows > 0 and num_tokens > 0:
@@ -321,41 +329,48 @@ class GenericMoeLayer(nn.Module):
             router_logits.float()
         )  # fuse kernel: at::native::unrolled_elementwise_kernel<direct_copy_kernel_cuda> (bf16 -> fp32 cast)
 
-        topk_weights = torch.empty(
-            (num_tokens, self.top_k),
-            dtype=torch.float32,
-            device=hidden_states.device,
-        )
-        # different executor may need different topk_ids dtype
-        topk_ids_dtype = self.fused_moe.topk_ids_dtype
-        topk_ids = torch.empty(
-            (num_tokens, self.top_k),
-            dtype=topk_ids_dtype,
-            device=hidden_states.device,
-        )
-
-        if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
-            self.group_topk(
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                scores=router_logits_fp32,
-                correction_bias=self.correction_bias,
-                n_group=self.num_expert_group,
-                topk_group=self.topk_group,
-                topk=self.top_k,
-                renormalize=self.renormalize,
-                routed_scaling_factor=self.routed_scaling_factor,
-            )
+        if router_pack is not None:
+            # CMP's optional producer keeps the ordinary norm and BF16 gate
+            # boundary, but writes routing/group-32 inputs into MegaMoE views.
+            topk_ids, topk_weights = router_pack(hidden_states, router_logits_fp32)
         else:
-            # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            topk_weights = torch.empty(
+                (num_tokens, self.top_k),
+                dtype=torch.float32,
+                device=hidden_states.device,
+            )
+            # different executor may need different topk_ids dtype
+            topk_ids_dtype = self.fused_moe.topk_ids_dtype
+            topk_ids = torch.empty(
+                (num_tokens, self.top_k),
+                dtype=topk_ids_dtype,
+                device=hidden_states.device,
+            )
+
+            if self.correction_bias is not None:
+                self.group_topk = GroupTopK()
+                self.renormalize = self.config.has_moe_norm
+                self.num_expert_group = self.config.moe_n_group
+
+                self.topk_group = self.config.moe_topk_group
+                self.n_routed_experts = (
+                    self.config.expert_num
+                )  # config.n_routed_experts
+                self.routed_scaling_factor = self.config.routed_scaling_factor
+                self.group_topk(
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    scores=router_logits_fp32,
+                    correction_bias=self.correction_bias,
+                    n_group=self.num_expert_group,
+                    topk_group=self.topk_group,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                )
+            else:
+                # Top-K selection using C++ SelectTopkOp
+                self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
@@ -371,12 +386,15 @@ class GenericMoeLayer(nn.Module):
             and self._use_mega_moe_fused_shared
         )
 
-        experts_output = self.fused_moe(
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation="SiGLU",
-        )
+        if router_pack is not None:
+            experts_output = self.fused_moe.forward_prepacked(hidden_states)
+        else:
+            experts_output = self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+            )
         if use_mega_moe_fused_shared:
             return experts_output
         if self.shared_expert is not None:
@@ -582,6 +600,10 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
+        *,
+        router_pack: Optional[
+            Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+        ] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run residual add, RMSNorm, then the dense MLP or MoE."""
         # Dense MLP: fuse add + RMSNorm + FP8 quant; up_proj consumes FP8 directly.
@@ -605,7 +627,12 @@ class GenericMoeDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
             )
-            hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
+            hidden_states = self.mlp(
+                bf16_hs,
+                x_fp8=fp8_hs,
+                x_scale=scale,
+                **({"router_pack": router_pack} if router_pack is not None else {}),
+            )
         # Fallback: use the standard norm path and let MLP/MoE prepare its inputs.
         else:
             hidden_states, residual = self.post_attention_layernorm(
@@ -676,7 +703,13 @@ class GenericMoeDecoderLayer(nn.Module):
             # Dense layers and unsupported MoE strategies use RTP's MLP path.
             hidden_states, output_residual = mla_post
             hidden_states, output_residual = self._fwd_mlp_or_moe(
-                hidden_states, output_residual
+                hidden_states,
+                output_residual,
+                router_pack=(
+                    cmp.moe_router_pack_callback(int(hidden_states.size(0)))
+                    if self._fuse_post_norm_quant_moe and hidden_states.dim() == 2
+                    else None
+                ),
             )
 
         return DecodeLayerOutput(hidden_states, output_residual, topk_indices)
