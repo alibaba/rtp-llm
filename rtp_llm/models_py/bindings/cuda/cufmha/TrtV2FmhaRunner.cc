@@ -36,6 +36,14 @@ TrtV2FmhaRunner::TrtV2FmhaRunner(const TrtV2FmhaRunnerConfig& config,
     q_scaling_(config.q_scaling / config.softmax_extra_scale),
     stream_(stream) {
 
+    // Keep the support probe safe on devices absent from the bundled cubins.
+    // FusedMHARunnerV2's constructor asserts its exact SM allowlist.
+    const int sm = get_sm();
+    if (sm != 70 && sm != 80 && sm != 86 && sm != 89 && sm != 90 && sm != 100 && sm != 120 && sm != 121) {
+        RTP_LLM_LOG_DEBUG("cuda sm %d has no bundled TRT V2 FMHA kernel", sm);
+        return;
+    }
+
     // 初始化 TRT V2 FMHA
     support_trt_v2_fmha_       = initTrtV2FmhaAndCheckSupport();
     support_trt_v2_paged_fmha_ = initTrtV2FmhaPagedAndCheckSupport();

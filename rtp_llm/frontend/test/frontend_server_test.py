@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -100,6 +101,63 @@ class FrontendServerTest(TestCase):
         self.assertTrue(self.frontend_server.check_health())
         visitor = self.frontend_server._frontend_worker.backend_rpc_server_visitor
         self.assertEqual(visitor.refresh_calls, [False])
+
+    def test_stream_completion_markers(self):
+        async def collect(openai):
+            async def generate():
+                yield FakePipelinResponse(res="first")
+                yield FakePipelinResponse(res="last")
+
+            response = CompleteResponseAsyncGenerator(
+                generate(), CompleteResponseAsyncGenerator.get_last_value
+            )
+            self.frontend_server._global_controller.increment()
+            return [
+                chunk
+                async for chunk in self.frontend_server.stream_response(
+                    {"stream": openai, request_id_field_name: 1}, response
+                )
+            ]
+
+        self.assertEqual(
+            asyncio.run(collect(True)),
+            [
+                'data: {"res":"first"}\r\n\r\n',
+                'data: {"res":"last"}\r\n\r\n',
+                "data: [DONE]\r\n\r\n",
+            ],
+        )
+        self.assertEqual(
+            asyncio.run(collect(False)),
+            [
+                'data:{"res":"first"}\r\n\r\n',
+                'data:{"res":"last"}\r\n\r\n',
+                "data:[done]\r\n\r\n",
+            ],
+        )
+
+    def test_failed_stream_has_no_success_marker(self):
+        async def collect():
+            async def generate():
+                yield FakePipelinResponse(res="partial")
+                raise RuntimeError("generation failed")
+
+            response = CompleteResponseAsyncGenerator(
+                generate(), CompleteResponseAsyncGenerator.get_last_value
+            )
+            self.frontend_server._global_controller.increment()
+            return [
+                chunk
+                async for chunk in self.frontend_server.stream_response(
+                    {"stream": True, request_id_field_name: 2}, response
+                )
+            ]
+
+        chunks = asyncio.run(collect())
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(chunks[0], 'data: {"res":"partial"}\r\n\r\n')
+        self.assertNotIn("[DONE]", "".join(chunks))
+        self.assertIn("error_code", json.loads(chunks[1][6:]))
 
 
 main()

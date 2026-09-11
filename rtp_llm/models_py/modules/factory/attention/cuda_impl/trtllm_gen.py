@@ -331,6 +331,7 @@ class FlashInferTRTLLMPrefillOp(object):
     def support(self, attention_inputs: PyAttentionInputs):
         return (
             is_sm_100()
+            and self.head_dim in (128, 256)
             and attention_inputs.is_prefill
             and attention_inputs.kv_cache_kernel_block_id_device is not None
         )
@@ -436,12 +437,17 @@ class FlashInferTRTLLMDecodeOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
-        if not is_sm_100():
+        # The pinned TRTLLM-GEN bundle has no 64-wide MHA kernel. Check before
+        # selection so eager and Graph use the same compatible implementation.
+        if not is_sm_100() or self.head_dim not in (128, 256):
+            return False
+        if attention_inputs.kv_cache_kernel_block_id_device is None:
             return False
         # Note: this max q length is used for mtp decode verification.
         decode_kernel_max_q_len = 11
         if (
             attention_inputs.is_prefill
+            and attention_inputs.input_lengths.numel() > 0
             and attention_inputs.input_lengths[0] < decode_kernel_max_q_len
             and (attention_inputs.input_lengths == attention_inputs.input_lengths[0])
             .all()

@@ -116,8 +116,8 @@ private:
     DataType              attn_dtype_;
     bool                  is_s_padded_;
     float                 q_scaling_;
-    bool                  support_trt_v2_fmha_;
-    bool                  support_trt_v2_paged_fmha_;
+    bool                  support_trt_v2_fmha_       = false;
+    bool                  support_trt_v2_paged_fmha_ = false;
     cudaStream_t          stream_;
 };
 

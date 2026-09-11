@@ -202,7 +202,9 @@ class FrontendServer(object):
                 data_str = res.model_dump_json(exclude_none=True)
                 yield response_data_prefix + data_str + "\r\n\r\n"
                 await asyncio.sleep(0)
-            if not is_openai_response:
+            if is_openai_response:
+                yield "data: [DONE]\r\n\r\n"
+            else:
                 yield f"data:[done]\r\n\r\n"
             await self._collect_complete_response_and_record_access_log(
                 request, response

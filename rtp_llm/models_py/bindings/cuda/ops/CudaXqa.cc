@@ -98,7 +98,8 @@ bool supportXqa(DataType input_type,
                 size_t   group_size,
                 size_t   head_dim,
                 size_t   page_size) {
-    bool support = (input_type == DataType::TYPE_BF16 || input_type == DataType::TYPE_FP16)
+    // The bundled mha_sm90 kernels are explicitly compiled only for SM90a.
+    bool support = get_sm() == 90 && (input_type == DataType::TYPE_BF16 || input_type == DataType::TYPE_FP16)
                    && (output_type == DataType::TYPE_BF16 || output_type == DataType::TYPE_FP16
                        || output_type == DataType::TYPE_FP8_E4M3)
                    && (kv_cache_type == DataType::TYPE_BF16 || kv_cache_type == DataType::TYPE_FP16

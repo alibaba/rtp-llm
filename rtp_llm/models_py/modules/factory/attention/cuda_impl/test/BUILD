@@ -1,5 +1,13 @@
 # Test configuration for PyFlashinferDecodeAttnOp
 
+py_test(
+    name = "test_kernel_capability",
+    srcs = ["test_kernel_capability.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["requires-blackwell"],
+)
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -200,4 +208,3 @@ py_test(
         'gpu': 'H20',
     },
 )
-
