@@ -292,44 +292,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
         if has_cmd_args:
             # Build a set of argument names that were provided via command line
             provided_args = set()
-            if args is not None:
-                # If args was provided, check which arguments are in the args list
-                i = 0
-                while i < len(args):
-                    arg = args[i]
-                    if arg.startswith("--"):
-                        # Find the action for this option
-                        for action_item in self._actions:
-                            if arg in action_item.option_strings:
-                                provided_args.add(action_item.dest)
-                                # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
-                                    # Skip the value if present
-                                    if i + 1 < len(args) and not args[i + 1].startswith(
-                                        "-"
-                                    ):
-                                        i += 1
-                                break
-                    i += 1
-            else:
-                # If args is None, argparse used sys.argv, so check sys.argv
-                i = 1  # Skip program name
-                while i < len(sys.argv):
-                    arg = sys.argv[i]
-                    if arg.startswith("--"):
-                        # Find the action for this option
-                        for action_item in self._actions:
-                            if arg in action_item.option_strings:
-                                provided_args.add(action_item.dest)
-                                # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
-                                    # Skip the value if present
-                                    if i + 1 < len(sys.argv) and not sys.argv[
-                                        i + 1
-                                    ].startswith("-"):
-                                        i += 1
-                                break
-                    i += 1
+            for arg in args if args is not None else sys.argv[1:]:
+                if arg == "--":
+                    break
+                # Match the same aliases, abbreviations and inline values that
+                # argparse accepted above, instead of reimplementing its rules.
+                option = self._parse_optional(arg)
+                if option is not None and option[0] is not None:
+                    provided_args.add(option[0].dest)
 
             # Now fill in missing values from environment variables
             for dest, env_name in self._env_mappings.items():
@@ -348,17 +318,13 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 break
 
                         if action is not None:
-                            # Convert the value using the action's type
-                            if action.type is not None:
-                                try:
-                                    converted_value = action.type(env_value)
-                                    setattr(parsed_args, dest, converted_value)
-                                except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
-                                    pass
-                            else:
-                                # No type converter, use as string
-                                setattr(parsed_args, dest, env_value)
+                            # Apply the same type and choices validation as CLI values.
+                            try:
+                                converted_value = self._get_value(action, env_value)
+                                self._check_value(action, converted_value)
+                            except argparse.ArgumentError as error:
+                                self.error(str(error))
+                            setattr(parsed_args, dest, converted_value)
 
         # 应用所有配置绑定
         if self._root_config is not None:
@@ -511,6 +477,24 @@ def setup_args() -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
+    # Sleep mode is parsed into RuntimeConfig, but Python weight allocation
+    # wrappers run before C++ hooks. Mirror these switches into the process
+    # environment so ENABLE_SLEEP_MODE / SLEEP_MODE_LEVEL work the same from CLI
+    # and env. SLEEP_MODE_LEVEL is read at weight-load time to decide whether the
+    # torch_memory_saver weights region is opened with host cpu_backup (level 1)
+    # or as discard-only (level 2).
+    os.environ["ENABLE_SLEEP_MODE"] = (
+        "1" if getattr(parsed_args, "enable_sleep_mode", False) else "0"
+    )
+    os.environ["SLEEP_MODE_LEVEL"] = str(
+        getattr(parsed_args, "sleep_mode_level", 1) or 1
+    )
+    # Same reason, one layer deeper: the NCCL release switch is read from a leaf
+    # utils module on the sleep hook path, which has no access to the parsed
+    # config object.
+    os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"] = (
+        "1" if getattr(parsed_args, "sleep_release_collective_memory", False) else "0"
+    )
 
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup

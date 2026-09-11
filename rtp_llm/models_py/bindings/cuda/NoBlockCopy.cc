@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -14,8 +15,13 @@ namespace rtp_llm {
 namespace {
 
 at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
+    // RPC threads can serve a different device on their next invocation.
+    static thread_local std::optional<at::cuda::CUDAStream> stream;
+    const auto                                              device = c10::cuda::current_device();
+    if (!stream || stream->device_index() != device) {
+        stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false, device);
+    }
+    return *stream;
 }
 
 enum class HostCoverage {
@@ -207,7 +213,8 @@ void execNoBlockCopy(const MultiCopyParams& params) {
                             params.multi_src.size(),
                             params.multi_dst.size());
 
-    int copy_device = -1;
+    int                                 copy_device = -1;
+    std::optional<c10::cuda::CUDAGuard> device_guard;
     if (!params.multi_dst.empty()) {
         if (params.multi_dst[0].is_cuda()) {
             copy_device = static_cast<int>(params.multi_dst[0].get_device());
@@ -215,7 +222,11 @@ void execNoBlockCopy(const MultiCopyParams& params) {
             copy_device = static_cast<int>(params.multi_src[0].get_device());
         }
         if (copy_device >= 0) {
-            check_cuda_value(cudaSetDevice(copy_device));
+            // CUDA 12+ PyTorch may remember a lazy target device separately
+            // from the runtime device (e.g. after from_blob on a new RPC thread).
+            // A raw cudaSetDevice does not clear that target: the stream pool
+            // can select cuda:0 for a cuda:1 VMM tensor and the copy then fails.
+            device_guard.emplace(copy_device);
         }
     }
 
@@ -255,7 +266,7 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
     }
 
 #if CUDART_VERSION >= 12080
-    check_cuda_value(cudaSetDevice(params.device_index));
+    c10::cuda::CUDAGuard device_guard(params.device_index);
     auto stream = getNoBlockCopyStream().stream();
 
     const size_t tile_num = params.tiles.size();
@@ -327,7 +338,7 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
         return false;
     }
 
-    check_cuda_value(cudaSetDevice(params.device_index));
+    c10::cuda::CUDAGuard device_guard(params.device_index);
     auto stream = getNoBlockCopyStream().stream();
 
     std::vector<void*>  h_ptrs;

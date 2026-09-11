@@ -180,6 +180,29 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+    return processImpl(streams, schedule_time_us, false);
+}
+
+absl::Status NormalExecutor::processForPause() {
+    std::list<GenerateStreamPtr> empty_streams;
+    return processImpl(empty_streams, 0, true);
+}
+
+bool NormalExecutor::consumeLastPauseSignal() {
+    return last_pause_signal_.exchange(false, std::memory_order_acq_rel);
+}
+
+void NormalExecutor::drainAsyncRunners() {
+    // Flush the stream-async output-dispatch worker (D2H/KV release/update). sync() is a
+    // no-op when nothing is in flight (task_done_ starts true). Only meaningful when
+    // stream-async is enabled; unconditionally safe otherwise.
+    if (useStreamAsync()) {
+        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
+}
+
+absl::Status
+NormalExecutor::processImpl(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us, bool pause_signal) {
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
@@ -194,6 +217,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
+    last_pause_signal_.store(false, std::memory_order_release);
     // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
     // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
     // token/seq_len fallbacks race the previous worker.
@@ -234,8 +258,15 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
         ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
 
+        if (pause_signal && model_input.skip_run) {
+            // Reuse the skip-run shape broadcast to carry a TP pause marker.
+            // Worker ranks may receive this before their local sleep RPC has
+            // set pause_, so NormalEngine must pause itself after process().
+            model_input.is_fake_stream = true;
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
+            last_pause_signal_.store(model_input.is_fake_stream, std::memory_order_release);
             return absl::OkStatus();
         }
 

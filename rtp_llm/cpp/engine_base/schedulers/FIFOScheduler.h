@@ -32,7 +32,11 @@ public:
                                                  enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
-    bool                                         empty() override;
+    void                                         wake() override;
+    void                                         setForcePoll(bool enable) override {
+        force_poll_.store(enable, std::memory_order_relaxed);
+    }
+    bool empty() override;
 
     void reportMetrics();
 
@@ -109,17 +113,20 @@ protected:
     size_t                          max_inited_kv_cache_streams_    = 0;
     const bool                      need_fill_fake_stream_          = false;
     const size_t                    prefill_cp_size_                = 1;
-    std::atomic<bool>               stop_                        = false;
-    bool                            schedule_trigger_            = false;
-    std::mutex                      lock_;
-    std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
-    int64_t                         last_admitted_context_batch_size_ = 0;
-    int64_t                         last_admitted_context_token_size_ = 0;
-    int64_t                         last_waiting_oldest_age_us_       = 0;
-    std::atomic<int64_t>            pending_group_fallback_count_     = 0;
-    AdmissionLane                   active_admission_lane_             = AdmissionLane::NONE;
-    bool                            prefer_group_next_                 = false;
+    // Keep polling while collective sleep-quiesce is armed so drained ranks
+    // continue issuing the synchronization co-steps.
+    std::atomic<bool>            force_poll_       = false;
+    std::atomic<bool>            stop_             = false;
+    bool                         schedule_trigger_ = false;
+    std::mutex                   lock_;
+    std::condition_variable      cond_;
+    kmonitor::MetricsReporterPtr metrics_reporter_                 = nullptr;
+    int64_t                      last_admitted_context_batch_size_ = 0;
+    int64_t                      last_admitted_context_token_size_ = 0;
+    int64_t                      last_waiting_oldest_age_us_       = 0;
+    std::atomic<int64_t>         pending_group_fallback_count_     = 0;
+    AdmissionLane                active_admission_lane_            = AdmissionLane::NONE;
+    bool                         prefer_group_next_                = false;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;

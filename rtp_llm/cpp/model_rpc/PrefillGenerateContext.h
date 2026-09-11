@@ -110,9 +110,12 @@ public:
     void         closeGrpcConnection();
 
 private:
-    void markRequestEnd();
-    void reportTime();
-    void stopStream();
+    int64_t requestIdForCacheStore() const;
+    void    markLocalRequestEnd(int64_t request_id);
+    void    markRemoteWorkersRequestEnd(int64_t request_id);
+    void    markRequestEnd();
+    void    reportTime();
+    void    stopStream();
 
     // The batch envelope exists before QueryConverter/local enqueue. Use the
     // same immutable identity for early Cancel and late stream registration.

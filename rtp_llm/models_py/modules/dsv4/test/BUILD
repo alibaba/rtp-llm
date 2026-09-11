@@ -4,6 +4,12 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_sleep_computed_weights",
+    srcs = ["test_sleep_computed_weights.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,

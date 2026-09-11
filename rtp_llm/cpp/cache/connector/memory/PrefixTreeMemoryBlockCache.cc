@@ -403,8 +403,19 @@ size_t PrefixTreeMemoryBlockCache::size() const {
     return count;
 }
 
-PrefixTreeMemoryBlockCache::Node&
-PrefixTreeMemoryBlockCache::upsertNodeLocked(CacheKeyType cache_key, const BlockDependency& dependency) {
+void PrefixTreeMemoryBlockCache::clear() {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    nodes_.clear();
+    pending_children_by_parent_.clear();
+    for (auto& lru : leaf_lru_) {
+        lru.clear();
+    }
+    access_seq_     = 0;
+    generation_seq_ = 0;
+}
+
+PrefixTreeMemoryBlockCache::Node& PrefixTreeMemoryBlockCache::upsertNodeLocked(CacheKeyType           cache_key,
+                                                                               const BlockDependency& dependency) {
     auto it = nodes_.find(cache_key);
     if (it == nodes_.end()) {
         Node node;

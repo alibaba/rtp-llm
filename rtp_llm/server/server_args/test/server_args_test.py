@@ -3,6 +3,7 @@ import os
 import pickle
 import sys
 from unittest import TestCase, main
+from unittest.mock import patch
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -19,6 +20,72 @@ class ServerArgsSetTest(TestCase):
         os.environ.clear()
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
+
+    @staticmethod
+    def _setup_args(args=None):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        # This branch's public entry reads sys.argv, not an explicit arg list.
+        if args is None:
+            return setup_args()
+        with patch.object(sys, "argv", ["rtp-llm", *args]):
+            return setup_args()
+
+    def test_fastsafetensors_reserve_defaults_and_cli_precedence(self):
+        setup_args = self._setup_args
+
+        self.assertEqual(setup_args([]).load_config.fastsafetensors_reserve_mb, 2048)
+        os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = "512"
+        self.assertEqual(setup_args([]).load_config.fastsafetensors_reserve_mb, 512)
+        configs = setup_args(["--fastsafetensors_reserve_mb", "0"])
+        self.assertEqual(configs.load_config.fastsafetensors_reserve_mb, 0)
+        self.assertIn("fastsafetensors_reserve_mb: 0", configs.load_config.to_string())
+
+    def test_fastsafetensors_reserve_equals_cli_overrides_environment(self):
+        setup_args = self._setup_args
+
+        os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = "512"
+        for value in (0, 128):
+            for use_sys_argv in (False, True):
+                with self.subTest(value=value, use_sys_argv=use_sys_argv):
+                    args = [f"--fastsafetensors_reserve_mb={value}"]
+                    if use_sys_argv:
+                        sys.argv = ["rtp-llm", *args]
+                        configs = setup_args()
+                    else:
+                        configs = setup_args(args)
+                    self.assertEqual(
+                        configs.load_config.fastsafetensors_reserve_mb, value
+                    )
+
+    def test_fastsafetensors_reserve_abbreviation_overrides_environment(self):
+        setup_args = self._setup_args
+
+        os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = "512"
+        for value in (0, 128):
+            for inline in (False, True):
+                with self.subTest(value=value, inline=inline):
+                    args = (
+                        [f"--fastsafetensors_reserve={value}"]
+                        if inline
+                        else ["--fastsafetensors_reserve", str(value)]
+                    )
+                    self.assertEqual(
+                        setup_args(args).load_config.fastsafetensors_reserve_mb,
+                        value,
+                    )
+
+    def test_fastsafetensors_reserve_rejects_invalid_values(self):
+        setup_args = self._setup_args
+
+        for value in ("-1", "1.5", "", "invalid"):
+            with self.subTest(value=value):
+                os.environ.pop("RTP_FASTSAFETENSORS_RESERVE_MB", None)
+                with self.assertRaises(SystemExit):
+                    setup_args(["--fastsafetensors_reserve_mb", value])
+                os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = value
+                with self.assertRaises(SystemExit):
+                    setup_args([])
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
@@ -205,6 +272,20 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
 
+    def test_warm_up_remains_enabled_by_default_with_sleep_on_or_off(self):
+        from rtp_llm.model_loader import weight_memory_saver as wms
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        try:
+            for sleep_enabled in ("0", "1"):
+                with self.subTest(sleep_enabled=sleep_enabled):
+                    os.environ.pop("WARM_UP", None)
+                    sys.argv = ["prog", "--enable-sleep-mode", sleep_enabled]
+                    config = setup_args()
+                    self.assertTrue(config.runtime_config.warm_up)
+        finally:
+            wms._reset_for_testing()
+
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"
         os.environ["WARM_UP_WITH_LOSS"] = "1"
@@ -244,6 +325,194 @@ class ServerArgsSetTest(TestCase):
         self.assertTrue(restored_runtime_config.warm_up)
         self.assertTrue(restored_runtime_config.warm_up_with_loss)
         self.assertFalse(restored_runtime_config.model_warm_up)
+
+    def test_enable_sleep_mode_arg_configures_runtime_and_weight_saver(self):
+        """Sleep mode CLI flag should enable both C++ runtime config and Python weight tagging."""
+        sys.argv = [
+            "prog",
+            "--enable-sleep-mode",
+            "1",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+        from rtp_llm.model_loader import weight_memory_saver as wms
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        wms._reset_for_testing()
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertTrue(py_env_configs.runtime_config.enable_sleep_mode)
+        self.assertEqual(py_env_configs.runtime_config.sleep_mode_level, 1)
+        self.assertTrue(wms.is_enabled())
+
+    def test_sleep_level_env_validation_with_and_without_cli(self):
+        for value in ("0", "3", "invalid", "1.5"):
+            for args in ([], ["--enable-sleep-mode", "1"]):
+                with self.subTest(value=value, args=args):
+                    os.environ["SLEEP_MODE_LEVEL"] = value
+                    with self.assertRaises(SystemExit):
+                        self._setup_args(args)
+
+    def test_sleep_level_binding_and_pickle_roundtrip(self):
+        from rtp_llm.model_loader import weight_memory_saver as wms
+
+        self.addCleanup(wms._reset_for_testing)
+        for level in (1, 2):
+            for source in ("cli", "env", "mixed", "cli_override"):
+                with self.subTest(level=level, source=source):
+                    wms._reset_for_testing()
+                    os.environ.pop("SLEEP_MODE_LEVEL", None)
+                    os.environ["ENABLE_SLEEP_MODE"] = "1"
+                    args = []
+                    if source in ("cli", "cli_override"):
+                        args = [
+                            "--enable-sleep-mode",
+                            "1",
+                            "--sleep-mode-level",
+                            str(level),
+                        ]
+                        if source == "cli_override":
+                            os.environ["SLEEP_MODE_LEVEL"] = "invalid"
+                    else:
+                        os.environ["SLEEP_MODE_LEVEL"] = str(level)
+                        if source == "mixed":
+                            args = ["--enable-sleep-mode", "1"]
+                    config = self._setup_args(args).runtime_config
+                    self.assertTrue(config.enable_sleep_mode)
+                    self.assertEqual(config.sleep_mode_level, level)
+                    self.assertTrue(wms.is_enabled())
+                    restored = pickle.loads(pickle.dumps(config))
+                    self.assertTrue(restored.enable_sleep_mode)
+                    self.assertEqual(restored.sleep_mode_level, level)
+
+    def test_runtime_config_legacy_pickle_sleep_defaults_and_field_alignment(self):
+        from rtp_llm.ops import RuntimeConfig
+
+        config = RuntimeConfig()
+        config.enable_sleep_mode = True
+        config.sleep_mode_level = 2
+        config.model_warm_up = False
+        config.use_batch_decode_scheduler = True
+        config.use_gather_batch_scheduler = False
+        config.model_name = "pickle-model"
+        config.worker_grpc_addrs = ["127.0.0.1:18001"]
+        config.worker_addrs = ["127.0.0.1:18002"]
+        config.specify_gpu_arch = "sm_100"
+        state = config.__getstate__()
+        self.assertEqual(len(state), 16)
+        # Legacy tuples lack sleep fields; the intermediate 15-field tuple
+        # has sleep fields but lacks model_warm_up.
+        legacy14 = state[:6] + state[7:15]
+        for size, saved in (
+            (13, legacy14[:13]),
+            (14, legacy14),
+            (15, state[:5] + state[6:]),
+            (16, state),
+        ):
+            with self.subTest(size=size):
+                restored = RuntimeConfig.__new__(RuntimeConfig)
+                restored.__setstate__(saved)
+                self.assertEqual(restored.enable_sleep_mode, size >= 15)
+                self.assertEqual(restored.sleep_mode_level, 2 if size >= 15 else 1)
+                self.assertEqual(
+                    restored.model_warm_up,
+                    RuntimeConfig().model_warm_up if size == 15 else False,
+                )
+                self.assertTrue(restored.use_batch_decode_scheduler)
+                self.assertFalse(restored.use_gather_batch_scheduler)
+                self.assertEqual(restored.model_name, config.model_name)
+                self.assertEqual(restored.worker_grpc_addrs, config.worker_grpc_addrs)
+                self.assertEqual(restored.worker_addrs, config.worker_addrs)
+                self.assertEqual(
+                    restored.specify_gpu_arch,
+                    (
+                        config.specify_gpu_arch
+                        if size >= 14
+                        else RuntimeConfig().specify_gpu_arch
+                    ),
+                )
+
+    def _setup_args_and_reload(self):
+        """Reload + setup_args with a clean weight_memory_saver, as the sleep tests do.
+
+        Returns the weight_memory_saver module so the caller can read the switches
+        the way the sleep hook path does.
+        """
+        import rtp_llm.server.server_args.server_args
+        from rtp_llm.model_loader import weight_memory_saver as wms
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        wms._reset_for_testing()
+        rtp_llm.server.server_args.server_args.setup_args()
+        return wms
+
+    # NOTE for the four tests below: unlike --enable-sleep-mode / --sleep-mode-level,
+    # --sleep_release_collective_memory has NO C++ RuntimeConfig field, so its
+    # `bind_to` resolves to None and the os.environ mirror written by setup_args() is
+    # the ONLY transport to the (leaf, config-less) sleep hook module. There is
+    # therefore nothing to assert on py_env_configs.runtime_config for this arg.
+
+    def test_sleep_release_collective_memory_defaults_off(self):
+        """Flag absent: the collective-release switch stays off."""
+        os.environ.pop("SLEEP_RELEASE_COLLECTIVE_MEMORY", None)
+        sys.argv = ["prog"]
+
+        wms = self._setup_args_and_reload()
+
+        self.assertFalse(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "0")
+
+    def test_sleep_release_collective_memory_arg_enables_switch(self):
+        """Both the underscored flag and its dashed alias must reach the env mirror."""
+        for flag in (
+            "--sleep_release_collective_memory",
+            "--sleep-release-collective-memory",
+        ):
+            with self.subTest(flag=flag):
+                os.environ.pop("SLEEP_RELEASE_COLLECTIVE_MEMORY", None)
+                sys.argv = ["prog", flag, "1"]
+
+                wms = self._setup_args_and_reload()
+
+                self.assertTrue(wms.release_collective_memory())
+                self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "1")
+
+    def test_sleep_release_collective_memory_env_only_is_honoured(self):
+        """env fallback: the env var alone turns the switch on (no CLI flag).
+
+        setup_args() unconditionally rewrites the mirror from the parsed value, so
+        the env surviving as "1" also proves the fallback was actually parsed: a
+        broken fallback would parse the default and stamp "0" over it.
+
+        Note this pins the effective env name, not the ``env_name=`` keyword --
+        EnvArgumentParser derives the same name from the ``--flag`` when env_name is
+        omitted, so dropping the keyword here would be invisible to any test.
+        """
+        os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"] = "1"
+        sys.argv = ["prog"]
+
+        wms = self._setup_args_and_reload()
+
+        self.assertTrue(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "1")
+
+    def test_sleep_release_collective_memory_explicit_zero_disables(self):
+        """Explicit 0 keeps the switch off, and overrides an env var asking for on."""
+        sys.argv = ["prog", "--sleep_release_collective_memory", "0"]
+
+        wms = self._setup_args_and_reload()
+
+        self.assertFalse(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "0")
+
+        # Command line wins over the environment (same precedence as every other arg).
+        os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"] = "1"
+        sys.argv = ["prog", "--sleep_release_collective_memory", "0"]
+
+        wms = self._setup_args_and_reload()
+
+        self.assertFalse(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "0")
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""

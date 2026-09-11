@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <list>
 #include <map>
 #include <memory>
@@ -46,6 +47,16 @@ public:
                          bool                                           warm_up                 = false);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    // Sleep/pause quiesce (mirrors NormalExecutor). Runs one empty synchronized
+    // step that broadcasts is_fake_stream=true through tpSyncModelInputs so worker
+    // ranks blocked in the collective are released and self-pause after the step,
+    // instead of re-blocking on the next iteration before their local sleep RPC
+    // sets pause_. Without these overrides speculative (MTP) models fall back to
+    // the base Executor::processForPause(), which runs an empty step but carries
+    // no pause marker, leaving the TP-only sleep quiesce path racy.
+    absl::Status processForPause() override;
+    bool         consumeLastPauseSignal() override;
+    void         drainAsyncRunners() override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
@@ -250,6 +261,13 @@ private:
     // hybrid linear+full). Per-step state advances every token, so the page
     // table must be re-gathered between draft propose and target verify.
     bool is_linear_attention_model_ = false;
+
+    // Set by processForPause() on the rank that drives the pause wave so the
+    // skip-run step tags model_input.is_fake_stream. last_pause_signal_ is set on
+    // every rank once the (broadcast) fake-stream marker is observed, and drained
+    // by consumeLastPauseSignal() so NormalEngine can self-pause the loop.
+    std::atomic<bool> pause_signal_requested_{false};
+    std::atomic<bool> last_pause_signal_{false};
 
     // group id tensors
     torch::Tensor target_kv_cache_layer_to_group;

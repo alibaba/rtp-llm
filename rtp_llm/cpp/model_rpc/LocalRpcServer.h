@@ -1,13 +1,20 @@
 #pragma once
 
 #include <atomic>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <iostream>
+#include <unordered_map>
+#include <vector>
 #include "grpc++/grpc++.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/sleep/AdmissionGate.h"
+#include "rtp_llm/cpp/engine_base/sleep/DrainManager.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
@@ -54,6 +61,14 @@ public:
 
     grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
+    grpc::Status SleepServing(grpc::ServerContext* context, const SleepRequestPB* request, EmptyPB* response);
+
+    grpc::Status WakeUpServing(grpc::ServerContext* context, const WakeUpRequestPB* request, EmptyPB* response);
+
+    grpc::Status IsSleeping(grpc::ServerContext* context, const EmptyPB* request, IsSleepingResponsePB* response);
+
+    grpc::Status GetSleepStatus(grpc::ServerContext* context, const EmptyPB* request, SleepStatusResponsePB* response);
+
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
 
     grpc::Status StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response);
@@ -87,6 +102,7 @@ public:
     }
 
     virtual size_t onflightRequestNum();
+    virtual size_t activeCacheTransferCount();
 
     void stop() {
         (void)engine_->stop();
@@ -105,6 +121,28 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    // Non-owning health/status check. Inference entries must use
+    // acquireAdmission() and retain the returned lease for their full scope.
+    grpc::Status checkAdmission() const {
+        return admission_gate_ ? admission_gate_->check() : grpc::Status::OK;
+    }
+    AdmissionAcquireResult acquireAdmission() const {
+        return admission_gate_ ? admission_gate_->acquire() : AdmissionAcquireResult{};
+    }
+
+    // Wire the sleep/wake_up SleepHooks (M3 drain counters, M5 KV memory,
+    // M6 weights, engine quiesce) into engine_->sleepController().
+    void installSleepHooks();
+
+    // One-line GPU/host snapshot shared by all sleep milestones. Keeping the
+    // rank/epoch context here avoids duplicating logging arguments in hooks.
+    void logSleepMemorySnapshot(const std::string& phase, int64_t epoch) const;
+
+    // Wake self-check: the KV memory controller must be resumed (not paused) and
+    // have an attached buffer before serving resumes. Returns false so the wake
+    // fails cleanly instead of the first post-wake forward faulting on unmapped KV.
+    static bool validateKvMemoryControllerForWake(const KVCachePhysicalMemoryControllerPtr& controller);
+
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status
          serializeErrorMsg(const std::string& request_key, const RequestInfo& request_info, ErrorInfo error_info);
@@ -118,16 +156,30 @@ protected:
                                                 std::shared_ptr<GenerateStream>& stream);
     TorchAllocatorDumpResultPB dumpTorchAllocatorOnCurrentProcess();
 
+    std::shared_ptr<void> registerAbortableStreamForScope(const std::shared_ptr<GenerateStream>& stream);
+    void                  unregisterAbortableStream(int64_t request_id);
+    size_t                cancelAbortableStreams();
+
 protected:
-    std::shared_ptr<EngineBase>           engine_;
-    std::shared_ptr<MultimodalProcessor>  mm_processor_;
-    EngineInitParams                      maga_init_params_;
-    ProposeModelEngineInitParams*         propose_maga_init_params_;
-    kmonitor::MetricsReporterPtr          metrics_reporter_;
-    std::atomic<size_t>                   onflight_requests_{0};
-    std::shared_ptr<RpcServerRuntimeMeta> meta_;
-    py::object                            weight_manager_;
-    std::shared_ptr<BroadcastManager>     tp_broadcaster_;
+    std::shared_ptr<EngineBase>                                engine_;
+    std::shared_ptr<AdmissionGate>                             admission_gate_;
+    std::shared_ptr<DrainManager>                              drain_manager_;
+    std::shared_ptr<VmmBackend>                                vmm_backend_;
+    std::shared_ptr<MultimodalProcessor>                       mm_processor_;
+    EngineInitParams                                           maga_init_params_;
+    ProposeModelEngineInitParams*                              propose_maga_init_params_;
+    kmonitor::MetricsReporterPtr                               metrics_reporter_;
+    std::atomic<size_t>                                        onflight_requests_{0};
+    std::shared_ptr<RpcServerRuntimeMeta>                      meta_;
+    py::object                                                 weight_manager_;
+    mutable std::mutex                                         abortable_streams_mutex_;
+    std::unordered_map<int64_t, std::weak_ptr<GenerateStream>> abortable_streams_;
+    std::shared_ptr<BroadcastManager>                          tp_broadcaster_;
+    // Level-2 wake overlaps the host memory-cache pinned rebuild (restoreMemoryCacheBacking,
+    // pure host cudaHostAlloc + memcpy) with the GPU weight reload. Launched at the start of
+    // restoreRestorableGpuMemory, joined in restoreKvMemoryBackingAndResetMetadata before the
+    // GPU KV VMM resume. Not valid when the async launch was skipped (fall back to sync).
+    std::future<bool> memory_cache_restore_future_;
 };
 
 }  // namespace rtp_llm

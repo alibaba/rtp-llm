@@ -22,6 +22,8 @@ public:
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response);
 
+    size_t activeCacheTransferCount() override;
+
     class LoadKVCacheContext {
     public:
         LoadKVCacheContext(int64_t                          request_id,

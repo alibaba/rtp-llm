@@ -155,7 +155,11 @@ bool KVCacheMemoryConnector::init() {
 
     checkLayerBlockStrideBytes();
 
+    const auto memory_cache_allocation_start = std::chrono::steady_clock::now();
     initBlockPool();
+    const double memory_cache_allocation_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - memory_cache_allocation_start).count();
+    RTP_LLM_LOG_INFO("memory cache allocation took %.3fs", memory_cache_allocation_seconds);
     RTP_LLM_CHECK_WITH_INFO(!(kv_cache_config_.enable_memory_cache_disk && kv_cache_config_.enable_tiered_memory_cache
                               && !usePrefixTreeMemoryCache()),
                             "init failed, enable_memory_cache_disk with tiered memory cache requires prefix-tree "
@@ -657,6 +661,73 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
             return false;
         }
     }
+    return true;
+}
+
+// Every pinned host buffer this connector owns, across all memory-cache layouts:
+//   - single pool        : block_pool_
+//   - dual pool          : complete_pool_ (+ incomplete_pool_ when linear_step > 1)
+//   - prefix-tree (DSV4) : compressed_pool_ + state_swa_pool_
+// Only the pools for the active layout are non-null (see initBlockPool()); the rest stay
+// null and are skipped. When the memory cache is disabled every pool is null (no-op).
+std::vector<std::shared_ptr<BlockPool>> KVCacheMemoryConnector::allHostPools() const {
+    std::vector<std::shared_ptr<BlockPool>> pools;
+    for (const auto& pool : {block_pool_, complete_pool_, incomplete_pool_, compressed_pool_, state_swa_pool_}) {
+        if (pool) {
+            pools.push_back(pool);
+        }
+    }
+    return pools;
+}
+
+bool KVCacheMemoryConnector::releaseMemoryCacheBacking() {
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    const auto                  pools = allHostPools();
+    if (pools.empty()) {
+        return true;
+    }
+    const auto release_start = std::chrono::steady_clock::now();
+    // The cache-key -> block index maps point into the buffers we are about to free.
+    // Clear in place (keeping the cache object's address stable) so lock-free readers that
+    // hold the shared_ptr never race a pointer swap; both caches are internally locked.
+    if (block_cache_) {
+        block_cache_->clear();
+    }
+    if (prefix_block_cache_) {
+        prefix_block_cache_->clear();
+    }
+    for (const auto& pool : pools) {
+        pool->releaseHostBuffer();
+    }
+    const double release_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - release_start).count();
+    RTP_LLM_LOG_INFO("memory cache pinned memory release took %.3fs", release_seconds);
+    RTP_LLM_LOG_INFO("memory cache backing released for sleep (%zu host pool(s))", pools.size());
+    return true;
+}
+
+bool KVCacheMemoryConnector::restoreMemoryCacheBacking() {
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    const auto                  pools = allHostPools();
+    if (pools.empty()) {
+        return true;
+    }
+    const auto allocation_start = std::chrono::steady_clock::now();
+    for (const auto& pool : pools) {
+        pool->reallocateHostBuffer();
+    }
+    // Start from an empty cache: the previous host KV contents were discarded.
+    // Clear in place rather than swapping the pointer so lock-free readers stay safe.
+    if (block_cache_) {
+        block_cache_->clear();
+    }
+    if (prefix_block_cache_) {
+        prefix_block_cache_->clear();
+    }
+    const double allocation_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - allocation_start).count();
+    RTP_LLM_LOG_INFO("wake up memory cache allocation took %.3fs", allocation_seconds);
+    RTP_LLM_LOG_INFO("memory cache backing restored on wake (%zu host pool(s))", pools.size());
     return true;
 }
 
@@ -1207,39 +1278,35 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
             return nullptr;
         }
-        auto write_done = [copy_plan,
-                           resource_copy = resource,
-                           slots,
-                           timer,
-                           total_block_num = cache_keys_size,
-                           this](bool success) mutable {
-                int64_t disk_write_block_num = 0;
-                for (const auto& copy_info : copy_plan->copy_infos) {
-                    if (copy_info.backing_type == CacheBackingType::DISK) {
-                        ++disk_write_block_num;
-                    }
+        auto write_done = [copy_plan, resource_copy = resource, slots, timer, total_block_num = cache_keys_size, this](
+                              bool success) mutable {
+            int64_t disk_write_block_num = 0;
+            for (const auto& copy_info : copy_plan->copy_infos) {
+                if (copy_info.backing_type == CacheBackingType::DISK) {
+                    ++disk_write_block_num;
                 }
-                if (success) {
-                    const auto& dependencies = resource_copy->blockDependencies();
-                    for (auto& copy_info : copy_plan->copy_infos) {
-                        const auto pos = static_cast<size_t>(std::find(resource_copy->cacheKeys().begin(),
-                                                                        resource_copy->cacheKeys().end(),
-                                                                        copy_info.cache_key)
-                                                             - resource_copy->cacheKeys().begin());
-                        const auto dependency =
-                            pos < dependencies.size() ? dependencies[pos] :
-                                                        BlockDependency{false, 0, static_cast<uint32_t>(pos)};
-                        putPrefixToCache(copy_info, dependency, slots);
-                    }
+            }
+            if (success) {
+                const auto& dependencies = resource_copy->blockDependencies();
+                for (auto& copy_info : copy_plan->copy_infos) {
+                    const auto pos        = static_cast<size_t>(std::find(resource_copy->cacheKeys().begin(),
+                                                                   resource_copy->cacheKeys().end(),
+                                                                   copy_info.cache_key)
+                                                         - resource_copy->cacheKeys().begin());
+                    const auto dependency = pos < dependencies.size() ?
+                                                dependencies[pos] :
+                                                BlockDependency{false, 0, static_cast<uint32_t>(pos)};
+                    putPrefixToCache(copy_info, dependency, slots);
                 }
-                resource_copy.reset();
-                const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
-                copy_plan.reset();
-                reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
-                if (disk_write_block_num > 0) {
-                    reportDiskWriteMetrics(success, timer.done_us(), total_block_num, success ? disk_write_block_num : 0);
-                }
-            };
+            }
+            resource_copy.reset();
+            const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
+            copy_plan.reset();
+            reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
+            if (disk_write_block_num > 0) {
+                reportDiskWriteMetrics(success, timer.done_us(), total_block_num, success ? disk_write_block_num : 0);
+            }
+        };
 
         auto context = std::make_shared<MemoryAsyncContext>(write_done);
         if (!startCopyAsync(context, copy_plan)) {

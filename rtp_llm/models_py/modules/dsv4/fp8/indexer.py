@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.model_loader.weight_memory_saver import suppress_weights_region
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -337,9 +338,16 @@ class IndexerFP8(PoolBackedModule):
         # do a single ``F.linear`` (cuBLAS GEMM) without a trailing elementwise
         # mul. New tensor — never mutate ``layer_weights`` in place.
         _wp_scale = self.softmax_scale * self.n_heads**-0.5
-        self.weights_proj = (
-            weights[W.v4_indexer_weights_proj_w] * _wp_scale
-        ).contiguous()
+        # This folded projection is a resident feature weight. Keep it in the
+        # same VMM-owned region as the FP8 scale repack above.
+        from rtp_llm.model_loader.weight_memory_saver import feature_weights_region
+
+        self._sleep_weights_proj_src = weights[W.v4_indexer_weights_proj_w]
+        self._sleep_weights_proj_scale = _wp_scale
+        with feature_weights_region():
+            self.weights_proj = (
+                weights[W.v4_indexer_weights_proj_w] * _wp_scale
+            ).contiguous()
 
         # Nested compressor: 132B layout (head_dim=128).
         inner_cmp_weights = {
@@ -371,6 +379,20 @@ class IndexerFP8(PoolBackedModule):
         # the nested compressor rebuilds its slot mappings post-gather
         # (CompressorFP8.forward handles that internally).
         self._cp_ctx: Optional[CPContext] = None
+
+    def reload_sleep_computed_weights(self, seen_cos_sin=None) -> None:
+        """Restore indexer-derived buffers after level-2 wake."""
+        if seen_cos_sin is None:
+            seen_cos_sin = set()
+        with suppress_weights_region():
+            rebuilt = (
+                self._sleep_weights_proj_src * self._sleep_weights_proj_scale
+            ).contiguous()
+        if rebuilt.shape != self.weights_proj.shape:
+            raise RuntimeError("DSV4 indexer weights_proj shape changed on wake")
+        self.weights_proj.copy_(rebuilt)
+        if self.compressor is not None:
+            self.compressor.reload_rope_cache(seen_cos_sin)
 
     # --------------------------------------------------------------
     # Pool propagation to nested compressor
