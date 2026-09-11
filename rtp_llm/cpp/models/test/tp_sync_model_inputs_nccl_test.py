@@ -191,6 +191,9 @@ def _worker(rank, port, uds_dir, output_dir):
     _write_report(report_path, report)
     initialized = False
     try:
+        # Register config types before compute-op default arguments use them.
+        from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+
         import librtp_compute_ops
         from rtp_llm.cpp.models.test import libtp_sync_model_inputs_test_ops as ops
         from rtp_llm.models_py.distributed.collective_torch import (
@@ -199,7 +202,6 @@ def _worker(rank, port, uds_dir, output_dir):
             destroy_distributed_environment,
             init_distributed_environment,
         )
-        from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
         torch.set_num_threads(1)
         torch.set_default_device("cpu")
