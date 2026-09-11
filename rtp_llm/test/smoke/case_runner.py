@@ -1085,6 +1085,10 @@ class CaseRunner(object):
                     task_states.err_msg = f"{config['role_name']} server start cancelled because another server failed"
                     results[config["role_name"]] = (None, task_states)
                 except Exception as e:
+                    logging.exception(
+                        "Unexpected exception starting server %s",
+                        config["role_name"],
+                    )
                     task_states = TaskStates()
                     task_states.ret = False
                     task_states.err_msg = (
