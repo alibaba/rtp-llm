@@ -259,6 +259,7 @@ class IndexerOp(nn.Module):
             if glm5_topk_backend == "topk_v3"
             else rtp_llm_ops.dsv4_persistent_topk
         )
+        self._hy4_use_topk_v3 = glm5_topk_backend == "topk_v3"
 
         prefill_topk_backend = (
             os.environ.get("GLM5_PREFILL_INDEXER_TOPK_BACKEND", "dsv4_per_row")
@@ -281,15 +282,28 @@ class IndexerOp(nn.Module):
         output: torch.Tensor,
         max_seq_len: int,
     ) -> None:
-        # HY4 resolves equal scores by token index before canonicalizing the
-        # selected IDs for deterministic sparse-attention accumulation.
+        max_seq_len = min(max(int(max_seq_len), 1), logits.shape[1])
+        # CMP uses paged logits: each row's valid interval starts at zero.
+        # Select the configured paged kernel without reading metadata to CPU.
+        if self._hy4_use_topk_v3:
+            self._paged_topk_op(
+                logits,
+                row_ends,
+                output,
+                _get_topk_workspace(logits.device),
+                2048,
+                max_seq_len,
+            )
+            return
+        # Preserve HY4's previous stable selection unless v3 is requested.
+        # The CMP caller canonicalizes the selected IDs for either backend.
         rtp_llm_ops.topk_v3_tie_break(
             logits,
             row_starts,
             row_ends,
             output,
             2048,
-            min(max(int(max_seq_len), 1), logits.shape[1]),
+            max_seq_len,
         )
 
     def _run_prefill_topk(

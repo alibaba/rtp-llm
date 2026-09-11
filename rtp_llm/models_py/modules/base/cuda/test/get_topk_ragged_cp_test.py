@@ -66,6 +66,38 @@ class GetTopkRaggedCPZeroLocalTest(TestCase):
             op = self._make_indexer_op()
         self.assertIs(op._paged_topk_op, rtp_llm_ops.topk_v3)
 
+    def test_hy4_cmp_honors_paged_v3_selection(self):
+        scores = torch.empty((2, 4096), dtype=torch.float32)
+        starts = torch.zeros(2, dtype=torch.int32)
+        ends = torch.tensor([3000, 4096], dtype=torch.int32)
+        output = torch.empty((2, 2048), dtype=torch.int32)
+        workspace = torch.empty(1, dtype=torch.uint8)
+        with patch.dict(
+            "os.environ", {"GLM5_INDEXER_TOPK_BACKEND": "topk_v3"}, clear=True
+        ), patch.object(rtp_llm_ops, "topk_v3") as paged_v3, patch.object(
+            rtp_llm_ops, "topk_v3_tie_break"
+        ) as stable_v3, patch(
+            "rtp_llm.models_py.modules.base.cuda.indexer_op._get_topk_workspace",
+            return_value=workspace,
+        ):
+            op = self._make_indexer_op()
+            op.hy4_topk(scores, starts, ends, output, 8192)
+        paged_v3.assert_called_once_with(scores, ends, output, workspace, 2048, 4096)
+        stable_v3.assert_not_called()
+
+    def test_hy4_cmp_preserves_stable_default(self):
+        scores = torch.empty((2, 4096), dtype=torch.float32)
+        starts = torch.zeros(2, dtype=torch.int32)
+        ends = torch.tensor([3000, 4096], dtype=torch.int32)
+        output = torch.empty((2, 2048), dtype=torch.int32)
+        with patch.dict("os.environ", {}, clear=True), patch.object(
+            rtp_llm_ops, "topk_v3"
+        ) as paged_v3, patch.object(rtp_llm_ops, "topk_v3_tie_break") as stable_v3:
+            op = self._make_indexer_op()
+            op.hy4_topk(scores, starts, ends, output, 8192)
+        stable_v3.assert_called_once_with(scores, starts, ends, output, 2048, 4096)
+        paged_v3.assert_not_called()
+
     def test_glm5_indexer_topk_backend_rejects_invalid_value(self):
         with patch.dict(
             "os.environ", {"GLM5_INDEXER_TOPK_BACKEND": "unknown"}, clear=True
