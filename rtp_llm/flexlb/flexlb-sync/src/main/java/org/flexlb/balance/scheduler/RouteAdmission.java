@@ -6,23 +6,19 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.strategy.SelectedRole;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.PriorityNormalizer;
 
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
-import java.util.stream.Stream;
 
 /** Exact selected route and its provisional resources, shared by both scheduling modes. */
 public final class RouteAdmission implements AutoCloseable {
@@ -137,44 +133,6 @@ public final class RouteAdmission implements AutoCloseable {
     }
 
     WorkerEndpoint blockedEndpoint() { return blockedEndpoint; }
-
-    /**
-     * Whether an ordered successor needs another capacity event at this
-     * endpoint. Unknown capacity or a possible preemption permits a wakeup.
-     * This only controls continuation of a retry chain; an already awakened
-     * request always routes across the fleet. The caller must revalidate the
-     * successor and capacity sequence before pausing the chain.
-     */
-    static boolean mustWaitForCapacity(BalanceContext context, WorkerEndpoint endpoint) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            if (pin == null) {
-                return false;
-            }
-            if (endpoint instanceof PrefillEndpoint prefill) {
-                return !prefill.canAcceptRequest()
-                        && !(context.getConfig().allowsPreemption(VictimStage.PREFILL_QUEUED)
-                            && prefill.canPreemptQueuedRequest(context.getPriority()));
-            }
-            if (!(endpoint instanceof DecodeEndpoint decode)) {
-                return false;
-            }
-            DecodeBinding request = DecodeBinding.capture(context);
-            if (request.mode() != ScheduledRequest.DecodeMode.PREEMPT_AT_PLACEMENT) {
-                return false;
-            }
-            DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(decode, request.capacity());
-            if (request.capacity().evaluate(snapshot.usage(),
-                    request.hardKvTokens(), request.expectedKvTokens()).fits()) {
-                return false;
-            }
-            // Exclude only cases with no possible lower-priority victim. Actual
-            // victim eligibility and feasibility remain owned by EvictionManager.
-            return Stream.of(snapshot.reserved(), snapshot.accepted(), snapshot.running())
-                    .flatMap(List::stream)
-                    .noneMatch(victim -> PriorityNormalizer.hasPriority(victim.priority())
-                            && victim.priority() < request.priority());
-        }
-    }
 
     boolean blockedEndpointChanged() {
         requireProvisional();
