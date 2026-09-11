@@ -33,7 +33,7 @@ class DispatchRouterTest {
         BatchHandler batch = mock(BatchHandler.class);
         PassthroughClient passthrough = mock(PassthroughClient.class);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/batch_infer").bodyValue("{}").exchange().expectStatus().isNotFound();
@@ -50,7 +50,7 @@ class DispatchRouterTest {
         when(passthrough.forward(any()))
                 .thenReturn(ServerResponse.ok().bodyValue("pass"));
         WebTestClient client = WebTestClient.bindToRouterFunction(
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes()).build();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class)).routes()).build();
 
         client.get().uri("/dispatcher/v1/models").exchange()
                 .expectStatus().isOk()
@@ -70,9 +70,8 @@ class DispatchRouterTest {
         when(passthrough.forward(any()))
                 .thenReturn(ServerResponse.ok().bodyValue("pass"));
 
-        List<BatchEndpointSpec> specs = List.of(BATCH_INFER, EMBEDDINGS);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), specs).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange()
@@ -96,7 +95,7 @@ class DispatchRouterTest {
         PassthroughClient passthrough = mock(PassthroughClient.class);
         when(passthrough.forward(any())).thenReturn(ServerResponse.ok().bodyValue("pass"));
 
-        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(root)).routes();
+        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/dispatcher/").bodyValue("{}").exchange()
@@ -117,7 +116,7 @@ class DispatchRouterTest {
         }));
         PassthroughClient passthrough = mock(PassthroughClient.class);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes)
                 .webFilter(new org.flexlb.httpserver.ActiveRequestWebFilter(counter)).build();
 
@@ -134,7 +133,7 @@ class DispatchRouterTest {
         when(batch.handle(any(), eq(BATCH_INFER)))
                 .thenReturn(Mono.error(new IllegalStateException("boom")));
         PassthroughClient passthrough = mock(PassthroughClient.class);
-        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
+        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes)
                 .webFilter(new org.flexlb.httpserver.ActiveRequestWebFilter(counter)).build();
 
@@ -157,7 +156,7 @@ class DispatchRouterTest {
                 .doOnNext(chunk -> countsWhileBodyStreaming.add(counter.getCount()));
         when(passthrough.forward(any())).thenReturn(
                 ServerResponse.ok().body(BodyInserters.fromPublisher(feBody, String.class)));
-        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
+        RouterFunction<ServerResponse> routes = new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes)
                 .webFilter(new org.flexlb.httpserver.ActiveRequestWebFilter(counter)).build();
 

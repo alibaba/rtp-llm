@@ -1,347 +1,151 @@
 package org.flexlb.dispatcher;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BatchChunkAssemblerTest {
-
-    @Test
-    void splitArrayDividesEvenly() {
-        JSONArray arr = JSONArray.of("a", "b", "c", "d");
-        List<JSONArray> chunks = BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2));
-        assertEquals(2, chunks.size());
-        assertEquals(JSONArray.of("a", "b"), chunks.get(0));
-        assertEquals(JSONArray.of("c", "d"), chunks.get(1));
-    }
-
-    @Test
-    void splitArrayLastChunkShorter() {
-        JSONArray arr = JSONArray.of("a", "b", "c", "d", "e");
-        List<JSONArray> chunks = BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2));
-        assertEquals(3, chunks.size());
-        assertEquals(1, chunks.get(2).size());
-    }
-
-    @Test
-    void splitArrayEmptyReturnsEmptyList() {
-        assertTrue(BatchChunkAssembler.split(new JSONArray(), new SubBatchSpec(SubBatchSpec.Mode.SIZE, 5)).isEmpty());
-    }
-
-    @Test
-    void splitByCountFrontLoadsRemainder() {
-        JSONArray arr = JSONArray.of(1, 2, 3, 4, 5, 6, 7);
-        List<JSONArray> chunks = BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 3));
-        assertEquals(3, chunks.size());
-        assertEquals(3, chunks.get(0).size());
-        assertEquals(2, chunks.get(1).size());
-        assertEquals(2, chunks.get(2).size());
-    }
-
-    @Test
-    void splitByCountClampsToTotalWhenRequestedExceeds() {
-        JSONArray arr = JSONArray.of("a", "b");
-        List<JSONArray> chunks = BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 5));
-        assertEquals(2, chunks.size());
-    }
-
-    @Test
-    void specAwareSplitRoutesBySizeAndCount() {
-        JSONArray arr = JSONArray.of(1, 2, 3, 4);
-        assertEquals(2, BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2)).size());
-        assertEquals(3, BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 3)).size());
-    }
-
-    @Test
-    void buildChunkBodiesDeepClonesAndReplacesArray() {
-        JSONObject envelope = new JSONObject();
-        envelope.put("model", "m");
-        envelope.put("prompt_batch", JSONArray.of("a", "b", "c"));
-        JSONObject gc = new JSONObject();
-        gc.put("temperature", 0.5);
-        envelope.put("generate_config", gc);
-
-        List<JSONArray> chunks = List.of(JSONArray.of("a"), JSONArray.of("b", "c"));
-        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(envelope, chunks, BatchEndpointSpec.BATCH_INFER, true);
-
-        assertEquals(2, bodies.size());
-        assertEquals(JSONArray.of("a"), bodies.get(0).getJSONArray("prompt_batch"));
-        assertEquals(JSONArray.of("b", "c"), bodies.get(1).getJSONArray("prompt_batch"));
-        assertEquals("m", bodies.get(0).getString("model"));
-        // Each chunk has its own generate_config so per-chunk mutations don't leak.
-        assertNotSame(bodies.get(0).getJSONObject("generate_config"),
-                bodies.get(1).getJSONObject("generate_config"));
-        // Original envelope is untouched.
-        assertEquals(3, envelope.getJSONArray("prompt_batch").size());
-        assertFalse(envelope.getJSONObject("generate_config").containsKey("force_batch"));
-    }
-
-    @Test
-    void buildChunkBodiesStripsReservedCallerRoleAddrs() {
-        JSONObject envelope = new JSONObject();
-        envelope.put("model", "m");
-        envelope.put("prompt_batch", JSONArray.of("a", "b"));
-        JSONObject gc = new JSONObject();
-        JSONArray roleAddrs = new JSONArray();
-        roleAddrs.add("PREFILL@10.0.0.1:8000");
-        gc.put("role_addrs", roleAddrs);
-        envelope.put("generate_config", gc);
-
-        List<JSONArray> chunks = List.of(JSONArray.of("a"), JSONArray.of("b"));
-        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(envelope, chunks, BatchEndpointSpec.BATCH_INFER, true);
-
-        assertFalse(bodies.get(0).getJSONObject("generate_config").containsKey("role_addrs"));
-        assertFalse(bodies.get(1).getJSONObject("generate_config").containsKey("role_addrs"));
-        assertEquals(1, envelope.getJSONObject("generate_config").getJSONArray("role_addrs").size(),
-                "defense-in-depth stripping must not mutate the source envelope");
-    }
-
-    @Test
-    void buildChunkBodiesNormalizesLegacyGenerationConfigWithoutLosingSettings() {
-        JSONObject legacy = JSONObject.of(
-                "max_new_tokens", 37,
-                "temperature", 0.25,
-                "adapter_name", "qa-lora");
-        JSONObject envelope = JSONObject.of(
-                "prompt_batch", JSONArray.of("a", "b"),
-                "generation_config", legacy);
-
-        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, List.of(JSONArray.of("a"), JSONArray.of("b")), BatchEndpointSpec.BATCH_INFER, true);
-
-        for (JSONObject body : bodies) {
-            assertFalse(body.containsKey("generation_config"));
-            JSONObject gc = body.getJSONObject("generate_config");
-            assertEquals(37, gc.getIntValue("max_new_tokens"));
-            assertEquals(0.25, gc.getDoubleValue("temperature"));
-            assertEquals("qa-lora", gc.getString("adapter_name"));
-            assertTrue(gc.getBooleanValue("force_batch"));
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            size:2 | [1,2,3,4] | [[1,2],[3,4]]
+            size:2 | [1,2,3,4,5] | [[1,2],[3,4],[5]]
+            size:5 | [] | []
+            count:3 | [1,2,3,4,5,6,7] | [[1,2,3],[4,5],[6,7]]
+            count:5 | [1,2] | [[1],[2]]
+            count:3 | [1,2,3,4] | [[1,2],[3],[4]]
+            """)
+    void splittingPreservesOrderAndDistribution(String mode, String input, String expected) {
+        BatchChunkAssembler batch = batch(JSONObject.of("prompt_batch", JSON.parseArray(input)), mode, true);
+        List<JSONArray> actual = batch.chunks(List.of()).stream().map(b -> b.getJSONArray("prompt_batch")).toList();
+        assertEquals(JSON.parseArray(expected), actual);
+        assertEquals(actual.size(), batch.chunkCount());
+        for (int i = 0; i < actual.size(); i++) {
+            assertEquals(actual.get(i).size(), batch.chunkSize(i));
         }
-        assertFalse(legacy.containsKey("force_batch"),
-                "normalization must not mutate the caller's config object");
     }
 
     @Test
-    void buildChunkBodiesStripsTopLevelRoleAddrsAsDefenseInDepth() {
-        JSONObject envelope = JSONObject.of(
-                "prompt_batch", JSONArray.of("a"),
-                "role_addrs", JSONArray.of(JSONObject.of("ip", "1.2.3.4")));
-
-        JSONObject body = BatchChunkAssembler.buildChunkBodies(
-                envelope, List.of(JSONArray.of("a")), BatchEndpointSpec.BATCH_INFER, true).getFirst();
-
-        assertFalse(body.containsKey("role_addrs"));
-        assertTrue(envelope.containsKey("role_addrs"));
-    }
-
-    @Test
-    void validateGenerateConfigRejectsEveryCallerRoutingSpelling() {
-        assertTrue(BatchChunkAssembler.validateGenerateConfig(
-                JSONObject.of("role_addrs", new JSONArray())).contains("role_addrs"));
-        assertTrue(BatchChunkAssembler.validateGenerateConfig(JSONObject.of(
-                "generation_config", JSONObject.of("role_addrs", new JSONArray())))
-                .contains("role_addrs"));
-        assertEquals("generation_config must be a JSON object",
-                BatchChunkAssembler.validateGenerateConfig(
-                        JSONObject.of("generation_config", "invalid")));
-    }
-
-    @Test
-    void buildChunkBodiesStampsForceBatchOnlyForPromptBatchEndpoints() {
-        JSONObject envelope = new JSONObject();
-        envelope.put("input", JSONArray.of("a", "b"));
-        List<JSONArray> chunks = List.of(JSONArray.of("a"), JSONArray.of("b"));
-
-        // prompt_batch generation endpoint: force_batch is stamped on every chunk.
-        List<JSONObject> promptBodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, chunks, BatchEndpointSpec.BATCH_INFER, true);
-        assertTrue(promptBodies.get(0).getJSONObject("generate_config").getBoolean("force_batch"));
-
-        // Non-prompt_batch endpoints (embedding "input", openai "requests"): force_batch is a
-        // generation generate_config flag with no meaning here, so no generate_config is fabricated.
-        List<JSONObject> embeddingBodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, chunks, BatchEndpointSpec.EMBEDDING, true);
-        assertFalse(embeddingBodies.get(0).containsKey("generate_config"));
-        List<JSONObject> openaiBodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, chunks, BatchEndpointSpec.CHAT, true);
-        assertFalse(openaiBodies.get(0).containsKey("generate_config"));
-    }
-
-    @Test
-    void injectForceBatchAddsWhenAbsent() {
-        JSONObject body = new JSONObject();
-        BatchChunkAssembler.injectForceBatch(body);
-        assertEquals(true, body.getJSONObject("generate_config").getBoolean("force_batch"));
-    }
-
-    @Test
-    void injectForceBatchPreservesUserFalse() {
-        JSONObject body = new JSONObject();
-        JSONObject gc = new JSONObject();
-        gc.put("force_batch", false);
-        body.put("generate_config", gc);
-        BatchChunkAssembler.injectForceBatch(body);
-        assertEquals(false, body.getJSONObject("generate_config").getBoolean("force_batch"));
-    }
-
-    @Test
-    void policyFallbackOverridesAndRemovesTopLevelForceBatch() {
-        JSONObject envelope = JSONObject.of(
-                "prompt_batch", JSONArray.of("a", "b"),
-                "force_batch", true,
+    void chunksIsolateMutableFieldsAndShareLargeReadOnlyFields() {
+        JSONObject tools = JSONObject.of("schema", "x".repeat(4096));
+        JSONObject source = JSONObject.of("model", "m", "tools", tools,
+                "prompt_batch", JSONArray.of("a", "b", "c"),
                 "generate_config", JSONObject.of("temperature", 0.5));
+        List<JSONObject> chunks = batch(source, "size:2", true).chunks(List.of());
+        assertEquals("m", chunks.getFirst().getString("model"));
+        assertSame(tools, chunks.getFirst().get("tools"));
+        assertNotSame(source.get("generate_config"), chunks.getFirst().get("generate_config"));
+        assertNotSame(chunks.getFirst().get("generate_config"), chunks.getLast().get("generate_config"));
+        chunks.getFirst().getJSONObject("generate_config").put("temperature", 9);
+        assertEquals(0.5, chunks.getLast().getJSONObject("generate_config").getDouble("temperature"));
+        assertEquals(3, source.getJSONArray("prompt_batch").size());
+        assertFalse(source.getJSONObject("generate_config").containsKey("force_batch"));
+    }
 
-        JSONObject body = BatchChunkAssembler.buildChunkBodies(
-                envelope, List.of(JSONArray.of("a")), BatchEndpointSpec.BATCH_INFER, false).getFirst();
-
-        assertFalse(body.containsKey("force_batch"),
-                "top-level GenerateConfig fields override nested fields in RequestExtractor");
-        assertFalse(body.getJSONObject("generate_config").getBooleanValue("force_batch"));
-        assertTrue(envelope.getBooleanValue("force_batch"),
-                "policy fallback must not mutate the caller envelope");
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '~', textBlock = """
+            {"generation_config":{"max_new_tokens":37,"temperature":0.25,"adapter_name":"qa-lora"}} | true | {"max_new_tokens":37,"temperature":0.25,"adapter_name":"qa-lora","force_batch":true}
+            {"generate_config":{"temperature":0.5},"generation_config":{"temperature":9}} | true | {"temperature":0.5,"force_batch":true}
+            {} | true | {"force_batch":true}
+            {"generate_config":{"force_batch":false}} | true | {"force_batch":false}
+            {"generate_config":{"force_batch":null}} | true | {"force_batch":null}
+            {"force_batch":true,"generate_config":{"temperature":0.5}} | false | {"temperature":0.5,"force_batch":false}
+            {"role_addrs":[{}],"generate_config":{"role_addrs":[{}]}} | true | {"force_batch":true}
+            """)
+    void configNormalizationPreservesCallerSettings(String json, boolean allowed, String expected) {
+        JSONObject source = JSON.parseObject(json);
+        source.put("prompt_batch", JSONArray.of("a", "b"));
+        byte[] original = BatchBodyParser.serialize(source);
+        for (JSONObject chunk : batch(source, "size:1", allowed).chunks(List.of())) {
+            assertEquals(JSON.parseObject(expected), chunk.getJSONObject("generate_config"));
+            assertFalse(chunk.containsKey("generation_config"));
+            assertFalse(chunk.containsKey("role_addrs"));
+            if (!allowed) {
+                assertFalse(chunk.containsKey("force_batch"));
+            }
+        }
+        assertArrayEquals(original, BatchBodyParser.serialize(source));
     }
 
     @Test
-    void stampPreAssignedBeAppendsRoleAddrs() {
-        JSONObject body = new JSONObject();
-        List<JSONObject> bodies = List.of(body);
-        BatchScheduleTarget target = new BatchScheduleTarget();
-        target.setRole(RoleType.PDFUSION);
-        target.setServerIp("10.0.0.1");
-        target.setHttpPort(8088);
-        target.setGrpcPort(50051);
-
-        BatchChunkAssembler.stampPreAssignedBe(bodies, List.of(target));
-
-        JSONArray addrs = body.getJSONObject("generate_config").getJSONArray("role_addrs");
-        assertEquals(1, addrs.size());
-        JSONObject addr = addrs.getJSONObject(0);
-        assertEquals("PDFUSION", addr.getString("role"));
-        assertEquals("10.0.0.1", addr.getString("ip"));
-        assertEquals(8088, addr.getIntValue("http_port"));
-        assertEquals(50051, addr.getIntValue("grpc_port"));
-    }
-
-    @Test
-    void stampPreAssignedBeSkipsTargetWithoutRole() {
-        // Pre-assignment must never be able to fail a request: a target missing its role
-        // (heterogeneous master response) is skipped like a missing grpc_port, not an NPE
-        // that turns the whole batch into a 500.
-        JSONObject body = new JSONObject();
-        BatchScheduleTarget target = new BatchScheduleTarget();
-        target.setServerIp("10.0.0.1");
-        target.setHttpPort(8088);
-        target.setGrpcPort(50051);
-        // role left null
-
-        BatchChunkAssembler.stampPreAssignedBe(List.of(body), List.of(target));
-
-        assertNull(body.getJSONObject("generate_config"),
-                "role-less target must be skipped without stamping anything");
-    }
-
-    @Test
-    void stampPreAssignedBeReplacesAnyExistingRoleAddrs() {
-        JSONObject body = new JSONObject();
-        JSONObject gc = new JSONObject();
-        JSONArray userAddrs = new JSONArray();
-        userAddrs.add(JSONObject.of("role", "PREFILL", "ip", "1.1.1.1", "http_port", 80, "grpc_port", 50));
-        gc.put("role_addrs", userAddrs);
-        body.put("generate_config", gc);
-
-        BatchScheduleTarget target = new BatchScheduleTarget();
-        target.setRole(RoleType.PDFUSION);
-        target.setServerIp("10.0.0.1");
-        target.setHttpPort(8088);
-        target.setGrpcPort(50051);
-
-        BatchChunkAssembler.stampPreAssignedBe(List.of(body), List.of(target));
-
-        JSONArray addrs = body.getJSONObject("generate_config").getJSONArray("role_addrs");
-        assertEquals(1, addrs.size());
-        assertEquals("PDFUSION", addrs.getJSONObject(0).getString("role"));
-    }
-
-    @Test
-    void stampPreAssignedBeNoOpOnEmptyTargets() {
-        JSONObject body = new JSONObject();
-        BatchChunkAssembler.stampPreAssignedBe(List.of(body), List.of());
-        assertTrue(body.isEmpty());
-    }
-
-    @Test
-    void stampPreAssignedBeToleratesShortTargetList() {
-        JSONObject body0 = new JSONObject();
-        JSONObject body1 = new JSONObject();
-        BatchScheduleTarget target = new BatchScheduleTarget();
-        target.setRole(RoleType.PDFUSION);
-        target.setServerIp("10.0.0.1");
-        target.setHttpPort(8088);
-        target.setGrpcPort(50051);
-
-        BatchChunkAssembler.stampPreAssignedBe(List.of(body0, body1), List.of(target));
-
-        assertFalse(body0.isEmpty());
-        assertTrue(body1.isEmpty());
-    }
-
-    @Test
-    void nonPositiveChunkSizeFailsExplicitlyRatherThanRelyingOnAssertions() {
-        // These are public pure functions and assertions are off by default in production, so a
-        // zero must raise here instead of reaching the chunk-count division as an ArithmeticException.
-        JSONArray arr = new JSONArray();
-        arr.add("a");
-
-        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 0)));
-        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 0)));
-        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, -1)));
-    }
-
-    @Test
-    void chunkCountIsOverflowSafeAtIntegerMaxValue() {
-        assertEquals(1_073_741_824, BatchChunkAssembler.chunkCount(
-                Integer.MAX_VALUE, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2)));
-        assertEquals(7, BatchChunkAssembler.chunkCount(
-                Integer.MAX_VALUE, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 7)));
-        assertEquals(0, BatchChunkAssembler.chunkCount(
-                0, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 1)));
-    }
-
-    @Test
-    void projectedOutboundBytesAccountsForRepeatedEnvelope() {
-        JSONObject body = new JSONObject();
-        body.put("model", "x".repeat(4096));
-        JSONArray inputs = JSONArray.of("a", "b", "c");
-        body.put("input", inputs);
-        BatchEndpointSpec embeddings = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
-
-        long oneChunk = BatchChunkAssembler.projectedChunkBytes(
-                body, inputs, 1, embeddings, true, List.of());
-        long threeChunks = BatchChunkAssembler.projectedChunkBytes(
-                body, inputs, 3, embeddings, true, List.of());
-
-        assertTrue(threeChunks > oneChunk + 8_000,
-                "the shared 4KiB envelope must be charged once per chunk");
-    }
-
-    @Test
-    void projectionMatchesSerializedChunksAcrossEndpointRewritesAndRouting() {
-        BatchScheduleTarget target = new BatchScheduleTarget("backend-中\"\\", 8088, 50051);
-        target.setRole(RoleType.PDFUSION);
+    void forceBatchBelongsOnlyToPromptEndpoints() {
         for (BatchEndpointSpec spec : BatchEndpointSpec.SPECS) {
-            for (String splitMode : List.of("size:2", "count:3", "count:20")) {
-                for (boolean atomicAllowed : List.of(true, false)) {
+            JSONObject body = JSONObject.of(spec.getRequestArrayField(), JSONArray.of("a"));
+            JSONObject chunk = new BatchChunkAssembler(body, spec, SubBatchSpec.parse("size:1"), true)
+                    .chunks(List.of()).getFirst();
+            assertEquals(spec.isPreAssignable(), chunk.containsKey("generate_config"));
+        }
+    }
+
+    @Test
+    void stampsOnlyAvailableGrpcTargetsAndNeverAppendsCallerAddresses() {
+        JSONObject source = JSONObject.of("prompt_batch", JSONArray.of("a", "b", "c", "d"),
+                "generate_config", JSONObject.of("role_addrs", JSONArray.of(JSONObject.of("ip", "caller"))));
+        BatchScheduleTarget valid = new BatchScheduleTarget("10.0.0.1", 8088, 50051, RoleType.PDFUSION);
+        BatchScheduleTarget noRole = new BatchScheduleTarget("10.0.0.2", 8088, 50051);
+        BatchScheduleTarget noGrpc = new BatchScheduleTarget();
+        noGrpc.setRole(RoleType.PDFUSION);
+        BatchChunkAssembler batch = batch(source, "size:1", true);
+        List<JSONObject> chunks = batch.chunks(List.of(valid, noRole, noGrpc));
+        assertEquals(JSON.parseArray("""
+                [{"role":"PDFUSION","ip":"10.0.0.1","http_port":8088,"grpc_port":50051}]
+                """), chunks.getFirst().getJSONObject("generate_config").getJSONArray("role_addrs"));
+        for (int i = 1; i < chunks.size(); i++) {
+            assertFalse(chunks.get(i).getJSONObject("generate_config").containsKey("role_addrs"));
+        }
+        assertTrue(batch.chunks(List.of()).stream().noneMatch(c -> c.getJSONObject("generate_config").containsKey("role_addrs")));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '~', textBlock = """
+            {"role_addrs":[]} | role_addrs
+            {"generation_config":{"role_addrs":[]}} | role_addrs
+            {"generation_config":"invalid"} | generation_config must be a JSON object
+            """)
+    void boundaryRejectsReservedRoutingFields(String json, String reason) {
+        assertTrue(BatchEndpointSpec.ROOT.validateRequest(JSON.parseObject(json)).contains(reason));
+    }
+
+    @Test
+    void countsAreOverflowSafeAndRejectInvalidSizes() {
+        assertEquals(1_073_741_824, BatchChunkAssembler.chunkCount(Integer.MAX_VALUE, SubBatchSpec.parse("size:2")));
+        assertEquals(7, BatchChunkAssembler.chunkCount(Integer.MAX_VALUE, SubBatchSpec.parse("count:7")));
+        assertEquals(0, BatchChunkAssembler.chunkCount(0, SubBatchSpec.parse("size:1")));
+        for (SubBatchSpec.Mode mode : SubBatchSpec.Mode.values()) {
+            for (int size : List.of(0, -1)) {
+                assertThrows(IllegalArgumentException.class,
+                        () -> BatchChunkAssembler.chunkCount(1, new SubBatchSpec(mode, size)));
+            }
+        }
+    }
+
+    @Test
+    void repeatedEnvelopesAreCounted() {
+        JSONObject body = JSONObject.of("model", "x".repeat(4096), "prompt_batch", JSONArray.of("a", "b", "c"));
+        long one = batch(body, "count:1", true).projectedBytes(List.of());
+        assertTrue(batch(body, "count:3", true).projectedBytes(List.of()) > one + 8000);
+    }
+
+    @Test
+    void projectionMatchesActualWireBytesAcrossEndpointRewritesAndRouting() {
+        BatchScheduleTarget target = new BatchScheduleTarget("backend-中\"\\", 8088, 50051, RoleType.PDFUSION);
+        for (BatchEndpointSpec spec : BatchEndpointSpec.SPECS) {
+            for (String mode : List.of("size:2", "count:3", "count:20")) {
+                for (boolean allowed : List.of(true, false)) {
                     for (int size : List.of(0, 1, 7)) {
                         JSONArray items = new JSONArray();
                         for (int i = 0; i < size; i++) {
@@ -351,19 +155,17 @@ class BatchChunkAssemblerTest {
                                 "model", "中-model", "query", "q", "sorted", true, "top_k", 2);
                         body.put("tools", null);
                         body.put("generation_config", JSONObject.of("temperature", 0.7, "seed", null));
-                        SubBatchSpec split = SubBatchSpec.parse(splitMode);
-                        List<JSONArray> chunks = BatchChunkAssembler.split(items, split);
+                        BatchChunkAssembler batch = new BatchChunkAssembler(body, spec, SubBatchSpec.parse(mode), allowed);
                         List<BatchScheduleTarget> targets = spec.isPreAssignable() ? List.of(target) : List.of();
-                        long projected = BatchChunkAssembler.projectedChunkBytes(
-                                body, items, chunks.size(), spec, atomicAllowed, targets);
-                        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(
-                                body, chunks, spec, atomicAllowed);
-                        BatchChunkAssembler.stampPreAssignedBe(bodies, targets);
-                        long actual = bodies.stream().mapToLong(chunk -> BatchBodyParser.serialize(chunk).length).sum();
-                        assertEquals(actual, projected, spec + "/" + splitMode + "/" + atomicAllowed + "/" + size);
+                        long actual = batch.chunks(targets).stream().mapToLong(c -> BatchBodyParser.serialize(c).length).sum();
+                        assertEquals(actual, batch.projectedBytes(targets), spec + "/" + mode + "/" + allowed + "/" + size);
                     }
                 }
             }
         }
+    }
+
+    private static BatchChunkAssembler batch(JSONObject body, String mode, boolean allowed) {
+        return new BatchChunkAssembler(body, BatchEndpointSpec.BATCH_INFER, SubBatchSpec.parse(mode), allowed);
     }
 }

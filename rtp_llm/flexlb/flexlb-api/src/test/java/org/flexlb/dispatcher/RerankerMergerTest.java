@@ -24,10 +24,8 @@ class RerankerMergerTest {
                 "sorted", true,
                 "top_k", 2,
                 "return_documents", false);
-        List<JSONArray> chunks = BatchChunkAssembler.split(
-                original.getJSONArray("documents"), new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2));
-        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(
-                original, chunks, BatchEndpointSpec.RERANKER, true);
+        List<JSONObject> bodies = new BatchChunkAssembler(
+                original, RERANKER, SubBatchSpec.parse("size:2"), true).chunks(List.of());
 
         assertEquals(true, original.getBoolean("sorted"));
         assertEquals(2, original.getIntValue("top_k"));
@@ -110,13 +108,13 @@ class RerankerMergerTest {
 
     @Test
     void validatesFieldsWhoseSemanticsDispatcherRewrites() {
-        assertNull(RERANKER.validateForFanout(JSONObject.of(
+        assertNull(RerankerMerger.validate(JSONObject.of(
                 "query", "q", "documents", JSONArray.of("d"), "top_k", 2.0)));
-        assertEquals("query must be a string", RERANKER.validateForFanout(JSONObject.of(
+        assertEquals("query must be a string", RerankerMerger.validate(JSONObject.of(
                 "documents", JSONArray.of("d"))));
-        assertEquals("sorted must be a boolean", RERANKER.validateForFanout(JSONObject.of(
+        assertEquals("sorted must be a boolean", RerankerMerger.validate(JSONObject.of(
                 "query", "q", "documents", JSONArray.of("d"), "sorted", "true")));
-        assertEquals("top_k must be an integer or null", RERANKER.validateForFanout(JSONObject.of(
+        assertEquals("top_k must be an integer or null", RerankerMerger.validate(JSONObject.of(
                 "query", "q", "documents", JSONArray.of("d"), "top_k", 1.5)));
     }
 

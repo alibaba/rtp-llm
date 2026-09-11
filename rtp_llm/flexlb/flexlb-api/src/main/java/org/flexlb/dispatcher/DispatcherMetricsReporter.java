@@ -61,7 +61,6 @@ public class DispatcherMetricsReporter {
     private static final FlexMetricTags NO_TAGS = FlexMetricTags.of();
     private static final FlexMetricTags RESULT_OK = FlexMetricTags.of("result", "ok");
     private static final FlexMetricTags RESULT_FAILED = FlexMetricTags.of("result", "failed");
-    private static final FlexMetricTags RESULT_EMPTY = FlexMetricTags.of("result", "empty");
 
     /** The reason set is closed, so every {@code (result, reason)} tag combination is pre-built. */
     private static final Map<String, FlexMetricTags> CHUNK_DETAIL_TAGS = Map.of(
@@ -130,10 +129,6 @@ public class DispatcherMetricsReporter {
      * dimension was unavailable. The metric name stays {@code preassign.rt} for dashboard
      * continuity.
      */
-    public void reportPreassignRt(long ms, boolean gotTargets) {
-        reportPreassignRt(ms, gotTargets, true, true);
-    }
-
     public void reportPreassignRt(
             long ms, boolean gotTargets, boolean assignBe, boolean assignFe) {
         String result = gotTargets ? "ok" : "empty";
@@ -149,10 +144,6 @@ public class DispatcherMetricsReporter {
     /**
      * Fanout latency: first chunk dispatch to all sub-batch responses collected.
      */
-    public void reportFanoutRt(long ms) {
-        reportFanoutRt(ms, FeAllocationMode.MASTER.configValue());
-    }
-
     public void reportFanoutRt(long ms, String feAllocation) {
         FlexMetricTags tags = allocationTags.computeIfAbsent(
                 "fanout\u0000" + feAllocation,

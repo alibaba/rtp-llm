@@ -54,6 +54,25 @@ public enum BatchEndpointSpec {
         return true;
     }
 
+    /** Validate routing fields before deciding whether to split or forward the whole request. */
+    public String validateRequest(JSONObject body) {
+        if (body.containsKey("role_addrs")) {
+            return "top-level role_addrs is reserved for dispatcher pre-assignment";
+        }
+        for (String key : List.of("generate_config", "generation_config")) {
+            if (body.containsKey(key)) {
+                if (!(body.get(key) instanceof JSONObject config)) {
+                    return key + " must be a JSON object";
+                }
+                if (config.containsKey("role_addrs")) {
+                    return key + ".role_addrs is reserved for dispatcher pre-assignment";
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Called only after the request has been classified as a splittable batch. */
     public String validateForFanout(JSONObject body) {
         return this == RERANKER ? RerankerMerger.validate(body) : null;
     }

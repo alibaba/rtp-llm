@@ -121,7 +121,7 @@ public class DispatcherInspectionHandler {
         if (body == null) {
             return badRequest("expected a JSON object body");
         }
-        String generateConfigError = BatchChunkAssembler.validateGenerateConfig(body);
+        String generateConfigError = spec.validateRequest(body);
         if (generateConfigError != null) {
             return badRequest(generateConfigError);
         }
@@ -135,7 +135,8 @@ public class DispatcherInspectionHandler {
         if (validationError != null) {
             return badRequest(validationError);
         }
-        int chunkCount = BatchChunkAssembler.chunkCount(arr.size(), cfg.getSubBatchSpec());
+        BatchChunkAssembler batch = new BatchChunkAssembler(body, spec, cfg.getSubBatchSpec(), atomicBatchAllowed);
+        int chunkCount = batch.chunkCount();
         if (chunkCount > maxChunkCount) {
             return DispatcherResponses.error(413, "too_many_sub_batches",
                     "batch produces " + chunkCount + " sub-batches; maximum is "
@@ -144,12 +145,11 @@ public class DispatcherInspectionHandler {
         // Reject request-controlled envelope amplification before target resolution (which can
         // advance master's BE cursor) and before allocating any chunk arrays/bodies.
         if (projectedResponseBytes(
-                spec, body, arr, chunkCount, effectivePreAssign, List.of(),
-                atomicBatchAllowed) > maxResponseBytes) {
+                batch, spec, arr.size(), effectivePreAssign, List.of()) > maxResponseBytes) {
             return responseTooLarge();
         }
         return buildDryRunResponse(
-                spec, body, arr, chunkCount, effectivePreAssign, atomicBatchAllowed);
+                batch, spec, arr.size(), effectivePreAssign);
     }
 
     private Mono<ServerResponse> handleDryRunException(Throwable e) {
@@ -190,10 +190,9 @@ public class DispatcherInspectionHandler {
         return policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty());
     }
 
-    private Mono<ServerResponse> buildDryRunResponse(BatchEndpointSpec spec, JSONObject envelope,
-                                                     JSONArray arr, int chunkCount,
-                                                     boolean effectivePreAssign,
-                                                     boolean atomicBatchAllowed) {
+    private Mono<ServerResponse> buildDryRunResponse(BatchChunkAssembler batch, BatchEndpointSpec spec,
+                                                     int totalItems, boolean effectivePreAssign) {
+        int chunkCount = batch.chunkCount();
         boolean shouldResolveTargets = effectivePreAssign && spec.isPreAssignable() && chunkCount > 0;
         BatchScheduleRequest request = new BatchScheduleRequest();
         request.setBatchCount(chunkCount);
@@ -212,19 +211,13 @@ public class DispatcherInspectionHandler {
             // length-bounded by the wire type. Account for them before materializing repeated
             // envelopes as well; the final serialization check remains the authoritative backstop.
             if (!targets.isEmpty() && projectedResponseBytes(
-                    spec, envelope, arr, chunkCount, effectivePreAssign, targets,
-                    atomicBatchAllowed)
+                    batch, spec, totalItems, effectivePreAssign, targets)
                     > maxResponseBytes) {
                 return responseTooLarge();
             }
-            List<JSONArray> chunks = BatchChunkAssembler.split(arr, cfg.getSubBatchSpec());
-            List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
-                    envelope, chunks, spec, atomicBatchAllowed);
-            BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
-            JSONArray chunksOut = new JSONArray();
-            chunksOut.addAll(chunkBodies);
+            JSONArray chunksOut = new JSONArray(batch.chunks(targets));
             JSONObject out = dryRunEnvelope(
-                    spec, arr.size(), chunkCount, effectivePreAssign, targets, chunksOut);
+                    spec, totalItems, chunkCount, effectivePreAssign, targets, chunksOut);
             byte[] serialized = BatchBodyParser.serialize(out);
             if (serialized.length > maxResponseBytes) {
                 return responseTooLarge();
@@ -239,18 +232,13 @@ public class DispatcherInspectionHandler {
      * Summing those deltas avoids serializing the repeated envelope {@code chunkCount} times while
      * still counting explicit JSON nulls exactly as the final dry-run serializer does.
      */
-    private long projectedResponseBytes(BatchEndpointSpec spec, JSONObject envelope,
-                                        JSONArray arr, int chunkCount, boolean effectivePreAssign,
-                                        List<BatchScheduleTarget> targets,
-                                        boolean atomicBatchAllowed) {
-        JSONObject skeleton = dryRunEnvelope(
-                spec, arr.size(), chunkCount, effectivePreAssign, targets, new JSONArray());
-        long projected = BatchBodyParser.serialize(skeleton).length;
-        if (chunkCount == 0) {
-            return projected;
-        }
-        return projected + BatchChunkAssembler.projectedChunkBytes(
-                envelope, arr, chunkCount, spec, atomicBatchAllowed, targets) + chunkCount - 1L;
+    private long projectedResponseBytes(BatchChunkAssembler batch, BatchEndpointSpec spec,
+                                        int totalItems, boolean effectivePreAssign,
+                                        List<BatchScheduleTarget> targets) {
+        int count = batch.chunkCount();
+        long framing = BatchBodyParser.serialize(dryRunEnvelope(
+                spec, totalItems, count, effectivePreAssign, targets, new JSONArray())).length;
+        return framing + batch.projectedBytes(targets) + Math.max(0, count - 1L);
     }
 
     private JSONObject dryRunEnvelope(BatchEndpointSpec spec, int totalItems, int chunkCount,

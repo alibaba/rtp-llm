@@ -87,14 +87,14 @@ class DispatcherMetricsReporterTest {
 
     @Test
     void reportPreassignRt_tagsResultByWhetherTargetsReturned() {
-        reporter.reportPreassignRt(7L, true);
+        reporter.reportPreassignRt(7L, true, true, true);
         ArgumentCaptor<FlexMetricTags> okTags = ArgumentCaptor.forClass(FlexMetricTags.class);
         verify(monitor).report(eq(DISPATCHER_PREASSIGN_RT), okTags.capture(), eq(7.0));
         assertEquals("ok", okTags.getValue().getTags().get("result"));
         assertEquals("true", okTags.getValue().getTags().get("assign_be"));
         assertEquals("true", okTags.getValue().getTags().get("assign_fe"));
 
-        reporter.reportPreassignRt(3L, false);
+        reporter.reportPreassignRt(3L, false, true, true);
         ArgumentCaptor<FlexMetricTags> emptyTags = ArgumentCaptor.forClass(FlexMetricTags.class);
         verify(monitor).report(eq(DISPATCHER_PREASSIGN_RT), emptyTags.capture(), eq(3.0));
         assertEquals("empty", emptyTags.getValue().getTags().get("result"));
@@ -102,7 +102,7 @@ class DispatcherMetricsReporterTest {
 
     @Test
     void reportFanoutRt_emitsLatency() {
-        reporter.reportFanoutRt(123L);
+        reporter.reportFanoutRt(123L, "master");
         verify(monitor).report(eq(DISPATCHER_FANOUT_RT),
                 eq(FlexMetricTags.of("fe_allocation", "master")), eq(123.0));
     }

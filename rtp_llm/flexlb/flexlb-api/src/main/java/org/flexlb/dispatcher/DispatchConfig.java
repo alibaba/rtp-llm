@@ -5,140 +5,52 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Getter;
 import lombok.Setter;
 
-/**
- * Dispatcher settings loaded and validated by {@link DispatcherConfiguration}.
- *
- * <p>Loading order: defaults → JSON from {@code DISPATCH_CONFIG} env → per-field env overrides
- * (e.g. {@code DISPATCH_BATCH_TIMEOUT_MS}, {@code DISPATCH_PROBE_PATH}). The per-field env wins,
- * using Spring property binding. Invalid overrides fail at startup.
- *
- * <p>Unknown JSON properties are ignored so a stale {@code DISPATCH_CONFIG} carrying old field
- * names (subBatchSize, feRequestTimeoutMs, …) still boots — they just have no effect.
- */
+/** Defaults, DISPATCH_CONFIG JSON, then Spring dispatch.* overrides; validated at startup. */
 @Getter
 @Setter
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class DispatchConfig {
-
-    /** How long an empty discovery result may retain the last FE pool. */
+    /** Empty discovery may retain the previous pool for this long. */
     private long discoveryFailureGraceMs = 300_000;
 
-    /**
-     * Chunk splitting DSL. {@code count:N} → exactly N chunks (default). {@code size:N} →
-     * each chunk holds at most N items. Bare integer is shorthand for {@code size:N}.
-     * Parsed eagerly during loading so a malformed value fails fast at boot.
-     */
+    /** count:N chunks (capped by item count), size:N items per chunk, or a bare size. */
     private String subBatch = "count:5";
 
-    /**
-     * Service-discovery name for the FE pool. Presence of {@code DISPATCH_FE_POOL_SERVICE_ID}
-     * env (or this field non-blank in {@code DISPATCH_CONFIG} JSON) is the dispatcher's enable
-     * signal — every dispatcher bean is gated on
-     * {@code @ConditionalOnProperty("dispatch.fe-pool-service-id")} so a blank value means
-     * the dispatcher subsystem never loads and {@code /dispatcher/**} routes are not registered.
-     */
+    /** Supplying an FE discovery name enables dispatcher routes. Whitespace-only names fail startup. */
     private String fePoolServiceId = "";
 
-    /**
-     * Per batch sub-call: how long to wait for the FE to start responding (first byte). Stops once
-     * the response header arrives; the body read is separately capped by {@link FeClient}'s
-     * whole-call timeout ({@code batchTimeoutMs + }{@link #bodyReadMarginMs}). Same idea as
-     * ft_proxy's {@code -t}, but only covers the header-wait window in reactor-netty's model.
-     *
-     * <p>Note for non-streaming generation endpoints ({@code /batch_infer} etc.): FE sends the
-     * response headers only after the whole chunk finishes generating, so this must cover the
-     * full generation time of one chunk — not a network-level header latency. Tune down for
-     * embedding-only deployments where sub-second responses are the norm.
-     */
+    /** Passed to Reactor Netty responseTimeout for each FE sub-call. */
     private int batchTimeoutMs = 30_000;
 
-    /**
-     * Extra budget past {@link #batchTimeoutMs} for reading the response body. {@code batchTimeoutMs}
-     * only bounds time-to-headers; without a whole-call cap an FE that sends headers and then stalls
-     * mid-body (half-open connection, GC-wedged process) would pin the request and its pooled
-     * connection forever. Headers arrive after generation completes, so the body is just
-     * bytes-on-the-wire — the default covers a full 16MB response with wide margin. Raise it for FE
-     * fleets on slow links.
-     */
+    /** The whole sub-call, including response body, is capped at batchTimeoutMs + bodyReadMarginMs. */
     private long bodyReadMarginMs = 30_000;
 
-    /**
-     * Path the {@link FeHealthChecker} probes via {@code GET <feUrl><probePath>} every 1s. Default
-     * matches rtp_llm FE's {@code /frontend_health} endpoint; switch to {@code /health} for vLLM
-     * deployments or any other backend that exposes a different liveness path. The 2-fail-then-dead,
-     * 1-success-resets, optimistic-default semantics in {@link FeHealthChecker} are unchanged
-     * regardless of path — only the URL suffix moves.
-     */
+    /** FE application health endpoint, independent of BE availability. */
     private String probePath = "/frontend_health";
 
-    /**
-     * Source of each chunk's FE assignment. {@code master} (default) uses the elected master's
-     * single cursor for even, attributable fleet-wide distribution. {@code local} is the explicit
-     * availability escape hatch: it bypasses master FE assignment and uses this dispatcher's own
-     * health-filtered {@link FePool}. Set {@code DISPATCH_FE_ALLOCATION=local} during a master
-     * outage or on a multi-role deployment whose master cannot serve {@code /batch_schedule};
-     * restore {@code master} after the incident to regain the global cursor.
-     *
-     * {@link DispatcherConfiguration} validates the value at startup through
-     * {@link FeAllocationMode#parse(String)}.
-     */
+    /** master shares the elected master's FE cursor; local uses this dispatcher's FE pool. */
     private String feAllocation = FeAllocationMode.MASTER.configValue();
 
     /**
-     * BE pre-assignment toggle. When {@code true}, the dispatcher resolves N BE targets via
-     * master's {@code /rtp_llm/batch_schedule} before fanout and writes each target as the sole
-     * entry in the chunk's {@code generate_config.role_addrs} (matching Python
-     * {@code rtp_llm.config.generate_config.RoleAddr}: {@code {role, ip, http_port, grpc_port}})
-     * so the receiving FE skips its own master round-trip.
-     *
-     * <p>Defaults to {@code false}, preserving request-aware LLM scheduling and admission.
-     * Preassignment is stateless and supports a single backend role without traffic policies.
-     * Receiving FEs must support the typed {@code role_addrs} request field.
-     * The dispatcher and every receiving FE must also share the same non-blank
-     * {@code DISPATCH_ROUTING_TOKEN}; unauthenticated HTTP clients are forbidden from choosing
-     * internal gRPC targets through {@code role_addrs}.
-     *
-     * <p>Disabling this flag does not disable master FE allocation. It changes a master request to
-     * FE-only, so no unused BE target is selected and no BE round-robin cursor is advanced.
+     * Stateless BE placement for supported single-role deployments without traffic policies.
+     * Default false retains FE request-aware LLM scheduling and admission. FE allocation is independent.
      */
     private boolean preAssignBe = false;
 
-    /**
-     * Shared secret used only on dispatcher-to-FE fanout when {@link #preAssignBe} is enabled.
-     * Loaded from {@code DISPATCH_ROUTING_TOKEN}; it is deliberately excluded from JSON config
-     * and boot logs so the dispatcher cannot disclose it through config dumps or diagnostics.
-     */
+    /** Required on dispatcher and receiving FEs for BE preassignment; loaded only from DISPATCH_ROUTING_TOKEN. */
     @JsonIgnore
     private String trustedRoutingToken = "";
 
-    /**
-     * Maximum bytes retained across all successful FE responses for one fanout request. The
-     * dispatcher merges non-streaming responses in memory, so the per-FE response cap alone is
-     * insufficient when a request produces many chunks.
-     */
+    /** Aggregate retained response bytes per batch, in addition to the per-FE response cap. */
     private long maxAggregateResponseBytes = 128L * 1024 * 1024;
 
-    /**
-     * Maximum total bytes sent across all FE chunks for one request. This bounds amplification
-     * when a large shared request envelope is repeated once per sub-batch.
-     */
+    /** Aggregate outbound bytes, including the envelope repeated across chunks. */
     private long maxAggregateRequestBytes = 128L * 1024 * 1024;
 
-    /**
-     * Maximum serialized response size for {@code /dispatcher/_dryrun/**}. Dry-run repeats the
-     * request envelope once per chunk, so a small input can otherwise amplify into a very large
-     * diagnostic response without contacting an FE.
-     */
+    /** Serialized dry-run response limit, checked before allocating repeated envelopes. */
     private long maxDryRunResponseBytes = 64L * 1024 * 1024;
 
-    /**
-     * Parsed sub-batch spec; populated by {@link DispatcherConfiguration} during loading.
-     *
-     * <p>{@code @JsonIgnore}, not {@code transient}: Jackson does not honour the {@code transient}
-     * keyword by default, and Lombok exposes this as a bean property — so a {@code subBatchSpec}
-     * key appearing in {@code DISPATCH_CONFIG} would be bound onto a derived field instead of
-     * being ignored. It is derived from {@link #subBatch} and never part of the wire contract.
-     */
+    /** Derived at startup; excluded from JSON binding despite Lombok's generated accessors. */
     @JsonIgnore
     private SubBatchSpec subBatchSpec;
 }

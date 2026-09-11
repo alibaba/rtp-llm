@@ -21,7 +21,6 @@ import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
 import java.time.Duration;
-import java.util.List;
 
 /**
  * Dispatcher infrastructure beans (config, connection provider, shared WebClient, route table).
@@ -76,16 +75,6 @@ public class DispatcherConfiguration {
     @Bean
     public DispatchConfig dispatchConfig(ConfigurableEnvironment environment) {
         return loadAndValidate(environment);
-    }
-
-    /**
-     * Exposes the dispatcher's batch endpoint table as a Spring bean for {@link DispatchRouter}
-     * to autowire. Single source of truth — every batch endpoint the dispatcher serves is one
-     * row in {@link BatchEndpointSpec#SPECS}.
-     */
-    @Bean
-    public List<BatchEndpointSpec> batchEndpointSpecs() {
-        return BatchEndpointSpec.SPECS;
     }
 
     /** Fixed CPU pool for request-controlled JSON parsing, projection and merging. */

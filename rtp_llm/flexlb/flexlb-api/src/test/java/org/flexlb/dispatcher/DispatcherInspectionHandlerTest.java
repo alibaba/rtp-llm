@@ -1,9 +1,8 @@
 package org.flexlb.dispatcher;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -11,734 +10,250 @@ import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.BatchScheduleCoordinator;
-import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.mockito.ArgumentMatchers;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.reactive.function.server.MockServerRequest;
 import org.springframework.web.reactive.function.server.EntityResponse;
+import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
-import reactor.test.StepVerifier;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/**
- * Unit tests for the combined inspection surface — {@code GET /dispatcher/_snapshot} and
- * {@code POST /dispatcher/_dryrun/<path>}. Mocks {@link FeHealthChecker},
- * {@link DispatcherFePoolRefresher}, and {@link BatchScheduleCoordinator} directly so each case can
- * inject a known fixture and assert on the JSON response.
- *
- * <p>The handler emits its response as raw bytes (fastjson2 serialization). Tests parse those
- * bytes back into Jackson trees so the existing assertion idioms ({@code body.get("...").asText()})
- * stay readable — Jackson is no longer the production codec but it's still the most ergonomic
- * tree API for test assertions.
- */
+@Timeout(30)
 class DispatcherInspectionHandlerTest {
+    private final DispatchConfig cfg = new DispatchConfig();
+    private final FlexlbConfig lbConfig = new FlexlbConfig();
+    private final BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
+    private final DispatcherFePoolRefresher refresher = mock(DispatcherFePoolRefresher.class);
+    private final FeHealthChecker health = mock(FeHealthChecker.class);
 
-    private static final String SERVICE_ID = "test.fe.publish";
-
-    private final ObjectMapper mapper = new ObjectMapper();
-
-    // ───────────────────────── snapshot ─────────────────────────
-
-    @Nested
-    class Snapshot {
-
-        @Test
-        void healthyPoolReportsAllAliveWithZeroFailures() {
-            List<String> urls = List.of(
-                    "http://10.0.0.1:23840", "http://10.0.0.2:23840", "http://10.0.0.3:23840");
-            FeHealthChecker hc = mock(FeHealthChecker.class);
-            when(hc.isAlive(anyString())).thenReturn(true);
-            when(hc.consecFails(anyString())).thenReturn(0);
-
-            ObjectNode body = invokeSnapshot(urls, hc);
-
-            ObjectNode fePool = (ObjectNode) body.get("fePool");
-            assertEquals(SERVICE_ID, fePool.get("serviceId").asText());
-            assertEquals(3, fePool.get("size").asInt());
-            ArrayNode hosts = (ArrayNode) fePool.get("hosts");
-            for (int i = 0; i < 3; i++) {
-                assertEquals(urls.get(i), hosts.get(i).get("url").asText(),
-                        "hosts must preserve refresher's snapshot order — round-robin order");
-                assertTrue(hosts.get(i).get("alive").asBoolean());
-                assertEquals(0, hosts.get(i).get("consecFails").asInt());
-            }
-        }
-
-        @Test
-        void mixedAliveAndDeadReportsPerHostStateFaithfully() {
-            List<String> urls = List.of(
-                    "http://10.0.0.1:23840", "http://10.0.0.2:23840", "http://10.0.0.3:23840");
-            FeHealthChecker hc = mock(FeHealthChecker.class);
-            when(hc.isAlive("http://10.0.0.1:23840")).thenReturn(true);
-            when(hc.consecFails("http://10.0.0.1:23840")).thenReturn(1);
-            when(hc.isAlive("http://10.0.0.2:23840")).thenReturn(false);
-            when(hc.consecFails("http://10.0.0.2:23840")).thenReturn(2);
-            when(hc.isAlive("http://10.0.0.3:23840")).thenReturn(true);
-            when(hc.consecFails("http://10.0.0.3:23840")).thenReturn(0);
-
-            ObjectNode body = invokeSnapshot(urls, hc);
-            ArrayNode hosts = (ArrayNode) body.get("fePool").get("hosts");
-
-            assertTrue(hosts.get(0).get("alive").asBoolean());
-            assertEquals(1, hosts.get(0).get("consecFails").asInt());
-            assertFalse(hosts.get(1).get("alive").asBoolean());
-            assertEquals(2, hosts.get(1).get("consecFails").asInt());
-            assertTrue(hosts.get(2).get("alive").asBoolean());
-            assertEquals(0, hosts.get(2).get("consecFails").asInt());
-        }
-
-        @Test
-        void emptyPoolReturns200WithSizeZeroAndEmptyHosts() {
-            FeHealthChecker hc = mock(FeHealthChecker.class);
-            ObjectNode body = invokeSnapshot(List.of(), hc);
-            ObjectNode fePool = (ObjectNode) body.get("fePool");
-            assertEquals(0, fePool.get("size").asInt());
-            assertEquals(0, fePool.get("hosts").size());
-            assertTrue(fePool.get("hosts").isArray(),
-                    "even an empty hosts list must be a JSON array — never null or absent");
-        }
-
-        @Test
-        void serviceIdEchoesConfigVerbatim() {
-            DispatchConfig cfg = new DispatchConfig();
-            cfg.setFePoolServiceId("very.specific.weird.name.publish");
-            cfg.setSubBatch("size:5");
-            cfg.setSubBatchSpec(SubBatchSpec.parse("size:5"));
-            DispatcherFePoolRefresher refresher = mock(DispatcherFePoolRefresher.class);
-            when(refresher.source()).thenReturn(() -> List.<String>of());
-            FeHealthChecker hc = mock(FeHealthChecker.class);
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
-            DispatcherInspectionHandler handler =
-                    new DispatcherInspectionHandler(cfg, refresher, hc, client,
-                            DispatcherTestSupport.configService(testLoadBalanceConfig),
-                            Schedulers.immediate());
-
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.GET)
-                    .uri(URI.create("http://x/dispatcher/_snapshot"))
-                    .build();
-
-            StepVerifier.create(handler.snapshot(req))
-                    .assertNext(resp -> {
-                        assertEquals(HttpStatus.OK, resp.statusCode());
-                        ObjectNode body = parseBody(resp);
-                        assertEquals("very.specific.weird.name.publish",
-                                body.get("fePool").get("serviceId").asText());
-                    })
-                    .verifyComplete();
-        }
+    @BeforeEach
+    void setUp() {
+        cfg.setFePoolServiceId("test.fe.publish");
+        cfg.setSubBatch("size:2");
+        when(refresher.source()).thenReturn(List::of);
     }
 
-    // ───────────────────────── dryRun ─────────────────────────
-
-    @Nested
-    class DryRun {
-
-        @Test
-        void requestJsonPipelineRunsOnDedicatedCpuScheduler() {
-            Scheduler scheduler = Schedulers.newSingle("dryrun-json-test");
-            try {
-                DispatchConfig cfg = config("size:2");
-                FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
-                testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(1000);
-                DispatcherInspectionHandler handler = new DispatcherInspectionHandler(cfg, refresher(), mock(FeHealthChecker.class), mock(BatchScheduleCoordinator.class),
-                        DispatcherTestSupport.configService(testLoadBalanceConfig), scheduler);
-                AtomicReference<String> responseThread = new AtomicReference<>();
-
-                handler.dryRun(dryRunRequest("not-json"))
-                        .doOnNext(ignored -> responseThread.set(Thread.currentThread().getName()))
-                        .block();
-
-                assertTrue(responseThread.get().startsWith("dryrun-json-test"),
-                        "dry-run parsing and projection must leave the Reactor/Netty thread");
-            } finally {
-                scheduler.dispose();
-            }
+    @ParameterizedTest
+    @CsvSource({"3,false,test.fe.publish", "3,true,test.fe.publish", "0,false,very.specific.weird.name.publish"})
+    void snapshotPreservesDiscoveryOrderAndHealth(int count, boolean mixed, String service) {
+        cfg.setFePoolServiceId(service);
+        List<String> urls = List.of("http://10.0.0.1:23840", "http://10.0.0.2:23840", "http://10.0.0.3:23840")
+                .subList(0, count);
+        when(refresher.source()).thenReturn(() -> urls);
+        for (int i = 0; i < count; i++) {
+            when(health.isAlive(urls.get(i))).thenReturn(!mixed || i != 1);
+            when(health.consecFails(urls.get(i))).thenReturn(mixed ? (i + 1) % 3 : 0);
         }
-
-        @Test
-        void unknownPathReturns400WithRegistryContents() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(false, client);
-
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/totally_made_up"))
-                    .body(Mono.just("{}".getBytes(StandardCharsets.UTF_8)));
-
-            assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, body -> {
-                assertEquals("invalid_inspection_request", body.get("error").asText());
-                String msg = body.get("message").asText();
-                assertTrue(msg.contains("/batch_infer"),
-                        "error message must enumerate registered paths so caller can fix the URL");
-                assertTrue(msg.contains("/v1/embeddings"));
-            });
+        ServerResponse response = handler(Schedulers.immediate()).snapshot(MockServerRequest.builder()
+                .method(HttpMethod.GET).uri(URI.create("http://x/dispatcher/_snapshot")).build()).block();
+        JSONObject pool = body(response, 200).getJSONObject("fePool");
+        assertEquals(service, pool.getString("serviceId"));
+        assertEquals(count, pool.getInteger("size"));
+        JSONArray hosts = pool.getJSONArray("hosts");
+        assertEquals(count, hosts.size());
+        for (int i = 0; i < count; i++) {
+            assertEquals(urls.get(i), hosts.getJSONObject(i).getString("url"));
+            assertEquals(!mixed || i != 1, hosts.getJSONObject(i).getBoolean("alive"));
+            assertEquals(mixed ? (i + 1) % 3 : 0, hosts.getJSONObject(i).getInteger("consecFails"));
         }
+        verifyNoInteractions(coordinator);
+    }
 
-        @Test
-        void emptyBodyReturns400InsteadOfEmptyResponse() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(false, client);
-
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .body(Mono.<byte[]>empty());
-
-            assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, body ->
-                    assertEquals("invalid_inspection_request", body.get("error").asText()));
-        }
-
-        @Test
-        void emptyArrayShortCircuitsWithoutCallingBatchScheduleCoordinator() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-
-            byte[] body = "{\"prompt_batch\":[]}".getBytes(StandardCharsets.UTF_8);
-
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .queryParam("pre_assign", "true")
-                    .body(Mono.just(body));
-
-            assertResponse(handler.dryRun(req), HttpStatus.OK, out -> {
-                assertEquals(0, out.get("chunkCount").asInt());
-                assertEquals(0, out.get("chunks").size());
-                assertEquals(0, out.get("preAssignTargets").size());
-                assertTrue(out.get("preAssignEffective").asBoolean(),
-                        "requested && supported holds for /batch_infer, so preAssignEffective stays true even when the empty batch resolves no targets");
-            });
-            verify(client, never()).schedule(ArgumentMatchers.argThat(request ->
-                    request.isAssignBe() && !request.isAssignFe()));
-        }
-
-        @Test
-        void queryParamTrueOverridesConfigDefaultFalse() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            when(client.schedule(ArgumentMatchers.argThat(request -> request.isAssignBe() && !request.isAssignFe())))
-                    .thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target("10.0.0.1")))));
-            DispatcherInspectionHandler handler = handlerWith(false, client);
-
-            ObjectNode out = invokeDryRun(handler, "true", List.of("a"));
-            assertFalse(out.get("preAssignConfigDefault").asBoolean());
-            assertTrue(out.get("preAssignEffective").asBoolean(),
-                    "query param true must override config false");
-            assertEquals(1, out.get("preAssignTargets").size(),
-                    "target should have been resolved since effective=true");
-        }
-
-        @Test
-        void queryParamFalseOverridesConfigDefaultTrue() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-
-            ObjectNode out = invokeDryRun(handler, "false", List.of("a"));
-            assertTrue(out.get("preAssignConfigDefault").asBoolean());
-            assertFalse(out.get("preAssignEffective").asBoolean(),
-                    "query param false must override config true");
-            verify(client, never()).schedule(ArgumentMatchers.argThat(request ->
-                    request.isAssignBe() && !request.isAssignFe()));
-        }
-
-        @Test
-        void noQueryParamIsSideEffectFreeEvenWhenConfigDefaultIsOn() {
-            // A diagnostic must not perturb production: resolving BE targets advances master's RR
-            // cursor, so an unqualified dry-run never does it — not even when preAssignBe=true.
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            when(client.schedule(ArgumentMatchers.argThat(request -> request.isAssignBe() && !request.isAssignFe())))
-                    .thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target("10.0.0.1")))));
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-
-            ObjectNode out = invokeDryRun(handler, null, List.of("a"));
-            assertTrue(out.get("preAssignConfigDefault").asBoolean(),
-                    "the config default is still reported for operators");
-            assertFalse(out.get("preAssignEffective").asBoolean(),
-                    "absent pre_assign must not resolve targets, whatever the config default says");
-            verifyNoInteractions(client);
-        }
-
-        @Test
-        void preAssignTrueProducesStampedChunks() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            when(client.schedule(ArgumentMatchers.argThat(request ->
-                    request.isAssignBe() && !request.isAssignFe()))).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(
-                    target("10.0.0.1"), target("10.0.0.2")))));
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-
-            ObjectNode out = invokeDryRun(handler, "true", List.of("a", "b", "c"));
-            ArrayNode chunks = (ArrayNode) out.get("chunks");
-            assertTrue(chunks.size() > 0);
-            for (JsonNode chunk : chunks) {
-                JsonNode roleAddrs = chunk.get("generate_config").get("role_addrs");
-                assertNotNull(roleAddrs,
-                        "every chunk must show its stamped role_addrs when pre_assign effective");
-            }
-            assertEquals("10.0.0.1", out.get("preAssignTargets").get(0).get("ip").asText());
-            assertEquals("10.0.0.2", out.get("preAssignTargets").get(1).get("ip").asText());
-        }
-
-        @Test
-        void preAssignFalseLeavesChunksUnstamped() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-
-            ObjectNode out = invokeDryRun(handler, "false", List.of("a", "b"));
-            for (JsonNode chunk : (ArrayNode) out.get("chunks")) {
-                // buildChunkBodies guarantees generate_config exists on every chunk.
-                JsonNode gc = chunk.get("generate_config");
-                assertNull(gc.get("role_addrs"),
-                        "preAssign=false must not stamp role_addrs even though config default is true");
-                assertTrue(gc.get("force_batch").asBoolean(),
-                        "force_batch still injected — that's independent of preAssign");
-            }
-            verify(client, never()).schedule(ArgumentMatchers.argThat(request ->
-                    request.isAssignBe() && !request.isAssignFe()));
-        }
-
-        @Test
-        void activeTrafficPolicyShowsPerItemRoutingAndDisablesPreAssignment() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatchConfig cfg = config("size:2");
-            cfg.setPreAssignBe(true);
-            FlexlbConfig loadBalanceConfig = new FlexlbConfig();
-            TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
+    @ParameterizedTest
+    @CsvSource(nullValues = "absent", value = {
+            "false,true,BATCH_INFER,3,false", "true,true,BATCH_INFER,3,false",
+            "true,false,BATCH_INFER,3,false", "true,absent,BATCH_INFER,3,false",
+            "true,true,EMBEDDING,3,false", "true,true,BATCH_INFER,0,false",
+            "true,true,BATCH_INFER,3,true"})
+    void dryRunAssignsOnlyWhenExplicitlyRequestedAndSupported(boolean configured, String requested,
+                                                              BatchEndpointSpec spec, int size, boolean policyActive) {
+        cfg.setPreAssignBe(configured);
+        if (policyActive) {
+            TrafficPolicyConfig policy = new TrafficPolicyConfig();
             TrafficPolicyConfig.Target target = new TrafficPolicyConfig.Target();
-        target.setGroup("tenant-a");
-        target.setWeight(1);
-        trafficPolicy.setDefaultTargets(List.of(target));
-            loadBalanceConfig.getRouter().setGroupSelector(trafficPolicy);
-            FlexlbConfig testLoadBalanceConfig = loadBalanceConfig;
-            testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(1000);
-            DispatcherInspectionHandler handler = new DispatcherInspectionHandler(cfg, refresher(), mock(FeHealthChecker.class), client,
-                    DispatcherTestSupport.configService(testLoadBalanceConfig),
-                    Schedulers.immediate());
-
-            ObjectNode out = invokeDryRun(handler, "true", List.of("a", "b"));
-
-            assertFalse(out.get("preAssignEffective").asBoolean());
-            for (JsonNode chunk : out.get("chunks")) {
-                assertFalse(chunk.get("generate_config").get("force_batch").asBoolean());
-            }
-            verifyNoInteractions(client);
+            target.setGroup("tenant-a");
+            target.setWeight(1);
+            policy.setDefaultTargets(List.of(target));
+            lbConfig.getRouter().setGroupSelector(policy);
         }
-
-        @Test
-        void preAssignRequestedOnNonPreAssignableEndpointStaysIneffective() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-
-            // /v1/embeddings is not pre-assignable (FE's embeddings pydantic model drops unknown
-            // top-level fields, so a stamped generate_config would be a dead write). Requesting
-            // pre_assign=true must not make it effective and must not consume a /batch_schedule
-            // round-trip — that would advance master's RR cursor for a write FE never reads.
-            byte[] body = "{\"input\":[\"a\",\"b\",\"c\"]}".getBytes(StandardCharsets.UTF_8);
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/v1/embeddings"))
-                    .queryParam("pre_assign", "true")
-                    .body(Mono.just(body));
-
-            assertResponse(handler.dryRun(req), HttpStatus.OK, out -> {
-                assertFalse(out.get("preAssignSupported").asBoolean(),
-                        "/v1/embeddings must report itself as not pre-assignable");
-                assertFalse(out.get("preAssignEffective").asBoolean(),
-                        "preAssignEffective = requested AND supported; an unsupported endpoint stays false");
-                assertEquals(0, out.get("preAssignTargets").size());
-                assertTrue(out.get("chunkCount").asInt() > 0,
-                        "the embedding batch itself still splits normally");
-            });
-            verify(client, never()).schedule(ArgumentMatchers.argThat(request ->
-                    request.isAssignBe() && !request.isAssignFe()));
+        when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(List.of(
+                new BatchScheduleTarget("10.0.0.1", 23840, 23841, RoleType.PDFUSION),
+                new BatchScheduleTarget("10.0.0.2", 23840, 23841, RoleType.PDFUSION)))));
+        JSONArray items = new JSONArray();
+        for (int i = 0; i < size; i++) {
+            items.add("prompt-" + i);
         }
-
-        @Test
-        void rerankerDryRunShowsSemanticChildRewrite() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(false, client);
-            byte[] body = ("{\"query\":\"cape pants\","
-                    + "\"documents\":[\"d0\",\"d1\",\"d2\"],"
-                    + "\"sorted\":true,\"top_k\":2}").getBytes(StandardCharsets.UTF_8);
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/v1/reranker"))
-                    .body(Mono.just(body));
-
-            assertResponse(handler.dryRun(req), HttpStatus.OK, out -> {
-                assertEquals(2, out.get("chunkCount").asInt());
-                for (JsonNode chunk : out.get("chunks")) {
-                    assertFalse(chunk.get("sorted").asBoolean());
-                    assertNull(chunk.get("top_k"));
+        JSONObject out = invoke(spec.getPath(), JSONObject.of(spec.getRequestArrayField(), items).toJSONString(), requested, 200);
+        boolean effective = Boolean.parseBoolean(requested) && spec.isPreAssignable() && !policyActive;
+        boolean allocated = effective && size > 0;
+        assertEquals(configured, out.getBoolean("preAssignConfigDefault"));
+        assertEquals(spec.isPreAssignable(), out.getBoolean("preAssignSupported"));
+        assertEquals(effective, out.getBoolean("preAssignEffective"));
+        assertEquals(size == 0 ? 0 : 2, out.getInteger("chunkCount"));
+        assertEquals(allocated ? 2 : 0, out.getJSONArray("preAssignTargets").size());
+        JSONArray chunks = out.getJSONArray("chunks");
+        assertEquals(size == 0 ? 0 : 2, chunks.size());
+        for (int i = 0; i < chunks.size(); i++) {
+            JSONObject config = chunks.getJSONObject(i).getJSONObject("generate_config");
+            if (spec.isPreAssignable()) {
+                assertEquals(!policyActive, config.getBoolean("force_batch"));
+                assertEquals(allocated, config.containsKey("role_addrs"));
+                if (allocated) {
+                    String ip = "10.0.0." + (i + 1);
+                    assertEquals(ip, config.getJSONArray("role_addrs").getJSONObject(0).getString("ip"));
+                    assertEquals(ip, out.getJSONArray("preAssignTargets").getJSONObject(i).getString("ip"));
                 }
-            });
-            verifyNoInteractions(client);
+            }
         }
-
-        @Test
-        void nonObjectBodyReturns400() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(false, client);
-
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .body(Mono.just("[\"a\"]".getBytes(StandardCharsets.UTF_8)));
-
-            assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, body ->
-                    assertEquals("invalid_inspection_request", body.get("error").asText()));
-        }
-
-        @Test
-        void nonObjectGenerateConfigReturns400NotInternalError() {
-            // A string generate_config is a caller error, exactly as in production (BatchHandler).
-            // Before the guard it fell into chunk assembly, threw JSONException, and surfaced as a
-            // 500 dryrun_internal_error — a drift from what /batch_infer actually returns.
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(false, client);
-
-            byte[] body = "{\"prompt_batch\":[\"a\"],\"generate_config\":\"oops\"}"
-                    .getBytes(StandardCharsets.UTF_8);
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .body(Mono.just(body));
-
-            assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, out ->
-                    assertEquals("invalid_inspection_request", out.get("error").asText()));
-            verify(client, never()).schedule(ArgumentMatchers.argThat(request ->
-                    request.isAssignBe() && !request.isAssignFe()));
-        }
-
-        @Test
-        void missingArrayFieldReportsPassthrough() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(false, client);
-
-            // An absent array field is not an error: production passthrough-forwards the body
-            // whole to one FE (BatchHandler treats arr==null as non-splittable), so dry-run must
-            // report that same disposition rather than a 400.
-            byte[] body = "{\"not_prompt_batch\":\"x\"}".getBytes(StandardCharsets.UTF_8);
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .body(Mono.just(body));
-
-            assertResponse(handler.dryRun(req), HttpStatus.OK, out -> {
-                assertEquals("passthrough", out.get("disposition").asText());
-                assertEquals(0, out.get("chunkCount").asInt());
-                assertEquals(0, out.get("totalItems").asInt());
-            });
-        }
-
-        @Test
-        void wholeBodyCompanionFieldReportsPassthrough() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(false, client);
-
-            // prompt_batch carrying sample-aligned top-level images is passthrough-forwarded whole
-            // in production (requiresWholeBody) — splitting would mis-align the companion field.
-            // Dry-run must mirror that instead of fabricating chunks.
-            byte[] body = ("{\"prompt_batch\":[\"a\",\"b\"],"
-                    + "\"images\":[[\"http://x/0.png\"],[\"http://x/1.png\"]]}")
-                    .getBytes(StandardCharsets.UTF_8);
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .body(Mono.just(body));
-
-            assertResponse(handler.dryRun(req), HttpStatus.OK, out -> {
-                assertEquals("passthrough", out.get("disposition").asText());
-                assertEquals(0, out.get("chunkCount").asInt());
-                assertEquals(2, out.get("totalItems").asInt());
-            });
-        }
-
-        @Test
-        void nonSplittableEmbeddingInputReportsPassthrough() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-
-            // /v1/embeddings input given as a single multimodal input (array of objects) is ONE
-            // input, not a batch — production passthrough-forwards it whole, so dry-run must
-            // report that disposition instead of fabricating per-element chunks.
-            byte[] body = "{\"input\":[{\"type\":\"text\",\"text\":\"hi\"}]}".getBytes(StandardCharsets.UTF_8);
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/v1/embeddings"))
-                    .queryParam("pre_assign", "true")
-                    .body(Mono.just(body));
-
-            assertResponse(handler.dryRun(req), HttpStatus.OK, out -> {
-                assertEquals("passthrough", out.get("disposition").asText());
-                assertEquals(0, out.get("chunkCount").asInt());
-                assertEquals(1, out.get("totalItems").asInt());
-            });
-            verify(client, never()).schedule(ArgumentMatchers.argThat(request ->
-                    request.isAssignBe() && !request.isAssignFe()));
-        }
-
-        @Test
-        void internalErrorReturns500NotBadRequest() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            when(client.schedule(ArgumentMatchers.argThat(request ->
-                    request.isAssignBe() && !request.isAssignFe()))).thenReturn(
-                    Mono.error(new RuntimeException("simulated coordinator failure")));
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-
-            byte[] body = "{\"prompt_batch\":[\"a\"]}".getBytes(StandardCharsets.UTF_8);
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .queryParam("pre_assign", "true")
-                    .body(Mono.just(body));
-
-            assertResponse(handler.dryRun(req), HttpStatus.INTERNAL_SERVER_ERROR, out -> {
-                assertEquals("dryrun_internal_error", out.get("error").asText());
-                assertFalse(out.get("message").asText().contains("simulated coordinator failure"),
-                        "the upstream exception text must stay in the log, not the client body");
-            });
-        }
-
-        @Test
-        void chunkLimitIsEnforcedBeforeDryRunMaterializesChunks() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatchConfig cfg = config("size:1");
-            FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
-            testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(2);
-            DispatcherInspectionHandler handler = new DispatcherInspectionHandler(cfg, refresher(), mock(FeHealthChecker.class), client,
-                    DispatcherTestSupport.configService(testLoadBalanceConfig),
-                    Schedulers.immediate());
-            MockServerRequest req = dryRunRequest(
-                    "{\"prompt_batch\":[\"a\",\"b\",\"c\"]}");
-
-            assertResponse(handler.dryRun(req), HttpStatus.PAYLOAD_TOO_LARGE, out ->
-                    assertEquals("too_many_sub_batches", out.get("error").asText()));
-            verifyNoInteractions(client);
-        }
-
-        @Test
-        void dryRunResponseBudgetRejectsAmplificationBeforeTargetResolution() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatchConfig cfg = config("size:1");
-            cfg.setMaxDryRunResponseBytes(1500);
-            FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
-            testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(1000);
-            DispatcherInspectionHandler handler = new DispatcherInspectionHandler(cfg, refresher(), mock(FeHealthChecker.class), client,
-                    DispatcherTestSupport.configService(testLoadBalanceConfig),
-                    Schedulers.immediate());
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .queryParam("pre_assign", "true")
-                    .body(Mono.just(("{\"model\":\"" + "x".repeat(600)
-                            + "\",\"prompt_batch\":[\"a\",\"b\",\"c\"]}")
-                            .getBytes(StandardCharsets.UTF_8)));
-
-            assertResponse(handler.dryRun(req), HttpStatus.PAYLOAD_TOO_LARGE, out ->
-                    assertEquals("dryrun_response_too_large", out.get("error").asText()));
-            verifyNoInteractions(client);
-        }
-
-        @Test
-        void smallDryRunFitsAOneKiBConfiguredBudget() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatchConfig cfg = config("size:1");
-            cfg.setMaxDryRunResponseBytes(1024);
-            FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
-            testLoadBalanceConfig.getRouter().setBatchScheduleMaxCount(1000);
-            DispatcherInspectionHandler handler = new DispatcherInspectionHandler(cfg, refresher(), mock(FeHealthChecker.class), client,
-                    DispatcherTestSupport.configService(testLoadBalanceConfig),
-                    Schedulers.immediate());
-
-            assertResponse(handler.dryRun(dryRunRequest(
-                    "{\"prompt_batch\":[\"a\"]}")), HttpStatus.OK, out ->
-                    assertEquals(1, out.get("chunkCount").asInt()));
-            verifyNoInteractions(client);
-        }
-
-        @Test
-        void callerRoleAddrsIsRejectedLikeProductionPath() {
-            BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-            DispatcherInspectionHandler handler = handlerWith(true, client);
-            MockServerRequest req = dryRunRequest("{\"prompt_batch\":[\"a\"],"
-                    + "\"images\":[[\"https://example/image.png\"]],"
-                    + "\"generate_config\":{\"role_addrs\":[]}}");
-
-            assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, out ->
-                    assertTrue(out.get("message").asText().contains("role_addrs")));
-            verifyNoInteractions(client);
-        }
-
-        @Test
-        void oversizedRequestBodyMapsTo413() {
-            DispatcherInspectionHandler handler = handlerWith(
-                    false, mock(BatchScheduleCoordinator.class));
-            MockServerRequest req = MockServerRequest.builder()
-                    .method(HttpMethod.POST)
-                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .body(Mono.error(new DataBufferLimitException("too large")));
-
-            assertResponse(handler.dryRun(req), HttpStatus.PAYLOAD_TOO_LARGE, out ->
-                    assertEquals("request_body_too_large", out.get("error").asText()));
+        if (allocated) {
+            verify(coordinator).schedule(argThat(r -> r.getBatchCount() == 2 && r.isAssignBe() && !r.isAssignFe()));
+        } else {
+            verifyNoInteractions(coordinator);
         }
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '~', textBlock = """
+            /batch_infer | {"not_prompt_batch":"x"} | 0
+            /batch_infer | {"prompt_batch":["a","b"],"images":[["http://x/0.png"],["http://x/1.png"]]} | 2
+            /v1/embeddings | {"input":[{"type":"text","text":"hi"}]} | 1
+            """)
+    void wholeBodyInputsReportPassthrough(String path, String json, int items) {
+        JSONObject out = invoke(path, json, "true", 200);
+        assertEquals("passthrough", out.getString("disposition"));
+        assertEquals(0, out.getInteger("chunkCount"));
+        assertEquals(items, out.getInteger("totalItems"));
+        verifyNoInteractions(coordinator);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '~', textBlock = """
+            ["a"] | JSON object
+            {"prompt_batch":["a"],"generate_config":"oops"} | generate_config
+            {"prompt_batch":["a"],"images":[["https://example/image.png"]],"generate_config":{"role_addrs":[]}} | role_addrs
+            """)
+    void invalidRequestsNeverAllocate(String json, String reason) {
+        JSONObject out = invoke("/batch_infer", json, "true", 400);
+        assertEquals("invalid_inspection_request", out.getString("error"));
+        assertTrue(out.getString("message").contains(reason));
+        verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void emptyBodyAndUnknownPathHaveExplicitErrors() {
+        ServerResponse empty = handler(Schedulers.immediate()).dryRun(request("/batch_infer", null, Mono.empty())).block();
+        assertEquals("invalid_inspection_request", body(empty, 400).getString("error"));
+        JSONObject unknown = invoke("/totally_made_up", "{}", null, 400);
+        assertEquals("invalid_inspection_request", unknown.getString("error"));
+        assertTrue(unknown.getString("message").contains("/batch_infer"));
+        assertTrue(unknown.getString("message").contains("/v1/embeddings"));
+        verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void rerankerRewritesChildSortingAndTopK() {
+        JSONObject out = invoke("/v1/reranker", """
+                {"query":"cape pants","documents":["d0","d1","d2"],"sorted":true,"top_k":2}
+                """, null, 200);
+        assertEquals(2, out.getInteger("chunkCount"));
+        for (Object value : out.getJSONArray("chunks")) {
+            JSONObject chunk = (JSONObject) value;
+            assertFalse(chunk.getBoolean("sorted"));
+            assertFalse(chunk.containsKey("top_k"));
+        }
+        verifyNoInteractions(coordinator);
+    }
+
+    @ParameterizedTest
     @CsvSource({"INVALID_REQUEST,400", "NO_AVAILABLE_WORKER,503"})
-    void explicitDryRunPlacementPreservesAllocationFailures(StrategyErrorType error, int status) {
-        BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
-        when(coordinator.schedule(ArgumentMatchers.any()))
-                .thenReturn(Mono.just(BatchScheduleResponse.error(error, "allocation unavailable")));
-        DispatcherInspectionHandler handler = handlerWith(true, coordinator);
-        MockServerRequest request = MockServerRequest.builder()
-                .method(HttpMethod.POST).uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                .queryParam("pre_assign", "true")
-                .body(Mono.just("{\"prompt_batch\":[\"a\",\"b\"]}".getBytes(StandardCharsets.UTF_8)));
-        var response = handler.dryRun(request).block();
-        assertEquals(status, response.rawStatusCode());
-        assertEquals("batch_schedule_failed", parseBody(response).get("error").asText());
+    void allocationFailuresPreserveTheirStatus(StrategyErrorType error, int status) {
+        when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.error(error, "unavailable")));
+        assertEquals("batch_schedule_failed", invoke("/batch_infer", "{\"prompt_batch\":[\"a\",\"b\"]}", "true", status).getString("error"));
     }
 
-    // ───────────────────────── helpers ───────────────────────
-
-    private ObjectNode invokeSnapshot(List<String> urls, FeHealthChecker hc) {
-        DispatchConfig cfg = new DispatchConfig();
-        cfg.setFePoolServiceId(SERVICE_ID);
-        cfg.setSubBatch("size:5");
-        cfg.setSubBatchSpec(SubBatchSpec.parse("size:5"));
-        DispatcherFePoolRefresher refresher = mock(DispatcherFePoolRefresher.class);
-        when(refresher.source()).thenReturn(() -> urls);
-        BatchScheduleCoordinator client = mock(BatchScheduleCoordinator.class);
-        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
-        DispatcherInspectionHandler handler =
-                new DispatcherInspectionHandler(cfg, refresher, hc, client,
-                        DispatcherTestSupport.configService(testLoadBalanceConfig),
-                        Schedulers.immediate());
-
-        MockServerRequest req = MockServerRequest.builder()
-                .method(HttpMethod.GET)
-                .uri(URI.create("http://x/dispatcher/_snapshot"))
-                .build();
-
-        ObjectNode[] captured = new ObjectNode[1];
-        StepVerifier.create(handler.snapshot(req))
-                .assertNext(resp -> {
-                    assertEquals(HttpStatus.OK, resp.statusCode());
-                    captured[0] = parseBody(resp);
-                })
-                .verifyComplete();
-        return captured[0];
+    @Test
+    void unexpectedErrorsDoNotLeakDetails() {
+        when(coordinator.schedule(any())).thenReturn(Mono.error(new RuntimeException("internal coordinator details")));
+        JSONObject out = invoke("/batch_infer", "{\"prompt_batch\":[\"a\"]}", "true", 500);
+        assertEquals("dryrun_internal_error", out.getString("error"));
+        assertFalse(out.getString("message").contains("internal coordinator details"));
     }
 
-    private DispatcherInspectionHandler handlerWith(boolean preAssignBeDefault, BatchScheduleCoordinator client) {
-        DispatchConfig cfg = config("size:2");
-        cfg.setPreAssignBe(preAssignBeDefault);
-        FlexlbConfig testLoadBalanceConfig = new FlexlbConfig();
-        return new DispatcherInspectionHandler(cfg, refresher(), mock(FeHealthChecker.class), client,
-                DispatcherTestSupport.configService(testLoadBalanceConfig),
-                Schedulers.immediate());
+    @Test
+    void requestAndResponseLimitsAreEnforcedBeforeAllocation() {
+        cfg.setSubBatch("size:1");
+        lbConfig.getRouter().setBatchScheduleMaxCount(2);
+        String json = JSONObject.of("model", "x".repeat(600), "prompt_batch", JSONArray.of("a", "b", "c")).toJSONString();
+        assertEquals("too_many_sub_batches", invoke("/batch_infer", json, "true", 413).getString("error"));
+        lbConfig.getRouter().setBatchScheduleMaxCount(1000);
+        cfg.setMaxDryRunResponseBytes(1500);
+        assertEquals("dryrun_response_too_large", invoke("/batch_infer", json, "true", 413).getString("error"));
+        cfg.setMaxDryRunResponseBytes(1024);
+        assertEquals(1, invoke("/batch_infer", "{\"prompt_batch\":[\"a\"]}", null, 200).getInteger("chunkCount"));
+        ServerResponse oversized = handler(Schedulers.immediate()).dryRun(request("/batch_infer", null,
+                Mono.error(new DataBufferLimitException("too large")))).block();
+        assertEquals("request_body_too_large", body(oversized, 413).getString("error"));
+        verifyNoInteractions(coordinator);
     }
 
-    private DispatchConfig config(String subBatch) {
-        DispatchConfig cfg = new DispatchConfig();
-        cfg.setFePoolServiceId("test.fe.publish");
-        cfg.setSubBatch(subBatch);
-        cfg.setSubBatchSpec(SubBatchSpec.parse(subBatch));
-        return cfg;
-    }
-
-    private DispatcherFePoolRefresher refresher() {
-        DispatcherFePoolRefresher refresher = mock(DispatcherFePoolRefresher.class);
-        when(refresher.source()).thenReturn(() -> List.<String>of());
-        return refresher;
-    }
-
-    private MockServerRequest dryRunRequest(String body) {
-        return MockServerRequest.builder()
-                .method(HttpMethod.POST)
-                .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                .body(Mono.just(body.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private ObjectNode invokeDryRun(DispatcherInspectionHandler handler, String preAssignParam,
-                                    List<String> prompts) {
-        StringBuilder sb = new StringBuilder("{\"prompt_batch\":[");
-        for (int i = 0; i < prompts.size(); i++) {
-            if (i > 0) {
-                sb.append(",");
-            }
-            sb.append("\"").append(prompts.get(i)).append("\"");
-        }
-        sb.append("]}");
-        byte[] body = sb.toString().getBytes(StandardCharsets.UTF_8);
-
-        MockServerRequest.Builder builder = MockServerRequest.builder()
-                .method(HttpMethod.POST)
-                .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"));
-        if (preAssignParam != null) {
-            builder.queryParam("pre_assign", preAssignParam);
-        }
-        MockServerRequest req = builder.body(Mono.just(body));
-
-        ObjectNode[] captured = new ObjectNode[1];
-        StepVerifier.create(handler.dryRun(req))
-                .assertNext(resp -> {
-                    assertEquals(HttpStatus.OK, resp.statusCode());
-                    captured[0] = parseBody(resp);
-                })
-                .verifyComplete();
-        return captured[0];
-    }
-
-    private void assertResponse(Mono<org.springframework.web.reactive.function.server.ServerResponse> mono,
-                                HttpStatus expectedStatus, Consumer<ObjectNode> bodyAssertions) {
-        StepVerifier.create(mono)
-                .assertNext(resp -> {
-                    assertEquals(expectedStatus, resp.statusCode());
-                    bodyAssertions.accept(parseBody(resp));
-                })
-                .verifyComplete();
-    }
-
-    private ObjectNode parseBody(org.springframework.web.reactive.function.server.ServerResponse resp) {
-        EntityResponse<?> entity = (EntityResponse<?>) resp;
-        Object value = entity.entity();
+    @Test
+    void jsonWorkUsesTheCpuScheduler() {
+        Scheduler scheduler = Schedulers.newSingle("dryrun-json-test");
         try {
-            if (value instanceof byte[] bytes) {
-                return (ObjectNode) mapper.readTree(bytes);
-            }
-            throw new IllegalStateException("unexpected entity type: " + value.getClass());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+            AtomicReference<String> thread = new AtomicReference<>();
+            ServerResponse response = handler(scheduler).dryRun(request("/batch_infer", null,
+                            Mono.just("not-json".getBytes(StandardCharsets.UTF_8))))
+                    .doOnNext(ignored -> thread.set(Thread.currentThread().getName())).block();
+            assertEquals("invalid_inspection_request", body(response, 400).getString("error"));
+            assertTrue(thread.get().startsWith("dryrun-json-test"));
+        } finally {
+            scheduler.dispose();
         }
     }
 
-    private static BatchScheduleTarget target(String ip) {
-        return new BatchScheduleTarget(ip, 23840, 23841, RoleType.PDFUSION);
+    private DispatcherInspectionHandler handler(Scheduler scheduler) {
+        cfg.setSubBatchSpec(SubBatchSpec.parse(cfg.getSubBatch()));
+        return new DispatcherInspectionHandler(cfg, refresher, health, coordinator,
+                DispatcherTestSupport.configService(lbConfig), scheduler);
+    }
+
+    private JSONObject invoke(String path, String json, String preassign, int status) {
+        return body(handler(Schedulers.immediate()).dryRun(request(path, preassign,
+                Mono.just(json.getBytes(StandardCharsets.UTF_8)))).block(), status);
+    }
+
+    private static MockServerRequest request(String path, String preassign, Mono<byte[]> bytes) {
+        MockServerRequest.Builder builder = MockServerRequest.builder().method(HttpMethod.POST)
+                .uri(URI.create("http://x/dispatcher/_dryrun" + path));
+        if (preassign != null) {
+            builder.queryParam("pre_assign", preassign);
+        }
+        return builder.body(bytes);
+    }
+
+    private static JSONObject body(ServerResponse response, int status) {
+        assertEquals(status, response.rawStatusCode());
+        return JSON.parseObject((byte[]) ((EntityResponse<?>) response).entity());
     }
 }

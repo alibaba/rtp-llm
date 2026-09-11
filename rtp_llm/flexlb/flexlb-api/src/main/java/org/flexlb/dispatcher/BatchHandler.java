@@ -26,19 +26,7 @@ import reactor.core.scheduler.Scheduler;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * Dispatcher batch handler. Reads each batch request body as raw bytes, parses with
- * fastjson2, splits the request array per {@link SubBatchSpec}, builds per-chunk bodies,
- * stamps any pre-assigned BE targets, fans out via {@link FanoutService}, and merges with
- * {@link ResponseMerger}.
- *
- * <p>Status mapping: 400 on a non-JSON-object body, passthrough disposition for registered
- * paths whose body is not a splittable batch, 200 on full or partial success, and on total
- * failure the chunks' shared FE 4xx when they agree on one — 500 otherwise.
- *
- * <p>Single-element batches still fan out as one chunk so partial-failure semantics stay
- * uniform; router-level rejection of non-batch traffic happens upstream.
- */
+/** HTTP batch validation, allocation, fanout and response accounting. */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class BatchHandler {
@@ -140,7 +128,7 @@ public class BatchHandler {
         // Enforce the reserved routing field at the registered HTTP boundary, before the
         // split-vs-passthrough disposition. A companion-field request is forwarded whole,
         // but must not use that path to make an FE dial a caller-selected backend.
-        String generateConfigError = BatchChunkAssembler.validateGenerateConfig(body);
+        String generateConfigError = spec.validateRequest(body);
         if (generateConfigError != null) {
             return badRequest(generateConfigError);
         }
@@ -164,19 +152,24 @@ public class BatchHandler {
             return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
         }
         pv.setTotalItems(arr.size());
-        int chunkCount = BatchChunkAssembler.chunkCount(arr.size(), subBatch);
+        boolean atomicBatchAllowed = !hasActiveTrafficPolicy();
+        BatchChunkAssembler batch = new BatchChunkAssembler(body, spec, subBatch, atomicBatchAllowed);
+        int chunkCount = batch.chunkCount();
         pv.setChunkCount(chunkCount);
         if (chunkCount > maxChunkCount) {
             return DispatcherResponses.error(413, "too_many_sub_batches",
                     "batch produces " + chunkCount + " sub-batches; maximum is "
                             + maxChunkCount + " (router.batchScheduleMaxCount)");
         }
-        boolean atomicBatchAllowed = !hasActiveTrafficPolicy();
-        List<JSONObject> chunkBodies = prepareBatch(
-                body, arr, chunkCount, spec, pv, atomicBatchAllowed);
+        // Charge repeated envelopes before allocating targets or materializing chunks.
+        if (batch.projectedBytes(List.of()) + 1024L * chunkCount > maxAggregateRequestBytes) {
+            throw new AggregateRequestTooLargeException(maxAggregateRequestBytes);
+        }
+        pv.setMinChunkItems(batch.chunkSize(chunkCount - 1));
+        pv.setMaxChunkItems(batch.chunkSize(0));
         boolean assignBe = preAssignBe && spec.isPreAssignable() && atomicBatchAllowed;
         boolean assignFe = feAllocationMode == FeAllocationMode.MASTER;
-        return resolveTargets(chunkBodies.size(), assignBe, assignFe)
+        return resolveTargets(chunkCount, assignBe, assignFe)
                 .publishOn(cpuScheduler)
                 .flatMap(allocation -> {
                     if (!allocation.isSuccess()) {
@@ -186,9 +179,7 @@ public class BatchHandler {
                                 allocation.getErrorMessage());
                     }
                     List<BatchScheduleTarget> targets = allocation.getServerStatus();
-                    if (assignBe) {
-                        BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
-                    }
+                    List<JSONObject> chunkBodies = batch.chunks(assignBe ? targets : List.of());
                     List<String> preAssignedFeUrls = assignFe
                             ? preAssignedFeUrls(targets) : List.of();
                     long fanoutStart = System.currentTimeMillis();
@@ -229,20 +220,6 @@ public class BatchHandler {
         }
     }
 
-    private List<JSONObject> prepareBatch(JSONObject body, JSONArray arr, int chunkCount,
-                                       BatchEndpointSpec spec, DispatchPvLogData pv,
-                                       boolean atomicBatchAllowed) {
-        long projectedBytes = BatchChunkAssembler.projectedChunkBytes(
-                body, arr, chunkCount, spec, atomicBatchAllowed, List.of())
-                + 1024L * chunkCount; // Preserve the allowance for routing fields added after allocation.
-        if (projectedBytes > maxAggregateRequestBytes) {
-            throw new AggregateRequestTooLargeException(maxAggregateRequestBytes);
-        }
-        List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
-        recordChunkShape(pv, chunks);
-        return BatchChunkAssembler.buildChunkBodies(body, chunks, spec, atomicBatchAllowed);
-    }
-
     private boolean hasActiveTrafficPolicy() {
         TrafficPolicyConfig policy = loadBalanceConfig.getRouter().getGroupSelector();
         return policy != null && (!policy.getRules().isEmpty() || !policy.getDefaultTargets().isEmpty());
@@ -256,20 +233,6 @@ public class BatchHandler {
             requestId = body.get("request_id");
         }
         pv.setCallerRequestId(scalarForLog(requestId));
-    }
-
-    private static void recordChunkShape(DispatchPvLogData pv, List<JSONArray> chunks) {
-        if (chunks.isEmpty()) {
-            return;
-        }
-        int min = Integer.MAX_VALUE;
-        int max = 0;
-        for (JSONArray chunk : chunks) {
-            min = Math.min(min, chunk.size());
-            max = Math.max(max, chunk.size());
-        }
-        pv.setMinChunkItems(min);
-        pv.setMaxChunkItems(max);
     }
 
     /** Keeps request-controlled observability fields scalar and bounded. */

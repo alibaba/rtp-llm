@@ -17,8 +17,6 @@ import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 
-import java.util.List;
-
 import static org.flexlb.dispatcher.DispatchConfigEnvironmentPostProcessor.ENABLE_PROPERTY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -160,11 +158,6 @@ class DispatchConfigEnvironmentPostProcessorTest {
         @Bean
         ActiveRequestCounter activeRequestCounter() {
             return mock(ActiveRequestCounter.class);
-        }
-
-        @Bean
-        List<BatchEndpointSpec> batchEndpointSpecs() {
-            return BatchEndpointSpec.SPECS;
         }
 
         @Bean
