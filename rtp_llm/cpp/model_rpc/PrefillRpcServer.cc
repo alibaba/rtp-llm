@@ -823,10 +823,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             "rtp_llm.prefill_generate_stream_call", server_context, true, "RpcService/GenerateStreamCall");
         prefill_context.trace_span_guard =
             std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &prefill_context.error_status);
-        // Bailian Unitrace index key (string) + internal numeric field
+        // Bailian Unitrace index key: the internal request ID's string form.
         prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
                                                        std::to_string(prefill_context.request_id));
-        prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, prefill_context.request_id);
     }
     telemetry::PhaseSpanSynthesisScope phase_span_scope([&prefill_context](bool exception_unwinding) {
         if (!prefill_context.trace_span_guard || !prefill_context.trace_span_guard->valid()) {

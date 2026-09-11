@@ -115,10 +115,8 @@ RTP_LLM_SCHEDULE_CODE = "flexlb.schedule.code"
 # absent from this span-key registry. Note host.ip carries "{hostname}-{pid}"
 # for per-process platform aggregation, while the real pod address lives in
 # rtp_llm.pod_ip. ---
-# Bailian Unitrace indexes spans by the unprefixed string request_id; the
-# rtp_llm.* twin retains the numeric engine id for internal correlation.
+# Bailian Unitrace indexes spans by the internal ID's unprefixed string form.
 REQUEST_ID = "request_id"
-RTP_LLM_REQUEST_ID = "rtp_llm.request_id"
 # Engine identity on C++-synthesized phase spans, sourced from world_rank alone
 # (not a dp_rank/world_rank pair: the world rank is already unique per
 # deployment). Written as an integer so the platform aggregates it numerically.

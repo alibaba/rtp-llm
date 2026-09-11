@@ -147,7 +147,6 @@ inline void synthesizeChildSpan(const opentelemetry::nostd::shared_ptr<opentelem
         // Analysis (visible in the detail waterfall only).
         if (request_id >= 0) {
             span->SetAttribute(kAttrRequestId, std::to_string(request_id));
-            span->SetAttribute(kAttrRtpLlmRequestId, request_id);
         }
         // Engine identity is unconditional: rank 0 is a real rank (every
         // single-node deployment reports it), so a missing key would be

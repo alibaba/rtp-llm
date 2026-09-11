@@ -231,7 +231,7 @@ TEST_F(TelemetryTest, InMemoryExportWithAttributes) {
 
     auto tracer = TelemetryRuntime::tracer();
     auto span   = tracer->StartSpan("rtp_llm.test_span");
-    span->SetAttribute("rtp_llm.request_id", (int64_t)42);
+    span->SetAttribute("request_id", "42");
     span->End();
 
     EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
@@ -239,8 +239,10 @@ TEST_F(TelemetryTest, InMemoryExportWithAttributes) {
     ASSERT_EQ(spans.size(), 1u);
     EXPECT_EQ(spans[0]->GetName(), "rtp_llm.test_span");
     const auto& attributes = spans[0]->GetAttributes();
-    auto        it         = attributes.find("rtp_llm.request_id");
+    auto        it         = attributes.find("request_id");
     ASSERT_NE(it, attributes.end());
+    EXPECT_EQ(nostd::get<std::string>(it->second), "42");
+    EXPECT_EQ(attributes.count("rtp_llm.request_id"), 0u);
 }
 
 TEST_F(TelemetryTest, PropagatorInjectExtractRoundtrip) {
@@ -583,7 +585,7 @@ TEST_F(TelemetryTest, SpanFactoriesCarryRpcAttributes) {
             EXPECT_EQ(nostd::get<std::string>(attributes.at("server.address")), "decode.example");
             EXPECT_EQ(nostd::get<int64_t>(attributes.at("server.port")), 26101);
             EXPECT_EQ(nostd::get<std::string>(attributes.at("request_id")), "42");
-            EXPECT_EQ(nostd::get<int64_t>(attributes.at("rtp_llm.request_id")), 42);
+            EXPECT_EQ(attributes.count("rtp_llm.request_id"), 0u);
             EXPECT_EQ(nostd::get<int64_t>(attributes.at("rtp_llm.retry_attempt")), 1);
         } else if (span->GetName() == "rtp_llm.decode_remote_generate") {
             const auto& attributes = span->GetAttributes();

@@ -210,11 +210,9 @@ class MasterClient:
                 "rtp_llm.flexlb.schedule", target
             )
             if client_span is not None:
-                # Double-write: the platform indexes the unprefixed string key for
-                # span search, the numeric twin stays for internal correlation.
+                # The platform indexes the internal ID's string form for span search.
                 # Same contract as the generate_stream_call / fetch_response spans.
                 client_span.set_attribute(trace_attrs.REQUEST_ID, str(request_id))
-                client_span.set_attribute(trace_attrs.RTP_LLM_REQUEST_ID, request_id)
             try:
                 response = await stub.Schedule(
                     request_pb,

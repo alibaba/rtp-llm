@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -161,12 +162,10 @@ class FlexlbTraceTest {
 
     /**
      * Cross-language contract: the platform indexes the unprefixed string key for
-     * span search, so a span carrying only the numeric twin cannot be found by
-     * request id. Both keys must be present, with the same value, and with the
-     * types the C++ and Python registries use.
+     * span search. Preserve the exact internal ID without a numeric companion.
      */
     @Test
-    void requestIdIsDoubleWrittenAsStringAndNumber() {
+    void requestIdIsExportedAsExactStringWithoutNumericCompanion() {
         Tracer tracer = GlobalOpenTelemetry.getTracer("test");
         Span root = tracer.spanBuilder("root").setSpanKind(SpanKind.SERVER).startSpan();
         try {
@@ -178,11 +177,10 @@ class FlexlbTraceTest {
         assertEquals(1, exporter.spans.size());
         SpanData span = exporter.spans.get(0);
         assertEquals("request_id", FlexlbTrace.REQUEST_ID);
-        assertEquals("rtp_llm.request_id", FlexlbTrace.RTP_LLM_REQUEST_ID);
         assertEquals("3540218608800727041",
                 span.getAttributes().get(AttributeKey.stringKey(FlexlbTrace.REQUEST_ID)));
-        assertEquals(3540218608800727041L,
-                span.getAttributes().get(AttributeKey.longKey(FlexlbTrace.RTP_LLM_REQUEST_ID)));
+        assertFalse(span.getAttributes().asMap().keySet().stream()
+                .anyMatch(key -> key.getKey().equals("rtp_llm.request_id")));
     }
 
     /**

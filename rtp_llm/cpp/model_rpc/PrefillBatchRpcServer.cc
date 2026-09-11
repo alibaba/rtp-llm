@@ -223,7 +223,6 @@ opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> startBatchLogicalSp
         std::vector<SpanAttribute> attributes;
         attributes.reserve(4);
         attributes.emplace_back(telemetry::kAttrRequestId, opentelemetry::nostd::string_view(request_id));
-        attributes.emplace_back(telemetry::kAttrRtpLlmRequestId, input.request_id());
         attributes.emplace_back(telemetry::kAttrRtpLlmPdSep, true);
         // The coalescing wait that precedes this span is otherwise unreadable:
         // master_route contains it but also contains the whole EnqueueGroup
@@ -1503,7 +1502,6 @@ grpc::Status PrefillBatchRpcServer::FetchResponse(grpc::ServerContext*          
     telemetry::GrpcStatusSpanGuard fetch_span_guard(span, &status);
     const int64_t                  request_id = request->request_id();
     fetch_span_guard.setAttribute(telemetry::kAttrRequestId, std::to_string(request_id));
-    fetch_span_guard.setAttribute(telemetry::kAttrRtpLlmRequestId, request_id);
 
     std::shared_ptr<DeferredPrefillContext> deferred;
     const auto                              take_status = deferred_contexts_->take(request_id, deferred);

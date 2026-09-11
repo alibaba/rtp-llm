@@ -1545,7 +1545,6 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // `request_id` (string) is the Bailian Unitrace index key
             decode_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
                                                           std::to_string(decode_context.request_id));
-            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, decode_context.request_id);
         }
         // Allocation retries are one logical stage, including retry backoff. The
         // retry helper performs stop/error checks without advancing this stage.

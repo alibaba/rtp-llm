@@ -458,7 +458,6 @@ class FrontendServer(object):
             # `request_id` is the Bailian Unitrace index key: spans without it
             # are accepted upstream but unsearchable (verified 2026-07-26)
             trace_state.set_attribute("request_id", str(request_id))
-            trace_state.set_attribute("rtp_llm.request_id", request_id)
             trace_state.set_attribute(trace_attrs.HTTP_REQUEST_METHOD, "POST")
             trace_state.set_attribute(trace_attrs.HTTP_METHOD, "POST")
 

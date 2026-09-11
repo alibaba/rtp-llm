@@ -1041,9 +1041,6 @@ class ModelRpcClient(object):
             client_settlement_abandoned = asyncio.Event()
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
             client_span.set_attribute(trace_attrs.REQUEST_ID, str(input_py.request_id))
-            client_span.set_attribute(
-                trace_attrs.RTP_LLM_REQUEST_ID, input_py.request_id
-            )
         last_output = None
 
         try:
