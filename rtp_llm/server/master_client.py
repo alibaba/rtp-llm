@@ -30,6 +30,8 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.worker_status import _coerce_role_type
+from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.telemetry import start_client_span
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 route_logger = logging.getLogger("route_logger")
@@ -195,6 +197,7 @@ class MasterClient:
         """Send gRPC schedule request. Returns proto response on success, None on transport failure."""
         target = self._get_grpc_target(addr)
         start = time.time()
+        trace_metadata = []
         try:
             channel = self._get_channel(target)
             stub = FlexlbServiceStub(channel)
@@ -203,7 +206,50 @@ class MasterClient:
                 request_id,
                 request_pb.priority,
             )
-            response = await stub.Schedule(request_pb, timeout=timeout_s)
+            client_span, trace_metadata = start_client_span(
+                "rtp_llm.flexlb.schedule", target
+            )
+            if client_span is not None:
+                # The platform indexes the internal ID's string form for span search.
+                # Same contract as the generate_stream_call / fetch_response spans.
+                client_span.set_attribute(trace_attrs.REQUEST_ID, str(request_id))
+            try:
+                response = await stub.Schedule(
+                    request_pb,
+                    timeout=timeout_s,
+                    metadata=trace_metadata or None,
+                )
+            except BaseException as error:
+                if client_span is not None:
+                    if isinstance(error, grpc.aio.AioRpcError):
+                        client_span.set_attribute(
+                            trace_attrs.RPC_RESPONSE_STATUS_CODE, error.code().name
+                        )
+                        client_span.finish(error=error, error_type="RpcError")
+                    elif isinstance(error, asyncio.CancelledError):
+                        client_span.finish(error=error, error_type="Cancelled")
+                    else:
+                        client_span.finish(error=error, error_type="RpcError")
+                raise
+            if client_span is not None:
+                # The transport succeeded whatever the business code says; the
+                # sibling fetch_response CLIENT span already ships this key, so it
+                # is known not to disturb the platform's token aggregation.
+                client_span.set_attribute(
+                    trace_attrs.RPC_RESPONSE_STATUS_CODE, grpc.StatusCode.OK.name
+                )
+                client_span.set_attribute(
+                    trace_attrs.RTP_LLM_SCHEDULE_CODE, int(response.code)
+                )
+                # A rejecting business code on an otherwise successful transport is
+                # still a failed schedule: the caller raises FtRuntimeException on
+                # it (see the SUCCESS_CODE branch below). Closing this span as OK
+                # would contradict the code just recorded above and hide the
+                # rejection from status-based filtering on the CLIENT span.
+                if int(response.code) != SUCCESS_CODE:
+                    client_span.finish(error_type="FlexlbBusinessRejected")
+                else:
+                    client_span.finish()
             return response
         except grpc.aio.AioRpcError as e:
             elapsed = time.time() - start
@@ -217,7 +263,7 @@ class MasterClient:
             )
             if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
                 await self._best_effort_cancel(
-                    stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
+                    stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED, trace_metadata
                 )
                 await self._close_channel(target)
                 raise FtRuntimeException(
@@ -229,7 +275,7 @@ class MasterClient:
         except asyncio.CancelledError:
             if "stub" in locals():
                 await self._best_effort_cancel(
-                    stub, request_id, CANCEL_REASON_CLIENT_CANCELLED
+                    stub, request_id, CANCEL_REASON_CLIENT_CANCELLED, trace_metadata
                 )
             raise
         except Exception as e:
@@ -244,11 +290,15 @@ class MasterClient:
             return None
 
     @staticmethod
-    async def _best_effort_cancel(stub, request_id: int, reason: int) -> None:
+    async def _best_effort_cancel(
+        stub, request_id: int, reason: int, metadata=None
+    ) -> None:
         try:
             await stub.Cancel(
                 FlexlbCancelRequestPB(request_id=request_id, reason=reason),
                 timeout=1.0,
+                # Retain the failed Schedule's ancestry even after its span ends.
+                metadata=metadata or None,
             )
         except Exception:
             route_logger.warning(

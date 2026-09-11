@@ -2,12 +2,20 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <future>
+#include <memory>
 #include <set>
+#include <string>
 #include <thread>
 #include <vector>
 
+#include "opentelemetry/exporters/memory/in_memory_span_data.h"
+#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
+#include "opentelemetry/sdk/trace/span_data.h"
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 
 namespace rtp_llm {
 namespace {
@@ -107,6 +115,78 @@ public:
     EnqueueGroupRequestPB captured_group_request;
 };
 
+class TerminalPublicationBarrierContext: public PrefillGenerateContext {
+public:
+    using PrefillGenerateContext::PrefillGenerateContext;
+
+    bool tryMarkOtherTerminal() override {
+        const bool marked = PrefillGenerateContext::tryMarkOtherTerminal();
+        if (marked && !paused_.exchange(true)) {
+            published.set_value();
+            resume.get_future().wait();
+        }
+        return marked;
+    }
+
+    std::promise<void> published;
+    std::promise<void> resume;
+
+private:
+    std::atomic<bool> paused_{false};
+};
+
+class TracingDecodeRpcService final: public RpcService::Service {
+public:
+    grpc::Status RemoteGenerate(grpc::ServerContext*                                            server_context,
+                                grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* stream) override {
+        grpc::Status status = grpc::Status::OK;
+        auto         span   = telemetry::startRpcServerSpan(
+            "rtp_llm.decode_remote_generate", server_context, true, "RpcService/RemoteGenerate");
+        telemetry::GrpcStatusSpanGuard span_guard(span, &status);
+
+        GenerateRequestPB request;
+        if (!stream->Read(&request)) {
+            status = grpc::Status(grpc::StatusCode::INTERNAL, "missing allocate request");
+            return status;
+        }
+        span_guard.setAttribute(telemetry::kAttrRequestId, std::to_string(request.request_id()));
+        GenerateOutputsPB response;
+        if (!stream->Write(response)) {
+            status = grpc::Status(grpc::StatusCode::INTERNAL, "write allocate response failed");
+            return status;
+        }
+        while (stream->Read(&request)) {}
+        return status;
+    }
+};
+
+class TracingDecodeRpcServer {
+public:
+    ~TracingDecodeRpcServer() {
+        if (server_) {
+            server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
+            server_->Wait();
+        }
+    }
+
+    bool start() {
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port_);
+        builder.RegisterService(&service_);
+        server_ = builder.BuildAndStart();
+        return server_ != nullptr && port_ > 0;
+    }
+
+    int port() const {
+        return port_;
+    }
+
+private:
+    TracingDecodeRpcService       service_;
+    std::unique_ptr<grpc::Server> server_;
+    int                           port_{0};
+};
+
 EnqueueBatchExternalInputPB* addInput(EnqueueBatchDpSlotPB* slot, int64_t request_id) {
     auto* external_input = slot->add_requests();
     external_input->mutable_input()->set_request_id(request_id);
@@ -155,6 +235,63 @@ GenerateStreamPtr makeGenerateStream(const std::shared_ptr<GenerateInput>& input
     return std::make_shared<NormalGenerateStream>(
         input, model_config, runtime_config, ResourceContext{}, /*metrics_reporter=*/nullptr);
 }
+
+namespace trace_api       = opentelemetry::trace;
+namespace trace_sdk       = opentelemetry::sdk::trace;
+namespace memory_exporter = opentelemetry::exporter::memory;
+namespace nostd           = opentelemetry::nostd;
+
+std::string toHex(const trace_api::TraceId& trace_id) {
+    char value[32];
+    trace_id.ToLowerBase16(value);
+    return std::string(value, 32);
+}
+
+std::string toHex(const trace_api::SpanId& span_id) {
+    char value[16];
+    span_id.ToLowerBase16(value);
+    return std::string(value, 16);
+}
+
+std::vector<const trace_sdk::SpanData*> findSpans(const std::vector<std::unique_ptr<trace_sdk::SpanData>>& spans,
+                                                  const std::string&                                       name) {
+    std::vector<const trace_sdk::SpanData*> matches;
+    for (const auto& span : spans) {
+        if (span->GetName() == name) {
+            matches.push_back(span.get());
+        }
+    }
+    return matches;
+}
+
+void setTraceContext(GenerateInputPB& input, const std::string& trace_id, const std::string& parent_span_id) {
+    auto* trace_context = input.mutable_request_info()->mutable_trace_context();
+    trace_context->set_traceparent("00-" + trace_id + "-" + parent_span_id + "-01");
+}
+
+class PrefillBatchTraceTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        telemetry::TelemetryRuntime::shutdown(5000);
+        auto                       exporter = memory_exporter::InMemorySpanExporterFactory::Create(span_data_);
+        telemetry::TelemetryConfig config;
+        config.enabled = true;
+        config.role    = "test";
+        config.tp_rank = 0;
+        ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    }
+
+    void TearDown() override {
+        telemetry::TelemetryRuntime::shutdown(5000);
+    }
+
+    std::vector<std::unique_ptr<trace_sdk::SpanData>> finishTelemetry() {
+        EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+        return span_data_->GetSpans();
+    }
+
+    std::shared_ptr<memory_exporter::InMemorySpanData> span_data_;
+};
 
 void buildReadySlots(PrefillBatchRpcServer&                         server,
                      const std::vector<int64_t>&                    request_ids,
@@ -883,6 +1020,34 @@ TEST(PrefillBatchRpcServerTest, TerminalCauseAloneCannotStartFinalizerBeforeCanc
     EXPECT_TRUE(deferred->requestPriorityFinalization());
 }
 
+TEST(PrefillBatchRpcServerTest, PriorityTerminalCannotClaimLogicalFinalizer) {
+    PrefillBatchRpcServer server;
+    auto                  deferred = makeDeferred(server, 3026);
+
+    ASSERT_EQ(deferred->context->requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+    EXPECT_FALSE(deferred->finishOperation());
+    // The priority finalizer has not been registered yet, but the terminal
+    // cause is already priority-owned. Logical finalization must not race it.
+    EXPECT_FALSE(deferred->requestLogicalFinalization());
+    EXPECT_TRUE(deferred->requestPriorityFinalization());
+}
+
+TEST(PrefillBatchRpcServerTest, PriorityFinalizerRegistrationIsExclusive) {
+    PrefillBatchRpcServer server;
+    auto                  deferred = makeDeferred(server, 3027);
+
+    ASSERT_EQ(deferred->context->requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+    // Publishing the priority cause must fence the ordinary logical finalizer
+    // even during the interval before the priority worker is registered.
+    EXPECT_FALSE(deferred->finishOperation());
+    EXPECT_FALSE(deferred->requestLogicalFinalization());
+
+    // Exactly one caller may register the priority finalizer. A duplicate
+    // registration cannot create a second owner for stream teardown.
+    EXPECT_TRUE(deferred->requestPriorityFinalization());
+    EXPECT_FALSE(deferred->requestPriorityFinalization());
+}
+
 TEST(PrefillBatchRpcServerTest, FetchAfterAcceptedPriorityCancelReturns8429Tombstone) {
     PrefillBatchRpcServer server;
     auto                  contexts = std::make_shared<DeferredPrefillContextMap>();
@@ -1181,6 +1346,505 @@ TEST(PrefillBatchRpcServerTest, CancelAllClearsAndCancelsDeferredContexts) {
     const auto shutdown_status = contexts->store(3008, after_shutdown);
     EXPECT_EQ(shutdown_status.error_code(), grpc::StatusCode::UNAVAILABLE);
     EXPECT_EQ(shutdown_status.error_message(), "Prefill batch server is shutting down");
+}
+
+TEST_F(PrefillBatchTraceTest, PerRequestCarriersCreateIsolatedLogicalParentsAndP2dChild) {
+    const std::string first_trace   = "11111111111111111111111111111111";
+    const std::string second_trace  = "22222222222222222222222222222222";
+    const std::string first_parent  = "1111111111111111";
+    const std::string second_parent = "2222222222222222";
+
+    TracingDecodeRpcServer decode_server;
+    ASSERT_TRUE(decode_server.start());
+
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(2);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i].input = std::make_shared<GenerateInputPB>();
+        slots[i].input->set_request_id(4001 + i);
+    }
+    setTraceContext(*slots[0].input, first_trace, first_parent);
+    setTraceContext(*slots[1].input, second_trace, second_parent);
+
+    server.buildSlotContexts(slots);
+    ASSERT_TRUE(slots[0].deferred->context->trace_span_guard);
+    ASSERT_TRUE(slots[1].deferred->context->trace_span_guard);
+
+    auto& first_context          = *slots[0].deferred->context;
+    first_context.generate_input = makeGenerateInput(4001);
+    first_context.generate_input->generate_config->role_addrs.emplace_back(
+        RoleType::DECODE, "127.0.0.1", /*http_port=*/0, decode_server.port());
+    server.prepareAllocateResource(first_context);
+    ASSERT_TRUE(first_context.error_status.ok()) << first_context.error_status.error_message();
+    ASSERT_TRUE(first_context.closeGrpcStream().ok());
+    const auto p2d_parent_span_id = first_context.trace_span_guard->sharedSpan()->GetContext().span_id();
+
+    for (auto& slot : slots) {
+        ASSERT_TRUE(slot.deferred->context->tryMarkOtherTerminal());
+        server.finishSlotOperation(slot.input->request_id(), slot.deferred);
+        slot.deferred->finishLogicalTrace();
+    }
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 2u);
+    const trace_sdk::SpanData* first_logical  = nullptr;
+    const trace_sdk::SpanData* second_logical = nullptr;
+    for (const auto* logical : logicals) {
+        if (toHex(logical->GetTraceId()) == first_trace) {
+            first_logical = logical;
+        } else if (toHex(logical->GetTraceId()) == second_trace) {
+            second_logical = logical;
+        }
+        EXPECT_EQ(logical->GetSpanKind(), trace_api::SpanKind::kInternal);
+        EXPECT_EQ(logical->GetAttributes().find("rpc.response.status_code"), logical->GetAttributes().end());
+        EXPECT_EQ(logical->GetAttributes().find("rpc.system"), logical->GetAttributes().end());
+    }
+    ASSERT_NE(first_logical, nullptr);
+    ASSERT_NE(second_logical, nullptr);
+    EXPECT_EQ(toHex(first_logical->GetParentSpanId()), first_parent);
+    EXPECT_EQ(toHex(second_logical->GetParentSpanId()), second_parent);
+
+    auto p2d_spans = findSpans(spans, "rtp_llm.remote_generate");
+    ASSERT_EQ(p2d_spans.size(), 1u);
+    EXPECT_EQ(p2d_spans[0]->GetSpanKind(), trace_api::SpanKind::kClient);
+    EXPECT_EQ(p2d_spans[0]->GetParentSpanId(), p2d_parent_span_id);
+    EXPECT_EQ(toHex(p2d_spans[0]->GetTraceId()), first_trace);
+    auto decode_spans = findSpans(spans, "rtp_llm.decode_remote_generate");
+    ASSERT_EQ(decode_spans.size(), 1u);
+    EXPECT_EQ(decode_spans[0]->GetSpanKind(), trace_api::SpanKind::kServer);
+    EXPECT_EQ(toHex(decode_spans[0]->GetTraceId()), first_trace);
+    EXPECT_EQ(decode_spans[0]->GetParentSpanId(), p2d_spans[0]->GetSpanId());
+}
+
+TEST_F(PrefillBatchTraceTest, ActiveOnlyShutdownWaitsForOperationOwnerAndEndsOnce) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    slots[0].input = std::make_shared<GenerateInputPB>();
+    slots[0].input->set_request_id(4051);
+    setTraceContext(*slots[0].input, "33333333333333333333333333333333", "3333333333333333");
+    server.buildSlotContexts(slots);
+
+    auto contexts = std::make_shared<DeferredPrefillContextMap>();
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(contexts->registerActive(4051, deferred).ok());
+    contexts->cancelAll(grpc::Status(grpc::StatusCode::UNAVAILABLE, "shutdown"));
+
+    EXPECT_TRUE(deferred->context->error_status.ok());
+    EXPECT_FALSE(deferred->context->cancel_state->load());
+    EXPECT_TRUE(span_data_->GetSpans().empty());
+    EXPECT_FALSE(deferred->finishOperation());
+    server.finishSlotOperation(4051, deferred);
+    server.finishSlotOperation(4051, deferred);
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 1u);
+    EXPECT_EQ(logicals[0]->GetStatus(), trace_api::StatusCode::kError);
+    EXPECT_EQ(nostd::get<std::string>(logicals[0]->GetAttributes().at("error.type")), "Unavailable");
+}
+
+TEST_F(PrefillBatchTraceTest, MissingMalformedAndDisabledCarriersFailOpenWithoutLogicalRoot) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(3);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i].input = std::make_shared<GenerateInputPB>();
+        slots[i].input->set_request_id(4101 + i);
+    }
+    setTraceContext(*slots[0].input, "33333333333333333333333333333333", "3333333333333333");
+    slots[2].input->mutable_request_info()->mutable_trace_context()->set_traceparent("malformed");
+
+    server.buildSlotContexts(slots);
+    ASSERT_TRUE(slots[0].deferred->context->trace_span_guard);
+    EXPECT_FALSE(slots[1].deferred->context->trace_span_guard);
+    EXPECT_FALSE(slots[2].deferred->context->trace_span_guard);
+    for (auto& slot : slots) {
+        ASSERT_TRUE(slot.deferred->context->tryMarkOtherTerminal());
+        server.finishSlotOperation(slot.input->request_id(), slot.deferred);
+    }
+
+    auto spans = finishTelemetry();
+    EXPECT_EQ(findSpans(spans, "rtp_llm.prefill_batch_request").size(), 1u);
+
+    std::vector<PrefillBatchRpcServer::BatchSlot> disabled_slots(1);
+    disabled_slots[0].input = std::make_shared<GenerateInputPB>();
+    disabled_slots[0].input->set_request_id(4104);
+    setTraceContext(*disabled_slots[0].input, "44444444444444444444444444444444", "4444444444444444");
+    server.buildSlotContexts(disabled_slots);
+    EXPECT_FALSE(disabled_slots[0].deferred->context->trace_span_guard);
+}
+
+TEST_F(PrefillBatchTraceTest, TraceContextLengthBoundaryPreservesValidParent) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(2);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i].input = std::make_shared<GenerateInputPB>();
+        slots[i].input->set_request_id(4110 + i);
+    }
+
+    const std::string first_trace    = "11111111111111111111111111111111";
+    const std::string second_trace   = "22222222222222222222222222222222";
+    const std::string first_parent   = "1111111111111111";
+    const std::string second_parent  = "2222222222222222";
+    const std::string tracestate_512 = "a=" + std::string(253, 'x') + ",b=" + std::string(254, 'y');
+    const std::string tracestate_513 = "a=" + std::string(253, 'x') + ",b=" + std::string(255, 'y');
+    ASSERT_EQ(tracestate_512.size(), 512u);
+    ASSERT_EQ(tracestate_513.size(), 513u);
+
+    setTraceContext(*slots[0].input, first_trace, first_parent);
+    slots[0].input->mutable_request_info()->mutable_trace_context()->set_tracestate(tracestate_512);
+    setTraceContext(*slots[1].input, second_trace, second_parent);
+    slots[1].input->mutable_request_info()->mutable_trace_context()->set_tracestate(tracestate_513);
+
+    server.buildSlotContexts(slots);
+    ASSERT_TRUE(slots[0].deferred->context->trace_span_guard);
+    ASSERT_TRUE(slots[1].deferred->context->trace_span_guard);
+    for (auto& slot : slots) {
+        ASSERT_TRUE(slot.deferred->context->tryMarkOtherTerminal());
+        server.finishSlotOperation(slot.input->request_id(), slot.deferred);
+    }
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 2u);
+    for (const auto* logical : logicals) {
+        if (toHex(logical->GetTraceId()) == first_trace) {
+            EXPECT_EQ(toHex(logical->GetParentSpanId()), first_parent);
+            EXPECT_EQ(logical->GetSpanContext().trace_state()->ToHeader(), tracestate_512);
+        } else if (toHex(logical->GetTraceId()) == second_trace) {
+            EXPECT_EQ(toHex(logical->GetParentSpanId()), second_parent);
+            EXPECT_TRUE(logical->GetSpanContext().trace_state()->ToHeader().empty());
+        } else {
+            FAIL() << "unexpected trace id " << toHex(logical->GetTraceId());
+        }
+    }
+}
+
+TEST_F(PrefillBatchTraceTest, LogicalFailureUsesDomainStatusWithoutRpcAttributesAndEndsOnce) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    slots[0].input = std::make_shared<GenerateInputPB>();
+    slots[0].input->set_request_id(4201);
+    setTraceContext(*slots[0].input, "55555555555555555555555555555555", "5555555555555555");
+    server.buildSlotContexts(slots);
+
+    auto& deferred = slots[0].deferred;
+    ASSERT_TRUE(deferred->context->tryMarkOtherTerminal());
+    deferred->commitTerminalStatus(grpc::Status(grpc::StatusCode::INTERNAL, "prepare failed"));
+    EXPECT_TRUE(deferred->context->error_status.ok());
+    server.finishSlotOperation(4201, deferred);
+    deferred->finishLogicalTrace();
+    deferred->finishLogicalTrace();
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 1u);
+    EXPECT_EQ(logicals[0]->GetStatus(), trace_api::StatusCode::kError);
+    const auto& attributes = logicals[0]->GetAttributes();
+    ASSERT_NE(attributes.find("error.type"), attributes.end());
+    EXPECT_EQ(nostd::get<std::string>(attributes.at("error.type")), "Internal");
+    EXPECT_EQ(attributes.find("rpc.response.status_code"), attributes.end());
+    EXPECT_EQ(attributes.find("rtp_llm.grpc_status_code"), attributes.end());
+}
+
+// Publishing the OTHER terminal cause is what unblocks requestLogicalFinalization()
+// on every other thread -- tryMarkOtherTerminal() also returns true when the cause
+// is already OTHER, so it fences nothing. finishSlotOperation() is a close-only
+// path: it claims the logical finalizer and ends the span while contributing no
+// status of its own. A failure status must therefore be committed before the cause
+// becomes visible, or the failed request is reported as a success.
+//
+// Entry A: cancel() itself publishes the cause (store/outward error paths).
+TEST_F(PrefillBatchTraceTest, CancelPublishingCauseItselfNeverReportsFailureAsSuccess) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    slots[0].input = std::make_shared<GenerateInputPB>();
+    slots[0].input->set_request_id(4601);
+    setTraceContext(*slots[0].input, "77777777777777777777777777777777", "7777777777777777");
+    server.buildSlotContexts(slots);
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(deferred->context->trace_span_guard);
+
+    // The cause is still ACTIVE, so no other thread can claim the finalizer yet.
+    ASSERT_EQ(deferred->context->terminalCause(), PrefillTerminalCause::ACTIVE);
+    EXPECT_FALSE(deferred->requestLogicalFinalization());
+
+    deferred->cancel(grpc::Status(grpc::StatusCode::INTERNAL, "store failed"));
+    // A slot operation completing right after the cause became visible.
+    server.finishSlotOperation(4601, deferred);
+
+    EXPECT_FALSE(deferred->logical_status.ok()) << "cancel status dropped";
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 1u);
+    EXPECT_EQ(logicals[0]->GetStatus(), trace_api::StatusCode::kError) << "a cancelled request was closed as a success";
+}
+
+// The reachable production interleaving: cancelAll() marks every stored context
+// under mu_, releases mu_, and only then loops calling cancel(). A slot whose
+// prepare task completes in that gap runs finishSlotOperation() on a worker
+// thread -- a close-only path -- sees the cause already OTHER, claims the
+// logical finalizer and ends the span. If cancelAll() had not committed the
+// shutdown status before marking, that span is closed as a success.
+TEST_F(PrefillBatchTraceTest, ConcurrentShutdownAndSlotFinalizationNeverReportsFailureAsSuccess) {
+    for (bool stored : {false, true}) {
+        TestPrefillBatchRpcServer server;
+        server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+        const int64_t                                 request_id = stored ? 6601 : 6600;
+        slots[0].input                                           = std::make_shared<GenerateInputPB>();
+        slots[0].input->set_request_id(request_id);
+        setTraceContext(*slots[0].input, "99999999999999999999999999999999", "9999999999999999");
+        server.buildSlotContexts(slots);
+        auto deferred = slots[0].deferred;
+        ASSERT_TRUE(deferred->context->trace_span_guard);
+
+        // Preserve the production-created span/status binding; replace only the
+        // context's terminal publication seam, before any concurrent operation.
+        RPCContext rpc_ctx{slots[0].input.get(), nullptr};
+        auto       barrier = std::make_unique<TerminalPublicationBarrierContext>(
+            &server.resource(), rpc_ctx, 10000, nullptr, server.metrics_reporter_, server.meta_);
+        barrier->trace_span_guard = std::move(deferred->context->trace_span_guard);
+        auto* paused              = barrier.get();
+        auto  previous_context    = std::move(deferred->context);
+        deferred->context         = std::move(barrier);
+        auto contexts             = server.deferred_contexts_;
+        if (stored) {
+            ASSERT_TRUE(contexts->store(request_id, deferred).ok());
+        }
+
+        auto        published = paused->published.get_future();
+        std::thread shutdowner([&] {
+            contexts->cancelAll(grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down"));
+        });
+        const bool  reached = published.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        if (reached) {
+            // This runs before tryMarkOtherTerminal() returns to cancelAll().
+            // Moving commit after mark therefore exports OK and fails below.
+            server.finishSlotOperation(request_id, deferred);
+        }
+        paused->resume.set_value();
+        shutdowner.join();
+        ASSERT_TRUE(reached) << "shutdown never published terminal cause";
+        EXPECT_FALSE(deferred->logical_status.ok());
+    }
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 2u);
+    std::set<std::string> request_ids;
+    for (const auto* logical : logicals) {
+        request_ids.insert(nostd::get<std::string>(logical->GetAttributes().at("request_id")));
+        EXPECT_EQ(logical->GetAttributes().count("rtp_llm.request_id"), 0u);
+        EXPECT_EQ(logical->GetStatus(), trace_api::StatusCode::kError)
+            << "a request that failed during shutdown was closed as a success";
+    }
+    EXPECT_EQ(request_ids, (std::set<std::string>{"6600", "6601"}));
+}
+
+// prepareGroup()'s registration-failure exit, driven through the real method: it
+// is the one failure exit reachable without the prepare pool, so the whole
+// publish-and-finish sequence is observable here. Guards that the failure status
+// reaches the logical span at all -- dropping the commit, or committing a status
+// the finalizer can no longer see, closes a failed request as a success.
+//
+// This case tests error delivery; the shutdown test above separately forces the
+// commit-before-mark interleaving at the production publication boundary.
+TEST_F(PrefillBatchTraceTest, PrepareRegistrationFailureReachesTheLogicalSpan) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    slots[0].input = std::make_shared<GenerateInputPB>();
+    slots[0].input->set_request_id(7701);
+    setTraceContext(*slots[0].input, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa");
+    server.buildSlotContexts(slots);
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(deferred->context->trace_span_guard);
+    // The slot never registered, so prepareGroup() takes its first failure exit.
+    slots[0].registration_status = grpc::Status(grpc::StatusCode::INTERNAL, "register active failed");
+
+    const auto results = server.prepareGroup(slots);
+
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_FALSE(results[0].prepared);
+    EXPECT_EQ(results[0].stage_status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_FALSE(deferred->logical_status.ok()) << "prepare failure never reached the logical status";
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 1u);
+    EXPECT_EQ(logicals[0]->GetStatus(), trace_api::StatusCode::kError)
+        << "a request whose registration failed was closed as a success";
+}
+
+// Committing the concrete prepare failure before the mark must not change which
+// cause is finally reported. A priority preemption installed first still owns the
+// outcome: tryMarkOtherTerminal() fails, and the PRIORITY_PREEMPTED status
+// overwrites the concrete error that was already committed. Without that
+// overwrite, moving the commit earlier would downgrade a preemption to
+// "prepare failed".
+TEST_F(PrefillBatchTraceTest, PriorityPreemptionStillOutranksAnAlreadyCommittedPrepareFailure) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    slots[0].input = std::make_shared<GenerateInputPB>();
+    slots[0].input->set_request_id(7702);
+    setTraceContext(*slots[0].input, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "bbbbbbbbbbbbbbbb");
+    server.buildSlotContexts(slots);
+    auto  deferred = slots[0].deferred;
+    auto& context  = *deferred->context;
+
+    // A higher-priority request preempts this one before prepare reports back.
+    ASSERT_EQ(context.requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+    ASSERT_TRUE(context.isPriorityPreempted());
+    ASSERT_EQ(context.terminalCause(), PrefillTerminalCause::PRIORITY_PREEMPTION);
+
+    grpc::Status stage_status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed");
+    deferred->commitTerminalStatus(stage_status);
+    ASSERT_EQ(deferred->logical_status.error_code(), grpc::StatusCode::INTERNAL);
+
+    // The mark fails because the preemption cause is already published.
+    ASSERT_FALSE(context.tryMarkOtherTerminal());
+    stage_status = server.outwardStatus(context, stage_status);
+    deferred->commitTerminalStatus(stage_status);
+
+    ErrorDetailsPB committed_details;
+    ASSERT_TRUE(committed_details.ParseFromString(deferred->logical_status.error_details()));
+    EXPECT_EQ(committed_details.error_code(), static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED))
+        << "an already-committed prepare failure shadowed the preemption";
+}
+
+TEST_F(PrefillBatchTraceTest, TtlStyleCancellationSynthesizesTruncatedWaitExactlyOnce) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    slots[0].input = std::make_shared<GenerateInputPB>();
+    slots[0].input->set_request_id(4301);
+    setTraceContext(*slots[0].input, "66666666666666666666666666666666", "6666666666666666");
+    server.buildSlotContexts(slots);
+
+    auto generate_input = makeGenerateInput(4301);
+    auto stream         = makeGenerateStream(generate_input);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    slots[0].deferred->context->generate_input = generate_input;
+    slots[0].deferred->context->setStream(stream);
+    EXPECT_FALSE(slots[0].deferred->finishOperation());
+
+    slots[0].deferred->cancel(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "FetchResponse context TTL expired"));
+    slots[0].deferred->finishLogicalTrace();
+    slots[0].deferred->finishLogicalTrace();
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+
+    auto spans = finishTelemetry();
+    ASSERT_EQ(findSpans(spans, "rtp_llm.prefill_batch_request").size(), 1u);
+    auto wait_spans = findSpans(spans, "wait");
+    ASSERT_EQ(wait_spans.size(), 1u);
+    EXPECT_EQ(wait_spans[0]->GetStatus(), trace_api::StatusCode::kError);
+    EXPECT_TRUE(findSpans(spans, "prefill").empty());
+    const auto& attributes = wait_spans[0]->GetAttributes();
+    ASSERT_NE(attributes.find("rtp_llm.phase.truncated"), attributes.end());
+    EXPECT_TRUE(nostd::get<bool>(attributes.at("rtp_llm.phase.truncated")));
+}
+
+TEST_F(PrefillBatchTraceTest, PriorityFinalizationUsesSnapshotBeforeReleasingStream) {
+    for (bool operation_active : {false, true}) {
+        TestPrefillBatchRpcServer server;
+        server.initThreadPools();
+        server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+        const int64_t                                 request_id = operation_active ? 4352 : 4351;
+        slots[0].input                                           = std::make_shared<GenerateInputPB>();
+        slots[0].input->set_request_id(request_id);
+        setTraceContext(*slots[0].input, "77777777777777777777777777777777", "7777777777777777");
+        server.buildSlotContexts(slots);
+
+        auto& deferred       = slots[0].deferred;
+        auto  generate_input = makeGenerateInput(request_id);
+        auto  stream         = makeGenerateStream(generate_input);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        deferred->context->generate_input = generate_input;
+        deferred->context->setStream(stream);
+        ASSERT_TRUE(server.deferred_contexts_->store(request_id, deferred).ok());
+        if (!operation_active) {
+            server.finishSlotOperation(request_id, deferred);
+        }
+        CancelRequestPB request;
+        request.set_request_id(request_id);
+        CancelResponsePB response;
+        ASSERT_TRUE(server.Cancel(nullptr, &request, &response).ok());
+        ASSERT_EQ(response.status(), CancelStatusPB::CANCEL_STATUS_ACCEPTED);
+        if (operation_active) {
+            EXPECT_TRUE(deferred->context->getStream());
+            EXPECT_TRUE(deferred->context->trace_span_guard);
+            server.finishSlotOperation(request_id, deferred);
+        }
+        // A tombstone is published under the map mutex after the production
+        // executor commits status, ends tracing and releases the stream.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do {
+            ASSERT_TRUE(server.Cancel(nullptr, &request, &response).ok());
+            if (response.status() == CancelStatusPB::CANCEL_STATUS_TOMBSTONED) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+        ASSERT_EQ(response.status(), CancelStatusPB::CANCEL_STATUS_TOMBSTONED);
+        EXPECT_FALSE(deferred->context->getStream());
+        EXPECT_EQ(server.deferred_contexts_->size(), 0u);
+        ASSERT_TRUE(server.Cancel(nullptr, &request, &response).ok());
+        EXPECT_EQ(response.status(), CancelStatusPB::CANCEL_STATUS_TOMBSTONED);
+    }
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 2u);
+    std::set<std::string> request_ids;
+    for (const auto* logical : logicals) {
+        EXPECT_EQ(logical->GetStatus(), trace_api::StatusCode::kError);
+        EXPECT_EQ(logical->GetDescription(), "PRIORITY_PREEMPTED");
+        const auto& logical_attributes = logical->GetAttributes();
+        request_ids.insert(nostd::get<std::string>(logical_attributes.at("request_id")));
+        EXPECT_EQ(logical_attributes.count("rtp_llm.request_id"), 0u);
+        EXPECT_EQ(nostd::get<std::string>(logical_attributes.at("error.type")), "PRIORITY_PREEMPTED");
+        EXPECT_EQ(nostd::get<int64_t>(logical_attributes.at("rtp_llm.error.code")),
+                  static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+        EXPECT_EQ(nostd::get<std::string>(logical_attributes.at("rtp_llm.error.reason")), "PRIORITY_PREEMPTED");
+    }
+    EXPECT_EQ(request_ids, (std::set<std::string>{"4351", "4352"}));
+    auto wait_spans = findSpans(spans, "wait");
+    ASSERT_EQ(wait_spans.size(), 2u);
+    for (const auto* wait : wait_spans) {
+        EXPECT_EQ(wait->GetStatus(), trace_api::StatusCode::kError);
+        EXPECT_EQ(nostd::get<std::string>(wait->GetAttributes().at("error.type")), "PRIORITY_PREEMPTED");
+        EXPECT_TRUE(nostd::get<bool>(wait->GetAttributes().at("rtp_llm.phase.truncated")));
+    }
+    EXPECT_TRUE(findSpans(spans, "prefill").empty());
+}
+
+TEST_F(PrefillBatchTraceTest, FetchNotFoundCreatesRealServerSpanWithTransportStatus) {
+    PrefillBatchRpcServer server;
+    grpc::ServerContext   server_context;
+    FetchRequestPB        request;
+    request.set_request_id(4401);
+
+    auto status = server.FetchResponse(&server_context, &request, nullptr);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+
+    auto spans       = finishTelemetry();
+    auto fetch_spans = findSpans(spans, "rtp_llm.fetch_response");
+    ASSERT_EQ(fetch_spans.size(), 1u);
+    EXPECT_EQ(fetch_spans[0]->GetSpanKind(), trace_api::SpanKind::kServer);
+    EXPECT_FALSE(fetch_spans[0]->GetParentSpanId().IsValid());
+    EXPECT_EQ(fetch_spans[0]->GetStatus(), trace_api::StatusCode::kError);
+    const auto& attributes = fetch_spans[0]->GetAttributes();
+    EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.response.status_code")), "NOT_FOUND");
+    EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/FetchResponse");
 }
 
 }  // namespace

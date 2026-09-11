@@ -269,9 +269,9 @@ def resolve_region_env() -> None:
 
     Must run in the top-level launcher BEFORE child processes spawn: the C++
     backend reads OTEL_EXPORTER_OTLP_TRACES_* strictly from its inherited
-    environment (TelemetryRuntime::init), and both runtimes read POD_IP for
-    host.ip. Disabled tracing is a pure no-op. Idempotent (only fills unset
-    keys) and fail-open.
+    environment (TelemetryRuntime::init), and both runtimes read POD_IP for the
+    rtp_llm.pod_ip resource attribute. Disabled tracing is a pure no-op.
+    Idempotent (only fills unset keys) and fail-open.
     """
     if not _env_bool("RTP_LLM_OTEL_TRACE_ENABLE", False):
         return
@@ -502,20 +502,37 @@ def _init_with_exporter_locked(exporter: Any, role: str, tp_rank: int) -> bool:
     # Unitrace topology shows each role as its own component; an explicit
     # RTP_LLM_OTEL_SERVICE_NAME still overrides globally.
     service_name = os.environ.get("RTP_LLM_OTEL_SERVICE_NAME") or f"rtp_llm_{role}"
+    # Resolved once so service.instance.id, host.name and host.ip can never
+    # disagree about which host this process runs on.
+    hostname = socket.gethostname()
+    pid = os.getpid()
     resource_attributes = {
         "service.name": service_name,
-        "service.instance.id": f"{socket.gethostname()}-{os.getpid()}",
-        "process.pid": os.getpid(),
+        # "unknown" fallback mirrors the C++ runtime: the instance id must never
+        # degrade into a bare "-<pid>".
+        "service.instance.id": f"{hostname or 'unknown'}-{pid}",
+        "process.pid": pid,
         "rtp_llm.role": role,
+        # Fixed marker the platform's GenAI statistics match on. It names the
+        # instrumentation contract being followed, not a library we link.
+        "gen_ai.instrumentation.sdk.name": "loongsuite-genai-utils",
         # rtp_llm.tp_rank is intentionally NOT a resource attribute: the
         # rank0-only gate makes it constantly 0 on every exported span (zero
         # information). tp_rank stays an init_telemetry() gate parameter only.
     }
-    # Aligned with the C++ runtime: host.ip only from a real POD_IP, never
-    # faked from hostname-pid.
+    # Aligned with the C++ runtime: host.ip carries "{hostname}-{pid}", not an IP.
+    # The platform's per-instance request/error/latency panels key off host.ip,
+    # and a pod IP is not process-unique -- frontend and backend share one pod --
+    # so an IP-valued host.ip merges them into a single bucket. The real address
+    # stays reported under rtp_llm.pod_ip. Neither host key is synthesized when
+    # the hostname is unknown: "unknown-<pid>" would pollute exactly the
+    # aggregation these fields exist to serve.
+    if hostname:
+        resource_attributes["host.name"] = hostname
+        resource_attributes["host.ip"] = f"{hostname}-{pid}"
     pod_ip = os.environ.get("POD_IP", "")
     if pod_ip:
-        resource_attributes["host.ip"] = pod_ip
+        resource_attributes["rtp_llm.pod_ip"] = pod_ip
     resource = Resource.create(resource_attributes)
     root_sampler = TraceIdRatioBased(
         _env_ratio("RTP_LLM_OTEL_TRACE_SAMPLER_RATIO", 1.0)
@@ -788,6 +805,7 @@ _CLIENT_ERROR_DESCRIPTIONS = {
     "Cancelled": "Client operation was cancelled",
     "RpcError": "Model RPC request failed",
     "TrafficLimit": "Request routing was rejected by traffic limits",
+    "FlexlbBusinessRejected": "Master rejected the schedule request",
 }
 
 
@@ -984,6 +1002,13 @@ CURRENT_TRACE_STATE: ContextVar[Optional[RequestTraceState]] = ContextVar(
     "rtp_llm_current_trace_state", default=None
 )
 
+# A short-lived child context used by in-process orchestration.  This lets a
+# real outbound RPC started inside an INTERNAL span inherit that span without
+# mutating the request root or relying on implicit thread-local propagation.
+CURRENT_INTERNAL_CONTEXT: ContextVar[Optional[Any]] = ContextVar(
+    "rtp_llm_current_internal_context", default=None
+)
+
 
 def reset_telemetry_for_test(deadline_ms: int = 2000) -> bool:
     """Reset process telemetry state for test isolation only."""
@@ -995,6 +1020,7 @@ def reset_telemetry_for_test(deadline_ms: int = 2000) -> bool:
         _provider = None
         _state = TelemetryState.UNINITIALIZED
     CURRENT_TRACE_STATE.set(None)
+    CURRENT_INTERNAL_CONTEXT.set(None)
     return True
 
 
@@ -1005,9 +1031,11 @@ class ClientSpanHandle:
         self,
         span: Any,
         error_description: Callable[[str], str] = _client_error_description,
+        context_token: Any = None,
     ):
         self._span = span
         self._error_description = error_description
+        self._context_token = context_token
         self._finished = False
         self._lock = threading.Lock()
 
@@ -1027,6 +1055,13 @@ class ClientSpanHandle:
                 if self._finished:
                     return
                 self._finished = True
+                context_token = self._context_token
+                self._context_token = None
+            if context_token is not None:
+                try:
+                    CURRENT_INTERNAL_CONTEXT.reset(context_token)
+                except Exception:  # noqa: BLE001 - context cleanup is fail-open
+                    pass
             if error is not None or error_type:
                 resolved_error_type = error_type or type(error).__name__
                 if OTEL_AVAILABLE:
@@ -1092,9 +1127,10 @@ def start_client_span(
         tracer = get_tracer()
         if tracer is None:
             return None, []
+        parent_context = CURRENT_INTERNAL_CONTEXT.get() or state.server_context
         span = tracer.start_span(
             span_name,
-            context=state.server_context,
+            context=parent_context,
             kind=trace.SpanKind.CLIENT,
             attributes=_parse_server_endpoint(target_address) or None,
         )
@@ -1132,7 +1168,8 @@ def start_internal_span(span_name: str) -> Optional[ClientSpanHandle]:
             context=state.server_context,
             kind=trace.SpanKind.INTERNAL,
         )
-        return ClientSpanHandle(span, _internal_error_description)
+        context_token = CURRENT_INTERNAL_CONTEXT.set(trace.set_span_in_context(span))
+        return ClientSpanHandle(span, _internal_error_description, context_token)
     except Exception:  # noqa: BLE001 - fail-open
         return None
 

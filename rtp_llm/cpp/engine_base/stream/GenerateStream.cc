@@ -750,6 +750,22 @@ bool GenerateStream::isFinished() const {
     return getStatus() == StreamState::FINISHED;
 }
 
+bool GenerateStream::finishWithoutGenerate() {
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        checkTimeoutWithoutLock();
+        if (getStatus() != StreamState::WAITING || hasErrorWithoutLock()) {
+            return false;
+        }
+        // No token was generated here: do not publish GenerateDone or execution timing.
+        generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
+        consumer_cv_->notify_all();
+    }
+    releaseResource();
+    reportMetricOnce();
+    return true;
+}
+
 bool GenerateStream::isActive() const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return !hasErrorWithoutLock() && getStatus() != StreamState::FINISHED;

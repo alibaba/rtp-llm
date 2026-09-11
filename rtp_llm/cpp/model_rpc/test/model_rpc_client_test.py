@@ -545,7 +545,10 @@ class ModelRpcClientTest(TestCase):
         with patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
             return_value=stub,
-        ):
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+            return_value=(None, []),
+        ) as start_span:
             responses = asyncio.run(self._run(client, input_py))
 
         self.assertEqual(len(responses), 1)
@@ -554,6 +557,9 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(stub.fetch_calls[0][0].request_id, 321)
         self.assertEqual(stub.fetch_calls[0][1]["timeout"], 1.0)
         self.assertEqual(stub.generate_calls, [])
+        start_span.assert_called_once_with(
+            "rtp_llm.fetch_response", "prefill-worker:9000"
+        )
 
     def test_enqueue_uses_generate_stream_without_master_enqueue(self):
         client = ModelRpcClient(
@@ -574,13 +580,19 @@ class ModelRpcClientTest(TestCase):
         with patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
             return_value=stub,
-        ):
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+            return_value=(None, []),
+        ) as start_span:
             responses = asyncio.run(self._run(client, input_py))
 
         self.assertEqual(len(responses), 1)
         self.assertEqual(len(stub.generate_calls), 1)
         self.assertEqual(stub.generate_calls[0][0].request_id, 322)
         self.assertEqual(stub.fetch_calls, [])
+        start_span.assert_called_once_with(
+            "rtp_llm.generate_stream_call", "worker:9000"
+        )
 
     def test_enqueue_cancels_fetch_stream_on_early_close(self):
         async def run_and_close():
@@ -698,9 +710,8 @@ class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
         self.metadata = None
         self.metadata_ready = asyncio.Event()
 
-    async def GenerateStreamCall(self, request, context):
-        self.metadata = {item.key: item.value for item in context.invocation_metadata()}
-        self.metadata_ready.set()
+    @staticmethod
+    def _response():
         outputs = GenerateOutputsPB()
         output = outputs.flatten_output
         output.output_ids.data_type = TensorPB.DataType.INT32
@@ -710,7 +721,19 @@ class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
         aux_info = output.aux_info.add()
         aux_info.input_len = 3
         aux_info.output_len = 1
-        yield outputs
+        return outputs
+
+    async def GenerateStreamCall(self, request, context):
+        self.method = "GenerateStreamCall"
+        self.metadata = {item.key: item.value for item in context.invocation_metadata()}
+        self.metadata_ready.set()
+        yield self._response()
+
+    async def FetchResponse(self, request, context):
+        self.method = "FetchResponse"
+        self.metadata = {item.key: item.value for item in context.invocation_metadata()}
+        self.metadata_ready.set()
+        yield self._response()
 
 
 class _DelayedTerminalServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
@@ -742,6 +765,75 @@ class _RealChannelPool:
 
 
 class ModelRpcClientGrpcMetadataTest(TestCase):
+    @unittest.skipUnless(tracing.OTEL_AVAILABLE, "opentelemetry SDK not available")
+    def test_trans_input_carries_distinct_w3c_context_per_request(self):
+        self.addCleanup(tracing.reset_telemetry_for_test)
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        exporter = InMemorySpanExporter()
+        self.assertTrue(tracing.reset_telemetry_for_test())
+        self.assertTrue(
+            tracing.init_telemetry_for_test(exporter, role="frontend", tp_rank=0)
+        )
+
+        def serialize(request_id, trace_id, parent_id, tracestate):
+            root = tracing.start_server_span(
+                f"root-{request_id}",
+                {
+                    "traceparent": f"00-{trace_id}-{parent_id}-01",
+                    "tracestate": tracestate,
+                    "baggage": "llm.user.id=must-not-propagate",
+                },
+            )
+            self.assertIsNotNone(root)
+            expected_server_span_id = format(
+                root.server_span.get_span_context().span_id, "016x"
+            )
+            input_pb = trans_input(
+                GenerateInput(
+                    token_ids=torch.tensor([1, 2, 3]),
+                    generate_config=GenerateConfig(),
+                    request_id=request_id,
+                    mm_inputs=[],
+                )
+            )
+            root.finish()
+            return input_pb.request_info.trace_context, expected_server_span_id
+
+        first, first_server_span_id = serialize(
+            951,
+            "11111111111111111111111111111111",
+            "1111111111111111",
+            "vendor=one",
+        )
+        second, second_server_span_id = serialize(
+            952,
+            "22222222222222222222222222222222",
+            "2222222222222222",
+            "vendor=two",
+        )
+        self.assertIn("-11111111111111111111111111111111-", first.traceparent)
+        self.assertIn("-22222222222222222222222222222222-", second.traceparent)
+        self.assertEqual(first.traceparent.split("-")[2], first_server_span_id)
+        self.assertEqual(second.traceparent.split("-")[2], second_server_span_id)
+        self.assertNotEqual(first.traceparent, second.traceparent)
+        self.assertEqual(first.tracestate, "vendor=one")
+        self.assertEqual(second.tracestate, "vendor=two")
+
+        self.assertTrue(tracing.shutdown_telemetry())
+        CURRENT_TRACE_STATE.set(None)
+        disabled = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(),
+                request_id=953,
+                mm_inputs=[],
+            )
+        )
+        self.assertFalse(disabled.request_info.HasField("trace_context"))
+
     def test_trace_disabled_full_consumer_waits_for_real_grpc_terminal(self):
         self.addCleanup(tracing.reset_telemetry_for_test)
 
@@ -829,6 +921,67 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
                     spans["rtp_llm.generate_stream_call"].parent.span_id,
                     spans["root"].context.span_id,
                 )
+            finally:
+                await channel.close()
+                await server.stop(None)
+                self.assertTrue(tracing.reset_telemetry_for_test())
+
+        asyncio.run(run())
+
+    @unittest.skipUnless(tracing.OTEL_AVAILABLE, "opentelemetry SDK not available")
+    def test_fetch_traceparent_name_usage_and_status_cross_real_grpc_boundary(self):
+        self.addCleanup(tracing.reset_telemetry_for_test)
+
+        async def run():
+            server = grpc.aio.server()
+            servicer = _MetadataCaptureServicer()
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+
+            from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+                InMemorySpanExporter,
+            )
+
+            exporter = InMemorySpanExporter()
+            self.assertTrue(tracing.reset_telemetry_for_test())
+            self.assertTrue(
+                tracing.init_telemetry_for_test(exporter, role="frontend", tp_rank=0)
+            )
+            root = tracing.start_server_span("fetch-root", {})
+            client = ModelRpcClient([], {}, max_rpc_timeout_ms=1000)
+            client._channel_pool = _RealChannelPool(channel)
+            input_py = GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(
+                    timeout_ms=1000,
+                    role_addrs=[_prefill_role_addr("127.0.0.1", port)],
+                ),
+                request_id=954,
+                mm_inputs=[],
+                enqueued_by_master=True,
+            )
+            try:
+                responses = [response async for response in client.enqueue(input_py)]
+                await asyncio.wait_for(servicer.metadata_ready.wait(), timeout=5)
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(servicer.method, "FetchResponse")
+                self.assertIn("traceparent", servicer.metadata)
+                root.finish()
+                self.assertTrue(tracing.shutdown_telemetry())
+                spans = {span.name: span for span in exporter.get_finished_spans()}
+                fetch_span = spans["rtp_llm.fetch_response"]
+                self.assertEqual(
+                    fetch_span.parent.span_id, spans["fetch-root"].context.span_id
+                )
+                self.assertEqual(
+                    fetch_span.attributes["rpc.response.status_code"], "OK"
+                )
+                self.assertEqual(fetch_span.attributes["gen_ai.usage.input_tokens"], 3)
+                self.assertEqual(fetch_span.attributes["gen_ai.usage.output_tokens"], 1)
             finally:
                 await channel.close()
                 await server.stop(None)
@@ -962,6 +1115,7 @@ class _FakeClientSpan:
         self.error_type = None
         self.finished = False
         self.finish_calls = 0
+        self.end_count = 0
         self.finished_event = asyncio.Event()
 
     def set_attribute(self, key, value):
@@ -972,6 +1126,7 @@ class _FakeClientSpan:
         self.finish_calls += 1
         if self.finished:
             return
+        self.end_count += 1
         self.finished = True
         if error is not None or error_type:
             self.status = "ERROR"
@@ -987,6 +1142,7 @@ class _FakeTraceState:
     def __init__(self, settled_ok=None, renderer_completed=False):
         self.settled_ok = settled_ok
         self.renderer_completed = renderer_completed
+        self.server_context = None
 
     def set_attribute(self, key, value):
         pass
@@ -1024,6 +1180,9 @@ class _SpanAwareStub:
         self._terminal_delay = terminal_delay
         self._terminal_never = terminal_never
         self.iterator = None
+
+    def FetchResponse(self, request, timeout=None, metadata=None):
+        return self.GenerateStreamCall(request, timeout=timeout, metadata=metadata)
 
     def GenerateStreamCall(self, input_pb, timeout=None, metadata=None):
         total, finish_last, terminal_error, terminal_delay, terminal_never = (
@@ -1568,6 +1727,115 @@ class ClientSpanSettlementTest(TestCase):
         self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
         for key in self.USAGE_KEYS:
             self.assertIn(key, span.attributes)
+
+    def test_fetch_cancellation_records_observed_latency_before_single_end(self):
+        async def run(span, client, exception_type, output_len, sequences):
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+            outputs = GenerateOutputs(
+                generate_outputs=[
+                    _FakeOut(False, output_len=output_len) for _ in range(sequences)
+                ]
+            )
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+                return_value=outputs,
+            ):
+                gen = client.enqueue(input_py)
+                await gen.__anext__()
+                with self.assertRaises(exception_type):
+                    await gen.athrow(exception_type())
+                await gen.aclose()
+            self.assertTrue(client._test_stub.iterator.cancelled)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "Cancelled")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertEqual(span.end_count, 1)
+            ttft = span.attributes.get("rtp_llm.engine.time_to_first_token_ms")
+            tpot = span.attributes.get("rtp_llm.engine.time_per_output_token_ms")
+            self.assertEqual(ttft, 8.5 if output_len > 0 else None)
+            self.assertEqual(tpot, 5.75 if output_len == 3 and sequences == 1 else None)
+
+        for exception_type in (GeneratorExit, asyncio.CancelledError):
+            for output_len, sequences in ((0, 1), (1, 1), (3, 1), (3, 2)):
+                with self.subTest(
+                    exception=exception_type, tokens=output_len, sequences=sequences
+                ):
+                    span = _FakeClientSpan()
+                    client = self._build_client(span, total=1, finish_last=False)
+                    asyncio.run(
+                        run(span, client, exception_type, output_len, sequences)
+                    )
+
+    def test_fetch_cleanup_recancellation_records_latency_before_single_end(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=3, finish_last=False)
+
+        async def run():
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+            gen = client.enqueue(input_py)
+            for _ in range(3):
+                await gen.__anext__()
+            # Cancel during the first teardown wait, then again in finally.
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client._wait_for_rpc_termination",
+                side_effect=asyncio.CancelledError,
+            ) as wait:
+                with self.assertRaises(asyncio.CancelledError):
+                    await gen.aclose()
+                self.assertEqual(wait.await_count, 2)
+            self.assertTrue(client._test_stub.iterator.cancelled)
+            self.assertEqual(span.end_count, 1)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "Cancelled")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertEqual(
+                span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5
+            )
+            self.assertEqual(
+                span.attributes["rtp_llm.engine.time_per_output_token_ms"], 5.75
+            )
+
+        asyncio.run(run())
+
+    def test_fetch_cancel_before_any_output_omits_latency(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=0, terminal_never=True)
+
+        async def run():
+            input_py = self._make_input()
+            input_py.enqueued_by_master = True
+            input_py.generate_config.role_addrs = [
+                _prefill_role_addr("127.0.0.1", 1234)
+            ]
+
+            async def consume():
+                async for _ in client.enqueue(input_py):
+                    self.fail("no output was expected")
+
+            task = asyncio.create_task(consume())
+            while client._test_stub.iterator is None:
+                await asyncio.sleep(0)
+            await asyncio.wait_for(
+                client._test_stub.iterator.code_started.wait(), timeout=5
+            )
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(span.end_count, 1)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+            self.assertNotIn("rtp_llm.engine.time_to_first_token_ms", span.attributes)
+            self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
+
+        asyncio.run(run())
 
     def test_stop_word_break_with_renderer_milestone_keeps_span_ok(self):
         """Stop-word truncation is normal before the root span is settled.

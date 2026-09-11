@@ -8,14 +8,17 @@ RTP-LLM 内置 OpenTelemetry trace（Python frontend + C++ engine 双侧自产 s
 export RTP_LLM_OTEL_TRACE_ENABLE=1        # 总开关，默认关闭
 # 二选一：
 export RTP_LLM_OTEL_REGION=cn-hangzhou    # region 映射自动解析 endpoint/headers/CA
-# 或显式指定 endpoint：
+# 或显式指定（此时需自行把 endpoint 和鉴权 headers 一起给齐）：
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://<collector>/v1/traces
+# collector 需鉴权时必须同时给 headers，否则导出被拒（401/403）；
+# 引擎不把 headers 传给 exporter 构造参数，而是依赖 OTel SDK 从该 env 读取。
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS='x-arms-license-key=<key>,x-arms-project=<proj>,x-cms-workspace=<ws>'
 ```
 
 行为要点（代码依据：`tracing.py` / `cpp/telemetry/TelemetryRuntime.cc`）：
 
 - **fail-open**：telemetry 任何初始化/导出失败只降级关闭，不影响推理。
-- **仅 tp_rank 0 产 span**，其余 rank 自动禁用；DP 部署下每个 DP 组的 tp_rank0 均产 span（请求只路由到一组，trace 不重复）。C++ 侧 Resource 带 `rtp_llm.dp_rank` / `rtp_llm.world_rank` 用于区分副本；Python frontend 侧 Resource 只有 `service.name` / `service.instance.id` / `process.pid` / `rtp_llm.role`，副本靠 `service.instance.id`（`hostname-pid`）区分。
+- **仅 tp_rank 0 产 span**，其余 rank 自动禁用；DP 部署下每个 DP 组的 tp_rank0 均产 span（请求只路由到一组，trace 不重复）。C++ 侧 Resource 带 `rtp_llm.dp_rank` / `rtp_llm.world_rank` 用于区分副本；Python frontend 侧无 rank 字段，副本靠 `service.instance.id` 区分（见第 3 节）。
 - 开关打开但无 endpoint 时 telemetry 静默禁用（error 日志可查）。
 
 ## 2. endpoint 解析优先级
@@ -31,20 +34,36 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://<collector>/v1/traces
 `/etc/rtp_llm/trace_regions.json`）。region 解析结果不会覆盖用户已显式设置的 env。
 region 解析在 launcher 进程（`start_server.py`）中执行后随环境继承给 C++ backend 子进程。
 
-## 3. POD_IP 与平台指标面板（重要）
+## 3. 实例身份与平台指标面板
 
-Python/C++ 两侧均在 **`POD_IP` 环境变量非空**时向 Resource 写入 `host.ip`。
-观测平台的请求数/错误数/耗时面板依赖该属性做实例维度的过滤统计，
-**span 缺少它时这些面板恒为"暂无数据"**——trace 本身仍然完整，只是指标面板统计不到。
+观测平台的请求数/错误数/耗时面板依赖 Resource 的 `host.ip` 做实例维度的过滤统计，
+**span 缺少它时这些面板恒为“暂无数据”**——trace 本身仍然完整，只是指标面板统计不到。
 
-- **k8s 部署**：`POD_IP` 通常已由 downward API 注入，无需额外配置。
-- **非 k8s 部署（物理机 / docker 直跑）**：必须显式设置，例如：
+各侧默认 Resource 属性：
+
+| 属性 | 取值 | 写入条件 |
+|---|---|---|
+| `host.name` | 主机名 | 主机名可取到时 |
+| `host.ip` | `{主机名}-{pid}`（**不是 IP**） | 同上 |
+| `service.instance.id` | `{主机名}-{pid}`，主机名缺失时为 `unknown-{pid}` | Python / C++ 自动写入；FlexLB 仅保留显式配置 |
+| `rtp_llm.pod_ip` | `POD_IP` | `POD_IP` 非空时 |
+| `gen_ai.instrumentation.sdk.name` | 固定 `loongsuite-genai-utils` | 恒写 |
+
+部署要点：
+
+- `host.name` / `host.ip` 由进程自行取主机名得到，**无需配置**；`$HOSTNAME` 不作为取值来源，
+  设置该变量不会改变它们。引擎进程取 `gethostname(2)`，FlexLB 读取 `/proc/sys/kernel/hostname`，
+  均取当前 UTS 命名空间的内核主机名。同一命名空间且主机名未变化时，三端取值一致。
+  取不到或为空时这两个键直接省略，不回退 `/etc/hostname` 或环境变量，也不写占位值；
+  部署显式配置的 Resource 属性仍保留。
+- `POD_IP` **不再影响指标面板**，只决定 `rtp_llm.pod_ip` 是否有值。k8s 下通常已由 downward API
+  注入；非 k8s 部署如需该字段，显式设置：
 
   ```bash
   export POD_IP=$(hostname -i | awk '{print $1}')
   ```
 
-注：时间窗内无错误请求时错误数显示"暂无数据"属正常现象（口径为 OTel status=ERROR 的 span 数）。
+注：时间窗内无错误请求时错误数显示“暂无数据”属正常现象（口径为 OTel status=ERROR 的 span 数）。
 
 ## 4. 环境变量一览
 
@@ -59,17 +78,75 @@ Python/C++ 两侧均在 **`POD_IP` 环境变量非空**时向 Resource 写入 `h
 | `RTP_LLM_OTEL_BSP_SCHEDULE_DELAY_MS` | `5000` | BSP 导出周期 |
 | `RTP_LLM_OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | `512` | 单批导出条数（自动 clamp 到不超过队列上限） |
 | `RTP_LLM_OTEL_HTTP_TIMEOUT_MS` | `3000` | OTLP HTTP 导出超时 |
-| `POD_IP` | 空 | 非空时写 Resource `host.ip`（指标面板依赖，见第 3 节） |
+| `POD_IP` | 空 | 非空时写 Resource `rtp_llm.pod_ip`（不影响指标面板，见第 3 节） |
 
 以上默认值 Python 与 C++ 两侧一致；两侧读取同一组环境变量，无需分别配置。
 
-## 5. 部署后验证
+## 5. FlexLB（Java master）的 trace
+
+FlexLB 是独立的 Java 进程，与 Python/C++ 引擎共用
+`RTP_LLM_OTEL_TRACE_ENABLE` 总开关，导出配置使用标准 `OTEL_*` 环境变量。
+开关为真且配置了 OTLP endpoint 时，`Application` 会在 Spring 启动前自动启用
+OpenTelemetry provider；无需额外添加 JVM `-D` 参数或 Java agent。
+
+FlexLB 内的埋点分两部分：
+- **手工埋点**（`GrpcTraceInterceptor` + `FlexlbTrace`）：负责 Schedule 的 SERVER span、
+  业务属性（`flexlb.schedule.*`、`rtp_llm.*`）与业务拒绝的 ERROR 状态。默认只启用
+  trace exporter；metrics/log exporter 默认关闭。
+- **自动埋点**（OpenTelemetry Java agent，可选）：额外补 gRPC 客户端/服务端 span、
+  `rpc.*` / `network.*` 等属性。当前生产启动脚本不加载 `-javaagent`。
+
+### 5.1 手工埋点的最小开启方式
+
+```bash
+export RTP_LLM_OTEL_TRACE_ENABLE=1
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://<collector>/apm/trace/opentelemetry/otlp/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS='x-arms-license-key=<key>,x-arms-project=<proj>,x-cms-workspace=<ws>'
+
+java -jar flexlb.jar ...
+```
+
+应用默认设置 `OTEL_SERVICE_NAME=rtp_llm_flexlb`，并关闭 metrics/log exporter；部署侧显式配置
+对应 `OTEL_*` 变量时以用户配置为准。若总开关关闭或 endpoint 缺失，provider 保持 no-op，
+不影响调度或远端 traceparent 透传。`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 承载接入凭证，
+应通过 Secret 在运行时注入，不应硬编码进镜像或发布包（与第 2 节口径一致）。
+
+### 5.2 启用自动埋点（Java agent，可选）
+
+若还想要 gRPC/HTTP 层的自动 span，再额外挂 agent：
+
+```bash
+java -javaagent:/path/to/opentelemetry-javaagent.jar -jar flexlb.jar ...
+```
+
+启用 agent 前需要知道的两点（均为实测结论）：
+
+1. **成功请求的 Schedule span 状态是 `UNSET`，不是 `OK`。** agent 拥有 SERVER span 时
+   由 agent 结束，而 OTel 规范要求 instrumentation 成功时不设 OK。按 `status == OK`
+   过滤成功请求的看板会漏掉这些 span —— 应改用「非 ERROR」或依赖 `flexlb.schedule.code`。
+   （业务拒绝仍会被手工埋点标为 `ERROR` + `error.type=FLEXLB_BUSINESS_REJECTED`，不受影响。）
+2. **agent 会显著放大 span 量。** 实测约 88% 是定时健康检查等后台任务产生的 span，
+   接入前需评估 collector 侧的采样与配额。
+
+手工 SERVER span 与 agent SERVER span **不会重复**：`GrpcTraceInterceptor` 检测到已有
+current span 时复用它（`ownsSpan=false`），不会再建第二个。
+
+## 6. 部署后验证
 
 1. 发一条 chat completions 请求（trace 仅覆盖 `/v1/chat/completions` 入口）。
 2. 从 access log 取 trace_id：`grep <prompt关键词> logs/access_r*_s*.log`，取 `trace_id` 字段。
 3. 确认导出无失败：`grep 'failed to export' logs/*.log` 应无命中。
-4. 在观测平台用 trace_id 检索，确认 span 树完整（PD 分离 11 span，含 decode 侧 `load_cache` 子 span；Fusion 6 span）、
+4. 在观测平台用 trace_id 检索，确认 span 树完整、
    流式请求的 POST span 附加信息 Events(1) 为 `first_response_chunk`；非流式请求无该 event、
-   平台上能看到该实例 IP（`<POD_IP>`）、且请求数/耗时指标有数据。
+   平台上该实例显示为 `host.ip`（即 `{主机名}-{pid}`，不是 IP）、且请求数/耗时指标有数据。
+
+   按拓扑对照 span 数（实测值）：
+
+   | 拓扑 | span 数 | 特征 span |
+   |---|---|---|
+   | Fusion | 6 | — |
+   | PD 分离（frontend 直连 prefill） | 11 | `rtp_llm.prefill_generate_stream_call`；decode 侧 `load_cache` |
+   | PD 分离 + master 凑批 | 14 | `rtp_llm.prefill_batch_request`、`rtp_llm.fetch_response`；FlexLB 的 `rtp_llm.flexlb.schedule` |
 
 新 service.name 首批 trace 的平台索引可能有分钟级延迟，属正常现象。

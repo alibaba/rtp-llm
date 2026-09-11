@@ -451,8 +451,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
     GenerateOutputsPB allocate_response;
+    prefill_context.supports_prefill_completion = false;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    prefill_context.supports_prefill_completion = allocate_response.supports_prefill_completion();
     if (prefillTraceLogEnabled() && allocate_response.has_error_info()
         && allocate_response.error_info().error_code() != 0) {
         RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "
@@ -556,6 +558,16 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 
     prefill_context.dequeueStreamFromRuntimeMeta();
     if (!prefill_context.getStream()->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+        if (prefill_context.supports_prefill_completion
+            && prefill_context.getStream()->hasEvent(StreamEvents::GenerateDone)
+            && !prefill_context.getStream()->hasError()) {
+            GenerateRequestPB completion;
+            completion.set_stage(RemoteStage::PREFILL_COMPLETE);
+            completion.set_client_id(process_id_);
+            completion.set_request_id(prefill_context.request_id);
+            CLIENT_GRPC_RET_IF_ERROR(
+                prefill_context, prefill_context.client_stream->Write(completion), ErrorCode::REMOTE_GENERATE_FAILED);
+        }
         RTP_LLM_LOG_DEBUG("request [%ld] pd-sep prefill finished locally without remote generate, "
                           "skipping remote generate stages",
                           prefill_context.request_id);
@@ -823,10 +835,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             "rtp_llm.prefill_generate_stream_call", server_context, true, "RpcService/GenerateStreamCall");
         prefill_context.trace_span_guard =
             std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &prefill_context.error_status);
-        // Bailian Unitrace index key (string) + internal numeric field
+        // Bailian Unitrace index key: the internal request ID's string form.
         prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
                                                        std::to_string(prefill_context.request_id));
-        prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, prefill_context.request_id);
     }
     telemetry::PhaseSpanSynthesisScope phase_span_scope([&prefill_context](bool exception_unwinding) {
         if (!prefill_context.trace_span_guard || !prefill_context.trace_span_guard->valid()) {

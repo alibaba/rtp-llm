@@ -235,12 +235,18 @@ message ReleaseLeasePB {
     repeated string lease_id = 1;
 }
 
+message TraceContextPB {
+    string traceparent = 1;
+    string tracestate = 2;
+}
+
 message RequestInfoPB {
     string frontend_ip = 1;
     string dash_ip = 2;
     string trace_id = 3;
     string request_id = 4;
     string source_role = 5;
+    TraceContextPB trace_context = 6;
 }
 
 message GenerateInputPB {
@@ -320,6 +326,8 @@ message GenerateOutputsPB {
     int64 begin_compute_time = 7;
     int64 compute_done_time = 8;
     RpcErrorPB error_info = 9;
+    // Advertised only by the Decode ALLOCATE response.
+    bool supports_prefill_completion = 10;
 }
 
 // return to python client
@@ -369,6 +377,8 @@ enum RemoteStage {
     ALLOCATE = 0;
     LOAD = 1;
     GENERATE = 2;
+    // Prefill completed locally after LOAD; no Decode execution is required.
+    PREFILL_COMPLETE = 3;
 }
 
 message GenerateRequestPB {

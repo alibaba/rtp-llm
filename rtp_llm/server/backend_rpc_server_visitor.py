@@ -373,7 +373,6 @@ class BackendRPCServerVisitor:
         if route_span is not None:
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
             route_span.set_attribute(trace_attrs.REQUEST_ID, str(input.request_id))
-            route_span.set_attribute(trace_attrs.RTP_LLM_REQUEST_ID, input.request_id)
         route_source = "none"
         route_error_type = ""
         try:

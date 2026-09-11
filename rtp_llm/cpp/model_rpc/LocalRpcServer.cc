@@ -294,9 +294,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         generate_context.trace_span_guard =
             std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &generate_context.error_status);
         // `request_id` is the Bailian Unitrace index key (string, verified);
-        // rtp_llm.request_id stays as the internal numeric field.
         generate_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId, std::to_string(request_id));
-        generate_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, request_id);
     }
     telemetry::PhaseSpanSynthesisScope phase_span_scope([&generate_context](bool exception_unwinding) {
         if (!generate_context.trace_span_guard || !generate_context.trace_span_guard->valid()) {

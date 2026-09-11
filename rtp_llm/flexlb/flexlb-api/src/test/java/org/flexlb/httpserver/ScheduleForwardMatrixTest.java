@@ -5,9 +5,9 @@ import ch.qos.logback.core.read.ListAppender;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -178,7 +178,7 @@ class ScheduleForwardMatrixTest {
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.MasterForwardResult.failed(
                                 "UNAVAILABLE", DEAD_MASTER)));
-        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any())).thenReturn(
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class))).thenReturn(
                 CompletableFuture.completedFuture(
                         FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
 
@@ -225,7 +225,7 @@ class ScheduleForwardMatrixTest {
 
         verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
         verify(grpcForwarder, never())
-                .forwardCompensatingCancelToMaster(any(), any());
+                .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
         verify(routeService, times(1)).route(any());
         assertSuccessfulResponse(observer);
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
@@ -261,7 +261,7 @@ class ScheduleForwardMatrixTest {
         verify(observer, never()).onError(any());
         verify(routeService, never()).route(any());
         verify(grpcForwarder, never())
-                .forwardCompensatingCancelToMaster(any(), any());
+                .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
         verify(requestToken, times(1)).close();
 
         // The forwarding node writes no PV record: no local scheduling trace.
@@ -307,7 +307,7 @@ class ScheduleForwardMatrixTest {
         service.schedule(request(90_006L), observer);
 
         verify(grpcForwarder, never())
-                .forwardCompensatingCancelToMaster(any(), any());
+                .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
         verify(routeService, never()).route(any());
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
         assertFalse(response.getSuccess());
@@ -477,7 +477,8 @@ class ScheduleForwardMatrixTest {
                 org.mockito.ArgumentCaptor.forClass(
                         FlexlbScheduleProtocol.FlexlbCancelRequestPB.class);
         verify(grpcForwarder, times(1)).forwardCompensatingCancelToMaster(
-                captor.capture(), org.mockito.ArgumentMatchers.eq(DEAD_MASTER));
+                captor.capture(), org.mockito.ArgumentMatchers.eq(DEAD_MASTER),
+                any(io.opentelemetry.context.Context.class));
         return captor.getValue();
     }
 

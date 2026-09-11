@@ -8,11 +8,24 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.api.trace.TraceFlags;
+import io.opentelemetry.api.trace.TraceState;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.data.SpanData;
+import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
+import io.opentelemetry.sdk.trace.export.SpanExporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -42,6 +55,148 @@ class FlexlbGrpcForwarderAsyncTest {
 
     private static final String MASTER_HTTP_ADDRESS = "10.0.0.2:7001";
     private static final String MASTER_CHANNEL_KEY = "10.0.0.2:7003";
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.SECONDS)
+    void asyncScheduleTracesActualGrpcSuccessRejectionAndTransportError() throws Exception {
+        for (int outcome = 0; outcome < 5; outcome++) {
+            AtomicReference<StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>> response = new AtomicReference<>();
+            AtomicReference<SpanContext> serverContext = new AtomicReference<>();
+            CountDownLatch received = new CountDownLatch(1);
+            try (TraceCapture capture = new TraceCapture();
+                 RpcFixture fixture = RpcFixture.start((request, observer) -> {
+                     serverContext.set(FlexlbTrace.spanContext(GrpcTraceInterceptor.getOtelContext()));
+                     response.set(observer);
+                     received.countDown();
+                 })) {
+                FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, mock(EngineHealthReporter.class));
+                CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending;
+                try (var scope = traceParent().makeCurrent()) {
+                    pending = forwarder.forwardScheduleToMaster(request(901L));
+                }
+                assertTrue(received.await(3, TimeUnit.SECONDS));
+                assertTrue(capture.spans.isEmpty(), "async return must not end the CLIENT span");
+                assertEquals("one", serverContext.get().getTraceState().get("vendor"));
+                int selected = outcome;
+                java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    if (selected == 2) {
+                        response.get().onError(Status.UNAVAILABLE.asRuntimeException());
+                    } else {
+                        response.get().onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                                .setSuccess(selected == 0)
+                                .setCode(selected == 0 ? 200 : selected == 1 ? 8430 : selected == 3 ? 500 : 8513)
+                                .build());
+                        response.get().onCompleted();
+                    }
+                }).join();
+                await(pending);
+                assertTrue(capture.ended.await(3, TimeUnit.SECONDS));
+                assertEquals(2, capture.spans.size());
+                SpanData client = capture.client();
+                SpanData server = capture.spans.stream().filter(s -> s.getKind()
+                        == io.opentelemetry.api.trace.SpanKind.SERVER).findFirst().orElseThrow();
+                assertEquals("rtp_llm.flexlb.forward_schedule", client.getName());
+                assertEquals("1111111111111111", client.getParentSpanId());
+                assertEquals(client.getSpanId(), server.getParentSpanId());
+                assertEquals("11111111111111111111111111111111", server.getTraceId());
+                assertEquals("901", client.getAttributes().get(io.opentelemetry.api.common.AttributeKey.stringKey("request_id")));
+                assertEquals(outcome == 0 ? io.opentelemetry.api.trace.StatusCode.OK : io.opentelemetry.api.trace.StatusCode.ERROR,
+                        client.getStatus().getStatusCode());
+                assertEquals(outcome == 2 ? "UNAVAILABLE" : "OK", client.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(FlexlbTrace.RPC_RESPONSE_STATUS_CODE)));
+                String[] errorTypes = {null, "FLEXLB_BUSINESS_REJECTED", "UNAVAILABLE",
+                        "FLEXLB_INTERNAL_ERROR", "FLEXLB_SCHEDULE_FAILED"};
+                assertEquals(errorTypes[outcome], client.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(FlexlbTrace.ERROR_TYPE)));
+                forwarder.shutdown();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void explicitCancellationEndsForwardClientOnlyOnce() throws Exception {
+        CountDownLatch received = new CountDownLatch(1);
+        try (TraceCapture capture = new TraceCapture();
+             RpcFixture fixture = RpcFixture.start((request, observer) -> received.countDown())) {
+            FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, mock(EngineHealthReporter.class));
+            CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending;
+            try (var scope = traceParent().makeCurrent()) {
+                pending = forwarder.forwardScheduleToMaster(request(902L));
+            }
+            assertTrue(received.await(3, TimeUnit.SECONDS));
+            pending.toCompletableFuture().cancel(true);
+            pending.toCompletableFuture().cancel(true);
+            assertTrue(capture.ended.await(3, TimeUnit.SECONDS));
+            assertEquals(2, capture.spans.size());
+            assertEquals("CANCELLED", capture.client().getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.stringKey(FlexlbTrace.RPC_RESPONSE_STATUS_CODE)));
+            forwarder.shutdown();
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void compensatingCancelKeepsExplicitTraceOutsideCancelledGrpcContext() throws Exception {
+        try (TraceCapture capture = new TraceCapture();
+             RpcFixture fixture = RpcFixture.startCancel((request, observer) -> {
+                 assertFalse(Context.current().isCancelled());
+                 assertEquals("one", FlexlbTrace.spanContext(GrpcTraceInterceptor.getOtelContext()).getTraceState().get("vendor"));
+                 observer.onNext(FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(true).build());
+                 observer.onCompleted();
+             })) {
+            FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, mock(EngineHealthReporter.class));
+            Context.CancellableContext cancelled = Context.current().withCancellation();
+            cancelled.cancel(null);
+            var result = cancelled.call(() -> Context.ROOT.call(() -> forwarder.forwardCompensatingCancelToMaster(
+                    FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder().setRequestId(903L).build(),
+                    MASTER_HTTP_ADDRESS, traceParent()))).toCompletableFuture().get(3, TimeUnit.SECONDS);
+            assertTrue(result.response().getFound());
+            assertTrue(capture.ended.await(3, TimeUnit.SECONDS));
+            assertEquals("rtp_llm.flexlb.cancel", capture.client().getName());
+            assertEquals("1111111111111111", capture.client().getParentSpanId());
+            assertEquals("11111111111111111111111111111111", capture.client().getTraceId());
+            forwarder.shutdown();
+        }
+    }
+
+    private static io.opentelemetry.context.Context traceParent() {
+        return io.opentelemetry.context.Context.root().with(Span.wrap(SpanContext.create(
+                "11111111111111111111111111111111", "1111111111111111", TraceFlags.getSampled(),
+                TraceState.builder().put("vendor", "one").build())));
+    }
+
+    private static final class TraceCapture implements SpanExporter, AutoCloseable {
+        final java.util.List<SpanData> spans = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final CountDownLatch ended = new CountDownLatch(2);
+        final OpenTelemetrySdk sdk;
+
+        TraceCapture() {
+            FlexlbTrace.configureEnabled(true);
+            GlobalOpenTelemetry.resetForTest();
+            sdk = OpenTelemetrySdk.builder().setTracerProvider(SdkTracerProvider.builder()
+                    .addSpanProcessor(SimpleSpanProcessor.create(this)).build()).build();
+            GlobalOpenTelemetry.set(sdk);
+        }
+
+        SpanData client() {
+            return spans.stream().filter(s -> s.getKind() == io.opentelemetry.api.trace.SpanKind.CLIENT)
+                    .findFirst().orElseThrow();
+        }
+
+        public CompletableResultCode export(java.util.Collection<SpanData> batch) {
+            spans.addAll(batch);
+            batch.forEach(ignored -> ended.countDown());
+            return CompletableResultCode.ofSuccess();
+        }
+        public CompletableResultCode flush() { return CompletableResultCode.ofSuccess(); }
+        public CompletableResultCode shutdown() { return CompletableResultCode.ofSuccess(); }
+        public void close() {
+            FlexlbTrace.configureEnabled(false);
+            sdk.close();
+            GlobalOpenTelemetry.resetForTest();
+        }
+    }
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
@@ -290,9 +445,11 @@ class FlexlbGrpcForwarderAsyncTest {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         when(consistency.getMasterHostIpPort()).thenReturn(currentMaster);
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(new org.flexlb.config.FlexlbConfig());
         FlexlbGrpcForwarder forwarder = new FlexlbGrpcForwarder(
                 consistency,
-                mock(ConfigService.class),
+                config,
                 reporter,
                 mock(EventLoopGroup.class),
                 mock(Executor.class));
@@ -368,6 +525,7 @@ class FlexlbGrpcForwarderAsyncTest {
                 FlexlbServiceGrpc.FlexlbServiceImplBase service) throws Exception {
             Server server = NettyServerBuilder.forPort(0)
                     .directExecutor()
+                    .intercept(new GrpcTraceInterceptor())
                     .addService(service)
                     .build()
                     .start();
