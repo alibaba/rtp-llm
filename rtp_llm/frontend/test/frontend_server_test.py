@@ -414,11 +414,18 @@ class FrontendServerTest(TestCase):
             },
         }
 
-        with self.assertRaises(FtRuntimeException) as raised:
-            asyncio.run(self.frontend_server.batch_infer(request, FakeRawRequest()))
+        response = asyncio.run(
+            self.frontend_server.batch_infer(request, FakeRawRequest())
+        )
 
-        self.assertEqual(ExceptionType.INVALID_PARAMS, raised.exception.exception_type)
+        self.assertEqual(500, response.status_code)
+        self.assertEqual(
+            ExceptionType.INVALID_PARAMS.value, json.loads(response.body)["error_code"]
+        )
         self.assertEqual([], self.frontend_server._frontend_worker.batch_calls)
+        self.assertEqual(
+            0, self.frontend_server._global_controller.current_concurrency.value
+        )
 
     def test_external_root_request_cannot_hide_backend_in_generation_config(self):
         response = asyncio.run(

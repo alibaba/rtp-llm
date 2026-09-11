@@ -567,13 +567,7 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
     async def batch_infer(self, req: dict, raw_request: Request):
-        from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
-
-        self._validate_dispatcher_routing_context(req, raw_request)
-        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
-        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
-        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
-        # only one slot regardless of N.
+        # Preserve the FE's existing one-slot-per-HTTP-batch concurrency accounting.
         sequence = self._global_controller.increment() % 4096
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
@@ -582,6 +576,8 @@ class FrontendServer(object):
             sequence,
         )
         try:
+            req[request_id_field_name] = request_id
+            self._validate_dispatcher_routing_context(req, raw_request)
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
             generate_config = req.get("generate_config", {})
@@ -595,6 +591,8 @@ class FrontendServer(object):
                 headers=request_headers,
             )
             return ORJSONResponse(content=result.model_dump(exclude_none=True))
+        except Exception as e:
+            return self._handle_exception(req, e, path="/batch_infer")
         finally:
             self._global_controller.decrement()
 

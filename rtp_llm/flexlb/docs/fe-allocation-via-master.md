@@ -22,7 +22,9 @@ export FLEXLB_CONFIG='{
 `workerRegistry.engineType` defaults to `LLM`. LLM workers must have a published, alive endpoint
 from the normal gRPC status synchronization. Embedding workers expose ARPC instead of that gRPC
 API, so their availability comes from service discovery. Discovery returning no workers makes
-embedding batch selection unavailable. Register the HTTP base port in an `http` endpoint;
+embedding batch selection unavailable. In `/rtp_llm/master/info`, embedding `alive` reflects
+the discovery snapshot and equals `discovered`; it does not represent an independent health probe.
+Register the HTTP base port in an `http` endpoint;
 embedding targets return `arpc_port = http_port + 1`, while LLM targets return `grpc_port`.
 The existing `MODEL_SERVICE_CONFIG` supplies the model, role and discovery address.
 Startup also requires the deployment's `HIPPO_ROLE`, as on main, even when consistency is disabled.
@@ -76,7 +78,9 @@ With consistency enabled, followers forward batch scheduling to the elected mast
 path rejects self-forwarding and a second forwarding hop, matching the mainline gRPC guard.
 An unknown leader, failed forwarding request or missing batch endpoint fails the request; a
 follower does not allocate locally in these cases. Without consistency, each instance allocates
-locally and the cursors are independent.
+locally and the cursors are independent. Upgrade every potential master to a build providing
+`/rtp_llm/batch_schedule` before enabling master FE allocation; mixed versions with an older
+master return an explicit allocation failure.
 
 ## Allocation contract
 
