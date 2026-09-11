@@ -177,6 +177,17 @@ This page lists server arguments used to configure the behavior and performance 
 |-----------|-------------|----------|
 | `--max-lora-model-size` | Maximum size limit for LoRA models | -1 |
 
+## Sleep Lifecycle Configuration
+
+| Arguments | Environment variable | Description | Defaults |
+|-----------|----------------------|-------------|----------|
+| `--enable-sleep-mode` | `ENABLE_SLEEP_MODE` | Enable sleep/wake lifecycle APIs | 0 |
+| `--sleep-mode-level` | `SLEEP_MODE_LEVEL` | Startup level: 1 = host backup, 2 = checkpoint reload | 1 |
+| `--sleep-release-collective-memory` | `SLEEP_RELEASE_COLLECTIVE_MEMORY` | Opt in to NCCL memory suspend/resume | 0 |
+
+See [Sleep and wake up](sleep_mode.md) for runtime prerequisites, HTTP APIs,
+distributed membership, timeout/rollback semantics and recovery guidance.
+
 ## System Debugging
 
 | Arguments | Description | Defaults |
