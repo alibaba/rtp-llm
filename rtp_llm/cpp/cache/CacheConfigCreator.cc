@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
-#include "rtp_llm/cpp/config/PPLayout.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -223,8 +223,8 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
                             "(pp_stage_layer_counts); it must be written by the Python startup decision point",
                             pp_size);
 
-    const PPLayout layout   = PPLayout::fromParallelismConfig(parallelism_config, model_config.num_layers);
-    const auto [begin, end] = layout.myLayerRange();
+    const auto layout       = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto [begin, end] = layout.myLayerRange(model_config.num_layers);
     RTP_LLM_CHECK_WITH_INFO(end > begin,
                             "pp stage %ld owns no layers: num_layers=%ld pp_size=%ld",
                             parallelism_config.pp_rank,
@@ -338,12 +338,11 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    RTP_LLM_CHECK_WITH_INFO(
-        parallelism_config.pp_size <= 1
-            || (is_mtp && !is_eagle && sp_config.type == SP_TYPE_MTP
-                && PPLayout::fromParallelismConfig(parallelism_config, score_model_config.num_layers).hasLmHead()),
-        "pipeline parallelism (pp_size=%ld) requires MTP cache configuration on the last stage",
-        parallelism_config.pp_size);
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1
+                                || (is_mtp && !is_eagle && sp_config.type == SP_TYPE_MTP
+                                    && RankLayout::fromParallelismConfig(parallelism_config).hasLmHead()),
+                            "pipeline parallelism (pp_size=%ld) requires MTP cache configuration on the last stage",
+                            parallelism_config.pp_size);
     CacheConfig score_config   = score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
                                      HybridPoolConfigCreator::createConfig(score_model_config,
                                                                          parallelism_config,

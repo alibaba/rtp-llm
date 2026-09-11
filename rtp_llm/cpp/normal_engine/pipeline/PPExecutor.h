@@ -11,7 +11,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/config/PPLayout.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/stream/SamplingState.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -139,14 +139,14 @@ private:
     }
 
 private:
-    const bool                                 warm_up_;
-    std::shared_ptr<KVCacheManager>            cache_manager_;
-    std::unique_ptr<ModelBase>                 model_;
-    std::unique_ptr<Sampler>                   sampler_;
-    std::unique_ptr<PPBatchStreamProcessor>    batch_stream_processor_;
-    std::shared_ptr<ExpertBalancer>            expert_balancer_;
-    TensorHolder                               buffer_holder_;
-    SamplingStates                            sampling_states_;
+    const bool                              warm_up_;
+    std::shared_ptr<KVCacheManager>         cache_manager_;
+    std::unique_ptr<ModelBase>              model_;
+    std::unique_ptr<Sampler>                sampler_;
+    std::unique_ptr<PPBatchStreamProcessor> batch_stream_processor_;
+    std::shared_ptr<ExpertBalancer>         expert_balancer_;
+    TensorHolder                            buffer_holder_;
+    SamplingStates                          sampling_states_;
 
     bool                                             mtp_enabled_            = false;
     size_t                                           propose_step_           = 0;
@@ -157,7 +157,7 @@ private:
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 
     const ParallelismConfig      parallelism_config_;
-    const PPLayout               pp_layout_;
+    const RankLayout             pp_layout_;
     std::unique_ptr<PPTransport> transport_;
     std::vector<InflightBatch>   slots_;
     size_t                       current_slot_ = 0;
@@ -168,7 +168,7 @@ private:
     std::function<void()>              profile_step_finish_;
     kmonitor::MetricsReporterPtr       metrics_reporter_ = nullptr;
 
-    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
+    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>                   tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
 };
 

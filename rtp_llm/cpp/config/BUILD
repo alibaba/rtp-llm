@@ -30,11 +30,12 @@ cc_library(
     copts = copts(),
 )
 
-# PP stage layout helper (consumes the materialized partition from
-# ParallelismConfig; see rtp_llm/config/pp_layout.py for the Python side).
+# C++ parallel rank/stage layout: rank lattice (mirrors
+# rtp_llm/models_py/distributed/rank_layout.py) + PP ring peers + PP layer
+# partition (mirrors rtp_llm/config/pp_layout.py).
 cc_library(
-    name = "pp_layout",
-    hdrs = ["PPLayout.h"],
+    name = "rank_layout",
+    hdrs = ["RankLayout.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [

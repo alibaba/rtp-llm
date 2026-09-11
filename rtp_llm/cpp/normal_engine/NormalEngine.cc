@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
-#include "rtp_llm/cpp/config/PPLayout.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -502,7 +502,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
-    const auto pp_layout = PPLayout::fromParallelismConfig(parallelism_config, model_config_.num_layers);
+    const auto pp_layout                  = RankLayout::fromParallelismConfig(parallelism_config);
     std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
     if (parallelism_config.pp_size > 1) {
         pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();

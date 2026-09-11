@@ -111,7 +111,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     propose_step_(params.sp_config.gen_num_per_cycle),
     position_id_len_factor_(params.model_config_.attn_config.rope_config.index_factor),
     parallelism_config_(params.parallelism_config),
-    pp_layout_(PPLayout::fromParallelismConfig(parallelism_config_, params.model_config_.num_layers)),
+    pp_layout_(RankLayout::fromParallelismConfig(parallelism_config_)),
     slots_(parallelism_config_.pp_size + 1),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
@@ -373,12 +373,12 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
 void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) {
     const auto stream_count = sampling_plan.request_ids.size(0);
 
-    const auto*   request_ids      = sampling_plan.request_ids.data_ptr<int64_t>();
-    const auto*   input_lengths    = sampling_plan.input_lengths.data_ptr<int32_t>();
-    const auto*   sequence_lengths = sampling_plan.sequence_lengths.data_ptr<int32_t>();
-    const auto&   cum_log_probs    = result.cum_log_probs;
-    const auto* success   = result.sample_success.data_ptr<bool>();
-    int64_t     batch_idx = 0;
+    const auto* request_ids      = sampling_plan.request_ids.data_ptr<int64_t>();
+    const auto* input_lengths    = sampling_plan.input_lengths.data_ptr<int32_t>();
+    const auto* sequence_lengths = sampling_plan.sequence_lengths.data_ptr<int32_t>();
+    const auto& cum_log_probs    = result.cum_log_probs;
+    const auto* success          = result.sample_success.data_ptr<bool>();
+    int64_t     batch_idx        = 0;
     for (int64_t stream_idx = 0; stream_idx < stream_count; ++stream_idx) {
         const int64_t stream_batch_size = std::max<int32_t>(sampling_plan.num_return_sequences[stream_idx], 1);
 
@@ -516,11 +516,11 @@ GptModelInputs PPExecutor::prepareDraftInputForPrefill(const GptModelInputs&  ta
         target_hidden_states = target_output.all_hidden_states;
     }
     mtp::prepareDraftInputForPrefill(draft_input,
-                                    target_hidden_states,
-                                    sampled_token_ids,
-                                    next_position_ids,
-                                    position_id_len_factor_,
-                                    buffer_holder_);
+                                     target_hidden_states,
+                                     sampled_token_ids,
+                                     next_position_ids,
+                                     position_id_len_factor_,
+                                     buffer_holder_);
     return draft_input;
 }
 
@@ -535,12 +535,12 @@ GptModelInputs PPExecutor::prepareDraftInputForDecode(const GptModelInputs&  tar
     }
 
     mtp::prepareDraftInputForDecode(draft_input,
-                                   target_hidden_states,
-                                   accepted_token_ids,
-                                   accepted_lengths,
-                                   mtp::DraftInputLayout::COMPACT,
-                                   position_id_len_factor_,
-                                   buffer_holder_);
+                                    target_hidden_states,
+                                    accepted_token_ids,
+                                    accepted_lengths,
+                                    mtp::DraftInputLayout::COMPACT,
+                                    position_id_len_factor_,
+                                    buffer_holder_);
     return draft_input;
 }
 
@@ -576,27 +576,32 @@ torch::Tensor PPExecutor::proposeDraftTokens(GptModelInputs draft_input, size_t 
                     const auto batch_size     = draft_input.input_lengths.numel();
                     const auto output_indexes = draft_input.lm_output_indexes.to(torch::kLong);
 
-                    draft_input.combo_tokens = draft_tokens.reshape({batch_size});
+                    draft_input.combo_tokens       = draft_tokens.reshape({batch_size});
                     draft_input.last_hidden_states = draft_output.all_hidden_states.index_select(
                         0, output_indexes.to(draft_output.all_hidden_states.device()));
-                    draft_input.sequence_lengths =
-                        draft_input.input_lengths + draft_input.prefix_lengths.to(draft_input.input_lengths.device())
-                        + 1;
+                    draft_input.sequence_lengths = draft_input.input_lengths
+                                                   + draft_input.prefix_lengths.to(draft_input.input_lengths.device())
+                                                   + 1;
                     draft_input.prefix_lengths          = torch::empty({0}, draft_input.prefix_lengths.options());
                     draft_input.sequence_lengths_plus_1 = torch::Tensor();
                     draft_input.lm_output_indexes = torch::arange(batch_size, draft_input.lm_output_indexes.options());
-                    draft_input.request_id              = torch::Tensor();
-                    draft_input.request_pd_separation   = torch::Tensor();
-                    draft_input.cache_keys              = torch::Tensor();
+                    draft_input.request_id        = torch::Tensor();
+                    draft_input.request_pd_separation = torch::Tensor();
+                    draft_input.cache_keys            = torch::Tensor();
                     if (draft_input.combo_position_ids.defined()) {
-                        const auto positions = draft_input.combo_position_ids.reshape(
-                            {-1, static_cast<int64_t>(position_id_len_factor_)});
+                        const auto positions =
+                            draft_input.combo_position_ids.reshape({-1, static_cast<int64_t>(position_id_len_factor_)});
                         draft_input.combo_position_ids =
-                            (positions.index_select(0, output_indexes.to(positions.device())) + 1).flatten().pin_memory();
+                            (positions.index_select(0, output_indexes.to(positions.device())) + 1)
+                                .flatten()
+                                .pin_memory();
                     }
                 } else {
-                    mtp::advanceDraftInput(
-                        draft_input, draft_output.all_hidden_states, draft_tokens, position_id_len_factor_, buffer_holder_);
+                    mtp::advanceDraftInput(draft_input,
+                                           draft_output.all_hidden_states,
+                                           draft_tokens,
+                                           position_id_len_factor_,
+                                           buffer_holder_);
                 }
             }
         }

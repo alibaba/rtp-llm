@@ -294,20 +294,23 @@ def _create_process_groups(
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
 
     if pp_size > 1:
-        for stage_ranks in layout.groups(Group.STAGE):
-            first = layout.coord_of(stage_ranks[0])
-            stage_group = torch.distributed.new_group(
-                ranks=stage_ranks,
-                backend=backend,
-                timeout=timedelta(days=36500),
-            )
-            if world_rank in stage_ranks:
-                group_key = Group.STAGE.name + str(first.pp)
-                _group_map[group_key] = stage_group
-                logging.info(
-                    f"[rank: {world_rank}] Stored STAGE group with key: {group_key} with ranks: {stage_ranks}"
+        # A distinct STAGE communicator is only needed when a stage spans more
+        # than one TP group (dp>1); otherwise STAGE is aliased at registration.
+        if dp_size > 1:
+            for stage_ranks in layout.groups(Group.STAGE):
+                first = layout.coord_of(stage_ranks[0])
+                stage_group = torch.distributed.new_group(
+                    ranks=stage_ranks,
+                    backend=backend,
+                    timeout=timedelta(days=36500),
                 )
-            torch.distributed.barrier()
+                if world_rank in stage_ranks:
+                    group_key = Group.STAGE.name + str(first.pp)
+                    _group_map[group_key] = stage_group
+                    logging.info(
+                        f"[rank: {world_rank}] Stored STAGE group with key: {group_key} with ranks: {stage_ranks}"
+                    )
+                torch.distributed.barrier()
 
         # PP groups: ranks of the same (dp_rank, tp_rank) lane across stages.
         for pp_ranks in layout.groups(Group.PP):
@@ -408,6 +411,17 @@ def _register_process_groups_to_cpp():
         pg_world = _group_map.get(Group.WORLD)
         if pg_world is not None:
             mode_to_group[_CPP_PARALLEL_MODE_TP] = pg_world
+
+    # pp>1 with dp=1: no distinct STAGE group was created above; alias STAGE to
+    # its TP group when one exists (tp>1), else leave it unregistered.
+    if (
+        _parallelism_config is not None
+        and _parallelism_config.pp_size > 1
+        and _CPP_PARALLEL_MODE_STAGE not in mode_to_group
+    ):
+        pg_tp = mode_to_group.get(_CPP_PARALLEL_MODE_TP)
+        if pg_tp is not None:
+            mode_to_group[_CPP_PARALLEL_MODE_STAGE] = pg_tp
 
     # NOTE: These callbacks are NOT thin wrappers around the module-level broadcast()/
     # all_reduce()/all_gather() because the C++ calling convention differs significantly:
@@ -792,7 +806,11 @@ def _get_group(
         elif group == Group.TP:
             group_key = Group.TP.name + str(coord.pp * dp_size + coord.dp)
         elif group == Group.STAGE:
-            group_key = Group.STAGE.name + str(coord.pp)
+            if dp_size > 1:
+                group_key = Group.STAGE.name + str(coord.pp)
+            else:
+                # dp=1: a stage coincides with its TP group.
+                group_key = Group.TP.name + str(coord.pp * dp_size + coord.dp)
         else:
             group_key = Group.PP.name + str(coord.dp * tp_size + coord.tp)
             if cpu_backend:

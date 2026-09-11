@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -678,13 +679,13 @@ void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
     RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "allocateAndSync requires positive global block_num");
     uint32_t     synced_block_num = static_cast<uint32_t>(config_.block_num);
-    const size_t stage_size       = parallelism_config_.tp_size * parallelism_config_.dp_size;
+    const auto   rank_layout      = RankLayout::fromParallelismConfig(parallelism_config_);
+    const size_t stage_size       = rank_layout.laneStride();
     if (stage_size > 1) {
-        const size_t stage_rank =
-            parallelism_config_.dp_rank * parallelism_config_.tp_size + parallelism_config_.tp_rank;
-        auto block_num_t          = torch::empty({(int64_t)stage_size}, torch::kInt32).pin_memory();
-        auto block_num_ptr        = block_num_t.data_ptr<int>();
-        block_num_ptr[stage_rank] = config_.block_num;
+        const size_t stage_rank    = rank_layout.stageRank();
+        auto         block_num_t   = torch::empty({(int64_t)stage_size}, torch::kInt32).pin_memory();
+        auto         block_num_ptr = block_num_t.data_ptr<int>();
+        block_num_ptr[stage_rank]  = config_.block_num;
         execAllGather({{block_num_t}, ParallelMode::STAGE});
         execSyncCommunication(false);
         cudaSyncAndCheck();

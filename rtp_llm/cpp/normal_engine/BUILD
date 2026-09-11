@@ -40,7 +40,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:pp_topology_validator",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:pp_layout",
+        "//rtp_llm/cpp/config:rank_layout",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base:executor",
