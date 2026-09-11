@@ -1,8 +1,10 @@
 import concurrent.futures
 import copy
+import errno
 import hashlib
 import io
 import json
+import multiprocessing
 import os
 import tarfile
 import tempfile
@@ -70,6 +72,21 @@ def tree_contents(root):
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def _restore_process(remote, target, start, results):
+    results.put(("ready", os.getpid(), None))
+    if not start.wait(15):
+        raise TimeoutError("restore processes did not start together")
+    restored = store.RemoteSnapshotStore(Path(remote)).restore(Path(target))
+    results.put(("restored", os.getpid(), restored))
+
+
+def _hold_restore_lock_process(target, acquired, release):
+    with store.restore_lock(Path(target)):
+        acquired.set()
+        if not release.wait(30):
+            raise TimeoutError("restore lock holder was not released")
 
 
 class DeepGemmCacheTest(unittest.TestCase):
@@ -451,6 +468,198 @@ class DeepGemmCacheTest(unittest.TestCase):
             self.assertFalse(manager.store.restore(target, cancel))
         self.assertEqual(tree_contents(target), before)
         self.assertFalse(target.with_name(f"{target.name}.ready").exists())
+
+    def wait_for(self, condition, message, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not condition():
+            if time.monotonic() >= deadline:
+                self.fail(message)
+            time.sleep(0.01)
+
+    def test_restore_error_keeps_real_watcher_and_recovers_remote_publish(self):
+        manager, scope = self.manager()
+        with mock.patch.object(jit, "SYNC_POLL_S", 0.025):
+            with mock.patch.object(
+                manager.store, "restore", side_effect=OSError("remote unavailable")
+            ), self.assertLogs(level="ERROR"):
+                manager.start_background_sync()
+            self.assertTrue(manager._observer.is_alive())
+            self.assertFalse(
+                manager.local_root.with_name(
+                    f"{manager.local_root.name}.ready"
+                ).exists()
+            )
+            source = write_entry(scope / "tmp/local-build")
+            target = scope / "cache/op.local-build"
+            target.parent.mkdir()
+            source.rename(target)
+            self.wait_for(manager.store._snapshots, "local build was not published")
+            manager.stop()
+        restored = self.root / "after-remote-recovery"
+        self.assertTrue(manager.store.restore(restored))
+        self.assertEqual(tree_contents(restored), tree_contents(manager.local_root))
+
+    def test_remote_readability_timeout_keeps_dirty_and_shutdown_retries(self):
+        manager, scope = self.manager()
+        copyfile = store.shutil.copyfile
+
+        def corrupt_remote_copy(source, destination, *args, **kwargs):
+            result = copyfile(source, destination, *args, **kwargs)
+            path = Path(destination)
+            if path.name.endswith(f"{store.SNAPSHOT_SUFFIX}.tmp"):
+                payload = path.read_bytes()
+                path.write_bytes(payload[:-1] + bytes([payload[-1] ^ 1]))
+            return result
+
+        with mock.patch.object(jit, "SYNC_POLL_S", 3600):
+            manager.start_background_sync()
+            write_entry(scope / "cache/op.readable")
+            self.wait_for(manager._dirty.is_set, "completed entry was not observed")
+            before = tree_contents(manager.local_root)
+            with mock.patch.object(
+                store.shutil, "copyfile", side_effect=corrupt_remote_copy
+            ), mock.patch.object(
+                store, "REMOTE_READY_TIMEOUT_S", 0.025
+            ), self.assertRaises(
+                TimeoutError
+            ):
+                manager.publish_pending_snapshot()
+            self.assertTrue(manager._dirty.is_set())
+            self.assertFalse(manager.store._snapshots())
+            self.assertFalse(list(manager.store.remote_root.glob("*.tmp")))
+            self.assertEqual(tree_contents(manager.local_root), before)
+            manager.stop()
+        self.assertFalse(manager._dirty.is_set())
+        restored = self.root / "readability-retry"
+        self.assertTrue(manager.store.restore(restored))
+        self.assertEqual(tree_contents(restored), before)
+
+    def test_disk_full_during_upload_cleans_partial_and_preserves_retry(self):
+        manager, scope = self.manager()
+        copyfile = store.shutil.copyfile
+
+        def disk_full(source, destination, *args, **kwargs):
+            path = Path(destination)
+            if path.name.endswith(f"{store.SNAPSHOT_SUFFIX}.tmp"):
+                path.write_bytes(b"partial")
+                raise OSError(errno.ENOSPC, "injected full snapshot filesystem")
+            return copyfile(source, destination, *args, **kwargs)
+
+        with mock.patch.object(jit, "SYNC_POLL_S", 3600):
+            manager.start_background_sync()
+            write_entry(scope / "cache/op.disk-full")
+            self.wait_for(manager._dirty.is_set, "completed entry was not observed")
+            before = tree_contents(manager.local_root)
+            with mock.patch.object(
+                store.shutil, "copyfile", side_effect=disk_full
+            ), self.assertRaises(OSError) as failure:
+                manager.publish_pending_snapshot()
+            self.assertEqual(failure.exception.errno, errno.ENOSPC)
+            self.assertTrue(manager._dirty.is_set())
+            self.assertFalse(manager.store._snapshots())
+            self.assertFalse(list(manager.store.remote_root.glob("*.tmp")))
+            self.assertEqual(tree_contents(manager.local_root), before)
+            manager.stop()
+        restored = self.root / "disk-full-retry"
+        self.assertTrue(manager.store.restore(restored))
+        self.assertEqual(tree_contents(restored), before)
+
+    def test_shutdown_is_bounded_when_remote_upload_stalls(self):
+        manager, scope = self.manager()
+        uploading, release = threading.Event(), threading.Event()
+
+        def stalled_readability(remote, local):
+            uploading.set()
+            if not release.wait(10):
+                raise RuntimeError("test did not release the stalled upload")
+            raise TimeoutError("injected remote visibility timeout")
+
+        with mock.patch.object(jit, "SYNC_POLL_S", 3600), mock.patch.object(
+            jit, "SHUTDOWN_TIMEOUT_S", 0.1
+        ):
+            manager.start_background_sync()
+            write_entry(scope / "cache/op.stalled")
+            self.wait_for(manager._dirty.is_set, "completed entry was not observed")
+            worker = manager._sync_thread
+            with mock.patch.object(
+                manager.store, "_wait_remote_ready", side_effect=stalled_readability
+            ), self.assertLogs(level="ERROR"):
+                try:
+                    manager._stop.set()
+                    self.assertTrue(uploading.wait(5))
+                    manager.stop()
+                    self.assertTrue(worker.is_alive())
+                    self.assertFalse(manager.store._snapshots())
+                finally:
+                    release.set()
+                    worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(manager._dirty.is_set())
+            self.assertFalse(list(manager.store.remote_root.glob("*.tmp")))
+
+    def cleanup_process(self, process):
+        if process.is_alive():
+            process.terminate()
+        process.join(5)
+        if process.is_alive():
+            process.kill()
+            process.join(5)
+
+    def test_sixteen_spawned_processes_restore_one_complete_tree(self):
+        manager, scope = self.manager()
+        write_entry(scope / "cache/op.shared")
+        self.assertTrue(manager.store.publish_snapshot(manager._snapshot_files))
+        target = self.root / "spawned-restore"
+        context = multiprocessing.get_context("spawn")
+        start, results = context.Event(), context.Queue()
+        self.addCleanup(results.close)
+        workers = [
+            context.Process(
+                target=_restore_process,
+                args=(str(manager.store.remote_root), str(target), start, results),
+            )
+            for _ in range(16)
+        ]
+        for worker in workers:
+            worker.start()
+            self.addCleanup(self.cleanup_process, worker)
+        ready = [results.get(timeout=15) for _ in workers]
+        self.assertEqual({row[0] for row in ready}, {"ready"})
+        self.assertEqual(len({row[1] for row in ready}), 16)
+        start.set()
+        restored = [results.get(timeout=15) for _ in workers]
+        self.assertEqual({row[0] for row in restored}, {"restored"})
+        self.assertEqual({row[1] for row in ready}, {row[1] for row in restored})
+        self.assertEqual(sum(row[2] for row in restored), 1)
+        for worker in workers:
+            worker.join(5)
+            self.assertEqual(worker.exitcode, 0)
+        self.assertEqual(tree_contents(target), tree_contents(manager.local_root))
+        self.assertTrue(target.with_name(f"{target.name}.ready").exists())
+        self.assertFalse(list(self.root.glob("*.stage.*")))
+
+    def test_killed_restore_lock_owner_does_not_wedge_next_process(self):
+        manager, scope = self.manager()
+        write_entry(scope / "cache/op.after-kill")
+        self.assertTrue(manager.store.publish_snapshot(manager._snapshot_files))
+        target = self.root / "killed-owner"
+        context = multiprocessing.get_context("spawn")
+        acquired, release = context.Event(), context.Event()
+        worker = context.Process(
+            target=_hold_restore_lock_process,
+            args=(str(target), acquired, release),
+        )
+        worker.start()
+        self.addCleanup(self.cleanup_process, worker)
+        self.assertTrue(acquired.wait(10))
+        self.assertFalse(target.with_name(f"{target.name}.ready").exists())
+        worker.terminate()
+        worker.join(5)
+        self.assertIsNotNone(worker.exitcode)
+        self.assertNotEqual(worker.exitcode, 0)
+        self.assertTrue(manager.store.restore(target))
+        self.assertEqual(tree_contents(target), tree_contents(manager.local_root))
+        self.assertTrue(target.with_name(f"{target.name}.ready").exists())
 
 
 if __name__ == "__main__":

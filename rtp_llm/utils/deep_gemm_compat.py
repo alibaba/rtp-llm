@@ -57,6 +57,15 @@ def mega_moe_combine_kwargs(deep_gemm, block_size: int) -> dict:
     return {}
 
 
+def mega_moe_numerics_kwargs(deep_gemm, block_size: int) -> dict:
+    """Validate the selected model's math before allocating or warming buffers."""
+    activation = mega_moe_activation_kwargs(deep_gemm, block_size)
+    combine = mega_moe_combine_kwargs(deep_gemm, block_size)
+    if block_size == 32 and not combine:
+        raise RuntimeError("V4.1 Mega requires the explicit torch_sum_combine patch")
+    return {**activation, **combine}
+
+
 def mega_moe_dispatch_kwargs(deep_gemm, use_fp8_dispatch: bool) -> dict:
     parameters = inspect.signature(deep_gemm.get_symm_buffer_for_mega_moe).parameters
     if "mma_type" in parameters:

@@ -63,7 +63,7 @@ class V41L20Tail:
             raise ValueError(
                 "L20 tail requires every encoder layer and all four sources"
             )
-        selected = context.selections.get(20)
+        selected = context.selection_for(20)
         if (
             selected is None
             or selected.topk.shape != (count, 512)
@@ -172,15 +172,17 @@ class V41L20Tail:
             cache, self.epoch, rows.start, rows.end, replay_floor
         )
         context.published_sources = {2, 8, 14, 20}
-        context.selections[20] = IndexSelection(
-            self.selection.topk[offset:].clone(),
-            self.selection.candidate_blocks[offset:].clone(),
-            self.selection.status[offset:].clone(),
-            20,
-            20,
-            0,
-            0,
-            0,
+        context.publish_selection(
+            IndexSelection(
+                self.selection.topk[offset:].clone(),
+                self.selection.candidate_blocks[offset:].clone(),
+                self.selection.status[offset:].clone(),
+                20,
+                20,
+                0,
+                0,
+                0,
+            )
         )
         return (
             V41L20Output(

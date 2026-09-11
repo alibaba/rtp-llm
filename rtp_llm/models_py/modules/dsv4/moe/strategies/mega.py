@@ -19,10 +19,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.utils.deep_gemm_compat import (
-    mega_moe_activation_kwargs,
-    mega_moe_combine_kwargs,
-)
+from rtp_llm.utils.deep_gemm_compat import mega_moe_numerics_kwargs
 
 from ..._profiler import record_function_range
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
@@ -222,11 +219,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
-        self._activation_launch_kwargs = mega_moe_activation_kwargs(
+        self._activation_launch_kwargs = mega_moe_numerics_kwargs(
             deep_gemm, cfg.shared_fp8_block_size
-        )
-        self._activation_launch_kwargs.update(
-            mega_moe_combine_kwargs(deep_gemm, cfg.shared_fp8_block_size)
         )
         E = cfg.n_local_experts
         D = cfg.dim

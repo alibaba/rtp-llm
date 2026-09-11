@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -324,6 +325,63 @@ class AttentionGpuTest(unittest.TestCase):
             frequencies = self.official.precompute_freqs_cis(64, 3, 0, 10000, 16, 32, 1)
         self.official.apply_rotary_emb(expected[..., -64:], frequencies)
         self.equal(actual, expected[0])
+
+    def test_same_shape_indices_cannot_cross_requests_or_epochs(self):
+        owner = self.model(20)
+        cache = self.cache()
+        first = cache.begin_forward(epoch=0, start=0, end=3)
+        owner(self.hidden(3), first)
+        retained = first.selection_for(20)
+        other_cache = self.cache(request="request-b")
+        second = other_cache.begin_forward(epoch=0, start=0, end=3)
+        owner(self.hidden(3), second)
+        second.selections[20] = retained
+        with self.assertRaisesRegex(ValueError, "stale.*identity"):
+            second.indices_for(21)
+        with self.assertRaisesRegex(ValueError, "stale.*identity"):
+            second.tail(1, replay_floor=1)
+        next_chunk = cache.begin_forward(epoch=1, start=3, end=6)
+        owner(self.hidden(3), next_chunk)
+        next_chunk.selections[20] = retained
+        with self.assertRaisesRegex(ValueError, "stale.*identity"):
+            next_chunk.indices_for(23)
+
+    def test_selection_binding_checks_source_owner_and_tensor_geometry(self):
+        cache = self.cache()
+        context = cache.begin_forward(epoch=0, start=0, end=3)
+        self.model(20)(self.hidden(3), context)
+        selected = context.selection_for(20)
+        for replacement in (
+            replace(selected, query_owner=24),
+            replace(selected, key_owner=14),
+            replace(selected, query_identity=None),
+        ):
+            context.selections[20] = replacement
+            with self.assertRaisesRegex(ValueError, "stale.*identity"):
+                context.indices_for(21)
+        context.selections[20] = replace(selected, topk=selected.topk[:, :8])
+        with self.assertRaisesRegex(ValueError, "query range"):
+            context.indices_for(21)
+        context.selections[20] = selected
+        with self.assertRaisesRegex(ValueError, "already published"):
+            context.publish_selection(selected)
+
+    def test_tail_rebinds_owned_query_results_to_its_actual_row_range(self):
+        cache = self.cache()
+        context = cache.begin_forward(epoch=0, start=0, end=129)
+        self.model(20)(self.hidden(129), context)
+        late = context.tail(1, replay_floor=1)
+        selected = late.selection_for(21)
+        self.assertEqual(selected.query_identity, late.query_identity)
+        self.assertNotEqual(selected.query_identity, context.query_identity)
+        self.equal(selected.topk, context.selections[20].topk[1:])
+        self.assertNotEqual(
+            selected.topk.untyped_storage().data_ptr(),
+            context.selections[20].topk.untyped_storage().data_ptr(),
+        )
+        late.selections[20] = replace(selected, query_identity=context.query_identity)
+        with self.assertRaisesRegex(ValueError, "stale.*identity"):
+            late.indices_for(21)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ selected. The local allocator is for component execution, not a CP deployment.
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 import torch
@@ -219,7 +219,7 @@ class V41AttentionContext:
             raise ValueError(
                 "late attention requires complete L20 source and query state"
             )
-        source = self.selections[20]
+        source = self.selection_for(20)
         offset = start - self.start
         selection = IndexSelection(
             source.topk[offset:].clone(),
@@ -234,11 +234,50 @@ class V41AttentionContext:
         result = V41AttentionContext(
             self.cache, self.epoch, start, self.end, replay_floor
         )
-        result.selections[20] = selection
         result.published_sources = set(self.published_sources)
+        result.publish_selection(selection)
         return result
 
-    def indices_for(self, layer):
+    def publish_selection(self, selected):
+        self.validate()
+        source = layer_sources(selected.query_owner)
+        if (
+            not source.scores_queries
+            or selected.key_owner != source.index_k_owner
+            or source.global_owner not in self.published_sources
+        ):
+            raise ValueError(
+                "index selection does not belong to a ready query/key owner"
+            )
+        if selected.query_owner in self.selections:
+            raise ValueError("index query owner already published this forward")
+        if selected.query_identity not in (None, self.query_identity):
+            raise ValueError("index selection has stale request/epoch/query identity")
+        self._validate_selection(selected)
+        self.selections[selected.query_owner] = replace(
+            selected, query_identity=self.query_identity
+        )
+
+    def _validate_selection(self, selected):
+        rows = self.end - self.start
+        device = self.cache.swa[selected.query_owner].pages.data.device
+        tensors = [(selected.topk, (rows, 512)), (selected.status, (rows,))]
+        if selected.query_owner == 20:
+            if selected.candidate_blocks is None:
+                raise ValueError("L20 selection requires its candidate block set")
+            tensors.append((selected.candidate_blocks, (rows, 2048)))
+        elif selected.candidate_blocks is not None:
+            raise ValueError("only L20 owns the reindex candidate block set")
+        if any(
+            tensor.shape != shape
+            or tensor.dtype != torch.int32
+            or tensor.device != device
+            or not tensor.is_contiguous()
+            for tensor, shape in tensors
+        ):
+            raise ValueError("index selection tensors do not match the query range")
+
+    def selection_for(self, layer):
         self.validate()
         source = layer_sources(layer)
         if source.global_owner not in self.published_sources:
@@ -246,9 +285,19 @@ class V41AttentionContext:
         if source.topk_owner not in self.selections:
             raise ValueError("attention query owner has not scored this query range")
         selected = self.selections[source.topk_owner]
-        if selected.topk.shape[0] != self.end - self.start:
-            raise ValueError("attention selection belongs to another query range")
-        return selected.topk
+        if (
+            selected.query_owner != source.topk_owner
+            or selected.key_owner != source.index_k_owner
+            or selected.query_identity != self.query_identity
+        ):
+            raise ValueError(
+                "index selection has stale request/epoch/query/owner identity"
+            )
+        self._validate_selection(selected)
+        return selected
+
+    def indices_for(self, layer):
+        return self.selection_for(layer).topk
 
 
 class V41Attention(nn.Module):
@@ -414,7 +463,7 @@ class V41Attention(nn.Module):
                 raise ValueError(
                     "reindex requires L20 candidates for the same query range"
                 )
-            candidates = context.selections[20].candidate_blocks
+            candidates = context.selection_for(20).candidate_blocks
         results = []
         for first in range(0, hidden.shape[0], QUERY_TILE):
             last = min(first + QUERY_TILE, hidden.shape[0])
@@ -449,15 +498,17 @@ class V41Attention(nn.Module):
                 else None
             )
             status = torch.cat([result.status for result in results])
-        context.selections[self.layer] = IndexSelection(
-            topk,
-            blocks,
-            status,
-            self.layer,
-            self.source.index_k_owner,
-            sum(result.scorer_calls for result in results),
-            max((result.max_logits_elements for result in results), default=0),
-            max((result.max_packed_kv_bytes for result in results), default=0),
+        context.publish_selection(
+            IndexSelection(
+                topk,
+                blocks,
+                status,
+                self.layer,
+                self.source.index_k_owner,
+                sum(result.scorer_calls for result in results),
+                max((result.max_logits_elements for result in results), default=0),
+                max((result.max_packed_kv_bytes for result in results), default=0),
+            )
         )
 
     @torch.inference_mode()
@@ -535,9 +586,9 @@ class V41Attention(nn.Module):
                 if global_kv is not None:
                     owner = self.source.global_owner
                     if owner not in context.planar_globals:
-                        context.planar_globals[
-                            owner
-                        ] = PlanarGlobalBinding.from_compact(global_kv)
+                        context.planar_globals[owner] = (
+                            PlanarGlobalBinding.from_compact(global_kv)
+                        )
                     planar_global = context.planar_globals[owner]
             outputs = []
             # Earlier queries must read the old ring before later writes wrap it.

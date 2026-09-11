@@ -137,6 +137,32 @@ class DeepGemmCompatTest(unittest.TestCase):
                         shared,
                     )
 
+    def test_shared32_numerics_reject_rounding_only_wheel(self):
+        with self.assertRaisesRegex(RuntimeError, "torch_sum_combine patch"):
+            compat.mega_moe_numerics_kwargs(self.module(), 32)
+
+    def test_numerics_keep_legacy_api_and_upstream_defaults(self):
+        self.assertEqual(compat.mega_moe_numerics_kwargs(self.module(False), 128), {})
+        self.assertEqual(compat.mega_moe_numerics_kwargs(self.module(), 128), {})
+
+        def patched_mega(
+            *arguments, round_swiglu_to_bf16=False, torch_sum_combine=False
+        ):
+            return round_swiglu_to_bf16, torch_sum_combine
+
+        module = self.module()
+        module.fp8_fp4_mega_moe = patched_mega
+        self.assertEqual(patched_mega(), (False, False))
+        self.assertEqual(
+            patched_mega(**compat.mega_moe_numerics_kwargs(module, 32)),
+            (True, True),
+        )
+        self.assertEqual(
+            patched_mega(**compat.mega_moe_numerics_kwargs(module, 128)),
+            (False, True),
+        )
+        self.assertEqual(patched_mega(), (False, False))
+
     def test_legacy_sizing_keeps_the_boolean_signature(self):
         module = self.module(modern=False)
         compat.mega_moe_symm_buffer_bytes(module, 8, 256, 1, 6, 7168, 2048)

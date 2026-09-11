@@ -16,9 +16,8 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.utils.deep_gemm_compat import (
-    mega_moe_activation_kwargs,
-    mega_moe_combine_kwargs,
     mega_moe_jit_token_counts,
+    mega_moe_numerics_kwargs,
     mega_moe_shared_kwargs,
     mega_moe_uses_shared32,
     prepare_mega_shared_scale,
@@ -105,10 +104,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             deep_gemm, cfg.shared_fp8_block_size
         )
         self._shared_launch_kwargs.update(
-            mega_moe_activation_kwargs(deep_gemm, cfg.shared_fp8_block_size)
-        )
-        self._shared_launch_kwargs.update(
-            mega_moe_combine_kwargs(deep_gemm, cfg.shared_fp8_block_size)
+            mega_moe_numerics_kwargs(deep_gemm, cfg.shared_fp8_block_size)
         )
         self._shared_recipe = (
             (1, 1, 32) if cfg.shared_fp8_block_size == 32 else (1, 128, 128)

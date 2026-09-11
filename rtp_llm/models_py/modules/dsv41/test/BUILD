@@ -1,4 +1,27 @@
 py_test(
+    name = "test_cprr_reader_native",
+    main = "test_cprr_reader.py",
+    srcs = ["test_cprr_reader.py", "test_compact_reader.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {
+        "DSV41_CPRR_READER_BACKEND": "native",
+        "DSV41_NATIVE_COMPACT_READER": "1",
+    },
+)
+
+py_test(
+    name = "test_cprr_reader_flashmla",
+    main = "test_cprr_reader.py",
+    srcs = ["test_cprr_reader.py", "test_compact_reader.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {
+        "DSV41_CPRR_READER_BACKEND": "flashmla",
+        "DSV41_NATIVE_COMPACT_READER": "1",
+        "DSV41_FLASHMLA": "1",
+    },
+)
+
+py_test(
     name = "test_prefill",
     srcs = ["test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
     deps = [
@@ -131,6 +154,24 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {"DSV41_MOE": "1"},
     tags = ["requires-dsv41-component-inputs"],
+)
+
+py_test(
+    name = "test_engram_binding",
+    srcs = ["test_engram_binding.py", "host_cuda_test_support.py", "standalone_load.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:models",
+    ],
+    env = {"DSV41_BLOCK32_LINEAR": "1"},
+    tags = ["requires-full-engram-host-memory"],
+    timeout = "long",
+)
+
+py_test(
+    name = "test_target_binding",
+    srcs = ["test_target_binding.py", "test_transformer.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
 )
 
 py_test(

@@ -166,6 +166,39 @@ def committed_history(history_ids, history_valid, accepted_ids, accepted_valid):
 class Engram(nn.Module):
     """Local lookup, model-supplied group32 projection, and per-HC gate injection."""
 
+    @classmethod
+    def from_weights(cls, layer_id, weights, shared_lookup, *, projection_factory=None):
+        """Bind checkpoint-local projection/gates while the caller owns host tables."""
+        from rtp_llm.models_py.modules.dsv41.linear import V41Block32Linear
+
+        if any(name.startswith("engram.embed.") for name in weights):
+            raise ValueError("Engram tables must remain in the host-shared loader")
+        q_weight, k_weight = weights["engram.q_weight"], weights["engram.k_weight"]
+        if (
+            q_weight.ndim != 2
+            or q_weight.shape[0] != 4
+            or q_weight.shape != k_weight.shape
+            or q_weight.dtype != torch.bfloat16
+            or k_weight.dtype != torch.bfloat16
+            or q_weight.device != k_weight.device
+        ):
+            raise ValueError("Engram requires checkpoint BF16 [4,hidden] gate weights")
+        weight, scale = weights["engram.wkv.weight"], weights["engram.wkv.scale"]
+        output_dim = 5 * q_weight.shape[1]
+        if (
+            weight.shape != (output_dim, 24 * 256)
+            or weight.dtype != torch.float8_e4m3fn
+            or weight.device != q_weight.device
+            or scale.shape != (output_dim // 32, 192)
+            or scale.dtype != torch.float8_e8m0fnu
+            or scale.device != weight.device
+        ):
+            raise ValueError(
+                "Engram projection must retain its checkpoint block32 layout"
+            )
+        factory = V41Block32Linear if projection_factory is None else projection_factory
+        return cls(layer_id, shared_lookup, factory(weight, scale), q_weight, k_weight)
+
     def __init__(self, layer_id, shared_lookup, projection, q_weight, k_weight):
         super().__init__()
         if (

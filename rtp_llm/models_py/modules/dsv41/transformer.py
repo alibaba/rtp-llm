@@ -135,12 +135,27 @@ class V41TargetModel(nn.Module):
         token_hasher: nn.Module,
         *,
         vision=None,
+        head_tp_size: int = 1,
+        head_tp_rank: int = 0,
     ):
         super().__init__()
         self.config = config
         t = config.text
         self.hidden_size = t["hidden_size"]
         self.hc_mult = t["hc_mult"]
+        if (
+            type(head_tp_size) is not int
+            or head_tp_size not in (1, 8)
+            or type(head_tp_rank) is not int
+            or not 0 <= head_tp_rank < head_tp_size
+            or t["vocab_size"] % head_tp_size
+        ):
+            raise ValueError("V4.1 head partition must be explicit TP1 or CP8 metadata")
+        self.head_tp_size = head_tp_size
+        self.head_tp_rank = head_tp_rank
+        self.head_vocab_size = t["vocab_size"] // head_tp_size
+        self.head_vocab_start = head_tp_rank * self.head_vocab_size
+        self.head_vocab_end = self.head_vocab_start + self.head_vocab_size
         if t["num_hidden_layers"] != 40 or len(blocks) != 40 or self.hc_mult != 4:
             raise ValueError(
                 "V4.1 target execution requires all forty four-stream blocks"
@@ -161,7 +176,7 @@ class V41TargetModel(nn.Module):
                 torch.bfloat16,
             ),
             ("norm", norm, (self.hidden_size,), torch.bfloat16),
-            ("head", head, (t["vocab_size"], self.hidden_size), torch.float32),
+            ("head", head, (self.head_vocab_size, self.hidden_size), torch.float32),
         ):
             if (
                 tensor.shape != shape
@@ -197,6 +212,8 @@ class V41TargetModel(nn.Module):
         token_hasher=None,
         vision=None,
         projection_factory=V41Block32Linear,
+        head_tp_size: int = 1,
+        head_tp_rank: int = 0,
     ):
         """Bind installed ModelWeights without reloading, converting or cloning them.
 
@@ -205,6 +222,8 @@ class V41TargetModel(nn.Module):
         provide the compatible quantized expert implementation explicitly;
         no legacy block128 or dequantized-expert implementation is selected.
         The caller owns the shared lookup's registration/Graph/close lifecycle.
+        CP8 callers pass their actual head partition. The engine retains its
+        existing last-hidden gather and TP logits gather after this model.
         """
         from rtp_llm.utils.model_weight import W
 
@@ -245,14 +264,11 @@ class V41TargetModel(nn.Module):
                 V41Block(attention, moe, {name: local[name] for name in block_names})
             )
             if layer in (1, 14):
-                engrams[layer] = Engram(
+                engrams[layer] = Engram.from_weights(
                     layer,
+                    local,
                     shared_lookup,
-                    projection_factory(
-                        local["engram.wkv.weight"], local["engram.wkv.scale"]
-                    ),
-                    local["engram.q_weight"],
-                    local["engram.k_weight"],
+                    projection_factory=projection_factory,
                 )
         if vision is None and any(
             name.startswith("v41.vision.") for name in weights.global_weights
@@ -273,6 +289,8 @@ class V41TargetModel(nn.Module):
             engrams,
             token_hasher,
             vision=vision,
+            head_tp_size=head_tp_size,
+            head_tp_rank=head_tp_rank,
         )
 
     def prepare_images(self, prepared) -> V41ImageFeatures:
@@ -424,7 +442,10 @@ class V41TargetModel(nn.Module):
         return self._finish(hidden, pre_mix, aux, aux_row_indices)
 
     @torch.inference_mode()
-    def logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def local_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Compute this rank's FP32 vocabulary slice for the engine's TP gather."""
+        if torch.is_autocast_enabled():
+            raise RuntimeError("V4.1 FP32 logits require CUDA autocast off")
         if (
             hidden_states.ndim != 2
             or hidden_states.shape[1] != self.hidden_size
@@ -433,6 +454,14 @@ class V41TargetModel(nn.Module):
         ):
             raise ValueError("V4.1 logits need the final normalized BF16 target hidden")
         return F.linear(hidden_states.float(), self.head)
+
+    @torch.inference_mode()
+    def logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.head_tp_size != 1:
+            raise RuntimeError(
+                "CP8 local logits require the engine's TP vocabulary gather before sampling"
+            )
+        return self.local_logits(hidden_states)
 
     @torch.inference_mode()
     def topk_logits(self, hidden_states: torch.Tensor, k: int, *, output_idx=None):

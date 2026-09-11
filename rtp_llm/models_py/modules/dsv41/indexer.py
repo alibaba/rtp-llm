@@ -101,6 +101,7 @@ class IndexSelection:
     scorer_calls: int
     max_logits_elements: int
     max_packed_kv_bytes: int
+    query_identity: Optional[tuple] = None
 
     def check(self) -> None:
         with torch.cuda.device(self.status.device):

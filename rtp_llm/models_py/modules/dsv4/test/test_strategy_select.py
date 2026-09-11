@@ -7,6 +7,7 @@ contract. Pure-Python, no CUDA / DeepGEMM / dist required — runs on host.
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import types
@@ -14,6 +15,8 @@ import unittest
 from contextlib import contextmanager
 from dataclasses import replace
 from unittest import mock
+
+from rtp_llm.models_py.modules.dsv4.moe import mega_se_buf
 
 # Importing strategies populates the registry via ``register_strategy``.
 from rtp_llm.models_py.modules.dsv4.moe.strategies import (
@@ -45,6 +48,43 @@ def _cfg(ep_size: int = 1) -> MoeCfg:
         local_expert_start=0,
         local_expert_end=n_local,
         max_tokens_per_rank=8192,
+    )
+
+
+def _fake_shared32_module(*, exact_combine: bool):
+    def mega(
+        y,
+        l1_weights,
+        l2_weights,
+        sym_buffer,
+        shared_l1_weights=None,
+        shared_l2_weights=None,
+        recipe=(1, 1, 32),
+        activation_clamp=None,
+        round_swiglu_to_bf16=False,
+        torch_sum_combine=False,
+    ):
+        pass
+
+    if not exact_combine:
+        signature = inspect.signature(mega)
+        mega.__signature__ = signature.replace(
+            parameters=[
+                parameter
+                for name, parameter in signature.parameters.items()
+                if name != "torch_sum_combine"
+            ]
+        )
+
+    def buffer(group, num_shared_experts=0, mma_type="fp8xfp4"):
+        pass
+
+    return types.SimpleNamespace(
+        fp8_fp4_mega_moe=mega,
+        get_symm_buffer_for_mega_moe=buffer,
+        get_block_m_for_mega_moe=object(),
+        transform_weights_for_mega_moe=object(),
+        transform_sf_into_required_layout=object(),
     )
 
 
@@ -189,6 +229,49 @@ class StrategySelectTest(unittest.TestCase):
     def test_shared32_clamp_is_explicit(self):
         with self.assertRaisesRegex(ValueError, "clamp 10.0"):
             replace(_cfg(ep_size=8), shared_fp8_block_size=32, swiglu_limit=0.0)
+
+    def test_shared32_capability_rejects_rounding_only_wheel_without_fallback(self):
+        cfg = replace(_cfg(ep_size=8), shared_fp8_block_size=32)
+        module = _fake_shared32_module(exact_combine=False)
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.dict(
+            sys.modules, {"deep_gemm": module}
+        ), mock.patch.object(
+            mega_se_buf, "_mega_moe_unavailable_reason", return_value=None
+        ):
+            self.assertIn(
+                "torch_sum_combine patch",
+                mega_se_buf._mega_moe_se_unavailable_reason(32),
+            )
+            self.assertFalse(MegaMoEStrategySE.can_handle(cfg))
+            with self.assertRaisesRegex(RuntimeError, "cannot handle"):
+                select_strategy(cfg)
+
+    def test_shared32_complete_wheel_is_selected_without_changing_defaults(self):
+        cfg = replace(_cfg(ep_size=8), shared_fp8_block_size=32)
+        module = _fake_shared32_module(exact_combine=True)
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.dict(
+            sys.modules, {"deep_gemm": module}
+        ), mock.patch.object(
+            mega_se_buf, "_mega_moe_unavailable_reason", return_value=None
+        ):
+            self.assertIsNone(mega_se_buf._mega_moe_se_unavailable_reason(32))
+            self.assertIs(select_strategy(cfg), MegaMoEStrategySE)
+            parameters = inspect.signature(module.fp8_fp4_mega_moe).parameters
+            self.assertIs(parameters["round_swiglu_to_bf16"].default, False)
+            self.assertIs(parameters["torch_sum_combine"].default, False)
+
+    def test_shared32_weight_setup_rejects_old_wheel_before_consuming_weights(self):
+        cfg = replace(_cfg(ep_size=8), shared_fp8_block_size=32)
+        module = _fake_shared32_module(exact_combine=False)
+        for strategy in (MegaMoEStrategySE, MegaMoEStrategy):
+            with self.subTest(strategy=strategy.name), mock.patch.dict(
+                sys.modules, {"deep_gemm": module}
+            ):
+                weights = {"unconsumed": object()}
+                before = dict(weights)
+                with self.assertRaisesRegex(RuntimeError, "torch_sum_combine patch"):
+                    strategy(cfg).setup_weights(weights)
+                self.assertEqual(weights, before)
 
     def test_ep_gt1_no_mega_raises(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):

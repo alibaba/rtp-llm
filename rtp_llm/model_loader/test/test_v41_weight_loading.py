@@ -221,6 +221,21 @@ class V41WeightLoadingTest(unittest.TestCase):
                 self.assertEqual(actual.shape, (3,))
                 torch.testing.assert_close(actual.cpu(), original, rtol=0, atol=0)
 
+    def test_real_cp8_head_shards_preserve_fp32_values_and_bounded_storage(self):
+        raw = self.database.load_tensor("head.weight", torch.bfloat16)[0]
+        self.assertEqual(tuple(raw.shape), (129280, 5120))
+        for rank in (0, 7):
+            with self.subTest(rank=rank):
+                _, info, load = self.deployment(rank=rank, cp=True)
+                descriptor = next(w for w in info.weights if w.name == W.lm_head)
+                actual = self.load_real(descriptor, None, load)
+                expected = raw[rank * 16160 : (rank + 1) * 16160].float()
+                self.assertEqual(actual.shape, (16160, 5120))
+                self.assertEqual(actual.dtype, torch.float32)
+                self.assertEqual(actual.storage_offset(), 0)
+                self.assertEqual(actual.untyped_storage().nbytes(), actual.numel() * 4)
+                torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
     def test_host_table_and_invalid_shape_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "host-shared"):
             V41AtomicWeight(

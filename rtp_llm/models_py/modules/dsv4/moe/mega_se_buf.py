@@ -15,7 +15,7 @@ import os
 import torch
 
 from rtp_llm.utils.deep_gemm_compat import (
-    mega_moe_activation_kwargs,
+    mega_moe_numerics_kwargs,
     mega_moe_shared_kwargs,
     mega_moe_symm_buffer_bytes,
     mega_moe_uses_shared32,
@@ -181,7 +181,7 @@ def _mega_moe_se_unavailable_reason(shared_fp8_block_size: int = 128) -> str | N
         if reason is not None:
             return reason
         mega_moe_shared_kwargs(deep_gemm, shared_fp8_block_size)
-        mega_moe_activation_kwargs(deep_gemm, shared_fp8_block_size)
+        mega_moe_numerics_kwargs(deep_gemm, shared_fp8_block_size)
         reason = _signature_has(
             deep_gemm.get_symm_buffer_for_mega_moe,
             ("num_shared_experts",),
