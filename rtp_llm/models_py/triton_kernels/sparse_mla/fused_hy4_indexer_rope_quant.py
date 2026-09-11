@@ -77,6 +77,7 @@ def _fused_hy4_indexer_rope_quant_kernel(
     HEAD_TILES: tl.constexpr,
     TILE_OFFSET: tl.constexpr,
     FOLD_HEAD_GATE: tl.constexpr,
+    ROUND_HEAD_GATE_BF16: tl.constexpr,
 ):
     """Tiled Q programs plus one K-cache program, all in a single launch."""
     token = tl.program_id(0).to(tl.int64)
@@ -152,6 +153,8 @@ def _fused_hy4_indexer_rope_quant_kernel(
         )
         if FOLD_HEAD_GATE:
             raw = tl.load(RAW_HEAD_GATE + token * 32 + heads)
+            if ROUND_HEAD_GATE_BF16:
+                raw = raw.to(tl.bfloat16).to(tl.float32)
             tl.store(HEAD_WEIGHTS + token * 32 + heads, (raw * q_scale) * head_scale)
     else:
         slot = tl.load(SLOT_MAPPING + token).to(tl.int64)
@@ -267,6 +270,7 @@ def fused_hy4_indexer_rope_quant_cache(
     raw_head_gate: Optional[torch.Tensor] = None,
     head_weights: Optional[torch.Tensor] = None,
     head_scale: float = 1.0,
+    round_head_gate_bf16: bool = False,
 ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
     """Run both branches, or only Q/K for CMP, with the same numerical kernel.
 
@@ -355,6 +359,7 @@ def fused_hy4_indexer_rope_quant_cache(
         HEAD_TILES=head_tiles,
         TILE_OFFSET=head_tiles if branch == "k" else 0,
         FOLD_HEAD_GATE=raw_head_gate is not None,
+        ROUND_HEAD_GATE_BF16=round_head_gate_bf16,
         num_warps=4,
         num_stages=2,
     )

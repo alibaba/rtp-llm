@@ -333,6 +333,9 @@ class GenericMoeMTPModel(GptModelBase):
             hidden_states,
             fmha_impl,
             self.kv_cache,
+            residual=residual,
+            force_reuse_topk_indices=reuse_topk_indices,
+            prev_topk_indices=prev_topk_indices,
         )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)

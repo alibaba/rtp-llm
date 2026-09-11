@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from enum import IntFlag, auto
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 import torch
 
@@ -128,6 +128,15 @@ def _move_indexer_rope_to_front(
     return grouped.reshape(tensor.shape).contiguous()
 
 
+def _hy4_bf16_rope_cache(
+    ts: List[torch.Tensor],
+    *,
+    process_fun: Callable[[List[torch.Tensor]], torch.Tensor],
+) -> torch.Tensor:
+    """Match HY4's BF16 rotary coefficients while retaining RTP's FP32 ABI."""
+    return process_fun(ts).bfloat16().float()
+
+
 class Hy4Weight(DeepSeekV2Weight):
     """Checkpoint mapping for HY V4 backbone weights."""
 
@@ -155,6 +164,14 @@ class Hy4Weight(DeepSeekV2Weight):
     def _process_meta(self, meta_dict: Any, weight_keys: List[str]):
         super()._process_meta(meta_dict, weight_keys)
         self._update_expert_checkpoint_layout(weight_keys)
+
+    def _create_rope_w(self) -> Optional[AtomicWeight]:
+        descriptor = super()._create_rope_w()
+        if descriptor is not None:
+            descriptor.process_fun = functools.partial(
+                _hy4_bf16_rope_cache, process_fun=descriptor.process_fun
+            )
+        return descriptor
 
     def _mla_config(self) -> MlaConfig:
         return MlaConfig(

@@ -136,6 +136,7 @@ class Hy4DecoderLayer(nn.Module):
             indexer_layernorm_eps=config.indexer_layernorm_eps,
             indexer_scale_fmt=config.indexer_scale_fmt,
             indexer_use_hadamard=config.indexer_use_hadamard,
+            indexer_bf16_compute=True,
         )
         if layer_idx in config.moe_layer_index:
             _validate_hy4_moe_quant_strategy(config, moe_config, layer_idx)
@@ -212,13 +213,28 @@ class Hy4DecoderLayer(nn.Module):
         clone.mlp_ihc = self.mlp_ihc
         clone._fuse_attn_ihc_mxfp8 = self._fuse_attn_ihc_mxfp8
         clone._fuse_mlp_ihc_mxfp8 = self._fuse_mlp_ihc_mxfp8
-        hy4_cmp = getattr(self, "hy4_cmp", None)
+        hy4_cmp = self.hy4_cmp
         clone.hy4_cmp = (
             None
             if hy4_cmp is None
             else hy4_cmp.clone_for_cuda_graph(self_attn=clone.self_attn, mlp=clone.mlp)
         )
         return clone
+
+    def _forward_hy4_cmp(self, channels, fmha_impl, kv_cache, prev_topk_indices):
+        output, topk, post_gate = self.hy4_cmp.forward_target_attention(
+            channels,
+            self.attn_ihc,
+            self.input_layernorm,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
+        )
+        channels = self.attn_ihc.post(output, channels, post_gate)
+        channels = self.hy4_cmp.forward_target_moe(
+            channels, self.mlp_ihc, self.post_attention_layernorm
+        )
+        return Hy4LayerOutput(channels, topk)
 
     def forward(
         self,
@@ -228,105 +244,23 @@ class Hy4DecoderLayer(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
     ) -> Hy4LayerOutput:
-        attn_input_fp8 = None
-        attn_input_scale = None
-        attn_input_fp32 = None
-        raw_head_gate_output = None
-        if getattr(self, "_fuse_attn_ihc_mxfp8", False):
-            raw_gate_candidate = (
-                self.hy4_cmp.allocate_raw_head_gate_output(
-                    channels, fmha_impl=fmha_impl, kv_cache=kv_cache
-                )
-                if enable_cmp and self.hy4_cmp is not None
-                else None
+        if enable_cmp:
+            return self._forward_hy4_cmp(
+                channels, fmha_impl, kv_cache, prev_topk_indices
             )
-            producer_outputs = (
-                self.attn_ihc.try_pre_normed_mxfp8_with_raw_gate_clear(
-                    channels,
-                    self.input_layernorm,
-                    raw_gate_candidate,
-                )
-                if raw_gate_candidate is not None
-                else None
+        attn_input_fp8 = attn_input_scale = None
+        if self._fuse_attn_ihc_mxfp8:
+            attn_input, attn_post_gate, attn_input_fp8, attn_input_scale = (
+                self.attn_ihc.pre_normed_mxfp8(channels, self.input_layernorm)
             )
-            emit_head_gate_fp32 = bool(
-                enable_cmp
-                and self.hy4_cmp is not None
-                and self.self_attn.indexer is not None
-                and not self.self_attn.reuse_topk_indices
-                and producer_outputs is None
-                and (
-                    channels.shape[0] > 32
-                    or getattr(
-                        self.self_attn.indexer, "_hy4_small_t_head_gate_weight", None
-                    )
-                    is None
-                )
-            )
-            if producer_outputs is not None:
-                (
-                    attn_input,
-                    attn_post_gate,
-                    attn_input_fp8,
-                    attn_input_scale,
-                ) = producer_outputs
-                raw_head_gate_output = raw_gate_candidate
-            elif emit_head_gate_fp32:
-                (
-                    attn_input,
-                    attn_post_gate,
-                    attn_input_fp8,
-                    attn_input_scale,
-                    attn_input_fp32,
-                ) = self.attn_ihc.pre_normed_mxfp8_with_fp32(
-                    channels, self.input_layernorm
-                )
-            else:
-                (
-                    attn_input,
-                    attn_post_gate,
-                    attn_input_fp8,
-                    attn_input_scale,
-                ) = self.attn_ihc.pre_normed_mxfp8(channels, self.input_layernorm)
         else:
-            attn_input, attn_post_gate = self.attn_ihc.pre_normed(
-                channels, self.input_layernorm
-            )
-        attn_kwargs = {}
-        if attn_input_fp8 is not None and attn_input_scale is not None:
-            attn_kwargs = {
-                "x_fp8": attn_input_fp8,
-                "x_scale": attn_input_scale,
-            }
-        if attn_input_fp32 is not None:
-            attn_kwargs["x_fp32"] = attn_input_fp32
-        attention = self.self_attn
-        if (
-            enable_cmp
-            and self.hy4_cmp is not None
-            and self.hy4_cmp.can_run(attn_input, fmha_impl, kv_cache)
-        ):
-            attention = self.hy4_cmp.forward_attention
-            if raw_head_gate_output is not None:
-                attn_kwargs["raw_head_gate_output"] = raw_head_gate_output
-        attn_output, topk_indices = attention(
-            hidden_states=attn_input,
-            fmha_impl=fmha_impl,
-            kv_cache=kv_cache,
-            prev_topk_indices=prev_topk_indices,
-            return_topk=True,
-            **attn_kwargs,
+            attn_input, attn_post_gate = self.attn_ihc.pre_normed(channels, self.input_layernorm)
+        attn_output, topk_indices = self.self_attn(
+            hidden_states=attn_input, fmha_impl=fmha_impl, kv_cache=kv_cache,
+            prev_topk_indices=prev_topk_indices, return_topk=True,
+            x_fp8=attn_input_fp8, x_scale=attn_input_scale,
         )
         channels = self.attn_ihc.post(attn_output, channels, attn_post_gate)
-
-        if enable_cmp and self.hy4_cmp is not None:
-            channels = self.hy4_cmp.forward_target_moe(
-                channels,
-                self.mlp_ihc,
-                self.post_attention_layernorm,
-                fuse_mxfp8=self._fuse_mlp_ihc_mxfp8,
-            )
-            return Hy4LayerOutput(channels, topk_indices)
 
         mlp_input_fp8 = mlp_input_scale = None
         if self._fuse_mlp_ihc_mxfp8:
@@ -431,6 +365,7 @@ class Hy4Model(GptModelBase):
             hidden_states,
             fmha_impl,
             self.kv_cache,
+            channels=channels,
         )
         for idx, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, idx)

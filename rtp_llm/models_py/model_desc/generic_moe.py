@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules import (
     GroupTopK,
     LinearFactory,
     MlaAttention,
+    RMSNorm,
     RMSResNorm,
     SelectTopk,
     SigmoidGateScaleAdd,
@@ -535,6 +536,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 indexer_layernorm_eps=getattr(config, "indexer_layernorm_eps", None),
                 indexer_scale_fmt=getattr(config, "indexer_scale_fmt", None),
                 indexer_use_hadamard=getattr(config, "indexer_use_hadamard", True),
+                indexer_bf16_compute=(config.model_type in ("hy_v4", "hy_v4_mtp")),
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -573,6 +575,11 @@ class GenericMoeDecoderLayer(nn.Module):
         )
         self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
+        )
+        self._hy4_mtp_post_norm = (
+            RMSNorm(weights[W.post_ln_gamma], eps=config.layernorm_eps)
+            if config.model_type == "hy_v4_mtp"
+            else None
         )
         self.cmp = (
             Glm5Cmp(
@@ -678,6 +685,7 @@ class GenericMoeDecoderLayer(nn.Module):
             clone.mlp = self.mlp
         clone.input_layernorm = self.input_layernorm
         clone.post_attention_layernorm = self.post_attention_layernorm
+        clone._hy4_mtp_post_norm = self._hy4_mtp_post_norm
         clone._fuse_input_norm_quant = self._fuse_input_norm_quant
         clone._fuse_input_scale_ue8m0 = self._fuse_input_scale_ue8m0
         clone._fuse_post_norm_quant = self._fuse_post_norm_quant
@@ -696,7 +704,7 @@ class GenericMoeDecoderLayer(nn.Module):
             None
             if self.hy4_cmp is None
             else self.hy4_cmp.clone_for_cuda_graph(
-                self_attn=clone.self_attn, mlp=clone.mlp
+                self_attn=clone.self_attn, mlp=clone.mlp, draft_prefill=draft_prefill
             )
         )
         return clone
@@ -707,6 +715,12 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run residual add, RMSNorm, then the dense MLP or MoE."""
+        if self._hy4_mtp_post_norm is not None:
+            # Match HY4 MTP's explicit add before post-attention RMSNorm.
+            # CMP folds this BF16 rounding into its norm/quant producer.
+            residual = hidden_states + residual
+            hidden_states = self._hy4_mtp_post_norm(residual)
+            return self.mlp(hidden_states), residual
         # Dense MLP: fuse add + RMSNorm + FP8 quant; up_proj consumes FP8 directly.
         if self._fuse_post_norm_quant and hidden_states.dim() == 2:
             fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
@@ -812,78 +826,17 @@ class GenericMoeDecoderLayer(nn.Module):
         prev_topk_indices,
         force_reuse_topk_indices,
     ) -> DecodeLayerOutput:
-        """MTP CMP entry; publish caller-produced inputs to HY4's three streams."""
-        fp8_hs = scale = fp32_hs = raw_head_gate_output = None
-        if self._fuse_hy4_cmp_input_norm_quant and hidden_states.dim() == 2:
-            raw_head_gate_output = self.hy4_cmp.allocate_raw_head_gate_output(
-                hidden_states,
-                fmha_impl=fmha_impl,
-                kv_cache=kv_cache,
-                force_reuse_topk_indices=force_reuse_topk_indices,
-            )
-            emit_head_gate_fp32 = bool(
-                self.hy4_cmp is not None
-                and self.self_attn.indexer is not None
-                and not self.self_attn.reuse_topk_indices
-                and not force_reuse_topk_indices
-                and raw_head_gate_output is None
-                and (
-                    hidden_states.shape[0] > 32
-                    or getattr(
-                        self.self_attn.indexer, "_hy4_small_t_head_gate_weight", None
-                    )
-                    is None
-                )
-            )
-            norm_outputs = fused_add_rmsnorm_fp8_quant_with_bf16_output(
-                hidden_states,
-                residual,
-                self.input_layernorm.weight.data,
-                self.input_layernorm.variance_epsilon,
-                group_size=32,
-                scale_ue8m0=True,
-                mxfp8_semantics=True,
-                emit_fp32_output=emit_head_gate_fp32,
-                raw_gate_clear_out=raw_head_gate_output,
-            )
-            if emit_head_gate_fp32:
-                bf16_hs, fp8_hs, scale, fp32_hs = norm_outputs
-            else:
-                bf16_hs, fp8_hs, scale = norm_outputs
-                fp32_hs = None
-        elif self._fuse_input_norm_quant and hidden_states.dim() == 2:
-            bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
-                hidden_states,
-                residual,
-                self.input_layernorm.weight.data,
-                self.input_layernorm.variance_epsilon,
-                group_size=128,
-                scale_ue8m0=self._fuse_input_scale_ue8m0,
-            )
-        else:
-            bf16_hs, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states, topk_indices = self.hy4_cmp.forward_attention(
-            bf16_hs,
-            fmha_impl,
-            kv_cache,
-            x_fp8=fp8_hs,
-            x_scale=scale,
-            x_fp32=fp32_hs,
-            raw_head_gate_output=raw_head_gate_output,
-            prev_topk_indices=prev_topk_indices,
-            force_reuse_topk_indices=force_reuse_topk_indices,
-            return_topk=True,
-        )
-        moe_output = self.hy4_cmp.forward_mtp_moe(
+        """CMP owns the input producer and its publication to the K/Q branches."""
+        hidden_states, topk_indices = self.hy4_cmp.forward_mtp_attention(
             hidden_states,
             residual,
-            self.post_attention_layernorm,
-            fuse_mxfp8=self._fuse_hy4_cmp_post_norm_quant_moe,
+            self.input_layernorm,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
         )
-        hidden_states, residual = (
-            self._fwd_mlp_or_moe(hidden_states, residual)
-            if moe_output is None
-            else moe_output
+        hidden_states, residual = self.hy4_cmp.forward_mtp_moe(
+            hidden_states, residual, self.post_attention_layernorm
         )
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
 
@@ -908,11 +861,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 force_reuse_topk_indices=force_reuse_topk_indices,
             )
 
-        if (
-            enable_hy4_cmp
-            and self.hy4_cmp is not None
-            and self.hy4_cmp.can_run(hidden_states, fmha_impl, kv_cache)
-        ):
+        if enable_hy4_cmp:
             return self._forward_hy4_cmp(
                 hidden_states,
                 residual,

@@ -134,6 +134,38 @@ class TestSigmoidMulFp8Quant(unittest.TestCase):
         fp8_out, scale_out = sigmoid_mul_fp8_quant_fwd(attn, gate)
         self.assertEqual(fp8_out.shape, (0, 2048))
 
+    def test_mxfp8_small_and_zero_groups_match_flashinfer(self):
+        if torch.cuda.get_device_capability()[0] < 10:
+            self.skipTest("FlashInfer MXFP8 quantization requires SM100+")
+
+        # Both launch variants, the 64-row transition, and CP8 local shapes
+        # for 10k/32k/64k/100k contexts. Zero and very small groups must use
+        # FlashInfer's UE8M0 scales instead of the generic FP8 absmax floor.
+        for tokens in (1, 32, 64, 65, 1250, 4000, 8000, 12500):
+            with self.subTest(tokens=tokens):
+                torch.manual_seed(20260910)
+                attn = torch.randn(tokens, 2048, device="cuda")
+                amplitudes = torch.tensor(
+                    [0.0, 1.0, 1e-4, 1e-6, 1e-8, 1e-12, 1e-20, 1e-30],
+                    device="cuda",
+                ).repeat_interleave(256)
+                attn = (attn * amplitudes).bfloat16()
+                gate = torch.zeros_like(attn)
+                gated = attn * torch.sigmoid(gate)
+                ref_fp8, ref_scale = mxfp8_quant_act_packed(gated)
+                actual_fp8, actual_scale = sigmoid_mul_fp8_quant_fwd(
+                    attn,
+                    gate,
+                    quant_group_size=32,
+                    scale_ue8m0=True,
+                    round_scale_to_pow2=True,
+                    column_major_scales=True,
+                )
+                self.assertTrue(
+                    torch.equal(actual_fp8.view(torch.uint8), ref_fp8.view(torch.uint8))
+                )
+                self.assertTrue(torch.equal(actual_scale, ref_scale))
+
     def test_mxfp8_group32_power_of_two_matches_flashinfer(self):
         major, _ = torch.cuda.get_device_capability()
         if major < 10:

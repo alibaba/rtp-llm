@@ -162,6 +162,49 @@ class TestFusedAddRmsNormFp8Quant(unittest.TestCase):
 
 
 class TestFusedAddRmsNormFp8QuantDualOutput(unittest.TestCase):
+    def test_explicit_bf16_residual_before_norm(self):
+        """HY4 MTP uses an explicit add; other fused consumers keep FP32 sum."""
+        torch.manual_seed(20260910)
+        for rows in (1, 32, 256, 1250):
+            hidden = torch.randn(rows, 6144, device="cuda", dtype=torch.bfloat16)
+            residual = torch.randn_like(hidden)
+            weight = torch.randn(6144, device="cuda", dtype=torch.bfloat16)
+            for rounded in (False, True):
+                with self.subTest(rows=rows, round_residual_bf16=rounded):
+                    updated = residual.clone()
+                    normed, quant, scales = (
+                        fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                            hidden,
+                            updated,
+                            weight,
+                            1e-5,
+                            group_size=32,
+                            scale_ue8m0=True,
+                            mxfp8_semantics=True,
+                            round_residual_bf16=rounded,
+                        )
+                    )
+                    summed = hidden.float() + residual.float()
+                    self.assertTrue(torch.equal(updated, summed.bfloat16()))
+                    if rounded:
+                        summed = summed.bfloat16().float()
+                    reference = (
+                        summed
+                        * torch.rsqrt(summed.square().mean(-1, keepdim=True) + 1e-5)
+                        * weight.float()
+                    ).bfloat16()
+                    relative = (
+                        normed.float() - reference.float()
+                    ).norm() / reference.float().norm()
+                    self.assertLess(relative.item(), 1e-4)
+                    expected_quant, expected_scales = mxfp8_quant_act_packed(normed)
+                    self.assertTrue(
+                        torch.equal(
+                            quant.view(torch.uint8), expected_quant.view(torch.uint8)
+                        )
+                    )
+                    self.assertTrue(torch.equal(scales, expected_scales))
+
     @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available():

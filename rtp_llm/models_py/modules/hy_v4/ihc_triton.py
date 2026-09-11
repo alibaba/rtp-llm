@@ -938,6 +938,7 @@ def maybe_fused_ihc_pre_normed_grouped(
     raw_gate_clear_out: torch.Tensor | None = None,
     mega_mxfp8_out: torch.Tensor | None = None,
     mega_mxfp8_scale_out: torch.Tensor | None = None,
+    out: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> (
     Tuple[torch.Tensor, torch.Tensor]
     | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
@@ -973,9 +974,7 @@ def maybe_fused_ihc_pre_normed_grouped(
             or raw_gate_clear_out.device != channels.device
         ):
             return None
-    emit_mega_moe = (
-        mega_mxfp8_out is not None or mega_mxfp8_scale_out is not None
-    )
+    emit_mega_moe = mega_mxfp8_out is not None or mega_mxfp8_scale_out is not None
     if emit_mega_moe:
         expected_activation = (m, hidden_size)
         expected_scale = (m, hidden_size // (4 * MX_BLOCK))
@@ -1005,20 +1004,43 @@ def maybe_fused_ihc_pre_normed_grouped(
         return None
 
     chunk_size = max(int(chunk_size), 1)
-    read = torch.empty((m, hidden_size), dtype=channels.dtype, device=channels.device)
-    post_gate = torch.empty((m, _HC_MULT), dtype=torch.float32, device=channels.device)
-    mxfp8_out = (
-        torch.empty(
-            (m, hidden_size), dtype=torch.float8_e4m3fn, device=channels.device
+    if out is None:
+        read = torch.empty(
+            (m, hidden_size), dtype=channels.dtype, device=channels.device
         )
-        if emit_mxfp8
-        else None
-    )
-    mxfp8_scale = (
-        _allocate_mxfp8_scale(m, hidden_size, channels.device)
-        if emit_mxfp8
-        else None
-    )
+        post_gate = torch.empty(
+            (m, _HC_MULT), dtype=torch.float32, device=channels.device
+        )
+        mxfp8_out = (
+            torch.empty(
+                (m, hidden_size), dtype=torch.float8_e4m3fn, device=channels.device
+            )
+            if emit_mxfp8
+            else None
+        )
+        mxfp8_scale = (
+            _allocate_mxfp8_scale(m, hidden_size, channels.device)
+            if emit_mxfp8
+            else None
+        )
+    else:
+        read, post_gate, mxfp8_out, mxfp8_scale = out
+        assert emit_mxfp8 and not emit_fp32
+        assert read.shape == mxfp8_out.shape == (m, hidden_size)
+        assert read.dtype == torch.bfloat16 and mxfp8_out.dtype == torch.float8_e4m3fn
+        assert read.is_contiguous() and mxfp8_out.is_contiguous()
+        assert post_gate.shape == (m, _HC_MULT) and post_gate.dtype == torch.float32
+        assert post_gate.is_contiguous()
+        assert mxfp8_scale.shape == (m, hidden_size // 128)
+        assert mxfp8_scale.dtype == torch.int32
+        assert mxfp8_scale.stride() == (1, (m + 3) // 4 * 4)
+        assert (
+            read.device
+            == post_gate.device
+            == mxfp8_out.device
+            == mxfp8_scale.device
+            == channels.device
+        )
     read_fp32 = (
         torch.empty((m, hidden_size), dtype=torch.float32, device=channels.device)
         if emit_fp32
@@ -1054,9 +1076,7 @@ def maybe_fused_ihc_pre_normed_grouped(
             post_gate_out=post_gate[start:end],
             mxfp8_out=(mxfp8_out[start:end] if emit_mxfp8 else None),
             mxfp8_scale_out=(mxfp8_scale[start:end] if emit_mxfp8 else None),
-            mega_mxfp8_out=(
-                mega_mxfp8_out[start:end] if emit_mega_moe else None
-            ),
+            mega_mxfp8_out=(mega_mxfp8_out[start:end] if emit_mega_moe else None),
             mega_mxfp8_scale_out=(
                 mega_mxfp8_scale_out[start:end] if emit_mega_moe else None
             ),

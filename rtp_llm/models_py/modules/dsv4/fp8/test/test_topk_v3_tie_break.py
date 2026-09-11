@@ -28,7 +28,9 @@ def _run(
     return output
 
 
-def _clamped_window(start: int, end: int, width: int, max_seq_len: int) -> tuple[int, int]:
+def _clamped_window(
+    start: int, end: int, width: int, max_seq_len: int
+) -> tuple[int, int]:
     start = min(max(start, 0), width)
     end = min(max(end, start), width)
     end = min(end, start + max_seq_len)
@@ -123,12 +125,12 @@ def _assert_stable_equiv(
         actual = output_host[row, :keep].to(torch.int64)
         padding = output_host[row, keep:]
         assert (padding == -1).all(), f"{tag}: row {row} padding is not -1"
-        assert ((actual >= 0) & (actual < length)).all(), (
-            f"{tag}: row {row} returned an out-of-window relative index"
-        )
-        assert torch.unique(actual).numel() == keep, (
-            f"{tag}: row {row} returned duplicate indices"
-        )
+        assert (
+            (actual >= 0) & (actual < length)
+        ).all(), f"{tag}: row {row} returned an out-of-window relative index"
+        assert (
+            torch.unique(actual).numel() == keep
+        ), f"{tag}: row {row} returned duplicate indices"
         expected = _stable_reference_indices(scores[row, start:end], keep).cpu()
         assert torch.equal(actual.sort().values, expected.sort().values), (
             f"{tag}: row {row} stable index set mismatch\n"
@@ -215,9 +217,7 @@ def test_negative_zero_coarse_threshold_matches_per_row() -> None:
     k = 512
     for length, start, path in ((8192, 9, "register"), (32771, 13, "streaming")):
         width = length + start + 7
-        scores = torch.full(
-            (1, width), torch.inf, device="cuda", dtype=torch.float32
-        )
+        scores = torch.full((1, width), torch.inf, device="cuda", dtype=torch.float32)
         window = torch.full((length,), -1.0, device="cuda", dtype=torch.float32)
         above = k // 2
         negative_zero_count = k
@@ -308,9 +308,7 @@ def test_signed_nan_threshold_bins_match_per_row() -> None:
     # Streaming path: the negative-NaN threshold interval overflows the
     # candidate buffer and exercises the exact rescan before index tie-break.
     length, start, k = 32771, 11, 512
-    scores = torch.empty(
-        (1, length + start + 5), device="cuda", dtype=torch.float32
-    )
+    scores = torch.empty((1, length + start + 5), device="cuda", dtype=torch.float32)
     window = scores[0, start : start + length]
     window[:] = lower_negative_nan
     window[:192] = positive_nan
@@ -364,9 +362,7 @@ def test_multi_request_nonzero_starts_ignore_poison() -> None:
             length, device="cuda", generator=generator
         )
     output = _run(scores, starts, ends, k, width)
-    _assert_stable_equiv(
-        output, scores, starts, ends, k, width, "multi-request poison"
-    )
+    _assert_stable_equiv(output, scores, starts, ends, k, width, "multi-request poison")
 
 
 def test_unaligned_score_view_and_row_starts() -> None:
@@ -418,8 +414,31 @@ def test_stable_selected_set_across_replays() -> None:
         if expected_set is None:
             expected_set = selected
         else:
-            assert torch.equal(selected, expected_set), (
-                f"stable tie-break changed selected set on replay {replay}"
+            assert torch.equal(
+                selected, expected_set
+            ), f"stable tie-break changed selected set on replay {replay}"
+
+
+def test_narrow_score_interval_overflow_count_snapshot() -> None:
+    # All scores occupy one coarse FP16 bin, overflowing its candidate buffer.
+    # There are both strictly-above scores and an exact tie at the FP32 cutoff.
+    generator = torch.Generator(device="cuda").manual_seed(123)
+    for rows, width in ((16, 4000), (33, 32000), (64, 64000), (128, 100000)):
+        scores = torch.rand(rows, width, generator=generator, device="cuda")
+        scores = 1.0 + (scores * 8).round() * (2.0**-20)
+        starts = torch.zeros(rows, dtype=torch.int32, device="cuda")
+        ends = torch.full_like(starts, width)
+        reference = scores.argsort(dim=-1, descending=True, stable=True)[:, :2048]
+        reference = reference.sort(dim=-1).values
+        output = _run(scores, starts, ends, 2048)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            rtp_llm_ops.topk_v3_tie_break(scores, starts, ends, output, 2048, width)
+        for _ in range(8):
+            graph.replay()
+            torch.testing.assert_close(
+                output.sort(dim=-1).values, reference.int(), rtol=0, atol=0
             )
 
 
@@ -550,6 +569,7 @@ if __name__ == "__main__":
     test_unaligned_score_view_and_row_starts()
     test_bounds_clamp_empty_rows_and_padding()
     test_stable_selected_set_across_replays()
+    test_narrow_score_interval_overflow_count_snapshot()
     test_empty_batch_is_noop()
     test_overflow_boundary_counter_is_snapshotted_by_all_warps()
     test_negative_midpoint_preserves_higher_scores_and_stable_ties()

@@ -41,9 +41,7 @@ def _create_mxfp8_packed_scale_output(
 
     packed_k = hidden_size // (4 * MX_BLOCK)
     aligned_tokens = deep_gemm.get_tma_aligned_size(tokens, 4)
-    storage = torch.empty(
-        (packed_k, aligned_tokens), device=device, dtype=torch.int32
-    )
+    storage = torch.empty((packed_k, aligned_tokens), device=device, dtype=torch.int32)
     return storage.transpose(0, 1)[:tokens, :]
 
 
@@ -192,9 +190,7 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     # on the kernel by avoiding the inline-asm div.rn.f32.
     if SCALE_UE8M0:
         if MXFP8_SEMANTICS:
-            normalized_max = absmax * tl.full(
-                absmax.shape, 1.0 / 448.0, tl.float32
-            )
+            normalized_max = absmax * tl.full(absmax.shape, 1.0 / 448.0, tl.float32)
             exp_field = _mxfp8_float_to_ue8m0(normalized_max)
             inv_scale = _mxfp8_ue8m0_to_inv_scale(exp_field)
             inv_scale_full = tl.broadcast_to(
@@ -288,6 +284,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     HAS_MEGA_MOE_OUTPUT: tl.constexpr,
     HAS_FP32_OUTPUT: tl.constexpr,
     HAS_RAW_GATE_CLEAR: tl.constexpr,
+    ROUND_RESIDUAL_BF16: tl.constexpr,
 ):
     """Single-pass dual-output: also stores bf16 normed alongside fp8.
 
@@ -303,14 +300,11 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     r = tl.load(residual_ptr + token_id * stride_r_t + offs, mask=mask, other=0.0).to(
         tl.float32
     )
-    # Precision-alignment with baseline: baseline performs bf16 in-place add
-    # then re-reads the bf16 residual for rmsnorm. We round-trip r_new through
-    # bf16 here to match exactly (otherwise the fp32 r_new used directly for
-    # sq_sum produces 1-ULP-different normed output, which is bit-different
-    # from baseline and accumulates across all transformer layers).
-    # Match production single-pass fused_add_rmsnorm: r + h stays in fp32
-    # for the rmsnorm reduction; only the residual store rounds to bf16.
+    # Ordinary fused add/RMSNorm retains the FP32 sum for the reduction.
+    # HY4 MTP post-attention instead has an explicit BF16 add before norm.
     r_new = r + h
+    if ROUND_RESIDUAL_BF16:
+        r_new = r_new.to(tl.bfloat16).to(tl.float32)
     tl.store(
         residual_ptr + token_id * stride_r_t + offs,
         r_new.to(tl.bfloat16),
@@ -362,9 +356,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     # on the kernel by avoiding the inline-asm div.rn.f32.
     if SCALE_UE8M0:
         if MXFP8_SEMANTICS:
-            normalized_max = absmax * tl.full(
-                absmax.shape, 1.0 / 448.0, tl.float32
-            )
+            normalized_max = absmax * tl.full(absmax.shape, 1.0 / 448.0, tl.float32)
             exp_field = _mxfp8_float_to_ue8m0(normalized_max)
             inv_scale = _mxfp8_ue8m0_to_inv_scale(exp_field)
             inv_scale_full = tl.broadcast_to(
@@ -456,9 +448,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
             mega_scale_exponent << ((mega_group_offsets % 4) * 8),
             0,
         )
-        mega_packed = tl.sum(
-            tl.reshape(mega_shifted, (mega_num_packed, 4)), axis=1
-        )
+        mega_packed = tl.sum(tl.reshape(mega_shifted, (mega_num_packed, 4)), axis=1)
         mega_packed_offsets = tl.arange(0, mega_num_packed)
         tl.store(
             mega_mxfp8_scale_out_ptr
@@ -547,6 +537,8 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     mega_mxfp8_scale_out: torch.Tensor | None = None,
     emit_fp32_output: bool = False,
     raw_gate_clear_out: torch.Tensor | None = None,
+    round_residual_bf16: bool = False,
+    out: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> (
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -595,6 +587,9 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     ):
         raise ValueError("invalid HY4 raw head-gate clear output ABI")
 
+    if out is not None and (H != 6144 or not mxfp8_semantics or emit_fp32_output):
+        raise ValueError("preallocated outputs require the HY4 BF16/MXFP8 producer")
+
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H:
         if clear_raw_gate:
@@ -622,25 +617,42 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
             mega_mxfp8_scale_out.copy_(mega_scale)
         return (*result, result[0].float()) if emit_fp32_output else result
 
-    bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=hidden_states.device)
     fp32_out = (
         torch.empty((T, H), dtype=torch.float32, device=hidden_states.device)
         if emit_fp32_output
         else None
     )
-    fp8_out = torch.empty(
-        (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
-    )
-    if mxfp8_semantics:
-        scale_out = _create_mxfp8_packed_scale_output(T, H, hidden_states.device)
+    if out is None:
+        bf16_out = torch.empty(
+            (T, H), dtype=torch.bfloat16, device=hidden_states.device
+        )
+        fp8_out = torch.empty(
+            (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
+        )
+        if mxfp8_semantics:
+            scale_out = _create_mxfp8_packed_scale_output(T, H, hidden_states.device)
+        else:
+            scale_out = create_per_token_group_quant_fp8_output_scale(
+                x_shape=(T, H),
+                device=hidden_states.device,
+                group_size=group_size,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=scale_ue8m0,
+            )
     else:
-        scale_out = create_per_token_group_quant_fp8_output_scale(
-            x_shape=(T, H),
-            device=hidden_states.device,
-            group_size=group_size,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=scale_ue8m0,
+        bf16_out, fp8_out, scale_out = out
+        assert mxfp8_semantics and not emit_fp32_output
+        assert bf16_out.shape == fp8_out.shape == (T, H)
+        assert bf16_out.dtype == torch.bfloat16 and fp8_out.dtype == torch.float8_e4m3fn
+        assert bf16_out.is_contiguous() and fp8_out.is_contiguous()
+        assert scale_out.shape == (T, H // 128) and scale_out.dtype == torch.int32
+        assert scale_out.stride() == (1, (T + 3) // 4 * 4)
+        assert (
+            bf16_out.device
+            == fp8_out.device
+            == scale_out.device
+            == hidden_states.device
         )
     if T == 0:
         if emit_fp32_output:
@@ -685,6 +697,7 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         HAS_MEGA_MOE_OUTPUT=emit_mega_moe,
         HAS_FP32_OUTPUT=emit_fp32_output,
         HAS_RAW_GATE_CLEAR=clear_raw_gate,
+        ROUND_RESIDUAL_BF16=round_residual_bf16,
         num_warps=_select_num_warps(H),
     )
     if emit_fp32_output:

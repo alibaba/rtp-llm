@@ -273,6 +273,25 @@ class IndexerOp(nn.Module):
             )
         self._prefill_topk_backend = prefill_topk_backend
 
+    def hy4_topk(
+        self,
+        logits: torch.Tensor,
+        row_starts: torch.Tensor,
+        row_ends: torch.Tensor,
+        output: torch.Tensor,
+        max_seq_len: int,
+    ) -> None:
+        # HY4 resolves equal scores by token index before canonicalizing the
+        # selected IDs for deterministic sparse-attention accumulation.
+        rtp_llm_ops.topk_v3_tie_break(
+            logits,
+            row_starts,
+            row_ends,
+            output,
+            2048,
+            min(max(int(max_seq_len), 1), logits.shape[1]),
+        )
+
     def _run_prefill_topk(
         self,
         logits: torch.Tensor,
@@ -697,6 +716,8 @@ class IndexerOp(nn.Module):
         kv_cache: KVCache,
         fmha_params: Any,
         attention_inputs: Any,
+        *,
+        force_multi_token: bool = False,
     ) -> torch.Tensor:
         """
         Compute TopK indices for paged attention (decode phase).
@@ -720,7 +741,7 @@ class IndexerOp(nn.Module):
         weights = weights.view(-1, self.index_n_heads)
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
         is_draft_extend = bool(getattr(attention_inputs, "is_draft_extend", False))
-        is_multi_token_decode = is_target_verify or is_draft_extend
+        is_multi_token_decode = force_multi_token or is_target_verify or is_draft_extend
 
         num_heads_kv = 1
         head_dim_with_sf = self._head_dim_with_sf()

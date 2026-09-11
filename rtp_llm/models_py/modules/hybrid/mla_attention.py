@@ -85,6 +85,7 @@ class MlaAttention(nn.Module):
         indexer_layernorm_eps: Optional[float] = None,
         indexer_scale_fmt: Optional[str] = None,
         indexer_use_hadamard: bool = True,
+        indexer_bf16_compute: bool = False,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -122,6 +123,7 @@ class MlaAttention(nn.Module):
                 parallelism_config,
                 scale_fmt=("none" if indexer_scale_fmt is None else indexer_scale_fmt),
                 use_hadamard=indexer_use_hadamard,
+                bf16_compute=indexer_bf16_compute,
             )
         else:
             self.indexer = None

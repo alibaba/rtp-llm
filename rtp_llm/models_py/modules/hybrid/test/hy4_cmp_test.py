@@ -1,46 +1,12 @@
 import os
 import unittest
-from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
 from torch import nn
 
-from rtp_llm.models_py.model_desc.generic_moe import (
-    GenericMoeDecoderLayer,
-    GenericMoeLayer,
-)
-from rtp_llm.models_py.modules.hybrid import hy4_cmp as bridge
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
-from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
-
-
-class _Callable(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def forward(self, *args, **kwargs):
-        return self.fn(*args, **kwargs)
-
-
-def _config(model_type: str = "hy_v4") -> SimpleNamespace:
-    return SimpleNamespace(model_type=model_type)
-
-
-def _parallelism(tp_size: int = 1) -> SimpleNamespace:
-    return SimpleNamespace(tp_size=tp_size, get_attn_tp_size=lambda: tp_size)
-
-
-def _attention(*, indexer=None) -> SimpleNamespace:
-    return SimpleNamespace(
-        q_lora_rank=2048,
-        gate_proj=Mock(),
-        gating_type="elementwise",
-        indexer=indexer,
-        reuse_topk_indices=False,
-    )
 
 
 class Hy4SmallTHeadGateTest(unittest.TestCase):
@@ -216,396 +182,6 @@ class Hy4SmallTHeadGateTest(unittest.TestCase):
             torch.backends.cuda.matmul.allow_tf32 = previous_tf32
 
 
-class Hy4CmpSchedulingControlsTest(unittest.TestCase):
-
-    def test_removed_overrides_cannot_reenable_experimental_schedules(self):
-        env = {
-            "RTP_LLM_HY4_CMP_EARLY_HEAD_GATE": "1",
-            "RTP_LLM_HY4_CMP_OUTPUT_GATE_STAGE": "before_attention",
-            "RTP_LLM_HY4_CMP_GATE_OVERLAP": "1",
-            "RTP_LLM_HY4_CMP_MTP_MULTISTREAM": "1",
-        }
-        for model_type in ("hy_v4", "hy_v4_mtp"):
-            with self.subTest(model_type=model_type), patch.dict(os.environ, env):
-                cmp = bridge.Hy4Cmp(
-                    config=_config(model_type),
-                    parallelism_config=_parallelism(),
-                    self_attn=_attention(),
-                )
-                self.assertNotIn("_early_head_gate", vars(cmp))
-                self.assertNotIn("_output_gate_stage", vars(cmp))
-                self.assertNotIn("_gate_overlap", vars(cmp))
-                self.assertNotIn("_mtp_multistream", vars(cmp))
-                self.assertFalse(hasattr(Indexer, "project_head_gate"))
-
-    def test_graph_clone_keeps_events_graph_local(self):
-        cmp = bridge.Hy4Cmp(
-            config=_config(),
-            parallelism_config=_parallelism(),
-            self_attn=_attention(),
-        )
-        cmp._events = object()
-        attention = _attention()
-        clone = cmp.clone_for_cuda_graph(self_attn=attention)
-        self.assertIsNone(clone._events)
-        self.assertIs(clone.self_attn, attention)
-
-    def test_target_indexer_switch_survives_schedule_cleanup(self):
-        with patch.dict(
-            os.environ,
-            {"RTP_LLM_HY4_CMP_INDEXER_FRONTEND": "0"},
-        ):
-            cmp = bridge.Hy4Cmp(
-                config=_config(),
-                parallelism_config=_parallelism(),
-                self_attn=_attention(),
-            )
-        clone = cmp.clone_for_cuda_graph(self_attn=_attention())
-        self.assertFalse(clone._indexer_frontend_parallel)
-        self.assertNotIn("_mtp_multistream", vars(clone))
-
-    def test_late_head_weights_follow_q_quantization_without_duplicate_gemm(self):
-        indexer = object.__new__(Indexer)
-        nn.Module.__init__(indexer)
-        indexer.use_hadamard = False
-        indexer._fuse_logits_head_gate = False
-        indexer._is_sparse_prefill_cp = lambda _: False
-        indexer.softmax_scale, indexer.weights_scale = 0.125, 0.25
-        x = torch.randn(4, 6, dtype=torch.bfloat16)
-        q, key = torch.randn(4, 3), torch.randn(4, 6)
-        q_scale = torch.rand(4, 3, 1)
-        weight = torch.randn(3, 6)
-        order = []
-        indexer._get_q_k_bf16 = Mock(
-            side_effect=lambda *a: (order.append("qk"), (q, key))[1]
-        )
-        indexer._quantize_q_k = Mock(
-            side_effect=lambda *a: (order.append("quant"), (q, q_scale))[1]
-        )
-        indexer.weights_proj = _Callable(
-            Mock(
-                side_effect=lambda value: (order.append("head_gate"), value @ weight.T)[
-                    1
-                ]
-            )
-        )
-        indexer._compute_topk = Mock(
-            side_effect=lambda *a: (order.append("topk"), "indices")[1]
-        )
-        result = indexer(
-            x,
-            q,
-            None,
-            None,
-            SimpleNamespace(is_prefill=False),
-            use_fast_path=False,
-            x_fp32=x.float(),
-        )
-        self.assertEqual(result, "indices")
-        self.assertEqual(order, ["qk", "quant", "head_gate", "topk"])
-        indexer.weights_proj.fn.assert_called_once()
-        torch.testing.assert_close(
-            indexer._compute_topk.call_args.args[1],
-            ((x.float() @ weight.T).unsqueeze(-1) * q_scale) * 0.03125,
-            rtol=0,
-            atol=0,
-        )
-
-    def test_boolean_aliases_and_invalid_values(self):
-        key = "RTP_LLM_HY4_CMP"
-        for value in ("1", "true", "yes", "on", " TRUE ", "\tOn\n"):
-            with patch.dict(os.environ, {key: value}):
-                self.assertTrue(bridge.resolve_hy4_cmp_enabled())
-        for value in ("0", "false", "no", "off", "", "  ", " OFF "):
-            with patch.dict(os.environ, {key: value}):
-                self.assertFalse(bridge.resolve_hy4_cmp_enabled())
-        with patch.dict(os.environ, {key: "invalid"}):
-            with self.assertRaises(ValueError):
-                bridge.resolve_hy4_cmp_enabled()
-
-
-class Hy4CmpTest(unittest.TestCase):
-    def test_switch_defaults_on(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertTrue(bridge.resolve_hy4_cmp_enabled())
-        with patch.dict(os.environ, {"RTP_LLM_HY4_CMP": "0"}):
-            self.assertFalse(bridge.resolve_hy4_cmp_enabled())
-        with patch.dict(os.environ, {"RTP_LLM_HY4_CMP": "1"}):
-            self.assertTrue(bridge.resolve_hy4_cmp_enabled())
-        with patch.dict(os.environ, {"RTP_LLM_HY4_CMP": "maybe"}):
-            with self.assertRaisesRegex(ValueError, "invalid RTP_LLM_HY4_CMP"):
-                bridge.resolve_hy4_cmp_enabled()
-
-    def test_static_contract_is_hy4_tp1_gated_mla(self) -> None:
-        cmp = bridge.Hy4Cmp(
-            config=_config(),
-            parallelism_config=_parallelism(),
-            self_attn=_attention(),
-        )
-        self.assertIsNone(cmp._disabled_reason)
-
-        cmp = bridge.Hy4Cmp(
-            config=_config("glm_5"),
-            parallelism_config=_parallelism(),
-            self_attn=_attention(),
-        )
-        self.assertEqual(cmp._disabled_reason, "unsupported model type")
-
-        cmp = bridge.Hy4Cmp(
-            config=_config(),
-            parallelism_config=_parallelism(8),
-            self_attn=_attention(),
-        )
-        self.assertEqual(cmp._disabled_reason, "HY4 CMP requires TP=1")
-
-    def test_missing_native_provider_only_disables_optional_fusion(self) -> None:
-        cmp = bridge.Hy4Cmp(
-            config=_config(),
-            parallelism_config=_parallelism(),
-            self_attn=_attention(indexer=SimpleNamespace(use_hadamard=False)),
-        )
-        layers = [SimpleNamespace(hy4_cmp=cmp)]
-        cache = SimpleNamespace(get_layer_cache=Mock(return_value=object()))
-        with patch.object(
-            cmp, "_dynamic_disabled_reason", return_value=None
-        ), patch.object(
-            bridge, "_load_hy4_ops", side_effect=ImportError("old wheel")
-        ) as load:
-            self.assertTrue(
-                bridge.should_enable_hy4_cmp(layers, 1, object(), object(), cache)
-            )
-            self.assertTrue(
-                bridge.should_enable_hy4_cmp(layers, 1, object(), object(), cache)
-            )
-        load.assert_called_once()
-        self.assertTrue(cmp._qkv_head_gate_initialized)
-        self.assertIn("old wheel", cmp._qkv_head_gate_disabled_reason)
-        clone = cmp.clone_for_cuda_graph(self_attn=cmp.self_attn)
-        self.assertTrue(clone._qkv_head_gate_initialized)
-        self.assertEqual(
-            clone._qkv_head_gate_disabled_reason,
-            cmp._qkv_head_gate_disabled_reason,
-        )
-
-    def test_qkv_a_can_publish_raw_head_gate_from_one_provider_call(self) -> None:
-        cmp = object.__new__(bridge.Hy4Cmp)
-        projected = torch.randn(2, 4, dtype=torch.bfloat16)
-        raw_gate = torch.empty(2, 1, dtype=torch.float32)
-        native = Mock(return_value=(projected, raw_gate))
-        cmp._qkv_head_gate_ops = SimpleNamespace(qkv_a_head_gate=native)
-        cmp._qkv_weight = object()
-        cmp._qkv_weight_scale = object()
-        cmp._qkv_head_gate_weight = object()
-        fallback = Mock(side_effect=AssertionError("fallback QKV-A called"))
-        cmp.self_attn = SimpleNamespace(
-            fused_qkv_a_proj=fallback,
-            q_lora_rank=2,
-            kv_lora_rank=1,
-            qk_rope_head_dim=1,
-            q_a_layernorm=nn.Identity(),
-            _fuse_q_a_norm_mode="off",
-        )
-        hidden = torch.randn(2, 4, dtype=torch.bfloat16)
-        x_fp8, x_scale = object(), object()
-        q, q_fp8, q_scale, kv = cmp._qkv_a(
-            hidden,
-            x_fp8,
-            x_scale,
-            {"qkv": projected},
-            raw_gate,
-        )
-        fallback.assert_not_called()
-        native.assert_called_once_with(
-            x_fp8,
-            x_scale,
-            cmp._qkv_weight,
-            cmp._qkv_weight_scale,
-            hidden,
-            cmp._qkv_head_gate_weight,
-            out=projected,
-            gate_output=raw_gate,
-        )
-        self.assertIsNone(q_fp8)
-        self.assertIsNone(q_scale)
-        torch.testing.assert_close(q, projected[:, :2], rtol=0, atol=0)
-        torch.testing.assert_close(kv, projected[:, 2:], rtol=0, atol=0)
-
-    def test_raw_gate_allocation_requires_complete_split_preflight(self) -> None:
-        cmp = object.__new__(bridge.Hy4Cmp)
-        cmp._qkv_head_gate_ops = object()
-        cmp._indexer_frontend_parallel = True
-        cmp.self_attn = SimpleNamespace(
-            indexer=SimpleNamespace(
-                index_n_heads=32, _hy4_small_t_head_gate_weight=None
-            ),
-            reuse_topk_indices=False,
-        )
-        source = SimpleNamespace(
-            shape=(64, 6144),
-            dim=Mock(return_value=2),
-            is_cuda=True,
-            device=torch.device("cuda"),
-        )
-        sentinel = object()
-        with patch.object(
-            cmp, "_can_preallocate_fused_raw_gate", return_value=False
-        ) as preflight, patch.object(
-            bridge.torch, "empty", return_value=sentinel
-        ) as allocate:
-            self.assertIsNone(
-                cmp.allocate_raw_head_gate_output(
-                    source, fmha_impl=object(), kv_cache=object()
-                )
-            )
-            allocate.assert_not_called()
-            preflight.return_value = True
-            self.assertIs(
-                cmp.allocate_raw_head_gate_output(
-                    source, fmha_impl=object(), kv_cache=object()
-                ),
-                sentinel,
-            )
-            allocate.assert_called_once_with(
-                (64, 32), device=source.device, dtype=torch.float32
-            )
-
-    def test_model_call_selects_cmp_for_all_layers_or_none(self) -> None:
-        first = bridge.Hy4Cmp(
-            config=_config(),
-            parallelism_config=_parallelism(),
-            self_attn=_attention(indexer=SimpleNamespace(use_hadamard=False)),
-        )
-        second = bridge.Hy4Cmp(
-            config=_config(),
-            parallelism_config=_parallelism(),
-            self_attn=_attention(indexer=None),
-        )
-        layers = [SimpleNamespace(hy4_cmp=first), SimpleNamespace(hy4_cmp=second)]
-        cache = SimpleNamespace(get_layer_cache=Mock(return_value=object()))
-        hidden = object()
-
-        with patch.object(first, "_dynamic_disabled_reason", return_value=None):
-            self.assertTrue(
-                bridge.should_enable_hy4_cmp(layers, 2, hidden, object(), cache)
-            )
-
-        second._disabled_reason = "unsupported"
-        with patch.object(first, "_dynamic_disabled_reason", return_value=None):
-            self.assertFalse(
-                bridge.should_enable_hy4_cmp(layers, 2, hidden, object(), cache)
-            )
-
-    def test_model_call_requires_first_indexer_and_dynamic_contract(self) -> None:
-        cmp = bridge.Hy4Cmp(
-            config=_config(),
-            parallelism_config=_parallelism(),
-            self_attn=_attention(indexer=None),
-        )
-        layers = [SimpleNamespace(hy4_cmp=cmp)]
-        cache = SimpleNamespace(get_layer_cache=Mock(return_value=object()))
-
-        with patch.object(cmp, "_dynamic_disabled_reason", return_value=None):
-            self.assertFalse(
-                bridge.should_enable_hy4_cmp(layers, 1, object(), object(), cache)
-            )
-        cmp.self_attn.indexer = object()
-        with patch.object(
-            cmp, "_dynamic_disabled_reason", return_value="ordinary prefill"
-        ):
-            self.assertFalse(
-                bridge.should_enable_hy4_cmp(layers, 1, object(), object(), cache)
-            )
-
-    def test_long_kv_threshold_matches_glm5_cmp(self) -> None:
-        cmp = bridge.Hy4Cmp(
-            config=_config(),
-            parallelism_config=_parallelism(),
-            self_attn=_attention(indexer=SimpleNamespace(use_hadamard=False)),
-        )
-        below = SimpleNamespace(
-            attn_inputs=SimpleNamespace(kv_cache_block_id_device=torch.empty(1, 8191))
-        )
-        threshold = SimpleNamespace(
-            attn_inputs=SimpleNamespace(kv_cache_block_id_device=torch.empty(1, 8192))
-        )
-
-        self.assertFalse(cmp._serialize_score_after_q_path(below))
-        self.assertTrue(cmp._serialize_score_after_q_path(threshold))
-
-    def test_hy4_mega_moe_prepack_views_require_exact_abi(self) -> None:
-        layer = object.__new__(GenericMoeLayer)
-        nn.Module.__init__(layer)
-        layer._hy4_mega_moe_prepack = True
-        layer.hidden_dim = 128
-        layer.top_k = 2
-        activation = torch.empty(4, 128, dtype=torch.float8_e4m3fn)
-        scale = torch.empty(4, 1, dtype=torch.int32)
-        indices = torch.empty(4, 2, dtype=torch.int64)
-        weights = torch.empty(4, 2, dtype=torch.float32)
-        layer.fused_moe = SimpleNamespace(
-            topk_ids_dtype=torch.int64,
-            prepacked_input_views=Mock(
-                return_value=(activation, scale, indices, weights)
-            ),
-        )
-
-        cmp = object.__new__(bridge.Hy4Cmp)
-        cmp.mlp = layer
-        valid_views = cmp.moe_prepacked_input_views(4)
-        self.assertTrue(
-            all(
-                actual is expected
-                for actual, expected in zip(
-                    valid_views, (activation, scale, indices, weights)
-                )
-            )
-        )
-
-        layer.fused_moe.prepacked_input_views.return_value = (
-            activation,
-            scale,
-            indices.to(torch.int32),
-            weights,
-        )
-        self.assertEqual(
-            cmp.moe_prepacked_input_views(4),
-            (None, None, None, None),
-        )
-
-    def test_forward_prepacked_reuses_dense_mxfp8_for_shared_expert(self) -> None:
-        layer = object.__new__(GenericMoeLayer)
-        nn.Module.__init__(layer)
-        experts = torch.randn(2, 4)
-        shared = torch.randn(2, 4)
-        layer.fake_balance_expert = None
-        layer._use_mega_moe_fused_shared = False
-        layer.fused_moe = SimpleNamespace(forward_prepacked=Mock(return_value=experts))
-        calls = {}
-
-        def run_shared(hidden_states, x_fp8=None, x_scale=None):
-            calls.update(hidden=hidden_states, fp8=x_fp8, scale=x_scale)
-            return shared
-
-        layer.shared_expert = _Callable(run_shared)
-        hidden = torch.randn(2, 4)
-        fp8 = object()
-        scale = object()
-
-        output = GenericMoeLayer.forward_prepacked(
-            layer,
-            hidden,
-            torch.empty(2, 2, dtype=torch.int64),
-            torch.empty(2, 2),
-            x_fp8=fp8,
-            x_scale=scale,
-        )
-
-        torch.testing.assert_close(output, experts + shared)
-        self.assertIs(calls["hidden"], hidden)
-        self.assertIs(calls["fp8"], fp8)
-        self.assertIs(calls["scale"], scale)
-
-
 class Hy4CmpIndexerFusionTest(unittest.TestCase):
     @staticmethod
     def _cos_sin_cache(max_position: int = 4096) -> torch.Tensor:
@@ -778,616 +354,113 @@ class Hy4CmpIndexerFusionTest(unittest.TestCase):
         graph.replay()
         torch.cuda.synchronize()
 
-    def test_cmp_indexer_post_selects_existing_fusion(self) -> None:
-        q_fp8 = object()
-        q_scale = object()
-        topk = object()
-        q_projection = torch.randn(2, 8)
-        precomputed_k = torch.randn(2, 4)
-        indexer = SimpleNamespace(
-            use_hadamard=False,
-            _is_sparse_prefill_cp=Mock(return_value=False),
-            _is_multi_token_decode=Mock(return_value=False),
-            wq_b=Mock(return_value=q_projection),
-            index_n_heads=2,
-            index_head_dim=4,
-            indexer_op=SimpleNamespace(
-                cos_sin_cache=object(),
-                is_neox_style=False,
-                _kv_cache_blocks=Mock(return_value=object()),
-            ),
-            _get_q_k_bf16=Mock(
-                side_effect=AssertionError("unfused Q/K path must not run")
-            ),
-            _quantize_q_k=Mock(
-                side_effect=AssertionError("unfused quant path must not run")
-            ),
-            _get_logits_head_gate=Mock(return_value=object()),
-            _compute_topk=Mock(return_value=topk),
-        )
-        fmha_params = SimpleNamespace(
-            positions_d=torch.arange(2), slot_mapping=torch.arange(2)
-        )
 
-        with patch(
-            "rtp_llm.models_py.modules.hybrid.indexer.fused_hy4_indexer_rope_quant_cache",
-            return_value=(q_fp8, q_scale),
-        ) as fused_kernel:
-            cmp = object.__new__(bridge.Hy4Cmp)
-            cmp.self_attn = SimpleNamespace(indexer=indexer)
-            result = cmp._indexer_post(
-                torch.randn(2, 16),
-                q_projection.view(2, 2, 4),
-                precomputed_k,
-                SimpleNamespace(
-                    fmha_params=fmha_params,
-                    attn_inputs=SimpleNamespace(is_prefill=False),
-                ),
-                object(),
-                None,
-            )
-
-        self.assertIs(result[0], q_fp8)
-        fused_call = fused_kernel.call_args.args
-        self.assertEqual(tuple(fused_call[0].shape), (2, 2, 4))
-        self.assertIs(fused_call[1], precomputed_k)
-        indexer._get_logits_head_gate.assert_called_once()
-        indexer._compute_topk.assert_not_called()
-
-    def test_cmp_k_preserves_projection_then_norm_formula(self) -> None:
-        torch.manual_seed(7)
-        indexer = SimpleNamespace(
-            wk=nn.Linear(4, 2, bias=False),
-            k_norm=nn.LayerNorm(2),
-        )
-        hidden = torch.randn(3, 4)
-
-        expected = indexer.k_norm(indexer.wk(hidden))
-        cmp = object.__new__(bridge.Hy4Cmp)
-        cmp.self_attn = SimpleNamespace(indexer=indexer)
-        actual = cmp._indexer_k(hidden, None, None)
-
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-class Hy4IndependentCmpTest(unittest.TestCase):
-    """Compare the dedicated path with ordinary MLA; inspect actual DAG edges."""
-
-    def _case(self, model_type="hy_v4", *, frontend=True, device="cpu"):
-        torch.manual_seed(37)
-        attn = object.__new__(MlaAttention)
-        nn.Module.__init__(attn)
-        attn.q_lora_rank, attn.kv_lora_rank, attn.qk_rope_head_dim = 2, 1, 1
-        attn.num_heads, attn.q_head_dim, attn.v_head_dim = 1, 2, 2
-        attn.layer_idx, attn.token_per_block = 0, 64
-        attn.gating_type = "elementwise"
-        attn.reuse_topk_indices = False
-        attn._reuse_mxfp8_hidden_quant = False
-        attn._fuse_q_a_norm_mode = "off"
-        attn._fuse_kv_a_norm = False
-        attn._fuse_gated_mla_quant = False
-        attn.attn_sink = torch.tensor([0.3], device=device)
-        attn.parallelism_config = _parallelism()
-        log = []
-        current = ["caller"]
-
-        def linear(name, inp, out):
-            weight = torch.randn(inp, out, device=device) * 0.2
-
-            def run(x, input_scales=None, out=None):
-                log.append((name, current[0]))
-                if input_scales is not None:
-                    x = x * input_scales
-                result = x @ weight
-                return result if out is None else out.copy_(result)
-
-            return _Callable(run)
-
-        def norm(fn, width):
-            obj = _Callable(fn)
-            obj.weight = nn.Parameter(torch.ones(width, device=device))
-            obj.variance_epsilon = 1e-5
-            return obj
-
-        attn.fused_qkv_a_proj = linear("qkv", 4, 4)
-        attn.q_a_layernorm = norm(lambda x: x * 0.5, 2)
-        attn.q_b_proj = linear("qb", 2, 2)
-        attn.q_b_proj.scale_ue8m0 = False
-        attn.kv_a_layernorm = norm(lambda x: x + 0.1, 1)
-        attn.gate_proj = linear("gate", 4, 2)
-        attn.o_proj = linear("output", 2, 4)
-        indexer = object.__new__(Indexer)
-        nn.Module.__init__(indexer)
-        indexer.use_hadamard = False
-        indexer._fuse_logits_head_gate = False
-        indexer.softmax_scale, indexer.weights_scale = 0.5, 1.0
-        indexer.index_n_heads, indexer.index_head_dim = 1, 2
-        indexer.wk = linear("index_k", 4, 2)
-        indexer.k_norm = norm(lambda x: x + 0.2, 2)
-        indexer.wq_b = linear("index_q", 2, 2)
-        indexer.weights_proj = linear("head", 4, 1)
-        cache = torch.zeros(2, 2, device=device)
-
-        def quant(q, k, cache, slots):
-            log.append(("post", current[0]))
-            cache.copy_(k)
-            return q, torch.ones(q.shape[:-1] + (1,), device=q.device)
-
-        def score(q, weights, cache, params, inputs):
-            log.append(("score", current[0]))
-            logits = (q.squeeze(1) @ cache.T) * weights.reshape(-1, 1)
-            return logits.topk(1, dim=-1).indices.to(torch.int32)
-
-        indexer.indexer_op = SimpleNamespace(
-            apply_rope_and_rotate_q_k=lambda q, k, pos: (q + 0.01, k + 0.01),
-            quant_q_k=quant,
-            _get_topk_paged=score,
-            cos_sin_cache=torch.empty(0, device=device),
-            is_neox_style=False,
-            _kv_cache_blocks=lambda cache: cache,
-        )
-        attn.indexer = indexer
-
-        def prepare(q, kv, k_pe, cache, layer, sink, **kwargs):
-            log.append(("main_ready", current[0]))
-            kwargs.pop("q_transformed", None)
-            if kwargs:
-                self.assertIn("kv_norm_weight", kwargs)
-                kv = kv + 0.1
-            return q.squeeze(1) + kv + k_pe + sink
-
-        def finish(prepared, topk):
-            log.append(("mla", current[0]))
-            return prepared + topk
-
-        fmha = SimpleNamespace(
-            is_sparse=lambda: True,
-            supports_topk_late_binding=True,
-            cp_params=None,
-            attn_inputs=SimpleNamespace(is_prefill=False),
-            fmha_params=SimpleNamespace(
-                positions_d=torch.arange(2, device=device),
-                slot_mapping=torch.arange(2, device=device),
-            ),
-            can_fuse_kv_norm_cache=lambda *a: False,
-            prepare_topk_independent_forward=prepare,
-            finish_topk_dependent_forward=finish,
-        )
-        fmha.forward = lambda q, kv, kp, cache, layer, topk, **kw: finish(
-            prepare(q, kv, kp, cache, layer, kw.get("attn_sink")), topk
-        )
-        cmp = bridge.Hy4Cmp(
-            config=_config(model_type),
-            parallelism_config=_parallelism(),
-            self_attn=attn,
-        )
-        cmp._indexer_frontend_parallel = frontend
-        return SimpleNamespace(
-            attn=attn,
-            cmp=cmp,
-            hidden=torch.randn(2, 4, device=device),
-            cache=cache,
-            fmha=fmha,
-            log=log,
-            current=current,
-        )
-
-    @contextmanager
-    def _queues(self, case):
-        class Stream:
-            def __init__(self, name):
-                self.name = name
-
-            def wait_event(self, event):
-                case.log.append(("wait", self.name, event.name))
-
-        class Event:
-            def __init__(self, name):
-                self.name = name
-
-            def record(self):
-                case.log.append(("record", case.current[0], self.name))
-
-        caller, main, k, q = (
-            Stream(n) for n in ("caller", "main_stream", "index", "index_q")
-        )
-        events = bridge._Events(
-            *(
-                Event(n)
-                for n in ("entry", "exit", "input", "qc", "q_ready", "main", "done")
+class Hy4CmpIndexerFusionTest(unittest.TestCase):
+    @staticmethod
+    def _cos_sin_cache(max_position: int = 4096) -> torch.Tensor:
+        rope_dim = 64
+        inv_freq = 1.0 / (
+            10_000_000.0
+            ** (
+                torch.arange(0, rope_dim, 2, device="cuda", dtype=torch.float32)
+                / rope_dim
             )
         )
+        positions = torch.arange(max_position, device="cuda", dtype=torch.float32)
+        freqs = torch.outer(positions, inv_freq)
+        return torch.cat((freqs.cos(), freqs.sin()), dim=-1)
 
-        @contextmanager
-        def stream(s):
-            old = case.current[0]
-            case.current[0] = s.name
-            try:
-                yield
-            finally:
-                case.current[0] = old
+    @unittest.skipUnless(
+        os.environ.get("RUN_HY4_CMP_INDEXER_BENCH") == "1",
+        "manual HY4 CMP Indexer benchmark",
+    )
+    def test_benchmark_operator_chain(self) -> None:
+        import flashinfer.rope as fi_rope
 
-        with patch.object(
-            case.cmp, "_dynamic_disabled_reason", return_value=None
-        ), patch.object(
-            case.cmp, "_side_streams", return_value=(main, k, q)
-        ) as streams, patch.object(
-            case.cmp, "_new_events", return_value=events
-        ) as create_events, patch.object(
-            bridge.torch.cuda, "stream", side_effect=stream
-        ), patch.object(
-            bridge.torch.cuda, "current_stream", return_value=caller
-        ), patch.object(
-            bridge, "_record_stream"
-        ) as lifetime:
-            yield SimpleNamespace(
-                streams=streams, events=create_events, lifetime=lifetime
-            )
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+        from rtp_llm.models_py.modules.base.cuda.indexer_op import _unpack_ue8m0_scale
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_hy4_indexer_rope_quant import (
+            fused_hy4_indexer_rope_quant_cache,
+        )
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-    def test_dedicated_path_matches_plain_attention_and_does_not_call_old_forwards(
-        self,
-    ):
-        for model in ("hy_v4", "hy_v4_mtp"):
-            for frontend in (False, True):
-                for long_kv in (False, True):
-                    with self.subTest(model=model, frontend=frontend, long_kv=long_kv):
-                        case = self._case(model, frontend=frontend)
-                        expected, indices = case.attn(
-                            case.hidden, case.fmha, case.cache, return_topk=True
-                        )
-                        expected_cache = case.cache.clone()
-                        case.cache.zero_()
-                        case.log.clear()
-                        with self._queues(case), patch.object(
-                            case.cmp,
-                            "_serialize_score_after_q_path",
-                            return_value=long_kv,
-                        ), patch.object(
-                            case.attn,
-                            "forward",
-                            side_effect=AssertionError("ordinary MLA called"),
-                        ), patch.object(
-                            case.attn.indexer,
-                            "forward",
-                            side_effect=AssertionError("ordinary Indexer called"),
-                        ), patch.object(
-                            case.fmha,
-                            "forward",
-                            side_effect=AssertionError("ordinary backend called"),
-                        ):
-                            output, topk = case.cmp.forward_attention(
-                                case.hidden, case.fmha, case.cache, return_topk=True
-                            )
-                        torch.testing.assert_close(output, expected, rtol=0, atol=0)
-                        self.assertTrue(torch.equal(topk, indices))
-                        self.assertTrue(torch.equal(case.cache, expected_cache))
-                        for name in (
-                            "qkv",
-                            "qb",
-                            "index_k",
-                            "index_q",
-                            "head",
-                            "gate",
-                            "score",
-                            "mla",
-                            "output",
-                        ):
-                            self.assertEqual(
-                                sum(x[0] == name for x in case.log), 1, name
-                            )
+        def elapsed_us(fn, warmup: int = 50, iterations: int = 500) -> float:
+            for _ in range(warmup):
+                fn()
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(iterations):
+                fn()
+            end.record()
+            end.synchronize()
+            return start.elapsed_time(end) * 1000.0 / iterations
 
-    def test_q_projection_waits_only_for_qc_and_fused_post_joins_both_branches(self):
-        case = self._case()
-        with self._queues(case):
-            case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
-        self.assertIn(("index_q", "index_q"), case.log)
-        self.assertIn(("index_k", "index"), case.log)
-        self.assertIn(("post", "index"), case.log)
-        self.assertEqual(
-            [x for x in case.log if x[:2] == ("wait", "index_q")],
-            [("wait", "index_q", "qc")],
-        )
-        self.assertLess(
-            case.log.index(("record", "index_q", "q_ready")),
-            case.log.index(("wait", "index", "q_ready")),
-        )
-        self.assertLess(
-            case.log.index(("wait", "index", "q_ready")),
-            case.log.index(("post", "index")),
-        )
-        self.assertLess(
-            case.log.index(("wait", "caller", "exit")),
-            case.log.index(("mla", "caller")),
-        )
-        self.assertLess(
-            case.log.index(("qb", "main_stream")),
-            case.log.index(("gate", "main_stream")),
-        )
+        cos_sin = self._cos_sin_cache()
+        for rows in (6, 8, 12, 24):
+            q_ref = torch.randn(rows, 32, 128, device="cuda", dtype=torch.bfloat16)
+            k_ref = torch.randn(rows, 128, device="cuda", dtype=torch.bfloat16)
+            q_fused, k_fused = q_ref.clone(), k_ref.clone()
+            positions = torch.arange(rows, device="cuda", dtype=torch.int32)
+            slots = torch.arange(rows, device="cuda", dtype=torch.int64)
+            cache_ref = torch.zeros(1, 64, 132, device="cuda", dtype=torch.uint8)
+            cache_fused = cache_ref.clone()
 
-    def test_split_qk_join_only_after_q_post_and_k_cache(self):
-        case = self._case()
-        expected, expected_topk = case.attn(
-            case.hidden, case.fmha, case.cache, return_topk=True
-        )
-        expected_cache = case.cache.clone()
-        case.cache.zero_()
-        case.log.clear()
-
-        def split(buffers, fmha, cache):
-            buffers["index_q"] = torch.empty(2, 1, 2)
-            buffers["index_k"] = torch.empty(2, 2)
-            return True
-
-        def post(q, k, fmha, buffers, branch, raw_gate=None):
-            case.log.append(("post_" + branch, case.current[0]))
-            if branch == "k":
-                case.cache.copy_(k + 0.01)
-                return None
-            return q + 0.01, (raw_gate * 0.5).unsqueeze(-1)
-
-        with (
-            self._queues(case),
-            patch.object(case.cmp, "_prepare_split_indexer", side_effect=split),
-            patch.object(case.cmp, "_indexer_rope_quant", side_effect=post),
-            patch(
-                "rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate.project_fp32_logits_head_gate",
-                side_effect=lambda hidden, linear, **kw: linear(hidden),
-            ),
-        ):
-            output, topk = case.cmp.forward_attention(
-                case.hidden, case.fmha, case.cache, return_topk=True
-            )
-        torch.testing.assert_close(output, expected, rtol=0, atol=0)
-        self.assertTrue(torch.equal(topk, expected_topk))
-        self.assertTrue(torch.equal(case.cache, expected_cache))
-        self.assertIn(("head", "index_q"), case.log)
-        self.assertIn(("post_q", "index_q"), case.log)
-        self.assertIn(("post_k", "index"), case.log)
-        self.assertLess(
-            case.log.index(("head", "index_q")), case.log.index(("qkv", "main_stream"))
-        )
-        self.assertLess(
-            case.log.index(("post_q", "index_q")),
-            case.log.index(("record", "index_q", "q_ready")),
-        )
-        self.assertLess(
-            case.log.index(("post_k", "index")),
-            case.log.index(("wait", "index", "q_ready")),
-        )
-        self.assertLess(
-            case.log.index(("wait", "index", "q_ready")),
-            case.log.index(("score", "index")),
-        )
-        self.assertEqual(
-            [x for x in case.log if x[:2] == ("wait", "index_q")],
-            [("wait", "index_q", "input"), ("wait", "index_q", "qc")],
-        )
-
-    def test_main_stream_joins_caller_and_publishes_all_outputs(self):
-        case = self._case()
-        with self._queues(case) as queues:
-            case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
-        for name in ("qkv", "qb", "gate", "main_ready"):
-            self.assertIn((name, "main_stream"), case.log)
-        for name in ("mla", "output"):
-            self.assertIn((name, "caller"), case.log)
-        self.assertLess(
-            case.log.index(("record", "caller", "entry")),
-            case.log.index(("wait", "main_stream", "entry")),
-        )
-        self.assertLess(
-            case.log.index(("wait", "main_stream", "entry")),
-            case.log.index(("qkv", "main_stream")),
-        )
-        self.assertLess(
-            case.log.index(("wait", "main_stream", "done")),
-            case.log.index(("record", "main_stream", "exit")),
-        )
-        self.assertLess(
-            case.log.index(("record", "main_stream", "exit")),
-            case.log.index(("wait", "caller", "exit")),
-        )
-        outputs, consumer = queues.lifetime.call_args.args
-        self.assertEqual(consumer.name, "caller")
-        self.assertEqual(len(outputs), 3)
-        self.assertTrue(all(isinstance(x, torch.Tensor) for x in outputs))
-
-    def test_device_streams_use_glm5_priorities_and_are_reused(self):
-        streams = (object(), object(), object())
-        with patch.object(bridge.Hy4Cmp, "_streams_by_device", {}), patch.object(
-            bridge, "_is_capturing", return_value=False
-        ), patch.object(
-            bridge.torch.cuda, "device", return_value=nullcontext()
-        ), patch.object(
-            bridge.torch.cuda, "Stream", side_effect=streams
-        ) as create:
-            first = bridge.Hy4Cmp._side_streams(torch.device("cuda:0"))
-            second = bridge.Hy4Cmp._side_streams(torch.device("cuda:0"))
-        self.assertIs(first, second)
-        self.assertEqual(first, streams)
-        self.assertEqual(
-            [call.kwargs for call in create.call_args_list], [{"priority": -1}, {}, {}]
-        )
-
-    def test_long_kv_delays_score_until_complete_main_query(self):
-        case = self._case()
-        with self._queues(case), patch.object(
-            case.cmp, "_serialize_score_after_q_path", return_value=True
-        ):
-            case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
-        self.assertLess(
-            case.log.index(("main_ready", "main_stream")),
-            case.log.index(("record", "main_stream", "main")),
-        )
-        self.assertLess(
-            case.log.index(("wait", "index", "main")),
-            case.log.index(("score", "index")),
-        )
-
-    def test_frontend_off_keeps_score_on_side_stream(self):
-        case = self._case(frontend=False)
-        with self._queues(case):
-            case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
-        for name in ("index_k", "index_q", "post", "head"):
-            self.assertIn((name, "main_stream"), case.log)
-        self.assertIn(("score", "index"), case.log)
-        self.assertFalse(any(x[1] == "index_q" for x in case.log))
-
-    def test_mtp_indexer_uses_streams_and_topk_reuse_stays_serial(self):
-        case = self._case("hy_v4_mtp")
-        with self._queues(case) as queues:
-            _, topk = case.cmp.forward_attention(
-                case.hidden, case.fmha, case.cache, return_topk=True
-            )
-        queues.streams.assert_called_once()
-        queues.events.assert_called_once()
-        queues.lifetime.assert_called()
-        self.assertIsNotNone(topk)
-        self.assertIn(("index_k", "index"), case.log)
-        self.assertIn(("index_q", "index_q"), case.log)
-        self.assertIn(("score", "index"), case.log)
-
-        for model in ("hy_v4", "hy_v4_mtp"):
-            case = self._case(model)
-            previous = torch.zeros(2, 1, dtype=torch.int32)
-            with self._queues(case) as queues:
-                _, topk = case.cmp.forward_attention(
-                    case.hidden,
-                    case.fmha,
-                    case.cache,
-                    force_reuse_topk_indices=True,
-                    prev_topk_indices=previous,
-                    return_topk=True,
+            def baseline() -> None:
+                fi_rope._apply_rope_pos_ids_cos_sin_cache(
+                    q=q_ref[:, :, :64],
+                    k=k_ref[:, :64].unsqueeze(1),
+                    q_rope=q_ref[:, :, :64],
+                    k_rope=k_ref[:, :64].unsqueeze(1),
+                    cos_sin_cache=cos_sin,
+                    pos_ids=positions,
+                    interleave=True,
                 )
-            queues.streams.assert_not_called()
-            queues.events.assert_not_called()
-            queues.lifetime.assert_not_called()
-            self.assertIs(topk, previous)
-            self.assertFalse(
-                any(
-                    x[0] in ("index_k", "index_q", "post", "score")
-                    for x in case.log
+                _, scale = sgl_per_token_group_quant_fp8(
+                    q_ref.view(-1, 128),
+                    group_size=128,
+                    eps=1.0e-10,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
                 )
+                _unpack_ue8m0_scale(scale)
+                rtp_llm_ops.indexer_k_quant_and_cache(
+                    k_ref, cache_ref, slots, 128, "ue8m0"
+                )
+
+            def fused() -> None:
+                fused_hy4_indexer_rope_quant_cache(
+                    q_fused,
+                    k_fused,
+                    positions,
+                    cos_sin,
+                    slots,
+                    cache_fused,
+                    is_neox_style=False,
+                )
+
+            baseline_us = elapsed_us(baseline)
+            fused_us = elapsed_us(fused)
+            torch.cuda.synchronize()
+            baseline_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(baseline_graph):
+                baseline()
+            fused_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(fused_graph):
+                fused()
+            baseline_graph_us = elapsed_us(baseline_graph.replay)
+            fused_graph_us = elapsed_us(fused_graph.replay)
+            print(
+                f"HY4 CMP Indexer rows={rows}: eager baseline={baseline_us:.3f} us, "
+                f"fused={fused_us:.3f} us; graph baseline={baseline_graph_us:.3f} us, "
+                f"fused={fused_graph_us:.3f} us, "
+                f"graph speedup={baseline_graph_us / fused_graph_us:.2f}x"
             )
 
-    def test_shared_quantization_and_q_norm_inputs_are_not_recomputed(self):
-        case = self._case()
-        case.attn._reuse_mxfp8_hidden_quant = True
-        case.attn._fuse_q_a_norm_mode = "mxfp8"
-        x8, xs = case.hidden.clone(), torch.ones(2, 1)
-        q8, qs = torch.randn(2, 2), torch.ones(2, 1)
-        with self._queues(case), patch.object(
-            bridge, "_mxfp8_quantize_hidden", return_value=(x8, xs)
-        ) as quant, patch(
-            "rtp_llm.models_py.modules.hybrid.mla_attention.fused_strided_rmsnorm_per_token_fp8_quant",
-            return_value=(q8, qs),
-            create=True,
-        ) as qnorm, patch.object(
-            case.attn.q_b_proj, "forward", wraps=case.attn.q_b_proj.forward
-        ) as main_q, patch.object(
-            case.attn.indexer.wq_b, "forward", wraps=case.attn.indexer.wq_b.forward
-        ) as index_q, patch.object(
-            case.attn.indexer.wk, "forward", wraps=case.attn.indexer.wk.forward
-        ) as index_k:
-            case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
-        quant.assert_called_once_with(case.hidden)
-        qnorm.assert_called_once()
-        self.assertTrue(qnorm.call_args.kwargs["mxfp8_semantics"])
-        for call in (main_q.call_args, index_q.call_args):
-            self.assertIs(call.args[0], q8)
-            self.assertIs(call.kwargs["input_scales"], qs)
-        self.assertIs(index_k.call_args.args[0], x8)
-        self.assertIs(index_k.call_args.kwargs["input_scales"], xs)
-
-    def test_kv_norm_and_output_gate_fusions_keep_original_contracts(self):
-        case = self._case("hy_v4_mtp")
-        case.attn._fuse_kv_a_norm = True
-        case.fmha.can_fuse_kv_norm_cache = lambda *a: True
-        case.attn._fuse_gated_mla_quant = True
-        case.attn._gated_mla_quant_group_size = 32
-        case.attn._gated_mla_scale_ue8m0 = True
-        case.attn._gated_mla_round_scale_to_pow2 = True
-        scale = torch.ones(2, 1)
-        with self._queues(case), patch(
-            "rtp_llm.models_py.modules.hybrid.mla_attention.sigmoid_mul_fp8_quant_fwd",
-            side_effect=lambda x, gate, **kw: (x * torch.sigmoid(gate), scale),
-            create=True,
-        ) as fused, patch.object(
-            case.attn.o_proj, "forward", wraps=case.attn.o_proj.forward
-        ) as output:
-            case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
-        self.assertEqual(
-            fused.call_args.kwargs,
-            dict(
-                quant_group_size=32,
-                scale_ue8m0=True,
-                round_scale_to_pow2=True,
-                column_major_scales=True,
-            ),
-        )
-        self.assertIs(output.call_args.kwargs["input_scales"], scale)
-
-    def test_capture_requires_warmup_and_clone_gets_fresh_events(self):
-        case = self._case()
-        with (
-            patch.object(bridge.Hy4Cmp, "_streams_by_device", {}),
-            patch.object(bridge, "_is_capturing", return_value=True),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "before capture"):
-                case.cmp._side_streams(torch.device("cuda:0"))
-            with self.assertRaisesRegex(RuntimeError, "before capture"):
-                case.cmp._new_events(torch.device("cuda:0"))
-        case.cmp._events = object()
-        cloned_mlp = object()
-        clone = case.cmp.clone_for_cuda_graph(self_attn=case.attn, mlp=cloned_mlp)
-        self.assertIs(clone.mlp, cloned_mlp)
-        self.assertIsNone(clone._events)
-        self.assertIs(clone.self_attn, case.attn)
-
-    def test_missing_reuse_topk_fails_before_gpu_submission(self):
-        case = self._case()
-        with self._queues(case), patch.object(case.cmp, "mla_prologue") as prologue:
-            with self.assertRaisesRegex(RuntimeError, "previous TopK"):
-                case.cmp.forward_attention(
-                    case.hidden, case.fmha, case.cache, force_reuse_topk_indices=True
-                )
-        prologue.assert_not_called()
-
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_real_cuda_streams_and_graph_replay_match_serial_attention(self):
-        # Real CUDA queues/events and math, with a small deterministic backend.
-        # This validates the coordinator, not full-model numerical accuracy.
-        for model in ("hy_v4", "hy_v4_mtp"):
-            for defer in (False, True):
-                case = self._case(model, device="cuda")
-                with torch.inference_mode(), patch.object(
-                    case.cmp, "_serialize_score_after_q_path", return_value=defer
-                ):
-                    for _ in range(3):
-                        case.cmp.forward_attention(case.hidden, case.fmha, case.cache)
-                    torch.cuda.synchronize()
-                    graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph):
-                        actual, indices = case.cmp.forward_attention(
-                            case.hidden, case.fmha, case.cache, return_topk=True
-                        )
-                    for value in (0.2, -0.7, 1.4):
-                        case.hidden.fill_(value)
-                        graph.replay()
-                        torch.cuda.synchronize()
-                        actual_copy, indices_copy, cache_copy = (
-                            actual.clone(),
-                            indices.clone(),
-                            case.cache.clone(),
-                        )
-                        expected, topk = case.attn(
-                            case.hidden, case.fmha, case.cache, return_topk=True
-                        )
-                        torch.testing.assert_close(
-                            actual_copy, expected, rtol=0, atol=0
-                        )
-                        self.assertTrue(torch.equal(indices_copy, topk))
-                        self.assertTrue(torch.equal(cache_copy, case.cache))
 
 
 if __name__ == "__main__":

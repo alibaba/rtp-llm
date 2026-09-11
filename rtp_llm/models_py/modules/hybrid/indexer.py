@@ -44,6 +44,7 @@ class Indexer(nn.Module):
         parallelism_config: Optional[ParallelismConfig] = None,
         scale_fmt: Optional[str] = "none",
         use_hadamard: bool = True,
+        bf16_compute: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -70,6 +71,7 @@ class Indexer(nn.Module):
         self.head_kv = 1
         self.scale_fmt = scale_fmt  # FP8 quantization format
         self.use_hadamard = use_hadamard
+        self.bf16_compute = bf16_compute
         self.softmax_scale = self.index_head_dim**-0.5
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
@@ -105,6 +107,36 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+        if (
+            bf16_compute
+            and _DEVICE_TYPE == DeviceType.Cuda
+            and quant_config is not None
+            and quant_config.get_method() == "MXFP8"
+            and self.wk.weight.dtype == torch.float8_e4m3fn
+        ):
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+                CudaF16Linear,
+            )
+
+            # HY4's reference WK consumes BF16 hidden states even when its
+            # checkpoint is MXFP8. Decode once, before graph capture; retain
+            # the loader's [RoPE, NoPE] order and never quantize X again here.
+            w = self.wk.weight
+            scales = self.wk.weight_scale
+            if scales.dtype != torch.float32 or scales.shape != (
+                w.shape[0],
+                w.shape[1] // 32,
+            ):
+                raise ValueError("HY4 WK requires unpacked FP32 MXFP8 scales")
+            decoded = (
+                (w.float().reshape(w.shape[0], -1, 32) * scales.unsqueeze(-1))
+                .reshape(w.shape)
+                .bfloat16()
+            )
+            self.wk = CudaF16Linear(decoded.t())
+        self.wk_bf16_input = bool(
+            bf16_compute and self.wk.weight.dtype == torch.bfloat16
+        )
 
         self.k_norm = LayerNorm(
             weights[W.mla_indexer_k_norm_w],
@@ -120,6 +152,17 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+        if bf16_compute:
+            # Native CMP still accumulates into its FP32 output buffer; the
+            # Q epilogue rounds that result to BF16 before applying Q scales.
+            # Also match the reference's weight conversion for other HY4
+            # checkpoints whose head weights are not exactly BF16-valued.
+            self.register_buffer(
+                "_bf16_head_weight",
+                self.weights_proj.weight.bfloat16(),
+                persistent=False,
+            )
+            self.weights_proj.weight = self._bf16_head_weight.float()
         # Pre-contiguify weight for the fused Triton kernel (one-time init
         # copy). Production weight is often a transposed view [N, K] of
         # underlying [K, N] storage; the small-T per-(t,n) kernel needs
@@ -152,6 +195,8 @@ class Indexer(nn.Module):
             "_hy4_small_t_head_gate_weight", small_t_weight, persistent=False
         )
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
+        # HY4's loader rounds this shared table to BF16 values in FP32
+        # storage, so MLA and Indexer agree without per-layer copies.
 
         self.indexer_op = IndexerOp(
             index_n_heads=self.index_n_heads,
@@ -199,6 +244,9 @@ class Indexer(nn.Module):
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
         # ``HWKernelConfig.enable_fuse_kernels``.
         scale = self.softmax_scale * self.weights_scale
+        if self.bf16_compute:
+            raw = torch.nn.functional.linear(x.bfloat16(), self._bf16_head_weight)
+            return raw.float().unsqueeze(-1) * q_scale * scale
         small_t_weight = getattr(self, "_hy4_small_t_head_gate_weight", None)
         if (
             small_t_weight is not None
@@ -252,7 +300,7 @@ class Indexer(nn.Module):
             q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if x_fp8 is not None and x_scale is not None:
+        if not self.wk_bf16_input and x_fp8 is not None and x_scale is not None:
             k = self.wk(x_fp8, input_scales=x_scale)
         else:
             k = self.wk(x)
@@ -283,7 +331,7 @@ class Indexer(nn.Module):
             q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if x_fp8 is not None and x_scale is not None:
+        if not self.wk_bf16_input and x_fp8 is not None and x_scale is not None:
             k = self.wk(x_fp8, input_scales=x_scale)
         else:
             k = self.wk(x)
@@ -325,7 +373,7 @@ class Indexer(nn.Module):
             q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if x_fp8 is not None and x_scale is not None:
+        if not self.wk_bf16_input and x_fp8 is not None and x_scale is not None:
             k = self.wk(x_fp8, input_scales=x_scale)
         else:
             k = self.wk(x)

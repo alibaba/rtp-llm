@@ -948,6 +948,26 @@ class SparseMlaImpl(MlaImplBase):
         if group_layer == 0:
             working.begin(self.fmha_impl._convert_topk_indices_to_global(topk_indices))
 
+    def prepare_hy4_native_query(
+        self, q_nope, q_transformed, kv_cache, layer_id, attn_sink
+    ) -> _SparseMlaPreparedForward:
+        """Consume HY4 Q-B outputs using the shared BF16 absorbed-Q kernel."""
+        from rtp_kernel.glm5 import absorbed_q_nope_bmm
+
+        absorbed_q_nope_bmm(
+            q_nope,
+            self.weights[layer_id][W.mla_kc],
+            out=q_transformed,
+        )
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+        return _SparseMlaPreparedForward(
+            q_transformed=q_transformed,
+            kv_input=kv_cache.kv_cache_base,
+            layer_id=layer_id,
+            attn_sink=attn_sink,
+        )
 
     def prepare_topk_independent_forward(
         self,
@@ -1048,6 +1068,21 @@ class SparseMlaImpl(MlaImplBase):
             layer_id=layer_id,
             attn_sink=attn_sink,
             physical_indices=physical_indices,
+        )
+
+    def hy4_output_weight(self, layer_id: int) -> torch.Tensor:
+        return self.weights[layer_id][W.mla_vc]
+
+    def finish_hy4_native_attention(
+        self, prepared: _SparseMlaPreparedForward, topk_indices: torch.Tensor
+    ) -> torch.Tensor:
+        """Leave the output BMM to HY4's fused BMM/gate/quant epilogue."""
+        return self.fmha_impl.forward(
+            prepared.q_transformed,
+            prepared.kv_input,
+            topk_indices,
+            layer_id=prepared.layer_id,
+            attn_sink=prepared.attn_sink,
         )
 
     def finish_topk_dependent_forward(

@@ -13,6 +13,10 @@ import triton.language as tl
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+    _float_to_ue8m0,
+    _ue8m0_to_inv_scale,
+)
 
 _MIN_TOTAL_PROGRAMS = 512
 _MIN_BLOCK_H = 128
@@ -141,6 +145,7 @@ def _sigmoid_mul_fp8_quant_kernel(
     BLOCK_N: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
     ROUND_SCALE_TO_POW2: tl.constexpr,
+    MXFP8_SEMANTICS: tl.constexpr,
 ):
     """Fused sigmoid-mul + per-token-group FP8 quant.
 
@@ -180,14 +185,23 @@ def _sigmoid_mul_fp8_quant_kernel(
             # Triton's default fp32 `/` is ``div.approx.f32`` (~1 ULP off);
             # ``tl.fdiv(.., ieee_rounding=True)`` emits ``div.rnd.f32`` to
             # match sgl's CUDA-default IEEE-RNE division.
-            _absmax = tl.maximum(tl.max(tl.abs(result)), 1e-4)
-            s_init = _ieee_rn_div_f32(_absmax, fp8_max)
-            s, exp_bits = _ue8m0_pow2_round_scalar(s_init)
-            fp8_val = tl.clamp(
-                _ieee_rn_div_f32(result, tl.full(result.shape, s, tl.float32)),
-                fp8_min,
-                fp8_max,
-            ).to(fp8_out_ptr.dtype.element_ty)
+            if MXFP8_SEMANTICS:
+                # FlashInfer MXFP8 has no absmax floor. A generic FP8 floor
+                # loses small gated values and gives zero groups the wrong
+                # exponent. Use the same zero-safe UE8M0 conversion as the
+                # standalone MXFP8 quantizer and fused RMSNorm.
+                exp_bits = _float_to_ue8m0(tl.max(tl.abs(result)) / fp8_max)
+                scaled = result * _ue8m0_to_inv_scale(exp_bits)
+            else:
+                _absmax = tl.maximum(tl.max(tl.abs(result)), 1e-4)
+                s_init = _ieee_rn_div_f32(_absmax, fp8_max)
+                s, exp_bits = _ue8m0_pow2_round_scalar(s_init)
+                scaled = _ieee_rn_div_f32(
+                    result, tl.full(result.shape, s, tl.float32)
+                )
+            fp8_val = tl.clamp(scaled, fp8_min, fp8_max).to(
+                fp8_out_ptr.dtype.element_ty
+            )
             tl.store(fp8_base + offs, fp8_val, mask=mask)
             packed_scale = packed_scale | (exp_bits << (g * 8))
         tl.store(
@@ -243,6 +257,7 @@ def _sigmoid_mul_fp8_quant_row_kernel(
     NUM_GROUP_BLOCKS: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
     ROUND_SCALE_TO_POW2: tl.constexpr,
+    MXFP8_SEMANTICS: tl.constexpr,
 ):
     """Long-prefill path: one program computes several adjacent row groups."""
     program_id = tl.program_id(0)
@@ -270,22 +285,28 @@ def _sigmoid_mul_fp8_quant_row_kernel(
     block_groups: tl.constexpr = BLOCK_H // GROUP_SIZE
     actual_groups: tl.constexpr = H // GROUP_SIZE
     gated_2d = tl.reshape(gated, (block_groups, GROUP_SIZE))
-    absmax = tl.maximum(tl.max(tl.abs(gated_2d), axis=1), 1e-4)
-    if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
-        scale = absmax / fp8_max
+    if MXFP8_SEMANTICS:
+        absmax = tl.max(tl.abs(gated_2d), axis=1)
+        exp_bits = _float_to_ue8m0(absmax / fp8_max)
+        inv_scale = _ue8m0_to_inv_scale(exp_bits)
+        quantized_values = gated_2d * tl.reshape(inv_scale, (block_groups, 1))
     else:
-        scale = _ieee_rn_div_f32(absmax, fp8_max)
-    if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
-        scale, exp_bits = _ue8m0_pow2_round_scalar(scale)
+        absmax = tl.maximum(tl.max(tl.abs(gated_2d), axis=1), 1e-4)
+        if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
+            scale = absmax / fp8_max
+        else:
+            scale = _ieee_rn_div_f32(absmax, fp8_max)
+        if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
+            scale, exp_bits = _ue8m0_pow2_round_scalar(scale)
 
-    scale_2d = tl.broadcast_to(
-        tl.reshape(scale, (block_groups, 1)),
-        (block_groups, GROUP_SIZE),
-    )
-    if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
-        quantized_values = gated_2d * (1.0 / scale_2d)
-    else:
-        quantized_values = _ieee_rn_div_f32(gated_2d, scale_2d)
+        scale_2d = tl.broadcast_to(
+            tl.reshape(scale, (block_groups, 1)),
+            (block_groups, GROUP_SIZE),
+        )
+        if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
+            quantized_values = gated_2d * (1.0 / scale_2d)
+        else:
+            quantized_values = _ieee_rn_div_f32(gated_2d, scale_2d)
     quantized = tl.clamp(quantized_values, fp8_min, fp8_max).to(
         fp8_out_ptr.dtype.element_ty
     )
@@ -435,6 +456,9 @@ def sigmoid_mul_fp8_quant_fwd(
             NUM_GROUP_BLOCKS=num_group_blocks,
             SCALE_UE8M0=scale_ue8m0,
             ROUND_SCALE_TO_POW2=round_scale_to_pow2,
+            MXFP8_SEMANTICS=(
+                quant_group_size == 32 and scale_ue8m0 and round_scale_to_pow2
+            ),
             num_warps=4,
             num_stages=2,
         )
@@ -456,5 +480,8 @@ def sigmoid_mul_fp8_quant_fwd(
             BLOCK_N=quant_group_size,
             SCALE_UE8M0=scale_ue8m0,
             ROUND_SCALE_TO_POW2=round_scale_to_pow2,
+            MXFP8_SEMANTICS=(
+                quant_group_size == 32 and scale_ue8m0 and round_scale_to_pow2
+            ),
         )
     return fp8_out, scale_out
