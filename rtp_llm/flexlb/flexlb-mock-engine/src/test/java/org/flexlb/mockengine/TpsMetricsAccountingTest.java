@@ -55,7 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class TpsMetricsAccountingTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final int BASE_PORT = 62900;
+    private static final int BASE_PORT = Integer.getInteger("mock.test.port.base", 62900);
 
     /** {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value} */
     private static final Pattern PER_ENGINE_METRIC_PATTERN = Pattern.compile(
@@ -133,6 +133,10 @@ class TpsMetricsAccountingTest {
             assertEquals(0L, secondMetrics.get("rtp_llm_context_tps")
                             .getOrDefault(prefillPort, -1L),
                     "second scrape with no events must read 0 (drain semantics)");
+
+            assertEquals(6144L, metrics.get("mock_engine_context_with_cache_tokens_total").get(prefillPort));
+            assertEquals(6144L, secondMetrics.get("mock_engine_context_with_cache_tokens_total").get(prefillPort));
+            assertEquals(3072L, secondMetrics.get("mock_engine_context_compute_tokens_total").get(prefillPort));
 
             // Cumulative hit_tokens_total via /snapshot (never drained).
             JsonNode engines = cluster.snapshot();

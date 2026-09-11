@@ -1,0 +1,13 @@
+# Test deployment only. No client Fetch and no production VIP engine registration.
+profile: single-batch
+prefill: 2
+decode: 2
+mock_port_offset: 50
+master_heap: 2g
+mock_heap: 2g
+startup_timeout_s: 120
+shutdown_timeout_s: 20
+performance: ../online_eval/data/performance/dsv4_flash_performance.fast_ab.json
+block_size: 1024
+prefill_kv_pool_blocks: 8192
+decode_kv_pool_blocks: 8192

@@ -965,6 +965,9 @@ public final class JavaMockEngineCluster {
         // completions count (production semantics: tokens actually accepted
         // and generated). hit_tokens_total is cumulative and never drained
         // (the cache_saved_tokens source via final_snapshot).
+        private final AtomicLong contextComputeTokensTotal = new AtomicLong();
+        private final AtomicLong contextWithCacheTokensTotal = new AtomicLong();
+        private final AtomicLong generateTokensTotal = new AtomicLong();
         private final AtomicLong contextComputeTokens = new AtomicLong();
         private final AtomicLong contextWithCacheTokens = new AtomicLong();
         private final AtomicLong generateTokens = new AtomicLong();
@@ -3224,7 +3227,9 @@ public final class JavaMockEngineCluster {
                         long inputLen = shape.inputLen();
                         long hitTokens = shape.hitTokens();
                         contextComputeTokens.addAndGet(Math.max(0L, inputLen - hitTokens));
+                        contextComputeTokensTotal.addAndGet(Math.max(0L, inputLen - hitTokens));
                         contextWithCacheTokens.addAndGet(inputLen);
+                        contextWithCacheTokensTotal.addAndGet(inputLen);
                         hitTokensTotal.addAndGet(hitTokens);
                     }
                     // Python marks the prefill-side lifecycle entry finished when the
@@ -4052,6 +4057,7 @@ public final class JavaMockEngineCluster {
                 // numerator is the stream's accepted output token count
                 // (the MTP fold), not the decode batch size.
                 generateTokens.addAndGet(shape.outputLen());
+                generateTokensTotal.addAndGet(shape.outputLen());
             }
             // Completion does not depend on a client Fetch in auto-fetch mode;
             // strict mode reaches this point only after the client attached.
@@ -5630,6 +5636,9 @@ public final class JavaMockEngineCluster {
             }
             snap.put("accepted", acceptedCount.get());
             snap.put("auto_fetch", autoFetch);
+            snap.put("context_compute_tokens_total", contextComputeTokensTotal.get());
+            snap.put("context_with_cache_tokens_total", contextWithCacheTokensTotal.get());
+            snap.put("generate_tokens_total", generateTokensTotal.get());
             snap.put("active_decode_requests", activeDecodeRequests.get());
             snap.put("response_buffers", responseQueues.size());
             snap.put("prefill_contexts", prefillSessions.size());

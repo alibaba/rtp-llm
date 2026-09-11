@@ -661,6 +661,8 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
+        if os.environ.get("RTP_LLM_MOCK_SCHEDULE_ONLY") == "1":
+            return bool(self.host_service.get_master_addr())
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             self.backend_role_list, refresh
         )

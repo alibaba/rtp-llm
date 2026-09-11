@@ -628,6 +628,11 @@ class FrontendApp(object):
             result = await self.grpc_client.post_request("update_eplb_config", req)
             return result
 
+        if os.environ.get("RTP_LLM_MOCK_SCHEDULE_ONLY") == "1":
+            from rtp_llm.frontend.mock_schedule import register_mock_schedule
+
+            register_mock_schedule(app, self.frontend_server, track_business_request)
+
         @app.post("/")
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
             # compat for huggingface-pipeline request endpoint

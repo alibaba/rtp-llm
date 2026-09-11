@@ -847,6 +847,9 @@ final class MockControlServer {
     private static void appendMetricsMeta(StringBuilder sb) {
         String[][] meta = {
                 {"mock_engine_up", "1 if engine is running, 0 if stopped", "gauge"},
+                {"mock_engine_context_compute_tokens_total", "completed computed input tokens", "counter"},
+                {"mock_engine_context_with_cache_tokens_total", "completed input tokens including cache hits", "counter"},
+                {"mock_engine_generate_tokens_total", "successfully completed output tokens", "counter"},
                 {"mock_engine_running", "current running requests", "gauge"},
                 {"mock_engine_waiting", "current waiting requests", "gauge"},
                 {"mock_engine_accepted_total", "total accepted requests", "counter"},
@@ -938,6 +941,9 @@ final class MockControlServer {
             // Production-caliber TPS (PD-split roles: prefill engines carry
             // the context series, decode engines the generate series; the
             // off-role series stay 0 so every engine reports the full set).
+            for (String key : List.of("context_compute_tokens_total", "context_with_cache_tokens_total", "generate_tokens_total")) {
+                sb.append(String.format("mock_engine_%s{%s} %s%n", key, labels, snap.get(key)));
+            }
             sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
             sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
             sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
@@ -993,6 +999,9 @@ final class MockControlServer {
             // engines; each engine's off-role series are 0 by design, so the
             // prefill bucket carries the context pair and the decode bucket
             // the generate series).
+            for (String key : List.of("context_compute_tokens_total", "context_with_cache_tokens_total", "generate_tokens_total")) {
+                sb.append(String.format("mock_engine_%s{%s} %d%n", key, label, sumLong(group, key)));
+            }
             sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
             sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
             sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
