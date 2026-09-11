@@ -17,6 +17,12 @@ import os
 
 import torch
 
+from rtp_llm.utils.deep_gemm_compat import (
+    mega_moe_dispatch_kwargs,
+    mega_moe_symm_buffer_bytes,
+    validate_mega_moe_buffer_bytes,
+)
+
 # Module-level cache for the Mega MoE symm-mem dispatch buffer. Keyed by the
 # shape parameters so different model configs in the same process don't
 # collide; in practice there's only ever one entry per process.
@@ -33,24 +39,20 @@ def estimate_mega_moe_symm_buffer_bytes(
     intermediate_hidden: int,
     use_fp8_dispatch: bool = True,
     activation: str = "swiglu",
-) -> int | None:
-    try:
-        import deep_gemm
+) -> int:
+    import deep_gemm
 
-        return int(
-            deep_gemm._C.get_symm_buffer_size_for_mega_moe(
-                group_size,
-                num_experts,
-                num_max_tokens_per_rank,
-                num_topk,
-                hidden,
-                intermediate_hidden,
-                use_fp8_dispatch,
-                activation,
-            )[0]
-        )
-    except Exception:
-        return None
+    return mega_moe_symm_buffer_bytes(
+        deep_gemm,
+        group_size,
+        num_experts,
+        num_max_tokens_per_rank,
+        num_topk,
+        hidden,
+        intermediate_hidden,
+        use_fp8_dispatch,
+        activation,
+    )
 
 
 def _get_or_create_mega_buf(
@@ -77,26 +79,9 @@ def _get_or_create_mega_buf(
     )
     buf = _MEGA_BUF_CACHE.get(key)
     if buf is None:
-        try:
-            group_size = int(group.size())
-        except Exception:
-            group_size = 0
-        estimated_bytes = (
-            estimate_mega_moe_symm_buffer_bytes(
-                group_size=group_size,
-                num_experts=num_experts,
-                num_max_tokens_per_rank=num_max_tokens_per_rank,
-                num_topk=num_topk,
-                hidden=hidden,
-                intermediate_hidden=intermediate_hidden,
-                use_fp8_dispatch=use_fp8_dispatch,
-                activation=activation,
-            )
-            if group_size > 0
-            else None
-        )
-        buf = deep_gemm.get_symm_buffer_for_mega_moe(
-            group=group,
+        group_size = int(group.size())
+        estimated_bytes = estimate_mega_moe_symm_buffer_bytes(
+            group_size=group_size,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             num_topk=num_topk,
@@ -105,52 +90,30 @@ def _get_or_create_mega_buf(
             use_fp8_dispatch=use_fp8_dispatch,
             activation=activation,
         )
-        actual_bytes = None
-        try:
-            actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
-        except Exception:
-            pass
-        if actual_bytes is not None:
-            if estimated_bytes is not None:
-                logging.info(
-                    "[DSV4 MegaMoE] allocated symm buffer: group_size=%d "
-                    "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
-                    "intermediate=%d actual=%.3f GiB estimated=%.3f GiB",
-                    group_size,
-                    num_experts,
-                    num_max_tokens_per_rank,
-                    num_topk,
-                    hidden,
-                    intermediate_hidden,
-                    actual_bytes / (1024**3),
-                    estimated_bytes / (1024**3),
-                )
-            else:
-                logging.info(
-                    "[DSV4 MegaMoE] allocated symm buffer: group_size=%d "
-                    "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
-                    "intermediate=%d actual=%.3f GiB",
-                    group_size,
-                    num_experts,
-                    num_max_tokens_per_rank,
-                    num_topk,
-                    hidden,
-                    intermediate_hidden,
-                    actual_bytes / (1024**3),
-                )
-        elif estimated_bytes is not None:
-            logging.info(
-                "[DSV4 MegaMoE] allocated symm buffer: group_size=%d "
-                "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
-                "intermediate=%d actual=unavailable estimated=%.3f GiB",
-                group_size,
-                num_experts,
-                num_max_tokens_per_rank,
-                num_topk,
-                hidden,
-                intermediate_hidden,
-                estimated_bytes / (1024**3),
-            )
+        buf = deep_gemm.get_symm_buffer_for_mega_moe(
+            group=group,
+            num_experts=num_experts,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_topk=num_topk,
+            hidden=hidden,
+            intermediate_hidden=intermediate_hidden,
+            **mega_moe_dispatch_kwargs(deep_gemm, use_fp8_dispatch),
+            activation=activation,
+        )
+        actual_bytes = validate_mega_moe_buffer_bytes(buf, estimated_bytes)
+        logging.info(
+            "[DSV4 MegaMoE] allocated symm buffer: group_size=%d "
+            "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
+            "intermediate=%d actual=%.3f GiB estimated=%.3f GiB",
+            group_size,
+            num_experts,
+            int(buf.num_max_tokens_per_rank),
+            num_topk,
+            hidden,
+            intermediate_hidden,
+            actual_bytes / (1024**3),
+            estimated_bytes / (1024**3),
+        )
         _MEGA_BUF_CACHE[key] = buf
     return buf
 

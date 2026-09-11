@@ -415,6 +415,7 @@ def fp8_gemm_nt(
     c: Optional[torch.Tensor] = None,
     compiled_dims: str = "nk",
     disable_ue8m0_cast: Optional[bool] = None,
+    recipe: Optional[Tuple[int, int, int]] = None,
 ) -> None:
     """Execute FP8 GEMM (A * B^T).
 
@@ -426,6 +427,8 @@ def fp8_gemm_nt(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
         disable_ue8m0_cast (bool, optional): Whether to disable E8M0 type cast for E8M0 scale.
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
+        recipe (Tuple[int, int, int], optional): Explicit activation/weight scale
+            MN granularity and K group size. None preserves the legacy API call.
 
     Returns:
         None
@@ -443,6 +446,7 @@ def fp8_gemm_nt(
         disable_ue8m0_cast=(
             disable_ue8m0_cast if disable_ue8m0_cast is not None else True
         ),
+        **({"recipe": recipe} if recipe is not None else {}),
     )
 
 

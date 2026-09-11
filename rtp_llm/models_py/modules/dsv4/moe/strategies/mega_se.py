@@ -15,6 +15,14 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.utils.deep_gemm_compat import (
+    mega_moe_activation_kwargs,
+    mega_moe_jit_token_counts,
+    mega_moe_shared_kwargs,
+    mega_moe_uses_shared32,
+    prepare_mega_shared_scale,
+)
+
 from ..._profiler import record_function_range
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..mega_se_buf import (
@@ -44,7 +52,6 @@ _MEGA_MOE_SE_JIT_WARMED_KEYS: set[tuple] = set()
 _MEGA_SE_GATE_PACK_KERNELS = None
 _MEGA_SE_GATE_PACK_KERNELS_UNAVAILABLE = False
 _ROUTED_RECIPE = (1, 1, FP4_BLOCK)
-_SHARED_RECIPE = (1, 128, 128)
 _MMA_TYPE = "fp8xfp4"
 
 
@@ -84,7 +91,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        return cfg.ep_size > 1 and _mega_moe_se_enabled()
+        return cfg.ep_size > 1 and _mega_moe_se_enabled(cfg.shared_fp8_block_size)
 
     def setup_weights(self, layer_weights: Dict) -> None:
         import deep_gemm
@@ -93,6 +100,15 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
+        self._shared_launch_kwargs = mega_moe_shared_kwargs(
+            deep_gemm, cfg.shared_fp8_block_size
+        )
+        self._shared_launch_kwargs.update(
+            mega_moe_activation_kwargs(deep_gemm, cfg.shared_fp8_block_size)
+        )
+        self._shared_recipe = (
+            (1, 1, 32) if cfg.shared_fp8_block_size == 32 else (1, 128, 128)
+        )
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
@@ -195,8 +211,12 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 f"got w13={w13_fp8.dtype}, w2={w2_fp8.dtype}"
             )
 
-        w13_sf_int = self._shared_expert_sf_to_int(deep_gemm, w13_scale, 2 * inter, D)
-        w2_sf_int = self._shared_expert_sf_to_int(deep_gemm, w2_scale, D, inter)
+        w13_sf_int = self._shared_expert_sf_to_int(
+            deep_gemm, w13_scale, 2 * inter, D, self.cfg.shared_fp8_block_size
+        )
+        w2_sf_int = self._shared_expert_sf_to_int(
+            deep_gemm, w2_scale, D, inter, self.cfg.shared_fp8_block_size
+        )
         del w13_scale, w2_scale
         (se_l1_w, se_l1_sf), (se_l2_w, se_l2_sf) = (
             deep_gemm.transform_weights_for_mega_moe(
@@ -212,16 +232,8 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._se_l2_sf = se_l2_sf
 
     @staticmethod
-    def _shared_expert_sf_to_int(deep_gemm, scale, mn, k):
-        if scale.dtype == torch.int32:
-            return scale
-        if scale.dtype != torch.float8_e8m0fnu:
-            raise TypeError(
-                "MegaMoE-SE expected shared UE8M0 scale, " f"got {scale.dtype}"
-            )
-        return deep_gemm.transform_sf_into_required_layout(
-            scale.float(), mn, k, _SHARED_RECIPE[1:], num_groups=None
-        )
+    def _shared_expert_sf_to_int(deep_gemm, scale, mn, k, block_size=128):
+        return prepare_mega_shared_scale(deep_gemm, scale, mn, k, block_size)
 
     def _block_m(self, tokens: int) -> int:
         import deep_gemm
@@ -243,6 +255,12 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         override = parse_mega_moe_se_jit_warmup_tokens_override()
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
+        import deep_gemm
+
+        if mega_moe_uses_shared32(deep_gemm):
+            return mega_moe_jit_token_counts(
+                deep_gemm, cfg, int(self._mega_buf.num_max_tokens_per_rank)
+            )
         return generate_mega_moe_se_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.n_routed_experts,
@@ -279,8 +297,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             cfg.moe_inter_dim,
             int(cfg.max_tokens_per_rank),
             cfg.swiglu_limit,
+            cfg.shared_fp8_block_size == 32,
             num_sms,
-            _SHARED_RECIPE,
+            self._shared_recipe,
             tuple(token_counts),
             bool(getattr(self, "_gate_pack_warmup_enabled", False)),
             (
@@ -307,7 +326,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 cfg.dim,
                 cfg.moe_inter_dim,
                 num_sms,
-                _SHARED_RECIPE,
+                self._shared_recipe,
             )
         tmpdir, previous_tmpdir = _activate_mega_moe_rank_nvcc_tmpdir(rank)
         try:
@@ -429,8 +448,8 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
-            fast_math=True,
-            shared_recipe=_SHARED_RECIPE,
+            fast_math=self.cfg.shared_fp8_block_size != 32,
+            **self._shared_launch_kwargs,
         )
 
     def forward(self, x, weights, indices):

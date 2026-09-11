@@ -14,6 +14,21 @@ filegroup(
 )
 
 py_test(
+    name = "deep_gemm_compat_test",
+    srcs = ["deep_gemm_compat_test.py"],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_test(
+    name = "jit_cache_deep_gemm_test",
+    srcs = ["jit_cache_deep_gemm_test.py"],
+    deps = ["//rtp_llm:jit_cache_manager_lib"],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     srcs = [
         "jit_cache_manager_test.py",

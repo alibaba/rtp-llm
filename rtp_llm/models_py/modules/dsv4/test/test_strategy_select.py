@@ -12,6 +12,7 @@ import sys
 import types
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from unittest import mock
 
 # Importing strategies populates the registry via ``register_strategy``.
@@ -152,6 +153,42 @@ class StrategySelectTest(unittest.TestCase):
             MegaMoEStrategy, "can_handle", return_value=True
         ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
+
+    def test_new_api_default_shared128_uses_routed_mega(self):
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=True
+        ), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=False
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.mega_se_buf.mega_moe_se_requires_shared32",
+            return_value=True,
+        ):
+            self.assertIs(select_strategy(_cfg(ep_size=8)), MegaMoEStrategy)
+
+    def test_new_api_explicit_shared128_fusion_is_rejected(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="1"), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=False
+        ), self.assertRaisesRegex(RuntimeError, "cannot handle"):
+            select_strategy(_cfg(ep_size=8))
+
+    def test_shared32_requires_fused_strategy(self):
+        cfg = replace(_cfg(ep_size=8), shared_fp8_block_size=32)
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=True
+        ):
+            self.assertIs(select_strategy(cfg), MegaMoEStrategySE)
+        with _env(DSV4_USE_MEGA_MOE_SE="0"), self.assertRaisesRegex(
+            RuntimeError, "requires the fused"
+        ):
+            select_strategy(cfg)
+        with _env(DSV4_MOE_STRATEGY="mega"), self.assertRaisesRegex(
+            RuntimeError, "requires the fused"
+        ):
+            select_strategy(cfg, forced="mega")
+
+    def test_shared32_clamp_is_explicit(self):
+        with self.assertRaisesRegex(ValueError, "clamp 10.0"):
+            replace(_cfg(ep_size=8), shared_fp8_block_size=32, swiglu_limit=0.0)
 
     def test_ep_gt1_no_mega_raises(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):

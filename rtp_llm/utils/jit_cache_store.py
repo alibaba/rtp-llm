@@ -15,6 +15,15 @@ from pathlib import Path
 
 import zstandard as zstd
 
+from rtp_llm.utils.jit_cache_deep_gemm import (
+    SNAPSHOT_MANIFEST,
+    deepjit_checksums,
+    deepjit_snapshot_files,
+    is_complete_deepjit_marker,
+    is_deepjit_scope,
+    validate_deepjit_snapshot,
+)
+
 SNAPSHOT_SUFFIX = ".jit_snapshot.tar.zst"
 # Enough headroom so GC never unlinks a snapshot an in-flight restore is reading.
 SNAPSHOT_KEEP = 20
@@ -34,13 +43,14 @@ def pack_zstd_tar(archive: Path, source: Path) -> None:
     # Symlinks are skipped; _safe_members rejects them on restore anyway. dereference
     # packs hardlinked members as full content, never as tar hardlink references.
     mtimes = {}
+    checksums = deepjit_checksums(source)
     with zstd.open(archive, "wb") as body, tarfile.open(
         fileobj=body, mode="w|", dereference=True
     ) as tar:
 
         def keep(info: tarfile.TarInfo):
             path = source / info.name
-            if path.is_symlink() or path.name == MTIME_MANIFEST:
+            if path.is_symlink() or path.name in (MTIME_MANIFEST, SNAPSHOT_MANIFEST):
                 return None
             if info.isfile():
                 mtimes[info.name] = path.stat().st_mtime_ns
@@ -51,6 +61,11 @@ def pack_zstd_tar(archive: Path, source: Path) -> None:
         info = tarfile.TarInfo(MTIME_MANIFEST)
         info.size = len(manifest)
         tar.addfile(info, io.BytesIO(manifest))
+        if checksums:
+            payload = json.dumps({"schema_version": 1, "files": checksums}).encode()
+            info = tarfile.TarInfo(SNAPSHOT_MANIFEST)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
 
 
 def _safe_path(root: Path, name: str) -> Path:
@@ -79,6 +94,7 @@ def extract_zstd_tar(archive: Path, target: Path) -> None:
         manifest.unlink()
         for name, mtime_ns in mtimes.items():
             os.utime(_safe_path(target, name), ns=(mtime_ns, mtime_ns))
+    validate_deepjit_snapshot(target)
 
 
 @contextmanager
@@ -128,17 +144,29 @@ def _tree_is_warm(root: Path) -> bool:
     # must skip a warm tree; artifact-free leftovers (lock corpses, empty scope dirs)
     # are clobberable so a killed cold start can retry.
     with suppress(OSError):
-        return any(
-            name != MTIME_MANIFEST and not is_lock_file(name)
-            for _, _, files in os.walk(root)
-            for name in files
-        )
+        if deepjit_snapshot_files(root):
+            return True
+        for directory, _, files in os.walk(root):
+            parts = Path(directory).relative_to(root).parts
+            if (
+                len(parts) >= 2
+                and parts[0] == "deep_gemm"
+                and is_deepjit_scope(parts[1])
+            ):
+                continue
+            if any(
+                name not in (MTIME_MANIFEST, SNAPSHOT_MANIFEST)
+                and not is_lock_file(name)
+                for name in files
+            ):
+                return True
     return False
 
 
-def _signature(path: Path) -> tuple[int, int, int, int]:
+def _signature(path: Path, name: str = "") -> tuple[int, int, int, int]:
     stat = path.stat()
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+    mtime = 0 if is_complete_deepjit_marker(name, path) else stat.st_mtime_ns
+    return stat.st_dev, stat.st_ino, stat.st_size, mtime
 
 
 class RemoteSnapshotStore:
@@ -222,7 +250,7 @@ class RemoteSnapshotStore:
         with tempfile.TemporaryDirectory(prefix=".jit_snapshot.") as tmp:
             staging = Path(tmp) / "staging"
             staging.mkdir()
-            signatures = {name: _signature(path) for name, path in files.items()}
+            signatures = {name: _signature(path, name) for name, path in files.items()}
             # Hardlink into staging instead of copying (cheap, no data move);
             # pack_zstd_tar dereferences, so even shared inodes pack as full
             # content, never hardlink members. Fall back to copy2 across devices.
@@ -241,7 +269,7 @@ class RemoteSnapshotStore:
             # race with a live build; the caller retries after the next quiet period.
             try:
                 changed = {
-                    name: _signature(path) for name, path in scan().items()
+                    name: _signature(path, name) for name, path in scan().items()
                 } != signatures
             except OSError:
                 changed = True

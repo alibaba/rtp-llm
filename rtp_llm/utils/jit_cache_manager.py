@@ -16,6 +16,13 @@ from urllib.parse import urlparse
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from rtp_llm.utils.jit_cache_deep_gemm import (
+    DeepGemmBuildIdentityError,
+    deep_gemm_build_scope,
+    deepjit_entry_files,
+    deepjit_snapshot_files,
+    is_deepjit_path,
+)
 from rtp_llm.utils.jit_cache_store import (
     RemoteSnapshotStore,
     is_lock_file,
@@ -199,6 +206,10 @@ def _resolve_components() -> tuple[Component, ...]:
             _pkg_version(part[1:]) if part.startswith("@") else scopes[part]
             for part in item.scopes
         )
+        if item.name == "deep_gemm":
+            build_scope = deep_gemm_build_scope(scopes["torch"])
+            if build_scope:
+                parts += (build_scope,)
         if parts and all(parts):
             local = root / item.name / "-".join((item.name, *parts))
             result.append(replace(item, local_dir=local))
@@ -219,6 +230,8 @@ def clear_jit_locks() -> None:
 def setup_jit_cache_env() -> tuple[tuple[Component, ...], bool]:
     try:
         components = _resolve_components()
+    except DeepGemmBuildIdentityError:
+        raise
     except Exception:
         logging.exception("JIT cache environment setup failed; using upstream defaults")
         return (), False
@@ -244,7 +257,7 @@ class _EventHandler(FileSystemEventHandler):
         self.manager = manager
 
     def on_any_event(self, event) -> None:
-        if event.is_directory or self.manager._stop.is_set():
+        if self.manager._stop.is_set():
             return
         path = Path(event.dest_path if event.event_type == "moved" else event.src_path)
         for component in self.manager.components:
@@ -252,6 +265,29 @@ class _EventHandler(FileSystemEventHandler):
                 continue
             with suppress(OSError, ValueError):
                 rel = path.relative_to(component.local_dir).as_posix()
+                if component.name == "deep_gemm" and is_deepjit_path(
+                    f"{component.local_dir.name}/{rel}"
+                ):
+                    parts = rel.split("/")
+                    if event.is_directory:
+                        if event.event_type != "moved" or len(parts) != 2:
+                            continue
+                        entry = path
+                    else:
+                        if event.event_type not in CREATED or len(parts) != 3:
+                            continue
+                        entry = path.parent
+                    if parts[0] != "cache":
+                        continue
+                    try:
+                        deepjit_entry_files(entry)
+                    except (OSError, ValueError):
+                        continue
+                    self.manager._last_event_at = time.monotonic()
+                    self.manager._dirty.set()
+                    return
+                if event.is_directory:
+                    continue
                 if component.should_sync(rel, event.event_type) and path.stat().st_size:
                     self.manager._last_event_at = time.monotonic()
                     self.manager._dirty.set()
@@ -298,11 +334,15 @@ class JitCacheManager:
         # different managed set may also populate.
         for component in COMPONENTS:
             root = self.local_root / component.name
+            if component.name == "deep_gemm":
+                files.update(deepjit_snapshot_files(self.local_root))
             for path in root.rglob("*"):
                 with suppress(OSError):  # file may vanish between walk and stat
                     if path.is_symlink() or not path.is_file():
                         continue
                     rel = path.relative_to(root).as_posix()
+                    if component.name == "deep_gemm" and is_deepjit_path(rel):
+                        continue
                     if component.should_sync(rel) and path.stat().st_size:
                         files[path.relative_to(self.local_root).as_posix()] = path
         return files

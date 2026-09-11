@@ -19,6 +19,8 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.utils.deep_gemm_compat import mega_moe_activation_kwargs
+
 from ..._profiler import record_function_range
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
@@ -35,8 +37,8 @@ from ..mega_jit_warmup import (
     parse_mega_moe_jit_warmup_tokens_override,
 )
 from ..shared_expert import strict_fused_moe_enabled
-from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ..warmup_sync import sync_cuda_graph_warmup_ranks
+from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
 _MEGA_MOE_NVCC_TMPDIR_ENV = "DSV4_MEGA_MOE_NVCC_TMPDIR"
@@ -76,7 +78,9 @@ def _get_gate_pack_kernels():
 
 def _gate_pack_input_packer_env_allows() -> bool:
     mode = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER", "fused").strip().lower()
-    impl = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+    impl = (
+        os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+    )
     return mode in ("auto", "fused") and impl == "optimized"
 
 
@@ -215,6 +219,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
+        self._activation_launch_kwargs = mega_moe_activation_kwargs(
+            deep_gemm, cfg.shared_fp8_block_size
+        )
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
@@ -319,6 +326,17 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         override = parse_mega_moe_jit_warmup_tokens_override()
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
+        import deep_gemm
+
+        from rtp_llm.utils.deep_gemm_compat import (
+            mega_moe_jit_token_counts,
+            mega_moe_uses_shared32,
+        )
+
+        if mega_moe_uses_shared32(deep_gemm):
+            return mega_moe_jit_token_counts(
+                deep_gemm, cfg, int(self._mega_buf.num_max_tokens_per_rank)
+            )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.n_routed_experts,
@@ -356,6 +374,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             cfg.moe_inter_dim,
             max_tokens_per_rank,
             cfg.swiglu_limit,
+            cfg.shared_fp8_block_size == 32,
             num_sms,
             tuple(token_counts),
             bool(getattr(self, "_gate_pack_warmup_enabled", False)),
@@ -567,7 +586,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
-            fast_math=True,
+            fast_math=self.cfg.shared_fp8_block_size != 32,
+            **self._activation_launch_kwargs,
         )
         return y
 
@@ -652,7 +672,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
-            fast_math=True,
+            fast_math=self.cfg.shared_fp8_block_size != 32,
+            **self._activation_launch_kwargs,
         )
         return y
 
@@ -685,9 +706,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         rank = dist.get_rank(group)
         world_size = dist.get_world_size(group)
         device = self._mega_l1_w.device
-        _log_pre_kernel_barrier(
-            "enter", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
 
         if device.type == "cuda":
             with torch.cuda.device(device):
@@ -702,6 +721,4 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         else:
             dist.barrier(group=group)
 
-        _log_pre_kernel_barrier(
-            "leave", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)

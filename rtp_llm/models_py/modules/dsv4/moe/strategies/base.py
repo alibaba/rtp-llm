@@ -56,6 +56,13 @@ class MoeCfg:
     local_expert_start: int
     local_expert_end: int
     max_tokens_per_rank: int
+    shared_fp8_block_size: int = 128
+
+    def __post_init__(self):
+        if self.shared_fp8_block_size not in (32, 128):
+            raise ValueError("shared_fp8_block_size must be 32 or 128")
+        if self.shared_fp8_block_size == 32 and self.swiglu_limit != 10.0:
+            raise ValueError("V4.1 shared32 requires activation clamp 10.0")
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -248,6 +255,8 @@ def select_strategy(
     """
     explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     explicit_env = bool(explicit_env and explicit_env != "auto")
+    if cfg.shared_fp8_block_size == 32 and cfg.ep_size <= 1:
+        raise RuntimeError("V4.1 shared32 requires the multi-rank Mega-SE strategy")
 
     # The current DeepGEMM shared-expert API and the older experimental fused
     # API use incompatible buffers. Never allow both variants to race.
@@ -255,10 +264,32 @@ def select_strategy(
         from rtp_llm.models_py.modules.dsv4.moe.mega_fused_buf import (
             mega_moe_fused_requested,
         )
-        from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import mega_moe_se_requested
+        from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import (
+            mega_moe_se_requested,
+            mega_moe_se_requires_shared32,
+        )
 
         se_requested = mega_moe_se_requested()
         fused_requested = mega_moe_fused_requested()
+        if (
+            se_requested
+            and cfg.shared_fp8_block_size == 128
+            and os.environ.get("DSV4_USE_MEGA_MOE_SE") != "1"
+            and forced in (None, "mega")
+        ):
+            se_cls = next(
+                (cls for cls in _STRATEGY_PRIORITY if cls.name == "mega_se"), None
+            )
+            if (
+                se_cls is not None
+                and not se_cls.can_handle(cfg)
+                and mega_moe_se_requires_shared32()
+            ):
+                # New Mega only fuses shared32. Keep V4 checkpoint scales and
+                # activation quantization on the independent shared128 path.
+                se_requested = False
+        if cfg.shared_fp8_block_size == 32 and not se_requested:
+            raise RuntimeError("V4.1 shared32 requires the fused Mega-SE strategy")
         if se_requested and fused_requested:
             raise RuntimeError(
                 "DSV4_USE_MEGA_MOE_SE (defaults to 1) conflicts with "
@@ -287,6 +318,8 @@ def select_strategy(
             forced, strict = "mega_fused", True
 
     if forced is not None:
+        if cfg.shared_fp8_block_size == 32 and forced != "mega_se":
+            raise RuntimeError("V4.1 shared32 requires the fused Mega-SE strategy")
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
