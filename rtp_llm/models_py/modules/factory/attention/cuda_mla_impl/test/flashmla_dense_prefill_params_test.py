@@ -3,7 +3,7 @@ import weakref
 from types import SimpleNamespace
 from typing import Sequence
 from unittest import TestCase, main, skipUnless
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -252,7 +252,11 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
             input_lengths_host=torch.tensor([1], dtype=torch.int32),
             prefix_lengths_host=torch.tensor([0], dtype=torch.int32),
         )
-        configs = SimpleNamespace(indexer_topk=128, is_sparse=False)
+        configs = SimpleNamespace(
+            indexer_topk=128,
+            is_sparse=False,
+            mla_fp8_compute=False,
+        )
         parallelism = SimpleNamespace(
             kv_page_rr_enabled=lambda: True,
             prefill_cp_config=SimpleNamespace(is_enabled=lambda: False),
@@ -326,6 +330,91 @@ def _assert_cuda_i32(test: TestCase, tensor: torch.Tensor) -> None:
 @skipUnless(CUDA_AVAILABLE, "requires CUDA")
 class FlashMlaDensePrefillParamsTest(TestCase):
     page_size = 128
+
+    def _read_page_rr_prefix(
+        self,
+        *,
+        raw_dtype: torch.dtype,
+        mla_fp8_compute: bool,
+        kv_scale: float = 0.5,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        canonical = (
+            torch.arange(2 * 576, dtype=torch.float32, device="cuda")
+            .remainder(9)
+            .sub(4)
+            .reshape(2, 576)
+            .to(raw_dtype)
+        )
+        adapter = SimpleNamespace(
+            page_tokens=self.page_size,
+            read_prefix=Mock(return_value=canonical),
+        )
+        forward = Mock(return_value=torch.empty(0, device="cuda"))
+        impl = object.__new__(MlaFlashMLAPrefillImpl)
+        impl.fmha_impl = SimpleNamespace(forward=forward)
+        impl.fmha_params = SimpleNamespace(prefix_lens_host=(2,))
+        impl.page_rr_cache_adapter = adapter
+        impl.attn_inputs = SimpleNamespace(
+            kv_cache_kernel_block_id_device=torch.ones(
+                (1, 1), dtype=torch.int32, device="cuda"
+            )
+        )
+        impl.attn_configs = SimpleNamespace(
+            kv_lora_rank=512,
+            rope_head_dim=64,
+            mla_fp8_compute=mla_fp8_compute,
+            mla_fp8_kv_scale=kv_scale,
+        )
+        kv_cache = SimpleNamespace(
+            kv_cache_base=torch.empty(
+                (1, self.page_size, 576), dtype=raw_dtype, device="cuda"
+            )
+        )
+        impl.compute_prefill_context(
+            torch.empty((1, 1, 192), dtype=torch.bfloat16, device="cuda"),
+            torch.empty((1, 512), dtype=torch.bfloat16, device="cuda"),
+            torch.empty((1, 1, 64), dtype=torch.bfloat16, device="cuda"),
+            kv_cache,
+            0,
+        )
+        adapter.read_prefix.assert_called_once()
+        return canonical, forward.call_args.kwargs["canonical_prefix_kv"]
+
+    def test_page_rr_fp8_prefix_is_dequantized_with_fixed_kv_scale(self) -> None:
+        raw, actual = self._read_page_rr_prefix(
+            raw_dtype=torch.float8_e4m3fn,
+            mla_fp8_compute=True,
+            kv_scale=0.5,
+        )
+
+        self.assertEqual(actual.dtype, torch.bfloat16)
+        torch.testing.assert_close(
+            actual,
+            raw.to(torch.bfloat16) * 0.5,
+            rtol=0,
+            atol=0,
+        )
+
+    def test_page_rr_bf16_prefix_is_forwarded_without_copy(self) -> None:
+        raw, actual = self._read_page_rr_prefix(
+            raw_dtype=torch.bfloat16,
+            mla_fp8_compute=False,
+        )
+
+        self.assertIs(actual, raw)
+
+    def test_page_rr_prefix_cache_dtype_must_match_fp8_mode(self) -> None:
+        for raw_dtype, mla_fp8_compute in (
+            (torch.bfloat16, True),
+            (torch.float8_e4m3fn, False),
+        ):
+            with self.subTest(
+                raw_dtype=raw_dtype, mla_fp8_compute=mla_fp8_compute
+            ), self.assertRaisesRegex(RuntimeError, "raw cache"):
+                self._read_page_rr_prefix(
+                    raw_dtype=raw_dtype,
+                    mla_fp8_compute=mla_fp8_compute,
+                )
 
     def _make_unplanned_op(
         self,

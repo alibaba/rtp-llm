@@ -25,7 +25,6 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.flashmla_for
     make_op,
     output_and_lse,
 )
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 
@@ -258,10 +257,8 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
             self.assertEqual(len(op._prefix_runtime_launches), expected_prefix_launches)
         reference = make_op(expanded_kv_capacity_tokens=0)
         reference.plan(inputs.params)
-        torch.manual_seed(shard_size * 1000 + sum(q_lens) + sum(prefix_lens))
-        weight = source.new_empty((512, op.num_heads * 256)).normal_().mul_(512**-0.5)
-        linear = CudaF16Linear(weight)
-        with mock.patch.object(reference, "_create_kv_b_proj", return_value=linear):
+        projection = DeterministicPackedProjection()
+        with mock.patch.object(reference, "_create_kv_b_proj", return_value=projection):
             expected_out, expected_lse = output_and_lse(reference, inputs)
 
         gathered = torch.stack(batches)
@@ -275,7 +272,7 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
             "all_gather_into",
             side_effect=gather,
         ) as collective, mock.patch.object(
-            op, "_create_kv_b_proj", return_value=linear
+            op, "_create_kv_b_proj", return_value=projection
         ), mock.patch.object(
             op,
             "_live_reuse_cache_page_indices",
@@ -289,11 +286,15 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
         torch.testing.assert_close(actual_out, expected_out, rtol=2e-2, atol=0.03125)
         torch.testing.assert_close(actual_lse, expected_lse, rtol=1e-4, atol=1e-4)
 
-    def test_page_rr_tp2_and_tp8_match_replicated_canonical_attention(self) -> None:
+    def test_page_rr_tp2_tp8_and_tp16_match_replicated_canonical_attention(
+        self,
+    ) -> None:
         cases = (
             (2, [3, 5], [257, 129], 0, 0),
             (2, [3, 5], [257, 129], 128, None),
             (8, [1], [65536], 16384, 4),
+            (8, [1, 1, 1], [1023, 1024, 1025], 0, 0),
+            (16, [1, 1, 1], [2047, 2048, 2049], 0, 0),
             (2, [2, 3, 1], [129, 0, 127], 0, 0),
             (2, [1], [128], 128, 1),
             (2, [1], [512], 128, 4),
