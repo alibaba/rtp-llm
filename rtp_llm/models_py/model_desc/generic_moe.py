@@ -52,7 +52,9 @@ class GraphPaddingMask:
             self.buffers[token_count] = buffers
         token_indices, padding_mask = buffers
         torch.ge(
-            token_indices, attention_inputs.cu_seqlens_device[-1], out=padding_mask
+            token_indices,
+            attention_inputs.cu_seqlens_device[-1],
+            out=padding_mask,
         )
         return padding_mask
 

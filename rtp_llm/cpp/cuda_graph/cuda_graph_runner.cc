@@ -635,7 +635,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device,
                                           state.current_batch_size,
                                           selected_graph_batch_size,
-                                          1);
+                                          0);
         }
         if (position_id_len_factor_ > 0) {
             const int64_t live_position_numel =
@@ -1029,6 +1029,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
             cuda_graph::graphGetCurrentStream().synchronize();
         }
+        refreshTaggedAttentionInputs(py_model_inputs_);
         py::gil_scoped_acquire gil;
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
     }
@@ -2120,6 +2121,7 @@ void CudaGraphRunner::buildBucketInstance(int key) {
         }
 
         inputs.attention_inputs.context_total_kv_length = seq_len;
+        inputs.attention_inputs.total_tokens            = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -2153,6 +2155,7 @@ void CudaGraphRunner::buildBucketInstance(int key) {
             max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
         }
         inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
+        inputs.attention_inputs.total_tokens            = bs * num_tokens_per_bs_;
         // capture-specific metadata above was written after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
 

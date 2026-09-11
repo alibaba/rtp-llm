@@ -1,3 +1,4 @@
+import logging
 import math
 from typing import Any, Optional
 
@@ -11,6 +12,10 @@ from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
     split_qkv_fp8,
     split_raw_qkv,
     unpad_kv_vectorized,
+)
+from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter_graph_prefill import (
+    graph_prefill_is_ready_for,
+    mha_batch_prefill_graph,
 )
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -31,6 +36,8 @@ from rtp_llm.ops.compute_ops import (
     get_scalar_type,
     paged_attention_atrex,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _is_mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:
@@ -283,8 +290,21 @@ class FMHAParams(ParamsBase):
             self.cu_seqlens_q = None
             self.cu_seqlens_k = None
 
-            # Create seq_lens on CUDA
-            if sequence_lengths is not None:
+            sequence_lengths_plus_1_device = getattr(
+                attn_inputs, "sequence_lengths_plus_1_device", None
+            )
+            if self.enable_cuda_graph:
+                if (
+                    sequence_lengths_plus_1_device is None
+                    or not sequence_lengths_plus_1_device.is_cuda
+                    or sequence_lengths_plus_1_device.dtype != torch.int32
+                ):
+                    raise ValueError(
+                        "AIter graph decode requires stable CUDA int32 "
+                        "sequence_lengths_plus_1_device"
+                    )
+                self.seq_lens = sequence_lengths_plus_1_device
+            elif sequence_lengths is not None:
                 self.seq_lens = (sequence_lengths + 1).to(torch.device("cuda"))
             else:
                 self.seq_lens = None
@@ -299,22 +319,23 @@ class FMHAParams(ParamsBase):
         input_lengths,
         kv_cache_block_id_host=None,
         kv_cache_block_id_device=None,
+        sequence_lengths_plus_1_device=None,
     ):
         self.sequence_lengths = sequence_lengths
         self.input_lengths = input_lengths
         self.kv_cache_block_id = kv_cache_block_id_host
         if kv_cache_block_id_device is not None:
             self.kv_cache_block_id_device = kv_cache_block_id_device
+        if self.enable_cuda_graph:
+            if (
+                sequence_lengths_plus_1_device is None
+                or sequence_lengths_plus_1_device.data_ptr() != self.seq_lens.data_ptr()
+            ):
+                raise ValueError("AIter graph decode sequence-length storage changed")
+            return
         if self.seq_lens is not None and self.sequence_lengths is not None:
             self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
-            if (
-                self.enable_cuda_graph
-                and self.graph_max_seq_len is not None
-                and self.graph_max_seq_len > 0
-            ):
-                self.max_seq_len = self.graph_max_seq_len
-            else:
-                self.max_seq_len = self.sequence_lengths.max().item() + 1
+            self.max_seq_len = self.sequence_lengths.max().item() + 1
             self.max_seqlen_k = self.max_seq_len
 
     def check_recycle(self) -> bool:
@@ -846,12 +867,16 @@ def _infer_cuda_graph_device(
 class AiterPrefillAttnOpPaged:
     """Paged prefill attention"""
 
-    def __init__(self, attn_configs: AttentionConfigs):
+    def __init__(self, attn_configs: AttentionConfigs, linear_v: bool = False):
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.max_seq_len = attn_configs.max_seq_len
+        self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        self.attn_dtype = attn_configs.dtype
+        self.has_fp8_cache = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        self.linear_v = linear_v
         self.enable_cuda_graph = False
         self.cuda_graph_prepared = False
         self.graph_device: Optional[torch.device] = None
@@ -860,8 +885,39 @@ class AiterPrefillAttnOpPaged:
         self.kv_page_indices_buf: Optional[torch.Tensor] = None
         self.descale_buf: Optional[torch.Tensor] = None
         self.sanitized_bt_buf: Optional[torch.Tensor] = None
+        self.page_claims_buf: Optional[torch.Tensor] = None
         self._block_positions: Optional[torch.Tensor] = None
         self.output_buf: Optional[torch.Tensor] = None
+        self.softmax_lse_buf: Optional[torch.Tensor] = None
+        self.dropout_randval_buf: Optional[torch.Tensor] = None
+        self.rng_state_buf: Optional[torch.Tensor] = None
+        self._graph_prefill_disabled = False
+
+    def _graph_output_dtype(self) -> torch.dtype:
+        return torch.bfloat16 if self.has_fp8_cache else self.attn_dtype
+
+    def _supports_graph_kernel_geometry(self) -> bool:
+        if self.attn_dtype not in (torch.float16, torch.bfloat16):
+            return False
+        vector_width = 16 if self.has_fp8_cache else 16 // self.attn_dtype.itemsize
+        return (
+            0 < self.head_dim <= 256
+            and self.head_dim % vector_width == 0
+            and self.tokens_per_block > 0
+            and self.tokens_per_block % vector_width == 0
+            and self.head_num_kv > 0
+            and self.head_num % self.head_num_kv == 0
+        )
+
+    def supports_graph_kernel(self) -> bool:
+        return (
+            self._supports_graph_kernel_geometry() and not self._graph_prefill_disabled
+        )
+
+    def graph_kernel_ready(self) -> bool:
+        return self.supports_graph_kernel() and graph_prefill_is_ready_for(
+            self._graph_output_dtype(), self.has_fp8_cache
+        )
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         if bool(getattr(attn_inputs, "is_cuda_graph", False)):
@@ -939,6 +995,22 @@ class AiterPrefillAttnOpPaged:
         batch_size = cu_seqlens_q.shape[0] - 1
         if graph_block_table.shape[0] != batch_size:
             raise ValueError("AIter graph prefill block table batch size changed")
+        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
+        graph_max_seqlen_k = getattr(
+            fmha_params, "graph_max_seqlen_k", fmha_params.max_seqlen_k
+        )
+        required_input_cols = (
+            graph_max_seqlen_k + self.tokens_per_block - 1
+        ) // self.tokens_per_block
+        required_bt_shape = (
+            batch_size,
+            max(graph_block_table.shape[1], required_input_cols + extra_pages),
+        )
+        output_capacity = getattr(
+            fmha_params, "graph_token_q_capacity", fmha_params.token_q_num
+        )
+        output_shape = (output_capacity, self.head_num, self.head_dim)
+        output_dtype = self._graph_output_dtype()
         if self.seqlen_k_buf is None:
             self.seqlen_k_buf = torch.empty(
                 max(1, batch_size), dtype=torch.int32, device=self.graph_device
@@ -967,46 +1039,59 @@ class AiterPrefillAttnOpPaged:
             self.descale_buf = torch.ones(
                 1, dtype=torch.float32, device=self.graph_device
             )
-        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
-        required_cols = (
-            fmha_params.max_seqlen_k + self.tokens_per_block - 1
-        ) // self.tokens_per_block + extra_pages
-        required_cols = max(graph_block_table.shape[1], required_cols)
         if self.sanitized_bt_buf is None:
             self.sanitized_bt_buf = torch.empty(
-                (max(1, batch_size), required_cols),
-                dtype=torch.int32,
-                device=self.graph_device,
+                required_bt_shape, dtype=torch.int32, device=self.graph_device
+            )
+            self.page_claims_buf = torch.empty(
+                required_bt_shape, dtype=torch.int32, device=self.graph_device
+            )
+            self.output_buf = torch.empty(
+                output_shape, dtype=output_dtype, device=self.graph_device
+            )
+            self.softmax_lse_buf = torch.empty(
+                0, dtype=torch.float32, device=self.graph_device
+            )
+            self.dropout_randval_buf = torch.empty(
+                0, dtype=output_dtype, device=self.graph_device
+            )
+            self.rng_state_buf = torch.zeros(
+                2, dtype=torch.int64, device=self.graph_device
             )
         elif (
-            self.sanitized_bt_buf.shape[0] < batch_size
-            or self.sanitized_bt_buf.shape[1] < required_cols
+            self.sanitized_bt_buf.shape != required_bt_shape
+            or self.page_claims_buf is None
+            or self.page_claims_buf.shape != required_bt_shape
+            or self.output_buf is None
+            or self.output_buf.shape != output_shape
+            or self.output_buf.dtype != output_dtype
         ):
             raise ValueError(
-                "Aiter paged-prefill CUDA graph replay exceeds the captured block table capacity"
+                "AIter graph prefill metadata shape changed after preparation"
             )
         self.cuda_graph_prepared = True
 
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
-        # NOTE: This is a *prefill*-stage operator (handles prefix-cache prefill).
-        # The graph_ready branches below are interface-compatible scaffolding for
-        # potential future CUDA-graph-captured prefill; in production, CUDA graph
-        # capture only happens in the decode stage (AiterDecodeAttnOp), so the
-        # graph_ready path here is never triggered and does not require dedicated
-        # regression tests.
         q_tensor = qkv[0][: fmha_params.token_q_num]
         device = q_tensor.device
 
         key_cache = kv_cache.kv_cache_base.select(1, 0)
         value_cache = kv_cache.kv_cache_base.select(1, 1)
-
-        x = 16 // key_cache.element_size()
+        vector_width = 16 // key_cache.element_size()
         kv_sizes = key_cache.shape
         key_cache = key_cache.view(
-            kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x
+            kv_sizes[0],
+            kv_sizes[1],
+            kv_sizes[3] // vector_width,
+            kv_sizes[2],
+            vector_width,
         )
         value_cache = value_cache.view(
-            kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x
+            kv_sizes[0],
+            kv_sizes[1],
+            kv_sizes[2] // vector_width,
+            kv_sizes[3],
+            vector_width,
         )
 
         graph_ready = self.enable_cuda_graph and self.cuda_graph_prepared
@@ -1025,41 +1110,17 @@ class AiterPrefillAttnOpPaged:
                 out=self.seqlen_k_buf[:batch_size],
             )
             seqlen_k = self.seqlen_k_buf[:batch_size]
-        else:
-            seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(torch.int32)
-
-        if graph_ready:
             block_table = fmha_params.kv_cache_block_id_device
-        else:
-            block_table = fmha_params.kv_cache_block_id_device.to(
-                dtype=torch.int32, device=device
-            )
-
-        max_seqlen_q = fmha_params.max_seqlen_q
-        max_seqlen_k = fmha_params.max_seqlen_k
-
-        # Apply sanitize + pad to prevent CK speculative prefetch OOB.
-        sanitized_bt, self._block_positions = _sanitize_and_pad_block_table(
-            block_table,
-            seqlen_k,
-            self.tokens_per_block,
-            max_seqlen_k,
-            self._block_positions,
-        )
-        if graph_ready:
-            # CUDA graph replay requires stable tensor addresses. Copy the
-            # sanitized result into the pre-allocated fixed-address buffer.
-            cols = sanitized_bt.shape[1]
-            self.sanitized_bt_buf[:batch_size, :cols] = sanitized_bt
-            block_table = self.sanitized_bt_buf[:batch_size, :cols]
-        else:
-            block_table = sanitized_bt
-
-        if graph_ready:
             self.kv_indptr_buf.zero_()
             kv_indptr = self.kv_indptr_buf[: batch_size + 1]
             kv_page_indices = self.kv_page_indices_buf
         else:
+            seqlen_k = getattr(fmha_params, "prefill_seqlen_k_int32", None)
+            if seqlen_k is None:
+                seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(torch.int32)
+            block_table = fmha_params.kv_cache_block_id_device.to(
+                dtype=torch.int32, device=device
+            )
             kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
             kv_page_indices = torch.zeros(1, dtype=torch.int32, device=device)
 
@@ -1076,29 +1137,111 @@ class AiterPrefillAttnOpPaged:
                 k_descale = torch.ones(1, dtype=torch.float32, device=device)
                 v_descale = torch.ones(1, dtype=torch.float32, device=device)
 
-        output = None
-        if graph_ready:
-            output_dtype = (
-                torch.bfloat16
-                if q_tensor.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
-                else q_tensor.dtype
-            )
-            output_capacity = getattr(
-                fmha_params, "graph_token_q_capacity", fmha_params.token_q_num
-            )
-            output_shape = (output_capacity, self.head_num, self.head_dim)
-            if self.output_buf is None:
-                self.output_buf = torch.empty(
-                    output_shape, dtype=output_dtype, device=device
-                )
-            elif (
-                self.output_buf.shape != output_shape
-                or self.output_buf.dtype != output_dtype
-            ):
-                raise ValueError("AIter graph prefill output shape or dtype changed")
-            output = self.output_buf
-            output.zero_()
+        max_seqlen_q = fmha_params.max_seqlen_q
+        max_seqlen_k = fmha_params.max_seqlen_k
+        softmax_scale = self.head_dim**-0.5
+        output_shape = (fmha_params.token_q_num, self.head_num, self.head_dim)
+        output_dtype = (
+            torch.bfloat16
+            if q_tensor.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+            else q_tensor.dtype
+        )
 
+        if graph_ready:
+            if not self.supports_graph_kernel():
+                raise RuntimeError("AIter graph prefill kernel is not supported")
+            self.output_buf.zero_()
+            res = mha_batch_prefill_graph(
+                q_tensor,
+                key_cache,
+                value_cache,
+                cu_seqlens_q,
+                kv_indptr,
+                kv_page_indices,
+                max_seqlen_q,
+                max_seqlen_k,
+                softmax_scale,
+                self.output_buf,
+                self.softmax_lse_buf,
+                self.dropout_randval_buf,
+                self.rng_state_buf,
+                block_table,
+                self.sanitized_bt_buf,
+                seqlen_k,
+                self.page_claims_buf,
+                self.linear_v,
+                q_descale,
+                k_descale,
+                v_descale,
+            )
+            return res[: fmha_params.token_q_num].reshape(
+                fmha_params.token_q_num, self.head_num * self.head_dim
+            )
+        elif (
+            self._supports_graph_kernel_geometry() and not self._graph_prefill_disabled
+        ):
+            extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
+            required_input_cols = (
+                max_seqlen_k + self.tokens_per_block - 1
+            ) // self.tokens_per_block
+            sanitized_block_table = torch.empty(
+                (
+                    block_table.shape[0],
+                    max(block_table.shape[1], required_input_cols + extra_pages),
+                ),
+                dtype=torch.int32,
+                device=device,
+            )
+            page_claims = torch.empty_like(sanitized_block_table)
+            output = torch.empty(output_shape, dtype=output_dtype, device=device)
+            softmax_lse = torch.empty(0, dtype=torch.float32, device=device)
+            dropout_randval = torch.empty(0, dtype=output_dtype, device=device)
+            rng_state = torch.zeros(2, dtype=torch.int64, device=device)
+            try:
+                res = mha_batch_prefill_graph(
+                    q_tensor,
+                    key_cache,
+                    value_cache,
+                    cu_seqlens_q,
+                    kv_indptr,
+                    kv_page_indices,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    softmax_scale,
+                    output,
+                    softmax_lse,
+                    dropout_randval,
+                    rng_state,
+                    block_table,
+                    sanitized_block_table,
+                    seqlen_k,
+                    page_claims,
+                    self.linear_v,
+                    q_descale,
+                    k_descale,
+                    v_descale,
+                )
+            except Exception as error:
+                self._graph_prefill_disabled = True
+                logger.warning(
+                    "Disabling AIter CK graph prefill after eager warmup failed: %s",
+                    error,
+                )
+                if self.linear_v:
+                    raise
+                res = None
+            if res is not None:
+                return res.reshape(
+                    fmha_params.token_q_num, self.head_num * self.head_dim
+                )
+
+        sanitized_block_table, self._block_positions = _sanitize_and_pad_block_table(
+            block_table,
+            seqlen_k,
+            self.tokens_per_block,
+            max_seqlen_k,
+            self._block_positions,
+        )
         res = aiter.mha_batch_prefill_func(
             q_tensor,
             key_cache,
@@ -1109,16 +1252,13 @@ class AiterPrefillAttnOpPaged:
             max_seqlen_q,
             max_seqlen_k,
             causal=True,
-            block_table=block_table,
+            block_table=sanitized_block_table,
             seqlen_k=seqlen_k,
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
-            out=output,
         )
-
-        token_num = fmha_params.token_q_num
-        return res.reshape(token_num, self.head_num * self.head_dim)
+        return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
 
 def _run_triton_paged_attention(
@@ -1943,9 +2083,16 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         query_group_size = max(1, attn_configs.head_num // max(1, self.head_num_kv))
         self.max_triton_q_len = min(4, 64 // query_group_size)
-
-        self.batch_prefill_impl = AiterPrefillAttnOpPaged(attn_configs)
         self.linear_v = not prefill_writes_vectorized_v(attn_configs, fmha_config)
+
+        self.batch_prefill_impl = AiterPrefillAttnOpPaged(
+            attn_configs, linear_v=self.linear_v
+        )
+        self.triton_prefill_impl = AiterPrefillAttnOpTriton(
+            attn_configs,
+            linear_v=self.linear_v,
+            use_unified_attention=self.use_unified_attention,
+        )
 
         rope_kvcache_cls = (
             FusedRopeKVCachePrefillOpNonAsm
@@ -1959,11 +2106,6 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.fmha_params: Optional[FMHAParams] = None
         self.triton_fmha_params: Optional[FMHAParams] = None
-        self.triton_prefill_impl = AiterPrefillAttnOpTriton(
-            attn_configs,
-            linear_v=self.linear_v,
-            use_unified_attention=self.use_unified_attention,
-        )
         # attn_inputs is fixed for this implementation instance. Select before
         # prepare() so only the dispatched backend owns metadata and workspace,
         # and keep all initialization out of forward().
@@ -1992,11 +2134,9 @@ class AiterPrefillImplPaged(FMHAImplBase):
         return "triton" if self._use_triton_paged_prefill(attn_inputs) else "batch"
 
     def support_cuda_graph(self) -> bool:
-        # Both dispatched backends implement prepare_cuda_graph().  In
-        # particular, DSpARK COMMIT runs gamma + 1 query tokens (8 for the
-        # common 7-token proposal), which selects CK batch-prefill instead of
-        # the short-query Triton path.
-        return self.backend in ("triton", "batch")
+        return self.backend == "triton" or (
+            self.backend == "batch" and self.batch_prefill_impl.supports_graph_kernel()
+        )
 
     def _prepare_backend(self, backend: str) -> FMHAParams:
         if backend == "triton":
@@ -2285,6 +2425,7 @@ class AiterDecodeImplBase(FMHAImplBase):
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_kernel_block_id,
             attn_inputs.kv_cache_kernel_block_id_device,
+            attn_inputs.sequence_lengths_plus_1_device,
         )
         if attn_inputs.kv_cache_kernel_block_id_device is not None:
             update_kv_cache_offset = getattr(

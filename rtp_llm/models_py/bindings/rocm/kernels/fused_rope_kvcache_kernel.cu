@@ -413,9 +413,10 @@ __global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
     const __nv_bfloat16*           QKV,
     const __nv_bfloat16* __restrict qkv_bias,
     const int*           __restrict padding_offset,
+    const int*           __restrict cu_seqlens,
     const float2*        __restrict cos_sin_cache,
     PrefixPromptBatchWeightsParam   param,
-    int token_num, int head_num, int head_num_kv, int head_dim, int seq_len,
+    int token_num, int batch_size, int head_num, int head_num_kv, int head_dim, int seq_len,
     int rot_dim, float rope_base, float rope_scale,
     bool store_kv, bool store_cache) {
     constexpr int VEC = 8;
@@ -424,14 +425,11 @@ __global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
 
     const int tok_local = threadIdx.y;
     const int token_idx = blockIdx.x * K_TOK + tok_local;
-    // Tail-block tok_local values where token_idx >= token_num must NOT early-
-    // return: the per-head loops below contain unconditional __syncthreads(),
-    // and dropping a subset of threads from the block deadlocks the rest (HIP
-    // requires every active thread to participate). Instead, mark inactive,
-    // clamp index math to safe_token_idx so loads/index calcs stay in-range,
-    // and skip only the global stores.
-    const bool active         = (token_idx < token_num);
-    const int  safe_token_idx = active ? token_idx : 0;
+    // Tail-block and graph-padding lanes must still participate in every
+    // __syncthreads(), but only live request tokens may write Q or KV cache.
+    const int  valid_token_num = cu_seqlens == nullptr ? token_num : cu_seqlens[batch_size];
+    const bool active          = token_idx < token_num && token_idx < valid_token_num;
+    const int  safe_token_idx  = active ? token_idx : 0;
 
     const int tid = threadIdx.x;
     const int d   = tid * VEC;
@@ -625,9 +623,9 @@ __global__ void add_fusedQKV_bias_transpose_prefill_v3_all_heads(
 template<typename T>
 struct V3OptKernelDispatch {
     static bool try_launch(T*, T*, T*, const T*, const T*,
-                           const int*, const float2*,
+                           const int*, const int*, const float2*,
                            PrefixPromptBatchWeightsParam&,
-                           int, int, int, int, int, int, float, float, bool, bool, bool, cudaStream_t) {
+                           int, int, int, int, int, int, int, float, float, bool, bool, bool, cudaStream_t) {
         return false;
     }
 };
@@ -635,9 +633,9 @@ template<>
 struct V3OptKernelDispatch<__nv_bfloat16> {
     static bool try_launch(__nv_bfloat16* q_buf, __nv_bfloat16* k_buf, __nv_bfloat16* v_buf,
                            const __nv_bfloat16* QKV, const __nv_bfloat16* qkv_bias,
-                           const int* padding_offset, const float2* cos_sin_cache,
+                           const int* padding_offset, const int* cu_seqlens, const float2* cos_sin_cache,
                            PrefixPromptBatchWeightsParam& param,
-                           int token_num, int head_num, int head_num_kv, int head_dim, int seq_len,
+                           int token_num, int batch_size, int head_num, int head_num_kv, int head_dim, int seq_len,
                            int rot_dim, float rope_base, float rope_scale,
                            bool store_kv, bool store_cache, bool v_vec_layout, cudaStream_t stream) {
         constexpr int VEC = 8, K_TOK = 4;
@@ -655,14 +653,14 @@ struct V3OptKernelDispatch<__nv_bfloat16> {
         if (v_vec_layout) {
             add_fusedQKV_bias_transpose_prefill_v3_all_heads<true>
                 <<<grid, block, smem, stream>>>(
-                    q_buf, k_buf, v_buf, QKV, qkv_bias, padding_offset, cos_sin_cache,
-                    param, token_num, head_num, head_num_kv, head_dim, seq_len,
+                    q_buf, k_buf, v_buf, QKV, qkv_bias, padding_offset, cu_seqlens, cos_sin_cache,
+                    param, token_num, batch_size, head_num, head_num_kv, head_dim, seq_len,
                     rot_dim, rope_base, rope_scale, store_kv, store_cache);
         } else {
             add_fusedQKV_bias_transpose_prefill_v3_all_heads<false>
                 <<<grid, block, smem, stream>>>(
-                    q_buf, k_buf, v_buf, QKV, qkv_bias, padding_offset, cos_sin_cache,
-                    param, token_num, head_num, head_num_kv, head_dim, seq_len,
+                    q_buf, k_buf, v_buf, QKV, qkv_bias, padding_offset, cu_seqlens, cos_sin_cache,
+                    param, token_num, batch_size, head_num, head_num_kv, head_dim, seq_len,
                     rot_dim, rope_base, rope_scale, store_kv, store_cache);
         }
         return true;
@@ -727,9 +725,9 @@ void invokeAddFusedQKVBiasTransposePrefillV1(T*                             q_bu
         // [numHeads, dimsPerHead, mTokensPerBlock]. Pass v_vec_layout=false so
         // V3's V cache write matches what the NonAsm CK FMHA reader expects.
         if (V3OptKernelDispatch<T>::try_launch(q_buf, k_buf, v_buf, QKV, qkv_bias,
-                                                padding_offset, cos_sin_cache,
+                                                padding_offset, cu_seqlens, cos_sin_cache,
                                                 param,
-                                                token_num, head_num, head_num_kv, size_per_head,
+                                                token_num, batch_size, head_num, head_num_kv, size_per_head,
                                                 seq_len,
                                                 rope_config.dim, rope_config.base, rope_config.scale,
                                                 store_kv, store_cache, /*v_vec_layout=*/false,
@@ -1073,9 +1071,9 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
         // reader expects — using the V1-style flat layout here corrupts V cache
         // and yields garbage attention output (root cause of the precision bug).
         if (V3OptKernelDispatch<T>::try_launch(q_buf, k_buf, v_buf, QKV, qkv_bias,
-                                                padding_offset, cos_sin_cache,
+                                                padding_offset, cu_seqlens, cos_sin_cache,
                                                 param,
-                                                token_num, head_num, head_num_kv, size_per_head,
+                                                token_num, batch_size, head_num, head_num_kv, size_per_head,
                                                 seq_len,
                                                 rope_config.dim, rope_config.base, rope_config.scale,
                                                 store_kv, store_cache, /*v_vec_layout=*/true,
@@ -1143,6 +1141,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
                                                              const int*    padding_offset,
                                                              const int*    cu_seqlens,
                                                              const int*    sequence_lengths,
+                                                             const bool    sequence_lengths_are_plus_one,
                                                              const int     batch_size,
                                                              const int     seq_len,
                                                              const int     head_num,
@@ -1173,12 +1172,15 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
         return;
     }
 
-    const int prefix_prompt_length = PREFIX_PROMPT ? param.d_prefix_prompt_lengths[batch_idx] : 0;
-    const int sequence_length      = sequence_lengths[batch_idx];
-    const int tlength              = sequence_length + param.max_prefix_prompt_length;
-    const int hidden_idx           = head_idx * size_per_head + tidx * vec_size;
-    const int n                    = head_num * size_per_head;
-    const int kv_n                 = head_num_kv * size_per_head;  // MQA
+    const int  prefix_prompt_length    = PREFIX_PROMPT ? param.d_prefix_prompt_lengths[batch_idx] : 0;
+    const int  encoded_sequence_length = sequence_lengths[batch_idx];
+    const bool active                  = !sequence_lengths_are_plus_one || encoded_sequence_length > 0;
+    const int  sequence_length =
+        sequence_lengths_are_plus_one ? max(encoded_sequence_length - 1, 0) : encoded_sequence_length;
+    const int tlength    = sequence_length + param.max_prefix_prompt_length;
+    const int hidden_idx = head_idx * size_per_head + tidx * vec_size;
+    const int n          = head_num * size_per_head;
+    const int kv_n       = head_num_kv * size_per_head;  // MQA
     // the [0..seq_len) indices really handle KV [max_pp_len..seq_len+max_pp_len)
     // and Q [0..seq_len)
     // Note: if !PREFIX_PROMPT, max_pp_len = 0, so it's no-op
@@ -1213,7 +1215,8 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
 
     // refer to the implementation of hipify decode attention
     // input_lengths is indexed by sequence (batch_idx), not head index (blockIdx.y).
-    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int position_id =
+        position_ids == nullptr ? sequence_length : get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_idx];
     const int timestep  = tlength;
@@ -1238,13 +1241,13 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
 
     __syncthreads();
 
-    if (store_q) {
+    if (store_q && active) {
         size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                             + seq_idx * size_per_head + tidx * vec_size;
         *reinterpret_cast<Vec_t*>(&q_buf[dest_q_idx]) = q;
     }
 
-    if (store_cache) {
+    if (store_cache && active) {
         if (head_idx < head_num_kv) {
             KVBlockArray kv_block_array = param.kv_block_array;
             Tcache*      k_cache = reinterpret_cast<Tcache*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
@@ -1303,6 +1306,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
                                                           const int*    padding_offset,
                                                           const int*    cu_seqlens,
                                                           const int*    sequence_lengths,
+                                                          const bool    sequence_lengths_are_plus_one,
                                                           const int     batch_size,
                                                           const int     seq_len,
                                                           const int     head_num,
@@ -1333,12 +1337,15 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
         return;
     }
 
-    const int prefix_prompt_length = PREFIX_PROMPT ? param.d_prefix_prompt_lengths[batch_idx] : 0;
-    const int sequence_length      = sequence_lengths[batch_idx];
-    const int tlength              = sequence_length + param.max_prefix_prompt_length;
-    const int hidden_idx           = head_idx * size_per_head + tidx * vec_size;
-    const int n                    = head_num * size_per_head;
-    const int kv_n                 = head_num_kv * size_per_head;  // MQA
+    const int  prefix_prompt_length    = PREFIX_PROMPT ? param.d_prefix_prompt_lengths[batch_idx] : 0;
+    const int  encoded_sequence_length = sequence_lengths[batch_idx];
+    const bool active                  = !sequence_lengths_are_plus_one || encoded_sequence_length > 0;
+    const int  sequence_length =
+        sequence_lengths_are_plus_one ? max(encoded_sequence_length - 1, 0) : encoded_sequence_length;
+    const int tlength    = sequence_length + param.max_prefix_prompt_length;
+    const int hidden_idx = head_idx * size_per_head + tidx * vec_size;
+    const int n          = head_num * size_per_head;
+    const int kv_n       = head_num_kv * size_per_head;  // MQA
     // the [0..seq_len) indices really handle KV [max_pp_len..seq_len+max_pp_len)
     // and Q [0..seq_len)
     // Note: if !PREFIX_PROMPT, max_pp_len = 0, so it's no-op
@@ -1373,7 +1380,8 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
 
     // refer to the implementation of hipify decode attention
     // input_lengths is indexed by sequence (batch_idx), not head index (blockIdx.y).
-    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int position_id =
+        position_ids == nullptr ? sequence_length : get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_idx];
     const int timestep  = tlength;
@@ -1401,7 +1409,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
     using QuantizedEltType = __hip_fp8_e4m3_fnuz;
     using QuantizedVecType = __hip_fp8x2_e4m3_fnuz;
 
-    if (store_q) {
+    if (store_q && active) {
         size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                             + seq_idx * size_per_head + tidx * vec_size;
         // Always write BF16 Q into q_buf.
@@ -1413,7 +1421,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
             convert_to_fp8(quantized_q_ptr, q);
         }
     }
-    if (store_cache) {
+    if (store_cache && active) {
         if (head_idx < head_num_kv) {
             KVBlockArray kv_block_array = param.kv_block_array;
             Tcache*      k_cache = reinterpret_cast<Tcache*>(kv_block_array.getKBlockPtr(batch_idx, dst_kv_seq_idx));
@@ -1474,6 +1482,7 @@ void invokeAddFusedQKVBiasTransposeDecodeV1(T*                             q_buf
                                             const int*                     padding_offset,
                                             const int*                     cu_seqlens,
                                             const int*                     sequence_lengths,
+                                            const bool                     sequence_lengths_are_plus_one,
                                             const int                      batch_size,
                                             const int                      seq_len,
                                             const int                      token_num,
@@ -1513,6 +1522,7 @@ void invokeAddFusedQKVBiasTransposeDecodeV1(T*                             q_buf
                                                              padding_offset,
                                                              cu_seqlens,
                                                              sequence_lengths,
+                                                             sequence_lengths_are_plus_one,
                                                              batch_size,
                                                              seq_len,
                                                              head_num,
@@ -1544,6 +1554,7 @@ void invokeAddFusedQKVBiasTransposeDecode(T*                             q_buf,
                                           const int*                     padding_offset,
                                           const int*                     cu_seqlens,
                                           const int*                     sequence_lengths,
+                                          const bool                     sequence_lengths_are_plus_one,
                                           const int                      batch_size,
                                           const int                      seq_len,
                                           const int                      token_num,
@@ -1583,6 +1594,7 @@ void invokeAddFusedQKVBiasTransposeDecode(T*                             q_buf,
                                                              padding_offset,
                                                              cu_seqlens,
                                                              sequence_lengths,
+                                                             sequence_lengths_are_plus_one,
                                                              batch_size,
                                                              seq_len,
                                                              head_num,
@@ -1685,6 +1697,7 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEPREFILL(__nv_bfloat16);
                                                          const int*                     padding_offset,                \
                                                          const int*                     cu_seqlens,                    \
                                                          const int*                     sequence_lengths,              \
+                                                         const bool                     sequence_lengths_are_plus_one, \
                                                          const int                      batch_size,                    \
                                                          const int                      seq_len,                       \
                                                          const int                      token_num,                     \
@@ -1722,6 +1735,7 @@ INSTANTIATEADDFUSEDQKVBIASTRANSPOSEDECODEV1(__nv_bfloat16);
                                                        const int*                     padding_offset,                  \
                                                        const int*                     cu_seqlens,                      \
                                                        const int*                     sequence_lengths,                \
+                                                       const bool                     sequence_lengths_are_plus_one,   \
                                                        const int                      batch_size,                      \
                                                        const int                      seq_len,                         \
                                                        const int                      token_num,                       \

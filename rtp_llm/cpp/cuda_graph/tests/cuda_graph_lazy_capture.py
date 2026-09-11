@@ -13,6 +13,9 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     prepare_causal_conv1d_graph_metadata,
     prepare_causal_conv1d_metadata,
 )
+from rtp_llm.models_py.triton_kernels.fla import store_ssm_state_to_block_map
+from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
+from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_graph_metadata
 from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyModelInputs,
@@ -346,14 +349,18 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
         torch.testing.assert_close(snapshot["block_ids_device"], expected_blocks)
 
     def test_graph_padding_mask_updates_in_place(self):
-        cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32, device="cuda")
+        cu_seqlens = torch.tensor([0, 3, 7], dtype=torch.int32, pin_memory=True)
+        cu_seqlens_device = cu_seqlens.cuda()
         attention_inputs = SimpleNamespace(
             is_cuda_graph=True,
             is_prefill=True,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_device=cu_seqlens_device,
         )
         graph_padding_mask = GraphPaddingMask()
-        padding_mask = graph_padding_mask.get(attention_inputs, 8, cu_seqlens.device)
+        padding_mask = graph_padding_mask.get(
+            attention_inputs, 8, cu_seqlens_device.device
+        )
         original_ptr = padding_mask.data_ptr()
 
         graph = torch.cuda.CUDAGraph()
@@ -361,11 +368,12 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
         capture_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(capture_stream):
             graph.capture_begin()
-            graph_padding_mask.get(attention_inputs, 8, cu_seqlens.device)
+            graph_padding_mask.get(attention_inputs, 8, cu_seqlens_device.device)
             graph.capture_end()
         torch.cuda.current_stream().wait_stream(capture_stream)
 
-        cu_seqlens[-1].fill_(5)
+        cu_seqlens[-1].fill_(4)
+        cu_seqlens_device[-1].fill_(5)
         graph.replay()
         torch.cuda.synchronize()
 
@@ -443,6 +451,203 @@ class TestCudaGraphLazyCapture(unittest.TestCase):
         )
         torch.cuda.synchronize()
         torch.testing.assert_close(graph_output[:, :14], expected[:, :14])
+
+    def test_causal_conv_state_store_uses_replay_block_ids(self):
+        query_start_loc = torch.tensor(
+            [0, 21, 21, 21, 21], dtype=torch.int32, device="cuda"
+        )
+        x = torch.randn(32, 21, dtype=torch.float16, device="cuda")
+        weight = torch.randn(32, 4, dtype=torch.float16, device="cuda")
+        prefix_lengths = torch.zeros(4, dtype=torch.int32, device="cuda")
+        block_map = torch.zeros((4, 8), dtype=torch.int32, device="cuda")
+        conv_states = torch.zeros(
+            (5, 3, 32), dtype=torch.float16, device="cuda"
+        ).transpose(1, 2)
+        metadata = prepare_causal_conv1d_graph_metadata(
+            query_start_loc, query_start_loc.device, 21
+        )
+
+        causal_conv1d_fn(
+            x,
+            weight,
+            None,
+            conv_states,
+            query_start_loc,
+            block_map,
+            prefix_lengths,
+            1024,
+            metadata=metadata,
+        )
+        torch.cuda.synchronize()
+        conv_states.zero_()
+
+        graph = torch.cuda.CUDAGraph()
+        capture_stream = torch.cuda.Stream()
+        capture_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(capture_stream):
+            graph.capture_begin()
+            prepare_causal_conv1d_graph_metadata(
+                query_start_loc, query_start_loc.device, 21, metadata
+            )
+            causal_conv1d_fn(
+                x,
+                weight,
+                None,
+                conv_states,
+                query_start_loc,
+                block_map,
+                prefix_lengths,
+                1024,
+                metadata=metadata,
+            )
+            graph.capture_end()
+        torch.cuda.current_stream().wait_stream(capture_stream)
+
+        block_map[0, 0] = 2
+        conv_states.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(conv_states[2], x[:, -3:])
+
+    def test_ssm_state_store_uses_replay_block_ids(self):
+        query_start_loc = torch.tensor(
+            [0, 21, 21, 21, 21], dtype=torch.int32, device="cuda"
+        )
+        prefix_lengths = torch.zeros(4, dtype=torch.int32, device="cuda")
+        block_map = torch.zeros((4, 8), dtype=torch.int32, device="cuda")
+        metadata = prepare_chunk_graph_metadata(query_start_loc, 21, 64)
+        h = torch.randn(5, 1, 16, 16, dtype=torch.float32, device="cuda")
+        final_states = torch.randn(4, 1, 16, 16, dtype=torch.float32, device="cuda")
+        ssm_states = torch.zeros(5, 1, 16, 16, dtype=torch.float32, device="cuda")
+
+        store_ssm_state_to_block_map(
+            h,
+            final_states,
+            prefix_lengths,
+            query_start_loc,
+            block_map,
+            ssm_states,
+            1024,
+            64,
+            block_v=16,
+            chunk_indices=metadata.chunk_indices,
+        )
+        torch.cuda.synchronize()
+        ssm_states.zero_()
+
+        graph = torch.cuda.CUDAGraph()
+        capture_stream = torch.cuda.Stream()
+        capture_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(capture_stream):
+            graph.capture_begin()
+            prepare_chunk_graph_metadata(query_start_loc, 21, 64, metadata)
+            store_ssm_state_to_block_map(
+                h,
+                final_states,
+                prefix_lengths,
+                query_start_loc,
+                block_map,
+                ssm_states,
+                1024,
+                64,
+                block_v=16,
+                chunk_indices=metadata.chunk_indices,
+            )
+            graph.capture_end()
+        torch.cuda.current_stream().wait_stream(capture_stream)
+
+        block_map[0, 0] = 2
+        ssm_states.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(ssm_states[2], final_states[0])
+
+    def test_fla_final_state_and_store_match_eager_on_replay(self):
+        torch.manual_seed(7)
+        query_start_loc = torch.tensor(
+            [0, 21, 21, 21, 21], dtype=torch.int32, device="cuda"
+        )
+        prefix_lengths = torch.zeros(4, dtype=torch.int32, device="cuda")
+        block_map = torch.zeros((4, 8), dtype=torch.int32, device="cuda")
+        q = torch.randn((1, 21, 4, 128), dtype=torch.bfloat16, device="cuda")
+        k = torch.randn_like(q)
+        v = torch.randn_like(q)
+        g = torch.nn.functional.logsigmoid(
+            torch.randn((1, 21, 4), dtype=torch.float32, device="cuda")
+        )
+        beta = torch.rand((1, 21, 4), dtype=torch.bfloat16, device="cuda")
+        initial_state = torch.zeros(
+            (4, 4, 128, 128), dtype=torch.float32, device="cuda"
+        )
+        ssm_states = torch.zeros((5, 4, 128, 128), dtype=torch.float32, device="cuda")
+        metadata = prepare_chunk_graph_metadata(query_start_loc, 21, 64)
+
+        chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=query_start_loc,
+            use_qk_l2norm_in_kernel=True,
+            chunk_metadata=metadata,
+        )
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        capture_stream = torch.cuda.Stream()
+        capture_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(capture_stream):
+            graph.capture_begin()
+            prepare_chunk_graph_metadata(query_start_loc, 21, 64, metadata)
+            graph_output, graph_h, graph_final_state = chunk_gated_delta_rule(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                initial_state=initial_state,
+                output_final_state=True,
+                cu_seqlens=query_start_loc,
+                use_qk_l2norm_in_kernel=True,
+                chunk_metadata=metadata,
+            )
+            store_ssm_state_to_block_map(
+                graph_h,
+                graph_final_state,
+                prefix_lengths,
+                query_start_loc,
+                block_map,
+                ssm_states,
+                1024,
+                64,
+                chunk_indices=metadata.chunk_indices,
+            )
+            graph.capture_end()
+        torch.cuda.current_stream().wait_stream(capture_stream)
+
+        block_map[0, 0] = 2
+        ssm_states.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        expected_output, _, expected_final_state = chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=query_start_loc,
+            use_qk_l2norm_in_kernel=True,
+        )
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(graph_output, expected_output)
+        torch.testing.assert_close(graph_final_state, expected_final_state)
+        torch.testing.assert_close(ssm_states[2], expected_final_state[0])
 
     def test_generation_prefill_disables_buckets_above_mori_capacity(self):
         runner = self._prefill_runner(mori_max_tokens=4)

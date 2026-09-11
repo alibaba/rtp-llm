@@ -598,16 +598,20 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         prefill_metadata = attn_meta.get_aiter_gdn_prefill_metadata(
             cu_seqlens_without_padding
         )
-        use_aiter_flydsl_gdn = _should_use_aiter_flydsl_gdn_prefill(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            prefill_metadata,
+        use_aiter_flydsl_gdn = (
+            chunk_metadata is None
+            and _should_use_aiter_flydsl_gdn_prefill(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                prefill_metadata,
+            )
         )
         use_flydsl_chunk_gdn = (
             not use_aiter_flydsl_gdn
+            and chunk_metadata is None
             and is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
@@ -670,6 +674,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
                 use_qk_l2norm_in_kernel=True,
+                chunk_metadata=chunk_metadata,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
@@ -1807,11 +1812,12 @@ class Qwen3NextModel(GptModelBase):
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
                 else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             )
+            layer_cache = self.kv_cache.get_layer_cache(i) if self.kv_cache else None
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_cache,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
                 padding_mask=padding_mask,
