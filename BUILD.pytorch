@@ -47,6 +47,23 @@ cc_library(
             # "torch/lib/lib*amd*.so*",
         ]),
         "//conditions:default": [],
+    }) + select({
+        # Torch 2.11 bundles these native dependencies in torch/lib.
+        # Declare them so both native linking and Bazel runfiles retain them.
+        "@//:using_cuda13_arm": [
+            "torch/lib/libarm_compute.so",
+            "torch/lib/libarm_compute_graph.so",
+            "torch/lib/libgfortran.so.5",
+            "torch/lib/libnvpl_blas_core.so.0",
+            "torch/lib/libnvpl_blas_lp64_gomp.so.0",
+            "torch/lib/libnvpl_lapack_core.so.0",
+            "torch/lib/libnvpl_lapack_lp64_gomp.so.0",
+            "torch/lib/libtorch_nvshmem.so",
+        ],
+        "@//:using_cuda13_x86": [
+            "torch/lib/libtorch_nvshmem.so",
+        ],
+        "//conditions:default": [],
     }),
     hdrs = glob([
         "torch/include/*.h",

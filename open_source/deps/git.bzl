@@ -228,6 +228,8 @@ def git_deps():
     git_repository(
         name = "com_google_absl",
         remote = "https://github.com/abseil/abseil-cpp.git",
+        patches = ["//patches/absl:0001-include-cstdint-for-gcc13.patch"],
+        patch_args = ["-p1"],
         patch_cmds = [
             "sed -i -e 's/^#define ABSL_OPTION_USE_STD_STRING_VIEW 2/#define ABSL_OPTION_USE_STD_STRING_VIEW 0/' 'absl/base/options.h'",
             "sed 's$@bazel_tools//platforms:(linux|osx|windows|android|freebsd|ios|os)$@platforms//os:\\1$' -E -i absl/BUILD.bazel",

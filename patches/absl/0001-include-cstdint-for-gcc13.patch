@@ -1,0 +1,8 @@
+diff --git a/absl/strings/internal/str_format/extension.h b/absl/strings/internal/str_format/extension.h
+--- a/absl/strings/internal/str_format/extension.h
++++ b/absl/strings/internal/str_format/extension.h
+@@ -21,3 +21,4 @@
+ #include <cstddef>
++#include <cstdint>
+ #include <cstring>
+ #include <ostream>

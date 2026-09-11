@@ -1,6 +1,7 @@
 #include <csignal>
 #include <sstream>
 #include <unistd.h>
+#include <sys/syscall.h>
 #include <iostream>
 #include <execinfo.h>
 #include <dlfcn.h>
@@ -15,6 +16,7 @@ namespace rtp_llm {
 void printSignalStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
     std::stringstream stack_ss;
     time_t            current_time = time(nullptr);
+    const auto        thread_id    = static_cast<pid_t>(syscall(SYS_gettid));
     stack_ss << std::endl
              << "*** Aborted at " << current_time << " (unix time) try \"date -d @" << current_time
              << "\" if you are using GNU date***" << std::endl;
@@ -22,26 +24,26 @@ void printSignalStackTrace(int signum, siginfo_t* siginfo, void* ucontext) {
     switch (signum) {
         case SIGSEGV:
             stack_ss << "*** SIGSEGV (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+                     << ") received by PID " << getpid() << " (TID " << thread_id << "); stack trace: ***" << std::endl;
             break;
         case SIGFPE:
             stack_ss << "*** SIGFPE (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+                     << ") received by PID " << getpid() << " (TID " << thread_id << "); stack trace: ***" << std::endl;
             break;
         case SIGILL:
             stack_ss << "*** SIGILL (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+                     << ") received by PID " << getpid() << " (TID " << thread_id << "); stack trace: ***" << std::endl;
             break;
         case SIGABRT:
             stack_ss << "*** SIGABRT (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+                     << ") received by PID " << getpid() << " (TID " << thread_id << "); stack trace: ***" << std::endl;
             break;
         case SIGBUS:
             stack_ss << "*** SIGBUS (@0x" << std::hex << reinterpret_cast<uintptr_t>(siginfo->si_addr) << std::dec
-                     << ") received by PID " << getpid() << " (TID " << gettid() << "); stack trace: ***" << std::endl;
+                     << ") received by PID " << getpid() << " (TID " << thread_id << "); stack trace: ***" << std::endl;
             break;
         default:
-            stack_ss << "*** Unknown signal (" << signum << ") received by PID " << getpid() << " (TID " << gettid()
+            stack_ss << "*** Unknown signal (" << signum << ") received by PID " << getpid() << " (TID " << thread_id
                      << "); stack trace: ***" << std::endl;
             break;
     }
