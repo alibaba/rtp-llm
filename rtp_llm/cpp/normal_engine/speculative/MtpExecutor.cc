@@ -613,7 +613,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
-                         bool                                           warm_up):
+                         bool                                           warm_up,
+                         bool                                           allow_cuda_graph):
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
@@ -766,7 +767,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                         false,
                                         true,
                                         DSparkModelRole::NONE,
-                                        true,
+                                        allow_cuda_graph,
                                         dspark_prefill_commit_only_));
     }
 
@@ -815,7 +816,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         model_params.metrics_reporter = metrics_reporter_;
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            // Keep the wrapper topology identical to the production executor even when a profiling
+            // executor disables capture. In particular, Graph-enabled MTP uses a separate draft
+            // prefill wrapper whose initialization memory must be visible to forward profiling.
+            const bool graph_topology_enabled = params.hw_kernel_config.enable_cuda_graph;
             // A DSpARK PREFILL worker only seeds the draft feature KV through
             // the ordinary CP-capable prefill path and never runs the
             // fixed-width decode proposal or tail commit. Capturing those
@@ -830,11 +834,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                       false,
                                                       false,
                                                       is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
-                                                      draft_graph_allowed));
+                                                      draft_graph_allowed && allow_cuda_graph));
             }
             // dspark use DSparkModelRole to call commit func, and token_per_bs is different
             // so another model is required
-            if (enable_cuda_graph || is_dspark_) {
+            if (graph_topology_enabled || is_dspark_) {
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
                 // runtime slot but constructs a gamma+1 decode-graph commit wrapper.
@@ -844,7 +848,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                        !is_dspark_,
                                        false,
                                        is_dspark_ ? DSparkModelRole::COMMIT : DSparkModelRole::NONE,
-                                       draft_graph_allowed,
+                                       draft_graph_allowed && allow_cuda_graph,
                                        dspark_prefill_commit_only_));
             }
         }
@@ -1115,7 +1119,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         return absl::OkStatus();
     }
 
-    if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+    if (!isTpRank0() || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -1140,6 +1144,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
+    }
+
+    if (warm_up_) {
+        cudaSyncAndCheck();
+        releaseAllModelBuffers();
+        return absl::OkStatus();
     }
 
     // collect metrics
@@ -1648,7 +1658,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+    if (!isTpRank0() || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -1666,6 +1676,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
+    }
+
+    if (warm_up_) {
+        cudaSyncAndCheck();
+        releaseAllModelBuffers();
+        return absl::OkStatus();
     }
 
     // Record after draft_model_sample so worker all_probs/token_ids reads wait
@@ -2324,6 +2340,17 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     }
 
     return absl::OkStatus();
+}
+
+size_t MtpExecutor::cudaGraphMemoryBytes() const {
+    size_t bytes = model_ ? model_->cudaGraphMemoryBytes() : 0;
+    if (draft_model_) {
+        bytes += draft_model_->cudaGraphMemoryBytes();
+    }
+    if (sp_prefill_draft_model_) {
+        bytes += sp_prefill_draft_model_->cudaGraphMemoryBytes();
+    }
+    return bytes;
 }
 
 bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {

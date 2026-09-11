@@ -11,6 +11,8 @@
 
 namespace rtp_llm {
 
+inline constexpr double kDefaultRuntimeMemorySafetyRatio = 0.10;
+
 /** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
     std::string master_ip   = "";
@@ -173,6 +175,7 @@ struct KVCacheConfig {
     int         fp8_kv_cache              = 0;
     std::string ssm_state_dtype           = "bf16";
     int64_t     kv_cache_mem_mb           = -1;
+    double      runtime_mem_safety_ratio = kDefaultRuntimeMemorySafetyRatio;
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;

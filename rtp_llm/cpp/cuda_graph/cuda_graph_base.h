@@ -57,6 +57,7 @@ public:
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)    = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)        = 0;
     virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
+    virtual size_t         cudaGraphMemoryBytes() const                                 = 0;
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
                                                   bool                 skip_forward_event_sync = false) = 0;
