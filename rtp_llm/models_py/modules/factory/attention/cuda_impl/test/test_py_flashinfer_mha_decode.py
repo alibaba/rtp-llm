@@ -389,6 +389,95 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             params.slot_mapping.cpu().tolist(), [10 * 64 + 63, 21 * 64 + 63]
         )
 
+    def test_device_decode_graph_tracks_active_slots_with_stale_tail(self):
+        """A capacity-sized input is not an all-active batch on graph replay."""
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        input_lengths = torch.ones(4, dtype=torch.int32, device="cuda")
+        # Inactive slots deliberately keep nonzero lengths and distinct pages.
+        sequence_lengths = torch.tensor(
+            [63, 127, 191, 255], dtype=torch.int32, device="cuda"
+        )
+        block_table = torch.tensor(
+            [[10, 11, 12, 13], [20, 21, 22, 23], [30, 31, 32, 33], [40, 41, 42, 43]],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        empty = torch.empty(0, dtype=torch.int32, device="cuda")
+
+        def fill(forbid_realloc):
+            params.fill_params_mha_device(
+                empty,
+                sequence_lengths,
+                input_lengths,
+                block_table,
+                64,
+                forbid_realloc=forbid_realloc,
+                planned_batch_size=4,
+                input_token_count=4,
+            )
+
+        fill(False)
+        fields = (
+            "decode_page_indptr_d",
+            "page_indice_d",
+            "paged_kv_last_page_len_d",
+            "batch_indice_d",
+            "positions_d",
+        )
+        addresses = [getattr(params, field).data_ptr() for field in fields]
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fill(True)
+
+        for active in ([1, 1, 0, 0], [1, 0, 1, 0], [0, 0, 0, 0], [1, 1, 1, 1]):
+            with self.subTest(active=active):
+                input_lengths.copy_(
+                    torch.tensor(active, dtype=torch.int32, device="cuda")
+                )
+                graph.replay()
+                torch.cuda.synchronize()
+                expected = rtp_llm_ops.FlashInferMlaAttnParams()
+                expected.fill_params(
+                    torch.empty(0, dtype=torch.int32),
+                    sequence_lengths.cpu(),
+                    input_lengths.cpu(),
+                    block_table.cpu(),
+                    64,
+                )
+                torch.cuda.synchronize()
+                pages = expected.page_indice_h.numel()
+                tokens = sum(active)
+                self.assertEqual(
+                    params.decode_page_indptr_d.cpu().tolist(),
+                    expected.decode_page_indptr_h.tolist(),
+                )
+                self.assertEqual(
+                    params.paged_kv_last_page_len_d.cpu().tolist(),
+                    expected.paged_kv_last_page_len_h.tolist(),
+                )
+                self.assertEqual(
+                    params.page_indice_d[:pages].cpu().tolist(),
+                    expected.page_indice_h.tolist(),
+                )
+                self.assertEqual(
+                    params.batch_indice_d[:tokens].cpu().tolist(),
+                    expected.batch_indice_h.tolist(),
+                )
+                self.assertEqual(
+                    params.positions_d[:tokens].cpu().tolist(),
+                    expected.positions_h.tolist(),
+                )
+                self.assertEqual(
+                    params.batch_indice_d[tokens:4].cpu().tolist(), [0] * (4 - tokens)
+                )
+                self.assertEqual(
+                    params.positions_d[tokens:4].cpu().tolist(), [0] * (4 - tokens)
+                )
+                self.assertEqual(
+                    [getattr(params, field).data_ptr() for field in fields], addresses
+                )
+
     def test_device_planner_prefill_padding_metadata(self):
         params = rtp_llm_ops.FlashInferMlaAttnParams()
         params.fill_params_mha_device(
@@ -609,9 +698,47 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             run_seq_lens,
             config.seq_size_per_block,
         )
+        # Keep stale tail sequence lengths/page rows, just as the graph runner
+        # can; input_lengths is the authoritative activity mask.
+        run_inputs.input_lengths = torch.tensor(
+            [1, 1, 0, 0], dtype=torch.int32, device="cuda"
+        )
+        run_inputs.sequence_lengths = run_inputs.sequence_lengths.cuda()
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
+        torch.cuda.synchronize()
 
         self.assertEqual(len(plan_calls), 0)
+        expected = rtp_llm_ops.FlashInferMlaAttnParams()
+        expected.fill_params(
+            torch.empty(0, dtype=torch.int32),
+            run_inputs.sequence_lengths.cpu(),
+            run_inputs.input_lengths.cpu(),
+            run_inputs.kv_cache_kernel_block_id,
+            config.seq_size_per_block,
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            fmha_params.decode_page_indptr_d.cpu().tolist(),
+            expected.decode_page_indptr_h.tolist(),
+        )
+        self.assertEqual(
+            fmha_params.paged_kv_last_page_len_d.cpu().tolist(),
+            expected.paged_kv_last_page_len_h.tolist(),
+        )
+        self.assertEqual(
+            fmha_params.page_indice_d[: expected.page_indice_h.numel()].cpu().tolist(),
+            expected.page_indice_h.tolist(),
+        )
+        self.assertEqual(fmha_params.batch_indice_d[:4].cpu().tolist(), [0, 1, 0, 0])
+        self.assertEqual(fmha_params.positions_d[:4].cpu().tolist(), [99, 199, 0, 0])
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(),
+            fmha_params.decode_page_indptr_d.data_ptr(),
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(),
+            fmha_params.page_indice_d.data_ptr(),
+        )
 
     def test_replay_updates_page_tables(self):
         """Page table buffers must reflect the replay inputs, not capture inputs."""

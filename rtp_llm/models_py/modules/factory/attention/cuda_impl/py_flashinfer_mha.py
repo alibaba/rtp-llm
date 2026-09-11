@@ -1195,20 +1195,23 @@ class PyFlashinferDecodeAttnOp(object):
             self._plan_decode_wrapper(attn_inputs)
             return
 
-        # CUDA-core device pipeline: update the device-resident buffers in place.
-        seq_plus_1 = attn_inputs.sequence_lengths_plus_1_device
-        if seq_plus_1 is None or not seq_plus_1.is_cuda:
-            seq_plus_1 = (attn_inputs.sequence_lengths.to(torch.int32) + 1).cuda()
-        block_id = _device_or(
-            attn_inputs.kv_cache_kernel_block_id_device,
-            attn_inputs.kv_cache_kernel_block_id,
+        # Match initial planning's active-slot predicate. Sequence lengths and
+        # block rows may retain capture-time values after a slot goes inactive.
+        input_lengths = _device_or(
+            attn_inputs.input_lengths_device, attn_inputs.input_lengths
         )
-        if block_id is not None and not block_id.is_cuda:
-            block_id = block_id.cuda()
-        self.fmha_params.fill_decode_cuda_graph_params(
-            seq_plus_1,
-            block_id,
+        self.fmha_params.fill_params_mha_device(
+            _device_or(attn_inputs.prefix_lengths_device, attn_inputs.prefix_lengths),
+            attn_inputs.sequence_lengths,
+            input_lengths,
+            _device_or(
+                attn_inputs.kv_cache_kernel_block_id_device,
+                attn_inputs.kv_cache_kernel_block_id,
+            ),
             self.seq_size_per_block,
+            forbid_realloc=True,
+            planned_batch_size=self.decode_wrapper._fixed_batch_size,
+            input_token_count=input_lengths.numel(),
         )
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:

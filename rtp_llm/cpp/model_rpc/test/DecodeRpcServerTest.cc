@@ -190,6 +190,8 @@ TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumPrefix) {
 }
 
 TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
+    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(1), (std::vector<size_t>{1}));
+    EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(2), (std::vector<size_t>{2}));
     EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(3), (std::vector<size_t>{2, 1}));
     EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(5), (std::vector<size_t>{2, 2, 1}));
     EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(4), (std::vector<size_t>{2, 2}));

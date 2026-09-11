@@ -14,13 +14,17 @@ namespace rtp_llm {
 //
 // planned_batch_size may exceed input_lengths.size(0) during CUDA graph replay.
 // The extra graph slots receive a one-token dummy KV page (page 0), while
-// producing no batch_indice/position entries.
+// producing no batch_indice/position entries. Decode slots inside the input
+// capacity with input_lengths[i] == 0 are inactive too (sequence lengths and
+// block-table rows may still contain stale capture data). Active decode token
+// metadata is compacted in slot order; the remaining input-capacity tail is
+// cleared to zero. Consumers must use their actual token count, not capacity.
 //
 // Required sizes (caller responsibility):
 //   paged_kv_last_page_len   >= planned_batch_size
 //   decode_page_indptr       >= planned_batch_size + 1
 //   page_indice              >= planned_batch_size * max_blocks_per_bs (loose upper bound)
-//   input_token_count        == sum(input_lengths) for prefill, or input batch size for decode
+//   input_token_count        == sum(input_lengths) for prefill, or input batch capacity for decode
 //   batch_indice             >= input_token_count
 //   positions                >= input_token_count
 //
