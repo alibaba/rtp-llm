@@ -143,6 +143,7 @@ try:
         GrammarConfig,
         GrpcConfig,
         HWKernelConfig,
+        HiddenStateCaptureDtype,
         HybridAttentionConfig,
         HybridAttentionType,
         KVCacheConfig,

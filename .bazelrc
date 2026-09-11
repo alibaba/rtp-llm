@@ -59,6 +59,9 @@ build:cuda --action_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
 build:cuda12 --config=cuda
 build:cuda12 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
 build:cuda12 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
+build:sm120 --repo_env=TF_CUDA_COMPUTE_CAPABILITIES=12.0
+build:sm120 --action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
+build:sm120 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 build:cuda12 --action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --define=using_cuda12=true

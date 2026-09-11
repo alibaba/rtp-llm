@@ -285,6 +285,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
     def test_generic_sparse_mla_cacheless_forward_passes_none(self):
         model = object.__new__(GenericMoeModel)
+        nn.Module.__init__(model)
         hidden_states = torch.zeros((2, 4), dtype=torch.float32)
         residual = torch.zeros_like(hidden_states)
         decoder_layer = Mock(
@@ -295,7 +296,8 @@ class AttentionInputRoutingTest(unittest.TestCase):
         )
         model.__dict__.update(
             config=SimpleNamespace(
-                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True),
+                hidden_state_capture_layer_ids=[],
             ),
             layer_num=1,
             layers=[decoder_layer],
@@ -303,11 +305,22 @@ class AttentionInputRoutingTest(unittest.TestCase):
             embed_tokens=Mock(return_value=hidden_states),
             norm=Mock(return_value=(hidden_states, None)),
         )
+        model._init_capture_context(
+            model._capture_canonical_layer,
+            model._capture_canonical_final,
+        )
         fmha_impl = {"default": object(), "indexer_kv": object()}
 
-        model.forward(SimpleNamespace(input_ids=torch.tensor([1, 2])), fmha_impl)
+        outputs = model.forward(
+            SimpleNamespace(
+                input_ids=torch.tensor([1, 2]), capture_hidden_states=False
+            ),
+            fmha_impl,
+        )
 
         self.assertIsNone(decoder_layer.call_args.kwargs["kv_cache"])
+        self.assertIs(outputs.hidden_states, hidden_states)
+        model.norm.assert_called_once_with(hidden_states, residual)
 
     def test_generic_dense_mla_keeps_scalar_group_selection(self):
         model = object.__new__(GenericMoeModel)
