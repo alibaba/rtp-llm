@@ -4,6 +4,7 @@ This is exact transport/state testing, not CP8 or disaggregated model acceptance
 All six rounds use the production NCCL callbacks, including CPU shape metadata.
 """
 
+import ctypes
 import hashlib
 import json
 import multiprocessing as mp
@@ -195,6 +196,12 @@ def _worker(rank, port, uds_dir, output_dir):
         from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
         import librtp_compute_ops
+
+        # Resolve the test bridge against the production communication registry.
+        runtime_library = ctypes.CDLL(
+            librtp_compute_ops.__file__, mode=ctypes.RTLD_GLOBAL
+        )
+        assert runtime_library._handle
         from rtp_llm.cpp.models.test import libtp_sync_model_inputs_test_ops as ops
         from rtp_llm.models_py.distributed.collective_torch import (
             Group,
