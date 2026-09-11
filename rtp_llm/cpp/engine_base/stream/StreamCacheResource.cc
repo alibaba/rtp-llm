@@ -495,6 +495,10 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_once_.exchange(true)) {
         return true;
     }
+    return submitAsyncLoadCache();
+}
+
+bool StreamCacheResource::submitAsyncLoadCache() {
     auto meta = std::make_shared<MetaImpl>(
         reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
     meta->generate_stream_ = stream_;
@@ -511,11 +515,10 @@ bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_->done()) {
         return false;  // coordinator 后台线程尚未处理完
     }
-    // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
-    if (!load_cache_context_->success()) {
+    const auto completed_context = load_cache_context_;
+    if (!completed_context->success()) {
         // 区分匹配失败和传输失败
-        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(completed_context);
         bool      should_retry = false;
         const int max_retry    = resource_context_.load_cache_retry_times;
         if (read_context && read_context->fusedMatchContext()) {
@@ -544,6 +547,10 @@ bool StreamCacheResource::loadCacheDone() {
             }
         }
 
+        // A retryable transfer failure must not mark the stream failed before
+        // the retry budget is exhausted. Non-retryable failures preserve the
+        // existing synchronous error-reporting behavior.
+        waitLoadCacheDone(completed_context, !should_retry);
         load_cache_context_.reset();
 
         if (should_retry) {
@@ -560,13 +567,23 @@ bool StreamCacheResource::loadCacheDone() {
                 return true;
             }
             load_cache_retry_count_++;
-            asyncLoadCache();
+            if (!submitAsyncLoadCache()) {
+                RTP_LLM_LOG_WARNING("load cache retry submission failed at retry %d/%d, stream: [%ld]",
+                                    load_cache_retry_count_,
+                                    max_retry,
+                                    stream_->streamId());
+                stream_->reportEventWithoutLock(
+                    StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "load cache retry submission failed");
+                releaseResource();
+                return true;
+            }
             return false;  // 失败重试
         } else {
             // 匹配失败：不重试，继续执行
             return true;
         }
     }
+    waitLoadCacheDone(completed_context);
     load_cache_context_.reset();
     return true;
 }
@@ -676,7 +693,7 @@ void StreamCacheResource::loadCacheSync() {
     // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
 }
 
-void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
+void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context, bool report_error) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
         return;
@@ -687,7 +704,7 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%s], error: %s",
                             stream_->streamLogTag().c_str(),
                             error.ToString().c_str());
-        if (error.hasError()) {
+        if (report_error && error.hasError()) {
             // loadCacheDone() is called from moveToNext(), which already holds the stream mutex.
             stream_->reportErrorWithoutLock(error.code(), error.ToString());
         }
