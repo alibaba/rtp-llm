@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 
+from rtp_llm.config.moe_config import MoeStrategyName
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -30,7 +31,10 @@ class CudaW4a8Int4PerChannelNoDPStrategy(MoeStrategy):
             quant_method
             in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
         )
-        checker.check(config.moe_strategy == "w4a8_int4_per_channel_no_dp" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == MoeStrategyName.W4A8_INT4_PER_CHANNEL_NO_DP.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_w4a8_moe import (
@@ -62,7 +66,11 @@ class CudaW4a8Int4PerChannelEpLowLatencyStrategy(MoeStrategy):
             quant_method
             in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
         )
-        checker.check(config.moe_strategy == "w4a8_int4_per_channel_ep_low_latency" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy
+            == MoeStrategyName.W4A8_INT4_PER_CHANNEL_EP_LOW_LATENCY.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_w4a8_moe import (
@@ -94,7 +102,10 @@ class CudaW4a8Int4PerChannelEpNormalStrategy(MoeStrategy):
             quant_method
             in ("W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED")
         )
-        checker.check(config.moe_strategy == "w4a8_int4_per_channel_ep_normal" or config.moe_strategy == "auto")
+        checker.check(
+            config.moe_strategy == MoeStrategyName.W4A8_INT4_PER_CHANNEL_EP_NORMAL.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_w4a8_moe import (

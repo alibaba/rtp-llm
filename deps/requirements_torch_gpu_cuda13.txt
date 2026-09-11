@@ -3,11 +3,11 @@
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # First-version scope: torch + torchvision + triton + deep_gemm + flash_mla
 # + fast_safetensors + fastsafetensors (the last two rebuilt against
-# torch 2.11+cu130 and mirrored to oss://rtp-maga/0502/).  Other
-# torch-ABI-bound wheels (flash_attn, flashinfer, deep_ep, rtp_kernel,
-# fast_hadamard, nvidia_cutlass_dsl) are deferred — see plan
-# §K and bazel/arch_select.bzl whl_deps() cuda13_x86 branch for how
-# rtp_llm/BUILD selects subset out of that set.
+# torch 2.11+cu130 and mirrored to oss://rtp-maga/0502/).
+# CUDA 13 uses the RTP-patched FlashInfer 0.6.12 Python and cubin wheels. Its
+# B12X CuTe DSL path needs the explicit TileIRAS and CUTLASS DSL pins below.
+# Other torch-ABI-bound wheels without CUDA 13 builds remain deferred; see
+# bazel/arch_select.bzl whl_deps() for the selected subset.
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
 # https://download.pytorch.org/whl/cu130/.
@@ -19,7 +19,7 @@ triton==3.6.0
 
 # Self-built wheels against torch 2.11+cu130 with gcc-toolset-12.
 # DeepGEMM ee6161b tracks nv_dev 2642b32 and includes native SM120 kernels.
-http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_sm120/ee6161be60445ec248cf63fced4215ba78ff9b39/deep_gemm-2.6.1%2Bee6161b.cu132-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_sm120/ee6161be60445ec248cf63fced4215ba78ff9b39/deep_gemm-2.6.1%2Bee6161b.cu132-cp310-cp310-linux_x86_64.whl#sha256=4adee1e3b30e3d8db17374935c439781c5f6bb683be7fdc535e34ebe9bb0e081
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
 
 # rtp_kernel built from gitlab cuda_extension main@3bc0ca45
@@ -27,6 +27,22 @@ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B924
 # against torch 2.11+cu130; flashinfer-dependent submodules (xqa,
 # sparse_attention*, clustered_gather) are import-tolerant in this build.
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/cu13/rtp_kernel_260902/rtp_kernel-0.1.0%2B3bc0ca45.cu13-cp310-cp310-linux_x86_64.whl
+
+# FlashInfer 0.6.9 has a known runtime bug. Use the internal 0.6.12 Python and
+# cubin distributions. The cu129 JIT cache is deliberately excluded because
+# its shared objects link libcudart.so.12 and libnvrtc.so.12; CUDA 13 must JIT.
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260523/flashinfer_python-0.6.12rc1%2Brtp.260523-py3-none-any.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260523/flashinfer_cubin-0.6.12rc1%2Brtp.260523-py3-none-any.whl
+
+# FlashInfer's metadata requires TVM FFI, TileIRAS, and CUTLASS DSL >= 4.5.0.
+# TileIRAS supplies CUDA 13 host compiler packages used by the SM120 DSL path.
+apache-tvm-ffi==0.1.10
+cuda-tile[tileiras]==1.3.0
+nvidia-cutlass-dsl==4.5.3
+
+# DeepSeek V4 selects the TileLang HC implementation by default. Version 0.1.9
+# is validated with torch 2.11+cu130; its remaining dependencies are locked.
+tilelang==0.1.9
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
@@ -47,4 +63,5 @@ tabulate==0.9.0
 # and autoawq-kernels (same).
 # auto_gptq      # deferred — torch 2.11 ABI rebuild needed
 # autoawq        # deferred
+# deep_ep        # deferred — current wheel links libcudart.so.12
 # tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).

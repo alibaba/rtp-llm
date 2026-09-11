@@ -18,6 +18,8 @@ load(
     _if_rocm = "if_rocm",
 )
 
+exports_files(["ops/libth_transformer_config.pyi"])
+
 if_rocm = _if_rocm
 
 
@@ -26,12 +28,16 @@ flashinfer = [
     "flashinfer-python",
 ]
 
-flashinfer_with_cache = [
+flashinfer_with_cache_packages = [
     "apache-tvm-ffi",
     "flashinfer-python",
     "flashinfer-cubin",
     "nvidia-cutlass-dsl",
     "flashinfer-jit-cache"
+]
+
+flashinfer_with_cache = flashinfer_with_cache_packages + [
+    "nvidia-cutlass-dsl-libs-runtime",
 ]
 
 flashmla = [
@@ -140,7 +146,22 @@ requirement([
     "watchdog",
     "zstandard",
     "xgrammar",
-] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+] + deep + flashinfer_with_cache_packages + flashmla + rtp_kernel + flashattn)
+
+
+py_library(
+    name = "nvidia-cutlass-dsl-libs-runtime",
+    deps = select({
+        "@//:using_cuda12_9_x86": [
+            "@pip_gpu_cuda12_9_torch//nvidia_cutlass_dsl_libs_base:pkg",
+        ],
+        "@//:using_cuda13_x86": [
+            "@pip_gpu_cuda13_torch//nvidia_cutlass_dsl_libs_base:pkg",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
 
 
 py_library(
@@ -241,11 +262,15 @@ py_library(
         "device/**/*.py",
     ]),
     deps = [
+        ":config",
         ":torch",
         ":psutil",
         ":utils",
         ":ops",
-    ],
+    ] + select({
+        "@//:using_cuda12": flashinfer,
+        "//conditions:default": [],
+    }),
 )
 
 py_library(
@@ -299,16 +324,20 @@ py_library(
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({
-        # cuda13 x86 lock ships deep-ep; the arm lock does not yet.
-        "@//:using_cuda13_x86": deep,
+        # CUDA 13 DeepEP rebuild is pending; the existing wheel links CUDA 12.
+        "@//:using_cuda13_x86": ["deep_gemm"],
         "@//:using_cuda13_arm": ["deep_gemm"],
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 locks ship flashinfer-python (+apache-tvm-ffi, nvidia-cutlass-dsl)
-        # and flash-mla (+tilelang on arm), but not flashinfer-cubin/jit-cache or
-        # fast-hadamard; those rebuilds for torch 2.11+cu130 are tracked separately.
-        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla"],
+        # cuda13 x86 ships FlashInfer 0.6.12 Python+cubin and TileLang. Its cu129
+        # JIT cache and fast-hadamard remain excluded because they link CUDA 12.
+        "@//:using_cuda13_x86": flashinfer + [
+            "flashinfer-cubin",
+            "nvidia-cutlass-dsl",
+            "flash-mla",
+            "tilelang",
+        ],
         "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],

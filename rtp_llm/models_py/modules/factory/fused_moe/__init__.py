@@ -21,8 +21,8 @@ import torch
 from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.utils.arch import get_sm, is_cuda
-
 from rtp_llm.utils.backend_registry import run_backend_registrations
+
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
 from .strategy_registry import StrategyRegistry
@@ -48,9 +48,9 @@ if device_type == DeviceType.ROCm:
         RocmBf16PureTPStrategy,
         RocmEpLowLatencyStrategy,
         RocmEpNormalStrategy,
-        RocmMXFp4PureTPStrategy,
         RocmFp8PerBlockPureTPStrategy,
         RocmFp8PerChannelPureTPStrategy,
+        RocmMXFp4PureTPStrategy,
     )
 
     registry = StrategyRegistry()
@@ -68,12 +68,12 @@ else:
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
-        CudaFp8PerBlockPureCPStrategy,
-        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerBlockEpLowLatencyStrategy,
         CudaFp8PerBlockEpNormalStrategy,
         CudaFp8PerBlockNoDPMaskedStrategy,
         CudaFp8PerBlockNoDPStrategy,
+        CudaFp8PerBlockPureCPStrategy,
+        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorNoDPStrategy,
@@ -105,11 +105,13 @@ else:
     # Only register FP4 strategies on SM_100+ (and only if CUDA GPU is available)
     if torch.cuda.is_available() and is_cuda() and get_sm()[0] >= 10:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
+            CudaFp4B12xNoDPStrategy,
             CudaFp4EpLowLatencyStrategy,
             CudaFp4EpNormalStrategy,
             CudaFp4NoDPStrategy,
         )
 
+        registry.register(CudaFp4B12xNoDPStrategy())
         registry.register(CudaFp4EpLowLatencyStrategy())
         registry.register(CudaFp4EpNormalStrategy())
         registry.register(CudaFp4NoDPStrategy())

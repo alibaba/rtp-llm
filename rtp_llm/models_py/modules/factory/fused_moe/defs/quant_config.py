@@ -3,6 +3,8 @@ from typing import Optional, Union
 
 import torch
 
+from rtp_llm.config.quant_config import NVFP4_BLOCK_SIZE
+
 # Type alias for quantization dtype
 QuantDtype = Union[None, torch.dtype, str]
 
@@ -62,7 +64,11 @@ class FusedMoEQuantConfig:
 
     @property
     def is_per_group_fp4(self) -> bool:
-        return self.quant_dtype == torch.uint8 and self.block_shape[0] == 16
+        return (
+            self.quant_dtype == torch.uint8
+            and self.block_shape is not None
+            and self.block_shape[0] == NVFP4_BLOCK_SIZE
+        )
 
     def scale_shape(
         self,

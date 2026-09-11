@@ -1,12 +1,15 @@
 import logging
-from typing import Dict, Generator, Tuple
+from typing import Dict, Generator, List, Tuple
 
 import fastsafetensors
 import torch
 from fastsafetensors import ParallelLoader
 from fastsafetensors.parallel_loader import TimingContext
 
-_REQUIRED_FST_VERSION = "0.1.19"
+from rtp_llm.model_loader.loader import (
+    _SUPPORTED_FST_VERSIONS,
+    _is_supported_fastsafetensors_version,
+)
 
 
 class PerExpertParallelLoader(ParallelLoader):
@@ -18,21 +21,28 @@ class PerExpertParallelLoader(ParallelLoader):
     size to a single expert slice (stacked_size / num_experts).
 
     Args:
-        stacked_key_config: Mapping from stacked checkpoint key to a per-expert
-            name template containing ``{expert_id}``.  Keys not in this dict
-            are handled by the normal broadcast path.
+        stacked_key_config: Mapping from stacked checkpoint key to one or more
+            per-expert name templates containing ``{expert_id}``. Keys not in
+            this dict are handled by the normal broadcast path.
     """
 
-    def __init__(self, stacked_key_config: Dict[str, str], *args, **kwargs):
+    def __init__(
+        self,
+        stacked_key_config: Dict[str, List[str]],
+        subscribed_keys=None,
+        *args,
+        **kwargs,
+    ):
         fst_ver = getattr(fastsafetensors, "__version__", "unknown")
-        if not fst_ver.startswith(_REQUIRED_FST_VERSION):
+        if not _is_supported_fastsafetensors_version(fst_ver):
             raise RuntimeError(
                 f"PerExpertParallelLoader is tested with fastsafetensors "
-                f"{_REQUIRED_FST_VERSION}*, current version: {fst_ver}. "
+                f"{_SUPPORTED_FST_VERSIONS}, current version: {fst_ver}. "
                 f"Internal API changes may cause breakage."
             )
         super().__init__(*args, **kwargs)
         self.stacked_key_config = stacked_key_config or {}
+        self.subscribed_keys = subscribed_keys
 
     def _consume_single_batch(self):
         # Mirrors ParallelLoader._consume_single_batch; only the key iteration
@@ -103,7 +113,9 @@ class PerExpertParallelLoader(ParallelLoader):
           factory.metadata.tensors, factory.tensors, factory.framework,
           factory.device, factory.free_dev_ptrs
         """
-        template = self.stacked_key_config[key]
+        templates = self.stacked_key_config[key]
+        if isinstance(templates, str):
+            templates = [templates]
         fb = batch.fb
         (rank, lidx) = fb._get_rank_lidx(key)
         factory = fb.rank_loaders[rank][lidx]
@@ -118,10 +130,11 @@ class PerExpertParallelLoader(ParallelLoader):
         if pg.size() == 1:
             src_tensor = factory.tensors[key]
             for eid in range(num_experts):
-                yield (
-                    template.format(expert_id=eid),
-                    src_tensor[eid].clone().detach().get_raw(),
-                )
+                for template in self._subscribed_templates(templates, eid):
+                    yield (
+                        template.format(expert_id=eid),
+                        src_tensor[eid].clone().detach().get_raw(),
+                    )
         else:
             for eid in range(num_experts):
                 if pg.rank() == rank:
@@ -130,10 +143,26 @@ class PerExpertParallelLoader(ParallelLoader):
                     expert_t = factory.framework.get_empty_tensor(
                         expert_shape, frame.dtype, factory.device
                     )
+                # All ranks participate, even when none of their collectors
+                # subscribe to this expert. Only the output copies are local.
                 pg.broadcast(expert_t, rank)
-                yield template.format(expert_id=eid), expert_t.get_raw()
+                for template in self._subscribed_templates(templates, eid):
+                    yield (
+                        template.format(expert_id=eid),
+                        expert_t.clone().detach().get_raw(),
+                    )
 
         if fb.auto_mem_delete:
             fb.instantiated[rank][lidx][key] = True
             if len(fb.instantiated[rank][lidx]) == len(factory.metadata.tensors):
                 factory.free_dev_ptrs()
+
+    def _subscribed_templates(self, templates: List[str], expert_id: int) -> List[str]:
+        """Filter outputs after the collective, preserving rank agreement."""
+        if self.subscribed_keys is None:
+            return templates
+        return [
+            template
+            for template in templates
+            if template.format(expert_id=expert_id) in self.subscribed_keys
+        ]

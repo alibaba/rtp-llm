@@ -36,3 +36,4 @@ class ExecutorType(Enum):
     )
     TRTLLM_FP4 = 7  # TRTLLM FP4 executor (specialized)
     CUTEDSL_FP4 = 8  # CuteDSL FP4 executor (FP4 optimized)
+    B12X_FP4 = 10  # SM120/121 flashinfer b12x CuTe DSL fused NVFP4 MoE

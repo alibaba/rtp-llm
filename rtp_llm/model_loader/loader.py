@@ -1,6 +1,7 @@
 import gc
 import logging
 import os
+import re
 from collections import OrderedDict
 from typing import Dict, List, Mapping, NamedTuple, Optional, Tuple
 
@@ -26,6 +27,16 @@ from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
+
+_SUPPORTED_FST_VERSIONS = ("0.1.19", "0.1.20")
+
+
+def _is_supported_fastsafetensors_version(version: str) -> bool:
+    """Accept the CUDA12 and CUDA13 internal-API-compatible wheel lines."""
+    return any(
+        re.fullmatch(rf"{re.escape(prefix)}(?:rc\d+)?(?:\+.*)?", version)
+        for prefix in _SUPPORTED_FST_VERSIONS
+    )
 
 
 class ModelLoader:
@@ -341,7 +352,7 @@ class ModelLoader:
 
     @staticmethod
     def _build_stacked_key_config(weight_info_list) -> dict:
-        """Build mapping: stacked ckpt key -> per-expert name template."""
+        """Build a rank-independent stacked key -> per-expert templates mapping."""
         stacked_key_config = {}
         for wi in weight_info_list:
             for moe_weight in iter_stacked_moe_weights(wi.weight):
@@ -353,8 +364,9 @@ class ModelLoader:
                         i=str(wi.layer_id),
                         expert_id="{expert_id}",
                     )
-                    if stacked_key not in stacked_key_config:
-                        stacked_key_config[stacked_key] = template
+                    templates = stacked_key_config.setdefault(stacked_key, [])
+                    if template not in templates:
+                        templates.append(template)
         return stacked_key_config
 
     def _is_online_ptpc(self) -> bool:
@@ -415,6 +427,7 @@ class ModelLoader:
             device,
             True,
             stacked_key_config=stacked_key_config,
+            subscribed_keys=set(tensor_to_weight_map),
         )
 
         _inline_count = 0

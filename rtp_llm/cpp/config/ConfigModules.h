@@ -295,6 +295,7 @@ struct MoeConfig {
     int         ll_num_max_token           = 0;
     std::string moe_strategy               = "auto";
     std::string fp4_moe_op                 = "auto";
+    double      b12x_zeroed_energy_limit   = 0.001;
     std::string to_string() const;
 };
 

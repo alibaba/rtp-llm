@@ -627,7 +627,7 @@ class MoeAtomicWeight(AtomicWeight):
         is_w1_s2 = self._process_fun_name == "stack_moe_w1_s2"
 
         if is_w1:
-            # stack_moe_w1: gate[512] + up[512] → [512, 2*intermediate, hidden]
+            # stack_moe_w1: up[512] + gate[512] -> [512, 2*intermediate, hidden]
             # For non-2D tensors (e.g. per-tensor quant scales), fall back to
             # the normal serial path which handles all shapes.
             if len(expert_shape) != 2:

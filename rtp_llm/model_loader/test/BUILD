@@ -13,6 +13,18 @@ py_test(
 )
 
 py_test(
+    name = "test_per_expert_parallel_loader",
+    srcs = ["test_per_expert_parallel_loader.py"],
+    deps = py_test_deps + ["//rtp_llm:fastsafetensors"],
+    tags = ["RTX_5000_PRO"],
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "2",
+    },
+)
+
+py_test(
     name = "test_pure_tp_preshard",
     srcs = ["test_pure_tp_preshard.py"],
     # auto_model: this test imports rtp_llm.models weight infos.
