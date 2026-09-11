@@ -716,6 +716,210 @@ class FlashMlaDensePrefillParamsTest(TestCase):
 
         self.assertFalse(params.has_reuse_cache)
 
+    @skipUnless(fp8_mla_available(), "SWA MLA requires SM100 or SM103")
+    def test_swa_prefill_window_consumer(self) -> None:
+        for window in (1, 2048, 4096):
+            with self.subTest(window=window):
+                self._check_swa_prefill_window_consumer(window)
+
+    @skipUnless(fp8_mla_available(), "SWA MLA requires SM100 or SM103")
+    def test_swa_prefill_uses_requested_layer_group(self) -> None:
+        self._check_swa_prefill_window_consumer(2048, layer_id=1)
+
+    def _check_swa_prefill_window_consumer(self, window, layer_id=0) -> None:
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.model_loader.model_weight_info import ModelWeights
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.sliding_window_mla_prefill import (
+            SlidingWindowMlaPrefillImpl,
+        )
+        from rtp_llm.ops import (
+            HybridAttentionType,
+            KvCacheDataType,
+            ParallelismConfig,
+            RoleType,
+        )
+        from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+        from rtp_llm.utils.model_weight import W
+
+        torch.manual_seed(311)
+        page = 4096
+        q_lens, prefixes = [window + 3, 5], [0, 4 * page - 2]
+        q_offsets = [0, q_lens[0], sum(q_lens)]
+        config = ModelConfig()
+        config.num_layers, config.max_seq_len = 1, 5 * page
+        config.quant_config = None
+        attn = config.attn_config
+        attn.use_mla, attn.is_sparse = True, False
+        attn.head_num, attn.kv_head_num = 96, 1
+        attn.kv_lora_rank, attn.nope_head_dim = 512, 128
+        attn.rope_head_dim, attn.v_head_dim = 64, 128
+        attn.tokens_per_block, attn.kernel_tokens_per_block = page, 128
+        attn.kv_cache_dtype, attn.sliding_window = KvCacheDataType.BASE, window
+        attn.rope_config.is_neox_style = False
+        hybrid = config.hybrid_attention_config
+        hybrid.enable_hybrid_attention = hybrid.enable_independent_kv_cache_pools = True
+        hybrid.hybrid_attention_types = [HybridAttentionType.SLIDING_WINDOW]
+        parallel = ParallelismConfig()
+        parallel.role_type = RoleType.PREFILL
+        parallel.prefill_cp_config.kv_cache_sharded = True
+        angles = torch.arange(config.max_seq_len, device="cuda")[:, None] * (
+            torch.arange(1, 33, device="cuda")[None, :] * 0.0007
+        )
+        rope = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+        for heads in (96, 12):
+            with self.subTest(heads=heads):
+                parallel.tp_size = parallel.world_size = 96 // heads
+                weights = ModelWeights(layer_id + 1, "cuda", torch.bfloat16)
+                projection = (
+                    torch.randn(512, heads * 256, device="cuda", dtype=torch.bfloat16)
+                    * 0.02
+                )
+                weights.weights[layer_id] = {W.mla_kv_b_w: projection}
+                weights.set_global_weight(W.rope_cos_sin_cache, rope)
+                table = torch.zeros(2, 8, dtype=torch.int32, device="cuda")
+                table[0, :2] = torch.tensor([3, 5], device="cuda")
+                table[1, 2:5] = torch.tensor([4, 1, 2], device="cuda")
+                tables = [torch.zeros_like(table)] * layer_id + [table]
+                inputs = PyAttentionInputs()
+                for name, value in vars(
+                    _attention_inputs(q_lens, prefixes, tables, 0)
+                ).items():
+                    setattr(inputs, name, value)
+                inputs.kv_cache_layer_to_group_host = torch.arange(layer_id + 1, dtype=torch.int32)
+                cache = LayerKVCache()
+                cache.kv_cache_base = torch.full(
+                    (6 * 32, 128, 576),
+                    float("nan"),
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                )
+                history = (
+                    torch.randn(window - 1, 576, device="cuda", dtype=torch.bfloat16)
+                    * 0.125
+                )
+                history_positions = torch.arange(
+                    prefixes[1] - window + 1, prefixes[1], device="cuda"
+                )
+                history_slots = table[1, history_positions // page].long() * page + history_positions % page
+                cache.kv_cache_base.view(-1, 576)[history_slots] = history
+                expected_cache = cache.kv_cache_base.clone().view(-1, 576)
+                compressed = (
+                    torch.randn(q_offsets[-1], 512, device="cuda", dtype=torch.bfloat16)
+                    * 0.125
+                )
+                # Preserve Eagle's fused-projection slice, not a contiguous KPE copy.
+                fused = (
+                    torch.randn(
+                        q_offsets[-1],
+                        2112 + heads * 128,
+                        device="cuda",
+                        dtype=torch.bfloat16,
+                    )
+                    * 0.125
+                )
+                k_pe = fused[:, 2048:2112]
+                query = (
+                    torch.randn(
+                        q_offsets[-1], heads, 192, device="cuda", dtype=torch.bfloat16
+                    )
+                    * 0.125
+                )
+                positions = torch.cat(
+                    [
+                        torch.arange(p, p + n, device="cuda")
+                        for p, n in zip(prefixes, q_lens)
+                    ]
+                )
+
+                def rotate(value):
+                    pair = value.float().reshape(value.shape[:-1] + (32, 2))
+                    cos, sin = rope[positions, :32], rope[positions, 32:]
+                    if value.ndim == 3:
+                        cos, sin = cos[:, None, :], sin[:, None, :]
+                    return (
+                        torch.stack(
+                            (
+                                pair[..., 0] * cos - pair[..., 1] * sin,
+                                pair[..., 0] * sin + pair[..., 1] * cos,
+                            ),
+                            -1,
+                        )
+                        .flatten(-2)
+                        .to(value.dtype)
+                    )
+
+                rotated_k = rotate(k_pe)
+                rotated_q = torch.cat((query[..., :128], rotate(query[..., 128:])), -1)
+                impl = SlidingWindowMlaPrefillImpl(
+                    config.getAttentionConfigs(parallel.get_attn_tp_size()),
+                    inputs, weights.weights, rope,
+                    quant_config=config.quant_config,
+                    max_seq_len=config.max_seq_len,
+                    parallelism_config=parallel,
+                )
+                output = impl.forward(query, compressed, k_pe, cache, layer_id)
+                torch.testing.assert_close(k_pe, rotated_k, atol=1e-3, rtol=2e-2)
+                torch.testing.assert_close(query, rotated_q, atol=1e-3, rtol=2e-2)
+                for request, (prefix, length) in enumerate(zip(prefixes, q_lens)):
+                    begin, end = q_offsets[request : request + 2]
+                    logical = positions[begin:end]
+                    slots = (
+                        table[request, logical // page].long() * page + logical % page
+                    )
+                    expected_cache[slots] = torch.cat(
+                        (compressed[begin:end], k_pe[begin:end]), -1
+                    )
+                    local_history = history if request else history[:0]
+                    kv = torch.cat(
+                        (
+                            local_history,
+                            torch.cat(
+                                (compressed[begin:end], rotated_k[begin:end]), -1
+                            ),
+                        )
+                    )
+                    projected = (kv[:, :512].float() @ projection.float()).reshape(
+                        -1, heads, 256
+                    )
+                    key = torch.cat(
+                        (
+                            projected[..., :128],
+                            kv[:, None, 512:].float().expand(-1, heads, -1),
+                        ),
+                        -1,
+                    )
+                    value = projected[..., 128:]
+                    samples = [0, window - 1, window, window + 2] if request == 0 else range(length)
+                    for token in samples:
+                        position = local_history.shape[0] + token
+                        start, stop = max(0, position - window + 1), position + 1
+                        scores = torch.einsum(
+                            "hd,khd->hk",
+                            rotated_q[begin + token].float(),
+                            key[start:stop],
+                        ) * (192**-0.5)
+                        expected = torch.einsum(
+                            "hk,khd->hd", scores.softmax(-1), value[start:stop]
+                        )
+                        torch.testing.assert_close(
+                            output[begin + token].float(),
+                            expected,
+                            atol=1e-3,
+                            rtol=2e-2,
+                        )
+                torch.testing.assert_close(
+                    cache.kv_cache_base.view(-1, 576),
+                    expected_cache,
+                    atol=0,
+                    rtol=0,
+                    equal_nan=True,
+                )
+                latent, _ = impl.fmha_impl._reuse_kv_cache_indexed_batched(
+                    compressed, k_pe, cache
+                )
+                self.assertEqual(latent.shape[0], sum(q_lens) + window - 1)
+
 
 if __name__ == "__main__":
     main()
