@@ -150,6 +150,7 @@ PyWrappedModel::~PyWrappedModel() {
         py::gil_scoped_acquire gil;
         held_attn_pyobj_   = py::object();
         py_forward_method_ = py::object();
+        py_prepare_method_ = py::object();
         // Always release py_model_ since it's always initialized now
         py_model_.release();
         if (graph_runner_ != nullptr) {
@@ -220,7 +221,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
     py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
 
-    if (inputs.combo_position_ids.defined()) {
+    const bool scalar_dspark = dspark_model_role_ != DSparkModelRole::NONE
+                               && description_.attention_conf.rope_config.style != RopeStyle::Mrope;
+    if (inputs.combo_position_ids.defined() && !scalar_dspark) {
         py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);
     }
 
@@ -816,16 +819,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
 
-        torch::Tensor combo_position_ids = torch::empty({0});
-        if (inputs.combo_position_ids.defined()) {
-            if (inputs.combo_position_ids.device().is_cuda()) {
-                combo_position_ids = inputs.combo_position_ids;
-            } else {
-                buffer_holder_.hold_host(inputs.combo_position_ids);
-                combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
-            }
-        }
-
         auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
@@ -850,7 +843,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto           py_model_inputs = PyModelInputs({token_ids,
                                                         input_hiddens,
-                                                        combo_position_ids,
+                                                        attention_inputs_.combo_position_ids,
                                                         embedding_inputs,
                                                         multimodal_inputs,
                                                         attention_inputs_,
@@ -880,7 +873,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            held_attn_pyobj_ = py_prepare_method_(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
             hidden_states    = py_model_outputs.hidden_states.clone();
@@ -891,9 +884,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
-                // Python returns normalized [B*gamma, hidden_dim]. Reuse the
-                // regular C++ lm_head and TP logits gather for every proposal
-                // row; the speculative executor owns only Markov sampling.
+                // Python returns normalized query rows. The standard lm_head
+                // indexes select gamma predictions per request, skipping a
+                // conditioning-only anchor when required by the checkpoint.
                 return callForwardPostLayers(hidden_states, inputs, true);
             }
             // Commit only updates the draft KV cache and has no logits

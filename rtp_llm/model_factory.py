@@ -107,6 +107,10 @@ class ModelFactory:
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
         )
+        if model_config.capture_aux_hidden_layer_ids and not callable(
+            getattr(model.py_model, "get_mtp_target_hidden_states", None)
+        ):
+            raise ValueError(f"{model_type} does not support DSpark target feature capture")
         return model
 
     @staticmethod
@@ -499,13 +503,7 @@ class ModelFactory:
     def _setup_dspark_configs(
         sp_config, model_config: ModelConfig, propose_model_config: ModelConfig
     ) -> None:
-        """Validate fixed-width DSpARK and wire target aux-state capture.
-
-        DeepSeek-V4 DSpARK uses a draft query block of exactly ``gamma`` rows
-        (one anchor plus ``gamma - 1`` noise tokens). The target verifies
-        ``gamma + 1`` rows. ``gen_num_per_cycle`` therefore remains the single
-        source of truth for the fixed proposal width in the engine.
-        """
+        """Wire target features and checkpoint-specific DSpark query geometry."""
         required = {
             "dspark_noise_token_id": propose_model_config.dspark_noise_token_id,
             "dspark_target_layer_ids": propose_model_config.dspark_target_layer_ids,
@@ -525,10 +523,14 @@ class ModelFactory:
             )
 
         noise_token_id = int(propose_model_config.dspark_noise_token_id)
-        if noise_token_id < 0 or noise_token_id >= propose_model_config.vocab_size:
+        input_vocab_size = (
+            getattr(propose_model_config, "input_vocab_size", 0)
+            or propose_model_config.vocab_size
+        )
+        if noise_token_id < 0 or noise_token_id >= input_vocab_size:
             raise ValueError(
                 f"invalid dspark_noise_token_id {noise_token_id} for vocab_size "
-                f"{propose_model_config.vocab_size}"
+                f"{input_vocab_size}"
             )
 
         target_layer_ids = [
@@ -536,6 +538,8 @@ class ModelFactory:
         ]
         if not target_layer_ids:
             raise ValueError("dspark_target_layer_ids must not be empty")
+        if target_layer_ids != sorted(set(target_layer_ids)):
+            raise ValueError("dspark_target_layer_ids must be sorted and unique")
         invalid_layer_ids = [
             layer_id
             for layer_id in target_layer_ids
@@ -552,6 +556,9 @@ class ModelFactory:
             raise ValueError(f"invalid dspark_markov_rank: {markov_rank}")
 
         sp_config.sp_dspark_mask_token_id = noise_token_id
+        sp_config.sp_dspark_sample_from_anchor = getattr(
+            propose_model_config, "dspark_sample_from_anchor", True
+        )
         # Both models carry the capture ids: the target uses them to capture
         # and to size the shared MTP hidden buffer rows; the draft only needs
         # them for the same row-width derivation (it never captures).
