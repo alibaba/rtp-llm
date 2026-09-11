@@ -1526,6 +1526,24 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual capture requires a residual tensor")
+        return hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual finalization requires a residual tensor")
+        return self.norm(hidden_states, residual)[0]
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
@@ -1643,6 +1661,7 @@ class Qwen3NextModel(GptModelBase):
         ):
             fmha_impl.bind_graph_inputs(inputs)
         hidden_states = self.word_embedding(inputs)
+        capture = self.capture_context(inputs.capture_hidden_states)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
@@ -1768,9 +1787,9 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            capture.capture_layer(i, hidden_states, residual)
 
-        hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        return capture.finalize(hidden_states, residual)
 
 
 class Qwen35Model(Qwen3NextModel):

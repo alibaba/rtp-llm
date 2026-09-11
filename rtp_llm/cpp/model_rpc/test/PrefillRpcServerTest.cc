@@ -3,11 +3,12 @@
 #include <functional>
 #include <limits>
 #include <memory>
-#include <optional>
+#include <stdexcept>
 #include <vector>
 
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
@@ -16,8 +17,8 @@ namespace rtp_llm {
 class TestDecodeRpcService final: public RpcService::Service {
 public:
     explicit TestDecodeRpcService(bool fail_first_allocate):
-        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(
-                                    grpc::Status(grpc::StatusCode::INTERNAL, "allocate failed once")) :
+        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(grpc::Status(
+                                                          grpc::StatusCode::INTERNAL, "allocate failed once")) :
                                                       std::nullopt) {}
 
     explicit TestDecodeRpcService(grpc::Status first_allocate_failure):
@@ -214,8 +215,7 @@ protected:
         ModelConfig model_config;
         model_config.max_seq_len = 2048;
         model_config.vocab_size  = 1024;
-        return std::make_shared<NormalGenerateStream>(
-            input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
     }
 
     std::unique_ptr<PrefillGenerateContext> makeContext(GenerateInputPB* request, int64_t timeout_ms = 0) {
@@ -243,6 +243,158 @@ TEST_F(PrefillRpcServerTest, waitStreamBeforeRunUsesEachServerTimeout) {
     auto second_error = second_server.waitStreamBeforeRunForTest(makeWaitingStream());
     EXPECT_EQ(second_error.code(), ErrorCode::WAIT_TO_RUN_TIMEOUT);
     EXPECT_NE(second_error.ToString().find("7000 us"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, GenerateStreamCallRejectsNullRequestBeforeDereference) {
+    TestPrefillRpcServer server;
+    grpc::ServerContext  context;
+
+    const auto status = server.GenerateStreamCall(&context, nullptr, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(error_details.error_message().find("prefill generate request must not be null"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, explicitPrefillOnlyRejectsPositiveMaxNewTokensBeforeRouting) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(0);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(2);
+    config->set_prefill_only(true);
+    config->set_can_use_pd_separation(true);
+
+    TestPrefillRpcServer server;
+    server.setEngineForTest(/*is_mtp_eagle=*/false);
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &request, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(error_details.error_message().find("prefill_only"), std::string::npos);
+    EXPECT_NE(error_details.error_message().find("max_new_tokens"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, explicitPrefillOnlyRejectsReturnPromptLogitsBeforeRouting) {
+    GenerateInputPB request;
+    request.set_request_id(2);
+    request.add_token_ids(0);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(0);
+    config->set_prefill_only(true);
+    config->set_return_prompt_logits(true);
+    config->set_can_use_pd_separation(true);
+
+    TestPrefillRpcServer server;
+    grpc::ServerContext  context;
+    const auto           status = server.GenerateStreamCall(&context, &request, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(error_details.error_message().find("prefill_only"), std::string::npos);
+    EXPECT_NE(error_details.error_message().find("return_prompt_logits"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, rawGrpcPromptScoringWithPositiveMaxNewTokensRoutesLocally) {
+    GenerateInputPB request;
+    request.set_request_id(3);
+    request.add_token_ids(0);
+    request.add_multimodal_inputs()->set_multimodal_url("image");
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(8);
+    config->set_return_prompt_logits(true);
+    config->set_is_streaming(true);
+    config->set_reuse_cache(true);
+    config->set_can_use_pd_separation(true);
+    ASSERT_FALSE(config->prefill_only());
+    ASSERT_EQ(QueryConverter::resolveMaxNewTokens(*config), 1);
+
+    TestPrefillRpcServer server;
+    server.mm_processor_          = std::make_shared<TestMultimodalProcessor>(ErrorCode::MM_WRONG_FORMAT_ERROR);
+    auto                processor = std::static_pointer_cast<TestMultimodalProcessor>(server.mm_processor_);
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &request, nullptr);
+
+    EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR));
+    EXPECT_NE(error_details.error_message().find("multimodal test error"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, bareWireZeroRoutesToLocalLegacyPrefill) {
+    GenerateInputPB request;
+    request.set_request_id(101);
+    request.add_token_ids(0);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(0);
+    config->set_prefill_only(false);
+    config->set_can_use_pd_separation(true);
+    ASSERT_EQ(QueryConverter::resolveMaxNewTokens(*config), 0);
+
+    std::string serialized_request;
+    ASSERT_TRUE(request.SerializeToString(&serialized_request));
+    GenerateInputPB wire_request;
+    ASSERT_TRUE(wire_request.ParseFromString(serialized_request));
+    ASSERT_EQ(wire_request.generate_config().max_new_tokens(), 0);
+    ASSERT_FALSE(wire_request.generate_config().prefill_only());
+    ASSERT_TRUE(wire_request.generate_config().can_use_pd_separation());
+
+    wire_request.add_multimodal_inputs()->set_multimodal_url("image");
+    TestPrefillRpcServer server;
+    server.mm_processor_          = std::make_shared<TestMultimodalProcessor>(ErrorCode::MM_WRONG_FORMAT_ERROR);
+    auto                processor = std::static_pointer_cast<TestMultimodalProcessor>(server.mm_processor_);
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &wire_request, nullptr);
+
+    EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR));
+    EXPECT_NE(error_details.error_message().find("multimodal test error"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, flaggedWireZeroRoutesToLocalPrefillOnly) {
+    GenerateInputPB request;
+    request.set_request_id(102);
+    request.add_token_ids(0);
+    request.add_token_ids(1);
+    request.add_token_ids(2);
+    request.add_multimodal_inputs()->set_multimodal_url("image");
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(0);
+    config->set_prefill_only(true);
+    config->set_can_use_pd_separation(true);
+
+    std::string serialized_request;
+    ASSERT_TRUE(request.SerializeToString(&serialized_request));
+    GenerateInputPB wire_request;
+    ASSERT_TRUE(wire_request.ParseFromString(serialized_request));
+    ASSERT_EQ(wire_request.generate_config().max_new_tokens(), 0);
+    ASSERT_TRUE(wire_request.generate_config().prefill_only());
+    ASSERT_TRUE(wire_request.generate_config().can_use_pd_separation());
+
+    TestPrefillRpcServer server;
+    server.mm_processor_          = std::make_shared<TestMultimodalProcessor>(ErrorCode::MM_WRONG_FORMAT_ERROR);
+    auto                processor = std::static_pointer_cast<TestMultimodalProcessor>(server.mm_processor_);
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &wire_request, nullptr);
+
+    EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR));
+    EXPECT_NE(error_details.error_message().find("multimodal test error"), std::string::npos);
 }
 
 TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatingMultimodalProcessing) {
@@ -545,8 +697,7 @@ TEST_F(PrefillRpcServerTest, retrySleepSaturatesOverflowingInterval) {
     request.set_request_id(12);
     auto context = makeContext(&request);
 
-    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()),
-              std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()), std::numeric_limits<int64_t>::max());
 }
 
 TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {

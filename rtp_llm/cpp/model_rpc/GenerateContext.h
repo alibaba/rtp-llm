@@ -25,8 +25,10 @@ public:
                     int64_t                               request_timeout_ms,
                     grpc::ServerContext*                  server_context,
                     kmonitor::MetricsReporterPtr&         metrics_reporter,
-                    std::shared_ptr<RpcServerRuntimeMeta> meta):
+                    std::shared_ptr<RpcServerRuntimeMeta> meta,
+                    bool                                  request_id_present = true):
         request_id(request_id),
+        request_id_present(request_id_present),
         request_key(std::to_string(request_id)),
         server_context(server_context),
         metrics_reporter(metrics_reporter),
@@ -50,6 +52,7 @@ public:
     bool                                     cancelled() const;
     virtual bool                             isRequestCancelled() const;
     bool                                     requestDeadlineExceeded() const;
+    ErrorInfo                                finalErrorInfo() const;
     int64_t                                  executeTimeMs();
     void                                     reportTime();
     void                                     collectBasicMetrics(RpcMetricsCollector& collector);
@@ -59,6 +62,7 @@ public:
 
 public:
     int64_t                               request_id;
+    bool                                  request_id_present;
     std::string                           request_key;
     int64_t                               retry_times           = 0;
     int64_t                               retry_cost_time_ms    = 0;
