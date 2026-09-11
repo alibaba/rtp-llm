@@ -179,6 +179,86 @@ TEST(CacheConfigCreatorTest, IndependentHybridEagleUsesDedicatedThirdPool) {
     EXPECT_EQ(config.mtp_sub_configs[0]->global_layer_ids[0], std::vector<int>({4}));
 }
 
+TEST(CacheConfigCreatorTest, MlaSwaQuotaTracksReplicatedCheckpointPages) {
+    createDevice();
+    auto target = makeTinyModelConfig(4);
+    auto draft = makeTinyModelConfig(1);
+    target.hybrid_attention_config.enable_hybrid_attention = true;
+    target.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    target.hybrid_attention_config.hybrid_attention_types = {
+        HybridAttentionType::NONE, HybridAttentionType::LINEAR,
+        HybridAttentionType::NONE, HybridAttentionType::LINEAR};
+    target.linear_attention_config.linear_conv_kernel_dim = 2;
+    target.linear_attention_config.linear_key_head_dim = 8;
+    target.linear_attention_config.linear_value_head_dim = 8;
+    target.linear_attention_config.linear_num_key_heads = 8;
+    target.linear_attention_config.linear_num_value_heads = 8;
+    draft.hybrid_attention_config.enable_hybrid_attention = true;
+    draft.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::SLIDING_WINDOW};
+    for (auto* model : {&target, &draft}) {
+        model->attn_config.use_mla = true;
+        model->attn_config.kv_lora_rank = 512;
+        model->attn_config.rope_head_dim = 64;
+        model->attn_config.head_num = 96;
+        model->attn_config.kv_head_num = 1;
+        model->attn_config.tokens_per_block = 16;
+    }
+    draft.attn_config.sliding_window = 16;
+    for (int cp : {1, 8}) {
+        for (int step : {1, 4}) {
+            for (bool decode : {false, true}) {
+                for (bool reuse : {false, true}) {
+                    ParallelismConfig parallel;
+                    parallel.tp_size = cp;
+                    parallel.role_type = decode ? RoleType::DECODE : RoleType::PREFILL;
+                    parallel.decode_cp_kv_cache_sharded = decode && cp > 1;
+                    parallel.prefill_cp_config.kv_cache_sharded = !decode && cp > 1;
+                    KVCacheConfig cache;
+                    cache.test_block_num = 9;
+                    cache.linear_step = step;
+                    cache.reuse_cache = reuse;
+                    SpeculativeExecutionConfig sp;
+                    sp.type = SP_TYPE_EAGLE3;
+                    sp.gen_num_per_cycle = 7;
+                    auto cfg = CacheConfigCreator::createSpConfig(
+                        target, draft, parallel, RuntimeConfig{}, cache, sp, std::nullopt, true, true);
+                    ASSERT_EQ(cfg.groupNums(), 3);
+                    EXPECT_EQ(cfg.linear_step, step);
+                    EXPECT_EQ(cfg.mtp_sub_configs[0]->linear_step, step);
+                    const size_t pages = 8 * cp;
+                    size_t retained = 0;
+                    for (size_t page = 0; page < pages; ++page) {
+                        if (pages - page <= 2 || (page + 1) % step == 0) {
+                            ++retained;
+                        }
+                    }
+                    const size_t expected = reuse ? std::max<size_t>(9, 1 + retained) : 9;
+                    EXPECT_EQ(cfg.groupBlockNumForGlobal(2, 0), 0u);
+                    EXPECT_EQ(cfg.groupBlockNumForGlobal(2, 1), 1u);
+                    EXPECT_EQ(cfg.group_block_nums[2], expected);
+                    EXPECT_EQ(cfg.mtp_sub_configs[0]->group_block_nums[0], expected);
+                    EXPECT_EQ(cfg.group_block_nums[0], 9u);
+                    cache.test_block_num = 0;
+                    cache.kv_cache_mem_mb = 1;
+                    auto budgeted = CacheConfigCreator::createSpConfig(
+                        target, draft, parallel, RuntimeConfig{}, cache, sp, std::nullopt, true, true);
+                    size_t actual_bytes = 0;
+                    size_t next_bytes = 0;
+                    for (size_t gid = 0; gid < budgeted.group_block_nums.size(); ++gid) {
+                        actual_bytes += budgeted.group_block_nums[gid] * budgeted.group_block_size_bytes[gid];
+                        next_bytes += budgeted.groupBlockNumForGlobal(gid, budgeted.block_num + 1)
+                                      * budgeted.group_block_size_bytes[gid];
+                    }
+                    EXPECT_LE(actual_bytes, size_t{1024 * 1024});
+                    EXPECT_GT(next_bytes, size_t{1024 * 1024});
+                    EXPECT_EQ(budgeted.group_block_nums[2], budgeted.mtp_sub_configs[0]->group_block_nums[0]);
+                }
+            }
+        }
+    }
+}
+
 TEST(CacheConfigCreatorTest, KimiMtpFullAttentionUsesDedicatedThirdPool) {
     auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/4);
     auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);

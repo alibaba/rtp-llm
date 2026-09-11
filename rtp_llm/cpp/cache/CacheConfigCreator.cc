@@ -161,7 +161,13 @@ void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size
                             kernel_seq_size_per_block);
 }
 
-void configureLocalCpCacheGeometry(CacheConfig& config, const ParallelismConfig& parallelism_config) {
+void configureLocalCpCacheGeometry(CacheConfig& config,
+                                   const ParallelismConfig& parallelism_config,
+                                   const KVCacheConfig& kv_cache_config) {
+    // Both speculative sub-configs participate in budgeting before merging.
+    config.linear_step = std::max(1, kv_cache_config.linear_step);
+    config.reuse_cache = kv_cache_config.reuse_cache;
+
     const bool sharded = parallelism_config.role_type == RoleType::DECODE ?
                              parallelism_config.decode_cp_kv_cache_sharded :
                              parallelism_config.prefill_cp_config.kv_cache_sharded;
@@ -200,7 +206,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
         config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp);
     }
 
-    configureLocalCpCacheGeometry(config, parallelism_config);
+    configureLocalCpCacheGeometry(config, parallelism_config, kv_cache_config);
     return config;
 }
 

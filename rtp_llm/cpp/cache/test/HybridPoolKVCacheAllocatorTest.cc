@@ -496,6 +496,116 @@ TEST_F(HybridPoolKVCacheAllocatorTest, K3CheckpointGeometrySurvivesReuseGrowthAn
     }
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, MlaSwaReuseMatchesPhysicalCheckpointKey) {
+    ModelConfig model;
+    model.model_type = "kimi_k3";
+    model.num_layers = 3;
+    model.attn_config.use_mla = true;
+    model.mla_ops_type = MlaOpsType::AUTO;
+    model.attn_config.kv_lora_rank = 16;
+    model.attn_config.rope_head_dim = 8;
+    model.attn_config.tokens_per_block = 4;
+    model.attn_config.sliding_window = 3;
+    model.hybrid_attention_config.enable_hybrid_attention = true;
+    model.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    model.hybrid_attention_config.hybrid_attention_types = {
+        HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::SLIDING_WINDOW};
+    model.linear_attention_config.linear_num_key_heads = 8;
+    model.linear_attention_config.linear_num_value_heads = 8;
+    model.linear_attention_config.linear_key_head_dim = 4;
+    model.linear_attention_config.linear_value_head_dim = 4;
+    model.linear_attention_config.linear_conv_kernel_dim = 4;
+    ParallelismConfig parallel;
+    parallel.role_type = RoleType::PREFILL;
+    parallel.tp_size = 8;
+    parallel.prefill_cp_config.kv_cache_sharded = true;
+    KVCacheConfig cache;
+    cache.test_block_num = 32;
+    cache.linear_step = 3;
+    cache.reuse_cache = true;
+    auto config = CacheConfigCreator::createConfig(model, parallel, RuntimeConfig{}, cache);
+    const int swa_gid = config.layer_to_group_id[2];
+    auto allocator = makeAllocator(config);
+    auto mapper = std::make_shared<CPSlotMapper>(0, 8, 4);
+    allocator->setCPSlotMapper(mapper);
+    ASSERT_TRUE(allocator->init());
+    auto resource = makeBatchResource(1, config);
+    auto tokens = makeCompleteTokenIds(1, 385, 4);
+    CacheKeysType keys;
+    for (int page = 0; page < 96; ++page) {
+        keys.push_back(2000 + page);
+    }
+    resource->setBatchCacheKeys(0, keys);
+    MallocInfo info{resource, tokens};
+    info.cp_slot_mapper = mapper;
+    info.reuse_cache = true;
+    info.enable_device_cache = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    const auto original_swa = resource->blocks(0, swa_gid);
+    ASSERT_EQ(original_swa.size(), 97u);
+    EXPECT_EQ(validBlockCount(original_swa), 33u);
+    InsertInfo insert{resource, tokens, false};
+    insert.cp_slot_mapper = mapper;
+    allocator->insertIntoCache(insert);
+    allocator->free({resource, tokens});
+
+    auto shared = allocator->sharedBlockCache();
+    for (size_t page = 0; page < keys.size(); ++page) {
+        // The original S=3 policy retains one physical P page per checkpoint.
+        const bool retained = page % 3 == 2;
+        EXPECT_EQ(isNullBlockIdx(shared->matchGroup(keys[page], swa_gid)), !retained) << page;
+    }
+    EXPECT_EQ(allocator->groupBlockPools()[swa_gid]->requestRefBlocksNum(), 0u);
+    resource->setBatchCacheKeys(0, keys);
+    info.enable_device_cache = true;
+    auto hit = allocator->malloc(info);
+    ASSERT_TRUE(hit.success);
+    EXPECT_EQ(hit.reuse_len, 384);
+    EXPECT_EQ(validBlockCount(resource->blocks(0, swa_gid)), 2u);
+    EXPECT_EQ(resource->blocks(0, swa_gid)[95], original_swa[95]);
+    allocator->free({resource, tokens});
+
+    // Removing the latest joint checkpoint must fall back to the previous
+    // boundary shared by FULL, LINEAR and the physical SWA P table.
+    auto removed = shared->remove(keys[95]);
+    ASSERT_TRUE(removed.has_value());
+    for (size_t gid = 0; gid < removed->slots.size(); ++gid) {
+        if (!isNullBlockIdx(removed->slots[gid])) {
+            allocator->groupBlockPools()[gid]->blockCacheFree(removed->slots[gid]);
+        }
+    }
+    resource->setBatchCacheKeys(0, keys);
+    auto partial = allocator->malloc(info);
+    ASSERT_TRUE(partial.success);
+    EXPECT_EQ(partial.reuse_len, 288);
+    EXPECT_EQ(resource->blocks(0, swa_gid)[71], original_swa[71]);
+    EXPECT_EQ(validBlockCount(resource->blocks(0, swa_gid)), 10u);
+
+    // Exhaust only SWA. FULL/LINEAR can grow first; failure must restore
+    // all three tables and request references atomically.
+    auto swa_pool = allocator->groupBlockPools()[swa_gid];
+    shared->evictAndFreeForGroup(swa_gid, swa_pool->totalBlocksNum());
+    auto guard = swa_pool->malloc(swa_pool->freeBlocksNum() - 1);
+    std::vector<BlockIndicesType> before_tables;
+    for (int gid = 0; gid < config.groupNums(); ++gid) {
+        before_tables.push_back(resource->blocks(0, gid));
+    }
+    const auto before = snapshotPoolCounters(allocator);
+    info.incr_seq_len_override = tokens->seqLength() + 32;
+    EXPECT_FALSE(allocator->malloc(info).success);
+    for (int gid = 0; gid < config.groupNums(); ++gid) {
+        EXPECT_EQ(resource->blocks(0, gid), before_tables[gid]);
+    }
+    expectPoolCountersEq(allocator, before);
+    swa_pool->requestFree(guard);
+    allocator->free({resource, tokens});
+    for (const auto& pool : allocator->groupBlockPools()) {
+        EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
+        EXPECT_EQ(pool->connectorRefBlocksNum(), 0u);
+        EXPECT_EQ(pool->availableBlocksNum(), pool->totalBlocksNum());
+    }
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) {
     auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/6, /*swa_block_num=*/8);
     auto allocator = makeAllocator(config);

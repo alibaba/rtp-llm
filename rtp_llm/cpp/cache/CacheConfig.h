@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -98,6 +99,7 @@ struct CacheConfig {
     size_t fixed_pool_reserve_bytes = 0;
 
     // Attention-specific configuration
+    bool reuse_cache = false;
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
     int linear_fixed_cap =
         0;  // >0 = ring buffer of this many blocks per LINEAR group (per request); 0 = legacy unbounded
@@ -138,6 +140,24 @@ struct CacheConfig {
         }
         if (use_explicit_fixed_blocks) {
             return dsv4_fixed_pool_blocks;
+        }
+        if (use_independent_block_pools && !use_typed_cache_regions && is_swa
+            && cache_specs[group_id]->type == KVCacheSpecType::MultiHeadLatentAttention) {
+            if (global_block_num == 0) {
+                return 0;
+            }
+            // N names local FULL blocks. SWA stores P pages on every rank,
+            // whereas one FULL block covers C*P logical tokens under CP.
+            const size_t pages = static_cast<size_t>(global_block_num - 1) * std::max(1, cp_size);
+            size_t blocks = global_block_num;
+            if (reuse_cache) {
+                const size_t tail = std::min(pages, size_t{2});
+                const size_t retained = tail + (pages - tail) / step;
+                blocks = std::max<size_t>(global_block_num, 1 + retained);
+            }
+            RTP_LLM_CHECK_WITH_INFO(blocks <= std::numeric_limits<uint32_t>::max(),
+                                    "SWA pool needs %zu blocks, exceeding the block ID range", blocks);
+            return static_cast<uint32_t>(blocks);
         }
         if ((is_swa || is_dsv4_fixed_region) && step > 1 && global_block_num > 0) {
             return std::max(1u, global_block_num / static_cast<uint32_t>(step));
@@ -231,6 +251,7 @@ struct CacheConfig {
         // Attention-specific configuration section
         os << indent1 << "# Attention Configuration:\n";
         OUTPUT_FIELD(linear_step);
+        OUTPUT_FIELD(reuse_cache);
         OUTPUT_FIELD(linear_fixed_cap);
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);
