@@ -45,11 +45,12 @@ void validateK3CacheSpecs(const CacheConfig& config) {
             || spec->seq_size_per_block != config.group_seq_size_per_block[gid]) {
             throw std::invalid_argument("Kimi K3 physical spec/group span mismatch");
         }
-        const auto kind     = config.group_types[gid];
-        const bool matching = (kind == CacheGroupType::FULL && spec->type == KVCacheSpecType::MultiHeadLatentAttention
-                               && dynamic_cast<const MLAKVCacheSpec*>(spec))
-                              || (kind == CacheGroupType::LINEAR && spec->type == KVCacheSpecType::LinearAttention
-                                  && dynamic_cast<const LinearKVCacheSpec*>(spec));
+        const auto kind = config.group_types[gid];
+        const bool matching =
+            ((kind == CacheGroupType::FULL || kind == CacheGroupType::SWA)
+             && spec->type == KVCacheSpecType::MultiHeadLatentAttention && dynamic_cast<const MLAKVCacheSpec*>(spec))
+            || (kind == CacheGroupType::LINEAR && spec->type == KVCacheSpecType::LinearAttention
+                && dynamic_cast<const LinearKVCacheSpec*>(spec));
         if (!matching) {
             throw std::invalid_argument("Kimi K3 physical spec/group kind mismatch");
         }
@@ -682,7 +683,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
         auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
-            info.version = shared_cache->version();
+            info.version      = shared_cache->version();
         }
         // memory cache keys
         const auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();

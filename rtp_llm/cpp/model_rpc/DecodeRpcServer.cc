@@ -145,49 +145,69 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
         const int     prefill_attention_tp = allocate_request.prefill_attention_tp_size();
         const int     decode_attention_tp  = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
         const int     decode_ktp           = static_cast<int>(maga_init_params_.parallelism_config.get_ktp_size());
-        const bool    projection_ktp       = decode_ktp > 1 && decode_attention_tp == 1
-                                             && (prefill_attention_tp == 8 || prefill_attention_tp == 16);
+        const int     source_shards        = decode_context.prefill_cp_size;
+        const int     peer_count           = static_cast<int>(decode_context.peer_addrs.size());
+        const int     configured_upstream_shards =
+            static_cast<int>(maga_init_params_.parallelism_config.upstream_kv_page_rr_shard_count());
+        GRPC_RET_IF_ERROR(decode_context,
+                          source_shards == configured_upstream_shards,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "K3 PD source shard count disagrees with Decode upstream configuration");
+        const bool    page_rr_to_replicated_decode = isK3PageRRToReplicatedDecode(
+            prefill_attention_tp, decode_attention_tp, source_shards, peer_count, configured_upstream_shards);
+        const bool projection_ktp = source_shards == 1 && decode_ktp > 1 && decode_attention_tp == 1
+                                    && (prefill_attention_tp == 8 || prefill_attention_tp == 16);
         const bool    equal_attention_tp   = decode_attention_tp == prefill_attention_tp;
         const int64_t prefill_block        = allocate_request.prefill_seq_size_per_block();
         const int64_t prefill_kernel_block = allocate_request.prefill_kernel_seq_size_per_block();
-        RTP_LLM_CHECK_WITH_INFO(prefill_block > 0 && prefill_kernel_block > 0
-                                    && static_cast<size_t>(prefill_block) == cache_config.seq_size_per_block
-                                    && cache_config.kernel_seq_size_per_block > 0
-                                    && prefill_block % prefill_kernel_block == 0
-                                    && cache_config.seq_size_per_block % cache_config.kernel_seq_size_per_block == 0,
-                                "K3 PD requires equal physical blocks and kernel pages that divide each local block");
-        RTP_LLM_CHECK_WITH_INFO(prefill_attention_tp > 0
-                                    && decode_context.peer_addrs.size() == static_cast<size_t>(prefill_attention_tp),
-                                "K3 PD requires one ordered Prefill peer per Prefill attention TP rank");
-        RTP_LLM_CHECK_WITH_INFO(equal_attention_tp || projection_ktp,
-                                "K3 PD supports equal attention TP or P8/P16 projection-KTP Decode; got P%d->D%d/KTP%d",
-                                prefill_attention_tp,
-                                decode_attention_tp,
-                                decode_ktp);
+        GRPC_RET_IF_ERROR(decode_context,
+                          prefill_block > 0 && prefill_kernel_block > 0
+                              && static_cast<size_t>(prefill_block) == cache_config.seq_size_per_block
+                              && cache_config.kernel_seq_size_per_block > 0
+                              && prefill_block % prefill_kernel_block == 0
+                              && cache_config.seq_size_per_block % cache_config.kernel_seq_size_per_block == 0,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "K3 PD requires equal physical blocks and kernel pages that divide each local block");
+        GRPC_RET_IF_ERROR(decode_context,
+                          prefill_attention_tp > 0 && peer_count == prefill_attention_tp,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "K3 PD requires one ordered Prefill peer per Prefill attention TP rank");
+        GRPC_RET_IF_ERROR(decode_context,
+                          equal_attention_tp || projection_ktp || page_rr_to_replicated_decode,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "K3 PD supports equal attention TP, P8/P16 projection-KTP Decode, or Page-RR to Decode owner");
+        if (page_rr_to_replicated_decode) {
+            GRPC_RET_IF_ERROR(decode_context,
+                              source_shards == 2 || source_shards == 4 || source_shards == 8 || source_shards == 16,
+                              grpc::StatusCode::INVALID_ARGUMENT,
+                              "K3 Page-RR PD source shard count must be one of 2, 4, 8, or 16");
+        }
         RTP_LLM_CHECK_WITH_INFO(resource_.workers.size() == resource_.grpc_workers.size(),
                                 "K3 PD worker and gRPC worker counts must match");
-        RTP_LLM_CHECK_WITH_INFO(linear_config.linear_num_key_heads > 0 && linear_config.linear_num_value_heads > 0
-                                    && linear_config.linear_num_key_heads % prefill_attention_tp == 0
-                                    && linear_config.linear_num_value_heads % prefill_attention_tp == 0,
-                                "K3 PD model KDA heads must be positive and divisible by Prefill attention TP");
-        RTP_LLM_CHECK_WITH_INFO(allocate_request.prefill_cache_dtype() == static_cast<int32_t>(cache_config.dtype),
-                                "K3 PD cache dtype mismatch: prefill=%d decode=%d",
-                                allocate_request.prefill_cache_dtype(),
-                                static_cast<int32_t>(cache_config.dtype));
+        GRPC_RET_IF_ERROR(decode_context,
+                          linear_config.linear_num_key_heads > 0 && linear_config.linear_num_value_heads > 0
+                              && linear_config.linear_num_key_heads % prefill_attention_tp == 0
+                              && linear_config.linear_num_value_heads % prefill_attention_tp == 0,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "K3 PD model KDA heads must be positive and divisible by Prefill attention TP");
+        GRPC_RET_IF_ERROR(decode_context,
+                          allocate_request.prefill_cache_dtype() == static_cast<int32_t>(cache_config.dtype),
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "K3 PD cache dtype mismatch");
         for (const auto& spec : cache_config.cache_specs) {
             const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(spec.get());
             if (linear_spec == nullptr) {
                 continue;
             }
-            RTP_LLM_CHECK_WITH_INFO(allocate_request.prefill_ssm_state_dtype()
-                                            == static_cast<int32_t>(linear_spec->ssm_state_dtype)
-                                        && allocate_request.prefill_conv_state_dtype()
-                                               == static_cast<int32_t>(linear_spec->conv_state_dtype),
-                                    "K3 PD state dtype mismatch");
-            const uint32_t expected_local_k_heads = projection_ktp ? linear_config.linear_num_key_heads :
-                                                                    linear_config.linear_num_key_heads / decode_attention_tp;
-            const uint32_t expected_local_v_heads = projection_ktp ? linear_config.linear_num_value_heads :
-                                                                    linear_config.linear_num_value_heads / decode_attention_tp;
+            GRPC_RET_IF_ERROR(decode_context,
+                              allocate_request.prefill_ssm_state_dtype()
+                                      == static_cast<int32_t>(linear_spec->ssm_state_dtype)
+                                  && allocate_request.prefill_conv_state_dtype()
+                                         == static_cast<int32_t>(linear_spec->conv_state_dtype),
+                              grpc::StatusCode::INVALID_ARGUMENT,
+                              "K3 PD state dtype mismatch");
+            const uint32_t expected_local_k_heads = linear_config.linear_num_key_heads / decode_attention_tp;
+            const uint32_t expected_local_v_heads = linear_config.linear_num_value_heads / decode_attention_tp;
             RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == expected_local_k_heads
                                         && linear_spec->local_num_v_heads == expected_local_v_heads,
                                     "K3 PD local KDA heads disagree with P%d->D%d/KTP%d mapping: expected k=%u v=%u, got k=%u v=%u",
@@ -205,11 +225,10 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
         const auto configured_prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
         RTP_LLM_CHECK_WITH_INFO(configured_prefill_cp_size > 1,
                                 "decode PREFILL_CP sharded mode requires explicit PREFILL_CP_SIZE");
-        RTP_LLM_CHECK_WITH_INFO(decode_context.prefill_cp_size == configured_prefill_cp_size,
-                                "request [%s] prefill_cp_size=%d does not match decode configured PREFILL_CP_SIZE=%ld",
-                                decode_context.request_key.c_str(),
-                                decode_context.prefill_cp_size,
-                                configured_prefill_cp_size);
+        GRPC_RET_IF_ERROR(decode_context,
+                          decode_context.prefill_cp_size == configured_prefill_cp_size,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "request prefill_cp_size does not match Decode configured PREFILL_CP_SIZE");
     }
     RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d, "
                       "prefill_seq_size_per_block=%d, prefill_kernel_seq_size_per_block=%d, "
@@ -421,7 +440,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
                             decode_ktp,
                             peer_addrs.size());
     if (load_context.prefill_cp_size > 1) {
-        // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
+        // Page-RR KV-sharded Prefill: each peer holds one RR shard, so pull from all peers.
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
@@ -488,7 +507,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
                             decode_ktp,
                             peer_addrs.size());
     if (load_context.prefill_cp_size > 1) {
-        // CP-sharded prefill: pull from all peers (each holds 1/N RR shard)
+        // Page-RR KV-sharded Prefill: pull from all peers because each holds one RR shard.
         request.set_partition_count(1);
         request.set_partition_id(0);
         for (const auto& addr : peer_addrs) {
@@ -894,10 +913,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_rank());
     const int decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
     const int decode_ktp          = static_cast<int>(maga_init_params_.parallelism_config.get_ktp_size());
+    const int decode_dp_rank      = static_cast<int>(maga_init_params_.parallelism_config.dp_rank);
     const bool projection_ktp = k3_hybrid_cache && decode_ktp > 1 && decode_attention_tp == 1 && !is_page_level_rr
                                 && peer_cnt > 1;
+    const bool page_rr_to_replicated_decode = k3_hybrid_cache && is_page_level_rr && decode_attention_tp == 1;
+    auto logPageRRFanInFailure = [&](const ErrorInfo& error) {
+        if (page_rr_to_replicated_decode) {
+            RTP_LLM_LOG_WARNING(
+                "[K3_PD_PAGE_RR_FAN_IN_FAILED] request_id=%ld source_shards=%d decode_dp_rank=%d error=%s",
+                load_context.request_id,
+                source_shards,
+                decode_dp_rank,
+                error.ToString().c_str());
+        }
+    };
     const int mla_source_peer =
-        projection_ktp ? static_cast<int>(maga_init_params_.parallelism_config.dp_rank % peer_cnt) : 0;
+        projection_ktp ? decode_dp_rank % peer_cnt : 0;
     const int k3_rank_affine_local_peer_index =
         projection_ktp ? mla_source_peer : (is_page_level_rr ? decode_tp_rank : 0);
     if (k3_hybrid_cache) {
@@ -911,10 +942,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         const bool valid_rank_affine_load  = decode_tp_rank >= 0 && decode_tp_rank < decode_attention_tp
                                             && (source_shards == 1 || source_shards == decode_attention_tp)
                                             && peer_cnt == source_shards;
-        RTP_LLM_CHECK_WITH_INFO(valid_projection_fan_in || valid_rank_affine_load,
-                                "K3 load requires rank-affine page-RR/equal-TP peers or Projection-KTP fan-in");
+        const bool supported_page_rr_shards =
+            source_shards == 2 || source_shards == 4 || source_shards == 8 || source_shards == 16;
+        const bool valid_page_rr_fan_in = page_rr_to_replicated_decode && supported_page_rr_shards
+                                          && decode_dp_rank >= 0 && peer_cnt == source_shards;
+        RTP_LLM_CHECK_WITH_INFO(valid_projection_fan_in || valid_rank_affine_load || valid_page_rr_fan_in,
+                                "K3 load requires rank-affine page-RR/equal-TP peers, Projection-KTP fan-in, or "
+                                "Page-RR to Decode-owner fan-in");
         if (load_context.cache_keys.empty()) {
-            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "K3 cache load has no cache keys");
+            const ErrorInfo error(ErrorCode::LOAD_KV_CACHE_FAILED, "K3 cache load has no cache keys");
+            logPageRRFanInFailure(error);
+            return error;
         }
         if (projection_ktp) {
             RTP_LLM_LOG_INFO(
@@ -927,6 +965,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 peer_cnt);
         }
     }
+    size_t page_owner_load_count = 0;
+    size_t kda_partition_load_count = 0;
+    size_t replica_load_count = 0;
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
         if (use_hybrid && layer_id < cfg.layer_to_group_ids.size() && !cfg.layer_to_group_ids[layer_id].empty()) {
@@ -962,6 +1003,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return isCpSlicedFixedRegion(region_name) || peer_idx == 0;
     };
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
+        if (page_rr_to_replicated_decode) {
+            return true;
+        }
         if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
         }
@@ -1134,7 +1178,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 // from every page-RR owner. The replicated baseline selects
                 // only P_i, whose request-local index is zero.
                 const bool is_k3_eagle_swa = k3_hybrid_cache && is_mtp && group_type == CacheGroupType::SWA;
-                if (is_k3_eagle_swa && peer_index != k3_rank_affine_local_peer_index) {
+                if (is_k3_eagle_swa && !page_rr_to_replicated_decode
+                    && peer_index != k3_rank_affine_local_peer_index) {
                     continue;
                 }
                 if (!shouldLoadGroupFromPeer(group_type, region_name, peer_index)) {
@@ -1160,17 +1205,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
                                          "K3 cache destination block table is too short");
                     }
-                    if (segmented_linear_group && !projection_ktp
+                    if (segmented_linear_group && !projection_ktp && !page_rr_to_replicated_decode
                         && peer_index != k3_rank_affine_local_peer_index) {
                         continue;
                     }
                 }
                 const auto block_positions =
                     blockPositionsForLoad(block_num, cfg, view_use_hybrid, group_type, region_name, gid);
-                const int local_part_cnt = projection_ktp ? (segmented_linear_group ? peer_cnt : 1) :
-                                                            (is_page_level_rr ? 1 : peer_cnt);
-                const int local_part_id  = projection_ktp ? (segmented_linear_group ? peer_index : 0) :
-                                                            (is_page_level_rr ? 0 : peer_index);
                 const auto buffer_request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id)
                                                 + "-g" + std::to_string(gid);
                 auto load_layer_cache =
@@ -1184,6 +1225,23 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 for (size_t block_pos : block_positions) {
                     if (!shouldLoadBlockFromPeer(group_type, block_pos, peer_index)) {
                         continue;
+                    }
+                    K3CacheLoadSourcePlan source_plan;
+                    K3CacheLoadSourcePolicy source_policy = K3CacheLoadSourcePolicy::PAGE_OWNER;
+                    if (page_rr_to_replicated_decode) {
+                        if (is_k3_eagle_swa) {
+                            source_policy = K3CacheLoadSourcePolicy::SINGLE_REPLICA;
+                        } else if (segmented_linear_group) {
+                            source_policy = K3CacheLoadSourcePolicy::ALL_PEER_PARTITION;
+                        } else if (group_type != CacheGroupType::FULL) {
+                            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                             "K3 Page-RR fan-in encountered an unsupported cache group");
+                        }
+                        source_plan = planK3CacheLoadSource(
+                            source_policy, block_pos, peer_index, peer_cnt, decode_dp_rank);
+                        if (!source_plan.selected) {
+                            continue;
+                        }
                     }
                     const auto block_id = block_ids[block_pos];
                     if (isNullBlockIdx(block_id)) {
@@ -1202,6 +1260,21 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     }
                     auto cache_key = makeCacheKey(
                         view.model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, region_name);
+                    int local_part_cnt = projection_ktp ? (segmented_linear_group ? peer_cnt : 1) :
+                                                          (is_page_level_rr ? 1 : peer_cnt);
+                    int local_part_id  = projection_ktp ? (segmented_linear_group ? peer_index : 0) :
+                                                          (is_page_level_rr ? 0 : peer_index);
+                    if (page_rr_to_replicated_decode) {
+                        local_part_cnt = source_plan.partition_count;
+                        local_part_id  = source_plan.partition_id;
+                        if (source_policy == K3CacheLoadSourcePolicy::PAGE_OWNER) {
+                            ++page_owner_load_count;
+                        } else if (source_policy == K3CacheLoadSourcePolicy::ALL_PEER_PARTITION) {
+                            ++kda_partition_load_count;
+                        } else {
+                            ++replica_load_count;
+                        }
+                    }
                     auto parts = (region_name != KVCacheRegionName::DEFAULT) ?
                                      cache_manager->convertIndexToBuffer(
                                          block_id, physical_layer_id, region_name, local_part_cnt, local_part_id) :
@@ -1339,6 +1412,21 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 aggregate_error = layer_cache_load_context->getErrorInfo();
             }
         }
+    }
+
+    if (page_rr_to_replicated_decode && aggregate_error.ok()) {
+        RTP_LLM_LOG_INFO(
+            "[K3_PD_PAGE_RR_FAN_IN] request_id=%ld source_shards=%d decode_dp_rank=%d page_owner_pages=%zu "
+            "kda_partitions=%zu replica_blocks=%zu mla_fp8=%d status=ok",
+            load_context.request_id,
+            source_shards,
+            decode_dp_rank,
+            page_owner_load_count,
+            kda_partition_load_count,
+            replica_load_count,
+            static_cast<int>(maga_init_params_.model_config_.attn_config.mla_fp8_compute));
+    } else if (page_rr_to_replicated_decode) {
+        logPageRRFanInFailure(aggregate_error);
     }
 
     return aggregate_error;

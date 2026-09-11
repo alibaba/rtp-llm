@@ -29,14 +29,15 @@ class MlaPageRRSlotMappingTest(unittest.TestCase):
         batch_indices: torch.Tensor,
         block_table: torch.Tensor,
         rank: int,
+        shard_size: int,
     ) -> torch.Tensor:
         slots = []
         for position, batch_idx in zip(positions.tolist(), batch_indices.tolist()):
             global_page = position // self.PAGE_TOKENS
-            if global_page % self.SHARD_SIZE != rank:
+            if global_page % shard_size != rank:
                 slots.append(-1)
                 continue
-            local_page = global_page // self.SHARD_SIZE
+            local_page = global_page // shard_size
             block_id = int(block_table[batch_idx, local_page])
             slots.append(block_id * self.PAGE_TOKENS + position % self.PAGE_TOKENS)
         return torch.tensor(slots, dtype=torch.int64)
@@ -61,55 +62,60 @@ class MlaPageRRSlotMappingTest(unittest.TestCase):
         batch_indices = torch.tensor(
             [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1], dtype=torch.int32
         )
-        owned_by_rank = []
-        owned_pages_by_rank = []
+        for shard_size in (8, 16):
+            owned_by_rank = []
+            owned_pages_by_rank = []
 
-        for rank in range(self.SHARD_SIZE):
-            with self.subTest(rank=rank):
-                block_table = self._block_table(rank, dtype=torch.int32)
-                actual = build_mla_page_rr_slot_mapping(
-                    positions,
-                    batch_indices,
-                    block_table,
-                    self.PAGE_TOKENS,
-                    self.SHARD_SIZE,
-                    rank,
-                )
-                expected = self._reference(positions, batch_indices, block_table, rank)
-                self.assertEqual(actual.dtype, torch.int64)
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-                owned_by_rank.append(actual >= 0)
-                owned_pages_by_rank.append(
-                    {
-                        (int(batch_idx), int(position) // self.PAGE_TOKENS)
-                        for position, batch_idx, slot in zip(
-                            positions.tolist(),
-                            batch_indices.tolist(),
-                            actual.tolist(),
-                        )
-                        if slot >= 0
-                    }
-                )
-
-        ownership_count = torch.stack(owned_by_rank).sum(dim=0)
-        torch.testing.assert_close(
-            ownership_count,
-            torch.ones_like(ownership_count),
-            rtol=0,
-            atol=0,
-        )
-        replicated_pages = {
-            (int(batch_idx), int(position) // self.PAGE_TOKENS)
-            for position, batch_idx in zip(positions.tolist(), batch_indices.tolist())
-        }
-        self.assertEqual(set().union(*owned_pages_by_rank), replicated_pages)
-        for left_rank in range(self.SHARD_SIZE):
-            for right_rank in range(left_rank + 1, self.SHARD_SIZE):
-                self.assertTrue(
-                    owned_pages_by_rank[left_rank].isdisjoint(
-                        owned_pages_by_rank[right_rank]
+            for rank in range(shard_size):
+                with self.subTest(shard_size=shard_size, rank=rank):
+                    block_table = self._block_table(rank, dtype=torch.int32)
+                    actual = build_mla_page_rr_slot_mapping(
+                        positions,
+                        batch_indices,
+                        block_table,
+                        self.PAGE_TOKENS,
+                        shard_size,
+                        rank,
                     )
+                    expected = self._reference(
+                        positions, batch_indices, block_table, rank, shard_size
+                    )
+                    self.assertEqual(actual.dtype, torch.int64)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    owned_by_rank.append(actual >= 0)
+                    owned_pages_by_rank.append(
+                        {
+                            (int(batch_idx), int(position) // self.PAGE_TOKENS)
+                            for position, batch_idx, slot in zip(
+                                positions.tolist(),
+                                batch_indices.tolist(),
+                                actual.tolist(),
+                            )
+                            if slot >= 0
+                        }
+                    )
+
+            ownership_count = torch.stack(owned_by_rank).sum(dim=0)
+            torch.testing.assert_close(
+                ownership_count,
+                torch.ones_like(ownership_count),
+                rtol=0,
+                atol=0,
+            )
+            replicated_pages = {
+                (int(batch_idx), int(position) // self.PAGE_TOKENS)
+                for position, batch_idx in zip(
+                    positions.tolist(), batch_indices.tolist()
                 )
+            }
+            self.assertEqual(set().union(*owned_pages_by_rank), replicated_pages)
+            for left_rank in range(shard_size):
+                for right_rank in range(left_rank + 1, shard_size):
+                    self.assertTrue(
+                        owned_pages_by_rank[left_rank].isdisjoint(
+                            owned_pages_by_rank[right_rank]
+                        )
+                    )
 
     def test_partial_terminal_leaves_unused_tail_ranks_unwritten(self) -> None:
         positions = torch.tensor([0, 127, 128, 129], dtype=torch.int64)
@@ -162,7 +168,13 @@ class MlaPageRRSlotMappingTest(unittest.TestCase):
         )
         batch_indices = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32)
         block_table = self._block_table(0, dtype=torch.int32)
-        expected = self._reference(positions, batch_indices, block_table, rank=0)
+        expected = self._reference(
+            positions,
+            batch_indices,
+            block_table,
+            rank=0,
+            shard_size=self.SHARD_SIZE,
+        )
 
         actual = build_mla_page_rr_slot_mapping(
             positions.cuda(),
