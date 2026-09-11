@@ -11,8 +11,8 @@ import java.util.List;
  * Generic merger for every batch endpoint on the dispatcher batch path. Picks the first
  * well-formed sub-batch's body as the response envelope template, replaces its
  * {@code spec.responseArrayField} with the stitched array, then optionally invokes
- * {@code spec.postMerger} for cross-chunk aggregation. Failed sub-batches are padded
- * item-by-item via {@code spec.failedItemFactory}, and an {@code _partial_failure} object
+ * {@link BatchEndpointSpec#finishMerge} for cross-chunk aggregation. Failed sub-batches are padded
+ * item-by-item via {@link BatchEndpointSpec#failedItem}, and an {@code _partial_failure} object
  * is appended when any items failed.
  */
 public final class ResponseMerger {
@@ -47,12 +47,14 @@ public final class ResponseMerger {
 
     public static MergedResponse merge(List<SubBatchResult> subs, BatchEndpointSpec spec,
                                        JSONObject originalRequest) {
-        // The production caller (FanoutService.dispatchChunks) collects subs via flatMapSequential,
-        // so they already arrive in chunk order; sort defensively so the stitched array — successful
-        // items appended in order and failure placeholders filled per chunk — lines up with absolute
-        // item positions for any caller, independent of the order subs are passed in.
-        List<SubBatchResult> ordered = new ArrayList<>(subs);
-        ordered.sort(Comparator.comparingInt(SubBatchResult::startIndex));
+        List<SubBatchResult> ordered = subs;
+        for (int i = 1; i < subs.size(); i++) {
+            if (subs.get(i - 1).startIndex() > subs.get(i).startIndex()) {
+                ordered = new ArrayList<>(subs);
+                ordered.sort(Comparator.comparingInt(SubBatchResult::startIndex));
+                break;
+            }
+        }
         JSONObject envelope = null;
         int totalItems = 0;
         for (SubBatchResult s : ordered) {
@@ -88,7 +90,7 @@ public final class ResponseMerger {
                 failedReasons.add(reason);
                 for (int i = 0; i < s.chunkSize(); i++) {
                     int abs = s.startIndex() + i;
-                    merged.add(spec.getFailedItemFactory().build(abs, reason));
+                    merged.add(spec.failedItem(abs, reason));
                     failedIndices.add(abs);
                 }
             }
@@ -102,9 +104,7 @@ public final class ResponseMerger {
             pf.put("failed_indices", fi);
             envelope.put("_partial_failure", pf);
         }
-        if (spec.getPostMerger() != null) {
-            spec.getPostMerger().apply(envelope, ordered, failedIndices, spec, originalRequest);
-        }
+        spec.finishMerge(envelope, ordered, failedIndices, originalRequest);
         return new MergedResponse(envelope, succeededChunks, ordered.size(), totalItems,
                 failedIndices, failedReasons, 500);
     }

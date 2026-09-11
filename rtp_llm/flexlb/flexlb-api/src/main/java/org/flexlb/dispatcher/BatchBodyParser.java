@@ -8,16 +8,7 @@ import com.alibaba.fastjson2.JSONWriter;
 
 import java.util.Objects;
 
-/**
- * Thin entry point for parsing dispatcher batch request bodies with fastjson2.
- * {@link JSON#parseObject(byte[])} consumes UTF-8 input directly without an intermediate
- * {@code String} allocation.
- *
- * <p>The dispatcher is array-only by design — every batch endpoint declares a
- * {@code requestArrayField} that must be present and shaped as a JSON array. {@link
- * #findArrayField(JSONObject, String)} returns {@code null} when the field is absent or not an
- * array so the handler can reject with a 400 instead of relaying a non-batch request to FE.
- */
+/** UTF-8 JSON parsing and serialization shared by dispatcher request and response paths. */
 public final class BatchBodyParser {
 
     private BatchBodyParser() {}
@@ -28,10 +19,7 @@ public final class BatchBodyParser {
      * bytes don't parse as valid JSON at all. The handler maps both cases to 400 (invalid
      * batch request) with the same envelope, so the loss of distinction is cosmetic.
      *
-     * <p>Uses {@link JSON#parseObject(byte[])} (the typed entry point) rather than
-     * {@link JSON#parse(byte[])} + cast — the typed entry hits fastjson2's JSONObject-specific
-     * ObjectReader path that skips the runtime type-dispatch the untyped {@code parse} does on
-     * every nested value. Measured ~21% faster on a 752KB envelope (500 CJK prompts × 500 chars).
+     * <p>The typed byte-array parser avoids an intermediate String allocation.
      */
     public static JSONObject parseObject(byte[] body) {
         Objects.requireNonNull(body, "body");
@@ -58,7 +46,7 @@ public final class BatchBodyParser {
 
     /**
      * WriteNulls preserves explicit nulls on the wire (e.g. {@code embedding: null} from
-     * {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL}); fastjson2 strips null
+     * {@link BatchEndpointSpec#failedItem}); fastjson2 strips null
      * entries by default.
      */
     static byte[] serialize(Object value) {

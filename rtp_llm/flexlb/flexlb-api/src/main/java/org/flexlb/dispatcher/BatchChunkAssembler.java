@@ -1,9 +1,7 @@
 package org.flexlb.dispatcher;
 
-import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
-import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 
 import java.util.ArrayList;
@@ -27,20 +25,21 @@ import java.util.List;
  */
 public final class BatchChunkAssembler {
 
-    /** Conservative allowance for dispatcher-owned role_addrs and small rewrite fields. */
-    private static final int ROUTING_STAMP_RESERVE_BYTES = 1024;
-
     private BatchChunkAssembler() {}
 
-    /**
-     * Spec-aware split entry point. Dispatches to {@link #splitArray} or {@link #splitByCount}
-     * based on {@link SubBatchSpec.Mode}. Empty input returns an empty list.
-     */
+    /** Ordered slices; count mode spreads the remainder over the first chunks. */
     public static List<JSONArray> split(JSONArray arr, SubBatchSpec spec) {
-        return switch (spec.mode()) {
-            case SIZE -> splitArray(arr, spec.value());
-            case COUNT -> splitByCount(arr, spec.value());
-        };
+        int count = chunkCount(arr.size(), spec);
+        List<JSONArray> chunks = new ArrayList<>(count);
+        int cursor = 0;
+        for (int i = 0; i < count; i++) {
+            int size = spec.mode() == SubBatchSpec.Mode.SIZE
+                    ? Math.min(spec.value(), arr.size() - cursor)
+                    : arr.size() / count + (i < arr.size() % count ? 1 : 0);
+            chunks.add(new JSONArray(arr.subList(cursor, cursor + size)));
+            cursor += size;
+        }
+        return chunks;
     }
 
     /** Returns the number of chunks without allocating them. */
@@ -62,38 +61,29 @@ public final class BatchChunkAssembler {
     }
 
     /**
-     * Projects total FE-bound bytes without materializing every repeated envelope. JSON array
-     * slices add one bracket/comma byte per split; all non-array fields repeat once per chunk.
-     * A small per-chunk reserve covers dispatcher-owned target stamps added after allocation.
+     * Exact sum of serialized chunk bodies, shared by production and dry-run. Project with
+     * one empty-array template before allocating repeated envelopes or resolving targets.
      */
-    public static long projectedOutboundBytes(JSONObject envelope, JSONArray requestArray,
-                                              int chunkCount, BatchEndpointSpec spec) {
-        return projectedOutboundBytes(envelope, requestArray, chunkCount, spec, true);
-    }
-
-    /**
-     * Policy-aware variant whose template exactly matches the force-batch value sent by the
-     * production handler.
-     */
-    public static long projectedOutboundBytes(JSONObject envelope, JSONArray requestArray,
-                                              int chunkCount, BatchEndpointSpec spec,
-                                              boolean atomicBatchAllowed) {
-        if (chunkCount < 1) {
+    public static long projectedChunkBytes(JSONObject envelope, JSONArray requestArray,
+                                           int chunkCount, BatchEndpointSpec spec,
+                                           boolean atomicBatchAllowed,
+                                           List<BatchScheduleTarget> targets) {
+        if (chunkCount == 0) {
             return 0;
         }
-        List<JSONObject> templateBodies = buildChunkBodies(
-                envelope, List.of(new JSONArray()), spec.getRequestArrayField(),
-                atomicBatchAllowed);
-        spec.prepareChunkBodies(envelope, templateBodies);
-        JSONWriter.Feature[] features = spec.isFanoutWriteNulls()
-                ? new JSONWriter.Feature[] {JSONWriter.Feature.WriteNulls}
-                : new JSONWriter.Feature[0];
-        long templateBytes = JSON.toJSONBytes(templateBodies.getFirst(), features).length;
-        long arrayBytes = JSON.toJSONBytes(requestArray, features).length;
-        long repeatedEnvelope = saturatingMultiply(Math.max(0, templateBytes - 2), chunkCount);
-        long slicedArrays = saturatingAdd(arrayBytes, chunkCount - 1L);
-        long routingReserve = saturatingMultiply(ROUTING_STAMP_RESERVE_BYTES, chunkCount);
-        return saturatingAdd(saturatingAdd(repeatedEnvelope, slicedArrays), routingReserve);
+        JSONObject template = chunkTemplate(envelope, spec, atomicBatchAllowed);
+        long templateBytes = BatchBodyParser.serialize(template).length;
+        long arrayBytes = BatchBodyParser.serialize(requestArray).length;
+        long bytes = saturatingAdd(saturatingMultiply(templateBytes - 2, chunkCount),
+                saturatingAdd(arrayBytes, chunkCount - 1L));
+        for (int i = 0; i < Math.min(chunkCount, targets.size()); i++) {
+            if (isPreAssignable(targets.get(i))) {
+                // generate_config already contains force_batch: comma + \"role_addrs\": + value.
+                bytes = saturatingAdd(bytes, 14L + BatchBodyParser.serialize(
+                        preAssignedRoleAddrs(targets.get(i))).length);
+            }
+        }
+        return bytes;
     }
 
     private static long saturatingMultiply(long left, long right) {
@@ -107,134 +97,51 @@ public final class BatchChunkAssembler {
         return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 
-    /**
-     * Splits into ordered chunks of at most {@code chunkSize}. Last chunk may be shorter.
-     * Items are shared by reference with the source array — callers must not mutate them.
-     */
-    public static List<JSONArray> splitArray(JSONArray arr, int chunkSize) {
-        // Not an assert: assertions are disabled by default in production, so a zero would slip
-        // through to the chunk-count division and surface as an ArithmeticException instead.
-        if (chunkSize < 1) {
-            throw new IllegalArgumentException("chunkSize must be >= 1, got " + chunkSize);
-        }
-        int n = arr.size();
-        if (n == 0) {
-            return List.of();
-        }
-        int chunks = 1 + (n - 1) / chunkSize;
-        List<JSONArray> out = new ArrayList<>(chunks);
-        for (int c = 0; c < chunks; c++) {
-            int start = c * chunkSize;
-            int end = start + Math.min(chunkSize, n - start);
-            JSONArray chunk = new JSONArray(end - start);
-            for (int i = start; i < end; i++) {
-                chunk.add(arr.get(i));
-            }
-            out.add(chunk);
-        }
-        return out;
-    }
-
-    /**
-     * Splits into at most {@code requestedCount} ordered chunks with the remainder front-loaded
-     * onto the leading chunks. If {@code total < requestedCount} the count is clamped to total
-     * so no empty chunk is emitted.
-     */
-    public static List<JSONArray> splitByCount(JSONArray arr, int requestedCount) {
-        // See splitArray: a public pure function must fail explicitly, not rely on -ea.
-        if (requestedCount < 1) {
-            throw new IllegalArgumentException("requestedCount must be >= 1, got " + requestedCount);
-        }
-        int n = arr.size();
-        if (n == 0) {
-            return List.of();
-        }
-        int chunks = Math.min(requestedCount, n);
-        int base = n / chunks;
-        int remainder = n % chunks;
-        List<JSONArray> out = new ArrayList<>(chunks);
-        int cursor = 0;
-        for (int c = 0; c < chunks; c++) {
-            int size = base + (c < remainder ? 1 : 0);
-            JSONArray chunk = new JSONArray(size);
-            for (int i = 0; i < size; i++) {
-                chunk.add(arr.get(cursor + i));
-            }
-            out.add(chunk);
-            cursor += size;
-        }
-        return out;
-    }
-
-    /**
-     * Builds per-chunk request bodies. Each is a <em>shallow</em> copy of {@code envelope} with
-     * the {@code requestArrayField} replaced by the chunk slice and the effective generation
-     * config replaced by a per-chunk copy, then
-     * {@code force_batch} stamped per {@link #injectForceBatch} contract. {@code force_batch}
-     * is only stamped on the {@code prompt_batch} generation endpoints (root {@code /} and
-     * {@code /batch_infer}); it is an rtp_llm generation {@code generate_config} flag with no
-     * meaning for the embedding / OpenAI-chat batch shapes, whose chunk bodies carry no
-     * {@code generate_config} of their own.
-     *
-     * <p>{@code generate_config} is copied per chunk because it's the one sub-tree that per-chunk
-     * writes ({@code force_batch}, dispatcher-owned {@code role_addrs}) mutate. The legacy
-     * {@code generation_config} alias is normalized to that canonical name on generation chunks;
-     * otherwise injecting an empty canonical object would make FE ignore every caller setting in
-     * the alias. A shallow {@code new JSONObject(sourceGc)} isolates the top-level scalars that get
-     * written, and reserved caller routing fields are removed. Every other top-level envelope
-     * field is either replaced wholesale ({@code requestArrayField}) or never written per chunk
-     * ({@code model}, etc.), so sharing references is safe and cheap.
-     */
+    /** Each chunk owns its envelope and mutable generation config; large read-only fields share references. */
     public static List<JSONObject> buildChunkBodies(JSONObject envelope, List<JSONArray> chunks,
-                                                    String requestArrayField) {
-        return buildChunkBodies(envelope, chunks, requestArrayField, true);
-    }
-
-    /**
-     * Builds chunk bodies while allowing the caller to disable atomic backend batching. Active
-     * traffic policies require per-item routing because one chunk can legitimately span multiple
-     * worker groups; in that case {@code force_batch=false} overrides any caller value.
-     */
-    public static List<JSONObject> buildChunkBodies(JSONObject envelope, List<JSONArray> chunks,
-                                                    String requestArrayField,
+                                                    BatchEndpointSpec spec,
                                                     boolean atomicBatchAllowed) {
-        boolean stampForceBatch = BatchEndpointSpec.PROMPT_BATCH_FIELD.equals(requestArrayField);
-        String sourceGcKey = effectiveGenerateConfigKey(envelope);
-        JSONObject sourceGc = sourceGcKey == null
-                ? null : (JSONObject) envelope.get(sourceGcKey);
-        List<JSONObject> chunkBodies = new ArrayList<>(chunks.size());
+        JSONObject template = chunkTemplate(envelope, spec, atomicBatchAllowed);
+        String configKey = effectiveGenerateConfigKey(template);
+        List<JSONObject> bodies = new ArrayList<>(chunks.size());
         for (JSONArray chunk : chunks) {
-            JSONObject copy = new JSONObject(envelope);
-            copy.put(requestArrayField, chunk);
-            // Defense in depth: HTTP handlers reject this before assembly, but pure helper users
-            // must not accidentally forward a top-level routing override either.
-            copy.remove("role_addrs");
-            if (sourceGc != null) {
-                JSONObject gc = new JSONObject(sourceGc);
-                gc.remove("role_addrs");
-                copy.put(sourceGcKey, gc);
+            JSONObject body = new JSONObject(template);
+            body.put(spec.getRequestArrayField(), chunk);
+            if (configKey != null) {
+                body.put(configKey, new JSONObject(template.getJSONObject(configKey)));
             }
-            if (stampForceBatch) {
-                if ("generation_config".equals(sourceGcKey)) {
-                    copy.put("generate_config", copy.remove("generation_config"));
-                } else {
-                    // FE gives generate_config precedence when both spellings are present. Drop
-                    // the ignored alias so each chunk has one unambiguous mutable config object.
-                    copy.remove("generation_config");
-                }
-                if (atomicBatchAllowed) {
-                    injectForceBatch(copy);
-                } else {
-                    // RequestExtractor applies top-level GenerateConfig fields after the nested
-                    // object, so leaving a caller's top-level force_batch=true would undo this
-                    // policy-required fallback.
-                    copy.remove("force_batch");
-                    ensureGenerateConfig(copy).put("force_batch", false);
-                }
-            }
-            chunkBodies.add(copy);
+            bodies.add(body);
         }
-        return chunkBodies;
+        return bodies;
+    }
+
+    private static JSONObject chunkTemplate(JSONObject envelope, BatchEndpointSpec spec,
+                                            boolean atomicBatchAllowed) {
+        JSONObject copy = new JSONObject(envelope);
+        copy.put(spec.getRequestArrayField(), new JSONArray());
+        copy.remove("role_addrs");
+        String configKey = effectiveGenerateConfigKey(envelope);
+        if (configKey != null) {
+            JSONObject gc = new JSONObject(envelope.getJSONObject(configKey));
+            gc.remove("role_addrs");
+            copy.put(configKey, gc);
+        }
+        if (spec.isPreAssignable()) {
+            if ("generation_config".equals(configKey)) {
+                copy.put("generate_config", copy.remove("generation_config"));
+            } else {
+                copy.remove("generation_config");
+            }
+            if (atomicBatchAllowed) {
+                injectForceBatch(copy);
+            } else {
+                // FE promotes top-level config after nested config, so remove that override too.
+                copy.remove("force_batch");
+                ensureGenerateConfig(copy).put("force_batch", false);
+            }
+        }
+        spec.prepareChunkBody(copy);
+        return copy;
     }
 
     /**

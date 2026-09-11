@@ -12,7 +12,6 @@ import reactor.core.publisher.Mono;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -26,24 +25,8 @@ import static org.mockito.Mockito.when;
 
 class DispatchRouterTest {
 
-    private static final BatchEndpointSpec BATCH_INFER =
-            BatchEndpointSpec.builder()
-                    .path("/batch_infer")
-                    .requestArrayField("prompt_batch")
-                    .responseArrayField("response_batch")
-                    .failedItemFactory(FailedItemFactory.NULL)
-                    .preAssignable(true)
-                    .build();
-    private static final BatchEndpointSpec EMBEDDINGS =
-            BatchEndpointSpec.builder()
-                    .path("/v1/embeddings")
-                    .requestArrayField("input")
-                    .responseArrayField("data")
-                    .failedItemFactory(FailedItemFactory.EMBEDDING_NULL)
-                    .postMerger(EmbeddingMerger.INSTANCE)
-                    .fanoutWriteNulls(true)
-                    .splitRequiresStringItems(true)
-                    .build();
+    private static final BatchEndpointSpec BATCH_INFER = BatchEndpointSpec.BATCH_INFER;
+    private static final BatchEndpointSpec EMBEDDINGS = BatchEndpointSpec.EMBEDDING;
 
     @Test
     void nonDispatcherPathsAreNotMatched() {

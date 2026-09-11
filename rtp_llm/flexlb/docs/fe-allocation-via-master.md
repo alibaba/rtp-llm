@@ -52,6 +52,12 @@ export DISPATCH_CONFIG='{
 `DISPATCH_CONFIG.discoveryFailureGraceMs` controls how long an empty FE discovery result may
 retain the previous pool; the default is 300000 ms. FE health probes still filter that pool.
 
+Incoming JSON bodies use the existing `MAX_IN_MEMORY_SIZE` limit (default `5MB`, bound to
+`spring.codec.max-in-memory-size`). It is independent of `maxAggregateRequestBytes` and
+`maxAggregateResponseBytes` (each defaults to 128 MiB), and `maxDryRunResponseBytes` (64 MiB).
+The aggregate request limit also counts the envelope repeated across chunks. A request over
+the inbound limit returns 413 even when its aggregate budget is larger.
+
 BE pre-assignment is optional and defaults to false. To enable it, set `preAssignBe=true` and
 supply the same nonempty `DISPATCH_ROUTING_TOKEN` to the dispatcher and receiving RTP FEs. The
 FE validates that token before accepting HTTP `role_addrs`. Keep the token outside JSON config
@@ -106,6 +112,8 @@ FE-only assignment works with multi-role deployments and during BE warm-up. Miss
 assignments fail the allocation before fanout. Dispatcher returns 400 for invalid allocation
 requests and 503 for unavailable workers or master transport failures. Master mode does not
 fall back to a local FE cursor.
+Direct `/rtp_llm/batch_schedule` callers receive 400 for invalid requests and 500 for allocation
+or master transport failures, with the reason in the structured response.
 
 ## LLM execution follows mainline scheduling
 

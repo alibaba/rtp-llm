@@ -24,12 +24,10 @@ class RerankerMergerTest {
                 "sorted", true,
                 "top_k", 2,
                 "return_documents", false);
-        List<JSONArray> chunks = BatchChunkAssembler.splitArray(
-                original.getJSONArray("documents"), 2);
+        List<JSONArray> chunks = BatchChunkAssembler.split(
+                original.getJSONArray("documents"), new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2));
         List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(
-                original, chunks, "documents");
-
-        RERANKER.prepareChunkBodies(original, bodies);
+                original, chunks, BatchEndpointSpec.RERANKER, true);
 
         assertEquals(true, original.getBoolean("sorted"));
         assertEquals(2, original.getIntValue("top_k"));

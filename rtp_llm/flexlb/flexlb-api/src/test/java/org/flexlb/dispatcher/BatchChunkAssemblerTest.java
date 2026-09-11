@@ -20,7 +20,7 @@ class BatchChunkAssemblerTest {
     @Test
     void splitArrayDividesEvenly() {
         JSONArray arr = JSONArray.of("a", "b", "c", "d");
-        List<JSONArray> chunks = BatchChunkAssembler.splitArray(arr, 2);
+        List<JSONArray> chunks = BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2));
         assertEquals(2, chunks.size());
         assertEquals(JSONArray.of("a", "b"), chunks.get(0));
         assertEquals(JSONArray.of("c", "d"), chunks.get(1));
@@ -29,20 +29,20 @@ class BatchChunkAssemblerTest {
     @Test
     void splitArrayLastChunkShorter() {
         JSONArray arr = JSONArray.of("a", "b", "c", "d", "e");
-        List<JSONArray> chunks = BatchChunkAssembler.splitArray(arr, 2);
+        List<JSONArray> chunks = BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2));
         assertEquals(3, chunks.size());
         assertEquals(1, chunks.get(2).size());
     }
 
     @Test
     void splitArrayEmptyReturnsEmptyList() {
-        assertTrue(BatchChunkAssembler.splitArray(new JSONArray(), 5).isEmpty());
+        assertTrue(BatchChunkAssembler.split(new JSONArray(), new SubBatchSpec(SubBatchSpec.Mode.SIZE, 5)).isEmpty());
     }
 
     @Test
     void splitByCountFrontLoadsRemainder() {
         JSONArray arr = JSONArray.of(1, 2, 3, 4, 5, 6, 7);
-        List<JSONArray> chunks = BatchChunkAssembler.splitByCount(arr, 3);
+        List<JSONArray> chunks = BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 3));
         assertEquals(3, chunks.size());
         assertEquals(3, chunks.get(0).size());
         assertEquals(2, chunks.get(1).size());
@@ -52,7 +52,7 @@ class BatchChunkAssemblerTest {
     @Test
     void splitByCountClampsToTotalWhenRequestedExceeds() {
         JSONArray arr = JSONArray.of("a", "b");
-        List<JSONArray> chunks = BatchChunkAssembler.splitByCount(arr, 5);
+        List<JSONArray> chunks = BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 5));
         assertEquals(2, chunks.size());
     }
 
@@ -73,7 +73,7 @@ class BatchChunkAssemblerTest {
         envelope.put("generate_config", gc);
 
         List<JSONArray> chunks = List.of(JSONArray.of("a"), JSONArray.of("b", "c"));
-        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(envelope, chunks, "prompt_batch");
+        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(envelope, chunks, BatchEndpointSpec.BATCH_INFER, true);
 
         assertEquals(2, bodies.size());
         assertEquals(JSONArray.of("a"), bodies.get(0).getJSONArray("prompt_batch"));
@@ -99,7 +99,7 @@ class BatchChunkAssemblerTest {
         envelope.put("generate_config", gc);
 
         List<JSONArray> chunks = List.of(JSONArray.of("a"), JSONArray.of("b"));
-        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(envelope, chunks, "prompt_batch");
+        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(envelope, chunks, BatchEndpointSpec.BATCH_INFER, true);
 
         assertFalse(bodies.get(0).getJSONObject("generate_config").containsKey("role_addrs"));
         assertFalse(bodies.get(1).getJSONObject("generate_config").containsKey("role_addrs"));
@@ -118,7 +118,7 @@ class BatchChunkAssemblerTest {
                 "generation_config", legacy);
 
         List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, List.of(JSONArray.of("a"), JSONArray.of("b")), "prompt_batch");
+                envelope, List.of(JSONArray.of("a"), JSONArray.of("b")), BatchEndpointSpec.BATCH_INFER, true);
 
         for (JSONObject body : bodies) {
             assertFalse(body.containsKey("generation_config"));
@@ -139,7 +139,7 @@ class BatchChunkAssemblerTest {
                 "role_addrs", JSONArray.of(JSONObject.of("ip", "1.2.3.4")));
 
         JSONObject body = BatchChunkAssembler.buildChunkBodies(
-                envelope, List.of(JSONArray.of("a")), "prompt_batch").getFirst();
+                envelope, List.of(JSONArray.of("a")), BatchEndpointSpec.BATCH_INFER, true).getFirst();
 
         assertFalse(body.containsKey("role_addrs"));
         assertTrue(envelope.containsKey("role_addrs"));
@@ -165,16 +165,16 @@ class BatchChunkAssemblerTest {
 
         // prompt_batch generation endpoint: force_batch is stamped on every chunk.
         List<JSONObject> promptBodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, chunks, "prompt_batch");
+                envelope, chunks, BatchEndpointSpec.BATCH_INFER, true);
         assertTrue(promptBodies.get(0).getJSONObject("generate_config").getBoolean("force_batch"));
 
         // Non-prompt_batch endpoints (embedding "input", openai "requests"): force_batch is a
         // generation generate_config flag with no meaning here, so no generate_config is fabricated.
         List<JSONObject> embeddingBodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, chunks, "input");
+                envelope, chunks, BatchEndpointSpec.EMBEDDING, true);
         assertFalse(embeddingBodies.get(0).containsKey("generate_config"));
         List<JSONObject> openaiBodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, chunks, "requests");
+                envelope, chunks, BatchEndpointSpec.CHAT, true);
         assertFalse(openaiBodies.get(0).containsKey("generate_config"));
     }
 
@@ -203,7 +203,7 @@ class BatchChunkAssemblerTest {
                 "generate_config", JSONObject.of("temperature", 0.5));
 
         JSONObject body = BatchChunkAssembler.buildChunkBodies(
-                envelope, List.of(JSONArray.of("a")), "prompt_batch", false).getFirst();
+                envelope, List.of(JSONArray.of("a")), BatchEndpointSpec.BATCH_INFER, false).getFirst();
 
         assertFalse(body.containsKey("force_batch"),
                 "top-level GenerateConfig fields override nested fields in RequestExtractor");
@@ -303,9 +303,9 @@ class BatchChunkAssemblerTest {
         JSONArray arr = new JSONArray();
         arr.add("a");
 
-        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.splitArray(arr, 0));
-        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.splitByCount(arr, 0));
-        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.splitArray(arr, -1));
+        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 0)));
+        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 0)));
+        assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.split(arr, new SubBatchSpec(SubBatchSpec.Mode.SIZE, -1)));
     }
 
     @Test
@@ -326,12 +326,44 @@ class BatchChunkAssemblerTest {
         body.put("input", inputs);
         BatchEndpointSpec embeddings = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
 
-        long oneChunk = BatchChunkAssembler.projectedOutboundBytes(
-                body, inputs, 1, embeddings);
-        long threeChunks = BatchChunkAssembler.projectedOutboundBytes(
-                body, inputs, 3, embeddings);
+        long oneChunk = BatchChunkAssembler.projectedChunkBytes(
+                body, inputs, 1, embeddings, true, List.of());
+        long threeChunks = BatchChunkAssembler.projectedChunkBytes(
+                body, inputs, 3, embeddings, true, List.of());
 
         assertTrue(threeChunks > oneChunk + 8_000,
                 "the shared 4KiB envelope must be charged once per chunk");
+    }
+
+    @Test
+    void projectionMatchesSerializedChunksAcrossEndpointRewritesAndRouting() {
+        BatchScheduleTarget target = new BatchScheduleTarget("backend-中\"\\", 8088, 50051);
+        target.setRole(RoleType.PDFUSION);
+        for (BatchEndpointSpec spec : BatchEndpointSpec.SPECS) {
+            for (String splitMode : List.of("size:2", "count:3", "count:20")) {
+                for (boolean atomicAllowed : List.of(true, false)) {
+                    for (int size : List.of(0, 1, 7)) {
+                        JSONArray items = new JSONArray();
+                        for (int i = 0; i < size; i++) {
+                            items.add("中\"\\\n" + i);
+                        }
+                        JSONObject body = JSONObject.of(spec.getRequestArrayField(), items,
+                                "model", "中-model", "query", "q", "sorted", true, "top_k", 2);
+                        body.put("tools", null);
+                        body.put("generation_config", JSONObject.of("temperature", 0.7, "seed", null));
+                        SubBatchSpec split = SubBatchSpec.parse(splitMode);
+                        List<JSONArray> chunks = BatchChunkAssembler.split(items, split);
+                        List<BatchScheduleTarget> targets = spec.isPreAssignable() ? List.of(target) : List.of();
+                        long projected = BatchChunkAssembler.projectedChunkBytes(
+                                body, items, chunks.size(), spec, atomicAllowed, targets);
+                        List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(
+                                body, chunks, spec, atomicAllowed);
+                        BatchChunkAssembler.stampPreAssignedBe(bodies, targets);
+                        long actual = bodies.stream().mapToLong(chunk -> BatchBodyParser.serialize(chunk).length).sum();
+                        assertEquals(actual, projected, spec + "/" + splitMode + "/" + atomicAllowed + "/" + size);
+                    }
+                }
+            }
+        }
     }
 }

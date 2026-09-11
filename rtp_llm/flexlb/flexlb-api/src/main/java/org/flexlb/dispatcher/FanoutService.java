@@ -1,9 +1,6 @@
 package org.flexlb.dispatcher;
 
-import com.alibaba.fastjson2.JSON;
-import com.alibaba.fastjson2.JSONException;
 import com.alibaba.fastjson2.JSONObject;
-import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.util.RateLimitedWarn;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
@@ -17,21 +14,14 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Per-chunk fanout on the dispatcher batch path. Serializes each chunk via fastjson2's
- * {@link JSON#toJSONBytes(Object, JSONWriter.Feature...)} and parses the FE response bytes back
- * into a {@link JSONObject}. Whether the serialize includes {@link JSONWriter.Feature#WriteNulls}
- * is driven by {@link BatchEndpointSpec#isFanoutWriteNulls()} — see the field's Javadoc for
- * when null preservation matters. FE URLs come from the master-stamped target vector or one local
- * {@link FePool#nextBatch(int)} reservation according to {@link FeAllocationMode}; the service
- * never silently crosses between those sources. Ordinary per-chunk failures become
+ * Sends chunks concurrently to their assigned FEs and preserves explicit JSON nulls.
+ * FE URLs come from the master allocation or one local pool reservation. Chunk failures become
  * {@link SubBatchResult#failed}; request-wide byte-budget violations fail the whole fanout.
  */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class FanoutService {
 
-    private static final JSONWriter.Feature[] WRITE_NULLS = { JSONWriter.Feature.WriteNulls };
-    private static final JSONWriter.Feature[] NO_FEATURES = {};
     /**
      * Caps how many sub-calls are in flight — and thus how many serialized request payloads exist
      * at once — bounding concurrent I/O and outbound buffer pressure. The merge still collects all
@@ -72,7 +62,6 @@ public class FanoutService {
                                                      BatchEndpointSpec spec,
                                                      HttpHeaders inboundHeaders,
                                                      String rawQuery) {
-        JSONWriter.Feature[] features = spec.isFanoutWriteNulls() ? WRITE_NULLS : NO_FEATURES;
         String arrayField = spec.getRequestArrayField();
         List<String> effectiveFeUrls = resolveFeUrls(chunkBodies.size(), preAssignedFeUrls);
         List<ChunkPlan> plans = new ArrayList<>(chunkBodies.size());
@@ -90,12 +79,11 @@ public class FanoutService {
             AtomicByteBudget responseBudget = new AtomicByteBudget(maxAggregateResponseBytes);
             AtomicByteBudget requestBudget = new AtomicByteBudget(maxAggregateRequestBytes);
             return Flux.fromIterable(plans)
-                    .flatMapSequential(plan -> dispatchOne(fePath, plan, features, spec, inboundHeaders,
+                    .flatMapSequential(plan -> dispatchOne(fePath, plan, spec, inboundHeaders,
                                     rawQuery, responseBudget, requestBudget),
                             effectiveConcurrency())
                     .collectList();
-        })
-                .publishOn(Schedulers.parallel());
+        });
     }
 
     /** Reserve a deterministic, index-aligned FE vector from the configured source. */
@@ -130,7 +118,7 @@ public class FanoutService {
      * {@link Schedulers#parallel()}; {@link BatchHandler} likewise offloads request projection and
      * chunk preparation. This keeps repeated CPU-heavy JSON work away from Netty event-loop threads.
      */
-    private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan, JSONWriter.Feature[] features,
+    private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan,
                                              BatchEndpointSpec spec, HttpHeaders inboundHeaders, String rawQuery,
                                              AtomicByteBudget responseBudget,
                                              AtomicByteBudget requestBudget) {
@@ -144,16 +132,16 @@ public class FanoutService {
         AtomicByteBudget.Reservation requestReservation = requestBudget.newReservation();
         AtomicByteBudget.Reservation responseReservation = responseBudget.newReservation();
         return Mono.fromCallable(() -> {
-                    byte[] payload = JSON.toJSONBytes(plan.body(), features);
+                    byte[] payload = BatchBodyParser.serialize(plan.body());
                     if (!requestReservation.tryReserve(payload.length)) {
                         throw new AggregateRequestTooLargeException(requestBudget.limit());
                     }
-                    return new Pick(plan.feUrl(), payload);
+                    return payload;
                 })
                 .subscribeOn(Schedulers.parallel())
-                .flatMap(pick -> {
+                .flatMap(payload -> {
                     long start = System.currentTimeMillis();
-                    return feClient.postBytes(pick.feUrl(), fePath, pick.payload(), inboundHeaders,
+                    return feClient.postBytes(plan.feUrl(), fePath, payload, inboundHeaders,
                                     rawQuery, responseReservation)
                             .publishOn(Schedulers.parallel())
                             .map(bytes -> {
@@ -165,12 +153,7 @@ public class FanoutService {
                                 }
                                 // Parse before reporting: a 200 with a non-JSON body must count
                                 // once as failed, not once as ok and again as failed.
-                                JSONObject parsed;
-                                try {
-                                    parsed = JSON.parseObject(bytes);
-                                } catch (JSONException ex) {
-                                    parsed = null;
-                                }
+                                JSONObject parsed = BatchBodyParser.parseObject(bytes);
                                 if (parsed == null) {
                                     // A 200 whose body is not a JSON object (top-level array/scalar or
                                     // garbage) is a malformed success, not a transport fault — meter it
@@ -179,7 +162,7 @@ public class FanoutService {
                                     metricsReporter.reportChunk(DispatcherMetricsReporter.CHUNK_MALFORMED,
                                             System.currentTimeMillis() - start);
                                     failureWarn.warn("FE chunk returned a non-object 200 body: url={}, path={}, size={}",
-                                            pick.feUrl(), fePath, plan.chunkSize());
+                                            plan.feUrl(), fePath, plan.chunkSize());
                                     return SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
                                             "malformed FE response body");
                                 }
@@ -200,7 +183,7 @@ public class FanoutService {
                                 metricsReporter.reportChunk(DispatcherMetricsReporter.CHUNK_TRANSPORT,
                                         System.currentTimeMillis() - start);
                                 failureWarn.warn("FE chunk returned empty body: url={}, path={}, size={}",
-                                        pick.feUrl(), fePath, plan.chunkSize());
+                                        plan.feUrl(), fePath, plan.chunkSize());
                                 return SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
                                         "empty FE response body");
                             }))
@@ -214,7 +197,7 @@ public class FanoutService {
                                 metricsReporter.reportChunk(reasonCategory(feStatus),
                                         System.currentTimeMillis() - start);
                                 failureWarn.warn("FE chunk failed: url={}, path={}, size={}, err={}",
-                                        pick.feUrl(), fePath, plan.chunkSize(), reason);
+                                        plan.feUrl(), fePath, plan.chunkSize(), reason);
                                 return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
                                         reason, feStatus));
                             });
@@ -256,7 +239,4 @@ public class FanoutService {
     private record ChunkPlan(JSONObject body, int startIndex, int chunkSize, String feUrl) {
     }
 
-    /** A picked FE URL with the chunk already serialized for it. */
-    private record Pick(String feUrl, byte[] payload) {
-    }
 }

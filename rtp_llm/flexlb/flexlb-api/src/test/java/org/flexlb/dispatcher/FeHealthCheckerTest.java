@@ -7,7 +7,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -16,7 +15,6 @@ import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
 
 import java.util.List;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -28,12 +26,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 class FeHealthCheckerTest {
 
@@ -225,9 +217,7 @@ class FeHealthCheckerTest {
     }
 
     @Test
-    void scheduledLoopIsSingleFlightIdempotentAndStops() {
-        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
-        AtomicInteger schedulerCreations = new AtomicInteger();
+    void scheduledProbesSkipOverlappingRoundsAndResumeAfterCompletion() {
         AtomicInteger exchanges = new AtomicInteger();
         Sinks.One<ClientResponse> firstResponse = Sinks.one();
         WebClient webClient = WebClient.builder().exchangeFunction(request ->
@@ -235,42 +225,20 @@ class FeHealthCheckerTest {
                         ? firstResponse.asMono()
                         : Mono.just(ClientResponse.create(HttpStatus.OK).build()))
                 .build();
-        FeHealthChecker checker = scheduledChecker(
-                () -> List.of("http://fe"), webClient,
-                () -> {
-                    schedulerCreations.incrementAndGet();
-                    return scheduler;
-                });
+        FeHealthChecker checker = feHealthChecker(() -> List.of("http://fe"), webClient, PROBE_PATH);
 
-        try {
-            checker.start();
-            checker.start();
-
-            ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
-            verify(scheduler, times(1)).scheduleAtFixedRate(
-                    task.capture(), eq(0L), anyLong(), eq(TimeUnit.MILLISECONDS));
-            assertEquals(1, schedulerCreations.get(), "repeated start must reuse one scheduler");
-
-            task.getValue().run();
-            assertEquals(1, exchanges.get());
-            task.getValue().run();
-            assertEquals(1, exchanges.get(), "a slow round must suppress the next tick");
-
-            Assertions.assertEquals(
-                    Sinks.EmitResult.OK,
-                    firstResponse.tryEmitValue(ClientResponse.create(HttpStatus.OK).build()));
-            task.getValue().run();
-            assertEquals(2, exchanges.get(), "completion must reopen the single-flight gate");
-        } finally {
-            checker.stop();
-            checker.stop();
-        }
-        verify(scheduler, times(1)).shutdownNow();
+        checker.probeTick();
+        assertEquals(1, exchanges.get());
+        checker.probeTick();
+        assertEquals(1, exchanges.get(), "a slow round must suppress the next tick");
+        Assertions.assertEquals(Sinks.EmitResult.OK,
+                firstResponse.tryEmitValue(ClientResponse.create(HttpStatus.OK).build()));
+        checker.probeTick();
+        assertEquals(2, exchanges.get(), "completion must reopen the single-flight gate");
     }
 
     @Test
-    void scheduledLoopRecoversAfterSynchronousSupplierFailure() {
-        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+    void scheduledProbesRecoverAfterSynchronousSupplierFailure() {
         AtomicInteger supplierCalls = new AtomicInteger();
         Supplier<List<String>> urls = () -> {
             if (supplierCalls.getAndIncrement() == 0) {
@@ -278,24 +246,14 @@ class FeHealthCheckerTest {
             }
             return List.of();
         };
-        FeHealthChecker checker = scheduledChecker(
-                urls, WebClient.builder().exchangeFunction(request -> Mono.error(
-                        new AssertionError("empty pool must not issue HTTP"))).build(),
-                () -> scheduler);
+        FeHealthChecker checker = feHealthChecker(urls,
+                WebClient.builder().exchangeFunction(request -> Mono.error(
+                        new AssertionError("empty pool must not issue HTTP"))).build(), PROBE_PATH);
 
-        try {
-            checker.start();
-            ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
-            verify(scheduler).scheduleAtFixedRate(
-                    task.capture(), eq(0L), anyLong(), eq(TimeUnit.MILLISECONDS));
-
-            task.getValue().run();
-            task.getValue().run();
-            assertEquals(2, supplierCalls.get(),
-                    "a synchronous round failure must reopen the gate for the next tick");
-        } finally {
-            checker.stop();
-        }
+        checker.probeTick();
+        checker.probeTick();
+        assertEquals(2, supplierCalls.get(),
+                "a synchronous round failure must reopen the gate for the next tick");
     }
 
     @Test
@@ -316,15 +274,4 @@ class FeHealthCheckerTest {
                 "probe must hit configured /health path, got: " + hit);
     }
 
-    private static FeHealthChecker scheduledChecker(
-            Supplier<List<String>> urls,
-            WebClient webClient,
-            Supplier<ScheduledExecutorService> schedulerFactory) {
-        DispatcherFePoolRefresher refresher = mock(DispatcherFePoolRefresher.class);
-        when(refresher.source()).thenReturn(urls);
-        DispatchConfig cfg = new DispatchConfig();
-        cfg.setProbePath(PROBE_PATH);
-        return new FeHealthChecker(
-                refresher, webClient, cfg, DispatcherTestSupport.noopMetrics(), schedulerFactory);
-    }
 }

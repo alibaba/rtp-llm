@@ -5,11 +5,10 @@ import com.alibaba.fastjson2.JSONObject;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Endpoint hooks for Voyage-style {@code /v1/reranker} requests.
+ * Chunk preparation and merging for Voyage-style {@code /v1/reranker} requests.
  *
  * <p>FE applies {@code sorted} and {@code top_k} inside each request. Those operations are not
  * distributive across chunks: concatenating each shard's top-k cannot recover the global top-k.
@@ -18,15 +17,11 @@ import java.util.List;
  * successful child returned one result per document, this class rebases local result indices,
  * performs one stable global sort, applies the caller's top-k once, and sums total tokens.
  */
-public final class RerankerMerger implements BatchEndpointSpec.ChunkBodyTransformer,
-        BatchEndpointSpec.PostMerger, BatchEndpointSpec.RequestValidator {
-
-    public static final RerankerMerger INSTANCE = new RerankerMerger();
+public final class RerankerMerger {
 
     private RerankerMerger() {}
 
-    @Override
-    public String validate(JSONObject body) {
+    public static String validate(JSONObject body) {
         if (!(body.get("query") instanceof String)) {
             return "query must be a string";
         }
@@ -40,19 +35,15 @@ public final class RerankerMerger implements BatchEndpointSpec.ChunkBodyTransfor
         return null;
     }
 
-    @Override
-    public void apply(JSONObject originalBody, List<JSONObject> chunkBodies) {
-        for (JSONObject chunkBody : chunkBodies) {
-            // FE must return every score in document order. Global request semantics are restored
-            // after all chunks arrive; applying either operation here loses information.
-            chunkBody.put("sorted", false);
-            chunkBody.remove("top_k");
-        }
+    public static void prepare(JSONObject chunkBody) {
+        // Restore global sorting and top-k only after all scores arrive.
+        chunkBody.put("sorted", false);
+        chunkBody.remove("top_k");
     }
 
-    @Override
-    public void apply(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices,
-                      BatchEndpointSpec spec, JSONObject originalRequest) {
+    public static void merge(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices,
+                             JSONObject originalRequest) {
+        BatchEndpointSpec spec = BatchEndpointSpec.RERANKER;
         // BatchHandler fails closed for this endpoint. Do not attempt to sort the generic null
         // placeholders: this body is discarded in favor of a 500 response.
         if (!failedIndices.isEmpty()) {
@@ -103,12 +94,7 @@ public final class RerankerMerger implements BatchEndpointSpec.ChunkBodyTransfor
                 item.put("index", Math.addExact(sub.startIndex(), localIndex));
                 scoreOf(item); // Validate before sorting, including the sorted=false path.
             }
-            for (boolean indexSeen : seen) {
-                if (!indexSeen) {
-                    throw new IllegalStateException(
-                            "reranker result indices must cover every item in the chunk");
-                }
-            }
+
         }
         mergedBody.put("total_tokens", totalTokens);
 
@@ -118,10 +104,7 @@ public final class RerankerMerger implements BatchEndpointSpec.ChunkBodyTransfor
         if (sorted && results.size() > 1) {
             // List.sort is stable, so equal scores retain original document order just like
             // Python's stable list.sort in RerankerRenderer.
-            List<Object> ranked = new ArrayList<>(results);
-            ranked.sort((left, right) -> compareScores((JSONObject) left, (JSONObject) right));
-            results.clear();
-            results.addAll(ranked);
+            results.sort((left, right) -> compareScores((JSONObject) left, (JSONObject) right));
         }
 
         if (originalRequest != null && originalRequest.get("top_k") != null) {

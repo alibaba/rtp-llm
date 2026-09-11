@@ -1,26 +1,20 @@
 package org.flexlb.dispatcher;
 
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -50,35 +44,22 @@ public class FeHealthChecker {
     private final WebClient webClient;
     private final String probePath;
     private final DispatcherMetricsReporter metricsReporter;
-    private final Supplier<ScheduledExecutorService> schedulerFactory;
     private final ConcurrentMap<String, AtomicInteger> consecFails = new ConcurrentHashMap<>();
     // Single-flight guard for the probe loop: probeOnce() only hands work off to reactor, so
-    // scheduleAtFixedRate's "runs never overlap" guarantee does not bound the async probes. Without
+    // A scheduled method's non-overlap guarantee does not bound the async probes. Without
     // this, a slow round can still be in flight when the next tick fires, and a stale late 2xx
     // (getAndSet(0)) could reset a failure counter the newer round just incremented — corrupting the
     // one signal this component produces.
     private final AtomicBoolean roundInFlight = new AtomicBoolean(false);
-    private ScheduledExecutorService scheduler;
 
-    @Autowired
     public FeHealthChecker(DispatcherFePoolRefresher refresher,
                            @Qualifier("dispatcherProbeWebClient") WebClient webClient,
                            DispatchConfig cfg,
                            DispatcherMetricsReporter metricsReporter) {
-        this(refresher, webClient, cfg, metricsReporter, FeHealthChecker::newScheduler);
-    }
-
-    /** Test seam for driving the scheduled lifecycle without wall-clock sleeps. */
-    FeHealthChecker(DispatcherFePoolRefresher refresher,
-                    WebClient webClient,
-                    DispatchConfig cfg,
-                    DispatcherMetricsReporter metricsReporter,
-                    Supplier<ScheduledExecutorService> schedulerFactory) {
         this.urlSupplier = refresher.source();
         this.webClient = webClient;
         this.probePath = cfg.getProbePath();
         this.metricsReporter = metricsReporter;
-        this.schedulerFactory = Objects.requireNonNull(schedulerFactory);
     }
 
     /**
@@ -167,46 +148,16 @@ public class FeHealthChecker {
                 .then();
     }
 
-    /**
-     * Start the background probe loop. Idempotent — subsequent calls are no-ops once started.
-     */
-    @PostConstruct
-    public synchronized void start() {
-        if (scheduler != null) {
+    /** Spring owns the timer lifecycle; an unfinished async round skips the next tick. */
+    @Scheduled(fixedRate = PROBE_INTERVAL_MS)
+    public void probeTick() {
+        if (!roundInFlight.compareAndSet(false, true)) {
             return;
         }
-        scheduler = schedulerFactory.get();
-        scheduler.scheduleAtFixedRate(() -> {
-            // Skip this tick if the previous round has not finished; overlapping rounds can let a
-            // late reply from the older round clobber the newer round's counter update.
-            if (!roundInFlight.compareAndSet(false, true)) {
-                return;
-            }
-            try {
-                probeOnce()
-                        .doFinally(sig -> roundInFlight.set(false))
-                        .subscribe();
-            } catch (Throwable t) {
-                roundInFlight.set(false);
-                Logger.warn("FE health probe round threw, scheduler kept alive: err={}: {}",
-                        t.getClass().getSimpleName(), t.getMessage());
-            }
-        }, 0, PROBE_INTERVAL_MS, TimeUnit.MILLISECONDS);
-    }
-
-    private static ScheduledExecutorService newScheduler() {
-        return Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "fe-health-checker");
-            t.setDaemon(true);
-            return t;
-        });
-    }
-
-    @PreDestroy
-    public synchronized void stop() {
-        if (scheduler != null) {
-            scheduler.shutdownNow();
-            scheduler = null;
-        }
+        Mono.defer(this::probeOnce)
+                .doFinally(signal -> roundInFlight.set(false))
+                .subscribe(ignored -> { }, error -> Logger.warn(
+                        "FE health probe round failed: err={}: {}",
+                        error.getClass().getSimpleName(), error.getMessage()));
     }
 }

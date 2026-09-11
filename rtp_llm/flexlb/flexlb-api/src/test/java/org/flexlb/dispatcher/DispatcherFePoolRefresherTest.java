@@ -84,7 +84,7 @@ class DispatcherFePoolRefresherTest {
 
     @Test
     @Timeout(10)
-    void timeoutRetiresWedgedExecutorSoNextPollCanRecover() {
+    void timedOutLookupDoesNotBlockTheNextPoll() {
         AtomicInteger calls = new AtomicInteger();
         AtomicBoolean safetyDeadlineExpired = new AtomicBoolean();
         CountDownLatch releaseWedgedCall = new CountDownLatch(1);
@@ -128,13 +128,13 @@ class DispatcherFePoolRefresherTest {
 
     @Test
     @Timeout(10)
-    void repeatedUninterruptibleTimeoutsOpenBoundedCircuitAndRecover() throws Exception {
+    void uninterruptibleLookupsStayBoundedAndRecover() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         AtomicInteger active = new AtomicInteger();
         AtomicInteger maxActive = new AtomicInteger();
         AtomicBoolean safetyDeadlineExpired = new AtomicBoolean();
         CountDownLatch release = new CountDownLatch(1);
-        CountDownLatch retiredFinished = new CountDownLatch(2);
+        CountDownLatch lookupsFinished = new CountDownLatch(2);
         org.flexlb.discovery.ServiceDiscovery discovery = new org.flexlb.discovery.ServiceDiscovery() {
             @Override
             public List<WorkerHost> getHosts(String address) {
@@ -149,7 +149,7 @@ class DispatcherFePoolRefresherTest {
                         return List.of();
                     } finally {
                         active.decrementAndGet();
-                        retiredFinished.countDown();
+                        lookupsFinished.countDown();
                     }
                 }
                 return List.of(WorkerHost.of("10.0.0.9", 8088));
@@ -169,15 +169,14 @@ class DispatcherFePoolRefresherTest {
                 discovery, cfg, 60_000, System::nanoTime, 250);
         try {
             refresher.refresh(); // second worker wedges and reaches the cap
-            refresher.refresh(); // circuit open: no third thread/call is created
+            refresher.refresh(); // saturated: no third thread/call is created
             assertEquals(2, calls.get());
             assertEquals(2, maxActive.get(), "uninterruptible discovery threads must be bounded");
 
             release.countDown();
             org.junit.jupiter.api.Assertions.assertTrue(
-                    retiredFinished.await(5, TimeUnit.SECONDS));
-            // The task's finally block runs just before ThreadPoolExecutor publishes TERMINATED.
-            // Poll the real recovery entry point until that final state transition is visible.
+                    lookupsFinished.await(5, TimeUnit.SECONDS));
+            // A task signals before its worker becomes idle. Poll until the pool has capacity again.
             long recoveryDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (calls.get() < 3 && System.nanoTime() < recoveryDeadline) {
                 refresher.refresh();
@@ -185,7 +184,7 @@ class DispatcherFePoolRefresherTest {
                     Thread.sleep(5);
                 }
             }
-            assertEquals(3, calls.get(), "a terminated retired worker must close the circuit");
+            assertEquals(3, calls.get(), "a completed lookup must restore capacity");
             assertEquals(1, refresher.currentSize());
             assertFalse(safetyDeadlineExpired.get(),
                     "the test safety deadline must never substitute for the production timeout");

@@ -8,20 +8,19 @@ import java.util.List;
 /**
  * Cross-chunk aggregation for OpenAI embedding-shaped responses on the dispatcher
  * path. After {@link ResponseMerger} has stitched the {@code data} array (including
- * any {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL} placeholders at absolute
+ * any {@link BatchEndpointSpec#failedItem} placeholders at absolute
  * failed indices), this post-merger renumbers each item's {@code index} to its absolute offset
  * in the merged array and sums {@code usage.prompt_tokens} / {@code usage.total_tokens} across
  * all well-formed sub-bodies — the same ones whose items {@link ResponseMerger} stitched into the
  * array. Failed or malformed sub-batches contribute zero to {@code usage}; their absolute indices
  * are preserved as failure placeholders.
  */
-public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
+public final class EmbeddingMerger {
 
-    public static final EmbeddingMerger INSTANCE = new EmbeddingMerger();
+    private EmbeddingMerger() {}
 
-    @Override
-    public void apply(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices,
-                      BatchEndpointSpec spec, JSONObject originalRequest) {
+    public static void merge(JSONObject mergedBody, List<SubBatchResult> subs, JSONObject originalRequest) {
+        BatchEndpointSpec spec = BatchEndpointSpec.EMBEDDING;
         if (mergedBody.getString("object") == null) {
             mergedBody.put("object", "list");
         }

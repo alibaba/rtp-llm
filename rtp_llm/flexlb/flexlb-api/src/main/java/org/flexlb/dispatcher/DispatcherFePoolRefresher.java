@@ -10,15 +10,12 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -51,8 +48,6 @@ import java.util.stream.Collectors;
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class DispatcherFePoolRefresher {
 
-    private static final AtomicInteger DISCOVERY_THREAD_ID = new AtomicInteger();
-
     /**
      * Bound on a synchronous discovery lookup. Both the inline boot seed and the periodic poll run
      * on shared pools (Spring bean construction, then the shared {@code task-scheduler} that also
@@ -60,9 +55,6 @@ public class DispatcherFePoolRefresher {
      * than park a shared thread — the same reason {@code WorkerAddressService} bounds its calls.
      */
     private static final long DISCOVERY_TIMEOUT_MS = 3_000;
-
-    /** Hard cap on discovery workers that may remain wedged after ignoring interruption. */
-    private static final int MAX_RETIRED_DISCOVERY_EXECUTORS = 2;
 
     /**
      * Fallback for the empty-discovery grace window when the configured value is absent or
@@ -94,15 +86,11 @@ public class DispatcherFePoolRefresher {
      */
     private volatile long lastNonEmptyNanos;
 
-    /**
-     * Dedicated single-thread executor for the bounded discovery lookup. A wedged discovery client
-     * must not park a {@code ForkJoinPool.commonPool()} thread (shared JVM-wide) nor the master's
-     * sync pool — its own daemon thread absorbs the stall and is cancelled on timeout.
-     */
-    private final AtomicReference<ExecutorService> discoveryExecutor =
-            new AtomicReference<>(newDiscoveryExecutor());
-    private final Object executorLock = new Object();
-    private final List<ExecutorService> retiredExecutors = new ArrayList<>();
+    // No queue: a poll can use the second worker while one lookup ignores interruption.
+    // If both are stuck, submission fails immediately; completed calls restore capacity.
+    private final ExecutorService discoveryExecutor = new ThreadPoolExecutor(
+            0, 2, 60, TimeUnit.SECONDS, new SynchronousQueue<>(),
+            Thread.ofPlatform().daemon().name("dispatcher-fe-discovery-", 0).factory());
 
     @Autowired
     public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg) {
@@ -254,75 +242,20 @@ public class DispatcherFePoolRefresher {
      * caller degrades to a warn (the retained snapshot is kept by {@link #applyUrls}).
      */
     private List<WorkerHost> boundedGetHosts() throws Exception {
-        ExecutorService executor = acquireDiscoveryExecutor();
-        Future<List<WorkerHost>> future = executor.submit(() -> serviceDiscovery.getHosts(serviceId));
+        Future<List<WorkerHost>> future = discoveryExecutor.submit(() -> serviceDiscovery.getHosts(serviceId));
         try {
             return future.get(discoveryTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            future.cancel(true);
-            retireTimedOutExecutor(executor);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             throw e;
+        } finally {
+            future.cancel(true);
         }
-    }
-
-    private ExecutorService acquireDiscoveryExecutor() {
-        synchronized (executorLock) {
-            reapRetiredExecutors();
-            ExecutorService current = discoveryExecutor.get();
-            if (current != null) {
-                return current;
-            }
-            if (retiredExecutors.size() >= MAX_RETIRED_DISCOVERY_EXECUTORS) {
-                throw new RejectedExecutionException(
-                        "discovery lookup circuit open: too many uninterruptible calls");
-            }
-            ExecutorService replacement = newDiscoveryExecutor();
-            discoveryExecutor.set(replacement);
-            return replacement;
-        }
-    }
-
-    /**
-     * Interrupting a native/socket-backed lookup is advisory. Retire the executor after a timeout
-     * so the next poll can run instead of queueing forever behind the wedged call.
-     */
-    private void retireTimedOutExecutor(ExecutorService timedOut) {
-        synchronized (executorLock) {
-            if (!discoveryExecutor.compareAndSet(timedOut, null)) {
-                return;
-            }
-            timedOut.shutdownNow();
-            retiredExecutors.add(timedOut);
-            reapRetiredExecutors();
-            if (retiredExecutors.size() < MAX_RETIRED_DISCOVERY_EXECUTORS) {
-                discoveryExecutor.set(newDiscoveryExecutor());
-            }
-        }
-    }
-
-    private void reapRetiredExecutors() {
-        retiredExecutors.removeIf(ExecutorService::isTerminated);
-    }
-
-    private static ExecutorService newDiscoveryExecutor() {
-        return Executors.newSingleThreadExecutor(r -> {
-            Thread thread = new Thread(r,
-                    "dispatcher-fe-discovery-" + DISCOVERY_THREAD_ID.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        });
     }
 
     @PreDestroy
     void shutdown() {
-        synchronized (executorLock) {
-            ExecutorService current = discoveryExecutor.getAndSet(null);
-            if (current != null) {
-                current.shutdownNow();
-            }
-            retiredExecutors.forEach(ExecutorService::shutdownNow);
-            retiredExecutors.clear();
-        }
+        discoveryExecutor.shutdownNow();
     }
 
     private static List<String> toUrls(List<WorkerHost> hosts) {

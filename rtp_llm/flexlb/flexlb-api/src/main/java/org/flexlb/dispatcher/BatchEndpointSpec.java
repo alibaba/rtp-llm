@@ -2,8 +2,8 @@ package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
-import lombok.Builder;
-import lombok.Value;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
 
 import java.util.Collection;
 import java.util.List;
@@ -11,131 +11,78 @@ import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-/**
- * Per-endpoint spec for the dispatcher batch path. Carries the request / response array
- * field names and the two SPI hooks — {@link FailedItemFactory} for per-item failure
- * placeholders and {@link PostMerger} for cross-chunk aggregation — plus the hardcoded
- * {@link #SPECS} table.
- *
- * <p>Bare {@code POST /} aliases {@code /batch_infer} semantics — rtp_llm FE historically
- * exposes batch generation on the root path and accepts the same {@code prompt_batch} /
- * {@code response_batch} wire shape. {@code /v1/reranker} splits its {@code documents} field
- * and uses endpoint hooks to restore the FE's global sort/top-k semantics. The remaining
- * embedding variants ({@code /v1/embeddings/dense|sparse|colbert|similarity} and
- * {@code /v1/classifier}) are not registered yet; add them here after verifying each wire shape.
- */
-@Value
-@Builder
-public class BatchEndpointSpec {
+/** Wire contracts of the FE endpoints supported by batch fanout. */
+@Getter
+@RequiredArgsConstructor
+public enum BatchEndpointSpec {
+    ROOT("/", "prompt_batch", "response_batch"),
+    BATCH_INFER("/batch_infer", "prompt_batch", "response_batch"),
+    CHAT("/v1/batch/chat/completions", "requests", "responses"),
+    EMBEDDING("/v1/embeddings", "input", "data"),
+    RERANKER("/v1/reranker", "documents", "results");
 
-    /**
-     * Request array field of the rtp_llm generation endpoints (root {@code /} and
-     * {@code /batch_infer}). Load-bearing beyond the {@link #SPECS} rows: {@link
-     * #requiresWholeBody} keys off it to scope the sample-aligned companion-field check to
-     * exactly these endpoints.
-     */
     public static final String PROMPT_BATCH_FIELD = "prompt_batch";
+    public static final List<BatchEndpointSpec> SPECS = List.of(values());
+    public static final Map<String, BatchEndpointSpec> BY_PATH = SPECS.stream()
+            .collect(Collectors.toUnmodifiableMap(BatchEndpointSpec::getPath, Function.identity()));
 
-    String path;
-    String requestArrayField;
-    String responseArrayField;
-    FailedItemFactory failedItemFactory;
-    /** May be null when an endpoint has no cross-chunk aggregation. */
-    PostMerger postMerger;
-    /** May be null when an endpoint's chunk bodies need no semantic rewrite. */
-    ChunkBodyTransformer chunkBodyTransformer;
-    /** May be null when the generic batch-shape checks are sufficient. */
-    RequestValidator requestValidator;
-    /**
-     * When true, outbound chunk bodies serialize with
-     * {@link com.alibaba.fastjson2.JSONWriter.Feature#WriteNulls} so user-supplied null entries
-     * (e.g. {@code "tools": null}) reach FE byte-for-byte. The dispatcher itself never adds
-     * nulls to a chunk body — they only come from the input request — so this matters only when
-     * FE pydantic distinguishes "field absent" from "field null" (rare in rtp_llm FE: pydantic
-     * Optional defaults to None and treats both the same). Costs ~18% on the chunk serialize
-     * step (measured by {@code SerializeMicroBench}), which on a 100-chunk fanout request is
-     * ~160µs CPU per request. Default false to take that win on the common wire shape; flip
-     * per-endpoint above for any endpoint where wire compat matters.
-     */
-    boolean fanoutWriteNulls;
-    /**
-     * When true, the array field only counts as a batch if every element is a string.
-     * {@code /v1/embeddings} needs this: FE's {@code input} union also admits a single
-     * multimodal/chat input expressed as {@code List[ContentPart]} / {@code List[ChatMessage]}
-     * — an array of JSON objects that is ONE input and must not be split per element.
-     * Endpoints whose batch items are legitimately objects (e.g. {@code requests} on
-     * {@code /v1/batch/chat/completions}) keep this false.
-     */
-    boolean splitRequiresStringItems;
-    /**
-     * Whether BE pre-assignment ({@code generate_config.role_addrs} stamping) applies to this
-     * endpoint. Only the {@code prompt_batch} generation endpoints honor it: FE's pydantic
-     * models for the OpenAI batch ({@code BatchChatCompletionRequest}) and embeddings shapes
-     * ignore unknown top-level fields, so a stamped {@code generate_config} would be silently
-     * dropped — the dispatcher would still consume a {@code /batch_schedule} round-trip and
-     * report pre-assign metrics for a write FE never reads.
-     */
-    boolean preAssignable;
-    /**
-     * Whether one failed chunk invalidates the entire endpoint result. Ranking endpoints need
-     * this: a missing shard may contain the globally highest-scoring item, so returning a 200
-     * with the surviving shards would look authoritative while being mathematically incomplete.
-     */
-    boolean failOnPartialFailure;
+    private final String path;
+    private final String requestArrayField;
+    private final String responseArrayField;
 
-    /**
-     * The single split-vs-passthrough disposition shared by {@link BatchHandler} and
-     * {@link DispatcherInspectionHandler}: a registered path splits only when the array field
-     * is present, batch-shaped for this endpoint, and the body carries no whole-body companion
-     * field. Keeping this in one place is what keeps dry-run honest about production behavior.
-     */
+    public boolean isPreAssignable() {
+        return this == ROOT || this == BATCH_INFER;
+    }
+
+    public boolean isFailOnPartialFailure() {
+        return this == RERANKER;
+    }
+
     public boolean isSplittableBatch(JSONObject body, JSONArray arr) {
         return arr != null && canSplit(arr) && !requiresWholeBody(body);
     }
 
-    /**
-     * Whether the array field is batch-shaped for this endpoint and may be split into
-     * chunks; non-splittable bodies are passthrough-forwarded whole.
-     */
+    /** Embedding arrays of content parts represent one multimodal input, not a batch. */
     public boolean canSplit(JSONArray arr) {
-        if (!splitRequiresStringItems) {
-            return true;
-        }
-        for (Object item : arr) {
-            if (!(item instanceof String)) {
-                return false;
+        if (this == EMBEDDING || this == RERANKER) {
+            for (Object item : arr) {
+                if (!(item instanceof String)) {
+                    return false;
+                }
             }
         }
         return true;
     }
 
-    /** Returns a caller-facing validation error, or {@code null} when fanout may proceed. */
     public String validateForFanout(JSONObject body) {
-        return requestValidator == null ? null : requestValidator.validate(body);
+        return this == RERANKER ? RerankerMerger.validate(body) : null;
     }
 
-    /** Applies an endpoint-specific semantic rewrite to the already-sliced chunk bodies. */
-    public void prepareChunkBodies(JSONObject originalBody, List<JSONObject> chunkBodies) {
-        if (chunkBodyTransformer != null) {
-            chunkBodyTransformer.apply(originalBody, chunkBodies);
+    public void prepareChunkBody(JSONObject body) {
+        if (this == RERANKER) {
+            RerankerMerger.prepare(body);
         }
     }
 
-    /**
-     * Whether this body must be forwarded whole instead of split, because it carries a
-     * companion field that FE positionally aligns to the request array but the dispatcher does
-     * not slice.
-     *
-     * <p>Only the {@code prompt_batch} endpoints (root {@code /} and {@code /batch_infer}) carry
-     * such companions. FE's root {@code /} handler validates top-level {@code images}/{@code
-     * urls} (each a {@code list[list]} indexed by prompt) and {@code adapter_name} (accepted at
-     * the request root or inside either generation-config spelling) against the prompt count
-     * ({@code request_extractor._get_urls} / {@code _get_adapter}). A split chunk would carry the
-     * full-length companion against a shorter prompt slice, so FE would reject every chunk.
-     * Streaming forms are likewise forwarded whole because fanout buffers and JSON-decodes each
-     * child response while FE returns SSE. Forwarding the intact body to one FE keeps such requests
-     * correct, at the cost of fanout.
-     */
+    public void finishMerge(JSONObject body, List<SubBatchResult> subs,
+                            List<Integer> failedIndices, JSONObject originalRequest) {
+        switch (this) {
+            case EMBEDDING -> EmbeddingMerger.merge(body, subs, originalRequest);
+            case RERANKER -> RerankerMerger.merge(body, subs, failedIndices, originalRequest);
+            default -> { }
+        }
+    }
+
+    public Object failedItem(int index, String reason) {
+        return switch (this) {
+            case CHAT -> JSONObject.of("index", index, "error", JSONObject.of(
+                    "code", "dispatcher_sub_batch_failed", "message", reason));
+            case EMBEDDING -> JSONObject.of("index", index, "embedding", null, "error", reason);
+            default -> null;
+        };
+    }
+
+    /** FE aligns companions to the entire prompt batch and streams SSE without JSON buffering. */
     public boolean requiresWholeBody(JSONObject body) {
         if (!PROMPT_BATCH_FIELD.equals(requestArrayField)) {
             return false;
@@ -209,115 +156,4 @@ public class BatchEndpointSpec {
         return true;
     }
 
-    /**
-     * Cross-chunk aggregation hook; runs after {@link ResponseMerger} has stitched
-     * the response array.
-     */
-    @FunctionalInterface
-    public interface PostMerger {
-        void apply(JSONObject mergedBody,
-                   List<SubBatchResult> subs,
-                   List<Integer> failedIndices,
-                   BatchEndpointSpec spec,
-                   JSONObject originalRequest);
-    }
-
-    /** Rewrites per-chunk requests when endpoint semantics cannot be applied independently. */
-    @FunctionalInterface
-    public interface ChunkBodyTransformer {
-        void apply(JSONObject originalBody, List<JSONObject> chunkBodies);
-    }
-
-    /** Validates fields that the dispatcher consumes or rewrites instead of forwarding verbatim. */
-    @FunctionalInterface
-    public interface RequestValidator {
-        /** Returns {@code null} on success, otherwise a stable caller-facing error message. */
-        String validate(JSONObject body);
-    }
-
-    /**
-     * Builds a per-item failure placeholder at the absolute batch index. Returning {@code null}
-     * is legal and means "store a JSON null at this position" — fastjson2's {@code JSONArray}
-     * preserves a null slot when you {@code add(null)}.
-     */
-    @FunctionalInterface
-    public interface FailedItemFactory {
-        Object build(int absoluteIndex, String reason);
-
-        FailedItemFactory NULL = (idx, reason) -> null;
-
-        FailedItemFactory OPENAI_ERROR = (idx, reason) -> {
-            JSONObject err = new JSONObject();
-            err.put("code", "dispatcher_sub_batch_failed");
-            err.put("message", reason);
-            JSONObject item = new JSONObject();
-            item.put("index", idx);
-            item.put("error", err);
-            return item;
-        };
-
-        FailedItemFactory EMBEDDING_NULL = (idx, reason) -> {
-            JSONObject item = new JSONObject();
-            item.put("index", idx);
-            item.put("embedding", null);
-            item.put("error", reason);
-            return item;
-        };
-    }
-
-    /**
-     * Hardcoded spec table for the dispatcher's batch endpoints.
-     */
-    public static final List<BatchEndpointSpec> SPECS = List.of(
-            BatchEndpointSpec.builder()
-                    .path("/")
-                    .requestArrayField(PROMPT_BATCH_FIELD).responseArrayField("response_batch")
-                    .failedItemFactory(FailedItemFactory.NULL)
-                    .fanoutWriteNulls(true)
-                    .preAssignable(true)
-                    .build(),
-            BatchEndpointSpec.builder()
-                    .path("/batch_infer")
-                    .requestArrayField(PROMPT_BATCH_FIELD).responseArrayField("response_batch")
-                    .failedItemFactory(FailedItemFactory.NULL)
-                    .fanoutWriteNulls(true)
-                    .preAssignable(true)
-                    .build(),
-            BatchEndpointSpec.builder()
-                    .path("/v1/batch/chat/completions")
-                    .requestArrayField("requests").responseArrayField("responses")
-                    .failedItemFactory(FailedItemFactory.OPENAI_ERROR)
-                    .fanoutWriteNulls(true)
-                    .build(),
-            BatchEndpointSpec.builder()
-                    .path("/v1/embeddings")
-                    .requestArrayField("input").responseArrayField("data")
-                    .failedItemFactory(FailedItemFactory.EMBEDDING_NULL)
-                    .postMerger(EmbeddingMerger.INSTANCE)
-                    .fanoutWriteNulls(true)
-                    .splitRequiresStringItems(true)
-                    .build(),
-            BatchEndpointSpec.builder()
-                    .path("/v1/reranker")
-                    .requestArrayField("documents").responseArrayField("results")
-                    // Partial results are never served for reranking, so this placeholder only
-                    // exists to satisfy the generic merge path before failOnPartialFailure turns
-                    // the outcome into an error response.
-                    .failedItemFactory(FailedItemFactory.NULL)
-                    .postMerger(RerankerMerger.INSTANCE)
-                    .chunkBodyTransformer(RerankerMerger.INSTANCE)
-                    .requestValidator(RerankerMerger.INSTANCE)
-                    .fanoutWriteNulls(true)
-                    .splitRequiresStringItems(true)
-                    .failOnPartialFailure(true)
-                    .build()
-    );
-
-    /**
-     * Path-lookup table; {@link Collectors#toUnmodifiableMap} throws at class-load if
-     * {@link #SPECS} contains duplicate paths so a typo in the table becomes a clear startup
-     * failure instead of a stream-collector explosion later.
-     */
-    public static final Map<String, BatchEndpointSpec> BY_PATH = SPECS.stream()
-            .collect(Collectors.toUnmodifiableMap(BatchEndpointSpec::getPath, Function.identity()));
 }
