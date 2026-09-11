@@ -1487,6 +1487,11 @@ class W:
     v4_dspark_main_proj_s = "v4.dspark.main_proj.scale"
     v4_dspark_markov_w1 = "v4.dspark.markov_w1.weight"
     v4_dspark_markov_w2 = "v4.dspark.markov_w2.weight"
+    # Shared DSpark slots retain the existing Python/C++ weight-key contract.
+    dspark_markov_w1 = v4_dspark_markov_w1
+    dspark_markov_w2 = v4_dspark_markov_w2
+    dspark_fc_w = "dspark.fc.weight"
+    dspark_hidden_norm_gamma = "dspark.hidden_norm.weight"
 
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
@@ -1675,6 +1680,8 @@ class W:
         v4_dspark_main_proj_s: sp_id,
         v4_dspark_markov_w1: sp_id,
         v4_dspark_markov_w2: sp_id,
+        dspark_fc_w: sp_id,
+        dspark_hidden_norm_gamma: sp_id,
     }
 
     weights_list = [

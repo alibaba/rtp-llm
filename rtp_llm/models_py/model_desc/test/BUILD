@@ -24,6 +24,14 @@ py_test(
 )
 
 py_test(
+    name = "qwen3_dspark_test",
+    srcs = ["qwen3_dspark_test.py"],
+    deps = py_test_deps + ["//rtp_llm:models"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
     name = "qwen3_next_moe_test",
     srcs = ["qwen3_next_moe_test.py"],
     deps = py_test_deps + [

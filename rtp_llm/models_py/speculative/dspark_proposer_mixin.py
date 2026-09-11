@@ -3,8 +3,8 @@
 DSpark evaluates one runtime-fixed query block ``[anchor, noise, ...]`` per
 round and corrects the resulting base logits left-to-right with a low-rank
 Markov bias.  :class:`DSparkProposerMixin` owns everything identical across model
-families — the engine input contract, query-block geometry, committed-row
-mapping and normalized proposal-hidden production — as an add-on base class::
+families — the feature input contract, commit/propose orchestration and
+proposal-hidden production — as an add-on base class::
 
     class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model): ...
 
@@ -23,8 +23,8 @@ are request-major):
   ``[rows, aux_feature_dim]`` (a zero-copy view of the shared MTP hidden
   buffer).
 * **Propose** (``forward_propose``, fixed-width block): ``input_ids`` = ``[B * width]`` query
-  block (column zero is the anchor; the remaining columns are forced to
-  the configured noise token here), ``attention_inputs.prefix_lengths`` =
+  block (column zero is the anchor; the remaining columns contain the
+  configured noise token), ``attention_inputs.prefix_lengths`` =
   committed sequence length immediately before the query block. No
   feature input — the block reads the committed feature KV.
 
@@ -92,8 +92,9 @@ class DSparkProposerMixin:
     """Add-on base class granting a model the DSpark proposal capability.
 
     Subclasses call :meth:`init_dspark_proposer` once during construction and
-    implement the three model-specific hooks. Everything else — per-round
-    orchestration and query-block/committed-row geometry — is inherited.
+    implement feature projection and output normalization. Backbones using
+    framework attention override commit_features and forward_proposal_hidden; the
+    default adapters provide explicit row/query geometry for the mapped hooks.
     """
 
     # ------------------------------------------------------------------
@@ -192,6 +193,12 @@ class DSparkProposerMixin:
     # Shared per-round flow
     # ------------------------------------------------------------------
 
+    def prepare_forward_commit(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ):
+        """Commit uses normal attention preparation unless the model overrides it."""
+        return self.prepare_fmha_impl(inputs, is_cuda_graph)
+
     def dspark_empty_outputs(
         self, batch_size: int, device: torch.device
     ) -> PyModelOutputs:
@@ -209,6 +216,7 @@ class DSparkProposerMixin:
         self,
         inputs: PyModelInputs,
         device: torch.device,
+        fmha_impl: Any = None,
     ) -> PyModelOutputs:
         """Commit target feature rows into the draft KV cache.
 
@@ -225,14 +233,6 @@ class DSparkProposerMixin:
         input_lengths = optional_tensor(
             getattr(attention_inputs, "input_lengths", None)
         )
-        # The device mirror feeds the tensor math below; the host field stays
-        # the batch-size probe. Copying the pinned host buffer to the device is
-        # a blocking H2D transfer, which CUDA rejects mid graph capture.
-        lengths_source = optional_tensor(
-            getattr(attention_inputs, "input_lengths_device", None)
-        )
-        if lengths_source is None:
-            lengths_source = input_lengths
         batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
         hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
 
@@ -255,7 +255,32 @@ class DSparkProposerMixin:
                 f"configured width {aux_dim}: shape={tuple(hidden.shape)}"
             )
         features = hidden.reshape(-1, aux_dim).to(device=device)
-        row_count = int(features.shape[0])
+        main_x = self.combine_hidden_states(features)
+        self.commit_features(main_x, inputs, fmha_impl)
+        return PyModelOutputs(main_x)
+
+    def commit_features(self, main_x, inputs, fmha_impl=None):
+        """Default commit adapter for backbones needing explicit row positions.
+
+        Backbones using framework RoPE/KV writers override this hook and consume
+        the already-prepared attention inputs directly.
+        """
+        attention_inputs = primary_attention_inputs(
+            inputs.attention_inputs, getattr(self, "kv_cache", None)
+        )
+        input_lengths = optional_tensor(
+            getattr(attention_inputs, "input_lengths", None)
+        )
+        batch_size = int(input_lengths.numel())
+        device, row_count = main_x.device, int(main_x.shape[0])
+        # The device mirror feeds the tensor math below; the host field stays
+        # the batch-size probe. Copying the pinned host buffer to the device is
+        # a blocking H2D transfer, which CUDA rejects mid graph capture.
+        lengths_source = optional_tensor(
+            getattr(attention_inputs, "input_lengths_device", None)
+        )
+        if lengths_source is None:
+            lengths_source = input_lengths
 
         prefix = optional_tensor(
             getattr(attention_inputs, "prefix_lengths_device", None)
@@ -296,7 +321,6 @@ class DSparkProposerMixin:
             starts, lengths, committed_ends, row_count, inputs
         )
 
-        main_x = self.combine_hidden_states(features)
         self.commit_feature_rows(
             main_x,
             req,
@@ -305,9 +329,6 @@ class DSparkProposerMixin:
             inputs,
             commit_ctx=commit_ctx,
         )
-        # The fixed-width commit CUDA graph owns a row-aligned output buffer even
-        # though the executor only needs this call's KV-cache side effect.
-        return PyModelOutputs(main_x)
 
     def run_propose_step(
         self,
@@ -319,6 +340,14 @@ class DSparkProposerMixin:
 
         The query block reads the committed feature KV written by
         :meth:`run_commit_step`; the call carries no feature input."""
+        hidden = self.forward_proposal_hidden(inputs, fmha_impl, device)
+        # Empty DP ranks still run collective layers, but skip the output head.
+        if hidden.numel() == 0:
+            return PyModelOutputs(hidden.reshape(0, self._dspark_hidden_dim))
+        return PyModelOutputs(self.compute_draft_hidden_states(hidden))
+
+    def forward_proposal_hidden(self, inputs, fmha_impl, device):
+        """Default proposal adapter for backbones taking explicit query metadata."""
         width = self._dspark_width
 
         attention_inputs = primary_attention_inputs(
@@ -378,9 +407,4 @@ class DSparkProposerMixin:
             fmha_impl,
         )
 
-        # Empty DP ranks must still execute every collective layer above so EP
-        # stays balanced; only the non-collective head is skipped.
-        if batch_size == 0:
-            return self.dspark_empty_outputs(0, device)
-
-        return PyModelOutputs(self.compute_draft_hidden_states(hidden))
+        return hidden

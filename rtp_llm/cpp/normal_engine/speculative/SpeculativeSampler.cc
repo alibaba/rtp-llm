@@ -71,6 +71,9 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         logits.div_(temperature_column);
         auto sampling_probabilities = torch::softmax(logits, -1);
         auto sampled_tokens         = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
+        if (d2t_map_.defined()) {
+            sampled_tokens = d2t_map_.index_select(0, sampled_tokens.to(torch::kLong)).to(torch::kInt32);
+        }
         all_probabilities.select(1, step).copy_(sampling_probabilities);
         token_columns.push_back(sampled_tokens);
         previous_tokens = sampled_tokens.to(torch::kLong);
@@ -157,7 +160,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     RTP_LLM_CHECK_WITH_INFO(draft_probs_point_mass
                                 || (draft_token_probs_d_t.defined() && draft_token_probs_d_t.dim() == 3),
                             "draft probabilities must be [B, steps, vocab] unless token ids define a point mass");
-    if (!draft_probs_point_mass && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
+    if (!draft_probs_point_mass && d2t_map_.defined()) {
         const int64_t target_vocab_size = target_token_probs_d_t.size(2);
         const int64_t num_spec          = draft_token_probs_d_t.size(1);
 

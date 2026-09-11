@@ -33,8 +33,9 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
 
 }  // namespace
 
-void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
-                                                            GptModelInputs&     model_input) const {
+void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups&  stream_groups,
+                                                            GptModelInputs&      model_input,
+                                                            const torch::Tensor& committed_ends) const {
     if (!model_input.combo_position_ids.defined()) {
         return;
     }
@@ -58,7 +59,19 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
     // Speculative decoding rejects num_return_sequences > 1 and beam search before this path.
     for (const auto& stream : stream_groups.allStreams()) {
         int* base_position_ids = dst_position_ids + batch_idx * (propose_step_ + 1) * position_id_len_factor;
-        stream->generateNextPositionId(base_position_ids);
+        if (committed_ends.defined()) {
+            // Derive only the immutable prompt offset on the host. Async
+            // bookkeeping can leave seqLength() behind this round's device state.
+            PositionIdsGenerator::generateNextPositionId(base_position_ids,
+                                                         stream->inputLength(),
+                                                         model_input_gatherer_config_.mm_position_ids_style,
+                                                         stream->getContextPositionIds());
+            for (size_t dim = 0; dim < position_id_len_factor; ++dim) {
+                base_position_ids[dim] -= stream->inputLength() - 1;
+            }
+        } else {
+            stream->generateNextPositionId(base_position_ids);
+        }
         for (int step = 0; step < propose_step_ + 1; ++step) {
             int* step_position_ids = base_position_ids + step * position_id_len_factor;
             for (size_t dim = 0; dim < position_id_len_factor; ++dim) {
@@ -68,6 +81,14 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
         batch_idx++;
     }
 
+    if (committed_ends.defined()) {
+        target_combo_position_ids = (target_combo_position_ids.to(committed_ends.device())
+                                         .view({static_cast<int64_t>(batch_size),
+                                                propose_step_ + 1,
+                                                static_cast<int64_t>(position_id_len_factor)})
+                                     + committed_ends.view({static_cast<int64_t>(batch_size), 1, 1}))
+                                        .reshape({-1});
+    }
     model_input.combo_position_ids = std::move(target_combo_position_ids);
 }
 
@@ -904,7 +925,7 @@ torch::Tensor MtpBatchStreamProcessor::compactAcceptedPositionIds(const torch::T
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors) {
-    const int64_t draft_width = propose_step_;
+    const int64_t draft_width = dspark_query_width_;
     if (!dspark_combo_cache_.defined() || dspark_combo_cache_.size(0) < batch_size
         || dspark_combo_cache_.size(1) != draft_width) {
         dspark_combo_cache_ = fullInt32OnCuda({batch_size, draft_width}, dspark_mask_token_id_);
@@ -916,7 +937,7 @@ torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, con
 
 torch::Tensor MtpBatchStreamProcessor::dsparkDraftInputLengths(int64_t batch_size) {
     if (!dspark_input_lengths_cache_.defined() || dspark_input_lengths_cache_.size(0) < batch_size) {
-        dspark_input_lengths_cache_ = fullInt32OnCuda({batch_size}, propose_step_);
+        dspark_input_lengths_cache_ = fullInt32OnCuda({batch_size}, dspark_query_width_);
     }
     return dspark_input_lengths_cache_.narrow(0, 0, batch_size);
 }
@@ -925,6 +946,9 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) 
     const int64_t token_count = batch_size * propose_step_;
     if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < token_count) {
         dspark_lm_indexes_cache_ = torch::arange(token_count, cudaInt32Options());
+        const int anchor_rows = dspark_query_width_ - propose_step_;
+        dspark_lm_indexes_cache_ +=
+            (torch::floor_divide(dspark_lm_indexes_cache_, propose_step_) + 1) * anchor_rows;
     }
     return dspark_lm_indexes_cache_.narrow(0, 0, token_count);
 }
@@ -978,6 +1002,7 @@ MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::prepareDSparkD
     if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
         return round_head;
     }
+    expandTargetVerifyPositionIds(stream_groups, model_input, round_head.committed_ends);
     buildDSparkProposeInput(model_input, round_head.anchors, round_head.committed_ends, host_holder);
     return round_head;
 }

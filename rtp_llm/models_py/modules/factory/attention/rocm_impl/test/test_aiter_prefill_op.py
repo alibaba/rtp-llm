@@ -844,7 +844,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
     """Unit tests for small-q dispatch under CUDA graph."""
 
     def _make_impl_with_mocked_prepare(
-        self, input_lengths, is_cuda_graph, need_rope_kv_cache=False
+        self, input_lengths, is_cuda_graph, need_rope_kv_cache=False, is_causal=True
     ):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
@@ -866,6 +866,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
 
         cfg = SimpleNamespace(
             need_rope_kv_cache=need_rope_kv_cache,
+            is_causal=is_causal,
             head_num=8,
             kv_head_num=1,
             size_per_head=8,
@@ -896,16 +897,20 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             observed_pad_query,
         )
 
-    def test_cuda_graph_supports_only_triton_backend(self):
-        for input_lengths, expected_backend in (([4, 1], "triton"), ([5, 1], "batch")):
+    def test_cuda_graph_supports_causal_and_noncausal_backends(self):
+        for width, causal, expected_backend in (
+            (4, True, "triton"),
+            (8, True, "batch"),
+            (1, False, "batch"),
+            (3, False, "batch"),
+            (8, False, "batch"),
+        ):
             with self.subTest(expected_backend=expected_backend):
                 impl, batch_impl, triton_impl, *_ = self._make_impl_with_mocked_prepare(
-                    input_lengths, True
+                    [width, 1], True, is_causal=causal
                 )
                 self.assertEqual(impl.backend, expected_backend)
-                self.assertEqual(
-                    impl.support_cuda_graph(), expected_backend == "triton"
-                )
+                self.assertTrue(impl.support_cuda_graph())
                 selected = triton_impl if expected_backend == "triton" else batch_impl
                 rejected = batch_impl if expected_backend == "triton" else triton_impl
                 selected.prepare.assert_called_once_with(impl.attn_inputs)
@@ -1667,6 +1672,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         from types import SimpleNamespace
 
         op = self._make_op(kv_cache_dtype=KvCacheDataType.FP8)
+        op.is_causal = False
         fp8_dtype = torch.float8_e4m3fn
         kv = torch.randn(16, 2, 4, 16, 128, dtype=torch.float16).to(fp8_dtype)
         q = torch.randn(4, 8, 128, dtype=torch.float16)
@@ -1691,6 +1697,7 @@ class TestCompactGatherReshape(unittest.TestCase):
             return expected, expected
 
         def fake_prefill(query, k_cache, v_cache, *args, **kwargs):
+            self.assertFalse(kwargs["causal"])
             self.assertIs(k_cache, expected)
             self.assertIs(v_cache, expected)
             self.assertIs(kwargs["block_table"], block_table)
@@ -1784,6 +1791,7 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
         head_num: int,
         head_num_kv: int,
         head_dim: int,
+        is_causal=True,
     ) -> torch.Tensor:
         """Per-sequence SDPA reference with prefix-cache causal mask.
 
@@ -1825,7 +1833,8 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
 
             # Compute attention: [H_q, q_len, D] x [H_q, D, kv_len] -> [H_q, q_len, kv_len]
             attn_weights = torch.matmul(q_h, k_h.transpose(-1, -2)) * scale
-            attn_weights.masked_fill_(causal_mask.unsqueeze(0), float("-inf"))
+            if is_causal:
+                attn_weights.masked_fill_(causal_mask.unsqueeze(0), float("-inf"))
             attn_weights = torch.softmax(attn_weights, dim=-1)
             # [H_q, q_len, kv_len] x [H_q, kv_len, D] -> [H_q, q_len, D]
             attn_out = torch.matmul(attn_weights, v_h)
@@ -1847,6 +1856,7 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
         head_num_kv: int,
         head_dim: int,
         tokens_per_block: int,
+        is_causal=True,
     ):
         """Build real paged KV cache, run AiterPrefillAttnOpPaged.forward, compare to SDPA ref.
 
@@ -1949,6 +1959,7 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
 
         # Build operator
         cfg = _make_attn_configs(head_num, head_num_kv, head_dim, tokens_per_block)
+        cfg.is_causal = is_causal
         op = AiterPrefillAttnOpPaged(cfg)
 
         # Construct cu_seqlens
@@ -1993,6 +2004,7 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
             head_num,
             head_num_kv,
             head_dim,
+            is_causal,
         )
 
         # Numerical regression: kernel output must match reference within fp16 tolerance.
@@ -2000,6 +2012,9 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
         self.assertFalse(torch.isinf(actual).any(), "Output contains Inf")
         self.assertEqual(actual.shape, (total_q_tokens, head_num * head_dim))
         torch.testing.assert_close(actual, ref, atol=1e-2, rtol=1e-2)
+
+    def test_noncausal_short_and_long_queries(self):
+        self._run_paged_prefill_e2e(3, [1, 3, 8], [0, 19, 48], 8, 4, 64, 16, is_causal=False)
 
     def test_single_batch_with_prefix(self):
         """Single sequence with prefix cache — simplest paged prefill case."""
