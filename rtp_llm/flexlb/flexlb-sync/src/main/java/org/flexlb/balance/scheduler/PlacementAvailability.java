@@ -72,6 +72,8 @@ public final class PlacementAvailability {
         // the newest version even when an older publication finishes later.
         lastChanged.merge(key, next, Math::max);
         if (key.endpoint() != null) {
+            // Exact waiters follow role/address across topology group changes.
+            lastChanged.merge(PlacementKey.exact(key.role(), null, key.endpoint()), next, Math::max);
             lastChanged.merge(new PlacementKey(key.role(), key.group()), next, Math::max);
         }
         if (key.group() != null) {

@@ -498,30 +498,24 @@ class RequestSchedulerTest {
     }
 
     @Test
-    void endpointConflictNeverLetsSameEndpointSuffixOvertake() throws Exception {
+    void capacityEventRetriesWaitersInOrderAndIngressDoesNotRetryFailures() throws Exception {
         try (CapacityFixture fixture = new CapacityFixture(0, false)) {
             fixture.submitBlockedRequests();
             assertEquals(List.of(), fixture.admitted);
-            assertEquals(1, fixture.requests.get(0).attempts.get());
-            assertEquals(0, fixture.requests.get(1).attempts.get());
-            assertEquals(0, fixture.requests.get(2).attempts.get());
-
+            for (CapacityRequest request : fixture.requests) {
+                assertEquals(1, request.attempts.get(), "every request receives its own placement attempt");
+            }
             fixture.releaseSlots(1);
             fixture.requests.get(0).future.get(5, TimeUnit.SECONDS);
-            assertTrue(fixture.requests.get(1).blockedAttempt.await(5, TimeUnit.SECONDS),
-                    "the next waiter must confirm that the single released slot was consumed");
             fixture.awaitIndependentCommit();
             assertEquals(List.of(820L), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());
-            assertEquals(1, fixture.requests.get(1).attempts.get());
-            assertEquals(0, fixture.requests.get(2).attempts.get(),
-                    "the suffix must remain parked behind the first confirming miss");
-
-            // Another ingress wakeup does not grant capacity or retry the blocked head.
+            assertEquals(2, fixture.requests.get(0).attempts.get());
+            assertEquals(2, fixture.requests.get(1).attempts.get());
+            assertEquals(1, fixture.requests.get(2).attempts.get(), "a confirming failure stops this capacity round");
             fixture.awaitIndependentCommit();
-            assertEquals(1, fixture.requests.get(1).attempts.get());
-            assertEquals(0, fixture.requests.get(2).attempts.get());
-
+            assertEquals(2, fixture.requests.get(1).attempts.get(), "unrelated ingress cannot retry failures");
+            assertEquals(1, fixture.requests.get(2).attempts.get());
             fixture.releaseSlots(2);
             fixture.awaitAllPublished();
             assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
@@ -557,92 +551,41 @@ class RequestSchedulerTest {
             assertEquals(0, fixture.availableSlots.get());
             assertEquals(3, head.attempts.get(),
                     "the stale full observation must trigger a fresh successful admission");
-            assertEquals(1, fixture.requests.get(1).attempts.get());
-            assertEquals(0, fixture.requests.get(2).attempts.get());
+            assertEquals(2, fixture.requests.get(1).attempts.get());
+            assertEquals(1, fixture.requests.get(2).attempts.get());
             fixture.awaitIndependentCommit();
-            assertEquals(1, fixture.requests.get(1).attempts.get(),
-                    "the confirming miss must stop the chain until another capacity edge");
+            assertEquals(2, fixture.requests.get(1).attempts.get(),
+                    "each failed request waits for another capacity edge");
         }
     }
 
     @Test
-    void activeRetryRoutesAcrossFleetWithoutCascadingWhenSourceCapacityIsConsumed() throws Exception {
+    void capacityWakeLetsEveryReadyRequestChooseAnotherWorker() throws Exception {
         try (CapacityFixture fixture = new CapacityFixture(0, false,
                 new CompletableFuture<>(), 1)) {
-            WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
-            when(pin.endpoint()).thenReturn(fixture.endpoint);
-            when(fixture.endpoint.tryPinGeneration()).thenReturn(pin);
-            when(fixture.endpoint.canAcceptRequest()).thenAnswer(
-                    invocation -> fixture.availableSlots.get() > 0);
             fixture.submitBlockedRequests();
-
-            PrefillEndpoint otherFullEndpoint = mockPrefillEndpoint("other-full-prefill", 8080);
-            PlacementKey otherKey = PlacementKey.exact(
-                    RoleType.PREFILL, "g1", "other-full-prefill:8080");
-            List<RouteAdmission> otherRoutes = new ArrayList<>();
-            CountDownLatch confirmingMiss = new CountDownLatch(1);
-            for (CapacityRequest request : fixture.requests.subList(1, 3)) {
-                RouteAdmission otherRoute = mock(RouteAdmission.class);
-                otherRoutes.add(otherRoute);
-                when(otherRoute.prefillEndpoint()).thenReturn(otherFullEndpoint);
-                when(otherRoute.blockedEndpoint()).thenReturn(otherFullEndpoint);
-                when(otherRoute.tryEnqueue(request.context, request.future, fixture.lifecycle))
-                        .thenAnswer(invocation -> {
-                            confirmingMiss.countDown();
-                            return PlacementResult.blocked(otherKey);
-                        });
-                doAnswer(invocation -> PlacementResult.success(
-                        fixture.availableSlots.get() > 0 ? request.route : otherRoute))
-                        .when(fixture.router).select(request.context, null);
+            PrefillEndpoint other = mockPrefillEndpoint("other-prefill", 8080);
+            for (CapacityRequest request : fixture.requests) {
+                RouteAdmission route = mock(RouteAdmission.class);
+                ScheduledRequest item = mock(ScheduledRequest.class);
+                when(item.prefillEp()).thenReturn(other);
+                ServerStatus status = new ServerStatus();
+                status.setRole(RoleType.PREFILL);
+                when(item.prefill()).thenReturn(status);
+                when(route.tryEnqueue(request.context, request.future, fixture.lifecycle)).thenAnswer(i -> {
+                    fixture.admitted.add(request.context.getRequestId());
+                    fixture.pendingReports.add(request);
+                    return PlacementResult.success(item);
+                });
+                when(fixture.router.select(request.context, null)).thenReturn(PlacementResult.success(route));
             }
-
-            CapacityRequest head = fixture.requests.get(0);
-            CapacityRequest second = fixture.requests.get(1);
-            CapacityRequest third = fixture.requests.get(2);
-            fixture.releaseSlots(1);
-            head.future.get(5, TimeUnit.SECONDS);
-            assertTrue(confirmingMiss.await(5, TimeUnit.SECONDS),
-                    "the next active waiter must route again even after the source becomes full");
-            fixture.awaitIndependentCommit();
-            assertEquals(List.of(820L), fixture.admitted);
-            assertEquals(0, fixture.availableSlots.get());
-            verify(fixture.router, times(2)).select(head.context, null);
-            verify(fixture.router, times(2)).select(second.context, null);
-            verify(otherRoutes.get(0), times(1))
-                    .tryEnqueue(second.context, second.future, fixture.lifecycle);
-            verify(fixture.router, times(1)).select(third.context, null);
-            verify(otherRoutes.get(1), never())
-                    .tryEnqueue(third.context, third.future, fixture.lifecycle);
-            assertEquals(0, second.attempts.get(),
-                    "the confirming retry selected another endpoint without publishing to the full source");
-            assertEquals(0, third.attempts.get(),
-                    "the source's remaining suffix must stay parked after one confirming retry");
-            assertFalse(second.future.isDone());
-            assertFalse(third.future.isDone());
-
-            // Unrelated ingress cannot restart either exact endpoint's retry chain.
-            fixture.awaitIndependentCommit();
-            verify(fixture.router, times(2)).select(second.context, null);
-            verify(fixture.router, times(1)).select(third.context, null);
-
-            // The second waiter now owns the other endpoint's blocker. Its exact
-            // edge must wake it before the source's suffix consumes the new slots.
-            fixture.availableSlots.addAndGet(2);
-            fixture.availability.capacityChanged(otherKey);
-            second.future.get(5, TimeUnit.SECONDS);
-            fixture.awaitIndependentCommit();
-            assertEquals(List.of(820L, 821L), fixture.admitted);
-            assertEquals(1, fixture.availableSlots.get());
-            verify(fixture.router, times(3)).select(second.context, null);
-            verify(fixture.router, times(1)).select(third.context, null);
-            assertFalse(third.future.isDone());
-
             fixture.availability.capacityChanged(fixture.key);
             fixture.awaitAllPublished();
             assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
-            assertEquals(0, fixture.availableSlots.get());
-            verify(fixture.router, times(3)).select(second.context, null);
-            verify(fixture.router, times(2)).select(third.context, null);
+            assertEquals(0, fixture.availableSlots.get(), "the original worker stayed full");
+            for (CapacityRequest request : fixture.requests) {
+                assertEquals(1, request.attempts.get(), "no retry returned to the full worker");
+            }
         }
     }
 
@@ -663,7 +606,7 @@ class RequestSchedulerTest {
             assertEquals(0, fixture.availableSlots.get());
             assertEquals(1, fixture.requests.get(0).attempts.get(),
                     "the cancelled active request must not consume the released slot");
-            assertEquals(1, fixture.requests.get(2).attempts.get());
+            assertEquals(2, fixture.requests.get(2).attempts.get());
         }
     }
 
@@ -699,8 +642,7 @@ class RequestSchedulerTest {
                 fixture.scheduler.submit(second.context);
                 allowPublication.countDown();
                 second.future.get(5, TimeUnit.SECONDS);
-                // The independent endpoint and the retry chain have separate
-                // scan turns; verify the handoff without another event or callback.
+                // Ready waiters progress without another event or completion callback.
                 fixture.requests.get(1).future.get(5, TimeUnit.SECONDS);
                 assertEquals(1, callbacks.size(), "handoff must not rely on running completion callbacks");
                 Runnable callback;
@@ -1002,8 +944,7 @@ class RequestSchedulerTest {
             doAnswer(invocation -> {
                 if (closes.incrementAndGet() == 1
                         && request.primaryEndpoint && requestId != 820L) {
-                    // Followers close their first plan only after the endpoint
-                    // conflict has parked them behind the initially full head.
+                    // Followers have finished their initial unsuccessful placement.
                     followersParked.countDown();
                 }
                 return null;

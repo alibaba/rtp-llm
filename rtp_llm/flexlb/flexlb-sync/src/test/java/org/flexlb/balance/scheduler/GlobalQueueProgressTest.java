@@ -1,8 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import static org.mockito.ArgumentMatchers.eq;
-
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
@@ -18,8 +15,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -29,7 +24,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongConsumer;
 
@@ -92,6 +86,19 @@ class GlobalQueueProgressTest {
         }
     }
 
+    @Test
+    void admissionFailureDoesNotFenceSmallerRequestOnTheSameWorker() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.aSlots.set(1);
+            f.admissionBlocked.add(1L);
+            f.submit(1, "a");
+            f.submit(2, "a");
+            awaitCondition(() -> f.admitted.contains(2L));
+            assertFalse(f.admitted.contains(1L));
+            assertEquals(1, f.scheduler.getQueuedRequestCount());
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         private final PlacementAvailability availability = new PlacementAvailability();
@@ -101,6 +108,7 @@ class GlobalQueueProgressTest {
         private final Set<Long> selected = ConcurrentHashMap.newKeySet();
         private final Set<Long> admitted = ConcurrentHashMap.newKeySet();
         private final List<Long> admissionOrder = new CopyOnWriteArrayList<>();
+        private final Set<Long> admissionBlocked = ConcurrentHashMap.newKeySet();
         private final Set<Long> decodeBlocked = ConcurrentHashMap.newKeySet();
         private volatile LongConsumer onSelection = ignored -> { };
         private final RequestScheduler scheduler;
@@ -124,8 +132,7 @@ class GlobalQueueProgressTest {
             when(router.queueAdmissionRole()).thenReturn(role);
             when(router.resolvePolicyGroup(any())).thenAnswer(i -> groups.get(((BalanceContext) i.getArgument(0)).getRequestId()));
             EndpointRegistry endpoints = mock(EndpointRegistry.class);
-            PrefillRoutingEntry a = endpoint("a", 0);
-            PrefillRoutingEntry b = endpoint("b", 1);
+            PrefillRoutingEntry a = endpoint("a");
             RequestRegistry lifecycle = mock(RequestRegistry.class);
             when(lifecycle.register(any())).thenAnswer(i -> {
                 BalanceContext context = i.getArgument(0);
@@ -152,6 +159,9 @@ class GlobalQueueProgressTest {
                 when(item.prefill()).thenReturn(status);
                 when(item.prefillEp()).thenReturn(a.endpoint());
                 when(route.tryEnqueue(any(), any(), any())).thenAnswer(commit -> {
+                    if (admissionBlocked.contains(id)) {
+                        return PlacementResult.blocked(PlacementKey.exact(role, "a", "a:8000"));
+                    }
                     admissionOrder.add(id);
                     admitted.add(id);
                     return PlacementResult.success(item);
@@ -176,14 +186,13 @@ class GlobalQueueProgressTest {
             scheduler.closePlacement();
         }
 
-        private static PrefillRoutingEntry endpoint(String group, long slots) {
+        private static PrefillRoutingEntry endpoint(String group) {
             PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
             WorkerStatus status = mock(WorkerStatus.class);
             WorkerStatus.TopologySnapshot topology = mock(WorkerStatus.TopologySnapshot.class);
             when(status.topologySnapshot()).thenReturn(topology);
             when(topology.group()).thenReturn(group);
             when(endpoint.getStatus()).thenReturn(status);
-            when(endpoint.availableRequestSlots()).thenReturn(slots);
             return new PrefillRoutingEntry(group + ":8000", endpoint);
         }
     }

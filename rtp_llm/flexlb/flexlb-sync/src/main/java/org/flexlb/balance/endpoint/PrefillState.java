@@ -1823,12 +1823,6 @@ public final class PrefillState {
         return outstandingRequestCount < requestLimit;
     }
 
-    /** Unreserved request seats in the published ownership summary. */
-    public long availableRequestSlots(long requestLimit) {
-        return requestLimit <= 0L ? Long.MAX_VALUE
-                : Math.max(0L, requestLimit - outstandingRequestCount);
-    }
-
     private boolean canAcceptRequestUnderLock(long maxOutstandingRequests) {
         requireLock();
         return requests.size() < maxOutstandingRequests

@@ -84,13 +84,12 @@ class PrefillRequestCapacityTest {
         var second = reserve(item(2), 2L).reservation();
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 1L).status());
         assertEquals(2L, state.observedRequestCount());
-        assertEquals(0L, state.availableRequestSlots(1L));
-        assertEquals(3L, state.availableRequestSlots(5L));
-        assertEquals(Long.MAX_VALUE, state.availableRequestSlots(0L));
+        assertFalse(state.canAcceptRequest(1L));
+        assertTrue(state.canAcceptRequest(5L));
         first.close();
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 1L).status());
         second.close();
-        assertEquals(1L, state.availableRequestSlots(1L));
+        assertTrue(state.canAcceptRequest(1L));
         assertNotNull(reserve(item(3), 1L).reservation());
     }
 
