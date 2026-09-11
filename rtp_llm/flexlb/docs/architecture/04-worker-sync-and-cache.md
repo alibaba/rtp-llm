@@ -178,8 +178,9 @@ hash 不同），路由侧统一用 `blockSize × 匹配块数` 折算 token，�
   的 `blockSize` + `blockHashLookaheadTokens` 刷新，不可用时保留上次有效值。
 - 执行：`BlockHashExecutor` 专用线程池（默认 core 8 / max 32 / 队列 16384，
   `flexlb.block-hash.*` 可调），出队等待/执行耗时指标，完成后 `publishOn(parallel)` 不占
-  hash 线程。调度请求必须提供 `block_cache_keys` 或 `input_ids` 至少一种；前者直接采用不再
-  计算，后者由 Master 按当前 worker hash 配置生成，两者都为空时返回 `INVALID_REQUEST`。
+  hash 线程。非空 `block_cache_keys` 直接采用，不再计算；未提供 key 但提供 `input_ids` 时由
+  Master 按当前 worker hash 配置生成；两者都为空时按零 cache block 继续路由，以兼容不足一个
+  完整 block 的请求。
 - Local Standby 块大小与主请求不同时，由 `LocalStandbyHashService`（低优先级独立线程池 +
   Caffeine 60s 结果缓存）异步补算，路由只等主 hash；主 hash 与 standby 共用同一个
   `BlockHashStrategy` bean。
