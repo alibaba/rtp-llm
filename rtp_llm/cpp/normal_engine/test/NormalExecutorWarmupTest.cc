@@ -30,6 +30,7 @@ struct ModelInitSnapshot {
     std::vector<int32_t> layer_to_group;
     bool                 has_cache;
     bool                 graph_enabled;
+    bool                 prefill_memory_warmup;
 };
 
 class NormalExecutorWarmupTest: public DeviceTestBase {
@@ -81,7 +82,8 @@ protected:
                                  params.kv_cache_group_num,
                                  params.kv_cache_layer_to_group,
                                  params.kv_cache_layer_layout.has_value(),
-                                 params.hw_kernel_config.enable_cuda_graph});
+                                 params.hw_kernel_config.enable_cuda_graph,
+                                 params.prefill_memory_warmup});
             return std::make_unique<MockModel>(vocab_size);
         };
     }
@@ -157,6 +159,8 @@ TEST_F(NormalExecutorWarmupTest, PrefillWarmupAndRealExecutorReceiveTheSameGeome
         EXPECT_EQ(snapshots[0].layer_to_group, snapshots[1].layer_to_group);
         EXPECT_TRUE(snapshots[0].graph_enabled);
         EXPECT_TRUE(snapshots[1].graph_enabled);
+        EXPECT_TRUE(snapshots[0].prefill_memory_warmup);
+        EXPECT_FALSE(snapshots[1].prefill_memory_warmup);
     }
 }
 
@@ -182,6 +186,7 @@ TEST_F(NormalExecutorWarmupTest, TypedCacheGeometryReachesModelAndGathererWithou
     ASSERT_EQ(snapshots.size(), 1u);
     EXPECT_FALSE(snapshots[0].has_cache);
     EXPECT_TRUE(snapshots[0].graph_enabled);
+    EXPECT_TRUE(snapshots[0].prefill_memory_warmup);
     EXPECT_EQ(snapshots[0].tokens, 256u);
     EXPECT_EQ(snapshots[0].kernel_tokens, 128u);
     EXPECT_EQ(snapshots[0].groups, config.groupNums());

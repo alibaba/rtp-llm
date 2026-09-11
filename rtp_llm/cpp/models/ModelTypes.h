@@ -64,6 +64,9 @@ struct GptModelInitParams {
     // input_hiddens.
     int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
+    // Temporary prefill executor used to size memory before KV allocation.
+    // Its graph capture belongs to the subsequent cache-backed executor.
+    bool prefill_memory_warmup = false;
 };
 
 enum GptModelInputIndex : size_t {

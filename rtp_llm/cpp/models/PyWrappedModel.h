@@ -113,6 +113,7 @@ private:
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void holdInputsHostBuffers(const GptModelInputs& inputs);
+    void validateWarmupInputs(const GptModelInputs& inputs) const;
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
@@ -132,6 +133,7 @@ private:
     py::object                         py_forward_method_;
     py::object                         held_attn_pyobj_;
     bool                               enable_cuda_graph_{false};
+    const bool                         prefill_memory_warmup_{false};
     bool                               is_prefill_cuda_graph_mode_{false};
     bool                               use_spec_decoding_{false};
     bool                               has_mtp_hidden_buffer_{false};
@@ -178,6 +180,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     description_(params.description),
     cache_manager_(params.cache_manager),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph),
+    prefill_memory_warmup_(params.prefill_memory_warmup),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
@@ -186,6 +189,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    if (prefill_memory_warmup_) {
+        RTP_LLM_CHECK_WITH_INFO(!params.kv_cache_layer_layout.has_value() && !params.cache_manager
+                                    && !is_prefill_cuda_graph_mode && dspark_model_role == DSparkModelRole::NONE,
+                                "prefill memory warmup must use a temporary target model without KV storage");
+        RTP_LLM_LOG_INFO("Prefill memory warmup uses eager prefill before KV allocation; CUDA graph requested=%d, "
+                         "capture is deferred to the subsequent cache-backed executor",
+                         static_cast<int>(enable_cuda_graph_));
+    }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
 #if USING_CUDA
@@ -284,22 +295,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
-    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                      "forward";
-    py_forward_method_             = py_model_.attr(forward_method);
-    const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
-    const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
-                                             || py_model_class_name == "DeepSeekV4MtpModel"
-                                             || py_model_class_name == "DeepSeekV4DSparkModel";
-    if (enable_cuda_graph_ && is_deepseek_v4_python_model && !params.kv_cache_layer_layout.has_value()) {
-        RTP_LLM_LOG_WARNING(
-            "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
-            "CacheManager is initialized.");
-        enable_cuda_graph_ = false;
-    }
+    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                  "forward";
+    py_forward_method_         = py_model_.attr(forward_method);
     if (enable_cuda_graph_) {
-#if USING_CUDA || USING_ROCM
         // CUDA graph capture stamps tokens_per_block / kernel_tokens_per_block
         // into GraphParams below; a 0 here propagates into every captured
         // graph and is impossible to recover from. Mirror the check
@@ -310,6 +310,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                 "from CacheConfig; got tokens_per_block=%zu kernel_tokens_per_block=%zu",
                                 params.tokens_per_block,
                                 params.kernel_tokens_per_block);
+    }
+    if (enable_cuda_graph_ && !prefill_memory_warmup_) {
+#if USING_CUDA || USING_ROCM
+        RTP_LLM_CHECK_WITH_INFO(is_prefill_cuda_graph_mode || params.kv_cache_layer_layout.has_value(),
+                                "decode CUDA graph capture requires allocated KV storage; only explicit prefill "
+                                "memory warmup may defer capture");
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
         // Create GraphParams from individual config fields

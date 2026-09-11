@@ -166,7 +166,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          kv_cache_layer_to_group,
          cache_manager,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter      = metrics_reporter_;
+    model_init_params.prefill_memory_warmup = prefill_warmup_cache_config != nullptr;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");

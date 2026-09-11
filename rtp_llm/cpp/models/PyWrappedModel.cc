@@ -480,6 +480,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 }
 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
+    validateWarmupInputs(inputs);
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
 
     // d2d_copies_ accumulates across all micro-batches before one fusedCopy().
@@ -588,7 +589,16 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
     prepareAttentionInputs(inputs, false);
 }
 
+void PyWrappedModel::validateWarmupInputs(const GptModelInputs& inputs) const {
+    if (prefill_memory_warmup_) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.warmup && inputs.sequence_lengths.defined()
+                                    && inputs.sequence_lengths.numel() == 0,
+                                "temporary prefill memory warmup model cannot execute decode or serving requests");
+    }
+}
+
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
+    validateWarmupInputs(inputs);
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
@@ -637,7 +647,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     auto empty_tensor    = torch::Tensor();
     auto py_model_inputs = PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{});
 
-    if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+    if (enable_cuda_graph_ && !prefill_memory_warmup_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
     }
@@ -669,7 +679,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 
     // CUDA-graph case: refresh the captured held buffers + FlashInfer plan
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
-    if (enable_cuda_graph_) {
+    if (enable_cuda_graph_ && !prefill_memory_warmup_) {
         auto empty_tensor    = torch::Tensor();
         auto py_model_inputs = PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{});
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
@@ -679,6 +689,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    validateWarmupInputs(inputs);
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
@@ -759,7 +770,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+        if (enable_cuda_graph_ && !prefill_memory_warmup_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
             RTP_LLM_LOG_DEBUG(

@@ -96,6 +96,19 @@ cc_test(
 )
 
 cc_test(
+    name = "py_wrapped_model_warmup_test",
+    srcs = ["PyWrappedModelWarmupTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+    ] + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "async_runner_test",
     srcs = [
         "AsyncRunnerTest.cc",
