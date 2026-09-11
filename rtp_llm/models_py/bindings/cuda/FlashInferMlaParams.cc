@@ -688,7 +688,8 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
     // allocator churn.
     const int page_num_upper = batch_size * max_blocks_per_bs;
     const int input_token_num_upper =
-        std::max(MIN_CACHE_INPUT_TOKEN_NUM, batch_size * max_blocks_per_bs * seq_size_per_block);
+        std::max(MIN_CACHE_INPUT_TOKEN_NUM,
+                 has_prefix ? batch_size * max_blocks_per_bs * seq_size_per_block : input_batch_size);
     const int64_t page_table_token_capacity =
         static_cast<int64_t>(input_batch_size) * max_blocks_per_bs * seq_size_per_block;
     RTP_LLM_CHECK_WITH_INFO(input_token_count >= 0 && input_token_count <= page_table_token_capacity,

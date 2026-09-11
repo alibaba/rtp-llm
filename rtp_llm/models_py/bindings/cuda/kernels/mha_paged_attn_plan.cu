@@ -33,6 +33,13 @@ __global__ void mhaPagedAttnPlanKernel(const int32_t* __restrict__ input_lengths
 
     const int tid = threadIdx.x;
 
+    // Clear decode capacity before writing the compact active-token prefix.
+    // A smaller replay must not expose positions from the preceding batch.
+    if (!prefix_lengths && tid < input_batch_size) {
+        batch_indice[tid] = 0;
+        positions[tid]    = 0;
+    }
+
     if (tid < planned_batch_size) {
         const bool has_input  = tid < input_batch_size;
         int32_t    input_len  = 0;
@@ -42,7 +49,7 @@ __global__ void mhaPagedAttnPlanKernel(const int32_t* __restrict__ input_lengths
             input_len  = has_input ? input_lengths[tid] : 0;
             prefix_len = has_input ? prefix_lengths[tid] : 0;
             seq_len    = input_len + prefix_len;
-        } else if (has_input) {
+        } else if (has_input && input_lengths[tid] > 0) {
             // Decode mode: one new token per batch; positions[tid] is the
             // 0-indexed slot for that new token (== previous sequence length).
             input_len = 1;
@@ -86,7 +93,7 @@ __global__ void mhaPagedAttnPlanKernel(const int32_t* __restrict__ input_lengths
                 batch_indice[t_start + j] = tid;
                 positions[t_start + j]    = j + prefix_len;
             }
-        } else if (has_input) {
+        } else if (input_len > 0) {
             // Decode: single token at the next sequence position.
             batch_indice[t_start] = tid;
             positions[t_start]    = sequence_lengths[tid];
@@ -94,7 +101,7 @@ __global__ void mhaPagedAttnPlanKernel(const int32_t* __restrict__ input_lengths
 
         if (kv_cache_block_id) {
             const bool has_real_kv =
-                has_input && (prefix_lengths ? input_lengths[tid] + prefix_lengths[tid] > 0 : true);
+                has_input && (prefix_lengths ? input_lengths[tid] + prefix_lengths[tid] > 0 : input_len > 0);
             if (!has_real_kv) {
                 // Page 0 belongs to the same cache allocation and is safe for
                 // ignored graph-padding output. Do not read a nonexistent
