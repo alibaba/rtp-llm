@@ -226,6 +226,29 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             endpoint_module.resolve_world_info.call_args.kwargs["require_manifest"]
         )
 
+    def test_server_config_ip_follows_restored_pod_identity(self):
+        configs = NS(server_config=NS(ip="192.0.2.10"))
+        observed = []
+        lifecycle = TemplateLifecycle()
+        lifecycle.register("server-config", scr._ServerConfigTemplateHook(configs))
+        # A hook registered afterwards must observe the refreshed value.
+        lifecycle.register(
+            "consumer",
+            CallbackHook(fixup=lambda _g: observed.append(configs.server_config.ip)),
+        )
+        lifecycle.prepare_for_template("g1", "restore")
+        runtime.fixup_runtime_after_restore(
+            "g1", lifecycle, restore_env={"RequestedIP": "192.0.2.20"}
+        )
+        self.assertEqual(configs.server_config.ip, "192.0.2.20")
+        self.assertEqual(observed, ["192.0.2.20"])
+        # A repeat restore of the same generation must re-read the new Pod IP.
+        lifecycle.prepare_for_template("g1", "restore")
+        runtime.fixup_runtime_after_restore(
+            "g1", lifecycle, restore_env={"RequestedIP": "192.0.2.30"}
+        )
+        self.assertEqual(configs.server_config.ip, "192.0.2.30")
+
     def test_native_or_component_fixup_failure_blocks_normal_release(self):
         for fail_native in (True, False):
             with self.subTest(fail_native=fail_native):

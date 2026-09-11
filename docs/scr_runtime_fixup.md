@@ -71,7 +71,8 @@ Epsilon 屏障成功返回
 | BackendRPCServerVisitor.source_ip | 构造时复制 server_config.ip；本次把身份刷新从 local-comm 扩展到所有走此模板入口的拓扑 | 地址成员仍由 endpoint manifest 决定；不把请求来源 IP 当作 rank 地址 |
 | Cache-store 对外地址与本机 loopback 通信 | 本次让 local-comm 的对外广告复用同一轮 Pod 身份；显式 manifest 地址保留 | 验收继续要求实际跨 Pod KV 传输 |
 | RemoteRpcServer.process_id_ / peer / cache-store | 现有代码延迟到 release 才读取 IP/PID、初始化 peer 和 transport | 不等于任意已运行通信对象都支持重建 |
-| ServerConfig.ip、DistributedServer.worker_info / TCPStore / NCCL 配置 | 多处启动时缓存；现有模板路径通过 endpoint manifest 和限定的 loopback 模式处理主要服务地址 | 不能把 manifest 更新等同于现存 TCPStore/NCCL 通信器都已重建；多节点和运行中 checkpoint 需要单独验证 |
+| ServerConfig.ip | 构造时缓存，前端请求 ID 机器位等消费者直接读取该字段；本次新增 server-config 模板 hook，在统一入口按本轮 Pod 身份刷新，插在 release 之前 | 仍需完整镜像与真实 restore 验收；确认没有其他启动期副本未刷新 |
+| DistributedServer.worker_info / TCPStore / NCCL 配置 | 多处启动时缓存；现有模板路径通过 endpoint manifest 和限定的 loopback 模式处理主要服务地址 | 不能把 manifest 更新等同于现存 TCPStore/NCCL 通信器都已重建；多节点和运行中 checkpoint 需要单独验证 |
 | HostService / VipServerWrapper.hosts / MasterService 路由快照与线程 | 构造阶段会发现地址并缓存，MasterService 创建刷新线程；本轮未看到这些类自身的完整模板 prepare/fixup/release 实现 | 明确列为后续审计项；周期刷新不能代替恢复前暂停、恢复后刷新、就绪门禁 |
 | MasterClient._channels | 按 target 缓存异步 gRPC channel，惰性创建 | seed 未接流量可减少捕获连接；运行中 checkpoint 必须处理已有 channel 的关闭/重建 |
 | GrammarValidator 沙箱池 | 现有 prepare 清理子进程与连接、release 恢复池目标 | 属于资源生命周期修复，不能用 env/string 刷新替代 |

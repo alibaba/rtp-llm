@@ -204,6 +204,41 @@ def register_backend_visitor_template_hook(visitor: Any, py_env_configs: Any) ->
         _BackendVisitorTemplateHook(visitor, py_env_configs),
     )
 
+
+class _ServerConfigTemplateHook:
+    """Re-derive ``ServerConfig.ip`` from the current Pod on every restore.
+
+    ``ServerConfig.ip`` is a plain attribute copied into consumers at startup
+    (frontend request-id machine bits, log lines). CRIU restores it with the
+    seed value, so refresh it after the unified identity fixup and before the
+    process releases into serving.
+    """
+
+    def __init__(self, py_env_configs: Any) -> None:
+        self.configs = py_env_configs
+
+    def prepare_for_template(self, generation: str) -> None:
+        return None
+
+    def restore_fixup(self, generation: str) -> None:
+        identity = get_restore_runtime_identity()
+        if identity is None or identity.generation != generation:
+            return
+        self.configs.server_config.ip = identity.pod_ip
+
+    def release_template(self, generation: str) -> None:
+        return None
+
+    def abort_template(self, generation: str) -> None:
+        return None
+
+
+def register_server_config_template_hook(py_env_configs: Any) -> None:
+    get_template_lifecycle().register(
+        f"server-config:{id(py_env_configs)}",
+        _ServerConfigTemplateHook(py_env_configs),
+    )
+
 # ``RTPLLM_ENABLE_SCR`` is RTP-LLM's own participation switch.  ``SCR_ENABLE``
 # and ``SCR_PHASE`` are external control-plane inputs and are never derived or
 # mutated here. Checkpoint versus restore is chosen by the controller/platform.
