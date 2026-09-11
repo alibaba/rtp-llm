@@ -7,7 +7,11 @@ and V4.1 attention driver are connected. V4's ratio dispatch is incompatible.
 import torch
 
 from rtp_llm.config.dsv41_config import V41Config
-from rtp_llm.config.dsv41_weights import build_v41_manifest, validate_inventory
+from rtp_llm.config.dsv41_weights import (
+    V41TensorSpec,
+    build_v41_manifest,
+    validate_inventory,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.model_weight_info import (
@@ -24,7 +28,57 @@ def _wo_a_bf16(tensors):
     return dequantize_block32(tensors[0], tensors[1])
 
 
+_CHECKPOINT_DTYPES = {
+    "BF16": torch.bfloat16,
+    "F32": torch.float32,
+    "I8": torch.int8,
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E8M0": torch.float8_e8m0fnu,
+}
+
+
+class V41AtomicWeight(AtomicWeight):
+    """Already EP-selected weights with the checkpoint's exact tensor layout."""
+
+    def __init__(self, name, specs: list[V41TensorSpec], process_fun, data_type):
+        if not name.startswith("v41.") or not specs:
+            raise ValueError("V4.1 atomic weights need their checkpoint specifications")
+        if any(spec.placement == "host_shared" for spec in specs):
+            raise ValueError("Engram tables must use the host-shared loader")
+        self.specs = tuple(specs)
+        super().__init__(
+            name,
+            [CkptWeightInfo(spec.name, identity) for spec in specs],
+            process_fun,
+            data_type=data_type,
+        )
+
+    def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
+        tensors = []
+        for spec in self.specs:
+            values = tensor_source.load_tensor(spec.name, None)
+            if len(values) != 1:
+                raise ValueError(f"{spec.name}: expected one checkpoint tensor")
+            value = values[0]
+            if (
+                tuple(value.shape) != spec.shape
+                or value.dtype != _CHECKPOINT_DTYPES[spec.dtype]
+            ):
+                raise ValueError(f"{spec.name}: checkpoint shape or dtype mismatch")
+            tensors.append(value.to(device))
+        # Unlike the generic loader, do not reshape 1D mHC scales or cast a
+        # paired FP8 weight/UE8M0 scale to one output dtype before conversion.
+        return {self.name: self.process_fun(tensors).to(self.data_type)}
+
+    def _split(self, tensor, load_config):
+        if load_config.tp_size != 1:
+            raise ValueError("V4.1 tensor descriptors require attention TP1")
+        return tensor if isinstance(tensor, dict) else {self.name: tensor}
+
+
 class DeepSeekV41Weight(ModelDeployWeightInfo):
+    supports_fastsafetensors = False
+
     def _process_meta(self, meta_dict, weight_keys):
         validate_inventory(
             build_v41_manifest(self.model_config.dsv41_config), weight_keys
@@ -58,13 +112,6 @@ class DeepSeekV41Weight(ModelDeployWeightInfo):
             "head.weight": W.lm_head,
             "norm.weight": W.final_ln_gamma,
         }
-        dtypes = {
-            "BF16": torch.bfloat16,
-            "F32": torch.float32,
-            "I8": torch.int8,
-            "F8_E4M3": torch.float8_e4m3fn,
-            "F8_E8M0": torch.float8_e8m0fnu,
-        }
         for name, spec in specs.items():
             if name.startswith("mtp.") or spec.placement == "host_shared":
                 continue
@@ -76,21 +123,32 @@ class DeepSeekV41Weight(ModelDeployWeightInfo):
                 local = config.text["n_routed_experts"] // self.ep_size
                 if not self.ep_rank * local <= expert < (self.ep_rank + 1) * local:
                     continue
-            source_weights = [CkptWeightInfo(name, identity)]
+            source_specs = [spec]
             process = identity
-            dtype = dtypes[spec.dtype]
+            dtype = _CHECKPOINT_DTYPES[spec.dtype]
             if spec.conversion == "dequantize_bf16":
-                source_weights.append(
-                    CkptWeightInfo(name.removesuffix(".weight") + ".scale", identity)
-                )
+                source_specs.append(specs[name.removesuffix(".weight") + ".scale"])
                 process, dtype = _wo_a_bf16, torch.bfloat16
             elif spec.conversion in ("fp32_logits", "fp32_norm"):
                 dtype = torch.float32
             is_layer = name.startswith("layers.")
+            if (
+                is_layer
+                and config.text["compress_ratios"][int(parts[1])] == 2
+                and ".".join(parts[2:])
+                in ("attn.compressor.wkv.weight", "attn.compressor.wgate.weight")
+            ):
+                dtype = torch.float32
             key = "v41." + (".".join(parts[2:]) if is_layer else name)
-            descriptor = AtomicWeight(
-                aliases.get(name, key), source_weights, process, data_type=dtype
-            )
+            if name in aliases:
+                descriptor = AtomicWeight(
+                    aliases[name],
+                    [CkptWeightInfo(name, identity)],
+                    process,
+                    data_type=dtype,
+                )
+            else:
+                descriptor = V41AtomicWeight(key, source_specs, process, dtype)
             if is_layer:
                 layers[int(parts[1])].append(descriptor)
             else:

@@ -248,7 +248,15 @@ class ModelLoader:
         return model_weights
 
     def _load_weight(self, device: str):
-        load_method = self._load_method
+        load_method = LoadMethod(self._load_method.lower())
+        if not self._weights_info.supports_fastsafetensors:
+            if load_method == LoadMethod.FASTSAFETENSORS:
+                raise ValueError(
+                    f"{type(self._weights_info).__name__} requires selective tensor loading; "
+                    "fastsafetensors stages whole shards, including host-shared weights"
+                )
+            if load_method == LoadMethod.AUTO:
+                load_method = LoadMethod.SCRATCH
         if load_method == LoadMethod.AUTO:
             is_safetensor = self._load_config.database.is_safetensor
             convert_device = self._choose_weight_convert_device(device)

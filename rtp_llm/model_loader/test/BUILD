@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_v41_weight_loading",
+    srcs = ["test_v41_weight_loading.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"DSV41_OWNER_COMPRESSOR": "1"},
+    tags = ["manual", "requires-dsv41-weights"],
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,

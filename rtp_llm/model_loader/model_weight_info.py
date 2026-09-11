@@ -100,6 +100,7 @@ class ModelWeightInfo:
 
 
 class ModelDeployWeightInfo:
+    supports_fastsafetensors = True
 
     TRT_ENGINE_LAYER_WEIGHT_MAP = {
         W.pre_ln_beta: "transformer.layers.{i}.input_layernorm.bias",
