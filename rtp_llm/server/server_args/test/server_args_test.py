@@ -20,6 +20,23 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_disable_access_log_binds_to_runtime_vit_config(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for env_value, cli_args, expected in (
+            (None, [], False),
+            ("true", [], True),
+            (None, ["--disable_access_log", "true"], True),
+            ("true", ["--disable_access_log", "false"], False),
+        ):
+            with self.subTest(env_value=env_value, cli_args=cli_args):
+                os.environ.clear()
+                if env_value is not None:
+                    os.environ["DISABLE_ACCESS_LOG"] = env_value
+                sys.argv = ["prog", *cli_args]
+                configs = setup_args()
+                self.assertEqual(configs.vit_config.disable_access_log, expected)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
