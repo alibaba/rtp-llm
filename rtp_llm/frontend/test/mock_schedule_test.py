@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 from fastapi import FastAPI, HTTPException
 from rtp_llm.frontend.mock_schedule import register_mock_schedule
+from rtp_llm.utils.concurrency_controller import ConcurrencyController
 
 
 class MockScheduleTest(unittest.IsolatedAsyncioTestCase):
@@ -24,7 +25,7 @@ class MockScheduleTest(unittest.IsolatedAsyncioTestCase):
                 server_config=SimpleNamespace(ip="127.0.0.1", server_port=22910)
             ),
             server_id="test",
-            _global_controller=SimpleNamespace(increment=lambda: 1),
+            _global_controller=ConcurrencyController(1),
         )
         app = FastAPI()
 
@@ -34,6 +35,11 @@ class MockScheduleTest(unittest.IsolatedAsyncioTestCase):
         register_mock_schedule(app, self.frontend, track)
         self.schedule = next(
             r.endpoint for r in app.routes if r.path == "/internal/mock/schedule"
+        )
+
+    def tearDown(self):
+        self.assertEqual(
+            self.frontend._global_controller.get_available_concurrency(), 1
         )
 
     async def accept(self, request):

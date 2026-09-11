@@ -48,42 +48,46 @@ def register_mock_schedule(app, frontend, track):
                 raise HTTPException(422, "invalid token plan or schedule budget")
             if len(tokens) + output > worker.backend_rpc_server_visitor.max_seq_len:
                 raise HTTPException(422, "token plan exceeds max_seq_len")
-            config = frontend.py_env_configs.server_config
-            rid = generate_request_id(
-                config.ip,
-                config.server_port,
-                frontend.server_id,
-                frontend._global_controller.increment() % 4096,
-            )
-            request = GenerateInput(
-                request_id=rid,
-                token_ids=torch.tensor(tokens, dtype=torch.int32),
-                mm_inputs=[],
-                generate_config=GenerateConfig(
-                    max_new_tokens=output, timeout_ms=timeout, qos_priority=priority
-                ),
-                headers={"x-dashscope-inner-qos-level": str(priority)},
-            )
-            visitor = worker.backend_rpc_server_visitor
-            visitor.fill_request_info(request)
-            start = time.monotonic()
-            # Use the production token hash / master client path, with no domain fallback,
-            # engine RPC, stream reader, retries or generated completion response.
-            failed = await visitor.get_master_route_addrs(request)
-            if failed is not None:
-                raise HTTPException(503, "master unavailable")
-            if not request.enqueued_by_master:
-                raise HTTPException(409, "schedule-only requires BATCH enqueue")
-            return JSONResponse(
-                status_code=202,
-                content={
-                    "status": "accepted",
-                    "request_id": str(rid),
-                    "enqueued_by_master": True,
-                    "fetch_output_stream": False,
-                    "inference_completed": False,
-                    "schedule_ms": (time.monotonic() - start) * 1000,
-                },
-            )
+            sequence = frontend._global_controller.increment()
+            try:
+                config = frontend.py_env_configs.server_config
+                rid = generate_request_id(
+                    config.ip,
+                    config.server_port,
+                    frontend.server_id,
+                    sequence % 4096,
+                )
+                request = GenerateInput(
+                    request_id=rid,
+                    token_ids=torch.tensor(tokens, dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(
+                        max_new_tokens=output, timeout_ms=timeout, qos_priority=priority
+                    ),
+                    headers={"x-dashscope-inner-qos-level": str(priority)},
+                )
+                visitor = worker.backend_rpc_server_visitor
+                visitor.fill_request_info(request)
+                start = time.monotonic()
+                # Use the production token hash / master client path, with no domain fallback,
+                # engine RPC, stream reader, retries or generated completion response.
+                failed = await visitor.get_master_route_addrs(request)
+                if failed is not None:
+                    raise HTTPException(503, "master unavailable")
+                if not request.enqueued_by_master:
+                    raise HTTPException(409, "schedule-only requires BATCH enqueue")
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "status": "accepted",
+                        "request_id": str(rid),
+                        "enqueued_by_master": True,
+                        "fetch_output_stream": False,
+                        "inference_completed": False,
+                        "schedule_ms": (time.monotonic() - start) * 1000,
+                    },
+                )
+            finally:
+                frontend._global_controller.decrement()
 
         return await track(call)
