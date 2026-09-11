@@ -120,12 +120,21 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                 "pipeline parallelism does not support FFN disaggregation");
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size == 1,
                                 "pipeline parallelism does not support data parallelism");
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.ep_size == 1,
-                                "pipeline parallelism does not support expert parallelism");
+        // PP+EP stays refused except for the one resolved, explicitly-enabled
+        // CP4EP4PP2 shape (pp2 x dp1 x tp4 x ep4 on 8 ranks). The predicate is
+        // exact on purpose; see ParallelismConfig::pp_ep_experimental_ok. The
+        // Python config layer does the full validation against RankLayout and
+        // mirrors the result here, so this is defense-in-depth, not the parser.
+        RTP_LLM_CHECK_WITH_INFO(
+            parallelism_config.ep_size == 1 || parallelism_config.pp_ep_experimental_ok(),
+            "pipeline parallelism does not support expert parallelism (ep_size=%ld); the "
+            "experimental CP4EP4PP2 path requires pp2/dp1/tp4/ep4/world8 with a resolved "
+            "DSV4_PP_EP_ENABLE=1 and DSV4_PP_EP_BACKEND in {purecp_bf16, fork_nccl_mxfp8}.",
+            static_cast<long>(parallelism_config.ep_size));
         // CP composes with PP as long as the paged pool is not ALSO sharded
         // across CP ranks: PP projects the layer axis (stage-sliced cache
         // descriptors) while CP splits the sequence axis inside each stage.
-        // PPLayout::rankOfStage preserves tp_rank, so equal cp_ranks pair across
+        // RankLayout::rankOfStage preserves tp_rank, so equal cp_ranks pair across
         // adjacent stages; the activation transport is shape-agnostic; and each
         // stage re-applies the zigzag split to its own copy of the plan
         // (PyWrappedModel::forwardPP copies GptModelInputs).  kv_cache_sharded

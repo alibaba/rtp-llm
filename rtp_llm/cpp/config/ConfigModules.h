@@ -111,6 +111,28 @@ struct ParallelismConfig {
     int64_t get_ffn_tp_rank() const {
         return prefill_cp_active() ? 0 : ffn_tp_rank;
     }
+
+    // Experimental CP4EP4PP2 opt-in. RESOLVED, not raw: the Python config layer
+    // parses DSV4_PP_EP_ENABLE / DSV4_PP_EP_BACKEND, validates them against the
+    // authoritative RankLayout and the narrow target shape, and only then sets
+    // these two fields. The C++ guard reads the resolved pair, so a stray env
+    // var can never by itself enable a capability that was never validated.
+    // Empty `pp_ep_backend` means off.
+    bool        pp_ep_enabled = false;
+    std::string pp_ep_backend;  // "purecp_bf16" | "fork_nccl_mxfp8"
+
+    // The ONLY PP+EP shape this branch accepts: pp2 x dp1 x tp4(=>cp4) x ep4 on
+    // 8 ranks, with an explicitly resolved and named expert backend. Deliberately
+    // exact rather than range-based — a PP+EP guard widened by one working test
+    // would silently admit unvalidated dp>1 / tp!=4 / ep!=tp combinations.
+    static bool pp_ep_backend_valid(const std::string& backend) {
+        return backend == "purecp_bf16" || backend == "fork_nccl_mxfp8";
+    }
+    bool pp_ep_experimental_ok() const {
+        return pp_ep_enabled && pp_ep_backend_valid(pp_ep_backend) && pp_size == 2 && dp_size == 1
+               && tp_size == 4 && ep_size == 4 && world_size == 8;
+    }
+
     std::string to_string() const;
 };
 

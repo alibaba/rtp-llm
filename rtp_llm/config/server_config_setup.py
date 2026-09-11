@@ -420,6 +420,32 @@ def set_parallelism_config(
                 "prefill_cp_kv_cache_sharded was enabled but explicit CP size "
                 "cannot be propagated."
             )
+
+    # Experimental CP4EP4PP2 opt-in. Parsed and validated HERE, once, against the
+    # authoritative RankLayout; only the resolved pair is mirrored into the C++
+    # config. The C++ PP+EP guard reads that pair, so an env var alone can never
+    # enable the path. Absent opt-in leaves the historic PP+EP refusal intact.
+    from rtp_llm.models_py.distributed.ep_stage_context import (
+        resolve_pp_ep_opt_in,
+        validate_pp_ep_shape,
+    )
+
+    pp_ep_enabled, pp_ep_backend = resolve_pp_ep_opt_in(parallelism_config)
+    if pp_ep_enabled:
+        validate_pp_ep_shape(parallelism_config)
+        logging.info(
+            "set_parallelism_config: experimental PP+EP opt-in resolved: "
+            "backend=%s shape=pp%dxdp%dxdp%dxep%d world=%d",
+            pp_ep_backend,
+            parallelism_config.pp_size,
+            parallelism_config.dp_size,
+            parallelism_config.tp_size,
+            parallelism_config.ep_size,
+            parallelism_config.world_size,
+        )
+    parallelism_config.pp_ep_enabled = pp_ep_enabled
+    parallelism_config.pp_ep_backend = pp_ep_backend
+
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )

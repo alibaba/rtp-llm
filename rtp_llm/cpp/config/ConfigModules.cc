@@ -71,7 +71,9 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
         << "prefill_cp_config: {\n"
-        << prefill_cp_config.to_string() << "}\n";
+        << prefill_cp_config.to_string() << "}\n"
+        << "pp_ep_enabled: " << pp_ep_enabled << "\n"
+        << "pp_ep_backend: " << pp_ep_backend << "\n";
     return oss.str();
 }
 

@@ -63,6 +63,7 @@ py_library(
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:ep_stage_context",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python; deep-ep only in the x86 lock.
