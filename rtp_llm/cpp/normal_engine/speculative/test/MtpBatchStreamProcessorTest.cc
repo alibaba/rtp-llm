@@ -98,7 +98,7 @@ public:
             query->generate_config->in_think_mode       = true;
             query->generate_config->max_thinking_tokens = 1024;
         }
-        query->generate_config->num_return_sequences  = num_return_sequences;
+        query->generate_config->num_return_sequences = num_return_sequences;
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         if (!end_think_token_ids.empty()) {
@@ -293,10 +293,10 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     // exactly the way MtpExecutor::buildSpecLogitsVerifyInline wires it.
     SpecLogitsVerifyRunner             runner;
     SpecLogitsVerifyRunner::LaunchTask task;
-    task.total_streams   = 1;
-    task.propose_step    = static_cast<int>(sp_config.gen_num_per_cycle);
-    task.vocab_size      = model_config.vocab_size;
-    task.draft_tokens    = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+    task.total_streams = 1;
+    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
+    task.vocab_size    = model_config.vocab_size;
+    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
     for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
         ASSERT_NE(processor_ptr, nullptr);
         ASSERT_EQ(processor_ptr->mtpCapability().mode, MtpProcessorMode::SPEC_VERIFY);
@@ -901,12 +901,18 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{102, 255, 255, 22, 255, 255}), toVec<int32_t>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
+    EXPECT_TRUE(model_input.sequence_lengths.defined());
+    EXPECT_EQ(0, model_input.sequence_lengths.numel());
 
     auto proposals = torch::tensor({{31, 32, 33}, {41, 42, 43}}, torch::kInt32).to(torch::kCUDA);
     processor.updateDSparkTargetVerifyModelInput(round_head, model_input, proposals, host_holder);
     EXPECT_EQ((std::vector<int32_t>{102, 31, 32, 33, 22, 41, 42, 43}), toVec<int32_t>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{gamma + 1, gamma + 1}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
+    EXPECT_TRUE(model_input.sequence_lengths.defined());
+    EXPECT_EQ(0, model_input.sequence_lengths.numel());
+    // Target-verify attention metadata starts at each stream's committed prefix.
+    EXPECT_EQ((std::vector<int32_t>{10, 3}), toVec<int32_t>(model_input.prefix_lengths + 1));
     EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7}), toVec<int32_t>(model_input.lm_output_indexes));
 }
 

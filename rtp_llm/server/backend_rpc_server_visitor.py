@@ -45,15 +45,23 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+_RETRYABLE_ROUTE_EXCEPTION_TYPES = frozenset(
+    {
+        ExceptionType.GET_HOST_FAILED,
+        ExceptionType.GET_CONNECTION_FAILED,
+        ExceptionType.CONNECT_FAILED,
+        ExceptionType.CONNECT_TIMEOUT,
+        ExceptionType.CONNECTION_RESET_BY_PEER,
+        # Master admission can be retried when no worker was available yet.
+        ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+    }
+)
 _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
     {
         ExceptionType.PRIORITY_PREEMPTED,
         ExceptionType.PRIORITY_ADMISSION_REJECTED,
         ExceptionType.RESOURCE_EXHAUSTED,
         ExceptionType.ADMISSION_UNAVAILABLE,
-        # A scheduling deadline is already a completed admission outcome.
-        # Retrying it with a new request id silently starts a second admission
-        # attempt with a fresh identity and can hide the original timeout.
         ExceptionType.BATCH_SLO_EXPIRED,
     }
 )
@@ -165,20 +173,15 @@ class BackendRPCServerVisitor:
 
     @staticmethod
     def _is_retryable_route_rpc_error(e: BaseException) -> bool:
-        # Use isinstance instead of getattr duck-typing — only FtRuntimeException
-        # carries exception_type; gRPC RpcError and other exceptions do not.
+        # Use an explicit allowlist. Numeric ranges are not stable retry
+        # contracts: cancellation, validation, and execution errors also use
+        # values in the 8000+ range and must not be resubmitted with a new id.
         if isinstance(e, FtRuntimeException):
             try:
-                exception_type = int(e.exception_type)
-                # These are completed admission decisions, not transient route
-                # transport failures.  A new request id would change request
-                # identity and hide the typed 429 result selected by Master.
-                if any(
-                    exception_type == int(terminal_type)
-                    for terminal_type in _TERMINAL_ROUTE_EXCEPTION_TYPES
-                ):
+                exception_type = e.exception_type
+                if exception_type in _TERMINAL_ROUTE_EXCEPTION_TYPES:
                     return False
-                return exception_type >= 8000
+                return exception_type in _RETRYABLE_ROUTE_EXCEPTION_TYPES
             except (TypeError, ValueError):
                 pass
         text = str(e)
@@ -575,6 +578,14 @@ class BackendRPCServerVisitor:
                 ExceptionType.LONG_PROMPT_ERROR,
                 f"model tokens can not be empty, request length is {input.prompt_length}",
             )
+        if input.generate_config.is_prefill_only():
+            if input.prompt_length > self.max_seq_len:
+                raise FtRuntimeException(
+                    ExceptionType.LONG_PROMPT_ERROR,
+                    f"model max tokens is {self.max_seq_len}, "
+                    f"request length is {input.prompt_length}, max_new_tokens is 0",
+                )
+            return
         max_new_tokens = min(
             self.max_seq_len - input.prompt_length,
             input.generate_config.max_new_tokens,
@@ -647,6 +658,11 @@ class BackendRPCServerVisitor:
                         for output in buffered_outputs:
                             yield output
                     return
+                except (asyncio.CancelledError, GeneratorExit):
+                    # Cancellation and generator teardown are control-flow signals,
+                    # never route failures. Do not replace them with a prior retry
+                    # exception or start another attempt.
+                    raise
                 except BaseException as e:
                     set_aux_info(e)
                     if first_exc is None:
@@ -706,6 +722,7 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
             self.fill_request_info(input)
+            input.generate_config.validate()
             self._validate_input(input)
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)

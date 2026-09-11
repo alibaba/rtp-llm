@@ -359,6 +359,9 @@ struct PyModelInputs {
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
 
+    // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
+    bool capture_hidden_states = false;
+
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
     }

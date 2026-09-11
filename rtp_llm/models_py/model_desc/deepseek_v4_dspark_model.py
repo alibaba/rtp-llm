@@ -111,6 +111,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
+        self._disable_capture_context()
 
         role_type = getattr(parallelism_config, "role_type", None)
         self._commit_only_prefill = (
@@ -632,9 +633,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             # the committed rows, so proposal rows never enter the store's
             # block plan.
             if write_cache_store_impl is not None:
-                write_cache_store_impl(
-                    self.kv_cache.get_layer_cache(layer_idx, SWA_KV)
-                )
+                write_cache_store_impl(self.kv_cache.get_layer_cache(layer_idx, SWA_KV))
 
     def _forward_dspark_attention(
         self,

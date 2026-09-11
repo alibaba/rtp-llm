@@ -264,7 +264,10 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("capture_hidden_states",
+                       &PyModelInputs::capture_hidden_states,
+                       "Capture configured hidden states for this homogeneous target-prefill batch");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

@@ -4,11 +4,24 @@ py_test(
     name = "backend_rpc_server_visitor_test",
     srcs = ["backend_rpc_server_visitor_test.py"],
     deps = [
+        "//rtp_llm:config",
         "//rtp_llm:config_ops",
         "//rtp_llm:pydantic",
         "//rtp_llm:testlib",
         "//rtp_llm:torch",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
+    name = "backend_rpc_server_visitor_validate_input_test",
+    size = "small",
+    srcs = ["backend_rpc_server_visitor_validate_input_test.py"],
+    deps = [
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
         "//rtp_llm/server:server",
     ],
 )
@@ -51,7 +64,10 @@ py_test(
     name = "vit_proxy_server_test",
     srcs = ["vit_proxy_server_test.py"],
     deps = [
+        "//rtp_llm:multimodal",
         "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
         "//rtp_llm/server:server",
     ],
 )

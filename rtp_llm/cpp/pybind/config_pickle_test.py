@@ -1,7 +1,7 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig
+from rtp_llm.ops import GrammarConfig, MoeConfig
 
 
 def _new_grammar_config():
@@ -24,6 +24,45 @@ class _PreviousSixTupleGrammarConfig:
     def __reduce__(self):
         previous_state = (True, 6, "six-tokenizer-info", [13, 17], 4096, True)
         return _new_grammar_config, (), previous_state
+
+
+def _new_moe_config():
+    return MoeConfig.__new__(MoeConfig)
+
+
+class _LegacyMoeConfig:
+    def __reduce__(self):
+        legacy_state = (
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            7,
+            8192,
+            True,
+            128,
+            "legacy",
+        )
+        return _new_moe_config, (), legacy_state
+
+
+class MoeConfigPickleTest(unittest.TestCase):
+    def test_non_default_fp4_moe_op_round_trip(self):
+        config = MoeConfig()
+        config.fp4_moe_op = "cutlass"
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.fp4_moe_op, "cutlass")
+
+    def test_legacy_twelve_tuple_defaults_fp4_moe_op(self):
+        restored = pickle.loads(pickle.dumps(_LegacyMoeConfig()))
+
+        self.assertEqual(restored.moe_strategy, "legacy")
+        self.assertEqual(restored.fp4_moe_op, "auto")
 
 
 class GrammarConfigPickleTest(unittest.TestCase):

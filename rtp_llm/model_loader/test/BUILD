@@ -41,6 +41,12 @@ py_test(
 )
 
 py_test(
+    name = "test_fp4_exclude_modules",
+    srcs = ["test_fp4_exclude_modules.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
     deps = py_test_deps + [

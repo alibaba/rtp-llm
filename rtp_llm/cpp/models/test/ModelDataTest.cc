@@ -109,14 +109,14 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     EXPECT_EQ(wire_hints.scalar_type(), torch::kInt64);
     EXPECT_EQ(wire_hints.data_ptr<int64_t>()[GptModelInputIndex::mtpHiddenStates], 3221225472LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{262144, 12288}));
 
     inputs.last_hidden_states = backing.expand({1048576, 12288});
     shape_hints               = getModelInputShapeHints(inputs);
     EXPECT_EQ(shape_hints[GptModelInputIndex::mtpHiddenStates], 12884901888LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 
@@ -125,6 +125,23 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(5, 2), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
+}
+
+TEST_F(ModelDataTest, testCaptureHiddenStatesShapeHintIsIndependentOfSkipLmHead) {
+    EXPECT_EQ(static_cast<size_t>(GptModelInputIndex::captureHiddenStates) + 1,
+              static_cast<size_t>(GptModelInputIndex::gptModelInputLength));
+
+    for (const bool skip_lm_head : {false, true}) {
+        for (const bool capture_hidden_states : {false, true}) {
+            GptModelInputs inputs;
+            inputs.skip_lm_head          = skip_lm_head;
+            inputs.capture_hidden_states = capture_hidden_states;
+
+            const auto shape_hints = getModelInputShapeHints(inputs);
+            EXPECT_EQ(static_cast<bool>(shape_hints[GptModelInputIndex::skipLmHead]), skip_lm_head);
+            EXPECT_EQ(static_cast<bool>(shape_hints[GptModelInputIndex::captureHiddenStates]), capture_hidden_states);
+        }
+    }
 }
 
 }  // namespace rtp_llm

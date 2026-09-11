@@ -48,9 +48,7 @@ except ImportError as _deep_ep_import_err:
             )
 
         def __init_subclass__(cls, **kwargs):
-            raise NotImplementedError(
-                "deep_ep is not available in this build."
-            )
+            raise NotImplementedError("deep_ep is not available in this build.")
 
         @classmethod
         def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
@@ -670,10 +668,9 @@ def init_deepep_wrapper(
     """
 
     if not DeepEPWrapper.supported():
-        logging.warning(
-            "DeepEP is not supported on this device, skipping initialization"
+        raise RuntimeError(
+            "DeepEP was explicitly requested but the DeepEP provider is unavailable"
         )
-        return
 
     enable_cuda_graph = (
         engine_config.hw_kernel_config.enable_cuda_graph

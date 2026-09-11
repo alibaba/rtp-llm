@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
@@ -340,12 +341,21 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
             static_cast<int>(decode_context.error_status.error_code()));
         return;
     }
-    GRPC_RET_IF_ERROR(decode_context,
-                      allocate_request.stage() == RemoteStage::ALLOCATE,
-                      grpc::StatusCode::INTERNAL,
-                      "message first status != RemoteStage::ALLOCATE");
-    decode_context.request_id  = allocate_request.request_id();
-    decode_context.request_key = makeRequestKey(allocate_request.client_id(), allocate_request.request_id());
+    decode_context.request_id         = allocate_request.request_id();
+    decode_context.request_id_present = true;
+    decode_context.request_key        = makeRequestKey(allocate_request.client_id(), allocate_request.request_id());
+    if (decode_context.trace_span_guard) {
+        decode_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
+                                                      std::to_string(decode_context.request_id));
+        decode_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, decode_context.request_id);
+    }
+    if (allocate_request.stage() != RemoteStage::ALLOCATE) {
+        decode_context.error_info =
+            ErrorInfo(ErrorCode::INVALID_PARAMS, "message first status != RemoteStage::ALLOCATE");
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        return;
+    }
 
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
@@ -459,12 +469,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
     if (!error_info.ok()) {
-        // loadCacheFromPrefill is not retried (not wrapped by EXECUTE_WITH_RETRY), so this is a final
-        // failure point: report to FlexLB immediately. Keep full downstream/topology details in server-side
-        // reporting, but return only the domain code and request correlation id across the client boundary.
-        reportEarlyFinishTask(decode_context,
-                              static_cast<int64_t>(error_info.code()),
-                              "decode load cache from prefill failed: " + error_info.ToString());
+        // Preserve downstream details for metrics/FlexLB, but never expose topology to the client.
         const auto client_error = cacheLoadClientError(decode_context.request_id, error_info.code());
         decode_context.error_status =
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, client_error);
@@ -488,10 +493,13 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                             static_cast<int>(decode_context.error_status.error_code()));
         return;
     }
-    GRPC_RET_IF_ERROR(decode_context,
-                      generate_request.stage() == RemoteStage::GENERATE,
-                      grpc::StatusCode::INTERNAL,
-                      "message first status != RemoteStage::GENERATE");
+    if (generate_request.stage() != RemoteStage::GENERATE) {
+        decode_context.error_info =
+            ErrorInfo(ErrorCode::INVALID_PARAMS, "message first status != RemoteStage::GENERATE");
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        return;
+    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
@@ -609,7 +617,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                          dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
                          generate_stream);
     decode_context.time_info.updateGenerateEndTime();
-    meta_->dequeue(decode_context.request_id, decode_context.getStream());
+    if (decode_context.ok()) {
+        meta_->dequeue(decode_context.request_id, decode_context.getStream());
+    }
 
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
 }
@@ -1462,35 +1472,32 @@ grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode
     return grpc::Status::OK;
 }
 
-// Report a terminal early failure to FlexLB via finishedTaskInfo so the scheduler can clean up its
-// inflight entry immediately instead of waiting for the 300s TTL eviction. finishTask() removes the
-// running entry first, so the fallback dequeue in ~GenerateContext() becomes a no-op afterwards and
-// no duplicate report is produced. NOTE: never call this from functions driven by EXECUTE_WITH_RETRY
-// (e.g. allocateResource), only from final failure points after retries are exhausted.
-void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_context,
-                                            int64_t                error_code,
-                                            const std::string&     error_message) {
-    if (decode_context.request_id == 0 || decode_context.early_finish_reported) {
+// Report a terminal failure to FlexLB via finishedTaskInfo so the scheduler can clean up its
+// inflight entry immediately. finishTask() removes the running entry first, so later dequeue is a no-op.
+void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_context) {
+    if (!meta_ || !decode_context.request_id_present || decode_context.ok() || decode_context.early_finish_reported) {
         return;
     }
+
+    const auto error_info                = decode_context.finalErrorInfo();
     decode_context.early_finish_reported = true;
     auto& stream                         = decode_context.getStream();
     meta_->finishTask(decode_context.request_id,
                       stream ? stream->inputLength() : 0,
                       /*prefix_length=*/0,
-                      error_code,
-                      error_message);
+                      static_cast<int64_t>(error_info.code()),
+                      error_info.ToString());
     RTP_LLM_LOG_DEBUG("request [%s] reported early finished task to master, error_code [%ld]",
                       decode_context.request_key.c_str(),
-                      error_code);
+                      static_cast<int64_t>(error_info.code()));
 }
 
-grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
+grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) try {
     RTP_LLM_PROFILE_FUNCTION();
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     DecodeRpcContext   rpc_context{grpc_stream};
-    // TODO(xinfei.sxf) request id is 0 here
+    // The request id is populated after the first message is read.
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
     decode_context.onflight_requests = &onflight_requests_;
     decode_context.loading_cache_requests = &loading_cache_requests_;
@@ -1534,61 +1541,57 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         }
     });
 
-    auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
-    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
-    int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;
-
     try {
-        EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
-        if (decode_context.trace_span_guard) {
-            // request_id becomes known only after the first ALLOCATE message;
-            // `request_id` (string) is the Bailian Unitrace index key
-            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
-                                                          std::to_string(decode_context.request_id));
-            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, decode_context.request_id);
-        }
-        // Allocation retries are one logical stage, including retry backoff. The
-        // retry helper performs stop/error checks without advancing this stage.
-        decode_context.stat_info.nextStage();
-        EXECUTE_WITH_RETRY(
-            allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
-        decode_context.stat_info.finishStage();
-        if (decode_context.hasError()) {
-            RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %ld times, cost time ms [%ld], "
-                                "max retry time [%ld], max retry timeout ms [%ld]",
-                                decode_context.request_key.c_str(),
-                                decode_context.retry_times,
-                                decode_context.retry_cost_time_ms,
-                                max_retry_times + 1,
-                                max_retry_timeout_ms);
-            // Retries are exhausted: this is the final failure point, report it to FlexLB so the
-            // scheduler releases its inflight entry without waiting for TTL eviction.
-            auto& stream     = decode_context.getStream();
-            auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
-            reportEarlyFinishTask(decode_context,
-                                  error_code,
-                                  "decode allocate resource failed: " + decode_context.error_status.error_message());
-            return decode_context.error_status;
-        }
-        EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
-        EXECUTE_STAGE_FUNC(localGenerate, decode_context);
-        decode_context.stat_info.nextStage();
+        decode_context.error_status = [&]() -> grpc::Status {
+            auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
+            auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
+            int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;
+
+            EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
+            // Retries and their backoff are one allocation stage, not additional RPC stages.
+            decode_context.stat_info.nextStage();
+            EXECUTE_WITH_RETRY(
+                allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
+            decode_context.stat_info.finishStage();
+            if (decode_context.hasError()) {
+                RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %ld times, cost time ms [%ld], "
+                                    "max retry time [%ld], max retry timeout ms [%ld]",
+                                    decode_context.request_key.c_str(),
+                                    decode_context.retry_times,
+                                    decode_context.retry_cost_time_ms,
+                                    max_retry_times + 1,
+                                    max_retry_timeout_ms);
+                return decode_context.error_status;
+            }
+            EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
+            EXECUTE_STAGE_FUNC(localGenerate, decode_context);
+            decode_context.stat_info.nextStage();
+            return grpc::Status::OK;
+        }();
+    } catch (const std::invalid_argument& e) {
+        auto error_msg = "request [" + decode_context.request_key + "] catch invalid argument [" + e.what() + "]";
+        decode_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, error_msg);
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
     } catch (const std::exception& e) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
         decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);
         decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
-        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION), error_msg);
-        return decode_context.error_status;
     } catch (...) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch unknown exception";
         decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);
         decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
-        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION), error_msg);
-        return decode_context.error_status;
     }
 
-    return grpc::Status::OK;
+    reportEarlyFinishTask(decode_context);
+    return decode_context.error_status;
+} catch (const std::exception& e) {
+    return serializeErrorMsg("unknown",
+                             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                       "Decode RemoteGenerate failed with exception: " + std::string(e.what())));
+} catch (...) {
+    return serializeErrorMsg(
+        "unknown", ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "Decode RemoteGenerate failed with unknown exception"));
 }
 
 }  // namespace rtp_llm

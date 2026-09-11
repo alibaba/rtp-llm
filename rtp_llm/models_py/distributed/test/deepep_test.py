@@ -92,6 +92,18 @@ class DeepEPTest(TestCase):
     def setUp(self) -> None:
         pass
 
+    def test_explicit_request_fails_when_provider_is_unavailable(self):
+        with patch(
+            "rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "provider is unavailable"):
+                init_deepep_wrapper(None, None)
+
+    def _skip_if_deepep_unavailable(self):
+        if not DeepEPWrapper.supported():
+            self.skipTest("DeepEP provider is unavailable in the test environment")
+
     @staticmethod
     def _test_intranode_main(
         num_tokens: int,
@@ -2201,6 +2213,7 @@ class DeepEPTest(TestCase):
         destroy_distributed_environment()
 
     def test_deepep_normal(self):
+        self._skip_if_deepep_unavailable()
         with PortsContext(None, 1) as ports:
             os.environ["MASTER_PORT"] = str(ports[0])
             for params in itertools.product(
@@ -2224,6 +2237,7 @@ class DeepEPTest(TestCase):
                 )
 
     def test_deepep_low_latency(self):
+        self._skip_if_deepep_unavailable()
         with PortsContext(None, 1) as ports:
             os.environ["MASTER_PORT"] = str(ports[0])
             for params in itertools.product(
@@ -2247,6 +2261,7 @@ class DeepEPTest(TestCase):
                 )
 
     def test_deepep_low_latency_m2n(self):
+        self._skip_if_deepep_unavailable()
         if not hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"):
             return
         with PortsContext(None, 1) as ports:
@@ -2274,6 +2289,7 @@ class DeepEPTest(TestCase):
                 )
 
     def test_deepep_normal_expert_alignment(self):
+        self._skip_if_deepep_unavailable()
         with PortsContext(None, 1) as ports:
             os.environ["MASTER_PORT"] = str(ports[0])
             mp.spawn(
@@ -2284,6 +2300,7 @@ class DeepEPTest(TestCase):
             )
 
     def test_deepep_low_latency_per_token_quant(self):
+        self._skip_if_deepep_unavailable()
         with PortsContext(None, 1) as ports:
             os.environ["MASTER_PORT"] = str(ports[0])
             for params in itertools.product(
@@ -2307,6 +2324,7 @@ class DeepEPTest(TestCase):
                 )
 
     def test_init_sp_deepep_wrapper(self):
+        self._skip_if_deepep_unavailable()
         with PortsContext(None, 1) as ports:
             os.environ["MASTER_PORT"] = str(ports[0])
             mp.spawn(

@@ -1,5 +1,7 @@
 import copy
+import fnmatch
 import functools
+import re
 from typing import Any, Dict, List, Union
 
 import torch
@@ -14,12 +16,13 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
-
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
     concat_0,
     identity,
+    is_v4_weight,
+    max_scalar,
     pad,
     pad_w13,
     sp_0,
@@ -30,9 +33,7 @@ from rtp_llm.utils.model_weight import (
     sp_neg1,
     stack_,
     stack_moe_w1,
-    max_scalar,
     stack_moe_w1_s2,
-    is_v4_weight,
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -42,6 +43,59 @@ W_SUFFIX = ".weight"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale"
 QS_2_SUFFIX = ".weight_scale_2"
+
+
+def _matches_excluded_module(quant_config: QuantizationConfig, name: str) -> bool:
+    matcher = getattr(quant_config, "is_module_excluded", None)
+    if matcher is not None:
+        return matcher(name)
+
+    for pattern in getattr(quant_config, "exclude_modules", ()):
+        if pattern.startswith("re:"):
+            if re.search(pattern[3:], name):
+                return True
+        elif pattern in name:
+            return True
+        elif "*" in pattern or "?" in pattern or "[" in pattern:
+            # ModelOpt emits module-path globs while checkpoint entries include
+            # the parameter suffix (for example `.gate_proj.weight`). Match the
+            # complete name as well as the module prefix, preserving the legacy
+            # substring behavior above.
+            if fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(
+                name, pattern + "*"
+            ):
+                return True
+    return False
+
+
+def _is_fp4_weight_excluded(
+    quant_config: QuantizationConfig, src_weight_info: WeightModule
+) -> bool:
+
+    checkpoint_names = [
+        weight.name for weight in getattr(src_weight_info, "weights", [])
+    ]
+    if not checkpoint_names:
+        return False
+
+    excluded_names = [
+        name
+        for name in checkpoint_names
+        if _matches_excluded_module(quant_config, name)
+    ]
+    if not excluded_names:
+        return False
+    if len(excluded_names) == len(checkpoint_names):
+        return True
+
+    quantized_names = [name for name in checkpoint_names if name not in excluded_names]
+    raise ValueError(
+        f"Cannot partially exclude fused FP4 weight '{src_weight_info.name}': "
+        "exclude_modules matched only some checkpoint tensors/modules; "
+        f"excluded={excluded_names}, quantized={quantized_names}. "
+        "Exclude either all component names or none of them."
+    )
+
 
 def gemm_group_fp4_gpt_style_tp_strategy():
     gemm_group_fp4_weight_tp_strategy: Dict[str, Any] = {
@@ -74,6 +128,7 @@ def gemm_group_fp4_gpt_style_tp_strategy():
     tp_strategy.update(gemm_group_fp4_weight_tp_strategy)
     return tp_strategy
 
+
 class W4A4Fp4PerGroupAtomicWeight(AtomicWeight):
     gpt_style_tp_strategy = gemm_group_fp4_gpt_style_tp_strategy()
 
@@ -83,11 +138,11 @@ class W4A4Fp4PerGroupAtomicWeight(AtomicWeight):
     def _get_split_func(self):
         return self.gpt_style_tp_strategy[self.name]
 
-class W4A4Fp4PerGroupAttnAtomicWeight(
-    AttnAtomicWeight, W4A4Fp4PerGroupAtomicWeight
-):
+
+class W4A4Fp4PerGroupAttnAtomicWeight(AttnAtomicWeight, W4A4Fp4PerGroupAtomicWeight):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
+
 
 class W4A4Fp4PerGroupFfnAtomicWeight(FfnAtomicWeight, W4A4Fp4PerGroupAtomicWeight):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -140,7 +195,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         # exclude from base so the registry "exactly one match" check passes.
         if is_v4_weight(src_weight_info):
             return False
-        return True
+        return not _is_fp4_weight_excluded(quant_config, src_weight_info)
 
     def __init__(
         self,
@@ -153,15 +208,25 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         scale: WeightModule = None
 
         if src_weight_info.name == W.attn_qkv_w:
-            kernel, scale, scale_2, input_scale = self._get_qkv_quant_weight(src_weight_info)
+            kernel, scale, scale_2, input_scale = self._get_qkv_quant_weight(
+                src_weight_info
+            )
         elif src_weight_info.name == W.attn_o_w:
-            kernel, scale, scale_2, input_scale = self._get_mha_attn_out_quant_weight(src_weight_info)
+            kernel, scale, scale_2, input_scale = self._get_mha_attn_out_quant_weight(
+                src_weight_info
+            )
         elif src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]:
-            kernel, scale, scale_2, input_scale = self._get_ffn_quant_weight(src_weight_info)
+            kernel, scale, scale_2, input_scale = self._get_ffn_quant_weight(
+                src_weight_info
+            )
         elif src_weight_info.name == W.moe_w1:
-            kernel, scale, scale_2, input_scale = self._get_moe_w1_quant_weight(src_weight_info)
+            kernel, scale, scale_2, input_scale = self._get_moe_w1_quant_weight(
+                src_weight_info
+            )
         elif src_weight_info.name == W.moe_w2:
-            kernel, scale, scale_2, input_scale = self._get_moe_w2_quant_weight(src_weight_info)
+            kernel, scale, scale_2, input_scale = self._get_moe_w2_quant_weight(
+                src_weight_info
+            )
         sub_weights = {kernel.name: kernel}
         if scale is not None:
             sub_weights.update({scale.name: scale})
@@ -173,7 +238,9 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         self.kernel = sub_weights.get(kernel.name)
         self.scale = sub_weights.get(scale.name) if scale is not None else None
         self.scale_2 = sub_weights.get(scale_2.name) if scale_2 is not None else None
-        self.input_scale = sub_weights.get(input_scale.name) if input_scale is not None else None
+        self.input_scale = (
+            sub_weights.get(input_scale.name) if input_scale is not None else None
+        )
 
     def _get_qkv_quant_weight(self, src_weight_info: AttnAtomicWeight):
         assert src_weight_info.name == W.attn_qkv_w
@@ -187,12 +254,12 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX, sub_w.merge_fun)
             for sub_w in weights
         ]
-        
+
         qkv_s2_list = [
             CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_2_SUFFIX, sub_w.merge_fun)
             for sub_w in weights
         ]
-        
+
         qkv_i_s_list = [
             CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + ACT_S_SUFFIX, sub_w.merge_fun)
             for sub_w in weights
@@ -214,7 +281,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
-        
+
         scale_2 = create_w4a4_fp4_per_group_weight(
             src_weight_info,
             W.attn_qkv_s2,
@@ -223,7 +290,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             data_type=torch.float32,
             config=src_weight_info.config,
         )
-        
+
         input_scale = create_w4a4_fp4_per_group_weight(
             src_weight_info,
             W.attn_qkv_i_s,
@@ -270,7 +337,7 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             data_type=torch.float32,
             config=src_weight_info.config,
         )
-        
+
         input_scale = create_w4a4_fp4_per_group_weight(
             src_weight_info,
             W.attn_o_i_s,
@@ -291,56 +358,56 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
             w1_name = weights[0].name[: -len(W_SUFFIX)]
             w3_name = weights[1].name[: -len(W_SUFFIX)]
             kernel = create_w4a4_fp4_per_group_weight(
-                        src_weight_info,
-                        w,
-                        [
-                            CkptWeightInfo(w1_name + QW_SUFFIX, identity),
-                            CkptWeightInfo(w3_name + QW_SUFFIX, identity),
-                        ],
-                        functools.partial(
-                            pad_w13,
-                            align_size=src_weight_info.config.align_size,
-                            dim=0,
-                        ),
-                        data_type=torch.uint8,
-                        config=src_weight_info.config,
+                src_weight_info,
+                w,
+                [
+                    CkptWeightInfo(w1_name + QW_SUFFIX, identity),
+                    CkptWeightInfo(w3_name + QW_SUFFIX, identity),
+                ],
+                functools.partial(
+                    pad_w13,
+                    align_size=src_weight_info.config.align_size,
+                    dim=0,
+                ),
+                data_type=torch.uint8,
+                config=src_weight_info.config,
             )
             scale = create_w4a4_fp4_per_group_weight(
-                        src_weight_info,
-                        s,
-                        [
-                            CkptWeightInfo(w1_name + QS_SUFFIX, identity),
-                            CkptWeightInfo(w3_name + QS_SUFFIX, identity),
-                        ],
-                        functools.partial(
-                            pad_w13,
-                            align_size=src_weight_info.config.align_size,
-                            dim=0,
-                        ),
-                        data_type=torch.float8_e4m3fn,
-                        config=src_weight_info.config,
+                src_weight_info,
+                s,
+                [
+                    CkptWeightInfo(w1_name + QS_SUFFIX, identity),
+                    CkptWeightInfo(w3_name + QS_SUFFIX, identity),
+                ],
+                functools.partial(
+                    pad_w13,
+                    align_size=src_weight_info.config.align_size,
+                    dim=0,
+                ),
+                data_type=torch.float8_e4m3fn,
+                config=src_weight_info.config,
             )
             scale_2 = create_w4a4_fp4_per_group_weight(
-                        src_weight_info,
-                        s_2,
-                        [
-                            CkptWeightInfo(w1_name + QS_2_SUFFIX, identity),
-                            CkptWeightInfo(w3_name + QS_2_SUFFIX, identity),
-                        ],
-                        max_scalar,
-                        data_type=torch.float32,
-                        config=src_weight_info.config,
+                src_weight_info,
+                s_2,
+                [
+                    CkptWeightInfo(w1_name + QS_2_SUFFIX, identity),
+                    CkptWeightInfo(w3_name + QS_2_SUFFIX, identity),
+                ],
+                max_scalar,
+                data_type=torch.float32,
+                config=src_weight_info.config,
             )
             input_scale = create_w4a4_fp4_per_group_weight(
-                        src_weight_info,
-                        i_s,
-                        [
-                            CkptWeightInfo(w1_name + ACT_S_SUFFIX, identity),
-                            CkptWeightInfo(w3_name + ACT_S_SUFFIX, identity),
-                        ],
-                        max_scalar,
-                        data_type=torch.float32,
-                        config=src_weight_info.config,
+                src_weight_info,
+                i_s,
+                [
+                    CkptWeightInfo(w1_name + ACT_S_SUFFIX, identity),
+                    CkptWeightInfo(w3_name + ACT_S_SUFFIX, identity),
+                ],
+                max_scalar,
+                data_type=torch.float32,
+                config=src_weight_info.config,
             )
             return [kernel, scale, scale_2, input_scale]
         elif src_weight_info.name in [W.ffn_w1, W.ffn_w3]:
@@ -521,8 +588,10 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
             if kernel_weight.dim() == 2 and scale_weight.dim() == 2:
-                kernel_weight, scale_weight = load_config.exported_device.convert_fp4_gemm_weight_params(
-                    kernel_weight, scale_weight
+                kernel_weight, scale_weight = (
+                    load_config.exported_device.convert_fp4_gemm_weight_params(
+                        kernel_weight, scale_weight
+                    )
                 )
 
             kernel_weight, scale_weight = (

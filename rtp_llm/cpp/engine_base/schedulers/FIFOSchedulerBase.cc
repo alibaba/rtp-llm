@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -66,13 +68,13 @@ bool FIFOSchedulerBase::checkInputLength(const GenerateStreamPtr& stream) {
     const auto reserve_step = stream->reserveStep();
     if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {
         const auto allowed_input_length = reserve_step <= max_seq_len_ ? max_seq_len_ - reserve_step : 0;
-        auto       error_info           = autil::StringUtil::formatString(
-            "input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
-            "allowed max input len for speculative decoding is %zu",
-            input_length,
-            reserve_step,
-            max_seq_len_,
-            allowed_input_length);
+        auto       error_info =
+            autil::StringUtil::formatString("input len %zu with speculative reserve_step %zu exceeds max seq len %zu, "
+                                            "allowed max input len for speculative decoding is %zu",
+                                            input_length,
+                                            reserve_step,
+                                            max_seq_len_,
+                                            allowed_input_length);
         stream->reportError(ErrorCode::LONG_PROMPT_ERROR, error_info);
         return false;
     }
@@ -104,6 +106,15 @@ absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (hasMixedExecutionModes(streams)) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), streams};
+    }
+
     std::vector<bool> enqueue_successes;
     enqueue_successes.reserve(streams.size());
     std::vector<GenerateStreamPtr> valid_streams;
@@ -145,7 +156,7 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& stre
     return moved_count;
 }
 
-void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
+void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams, bool include_running_mode) {
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr>             admitted_streams;
     std::unordered_set<GenerateStream*> admitted_stream_ptrs;
@@ -153,21 +164,57 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
-    const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       admitted_new_init_streams = 0;
 
+    std::unordered_map<int64_t, bool> group_prefill_only;
+    std::unordered_set<int64_t>       mixed_force_batch_group_ids;
+    for (const auto& stream : waiting_streams) {
+        if (!stream->isGroup()) {
+            continue;
+        }
+        const bool prefill_only = isPrefillOnly(stream);
+        const auto result       = group_prefill_only.emplace(stream->groupId(), prefill_only);
+        if (!result.second && result.first->second != prefill_only) {
+            mixed_force_batch_group_ids.insert(stream->groupId());
+        }
+    }
+
+    for (const auto& stream : waiting_streams) {
+        if (stream->isGroup() && mixed_force_batch_group_ids.count(stream->groupId()) > 0 && !stream->hasError()) {
+            stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+        }
+    }
+
+    bool has_scheduling_type     = false;
+    bool scheduling_prefill_only = false;
+    // Existing streams that will be returned this round define its execution mode. PDFusion prefill
+    // rounds exclude held running decodes; new_streams_ remains relevant for state-machine promotions.
+    const auto set_scheduling_type = [&](const std::list<GenerateStreamPtr>& streams) {
+        if (!has_scheduling_type && !streams.empty()) {
+            has_scheduling_type     = true;
+            scheduling_prefill_only = isPrefillOnly(streams.front());
+        }
+    };
+    if (include_running_mode) {
+        set_scheduling_type(running_streams_);
+    }
+    set_scheduling_type(new_streams_);
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream = *it;
+
+        const bool prefill_only = isPrefillOnly(stream);
+        if (has_scheduling_type && scheduling_prefill_only != prefill_only) {
+            ++it;
+            continue;
+        }
 
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
@@ -184,6 +231,10 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
             }
             admitted_streams.push_back(stream);
             admitted_stream_ptrs.insert(stream.get());
+            if (!has_scheduling_type) {
+                has_scheduling_type     = true;
+                scheduling_prefill_only = prefill_only;
+            }
             if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
                 ++admitted_new_init_streams;
             }

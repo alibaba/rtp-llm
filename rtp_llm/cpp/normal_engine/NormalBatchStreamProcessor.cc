@@ -43,6 +43,25 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
+absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(const StreamGroups& stream_groups) const {
+    for (const auto& stream : stream_groups.allStreams()) {
+        auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
+        stream->update({empty_token_ids,
+                        /*num_new_tokens=*/0,
+                        /*hidden_states=*/torch::Tensor(),
+                        /*logits=*/torch::Tensor(),
+                        /*softmax_probs=*/torch::Tensor(),
+                        /*cum_log_probs=*/torch::Tensor(),
+                        /*all_probs=*/torch::Tensor(),
+                        /*loss=*/torch::Tensor(),
+                        /*src_batch_indices=*/torch::Tensor(),
+                        /*all_hidden_states=*/torch::Tensor(),
+                        /*update_remote_generate=*/false,
+                        /*force_update_info=*/false});
+    }
+    return absl::OkStatus();
+}
+
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,
                                                                             TensorHolder&       host_holder) const {
     return model_input_gatherer_->gather(stream_groups, host_holder);
