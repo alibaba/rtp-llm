@@ -61,6 +61,15 @@ void BatchPrefillWithPagedKVCacheRun(
     int64_t window_left , std::optional<at::Tensor> maybe_custom_mask, std::optional<at::Tensor> maybe_mask_indptr,
     std::optional<at::Tensor> maybe_alibi_slopes, double logits_soft_cap, double sm_scale, double rope_rcp_scale, double rope_rcp_theta, int64_t cuda_stream);
 
+void BatchPrefillWithRaggedKVCacheRun(
+    at::Tensor float_workspace_buffer, at::Tensor int_workspace_buffer,
+    at::Tensor plan_info_vec, at::Tensor q, at::Tensor k, at::Tensor v,
+    at::Tensor qo_indptr, at::Tensor kv_indptr, at::Tensor o, std::optional<at::Tensor> maybe_lse,
+    int64_t mask_mode_code, int64_t layout, int64_t window_left,
+    std::optional<at::Tensor> maybe_custom_mask, std::optional<at::Tensor> maybe_mask_indptr,
+    std::optional<at::Tensor> maybe_alibi_slopes, double logits_soft_cap, double sm_scale,
+    double rope_rcp_scale, double rope_rcp_theta, int64_t cuda_stream);
+
 
 at::Tensor BatchMLAPagedAttentionPlan(at::Tensor float_workspace_buffer,
                                       at::Tensor int_workspace_buffer,

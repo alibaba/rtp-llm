@@ -58,6 +58,7 @@ public:
     DataType                  dtype = DataType::TYPE_INVALID;
     rtp_llm::AttentionConfigs attn_configs;
     bool                      is_prefill;
+    bool                      ragged_kv         = false;
     bool                      enable_cuda_graph = false;
 
     static bool check(const rtp_llm::AttentionConfigs& attn_configs,
@@ -74,16 +75,17 @@ public:
                              MlaOpsType                       mla_ops_type        = MlaOpsType::AUTO,
                              bool                             disable_flash_infer = false);
 
-    static bool      checkDecode(const rtp_llm::AttentionConfigs& attn_configs,
-                                 DataType                         dtype,
-                                 MlaOpsType                       mla_ops_type        = MlaOpsType::AUTO,
-                                 bool                             disable_flash_infer = false);
-    bool             check_recycle() override;
+    static bool checkDecode(const rtp_llm::AttentionConfigs& attn_configs,
+                            DataType                         dtype,
+                            MlaOpsType                       mla_ops_type        = MlaOpsType::AUTO,
+                            bool                             disable_flash_infer = false);
+    bool        check_recycle() override;
+    // CPU planners materialize host metadata here when callers provide CUDA tensors.
     static ParamsPtr prepare(const rtp_llm::AttentionConfigs& attn_configs,
-                             const torch::Tensor&             prefix_lengths_host,
-                             const torch::Tensor&             sequence_lengths_host,
-                             const torch::Tensor&             input_lengths_host,
-                             const torch::Tensor&             kv_cache_block_id_host,
+                             const torch::Tensor&             prefix_lengths,
+                             const torch::Tensor&             sequence_lengths,
+                             const torch::Tensor&             input_lengths,
+                             const torch::Tensor&             kv_cache_block_ids,
                              const torch::Tensor&             kv_cache_block_id_device,
                              DataType                         dtype,
                              MlaOpsType                       mla_ops_type,

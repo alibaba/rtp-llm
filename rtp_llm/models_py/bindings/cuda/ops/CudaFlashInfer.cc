@@ -1,5 +1,6 @@
 
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
@@ -28,6 +29,33 @@ constexpr auto TNone = torch::indexing::None;
 static const int MIN_CACHE_BATCH_SIZE      = 256;
 static const int MIN_CACHE_INPUT_TOKEN_NUM = 512;
 static const int MIN_CACHE_PAGE_NUM        = 1024 * 1024;
+
+namespace {
+
+torch::Tensor plannerHostInt32(const torch::Tensor& tensor, const char* name, int dimensions) {
+    if (!tensor.defined() || tensor.numel() == 0) {
+        return tensor;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == torch::kInt32 && tensor.dim() == dimensions,
+                            "FlashInfer %s must be a rank-%d int32 tensor",
+                            name,
+                            dimensions);
+    if (tensor.is_cuda()) {
+        RTP_LLM_CHECK_WITH_INFO(at::cuda::currentStreamCaptureStatus() == at::cuda::CaptureStatus::None,
+                                "FlashInfer host planning must run before CUDA graph capture");
+        // TODO(async): the native planner consumes CPU pointers. Keep the
+        // explicit, synchronous D2H here until its planning API is device-native.
+        return tensor.cpu().contiguous();
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.device().is_cpu(), "FlashInfer %s must be on CPU or CUDA", name);
+    return tensor.contiguous();
+}
+
+bool hasEntries(const torch::Tensor& tensor) {
+    return tensor.defined() && tensor.numel() > 0;
+}
+
+}  // namespace
 
 bool FlashInferAttnParams::isDecode(int input_token_num) {
     return input_token_num <= MIN_CACHE_INPUT_TOKEN_NUM * 2;
@@ -150,7 +178,7 @@ void FlashInferAttnParams::fillParams(torch::Tensor sequence_lengths,
                                       torch::Tensor prefix_lengths) {
     fillFlashInfer(
         prefix_lengths, sequence_lengths, input_lengths, kv_cache_block_id_host, batch_size, seq_size_per_block);
-    refreshFlashInferBuf(batch_size, input_lengths.size(0));
+    refreshFlashInferBuf(batch_size, accu_q_len);
 
     bool cuda_graph_active =
         enable_cuda_graph || (at::cuda::currentStreamCaptureStatus() != at::cuda::CaptureStatus::None);
@@ -172,7 +200,24 @@ void FlashInferAttnParams::fillFlashInfer(const torch::Tensor& prefix_lengths_ho
                                           const torch::Tensor& kv_cache_block_id_host,
                                           const int            batch_size,
                                           const int            tokens_per_block) {
-    const int max_batch_blocks = kv_cache_block_id_host.defined() ? kv_cache_block_id_host.size(1) : -1;
+    const auto prefix_lengths_cpu   = plannerHostInt32(prefix_lengths_host, "prefix_lengths", 1);
+    const auto sequence_lengths_cpu = plannerHostInt32(sequence_lengths_host, "sequence_lengths", 1);
+    const auto input_lengths_cpu    = plannerHostInt32(input_lengths_host, "input_lengths", 1);
+    const auto block_ids_cpu        = plannerHostInt32(kv_cache_block_id_host, "block_ids", 2);
+    RTP_LLM_CHECK_WITH_INFO(batch_size > 0 && tokens_per_block > 0 && hasEntries(input_lengths_cpu)
+                                && input_lengths_cpu.numel() == batch_size,
+                            "FlashInfer requires positive batch/page sizes and one input length per request");
+    const bool prefill = hasEntries(prefix_lengths_cpu);
+    RTP_LLM_CHECK_WITH_INFO(prefill ? prefix_lengths_cpu.numel() == batch_size :
+                                      hasEntries(sequence_lengths_cpu) && sequence_lengths_cpu.numel() == batch_size,
+                            "FlashInfer requires one prefix or sequence length per request");
+    RTP_LLM_CHECK_WITH_INFO(!hasEntries(block_ids_cpu) || block_ids_cpu.size(0) == batch_size,
+                            "FlashInfer block table batch dimension must match input lengths");
+    RTP_LLM_CHECK_WITH_INFO(hasEntries(block_ids_cpu) || (ragged_kv && prefill),
+                            "FlashInfer paged attention requires a block table");
+    RTP_LLM_CHECK_WITH_INFO(!ragged_kv || !hasEntries(block_ids_cpu),
+                            "FlashInfer cannot change ragged/paged mode when refreshing an existing plan");
+    const int max_batch_blocks = hasEntries(block_ids_cpu) ? block_ids_cpu.size(1) : 0;
     RTP_LLM_CHECK_WITH_INFO(
         batch_size <= this->batch_size, "batch_size exceed reserved %d > %d", batch_size, this->batch_size);
     auto qo_indptr              = qo_indptr_h.data_ptr<int>();
@@ -182,24 +227,30 @@ void FlashInferAttnParams::fillFlashInfer(const torch::Tensor& prefix_lengths_ho
     auto paged_kv_last_page_len = paged_kv_last_page_len_h.data_ptr<int>();
     auto kvlen                  = kvlen_h.data_ptr<int>();
     auto page_indice            = page_indice_h.data_ptr<int>();
-    auto input_lengths          = input_lengths_host.data_ptr<int>();
-    auto prefix_lengths         = prefix_lengths_host.defined() ? prefix_lengths_host.data_ptr<int>() : nullptr;
-    auto sequence_lengths       = sequence_lengths_host.defined() ? sequence_lengths_host.data_ptr<int>() : nullptr;
-    auto kv_cache_block_id      = kv_cache_block_id_host.defined() ? kv_cache_block_id_host.data_ptr<int>() : nullptr;
+    auto input_lengths          = input_lengths_cpu.data_ptr<int>();
+    auto prefix_lengths         = prefill ? prefix_lengths_cpu.data_ptr<int>() : nullptr;
+    auto sequence_lengths       = hasEntries(sequence_lengths_cpu) ? sequence_lengths_cpu.data_ptr<int>() : nullptr;
+    auto kv_cache_block_id      = hasEntries(block_ids_cpu) ? block_ids_cpu.data_ptr<int>() : nullptr;
     int  offset                 = 0;
     int  total_page_idx         = 0;
     qo_indptr[0]                = 0;
     page_indptr[0]              = 0;
     max_q_len                   = 1;
+    max_kv_len                  = 0;
     accu_q_len                  = 0;
     for (int i = 0; i < batch_size; i++) {
         int seq_len = 0;
         if (prefix_lengths) {
             int input_length  = input_lengths[i];
             int prefix_length = prefix_lengths[i];
-            RTP_LLM_CHECK_WITH_INFO(offset + input_length <= this->input_token_num,
-                                    "token_num exceed reserved %d > %d",
-                                    offset + input_length,
+            RTP_LLM_CHECK_WITH_INFO(input_length > 0 && prefix_length >= 0 && (!ragged_kv || prefix_length == 0),
+                                    "FlashInfer ragged prefill requires positive input lengths and zero cached prefix");
+            RTP_LLM_CHECK_WITH_INFO(prefix_length <= std::numeric_limits<int>::max() - input_length,
+                                    "FlashInfer total sequence length exceeds int32 capacity");
+            RTP_LLM_CHECK_WITH_INFO(input_length <= this->input_token_num - offset,
+                                    "token span offset=%d length=%d exceeds reserved %d",
+                                    offset,
+                                    input_length,
                                     this->input_token_num);
             for (int j = 0; j < input_length; j++) {
                 batch_indice[offset] = i;
@@ -210,6 +261,8 @@ void FlashInferAttnParams::fillFlashInfer(const torch::Tensor& prefix_lengths_ho
             max_q_len = max(max_q_len, input_length);
             accu_q_len += input_length;
         } else {
+            RTP_LLM_CHECK_WITH_INFO(sequence_lengths[i] >= 0 && sequence_lengths[i] < std::numeric_limits<int>::max(),
+                                    "FlashInfer decode sequence length must leave room for one int32 token");
             batch_indice[i] = i;
             positions[i]    = sequence_lengths[i];
             seq_len         = sequence_lengths[i] + 1;
@@ -219,18 +272,25 @@ void FlashInferAttnParams::fillFlashInfer(const torch::Tensor& prefix_lengths_ho
         kvlen[i]                  = seq_len;
         max_kv_len                = max(seq_len, max_kv_len);
 
-        int page_num = (seq_len + tokens_per_block - 1) / tokens_per_block;
-        RTP_LLM_CHECK_WITH_INFO(total_page_idx + page_num <= this->page_num,
-                                "page_num exceed reserved %d > %d",
-                                total_page_idx + page_num,
+        int page_num = (seq_len - 1) / tokens_per_block + 1;
+        RTP_LLM_CHECK_WITH_INFO(ragged_kv || page_num <= max_batch_blocks,
+                                "FlashInfer block table is too short for request %d: need %d, have %d",
+                                i,
+                                page_num,
+                                max_batch_blocks);
+        RTP_LLM_CHECK_WITH_INFO(page_num <= this->page_num - total_page_idx,
+                                "page span offset=%d length=%d exceeds reserved %d",
+                                total_page_idx,
+                                page_num,
                                 this->page_num);
         if (kv_cache_block_id) {
             for (int j = 0; j < page_num; j++) {
-                auto page_idx                 = kv_cache_block_id[i * max_batch_blocks + j];
+                auto page_idx = kv_cache_block_id[i * max_batch_blocks + j];
+                RTP_LLM_CHECK_WITH_INFO(page_idx >= 0, "FlashInfer used block id must be nonnegative");
                 page_indice[total_page_idx++] = page_idx;
             }
         }
-        page_indptr[i + 1] = total_page_idx;
+        page_indptr[i + 1] = ragged_kv ? accu_q_len : total_page_idx;
         qo_indptr[i + 1]   = accu_q_len;
     }
 }
@@ -329,7 +389,7 @@ void FlashInferAttnParams::genPlan(int     batch_size,
                 batch_size,                                                  // batch_size
                 local_head_num,                                              // num_qo_heads
                 local_head_num_kv,                                           // num_kv_heads
-                tokens_per_block,                                            // page_size
+                ragged_kv ? 1 : tokens_per_block,                            // token offsets for ragged KV
                 false,                                                       // enable_cuda_graph
                 size_per_head,                                               // head_dim_qk
                 size_per_head,                                               // head_dim_vo
@@ -428,16 +488,22 @@ bool FlashInferAttnParams::checkDecode(const rtp_llm::AttentionConfigs& attn_con
 }
 
 ParamsPtr FlashInferAttnParams::prepare(const rtp_llm::AttentionConfigs& attn_configs,
-                                        const torch::Tensor&             prefix_lengths_host,
-                                        const torch::Tensor&             sequence_lengths_host,
-                                        const torch::Tensor&             input_lengths_host,
-                                        const torch::Tensor&             kv_cache_block_id_host,
+                                        const torch::Tensor&             prefix_lengths,
+                                        const torch::Tensor&             sequence_lengths,
+                                        const torch::Tensor&             input_lengths,
+                                        const torch::Tensor&             kv_cache_block_ids,
                                         const torch::Tensor&             kv_cache_block_id_device,
                                         DataType                         dtype,
                                         MlaOpsType                       mla_ops_type,
                                         bool                             enable_cuda_graph,
                                         bool                             skip_no_prefix) {
-
+    const auto prefix_lengths_host    = plannerHostInt32(prefix_lengths, "prefix_lengths", 1);
+    const auto sequence_lengths_host  = plannerHostInt32(sequence_lengths, "sequence_lengths", 1);
+    const auto input_lengths_host     = plannerHostInt32(input_lengths, "input_lengths", 1);
+    const auto kv_cache_block_id_host = plannerHostInt32(
+        hasEntries(kv_cache_block_ids) ? kv_cache_block_ids : kv_cache_block_id_device, "block_ids", 2);
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_host.defined() && input_lengths_host.dim() == 1,
+                            "FlashInfer input_lengths must be defined and rank 1");
     const int batch_size = input_lengths_host.size(0);
     // should not happend
     if (batch_size == 0) {
@@ -472,8 +538,11 @@ ParamsPtr FlashInferAttnParams::prepare(const rtp_llm::AttentionConfigs& attn_co
 
     int input_token_num = 0;
     if (is_prefill) {
-        input_token_num =
-            std::accumulate(input_lengths_host.data_ptr<int>(), input_lengths_host.data_ptr<int>() + batch_size, 0);
+        const auto total = std::accumulate(
+            input_lengths_host.data_ptr<int>(), input_lengths_host.data_ptr<int>() + batch_size, int64_t{0});
+        RTP_LLM_CHECK_WITH_INFO(total > 0 && total <= std::numeric_limits<int>::max(),
+                                "FlashInfer input token count must fit a positive int32");
+        input_token_num = static_cast<int>(total);
     } else {
         input_token_num = input_lengths_host.size(0);
     }
@@ -482,14 +551,13 @@ ParamsPtr FlashInferAttnParams::prepare(const rtp_llm::AttentionConfigs& attn_co
         max(MIN_CACHE_BATCH_SIZE, batch_size), max(MIN_CACHE_INPUT_TOKEN_NUM, input_token_num), MIN_CACHE_PAGE_NUM);
     params->attn_configs = attn_configs;
     params->is_prefill   = is_prefill;
+    params->ragged_kv    = is_prefill && !attn_configs.use_mla && !hasEntries(kv_cache_block_id_host);
 
     ParamsPtr ret(params, recycle);
 
-    if (kv_cache_block_id_device.defined()) {
-        params->kv_cache_block_id_d = kv_cache_block_id_device;
-    }
-    params->mla_ops_type = mla_ops_type;
-    params->dtype        = dtype;
+    params->kv_cache_block_id_d = kv_cache_block_id_device;
+    params->mla_ops_type        = mla_ops_type;
+    params->dtype               = dtype;
     params->fillFlashInfer(prefix_lengths_host,
                            sequence_lengths_host,
                            input_lengths_host,

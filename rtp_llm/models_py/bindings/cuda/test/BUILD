@@ -16,6 +16,23 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "flashinfer_metadata_test",
+    srcs = ["FlashInferMetadataTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_bindings",
+        "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
     name = "cuda_speculative_sampling_test",
     srcs = ["CudaSpeculativeSamplingTest.cc"],
     copts = copts(),
