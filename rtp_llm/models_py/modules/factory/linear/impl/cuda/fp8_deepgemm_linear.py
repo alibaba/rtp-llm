@@ -7,7 +7,6 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_gemm_nt,
-    fp8_gemm_nt_skip_head_mid,
     has_deep_gemm,
     is_deep_gemm_e8m0_used,
 )
@@ -150,8 +149,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             return False
         left, middle, right = head_splits
         return (
-            self.bias is None
-            and left > 0
+            left > 0
             and middle >= 0
             and right > 0
             and self.N % (left + right) == 0
@@ -171,10 +169,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         *,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Write FP8 GEMM K/V output around an existing BF16 RoPE gap.
+        """FP8 GEMM followed by BF16 K/V placement, preserving the RoPE gap.
 
-        The caller owns the middle region and may fill it before or after this
-        operation. This method leaves that region untouched.
+        The historical-prefix gather has already written RoPE into the middle
+        region of caller-owned output. Do not zero or overwrite that region.
+        The only temporary is the ordinary unpadded BF16 GEMM result.
         """
         if not self.supports_skip_head_mid(input, head_splits):
             raise ValueError("unsupported FP8 skip-head-mid input or head layout")
@@ -202,15 +201,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 == source.untyped_storage().data_ptr()
             ):
                 raise ValueError("FP8 skip-head-mid output must not alias its operands")
-        input_fp8, input_scales = self.quantize_input(input)
-        if input.shape[0]:
-            fp8_gemm_nt_skip_head_mid(
-                (input_fp8, input_scales),
-                (self.weight, self.weight_scales),
-                output,
-                head_splits,
-                disable_ue8m0_cast=not self.scale_ue8m0,
-            )
+        kv = self.forward(input).view(input.shape[0], heads, left + right)
+        packed = output.view(input.shape[0], heads, left + middle + right)
+        packed[..., :left].copy_(kv[..., :left])
+        packed[..., left + middle :].copy_(kv[..., left:])
         return output
 
     def maybe_cache_quant_scale(self, max_len: int) -> None:
