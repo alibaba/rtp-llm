@@ -12,7 +12,7 @@ LOAD 模拟 KV 字节传输，缓存容量、预留、排队、生成与取消�
 bash mvnw -P'opensource,!internal' -pl flexlb-mock-engine -am package
 ```
 
-公司环境先按 master CI 的顺序构建 common 和 `internal_source/java`，再执行 `-Pinternal` Maven package。该 profile 为 mock jar 加入现有 KMonitor 适配包；没有私有包的开源构建不引用其类型。将 `target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar` 复制为 `whale/mock-engine.jar`，以 `whale/` 为 Docker build context。
+公司环境先按 master CI 的顺序构建 common，再在 `internal_source/java` 执行 `mvn -pl kmonitor -am install -DskipTests`（不构建 mock 不需要的 VipServer），最后执行 `-Pinternal` Maven package。该 profile 为 mock jar 加入现有 KMonitor 适配包；没有私有包的开源构建不引用其类型。将 `target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar` 复制为 `whale/mock-engine.jar`，以 `whale/` 为 Docker build context。
 
 `--kmonitor true` 只允许与 `--whale true` 同时启用。启用后若私有适配缺失或退化为 NoOp，启动失败，避免把未上报指标误当成上线成功。开源网络联调显式设置 `MOCK_KMONITOR_ENABLED=false`。
 

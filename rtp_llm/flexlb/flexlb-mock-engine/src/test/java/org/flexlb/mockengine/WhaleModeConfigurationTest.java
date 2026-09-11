@@ -40,6 +40,19 @@ class WhaleModeConfigurationTest {
     }
 
     @Test
+    void internalProfileCreatesUsableMonitorAndOpenProfileFailsExplicitly() throws Exception {
+        try {
+            Class.forName("org.flexlb.monitor.FlexMonitorFactory");
+        } catch (ClassNotFoundException absentInOpenProfile) {
+            assertThrows(IllegalStateException.class, WhaleMockMonitor::create);
+            return;
+        }
+        try (WhaleMockMonitor monitor = WhaleMockMonitor.create()) {
+            assertNotNull(monitor);
+        }
+    }
+
+    @Test
     void wrapperRefusesImplicitActivationAndMapsWhalePortsAndFetch() throws Exception {
         Path script = Path.of("whale/start.sh").toAbsolutePath();
         ProcessBuilder refused = new ProcessBuilder("sh", script.toString()).redirectErrorStream(true);

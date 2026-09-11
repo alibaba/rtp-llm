@@ -3,6 +3,7 @@ package org.flexlb.mockengine;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.MasterStatusProvider;
 import org.flexlb.metric.NoOpFlexMonitor;
 
 import java.util.Map;
@@ -18,7 +19,7 @@ final class WhaleMockMonitor implements AutoCloseable {
     static WhaleMockMonitor create() {
         try {
             FlexMonitor monitor = (FlexMonitor) Class.forName("org.flexlb.monitor.FlexMonitorFactory")
-                    .getMethod("createKMonitorAdapter").invoke(null);
+                    .getMethod("createKMonitorAdapter", MasterStatusProvider.class).invoke(null, new Object[]{null});
             if (monitor instanceof NoOpFlexMonitor) {
                 throw new IllegalStateException("KMonitor initialization returned a no-op adapter");
             }
