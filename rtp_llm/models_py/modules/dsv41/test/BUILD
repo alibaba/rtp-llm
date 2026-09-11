@@ -1,4 +1,14 @@
 py_test(
+    name = "test_indexer",
+    srcs = ["test_indexer.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {
+        "DSV41_SPARSE_INDEXER": "1",
+        "DSV41_NATIVE_COMPACT_WRITER": "1",
+    },
+)
+
+py_test(
     name = "test_compressor",
     srcs = ["test_compressor.py", "official_compressor.py", "test_compact_writer.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
