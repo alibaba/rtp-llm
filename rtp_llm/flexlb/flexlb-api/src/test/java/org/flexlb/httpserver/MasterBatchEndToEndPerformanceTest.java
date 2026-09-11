@@ -168,6 +168,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static final int ENGINE_MATRIX_WARMUP_REQUESTS_PER_PREFILL =
             Integer.getInteger(
                     "flexlb.perf.engine-matrix-warmup-requests-per-prefill", 2);
+    private static final int ENGINE_MATRIX_WARMUP_MS =
+            Integer.getInteger("flexlb.perf.engine-matrix-warmup-ms", 0);
     private static final int ENGINE_MATRIX_FIRST_PREFILL_GRPC_PORT =
             Integer.getInteger(
                     "flexlb.perf.engine-matrix-first-prefill-grpc-port", 22_001);
@@ -578,7 +580,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         int warmupRequests = Math.max(
                 WARMUP_REQUESTS,
-                prefillEngineCount * ENGINE_MATRIX_WARMUP_REQUESTS_PER_PREFILL);
+                Math.max(prefillEngineCount * ENGINE_MATRIX_WARMUP_REQUESTS_PER_PREFILL,
+                        targetQps * ENGINE_MATRIX_WARMUP_MS / 1_000));
         TrafficResult warmup = runTraffic(
                 warmupRequests,
                 50_000_000L + prefillEngineCount * 10_000L + targetQps,
@@ -881,12 +884,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
 
         long trafficStartNanos = System.nanoTime();
-        long issueIntervalNanos = targetQps > 0
-                ? Math.max(1L, TimeUnit.SECONDS.toNanos(1) / targetQps)
-                : 0L;
         long nextIssueNanos = trafficStartNanos;
         long pacingLagNanos = 0L;
-        long skippedIssueSlots = 0L;
         long issueCallNanos = 0L;
         for (int index = 0; index < requestCount; index++) {
             if (targetQps > 0) {
@@ -897,20 +896,15 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 pacingLagNanos += Math.max(0L, issueStartedNanos - nextIssueNanos);
             }
             issueRequest(futures.get(index), serializedRequests[index], index,
-                    firstRequestId + index);
+                    firstRequestId + index, targetQps > 0 ? nextIssueNanos : issueStartedNanos);
             long issueCompletedNanos = System.nanoTime();
             issueCallNanos += issueCompletedNanos - issueStartedNanos;
             if (targetQps > 0 && index + 1 < requestCount) {
-                // Keep an absolute deadline grid so waking less than one slot late
-                // does not accumulate drift. After a longer pause, skip elapsed
-                // slots to the first future deadline instead of replaying a burst.
-                nextIssueNanos += issueIntervalNanos;
-                long overdueNanos = issueCompletedNanos - nextIssueNanos;
-                if (overdueNanos >= 0L) {
-                    long skippedSlots = overdueNanos / issueIntervalNanos + 1L;
-                    nextIssueNanos += skippedSlots * issueIntervalNanos;
-                    skippedIssueSlots += skippedSlots;
-                }
+                // Open-loop arrivals retain their original deadlines. Skipping late
+                // slots silently reduces offered load (notably at 10K QPS), hiding
+                // saturation. Client latency includes any delay before actual issue.
+                nextIssueNanos = trafficStartNanos
+                        + (index + 1L) * TimeUnit.SECONDS.toNanos(1) / targetQps;
             }
         }
 
@@ -950,9 +944,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
         long elapsedNanos = System.nanoTime() - trafficStartNanos;
         System.out.printf("FlexLB offered traffic: requests=%d target_qps=%d offered_qps=%.1f "
-                        + "pacing_lag_avg_us=%.3f pacing_skipped_slots=%d issue_call_avg_us=%.3f%n",
+                        + "pacing_lag_avg_us=%.3f issue_call_avg_us=%.3f%n",
                 requestCount, targetQps, requestCount * 1_000_000_000.0 / issueElapsedNanos,
-                pacingLagNanos / (1000.0 * requestCount), skippedIssueSlots,
+                pacingLagNanos / (1000.0 * requestCount),
                 issueCallNanos / (1000.0 * requestCount));
         long[] latencies = new long[requestCount];
         List<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responses =
@@ -977,8 +971,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             CompletableFuture<TimedResponse> future,
             byte[] serializedRequest,
             int requestIndex,
-            long requestId) {
-        long requestStartNanos = System.nanoTime();
+            long requestId,
+            long requestStartNanos) {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 new StreamObserver<>() {
                     @Override
