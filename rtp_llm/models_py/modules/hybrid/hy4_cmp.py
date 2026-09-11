@@ -353,7 +353,17 @@ class Hy4Cmp:
             and _tensor(positions, (rows,), positions.dtype, device)
         ):
             return "invalid positions"
+        working_entry = fmha.pinned_mla_groups.get(self.self_attn.layer_idx)
         mla_cache = cache.kv_cache_base
+        if working_entry is not None:
+            working, group_layer = working_entry
+            if (
+                cache.kv_cache_base.data_ptr()
+                != working.backing[group_layer].data_ptr()
+                or working.capacity < rows * 2048
+            ):
+                return "invalid tiered MLA backing or resident capacity"
+            mla_cache = working.resident[group_layer]
         if not (
             isinstance(mla_cache, torch.Tensor)
             and mla_cache.ndim == 3
@@ -526,9 +536,9 @@ class Hy4Cmp:
             a.kv_a_layernorm.weight,
             fmha._cos_sin_cache,
             buffers["positions"],
-            fmha.fmha_params.slot_mapping,
+            buffers["mla_slots"],
             *buffers["q_a"],
-            cache.kv_cache_base,
+            buffers["mla_cache"],
             a.q_a_layernorm.variance_epsilon,
             a.kv_a_layernorm.variance_epsilon,
             self._ops.get_pdl(),
@@ -626,10 +636,25 @@ class Hy4Cmp:
         buffers = self._allocate_buffers(source, indexed, raw_gate)
         # Canonicalize metadata once on caller, before any side-stream launch.
         buffers["positions"] = self._positions
+        working_entry = fmha.pinned_mla_groups.get(self.self_attn.layer_idx)
+        buffers["mla_cache"] = cache.kv_cache_base
+        buffers["mla_slots"] = fmha.fmha_params.slot_mapping
+        if working_entry is not None:
+            rows = source.shape[0]
+            buffers["mla_cache"] = torch.empty(
+                ((rows + 63) // 64, 64, 656), device=source.device, dtype=torch.uint8
+            )
+            buffers["mla_slots"] = torch.arange(
+                rows, device=source.device, dtype=torch.int64
+            )
         if not indexed:
+            if working_entry is not None:
+                fmha.prefetch_kv(self.self_attn.layer_idx, prev_topk)
             hidden, x_fp8, x_scale = producer(0)
             q_inputs = self._qkv_a(hidden, x_fp8, x_scale, buffers, fmha, cache)
             prepared, gate = self._main_query(hidden, q_inputs, fmha, cache, buffers)
+            if working_entry is not None:
+                fmha.finish_hy4_cache_write(prepared, cache, buffers["mla_cache"])
             return prepared, gate, prev_topk
 
         i = self.self_attn.indexer
@@ -711,6 +736,8 @@ class Hy4Cmp:
             if not defer_score:
                 with torch.cuda.stream(index):
                     topk = self._score_topk(score_inputs, score_plan)
+                    if working_entry is not None:
+                        fmha.prefetch_kv(self.self_attn.layer_idx, topk)
                     events.indexer_complete.record()
             prepared, gate = self._main_query(hidden, q_inputs, fmha, cache, buffers)
             if defer_score:
@@ -718,6 +745,8 @@ class Hy4Cmp:
                 index.wait_event(events.q_path_complete)
                 with torch.cuda.stream(index):
                     topk = self._score_topk(score_inputs, score_plan)
+                    if working_entry is not None:
+                        fmha.prefetch_kv(self.self_attn.layer_idx, topk)
                     events.indexer_complete.record()
             main.wait_event(events.indexer_complete)
             events.side_streams_complete.record()
@@ -725,6 +754,8 @@ class Hy4Cmp:
         # Unlike fixed buffers, TopK is allocated on index. Event ordering
         # alone does not protect its storage from caching-allocator reuse.
         topk.record_stream(caller)
+        if working_entry is not None:
+            fmha.finish_hy4_cache_write(prepared, cache, buffers["mla_cache"])
         return prepared, gate, topk
 
     def moe_prepacked_input_views(self, rows):

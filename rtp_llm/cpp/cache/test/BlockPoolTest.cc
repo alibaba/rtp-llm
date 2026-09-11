@@ -133,6 +133,31 @@ TEST_F(BlockPoolTest, Glm52SharedIndexerKvCacheIsOptIn) {
     EXPECT_ANY_THROW(SingleConfigCreator::createSingleConfig(model_config, parallelism_config, /*is_mtp=*/false));
 }
 
+TEST_F(BlockPoolTest, Hy4CompactsOnlyTargetIndexerStorage) {
+    auto model                                 = makeTestModelConfig(4);
+    model.model_type                           = "hy_v4";
+    model.attn_config.use_mla                  = true;
+    model.attn_config.is_sparse                = true;
+    model.attn_config.kv_cache_dtype           = KvCacheDataType::FP8;
+    model.attn_config.kv_lora_rank             = 512;
+    model.attn_config.rope_head_dim            = 64;
+    model.attn_config.indexer_head_dim         = 128;
+    model.enable_glm52_shared_indexer_kv_cache = true;
+    model.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
+    ParallelismConfig parallelism;
+    auto              target = SingleConfigCreator::createSingleConfig(model, parallelism, false);
+    EXPECT_EQ(target.layer_to_indexer_kv_slot, std::vector<int>({0, 1, 1, 1}));
+    EXPECT_EQ(target.kv_scale_size_bytes, 2u * target.kv_scale_stride_bytes);
+    EXPECT_ANY_THROW(SingleConfigCreator::createSingleConfig(model, parallelism, true));
+    model.model_type                           = "hy_v4_mtp";
+    model.enable_glm52_shared_indexer_kv_cache = false;
+    model.glm52_indexer_kv_slot_mapping.clear();
+    auto mtp = SingleConfigCreator::createSingleConfig(model, parallelism, true);
+    EXPECT_TRUE(mtp.layer_to_indexer_kv_slot.empty());
+    EXPECT_EQ(mtp.kv_scale_size_bytes, mtp.layer_num * mtp.kv_scale_stride_bytes);
+    EXPECT_EQ(target.kv_block_size_bytes, mtp.kv_block_size_bytes);
+}
+
 TEST_F(BlockPoolTest, PinnedMlaKeepsIndexerOnGpuAndVersionsRecycledBlocks) {
     auto model = makeTestModelConfig(4);
     model.model_type = "glm_5";

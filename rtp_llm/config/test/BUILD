@@ -27,3 +27,10 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+
+py_test(
+    name = "shared_indexer_kv_test",
+    srcs = ["shared_indexer_kv_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = ["//rtp_llm:testlib"],
+)

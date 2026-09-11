@@ -85,3 +85,15 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "hy4_tiered_cache_test",
+    srcs = ["hy4_tiered_cache_test.py"],
+    deps = [
+        "//rtp_llm/models_py:pinned_mla_cache",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+    ],
+    tags = ["manual"],
+)

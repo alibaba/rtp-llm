@@ -717,12 +717,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 )
             self.full_rope_pos_ids = None
 
-        # Gather path: prefill-only, gated by USE_GATHER_PATH (mirrors non-CP).
+        tiered = int(os.environ.get("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "0")) > 0
+        # Tiered prefill bypasses decode admission and gathers each owning rank.
         gather_enabled = (
-            (os.environ.get("USE_GATHER_PATH", "0") == "1" or self.kv_cache_sharded)
+            (
+                os.environ.get("USE_GATHER_PATH", "0") == "1"
+                or self.kv_cache_sharded
+                or tiered
+            )
             and attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
-            and (not self.use_cuda_graph or self.kv_cache_sharded)
+            and (not self.use_cuda_graph or self.kv_cache_sharded or tiered)
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
@@ -787,6 +792,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         layer_id: int = 0,
         scatter_out: Optional[torch.Tensor] = None,
         attn_sink: Optional[torch.Tensor] = None,
+        pinned_cache: Optional[tuple] = None,
     ) -> torch.Tensor:
         """CP prefill: all-gather → restore → write to kv_cache → attend on q tokens
         owned by this rank (q[total_local_ids]). Returns [total_q_len, H, kv_lora_rank]
@@ -800,15 +806,38 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
         restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
+        write_slots = (
+            self.sharded_slot_mapping
+            if self.kv_cache_sharded
+            else self.mla_params.slot_mapping
+        )
+        cache_target = kv_cache
+        if pinned_cache is not None:
+            from rtp_llm.ops.compute_ops import LayerKVCache
+
+            cache_target = LayerKVCache()
+            cache_target.kv_cache_base = torch.empty(
+                (restored_ckv.shape[0], 1, 656),
+                device=restored_ckv.device,
+                dtype=kv_cache.kv_cache_base.dtype,
+            )
+            scratch_slots = torch.arange(
+                restored_ckv.shape[0], device=restored_ckv.device, dtype=torch.int64
+            )
+        else:
+            scratch_slots = write_slots
         self.kv_cache_write_op.forward(
             restored_ckv,
             restored_k_pe,
-            kv_cache,
+            cache_target,
             self.mla_params,
-            slot_mapping_override=(
-                self.sharded_slot_mapping if self.kv_cache_sharded else None
-            ),
+            slot_mapping_override=scratch_slots,
         )
+        if pinned_cache is not None:
+            working, group_layer = pinned_cache
+            working.write(
+                group_layer, write_slots, cache_target.kv_cache_base.flatten(0, 1)
+            )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
@@ -822,7 +851,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if no_q_work:
             if self.kv_cache_sharded and self._gather is not None:
                 fused_kv = self._allocate_fused_kv()
-                self._gather_sharded_kv_cache(kv_cache, fused_kv)
+                self._gather_sharded_kv_cache(kv_cache, fused_kv, pinned_cache)
             return None
 
         assert q is not None and q.size(0) > 0
@@ -837,7 +866,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         else:
             q0 = q[self.total_local_ids].contiguous()
         if self._gather is not None:
-            out0 = self._attend_gather(q0, kv_cache, topk, attn_sink)
+            out0 = self._attend_gather(q0, kv_cache, topk, attn_sink, pinned_cache)
         else:
             out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id, attn_sink)
 
@@ -856,7 +885,27 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.block_table.device,
         )
 
-    def _gather_sharded_kv_cache(self, kv_cache, fused_kv: torch.Tensor) -> None:
+    def _gather_cache(self, kv_cache, out, lengths, starts, pinned_cache):
+        if pinned_cache is not None:
+            working, group_layer = pinned_cache
+            working.gather_bf16(group_layer, out, self.block_table, lengths, starts)
+        else:
+            src = _as_uint8(kv_cache.kv_cache_base)
+            if src.ndim == 4:
+                src = src.squeeze(2)
+            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+                src,
+                out,
+                self.block_table.to(torch.int32),
+                lengths,
+                starts,
+                lengths.numel(),
+                out.shape[0],
+            )
+
+    def _gather_sharded_kv_cache(
+        self, kv_cache, fused_kv: torch.Tensor, pinned_cache=None
+    ) -> None:
         """Mirror indexer's sharded gather flow (indexer_op.py:1017-1078):
 
           1) Drive the GPU gather kernel with *actual* owned lengths so
@@ -887,10 +936,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert self.sharded_actual_local_kv_lens is not None
         assert self.sharded_actual_workspace_starts is not None
 
-        src = _as_uint8(kv_cache.kv_cache_base)
-        if src.ndim == 4:
-            src = src.squeeze(2)
-
         # Padded buffer MUST be torch.zeros (not torch.empty): padding rows
         # participate in NCCL all_gather and must stay clean 0. Otherwise a
         # restore_indices value that lands on a padding row (multi-request
@@ -909,14 +954,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 dtype=fused_kv.dtype,
                 device=fused_kv.device,
             )
-            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
-                src,
+            self._gather_cache(
+                kv_cache,
                 actual_fused,
-                self.block_table.to(torch.int32),
                 self.sharded_actual_local_kv_lens,
                 self.sharded_actual_workspace_starts,
-                ws.batch_size,
-                self.sharded_actual_total_local_kv_len,
+                pinned_cache,
             )
             _scatter_actual_to_padded(
                 actual=actual_fused,
@@ -971,6 +1014,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache,
         topk: torch.Tensor,
         attn_sink: Optional[torch.Tensor] = None,
+        pinned_cache: Optional[tuple] = None,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
         cache has the full per-request KV; the only CP-specific bit is using
@@ -984,19 +1028,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert ws is not None and self.precomputed_req_ids is not None
         fused_kv = self._allocate_fused_kv()
         if self.kv_cache_sharded:
-            self._gather_sharded_kv_cache(kv_cache, fused_kv)
+            self._gather_sharded_kv_cache(kv_cache, fused_kv, pinned_cache)
         else:
-            src = _as_uint8(kv_cache.kv_cache_base)
-            if src.ndim == 4:
-                src = src.squeeze(2)
-            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
-                src,
-                fused_kv,
-                self.block_table.to(torch.int32),
-                ws.seq_lens,
-                ws.workspace_starts,
-                ws.batch_size,
-                ws.total_kv_len,
+            self._gather_cache(
+                kv_cache, fused_kv, ws.seq_lens, ws.workspace_starts, pinned_cache
             )
         offsets = ws.workspace_starts[self.precomputed_req_ids]
         topk_2d = _topk_2d(topk)
@@ -1095,7 +1130,10 @@ class SparseMlaCpImpl(SparseMlaImpl):
         self.fmha_impl.kv_owner_tokens_per_block = self._kv_owner_tokens_per_block
         self._glm53_prefill_workspace: Optional[Glm53PrefillWorkspace] = None
 
-    def enable_glm53_prefill_workspace(self) -> None:
+    def uses_pinned_prefill_gather(self) -> bool:
+        return True
+
+    def enable_prefill_workspace(self) -> None:
         """Enable GLM5.3's per-forward attention workspace manager."""
         self._glm53_prefill_workspace = Glm53PrefillWorkspace()
 
@@ -1304,6 +1342,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             layer_id=layer_id,
             scatter_out=scatter_out,
             attn_sink=attn_sink,
+            pinned_cache=self.pinned_mla_groups.get(layer_id),
         )
         if attn_output is None:
             return None

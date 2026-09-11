@@ -137,6 +137,7 @@ def fixture(rows=32, model="hy_v4_mtp"):
         supports_topk_late_binding=True,
         can_fuse_kv_norm_cache=lambda x, w: True,
         attn_inputs=inputs,
+        pinned_mla_groups={},
         fmha_params=params,
         _cos_sin_cache=op.cos_sin_cache,
         _is_neox_style=False,

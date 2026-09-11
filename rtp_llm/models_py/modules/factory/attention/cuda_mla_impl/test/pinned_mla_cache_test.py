@@ -256,8 +256,13 @@ class PinnedMlaCacheTest(unittest.TestCase):
 
         attention.indexer = indexer
         fmha = SimpleNamespace(
-            pinned_mla_groups={}, is_sparse=lambda: True, fmha_params=None,
-            attn_inputs=None, cp_params=None, forward=forward,
+            pinned_mla_groups={},
+            is_sparse=lambda: True,
+            fmha_params=None,
+            uses_pinned_prefill_gather=lambda: False,
+            attn_inputs=None,
+            cp_params=None,
+            forward=forward,
             prefetch_kv=lambda *args: events.append("prefetch"),
         )
         hidden = torch.randn((3, 16), device="cuda")
@@ -709,7 +714,6 @@ class PinnedMlaCacheTest(unittest.TestCase):
 
     def test_flat_vs_paged_decode(self):
         from flash_mla import flash_mla_sparse_fwd, flash_mla_with_kvcache, get_mla_metadata
-
 
         for rows in (1, 8, 32, 128):
             tokens = rows * 2048 * 2

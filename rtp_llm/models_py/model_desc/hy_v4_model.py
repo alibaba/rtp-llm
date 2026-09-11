@@ -358,6 +358,7 @@ class Hy4Model(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
+        fmha_impl.pinned_mla_groups = self.pinned_mla_groups
         prev_topk_indices = None
         enable_cmp = should_enable_hy4_cmp(
             self.layers,

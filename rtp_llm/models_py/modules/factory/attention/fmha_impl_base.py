@@ -51,6 +51,13 @@ class MlaImplBase(object):
         self.pinned_mla_groups: Dict[int, Any] = {}
         self.parallelism_config = parallelism_config
 
+    def enable_prefill_workspace(self) -> None:
+        """Optional workspace ownership for eager prefill implementations."""
+        pass
+
+    def uses_pinned_prefill_gather(self) -> bool:
+        return False
+
     @staticmethod
     def is_sparse() -> bool:
         return False

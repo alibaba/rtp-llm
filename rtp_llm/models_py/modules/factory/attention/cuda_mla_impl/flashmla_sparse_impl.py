@@ -336,6 +336,7 @@ class _SparseMlaPreparedForward:
     layer_id: int
     attn_sink: Optional[torch.Tensor]
     physical_indices: Optional[torch.Tensor] = None
+    pinned_cache: Optional[tuple] = None
 
 
 class SparseMlaFp8Op(SparseMlaOp):
@@ -409,13 +410,14 @@ class SparseMlaFp8Op(SparseMlaOp):
         # it on first call, then reuses it for the rest of the forward.
         self._reset_sched_meta(int(mla_params.batch_indice_h.shape[0]) * self.num_heads)
 
-        # Gather path: only for prefill, gated by env var.
+        tiered = int(os.environ.get("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "0")) > 0
+        # Full history is gathered directly from both tiers for eager prefill.
         gather_enabled = (
-            os.environ.get("USE_GATHER_PATH", "0") == "1"
+            (os.environ.get("USE_GATHER_PATH", "0") == "1" or tiered)
             and attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
             and not _is_multi_token_decode(attn_inputs)
-            and not self.use_cuda_graph
+            and (not self.use_cuda_graph or tiered)
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
@@ -448,9 +450,10 @@ class SparseMlaFp8Op(SparseMlaOp):
         layer_id: int = 0,
         attn_sink: Optional[torch.Tensor] = None,
         physical_indices: Optional[torch.Tensor] = None,
+        pinned_cache: Optional[tuple] = None,
     ) -> torch.Tensor:
         if self._gather is not None and physical_indices is None:
-            return self._forward_gather(q, kv, topk_indices, attn_sink)
+            return self._forward_gather(q, kv, topk_indices, attn_sink, pinned_cache)
         return self._forward_with_kvcache(
             q,
             kv,
@@ -466,6 +469,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         kv_cache_fp8: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_sink: Optional[torch.Tensor] = None,
+        pinned_cache: Optional[tuple] = None,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd (prefill fast path)."""
         q, attn_sink, actual_heads = self._pad_query_and_sink(
@@ -494,15 +498,25 @@ class SparseMlaFp8Op(SparseMlaOp):
             src = src.squeeze(2)
 
         # FP8 paged → BF16 contiguous workspace
-        rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
-            src,
-            fused_kv,
-            self.block_table.to(torch.int32),
-            ws.seq_lens,
-            ws.workspace_starts,
-            ws.batch_size,
-            ws.total_kv_len,
-        )
+        if pinned_cache is not None:
+            working, group_layer = pinned_cache
+            working.gather_bf16(
+                group_layer,
+                fused_kv,
+                self.block_table,
+                ws.seq_lens,
+                ws.workspace_starts,
+            )
+        else:
+            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+                src,
+                fused_kv,
+                self.block_table.to(torch.int32),
+                ws.seq_lens,
+                ws.workspace_starts,
+                ws.batch_size,
+                ws.total_kv_len,
+            )
 
         # Request-local topk → workspace offset (ws_starts[req] + local_pos)
         offsets = ws.workspace_starts[self.mla_params.batch_indice_d]
@@ -943,6 +957,12 @@ class SparseMlaImpl(MlaImplBase):
 
     # -- Main forward --------------------------------------------------------
 
+    def uses_pinned_prefill_gather(self) -> bool:
+        return (
+            isinstance(self.fmha_impl, SparseMlaFp8Op)
+            and self.fmha_impl._gather is not None
+        )
+
     def prefetch_kv(self, layer_id: int, topk_indices: torch.Tensor) -> None:
         working, group_layer = self.pinned_mla_groups[layer_id]
         if group_layer == 0:
@@ -959,14 +979,29 @@ class SparseMlaImpl(MlaImplBase):
             self.weights[layer_id][W.mla_kc],
             out=q_transformed,
         )
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+        if layer_id not in self.pinned_mla_groups:
+            common.apply_write_cache_store(
+                self.write_cache_store_impl, self.attn_inputs, kv_cache
+            )
         return _SparseMlaPreparedForward(
             q_transformed=q_transformed,
             kv_input=kv_cache.kv_cache_base,
             layer_id=layer_id,
             attn_sink=attn_sink,
+        )
+
+    def finish_hy4_cache_write(self, prepared, kv_cache, packed_rows):
+        working, group_layer = self.pinned_mla_groups[prepared.layer_id]
+        rows = self.rope_params.slot_mapping.numel()
+        working.write(
+            group_layer,
+            self.rope_params.slot_mapping,
+            packed_rows.view(-1, 656)[:rows].view(working.backing[group_layer].dtype),
+        )
+        prepared.kv_input = working.resident[group_layer]
+        prepared.physical_indices = working.physical_indices
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
     def prepare_topk_independent_forward(
@@ -1054,7 +1089,8 @@ class SparseMlaImpl(MlaImplBase):
                 cache_target.kv_cache_base.flatten(0, 1),
             )
             kv_input = working.resident[group_layer]
-            physical_indices = working.physical_indices
+            if not self.uses_pinned_prefill_gather():
+                physical_indices = working.physical_indices
         else:
             kv_input = kv_cache.kv_cache_base
         common.apply_write_cache_store(
@@ -1068,6 +1104,7 @@ class SparseMlaImpl(MlaImplBase):
             layer_id=layer_id,
             attn_sink=attn_sink,
             physical_indices=physical_indices,
+            pinned_cache=working_entry if self.uses_pinned_prefill_gather() else None,
         )
 
     def hy4_output_weight(self, layer_id: int) -> torch.Tensor:
@@ -1083,6 +1120,11 @@ class SparseMlaImpl(MlaImplBase):
             topk_indices,
             layer_id=prepared.layer_id,
             attn_sink=prepared.attn_sink,
+            **(
+                {"physical_indices": prepared.physical_indices}
+                if prepared.physical_indices is not None
+                else {}
+            ),
         )
 
     def finish_topk_dependent_forward(
@@ -1097,6 +1139,11 @@ class SparseMlaImpl(MlaImplBase):
             topk_indices,
             layer_id=prepared.layer_id,
             attn_sink=prepared.attn_sink,
+            **(
+                {"pinned_cache": prepared.pinned_cache}
+                if prepared.pinned_cache is not None
+                else {}
+            ),
             **(
                 {"physical_indices": prepared.physical_indices}
                 if prepared.physical_indices is not None
@@ -1122,7 +1169,11 @@ class SparseMlaImpl(MlaImplBase):
         """Sparse MLA forward. q: [T, H, qk_head_dim], topk: [T, (H,) topk] (req-local).
         Returns [T, H, nope_head_dim]."""
         assert topk_indices is not None
-        if layer_id in self.pinned_mla_groups and not kv_prefetched:
+        if (
+            layer_id in self.pinned_mla_groups
+            and not kv_prefetched
+            and not self.uses_pinned_prefill_gather()
+        ):
             self.prefetch_kv(layer_id, topk_indices)
         prepared = self.prepare_topk_independent_forward(
             q,

@@ -359,7 +359,9 @@ class MlaAttention(nn.Module):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         early_prefetch = (
-            self.q_lora_rank > 0 and self.layer_idx in fmha_impl.pinned_mla_groups
+            self.q_lora_rank > 0
+            and self.layer_idx in fmha_impl.pinned_mla_groups
+            and not fmha_impl.uses_pinned_prefill_gather()
         )
         if (
             x_fp8 is None

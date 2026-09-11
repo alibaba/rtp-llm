@@ -205,6 +205,70 @@ def _check_selected_bytes(
             tl.atomic_add(Errors, 1, sem="relaxed")
 
 
+@triton.jit
+def _gather_tiered_fp8_mla(
+    Host,
+    Hbm,
+    Table,
+    Lengths,
+    Starts,
+    Out,
+    TABLE_STRIDE: tl.constexpr,
+    TABLE_COLUMNS: tl.constexpr,
+    BATCH: tl.constexpr,
+    BATCH_BLOCK: tl.constexpr,
+    PAGE: tl.constexpr,
+    HBM_TOKENS: tl.constexpr,
+    LOGICAL_TOKENS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    batch_ids = tl.arange(0, BATCH_BLOCK)
+    starts = tl.load(Starts + batch_ids, batch_ids < BATCH, other=0x7FFFFFFF)
+    request = tl.sum((starts <= row).to(tl.int32), 0) - 1
+    pos = row - tl.load(Starts + request)
+    length = tl.load(Lengths + request)
+    valid = (pos >= 0) & (pos < length) & (pos // PAGE < TABLE_COLUMNS)
+    block = tl.load(Table + request * TABLE_STRIDE + pos // PAGE, valid, other=-1)
+    token = block.to(tl.int64) * PAGE + pos % PAGE
+    valid = valid & (block >= 0) & (token < LOGICAL_TOKENS)
+    in_hbm = valid & (token < HBM_TOKENS)
+    in_host = valid & (token >= HBM_TOKENS)
+    device_row = Hbm + token * 656
+    host_row = Host + (token - HBM_TOKENS) * 656
+    d = tl.arange(0, 1024)
+    k_mask = d < 512
+    k_hbm = tl.load(device_row + d, in_hbm & k_mask, other=0)
+    k_host = tl.load(host_row + d, in_host & k_mask, other=0)
+    k = tl.where(in_hbm, k_hbm, k_host).to(tl.float8e4nv, bitcast=True).to(tl.float32)
+    scale_offset = 512 + (d // 128) * 4
+    scale_hbm = tl.load(
+        (device_row + scale_offset).to(tl.pointer_type(tl.float32)),
+        in_hbm & k_mask,
+        other=0.0,
+    )
+    scale_host = tl.load(
+        (host_row + scale_offset).to(tl.pointer_type(tl.float32)),
+        in_host & k_mask,
+        other=0.0,
+    )
+    scale = tl.where(in_hbm, scale_hbm, scale_host)
+    rope_mask = (d >= 512) & (d < 576)
+    rope_offset = 528 + (d - 512) * 2
+    rope_hbm = tl.load(
+        (device_row + rope_offset).to(tl.pointer_type(tl.bfloat16)),
+        in_hbm & rope_mask,
+        other=0.0,
+    ).to(tl.float32)
+    rope_host = tl.load(
+        (host_row + rope_offset).to(tl.pointer_type(tl.bfloat16)),
+        in_host & rope_mask,
+        other=0.0,
+    ).to(tl.float32)
+    rope = tl.where(in_hbm, rope_hbm, rope_host)
+    result = tl.where(k_mask, k * scale, rope)
+    tl.store(Out + row * 576 + d, result, d < 576)
+
+
 class PinnedMlaWorkingSet:
     """One global, GPU-managed working set per shared-index group.
 
@@ -396,6 +460,56 @@ class PinnedMlaWorkingSet:
                 self.mapping, logical_slots, values.view(torch.uint8),
                 self.width, triton.next_power_of_2(self.width), self.hbm_tokens,
             )
+
+    def gather_bf16(self, layer, out, block_table, lengths, starts):
+        """Gather complete prefill history without admitting it into decode slots."""
+        if self.width != 656 or self.backing[layer].element_size() != 1:
+            raise ValueError("tiered prefill requires packed FP8 MLA rows of 656 bytes")
+        if (
+            out.ndim != 2
+            or out.shape[1] != 576
+            or out.dtype != torch.bfloat16
+            or out.device != self.device
+            or not out.is_contiguous()
+        ):
+            raise ValueError(
+                "tiered prefill output must be contiguous BF16 [tokens, 576]"
+            )
+        batch = lengths.numel()
+        if (
+            batch <= 0
+            or starts.numel() != batch
+            or block_table.ndim != 2
+            or block_table.shape[0] != batch
+            or block_table.stride(1) != 1
+            or any(
+                t.device != self.device or t.dtype not in (torch.int32, torch.int64)
+                for t in (block_table, lengths, starts)
+            )
+            or not lengths.is_contiguous()
+            or not starts.is_contiguous()
+        ):
+            raise ValueError("invalid tiered prefill block table or ragged metadata")
+        self.compute_stream = torch.cuda.current_stream(self.device)
+        if self.started:
+            self.layer_cache(layer)
+        if out.shape[0]:
+            _gather_tiered_fp8_mla[(out.shape[0],)](
+                self.backing[layer].view(torch.uint8),
+                self.resident[layer].view(torch.uint8),
+                block_table,
+                lengths,
+                starts,
+                out,
+                block_table.stride(0),
+                block_table.shape[1],
+                batch,
+                triton.next_power_of_2(batch),
+                self.backing[layer].shape[1],
+                self.hbm_tokens,
+                self.logical_tokens,
+            )
+        return out
 
     def invalidate(self, logical_slots: torch.Tensor) -> None:
         """Invalidate all layers before allocator reuse or external backing writes."""
