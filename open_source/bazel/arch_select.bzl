@@ -25,6 +25,15 @@ def copy_all_so():
     copy_so("@flashinfer_cpp//:flashinfer_sm90")
     copy_so("@deep_ep//:deep_ep_cu")
 
+def cuda13_requirement(names):
+    """The public source overlay does not provide the internal CUDA13 locks."""
+    for name in names:
+        native.py_library(
+            name = name,
+            deps = [],
+            visibility = ["//visibility:public"],
+        )
+
 def requirement(names):
     for name in names:
         native.py_library(

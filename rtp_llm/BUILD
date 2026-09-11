@@ -412,7 +412,8 @@ py_library(
         ":structure",
     ],
     data = [
-        "openai/renderers/qwen_agent/utils/qwen.tiktoken"
+        "openai/renderers/qwen_agent/utils/qwen.tiktoken",
+        "openai/renderers/v41_recipe.LICENSE",
     ],
 )
 

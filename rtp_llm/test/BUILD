@@ -89,6 +89,29 @@ py_test(
 )
 
 py_test(
+    name = "v41_recipe_protocol_test",
+    srcs = ["v41_recipe_protocol_test.py"],
+    data = [
+        "//rtp_llm:openai/reasoning_effort.py",
+        "//rtp_llm:openai/renderers/v41_recipe.py",
+        "//rtp_llm:openai/renderers/v41_stream.py",
+    ],
+)
+
+py_test(
+    name = "v41_recipe_reference_test",
+    srcs = ["v41_recipe_reference_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["requires-dsv41-weights"],
+)
+
+py_test(
+    name = "v41_recipe_endpoint_test",
+    srcs = ["v41_recipe_endpoint_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "deepseek_v41_image_renderer_test",
     srcs = ["deepseek_v41_image_renderer_test.py"],
     deps = ["//rtp_llm:testlib"],

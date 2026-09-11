@@ -60,6 +60,30 @@ class DeepSeekV41VisionEmbedding(nn.Module):
             }
         )
 
+    @classmethod
+    def from_model_weights(cls, config, global_weights):
+        """Bind the framework-installed vision tensors without duplicate allocation."""
+        with torch.device("meta"):
+            model = cls(config, device="meta")
+        expected = model.state_dict()
+        state = {}
+        device = None
+        for name, placeholder in expected.items():
+            value = global_weights["v41." + name]
+            if value.shape != placeholder.shape or value.dtype != placeholder.dtype:
+                raise ValueError(
+                    f"V4.1 installed vision tensor {name} has wrong shape/dtype"
+                )
+            if value.device.type == "meta" or (
+                device is not None and value.device != device
+            ):
+                raise ValueError(
+                    "V4.1 installed vision tensors must share a materialized device"
+                )
+            state[name], device = value, value.device
+        model.load_state_dict(state, strict=True, assign=True)
+        return model.eval()
+
     def load_checkpoint(self, checkpoint: str | Path) -> dict[str, int]:
         """Load only the real vision and delimiter tensors, retaining norm FP32."""
         from safetensors import safe_open

@@ -46,7 +46,16 @@ def _retain(
     if previous is not None:
         scores = torch.cat((previous.scores, scores), dim=-1)
         positions = torch.cat((previous.positions, positions), dim=-1)
-    values, offsets = scores.topk(min(capacity, scores.shape[-1]), dim=-1)
+    if os.environ.get("DSV41_DEEPSELECT") == "1":
+        from rtp_llm.models_py.modules.dsv41.deepselect import topk
+
+        selected = topk(scores, min(capacity, scores.shape[-1]))
+        torch._assert_async(
+            (selected.status == 0).all(), "invalid DeepSelect index selection"
+        )
+        values, offsets = selected.values, selected.indices.clamp_min(0).long()
+    else:
+        values, offsets = scores.topk(min(capacity, scores.shape[-1]), dim=-1)
     return RankedPositions(values, positions.gather(-1, offsets))
 
 
@@ -60,7 +69,12 @@ class IndexScoreTile:
     packed_kv_bytes: int = 0
 
     def topk(self, previous: Optional[RankedPositions] = None) -> RankedPositions:
-        return _retain(self.logits.float(), self.positions, INDEX_TOPK, previous)
+        scores = (
+            self.logits
+            if os.environ.get("DSV41_DEEPSELECT") == "1"
+            else self.logits.float()
+        )
+        return _retain(scores, self.positions, INDEX_TOPK, previous)
 
     def block_topk(self, previous: Optional[RankedPositions] = None) -> RankedPositions:
         scores = self.logits.float().unflatten(-1, (-1, SPARSE_BLOCK)).amax(-1)

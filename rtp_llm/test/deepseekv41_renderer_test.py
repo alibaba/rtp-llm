@@ -28,7 +28,21 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv41_detector 
 class V41RequestTest(unittest.TestCase):
     def test_strict_json_types_and_legacy_validation(self):
         for stream in (True, False):
-            for value in (None, 1, 25, 50, 75, 100, "low", "high", "xhigh", "max"):
+            for value in (
+                None,
+                1,
+                25,
+                50,
+                75,
+                100,
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "none",
+            ):
                 request = ChatCompletionRequest.model_validate_json(
                     json.dumps(
                         {"messages": [], "reasoning_effort": value, "stream": stream}
@@ -43,7 +57,7 @@ class V41RequestTest(unittest.TestCase):
                     ChatCompletionRequest.model_validate_json(
                         json.dumps({"messages": [], "reasoning_effort": value})
                     )
-            for value in ("1", "50", "medium", "none", 0, 101):
+            for value in ("1", "50", "HIGH", 0, 101):
                 with self.subTest(value=value), self.assertRaisesRegex(
                     ValueError, "reasoning_effort"
                 ):
@@ -65,7 +79,13 @@ class V41RequestTest(unittest.TestCase):
             parse_other_params(request, model_type="deepseek_v41").reasoning_effort, 100
         )
         self.assertEqual(parse_other_params(request).reasoning_effort, "xhigh")
-        for value in ("37", "medium", "HIGH"):
+        for value, expected in (("minimal", 50), ("medium", 75), ("none", "none")):
+            request.parameters["reasoning_effort"].string_param = value
+            self.assertEqual(
+                parse_other_params(request, model_type="deepseek_v41").reasoning_effort,
+                expected,
+            )
+        for value in ("37", "HIGH"):
             request.parameters["reasoning_effort"].string_param = value
             with self.assertRaises(DashScParameterError):
                 parse_other_params(request, model_type="deepseek_v41")
@@ -119,12 +139,14 @@ class V41OfficialEncodingTest(unittest.TestCase):
             {"role": "assistant", "content": "hello"},
             {"role": "system", "content": "Second instruction"},
         ]
-        for thinking, effort in (
-            (False, None),
-            (True, None),
-            (True, "low"),
-            (True, 1),
-            (True, 100),
+        # Operator R2 adopts pinned recipe budgets and historical reasoning.
+        for thinking, effort, budget in (
+            (False, None, 75),
+            (True, None, 75),
+            (True, "low", 50),
+            (True, "medium", 75),
+            (True, 1, 1),
+            (True, 100, 100),
         ):
             with self.subTest(thinking=thinking, effort=effort):
                 request = ChatCompletionRequest.model_validate_json(
@@ -140,8 +162,8 @@ class V41OfficialEncodingTest(unittest.TestCase):
                 expected = renderer.encoding_module.encode_messages(
                     messages,
                     thinking_mode="thinking" if thinking else "chat",
-                    reasoning_effort=normalize_v41_reasoning_effort(effort),
-                    drop_thinking=True,
+                    reasoning_effort=budget,
+                    drop_thinking=False,
                     add_default_bos_token=True,
                 )
                 self.assertEqual(actual.rendered_prompt, expected)

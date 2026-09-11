@@ -100,6 +100,35 @@ class V41VisionEmbeddingTest(TestCase):
         )
 
     @torch.inference_mode()
+    def test_framework_binding_preserves_storage_and_fp32_norms(self):
+        installed = {
+            "v41." + name: tensor for name, tensor in self.adapter.state_dict().items()
+        }
+        config = V41Config.from_path(Path(os.environ["DSV41_MODEL_PATH"]))
+        bound = DeepSeekV41VisionEmbedding.from_model_weights(config, installed)
+        for name, value in bound.state_dict().items():
+            self.assertEqual(value.data_ptr(), installed["v41." + name].data_ptr())
+        for module in bound.vision.modules():
+            if isinstance(module, RMSNorm):
+                self.assertEqual(module.weight.dtype, torch.float32)
+        with sdpa_kernel(SDPBackend.MATH):
+            image = V41ImageInput(
+                0,
+                torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16),
+                3,
+                6,
+                image_token_types(1, 2),
+                "",
+                bound.processor_config.identity,
+            )
+            torch.testing.assert_close(
+                bound.encode_image(image),
+                self.adapter.encode_image(image),
+                rtol=0,
+                atol=0,
+            )
+
+    @torch.inference_mode()
     def test_full_image_and_delimiters_match_official_math(self):
         with sdpa_kernel(SDPBackend.MATH), torch.device("cuda"):
             for height, width in ((3, 6), (4, 7), (39, 39)):

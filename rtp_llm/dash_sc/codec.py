@@ -992,7 +992,12 @@ def parse_other_params(
                     "reasoning_effort must be a strict string or integer"
                 )
         try:
-            reasoning_effort = normalize_v41_reasoning_effort(raw_effort)
+            normalized_effort = normalize_v41_reasoning_effort(raw_effort)
+            # Absence and `none` affect the shared request converter's thinking
+            # switch, so do not collapse them into a numeric effort here.
+            reasoning_effort = (
+                raw_effort if raw_effort in (None, "none") else normalized_effort
+            )
         except ValueError as error:
             raise DashScParameterError(str(error)) from error
 

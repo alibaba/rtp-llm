@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", "requirement")
+load("//bazel:arch_select.bzl", "cuda13_requirement", "requirement")
 
 py_library(
     name = "utils",
@@ -18,6 +18,7 @@ requirement(deep)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
+cuda13_requirement(["deep-select"])
 
 
 filegroup(
@@ -64,8 +65,8 @@ py_library(
         "//conditions:default": [],
     }) + select({
         # cuda13 lock currently ships flash-mla + tilelang (no fast-hadamard).
-        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
-        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_x86": ["flash-mla", "tilelang", "deep-select"],
+        "@//:using_cuda13_arm": ["flash-mla", "tilelang", "deep-select"],
         "@//:using_cuda12_9_x86": flashmla,
         "@//:using_cuda12_arm": flashmla,
         "//conditions:default": [],
