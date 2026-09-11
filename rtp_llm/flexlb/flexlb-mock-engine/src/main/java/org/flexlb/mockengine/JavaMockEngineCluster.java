@@ -3802,7 +3802,8 @@ public final class JavaMockEngineCluster {
                 releaseBlockLease(id);
                 return;
             }
-            if (queue != null && (session.decode != null || session.remoteDecode)) {
+            if (queue != null && (session.decode != null || session.remoteDecode)
+                    && (!whaleRemote || session.shape.outputLen() > 1)) {
                 queue.offer(buildOutput(session.shape, false));
             }
             if (!session.isClosed() && !cancelledRequests.containsKey(id)) {
@@ -4589,10 +4590,11 @@ public final class JavaMockEngineCluster {
                                                                boolean finished) {
             int outputLen = whaleRemote && !finished ? Math.min(1, shape.outputLen()) : shape.outputLen();
             // Frontend concatenates frames. P already sent the first token, so
-            // a remote D terminal carries only the remaining tokens.
+            // a remote D terminal carries only the remaining tokens. A one-token
+            // request has no preliminary frame: Python rejects an empty tensor.
             int stepOutputLen = whaleRemote && finished
-                    && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
-                    ? Math.max(0, outputLen - 1) : outputLen;
+                    && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE && outputLen > 1
+                    ? outputLen - 1 : outputLen;
             var flatten = EngineRpcService.FlattenOutputPB.newBuilder()
                     .addFinished(finished)
                     .addAuxInfo(EngineRpcService.AuxInfoPB.newBuilder()

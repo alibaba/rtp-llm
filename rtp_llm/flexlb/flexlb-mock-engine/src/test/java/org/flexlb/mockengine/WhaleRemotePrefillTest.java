@@ -100,11 +100,10 @@ class WhaleRemotePrefillTest {
         assertEquals(1, ack.getSuccessesCount());
         var stream = fetch(prefill, 77, 10_000);
         assertNull(stream.error.get());
-        assertEquals(2, stream.frames.size());
+        assertEquals(1, stream.frames.size(), "frontend cannot decode an empty tensor frame");
         assertFrontendTensor(stream.frames.get(0), 1, 9);
-        assertFrontendTensor(stream.frames.get(1), 0, 9);
-        assertTrueFrame(stream.frames.get(1), "empty decode delta must still finish the stream");
-        assertEquals(1, stream.frames.get(1).getFlattenOutput().getAuxInfo(0).getOutputLen());
+        assertTrueFrame(stream.frames.get(0), "single token must finish in one nonempty frame");
+        assertEquals(1, stream.frames.get(0).getFlattenOutput().getAuxInfo(0).getOutputLen());
     }
 
     @Test
