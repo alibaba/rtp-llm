@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 import yaml
@@ -124,6 +125,32 @@ def run():
             env,
         )
         ready(http_port + 2, master)
+        # This bundle replaces appctl, so it also owns the normal local online hook.
+        deadline = time.monotonic() + cfg["startup_timeout_s"]
+        while not stopping:
+            if master.poll() is not None:
+                raise RuntimeError("master exited before application readiness")
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{http_port}/hook/process_ok", timeout=2
+                ) as response:
+                    if response.status == 200:
+                        break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("master application readiness deadline exceeded")
+                time.sleep(0.2)
+        if stopping:
+            return
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{http_port}/hook/after_start",
+            timeout=cfg["startup_timeout_s"],
+        ) as response:
+            response.read()
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{http_port}/health", timeout=2
+        ) as response:
+            response.read()
         (runtime / "identity.json").write_text(
             json.dumps(
                 {
