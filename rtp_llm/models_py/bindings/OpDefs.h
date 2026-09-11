@@ -26,6 +26,14 @@ namespace torch_ext {
 // kernel-block granularity:
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, physical_elements_per_token]
+// MHA layout contract (ratio = seq_size_per_block / kernel_seq_size_per_block,
+// i.e. kernel blocks per physical block): every *kernel block* owns a
+// contiguous K slice followed by its V slice — NOT a full-K-then-full-V region
+// per physical block (a direct re-chunked view would misread the (s+1)-th K
+// sub-slice as the s-th kernel block's V when ratio > 1). Current constraint:
+// ratio == 1 only (enforced in makeLayerCache on Ascend), where the view is
+// byte-identical to the physical [K region][V region] layout. Store/restore
+// copy whole physical blocks as opaque bytes and are layout-agnostic.
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
@@ -198,8 +206,24 @@ private:
                                     expected_numel,
                                     layer_id,
                                     group.tag.c_str());
+#if USING_ASCEND
+            // Constraint: ratio == 1 (one kernel block per physical block).
+            // Subdivided blocks need the kernel-granular write path validated
+            // end-to-end first; reject instead of serving an unvalidated layout.
+            RTP_LLM_CHECK_WITH_INFO(blocks_per_physical == 1,
+                                    "MHA kernel block subdivision (seq_size_per_block=%zu, "
+                                    "kernel_seq_size_per_block=%zu, ratio=%lld) is not yet supported on Ascend; "
+                                    "require seq_size_per_block == kernel_seq_size_per_block for tag=%s",
+                                    group.seq_size_per_block,
+                                    group.kernel_seq_size_per_block,
+                                    static_cast<long long>(blocks_per_physical),
+                                    group.tag.c_str());
+            result.kv_cache_base =
+                buffers.kv_addr.view({kernel_block_num, 2, kernel_seq_size, local_kv_heads, head_dim});
+#else
             result.kv_cache_base =
                 buffers.kv_addr.view({kernel_block_num, 2, local_kv_heads, kernel_seq_size, head_dim});
+#endif
             if (buffers.kv_scale_addr.defined()) {
                 RTP_LLM_CHECK_WITH_INFO(buffers.kv_scale_addr.is_contiguous() && buffers.kv_scale_addr.dim() > 0
                                             && buffers.kv_scale_addr.size(0) == physical_block_num
@@ -239,7 +263,7 @@ private:
         return result;
     }
 
-    const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
+    rtp_llm::GroupedCacheLayerLayout grouped_layout_;
 };
 
 struct PyModelInitResources {
@@ -279,6 +303,7 @@ struct PyContextParallelParams {
 // Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)
 // counterpart carries a _device suffix.
 struct PyAttentionInputs {
+    std::optional<KVCache> kv_cache;
     bool          is_prefill{false};
     bool          is_target_verify{false};
     torch::Tensor prefix_lengths;

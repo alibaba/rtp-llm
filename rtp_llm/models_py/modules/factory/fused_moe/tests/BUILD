@@ -40,6 +40,14 @@ py_test(
 )
 
 py_test(
+    name = "test_ascend_moe_strategy",
+    srcs = ["test_ascend_moe_strategy.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_batched_data_router_ep",
     srcs = ["test_batched_data_router_ep.py"],
     deps = [

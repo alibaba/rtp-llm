@@ -78,22 +78,25 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     // PDFUSION fast path, so non-root ranks can allocate matching GPU buffers
     // and tpSync's pack/unpack stays in lockstep.
     uint32_t device_bits = 0;
-    if (inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()) {
+    // Device-resident predicate (CUDA or NPU); must match the pack/unpack
+    // classification below.
+    auto is_accel = [](const torch::Tensor& t) { return t.is_cuda() || t.is_privateuseone(); };
+    if (inputs.combo_tokens.defined() && is_accel(inputs.combo_tokens)) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitComboTokens;
     }
-    if (inputs.input_lengths.defined() && inputs.input_lengths.is_cuda()) {
+    if (inputs.input_lengths.defined() && is_accel(inputs.input_lengths)) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitInputLengths;
     }
-    if (inputs.sequence_lengths.defined() && inputs.sequence_lengths.is_cuda()) {
+    if (inputs.sequence_lengths.defined() && is_accel(inputs.sequence_lengths)) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitSequenceLengths;
     }
-    if (inputs.prefix_lengths.defined() && inputs.prefix_lengths.is_cuda()) {
+    if (inputs.prefix_lengths.defined() && is_accel(inputs.prefix_lengths)) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitPrefixLengths;
     }
-    if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
+    if (inputs.lm_output_indexes.defined() && is_accel(inputs.lm_output_indexes)) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
     }
-    if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
+    if (inputs.kv_cache_kernel_block_id.defined() && is_accel(inputs.kv_cache_kernel_block_id)) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
     }
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
@@ -227,10 +230,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                 "tpSyncModelInputs tensor storage size overflow");
         auto options = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
-            options = options.device(torch::kCUDA);
+            options = options.device(getTorchCudaDevice());
         }
         auto tensor = torch::empty(dims, options);
         // NCCL broadcast requires pinned memory for CPU buffers
+        // TODO: Ascend - check if this is still true for ascend
         if (atype != rtp_llm::AllocationType::DEVICE) {
             tensor = tensor.pin_memory();
         }
@@ -417,7 +421,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                 "tpSyncModelInputs tensor byte size exceeds int64");
         const auto nb      = static_cast<int64_t>(raw_nbytes);
         const auto aligned = align_up(nb, kPackAlignment);
-        if (tp->is_cuda()) {
+        if (tp->is_cuda() || tp->is_privateuseone()) {
             gpu_entries.push_back({tp, gpu_total_bytes, nb});
             RTP_LLM_CHECK_WITH_INFO(gpu_total_bytes <= std::numeric_limits<int64_t>::max() - aligned,
                                     "tpSyncModelInputs GPU packed-buffer size overflow");
@@ -448,7 +452,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
 
     if (gpu_total_bytes > 0) {
-        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8)
+                                 .device(getTorchCudaDevice()));
         if (is_root) {
             auto*              packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
             FusedD2DCopyParams fused_params;

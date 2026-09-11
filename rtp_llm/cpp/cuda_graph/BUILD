@@ -52,6 +52,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
     visibility = ["//visibility:public"],
 )

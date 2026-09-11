@@ -75,6 +75,10 @@ py_library(
             "//rtp_llm/models_py/modules/base/rocm:rocm_base",
             "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
         ],
+        "@//:using_ascend": [
+            "//rtp_llm/models_py/modules/base/ascend:ascend_base",
+            "//rtp_llm/models_py/modules/factory/fused_moe/impl/ascend:ascend_moe",
+        ],
         "//conditions:default": [],
     }) + select({
         # cuda13 locks currently ship flash-mla (+tilelang on arm; no fast-hadamard).
@@ -133,6 +137,15 @@ py_library(
 )
 
 py_library(
+    name = "modules_ascend",
+    srcs = glob([
+        "modules/ascend/*.py",
+        "modules/ascend/**/*.py",
+    ]),
+    visibility = [":__subpackages__"],
+)
+
+py_library(
     name = "kernels",
     srcs = glob([
         "kernels/*.py",
@@ -168,6 +181,9 @@ py_library(
         ],
         "@//:using_rocm": [
             ":modules_rocm"
+        ],
+        "@//:using_ascend": [
+            ":modules_ascend"
         ],
         "//conditions:default": [],
     }),

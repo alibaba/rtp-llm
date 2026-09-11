@@ -47,7 +47,7 @@ using StreamType = cudaStream_t;
         }                                                                                                              \
     }()
 
-#define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda() || x.is_privateuseone(), #x " must be a CUDA or NPU tensor")
 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_LAST_DIM_CONTIGUOUS(x)                                                                                   \

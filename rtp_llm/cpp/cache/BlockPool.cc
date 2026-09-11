@@ -46,6 +46,8 @@ const char* memoryTypeName(MemoryType memory_type) {
             return "CPU_PINNED";
         case MemoryType::MEMORY_GPU:
             return "GPU";
+        case MemoryType::MEMORY_NPU:
+            return "NPU";
     }
     return "UNKNOWN";
 }
@@ -184,8 +186,17 @@ void BlockPool::initializeCacheBuffer() {
     } else if (use_cuda_malloc_backing_) {
         initializeCudaMallocBuffer();
     } else {
+#if USING_CUDA
+        torch::Device device = torch::kCUDA;
+#elif USING_ASCEND
+        torch::Device device = torch::Device(torch::kPrivateUse1);
+#elif USING_ROCM
+        torch::Device device = torch::kCUDA;
+#else
+        torch::Device device = torch::kCPU;
+#endif
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(device));
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
@@ -566,7 +577,8 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
     if (cache_store_ && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config_.pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+        // NPU pool memory is device memory; register with the device flag.
+        const bool gpu = where() == MemoryType::MEMORY_GPU || where() == MemoryType::MEMORY_NPU;
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -600,7 +612,7 @@ void BlockPool::deregUserMr() {
     if (kvcache_reg_mr_ && cache_store_) {
         RTP_LLM_LOG_INFO("start to deregister user mr, pool_name=%s", config_.pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+        const bool gpu = where() == MemoryType::MEMORY_GPU || where() == MemoryType::MEMORY_NPU;
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -738,10 +750,14 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 }
 
 MemoryType BlockPool::where() const {
+#if USING_ASCEND
+    return cache_aligned_buffer_.is_privateuseone() ? MemoryType::MEMORY_NPU : MemoryType::MEMORY_CPU;
+#else
     if (cache_aligned_buffer_.is_cuda()) {
         return MemoryType::MEMORY_GPU;
     }
     return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
+#endif
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {

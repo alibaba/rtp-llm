@@ -172,6 +172,17 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
         return;
     }
 
+#if USING_ASCEND
+    // Fail loudly: the CUDA-only device classification below misroutes NPU
+    // tensors to the CPU branch where std::memcpy touches device pointers.
+    // Needs an aclrtMemcpyAsync-based implementation (D2D/D2H/H2D).
+    RTP_LLM_FAIL("optimizedCopyAsync is unsupported on Ascend: CUDA-only copy path "
+                 "cannot handle NPU tensors (src=%s, dst=%s, size=%zu); "
+                 "an aclrtMemcpyAsync-based implementation is required",
+                 src.device().str().c_str(),
+                 dst.device().str().c_str(),
+                 size);
+#else
     RTP_LLM_PROFILE_SCOPE("optimizedCopyAsync");
 
     void* stream = reinterpret_cast<void*>(cuda_graph::graphGetCurrentStream().stream());
@@ -184,6 +195,7 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     } else {
         cuda_graph::graphMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cuda_graph::GraphMemcpyKind::H2D, stream);
     }
+#endif
 }
 
 void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
@@ -1027,7 +1039,9 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
-    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32)
+        .device(getTorchCudaDevice())
+        .requires_grad(false);
     // Initialize BertEmbeddingInputs for capture
     // combo_position_ids: empty tensor for capture (will be filled during actual forward)
     inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);

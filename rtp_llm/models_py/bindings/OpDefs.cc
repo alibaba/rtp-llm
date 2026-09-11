@@ -133,6 +133,7 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
+        .def_readwrite("kv_cache", &PyAttentionInputs::kv_cache)
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)

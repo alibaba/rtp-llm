@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 
 namespace rtp_llm {
 

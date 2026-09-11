@@ -9,6 +9,7 @@ cc_library(
     deps = [
         "//:rtp_compute_ops",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps() + no_block_copy_link_deps(),
     visibility = ["//visibility:public"],

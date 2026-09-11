@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <random>
 #include <memory>
+#elif USING_ASCEND
+#include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #endif
 
 using namespace std;
@@ -24,7 +26,7 @@ namespace rtp_llm {
 
 namespace {
 
-struct RejectionSamplingLaunchConfig {
+struct [[maybe_unused]] RejectionSamplingLaunchConfig {
     int batch_size;
     int num_speculative_tokens;
     int target_vocab_size;
@@ -47,7 +49,7 @@ void checkSameDevice(const torch::Tensor& tensor, const char* name, const c10::D
     RTP_LLM_CHECK_WITH_INFO(tensor.device() == device, "%s must be on the same device as draft_token_ids_d", name);
 }
 
-RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSamplingParams& params) {
+[[maybe_unused]] RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSamplingParams& params) {
     // An in-model proposer (DSpARK) emits draft tokens, not per-vocab draft
     // probabilities. In that case draft_probs_d is intentionally undefined and
     // the kernel treats q(draft_token) == 1, so all shapes must be derived from
@@ -573,6 +575,209 @@ void mappingDraft2Target(const MappingDraft2TargetParams& params) {
     }
 }
 
+#elif USING_ASCEND
+
+}  // namespace rtp_llm — close temporarily for torch_npu includes
+
+#include "rtp_llm/models_py/bindings/ascend/ops/ascend_apply_top_k_top_p_custom.h"
+
+namespace rtp_llm {  // reopen
+
+// ============================================================
+// Sample ops (Ascend) — NPU-accelerated implementation
+//
+// Strategy:
+//   - Temperature:        PyTorch div_() → torch_npu maps to NPU
+//   - Top-k/Top-p:        AscendC custom op applyTopKTopP
+//   - do_sample=false:    per-row merge with argmax (mixed batches)
+//   - cum_log_probs:      log of the sampled token's probability in the
+//                         filtered, renormalized distribution (CUDA parity)
+//   - Repetition/presence/frequency penalties and no_repeat_ngram_size:
+//                         not implemented — non-neutral values are rejected
+// ============================================================
+
+GreedyOutput sampleGreedy(const GreedyParams& params) {
+    static const auto device_type = torch::Device(torch::kPrivateUse1);
+    const auto        batch_size  = params.logits.size(0);
+
+    // [batch_size, step + 1] — clone to NPU
+    auto device_tokens     = params.token_ids.to(device_type);
+    // [step + 1, batch_size]
+    auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+
+    // ---- Handle do_sample: save logits for non-sampling (greedy) batches ----
+    bool has_not_do_sample = params.do_sample.has_value() &&
+                             std::any_of(params.do_sample.value().data_ptr<bool>(),
+                                         params.do_sample.value().data_ptr<bool>() + batch_size,
+                                         [](auto t) { return !t; });
+    bool need_do_sample    = (!params.do_sample.has_value()) ||
+                              std::any_of(params.do_sample.value().data_ptr<bool>(),
+                                         params.do_sample.value().data_ptr<bool>() + batch_size,
+                                         [](auto t) { return t; });
+
+    torch::Tensor selected_logits;
+    torch::Tensor mask_tensor;
+    if (has_not_do_sample && need_do_sample) {
+        auto do_sample_npu = params.do_sample.value().to(device_type);
+        mask_tensor        = do_sample_npu.reshape({(int64_t)batch_size, 1}).logical_not();
+        selected_logits    = params.logits.masked_select(mask_tensor);
+    }
+
+    // ---- 1. Apply temperature penalty (PyTorch op, torch_npu handles NPU) ----
+    if (need_do_sample) {
+        if (std::any_of(params.temperature.data_ptr<float>(),
+                        params.temperature.data_ptr<float>() + batch_size,
+                        [](auto t) { return t != 1.0f; })) {
+            auto temperature_npu = params.temperature.to(device_type).reshape({(int64_t)batch_size, 1});
+            params.logits.div_(temperature_npu);
+        }
+    }
+
+    // Restore non-sampling batch logits (penalties should not affect greedy batches)
+    if (has_not_do_sample && need_do_sample) {
+        params.logits.masked_scatter_(mask_tensor, selected_logits);
+    }
+
+    // ---- 1.5 Reject unsupported penalties (not implemented on Ascend) ----
+    // Fail fast with a clear error instead of silently ignoring user
+    // settings. Neutral values (=1.0 / =0) are allowed through as no-ops.
+    auto has_nonneutral_float = [](const c10::optional<torch::Tensor>& t, float neutral) {
+        if (!t.has_value()) {
+            return false;
+        }
+        const auto* p = t.value().data_ptr<float>();
+        return std::any_of(p, p + t.value().numel(), [neutral](auto v) { return v != neutral; });
+    };
+    if (has_nonneutral_float(params.repetition_penalty, 1.0f) ||
+        has_nonneutral_float(params.presence_penalty, 0.0f) ||
+        has_nonneutral_float(params.frequency_penalty, 0.0f) ||
+        (params.no_repeat_ngram_size.has_value() &&
+         torch::any(params.no_repeat_ngram_size.value().gt(0)).item<bool>())) {
+        RTP_LLM_CHECK_WITH_INFO(false,
+                                "Ascend sampler does not support repetition/presence/frequency "
+                                "penalties or no_repeat_ngram_size yet; disable them for Ascend");
+    }
+
+    // ---- 2. Fast path: top_k = 1 for all batches → argmax only ----
+    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; }) &&
+        !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+        auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1,
+                                                  transposed_tokens.size(0)).squeeze(0);
+        auto selected_tokens = torch::argmax(params.logits, -1, /*keepdim=*/false);
+        samples_t.copy_(selected_tokens);
+
+        auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
+        params.token_ids.copy_(output_tokens);
+        return GreedyOutput{};
+    }
+
+    // ---- 3. Apply top-k/top-p filtering via AscendC custom operator ----
+    auto top_p_ptr = params.top_p.data_ptr<float>();
+    std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr,
+                   [](auto t) { return std::abs(t) < 1e-7f ? 1.0f : t; });
+
+    bool has_top_k = !std::all_of(top_k_ptr, top_k_ptr + batch_size,
+                                   [](auto t) { return t <= 0; });
+    bool has_top_p = !std::all_of(top_p_ptr, top_p_ptr + batch_size,
+                                   [](auto t) { return std::abs(t - 1.0f) < 1e-7f; });
+
+    if (has_top_k || has_top_p) {
+        // Move top_k/top_p from CPU to NPU.
+        // applyTopKTopP expects: k → INT32 1D [batch_size], p → FLOAT32 1D [batch_size].
+        c10::optional<at::Tensor> k_npu;
+        c10::optional<at::Tensor> p_npu;
+        if (has_top_k) {
+            k_npu = params.top_k.to(torch::TensorOptions().dtype(torch::kInt32).device(device_type));
+        }
+        if (has_top_p) {
+            p_npu = params.top_p.to(torch::TensorOptions().dtype(torch::kFloat32).device(device_type));
+        }
+
+        at::Tensor output = at::empty_like(params.logits);
+        rtp_llm::ascend::applyTopKTopP(params.logits, p_npu, k_npu, output);
+        params.logits.copy_(output);
+    }
+
+    // ---- 4. Softmax → probabilities (params.logits keeps the filtered logits) ----
+    auto probs_t = torch::softmax(params.logits, -1);
+
+    // ---- 5. Output_all_probs ----
+    torch::Tensor output_all_probs_t;
+    if (params.output_all_probs.has_value()) {
+        output_all_probs_t = params.output_all_probs.value();
+    }
+
+    // ---- 6. Sample (per-row do_sample merge) ----
+    auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1,
+                                              transposed_tokens.size(0)).squeeze(0);
+
+    bool all_topk_1 = std::all_of(top_k_ptr, top_k_ptr + batch_size,
+                                   [](auto t) { return t == 1; });
+    torch::Tensor selected;
+    if (all_topk_1) {
+        // Greedy: argmax (top-1 filtering renormalizes each row to one-hot,
+        // so sampling would be equivalent but slower).
+        selected = torch::argmax(probs_t, -1, /*keepdim=*/false);
+    } else {
+        // Random sample: multinomial (same fallback as ROCm).
+        // Only use a generator whose device matches the probs tensor;
+        // a mismatched generator (e.g. CPU gen on NPU data) causes a
+        // RuntimeError. If no matching generator is found, pass nullopt
+        // to use the default per-device generator (random in production).
+        c10::optional<at::Generator> gen;
+        for (auto& g : params.generator) {
+            if (g.defined() && g.device().type() == probs_t.device().type()) {
+                gen = g;
+                break;
+            }
+        }
+        selected = torch::multinomial(probs_t, 1, /*replacement=*/false, gen).squeeze(-1);
+        if (params.do_sample.has_value()) {
+            // Per-row merge: do_sample=false rows must take argmax even in a
+            // mixed batch, instead of being sampled together with the rest.
+            auto greedy      = torch::argmax(probs_t, -1, /*keepdim=*/false);
+            auto do_sample_npu = params.do_sample.value().to(probs_t.device());
+            selected          = torch::where(do_sample_npu, selected, greedy);
+        }
+    }
+    samples_t.copy_(selected);
+
+    if (output_all_probs_t.defined()) {
+        output_all_probs_t.copy_(probs_t);
+    }
+
+    // ---- 7. Update cum_log_probs ----
+    // CUDA parity: accumulate the log probability of the sampled token under
+    // the filtered, renormalized distribution (probs_t), i.e. log(probs[i, token]).
+    if (params.cum_log_probs.has_value()) {
+        auto cum_log_probs_t = params.cum_log_probs.value();
+        auto token_probs     = probs_t.gather(
+            1, samples_t.reshape({(int64_t)batch_size, 1}).to(torch::kLong)).squeeze(-1);
+        cum_log_probs_t.add_(token_probs.log().to(cum_log_probs_t.device()));
+    }
+
+    // ---- 8. Copy results back to token_ids ----
+    auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
+    params.token_ids.copy_(output_tokens);
+
+    return GreedyOutput{};
+}
+
+torch::Tensor sampleFromProbs(const torch::Tensor&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "DSpARK stochastic probability sampling currently requires CUDA");
+    return {};
+}
+
+void rejectionSampling(const RejectionSamplingParams&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "rejection sampling currently requires CUDA");
+}
+
+void mappingDraft2Target(const MappingDraft2TargetParams&) {
+    RTP_LLM_CHECK_WITH_INFO(false, "mappingDraft2Target currently requires CUDA");
+}
+
+
 #else  // !USING_CUDA — ROCm platform
 
 }  // namespace rtp_llm — temporarily close for includes
@@ -928,7 +1133,6 @@ void mappingDraft2Target(const MappingDraft2TargetParams& params) {
         RTP_LLM_CHECK_WITH_INFO(false, "tokens and d2t_map must be on the same device");
     }
 }
-
 #endif  // USING_CUDA
 
 }  // namespace rtp_llm
