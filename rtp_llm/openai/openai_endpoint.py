@@ -69,6 +69,7 @@ class OpenaiEndpoint(object):
         self.generate_env_config = model_config.generate_env_config
         self.max_seq_len = model_config.max_seq_len
         self.model_name = model_config.model_name
+        self.model_type = model_config.model_type
         self.special_tokens = model_config.special_tokens
         template_type = model_config.template_type
         ckpt_path = model_config.ckpt_path
@@ -566,6 +567,7 @@ class OpenaiEndpoint(object):
         )
 
     def render_chat(self, chat_request: ChatCompletionRequest):
+        self._validate_reasoning_effort(chat_request)
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
@@ -575,6 +577,11 @@ class OpenaiEndpoint(object):
             chat_request.messages.pop()
         rendered_input = renderer.render_chat(chat_request)
         if prepopulate_str != "":
+            v41_inputs = getattr(rendered_input, "v41_inputs", None)
+            if v41_inputs is not None:
+                rendered_input.v41_inputs = v41_inputs.append_text(
+                    prepopulate_str, self.tokenizer.encode(prepopulate_str)
+                )
             rendered_input.rendered_prompt += prepopulate_str
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
         return rendered_input
@@ -613,6 +620,9 @@ class OpenaiEndpoint(object):
             except (TypeError, ValueError):
                 pass
 
+        typed_inputs = {}
+        if getattr(rendered_input, "v41_inputs", None) is not None:
+            typed_inputs["v41_inputs"] = rendered_input.v41_inputs
         choice_generator = renderer.generate_choice(
             request_id,
             rendered_input.input_ids,
@@ -621,13 +631,27 @@ class OpenaiEndpoint(object):
             self.backend_rpc_server_visitor,
             chat_request,
             headers=request_headers,
+            **typed_inputs,
         )
 
         return self._complete_stream_response(
             choice_generator, debug_info, self.tokenizer
         )
 
+    def _validate_reasoning_effort(self, chat_request: ChatCompletionRequest) -> None:
+        from rtp_llm.openai.reasoning_effort import validate_reasoning_effort_for_model
+
+        try:
+            validate_reasoning_effort_for_model(
+                chat_request.reasoning_effort, getattr(self, "model_type", "")
+            )
+        except ValueError as error:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, str(error)
+            ) from error
+
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
+        self._validate_reasoning_effort(chat_request)
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )

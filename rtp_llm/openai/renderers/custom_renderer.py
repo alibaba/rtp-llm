@@ -250,10 +250,18 @@ class RenderedInputs:
         input_urls: List[str] = [],
         input_urls_type: List[MMUrlType] = [],
         preprocess_configs: List[MMPreprocessConfig] = [],
+        v41_inputs=None,
     ):
         self.input_ids = input_ids
         self.rendered_prompt = rendered_prompt
         self.multimodal_inputs = []
+        self.v41_inputs = v41_inputs
+        if v41_inputs is not None:
+            v41_inputs.validate(input_ids)
+            if input_urls:
+                raise ValueError(
+                    "prepared V4.1 images cannot use generic URL expansion"
+                )
         if len(input_urls_type) == 0:
             input_urls_type = [MMUrlType.DEFAULT] * len(input_urls)
         elif len(input_urls_type) != len(input_urls):
@@ -417,6 +425,7 @@ class CustomChatRenderer:
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
+        v41_inputs=None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -431,6 +440,7 @@ class CustomChatRenderer:
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
                     headers=normalize_request_headers(headers),
+                    v41_inputs=v41_inputs,
                 )
             )
         )

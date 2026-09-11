@@ -31,7 +31,12 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
+from rtp_llm.utils.grpc_util import (
+    trans_from_tensor,
+    trans_option,
+    trans_option_cast,
+    trans_tensor,
+)
 
 
 class StreamState:
@@ -81,6 +86,30 @@ def trans_input(input_py: GenerateInput):
         getattr(input_py, "headers", None), input_py.generate_config
     )
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    prepared = getattr(input_py, "v41_inputs", None)
+    if prepared is not None:
+        prepared.validate(input_pb.token_ids)
+        if input_py.mm_inputs:
+            raise ValueError("V4.1 prepared images cannot use generic URL expansion")
+        if len(prepared.token_ids) + input_py.generate_config.max_new_tokens > 1048576:
+            raise ValueError(
+                "V4.1 input plus output budget exceeds the model context limit"
+            )
+        typed = input_pb.v41_inputs
+        typed.schema_version = 1
+        typed.token_types.extend(prepared.token_types)
+        typed.image_mask.extend(prepared.image_mask.tolist())
+        for image in prepared.images:
+            target = typed.images.add()
+            target.start, target.n_vit_h, target.n_vit_w = (
+                image.start,
+                image.n_vit_h,
+                image.n_vit_w,
+            )
+            target.types.extend(image.types.tolist())
+            target.patches.CopyFrom(trans_from_tensor(image.patches))
+            target.content_sha256 = image.content_sha256
+            target.processor_identity = image.processor_identity
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:

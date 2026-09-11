@@ -66,6 +66,7 @@ class VitParameters:
 class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
+        "dsv41_config",
         "is_mtp",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",

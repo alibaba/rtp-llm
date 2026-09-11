@@ -687,7 +687,7 @@ class OtherParams:
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
     traffic_reject_priority: int | None = None
-    reasoning_effort: str | None = None
+    reasoning_effort: str | int | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
 
 
@@ -922,7 +922,9 @@ def parse_sampling_params(
     )
 
 
-def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> OtherParams:
+def parse_other_params(
+    request, ds_attrs: dict[str, Any] | None = None, *, model_type: str = ""
+) -> OtherParams:
     """Parse non-sampling request controls.
 
     ``ds_header_attributes`` carries DashScope request-scoped controls that need
@@ -975,6 +977,24 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         reasoning_effort = _extract_reasoning_effort_value(
             _lookup_ds_request_control(ds_attrs, "reasoning_effort")
         )
+    if model_type == "deepseek_v41":
+        from rtp_llm.openai.reasoning_effort import normalize_v41_reasoning_effort
+
+        raw_effort = _lookup_ds_request_control(ds_attrs, "reasoning_effort")
+        if "reasoning_effort" in request.parameters:
+            parameter = request.parameters["reasoning_effort"]
+            if parameter.HasField("int64_param"):
+                raw_effort = parameter.int64_param
+            elif parameter.HasField("string_param"):
+                raw_effort = parameter.string_param
+            else:
+                raise DashScParameterError(
+                    "reasoning_effort must be a strict string or integer"
+                )
+        try:
+            reasoning_effort = normalize_v41_reasoning_effort(raw_effort)
+        except ValueError as error:
+            raise DashScParameterError(str(error)) from error
 
     timeout_s = _parse_optional_int_value(ds_attrs.get("x-dashscope-inner-timeout"))
     timeout_ms = timeout_s * 1000 if timeout_s is not None and timeout_s > 0 else None
@@ -1010,6 +1030,8 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
 
 def parse_dash_sc_grpc_request(
     request,
+    *,
+    model_type: str = "",
 ) -> tuple[ParsedInputIds | None, SamplingParams | None, OtherParams | None]:
     """Parse one ``ModelInferRequest``: ``input_ids``, sampling tensors, ``other`` params."""
     ids = _parse_input_ids_for_inference(request)
@@ -1019,7 +1041,7 @@ def parse_dash_sc_grpc_request(
     return (
         ids,
         parse_sampling_params(request, ds_attrs),
-        parse_other_params(request, ds_attrs),
+        parse_other_params(request, ds_attrs, model_type=model_type),
     )
 
 

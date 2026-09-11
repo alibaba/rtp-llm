@@ -291,6 +291,16 @@ def local_rank_start(
         _send_pipe_status(pipe_writer, "failed", error_msg, error_trace)
         raise e
     finally:
+        # os._exit below bypasses atexit; retire GPU readers before their host
+        # mappings and leases. Legacy models do not import this resource owner.
+        engram_resources = sys.modules.get("rtp_llm.model_loader.host_shared_cuda")
+        if engram_resources is not None:
+            try:
+                engram_resources.shutdown_shared_engram()
+            except Exception:
+                logging.exception(
+                    "Shared Engram shutdown failed; retaining mappings until process exit"
+                )
         clear_cpp_comm_ops()
         # Best-effort cleanup: log failures but never skip the hard-exit below.
         try:
@@ -513,9 +523,7 @@ def multi_rank_start(
 
     # Wait for all ranks to report startup status
     try:
-        _wait_for_ranks_startup(
-            processes, rank_pipe_readers, local_world_size, manager
-        )
+        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size, manager)
 
         # Report success via external pipe
         _send_pipe_status(

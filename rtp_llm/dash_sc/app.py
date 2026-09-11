@@ -624,9 +624,7 @@ class DashScApp:
                     and grammar_config.grammar_backend.strip().lower() == "xgrammar"
                 ):
                     grammar_validator = GrammarValidator(
-                        build_model_grammar_tokenizer_info_json(
-                            base_tok, model_config
-                        ),
+                        build_model_grammar_tokenizer_info_json(base_tok, model_config),
                         grammar_config,
                         self.py_env_configs.grammar_admission_config,
                     )
@@ -643,6 +641,7 @@ class DashScApp:
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
+                    model_type=model_config.model_type,
                 )
 
             loop = self._start_enqueue_loop()

@@ -64,8 +64,10 @@ def _preview_text(text: str, limit: int = 512) -> str:
     return f"{text[:half]}...[{len(text)} chars]...{text[-half:]}"
 
 
-def _split_reasoning_before_dsml(text: str) -> Optional[Tuple[str, str]]:
-    idx = text.find(DSML_TOOL_CALLS_MARKER)
+def _split_reasoning_before_dsml(
+    text: str, marker: str = DSML_TOOL_CALLS_MARKER
+) -> Optional[Tuple[str, str]]:
+    idx = text.find(marker)
     if idx == -1:
         return None
 
@@ -124,6 +126,9 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
     2. Uses encode_messages function for rendering
     3. Supports thinking mode and tool calls
     """
+
+    detector_class = DeepSeekV4Detector
+    dsml_tool_calls_marker = DSML_TOOL_CALLS_MARKER
 
     def __init__(
         self,
@@ -312,7 +317,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         if not active_tools:
             raise ValueError("tool_choice requires at least one tool")
 
-        detector = DeepSeekV4Detector()
+        detector = self.detector_class()
         return detector.tool_call_structural_tag(
             rtp_tools_to_sglang_tools(active_tools),
             stop_after_first=self._tool_choice_name(request) is not None,
@@ -337,16 +342,8 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             structural_tag, ensure_ascii=False, separators=(",", ":")
         )
 
-    def _build_prompt(self, request: ChatCompletionRequest) -> str:
-        """
-        Build prompt string using the DeepSeek V4.0 encoding script.
-
-        Args:
-            request: Chat completion request
-
-        Returns:
-            str: Rendered prompt string
-        """
+    def _prepare_encoding_inputs(self, request: ChatCompletionRequest):
+        """Build checkpoint-encoder messages and normalized request arguments."""
         # Convert request messages to the format expected by encoding_dsv4
         messages = []
         for msg in request.messages:
@@ -452,7 +449,12 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             "reasoning_effort",
         }
         filtered_config = {k: v for k, v in encode_config.items() if k in valid_params}
+        return messages, filtered_config
 
+    def _build_prompt(self, request: ChatCompletionRequest) -> str:
+        messages, filtered_config = self._prepare_encoding_inputs(request)
+        thinking_mode = filtered_config["thinking_mode"]
+        active_tools = self._active_tools_for_request(request)
         try:
             # Use the encoding module to encode messages
             rendered_prompt = self.encoding_module.encode_messages(
@@ -500,7 +502,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
 
             # Pass the encoding module and thinking_mode to detector
             # Detector is created fresh for each request (not singleton)
-            return DeepSeekV4Detector(
+            return self.detector_class(
                 encoding_module=self.encoding_module, thinking_mode=thinking_mode
             )
         return None
@@ -588,7 +590,9 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 and reasoning_content
                 and DSML_PREFIX in reasoning_content
             ):
-                split_result = _split_reasoning_before_dsml(reasoning_content)
+                split_result = _split_reasoning_before_dsml(
+                    reasoning_content, self.dsml_tool_calls_marker
+                )
                 if split_result is not None:
                     reasoning_content, tool_text = split_result
                     tool_calls, remaining_text = await self._extract_tool_calls_content(
@@ -669,7 +673,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
 
         think_start = getattr(detector, "think_start_token", "<think>")
         think_end = getattr(detector, "think_end_token", "</think>")
-        dsml_start = DSML_TOOL_CALLS_MARKER
+        dsml_start = self.dsml_tool_calls_marker
 
         detector._buffer += text
         current_text = detector._buffer
@@ -755,10 +759,12 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             )
         if (
             reasoning_parser
-            and DSML_TOOL_CALLS_MARKER in text
-            and DSML_TOOL_CALLS_MARKER not in remaining_text
+            and self.dsml_tool_calls_marker in text
+            and self.dsml_tool_calls_marker not in remaining_text
         ):
-            split_result = _split_reasoning_before_dsml(text)
+            split_result = _split_reasoning_before_dsml(
+                text, self.dsml_tool_calls_marker
+            )
             if split_result is not None:
                 reasoning_text, remaining_text = split_result
 

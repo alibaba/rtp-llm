@@ -83,6 +83,19 @@ py_test(
 )
 
 py_test(
+    name = "deepseekv41_renderer_test",
+    srcs = ["deepseekv41_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "deepseek_v41_image_renderer_test",
+    srcs = ["deepseek_v41_image_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["requires-dsv41-weights"],
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

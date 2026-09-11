@@ -24,7 +24,9 @@ class MMProcessEngine:
     def __init__(self, model, vit_config):
         self.model = model
         self.vit_config = vit_config
-        self.contains_pos: bool = self.model.model_config.mm_model_config.mm_position_ids_style != 0
+        self.contains_pos: bool = (
+            self.model.model_config.mm_model_config.mm_position_ids_style != 0
+        )
         self.run_batch: bool = self.model.model_config.mm_related_params.support_batch
         self.download_headers = self.vit_config.download_headers
 
@@ -33,6 +35,13 @@ class MMProcessEngine:
             return list(tensor)
         else:
             return [tensor]
+
+    def submit_v41(self, images):
+        if self.model.model_config.model_type != "deepseek_v41":
+            raise ValueError(
+                "prepared V4.1 image metadata requires the dedicated V4.1 vision adapter"
+            )
+        return MMEmbeddingRes(self.model.mm_part.encode_prepared_images(images))
 
     def submit(
         self,
@@ -43,7 +52,9 @@ class MMProcessEngine:
     ):
         if self.run_batch:
             with Timer() as route_timer:
-                res, pos = self.model.mm_part.mm_embedding(urls=urls, mm_types=types, tensors=tensors)
+                res, pos = self.model.mm_part.mm_embedding(
+                    urls=urls, mm_types=types, tensors=tensors
+                )
             kmonitor.report(
                 GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms()
             )
@@ -59,10 +70,10 @@ class MMProcessEngine:
             pos: Optional[List[torch.Tensor]] = [] if self.contains_pos else None
             for index in range(len(urls)):
                 embedding, pos_ids = self.model.mm_part.mm_embedding(
-                    url=urls[index], 
-                    mm_type=types[index], 
+                    url=urls[index],
+                    mm_type=types[index],
                     download_headers=self.download_headers,
-                    configs=configs[index]
+                    configs=configs[index],
                 )
                 res.extend(self._maybe_tensor_to_list(embedding))
                 if self.contains_pos:

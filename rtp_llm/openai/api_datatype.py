@@ -2,7 +2,7 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictInt, StrictStr, model_validator
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.utils.base_model_datatypes import AuxInfo
@@ -184,7 +184,7 @@ class ChatCompletionRequest(BaseModel):
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
     tool_choice: Optional[ToolChoice] = None
-    reasoning_effort: Optional[str] = None
+    reasoning_effort: Optional[Union[StrictStr, StrictInt]] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     top_k: Optional[int] = None

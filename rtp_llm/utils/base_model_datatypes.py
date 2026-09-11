@@ -49,6 +49,7 @@ class GenerateInput:
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    v41_inputs: Optional[Any] = field(default=None, repr=False)
 
     class Config:
         arbitrary_types_allowed = True
@@ -62,6 +63,10 @@ class GenerateInput:
         return self.token_ids.shape[-1] - self.prefix_length
 
     def update_prefix(self, prefix_tokens: torch.Tensor):
+        if self.v41_inputs is not None:
+            raise ValueError(
+                "V4.1 prefixes must be rendered with their canonical image/history metadata"
+            )
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
 
