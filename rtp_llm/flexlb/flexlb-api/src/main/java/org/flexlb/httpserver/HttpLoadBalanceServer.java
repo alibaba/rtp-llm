@@ -8,10 +8,13 @@ import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -19,6 +22,8 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.service.BatchScheduleCoordinator;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.JsonUtils;
@@ -29,6 +34,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
 
 import java.io.IOException;
@@ -60,6 +66,9 @@ public class HttpLoadBalanceServer {
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
+    private final BatchScheduleCoordinator batchScheduleCoordinator;
+    private final EngineHealthReporter engineHealthReporter;
+
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  ConfigService configService,
                                  RequestScheduler requestScheduler,
@@ -67,7 +76,9 @@ public class HttpLoadBalanceServer {
                                  WorkerDirectory workerDirectory,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
-                                 ServerScheduleLatencyRecorder serverLatencyRecorder) {
+                                 ServerScheduleLatencyRecorder serverLatencyRecorder,
+                                 BatchScheduleCoordinator batchScheduleCoordinator,
+                                 EngineHealthReporter engineHealthReporter) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
         this.requestScheduler = requestScheduler;
@@ -75,11 +86,15 @@ public class HttpLoadBalanceServer {
         this.workerDirectory = workerDirectory;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
+        this.batchScheduleCoordinator = batchScheduleCoordinator;
+        this.engineHealthReporter = engineHealthReporter;
     }
 
     @Bean
     public RouterFunction<ServerResponse> loadBalancePrefill() {
         return route()
+                .POST("/rtp_llm/batch_schedule", accept(MediaType.APPLICATION_JSON),
+                        this::batchScheduleRequest)
                 .POST("/rtp_llm/master/info", accept(MediaType.APPLICATION_JSON),
                         this::responseMasterInfo)
                 .POST("/rtp_llm/schedule_snapshot", accept(MediaType.APPLICATION_JSON),
@@ -97,6 +112,31 @@ public class HttpLoadBalanceServer {
                 .GET("/rtp_llm/server_latency", this::serverLatency)
                 .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
                 .build();
+    }
+
+    public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
+        long start = System.currentTimeMillis();
+        return request.bodyToMono(BatchScheduleRequest.class)
+                .switchIfEmpty(Mono.error(new ServerWebInputException("empty request body")))
+                .flatMap(batch -> batchScheduleCoordinator.schedule(batch)
+                        .onErrorResume(error -> {
+                            Logger.error("Batch scheduling failed", error);
+                            return Mono.just(BatchScheduleResponse.error(
+                                    StrategyErrorType.NO_AVAILABLE_WORKER, "batch scheduling failed"));
+                        })
+                        .doOnNext(response -> engineHealthReporter.reportBatchSchedule(batch, response, start)))
+                .onErrorResume(error -> {
+                    Logger.error("Batch schedule request failed", error);
+                    boolean invalid = error instanceof ServerWebInputException;
+                    return Mono.just(BatchScheduleResponse.error(invalid
+                            ? StrategyErrorType.INVALID_REQUEST : StrategyErrorType.NO_AVAILABLE_WORKER,
+                            invalid ? "invalid batch schedule request" : "batch scheduling failed"));
+                })
+                .flatMap(response -> {
+                    int status = response.isSuccess() ? 200
+                            : response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode() ? 400 : 500;
+                    return json(status, response);
+                });
     }
 
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
@@ -133,11 +173,14 @@ public class HttpLoadBalanceServer {
         Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
         for (RoleType role : RoleType.values()) {
             Map<String, WorkerStatus> statusMap = workerDirectory.statusSnapshot(role);
-            if (statusMap.isEmpty()) {
+            int embeddingCount = masterEngineSynchronizer == null ? 0
+                    : masterEngineSynchronizer.embeddingWorkerSnapshot(role).size();
+            if (statusMap.isEmpty() && embeddingCount == 0) {
                 continue;
             }
             Response.WorkerRoleSummary rs = new Response.WorkerRoleSummary();
-            rs.setDiscovered(statusMap.size());
+            rs.setDiscovered(statusMap.size() + embeddingCount);
+            rs.setAlive(embeddingCount);
             for (WorkerStatus ws : statusMap.values()) {
                 if (ws.pollHealth().reportedAlive()) {
                     rs.setAlive(rs.getAlive() + 1);
@@ -321,4 +364,10 @@ public class HttpLoadBalanceServer {
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(Map.of("reset", true));
     }
+    private Mono<ServerResponse> json(int status, Object body) {
+        return ServerResponse.status(status)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body);
+    }
+
 }

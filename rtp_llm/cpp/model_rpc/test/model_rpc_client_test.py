@@ -3,6 +3,7 @@ import json
 import struct
 import sys
 from enum import Enum
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -62,6 +63,8 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateOutputsPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     GenerateConfigPB,
     GenerateInputPB,
@@ -1692,6 +1695,106 @@ class ClientSpanSettlementTest(TestCase):
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
         self.assertEqual(raised.exception.message, "future error")
+
+
+class DispatcherBatchRpcTest(TestCase):
+    def setUp(self):
+        self.client = ModelRpcClient.__new__(ModelRpcClient)
+        self.client._max_rpc_timeout_ms = 30000
+        self.client._addresses = ["10.0.0.9:8081"]
+        self.client._decode_entrance = False
+        self.client._channel_pool = _FakeChannelPool()
+
+    @staticmethod
+    def input(request_id, ip="10.0.0.1", timeout_ms=1000, role=RoleType.PDFUSION):
+        return SimpleNamespace(
+            request_id=request_id,
+            generate_config=GenerateConfig(
+                timeout_ms=timeout_ms,
+                role_addrs=(
+                    [RoleAddr(role=role, ip=ip, http_port=8080, grpc_port=8081)]
+                    if ip
+                    else []
+                ),
+            ),
+        )
+
+    def invoke(self, inputs, response=None, error=None):
+        from unittest.mock import AsyncMock
+
+        stub = SimpleNamespace(
+            BatchGenerateCall=AsyncMock(
+                return_value=response or BatchGenerateOutputsPB(), side_effect=error
+            )
+        )
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            side_effect=lambda _: GenerateInputPB(),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+            side_effect=lambda inp, *_: inp.request_id,
+        ):
+            result = asyncio.run(self.client.batch_enqueue(inputs))
+        return result, stub
+
+    def test_preassignment_and_static_address_selection(self):
+        self.assertEqual(
+            "10.0.0.1:8081",
+            self.client._select_batch_address([self.input(1), self.input(2)]),
+        )
+        self.assertEqual(
+            "10.0.0.9:8081", self.client._select_batch_address([self.input(1, ip=None)])
+        )
+
+    def test_mixed_or_non_pdfusion_targets_are_rejected(self):
+        for inputs in (
+            [self.input(1), self.input(2, ip="10.0.0.2")],
+            [self.input(1), self.input(2, ip=None)],
+            [self.input(1, role=RoleType.PREFILL)],
+        ):
+            with self.assertRaises(FtRuntimeException) as error:
+                self.client._select_batch_address(inputs)
+            self.assertEqual(
+                ExceptionType.INVALID_PARAMS, error.exception.exception_type
+            )
+
+    def test_response_order_and_item_deadlines_are_preserved(self):
+        response = BatchGenerateOutputsPB()
+        response.results.add().final_output.SetInParent()
+        response.results.add().final_output.SetInParent()
+        inputs = [self.input(1, timeout_ms=1001), self.input(2, timeout_ms=0)]
+        result, stub = self.invoke(inputs, response)
+        self.assertEqual([1, 2], result)
+        request = stub.BatchGenerateCall.call_args.args[0]
+        self.assertEqual(
+            [1001, 30000], [item.generate_config.timeout_ms for item in request.inputs]
+        )
+        self.assertEqual(30.0, stub.BatchGenerateCall.call_args.kwargs["timeout"])
+        self.assertEqual(
+            [1001, 0], [item.generate_config.timeout_ms for item in inputs]
+        )
+
+    def test_response_must_contain_exactly_one_result_per_item(self):
+        for count in (0, 2):
+            response = BatchGenerateOutputsPB()
+            for _ in range(count):
+                response.results.add().final_output.SetInParent()
+            with self.assertRaises(FtRuntimeException):
+                self.invoke([self.input(1)], response)
+
+    def test_engine_error_code_without_message_still_fails_chunk(self):
+        response = BatchGenerateOutputsPB()
+        response.results.add().error_info.error_code = ErrorCodePB.CANCELLED
+        with self.assertRaises(FtRuntimeException) as error:
+            self.invoke([self.input(1)], response)
+        self.assertEqual(ExceptionType.CANCELLED, error.exception.exception_type)
+
+    def test_empty_batch_never_sends_rpc(self):
+        result, stub = self.invoke([])
+        self.assertEqual([], result)
+        stub.BatchGenerateCall.assert_not_awaited()
 
 
 if __name__ == "__main__":

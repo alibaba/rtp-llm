@@ -8,6 +8,8 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -45,6 +47,8 @@ import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_RT;
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_QPS;
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
@@ -125,6 +129,9 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS);
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
+        this.monitor.register(ENGINE_BALANCING_MASTER_BATCH_QPS, FlexMetricType.QPS);
+        this.monitor.register(ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(PREFILL_SELECTED_ESTIMATED_TTFT_MS,
@@ -444,5 +451,12 @@ public class EngineHealthReporter {
 
     public void reportForwardToMasterResult(String type, String code) {
         monitor.report(FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
+    }
+
+    public void reportBatchSchedule(BatchScheduleRequest request, BatchScheduleResponse response, long start) {
+        FlexMetricTags tags = FlexMetricTags.of("code", String.valueOf(response.getCode()),
+                "assign_be", String.valueOf(request.isAssignBe()), "assign_fe", String.valueOf(request.isAssignFe()));
+        monitor.report(ENGINE_BALANCING_MASTER_BATCH_QPS, tags, 1.0);
+        monitor.report(ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT, tags, System.currentTimeMillis() - start);
     }
 }

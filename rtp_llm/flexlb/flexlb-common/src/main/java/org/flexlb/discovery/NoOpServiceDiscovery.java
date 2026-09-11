@@ -6,7 +6,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.master.WorkerHost;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -52,8 +51,8 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
                     .map(this::parseHost)
                     .collect(Collectors.toList());
         } catch (Exception e) {
-            log.error("Failed to parse hosts configuration for address: {}, config: {}", address, hostsConfig, e);
-            return new ArrayList<>();
+            // A malformed configuration is a lookup failure, not an empty fleet.
+            throw new IllegalArgumentException("malformed hosts configuration for address " + address, e);
         }
     }
 
@@ -63,7 +62,11 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
         // Default empty implementation does not support dynamic listening, could consider periodic polling implementation
         // Simply trigger initialization once here
         if (listener != null) {
-            listener.onHostsChanged(getHosts(address));
+            try {
+                listener.onHostsChanged(getHosts(address));
+            } catch (Exception e) {
+                log.error("Initial host lookup failed for address: {}", address, e);
+            }
         }
     }
 

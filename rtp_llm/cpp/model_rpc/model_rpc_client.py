@@ -15,6 +15,7 @@ from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     FetchRequestPB,
     GenerateConfigPB,
@@ -547,7 +548,7 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.normalized_hidden_states
     )
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
-    generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
+    generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms or 0
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(
             input_py.generate_config.sp_advice_prompt_token_ids
@@ -1224,20 +1225,70 @@ class ModelRpcClient(object):
             if response_iterator and should_cancel:
                 response_iterator.cancel()
 
+    def _select_batch_address(self, inputs: list[GenerateInput]) -> str:
+        targets = set()
+        for input in inputs:
+            addresses = input.generate_config.role_addrs
+            if not addresses:
+                targets.add(None)
+                continue
+            if (
+                len(addresses) != 1
+                or addresses[0].role != RoleType.PDFUSION
+                or not addresses[0].ip
+                or addresses[0].grpc_port <= 0
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "batch RPC requires one PDFUSION backend per item",
+                )
+            targets.add(f"{addresses[0].ip}:{addresses[0].grpc_port}")
+        if len(targets) != 1:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "batch RPC requires the same backend for every item",
+            )
+        target = targets.pop()
+        if target is not None:
+            return target
+        if not self._addresses:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR, "no backend available for batch RPC"
+            )
+        return self._addresses[inputs[0].request_id % len(self._addresses)]
+
+    @staticmethod
+    def _exception_type_from_rpc_error_code(error_code: int) -> ExceptionType:
+        """Translate the compact model-RPC enum to the public exception taxonomy by name."""
+        try:
+            name = ErrorCodePB.Name(error_code)
+        except ValueError:
+            return ExceptionType.UNKNOWN_ERROR
+        # The protobuf keeps the historical US spelling while ExceptionType uses the
+        # spelling already exposed by the Python API.
+        if name == "P2P_CONNECTOR_WORKER_READ_CANCELED":
+            name = "P2P_CONNECTOR_WORKER_READ_CANCELLED"
+        return ExceptionType.__members__.get(name, ExceptionType.UNKNOWN_ERROR)
+
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        """Execute one preassigned chunk, preserving item order and failing the chunk on error."""
         if not inputs:
             return []
-
-        max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
-        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
+        effective_timeout_ms = [
+            round(self._compute_grpc_timeout(inp.generate_config.timeout_ms) * 1000)
+            for inp in inputs
+        ]
+        grpc_timeout_seconds = max(effective_timeout_ms) / 1000.0
 
         batch_input_pb = BatchGenerateInputPB()
-        for inp in inputs:
-            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
+        for inp, timeout_ms in zip(inputs, effective_timeout_ms):
             input_pb = trans_input(inp)
+            # A batch has one outer deadline, but every backend item keeps its own effective
+            # timeout. Do not normalize by mutating the caller's GenerateInput.
+            input_pb.generate_config.timeout_ms = timeout_ms or 0
             batch_input_pb.inputs.append(input_pb)
 
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        target_address = self._select_batch_address(inputs)
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )
@@ -1249,15 +1300,34 @@ class ModelRpcClient(object):
                 batch_input_pb, timeout=grpc_timeout_seconds
             )
 
+            if len(response.results) != len(inputs):
+                # C++ BatchGenerateCall is contractually 1:1 (one result per input). A shorter
+                # result vector would otherwise make the loop below return a silently-truncated
+                # list (dropping trailing inputs with no error); a longer one would IndexError on
+                # inputs[i]. Fail typed instead so a server-side contract break surfaces loudly.
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    f"batch request: [{len(inputs)} items] got {len(response.results)} result(s); "
+                    f"server violated the 1:1 per-item contract",
+                )
+
             results = []
             for i, result_pb in enumerate(response.results):
-                if (
-                    result_pb.HasField("error_info")
-                    and result_pb.error_info.error_message
+                if result_pb.HasField("error_info") and (
+                    result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
+                    or result_pb.error_info.error_message
                 ):
+                    error_type = self._exception_type_from_rpc_error_code(
+                        result_pb.error_info.error_code
+                    )
+                    message = result_pb.error_info.error_message or error_type.name
+                    raise FtRuntimeException(
+                        error_type, f"batch item {i} failed: {message}"
+                    )
+                if not result_pb.HasField("final_output"):
                     raise FtRuntimeException(
                         ExceptionType.UNKNOWN_ERROR,
-                        f"batch item {i} failed: {result_pb.error_info.error_message}",
+                        f"batch item {i} is missing final_output",
                     )
                 stream_state = StreamState()
                 output = trans_output(inputs[i], result_pb.final_output, stream_state)
@@ -1266,8 +1336,3 @@ class ModelRpcClient(object):
 
         except grpc.RpcError as e:
             self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
-        except FtRuntimeException:
-            raise
-        except Exception as e:
-            logging.error(f"batch rpc unknown error: {str(e)}")
-            raise e

@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import logging
 import queue
 import threading
@@ -660,6 +659,7 @@ class Pipeline(object):
         base_request_id: int,
         generate_config_json: dict,
         generate_env_config=None,
+        headers: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> List[GenerateResponse]:
         generate_config = self.create_generate_config(
@@ -672,16 +672,82 @@ class Pipeline(object):
         )
         generate_config.is_streaming = False
 
+        return await self.batch_infer_prepared(
+            prompts=prompts,
+            request_ids=[base_request_id + i for i in range(len(prompts))],
+            generate_configs=[
+                generate_config.model_copy(deep=True) for _ in range(len(prompts))
+            ],
+            headers=headers,
+            group_id=base_request_id,
+            **kwargs,
+        )
+
+    @torch.inference_mode()
+    async def batch_infer_prepared(
+        self,
+        prompts: List[str],
+        request_ids: List[int],
+        generate_configs: List[GenerateConfig],
+        input_urls: Optional[List[List[str]]] = None,
+        headers: Optional[Dict[str, Any]] = None,
+        group_id: Optional[int] = None,
+        **kwargs: Any,
+    ) -> List[GenerateResponse]:
+        """Submit independently prepared prompts as one atomic backend batch RPC."""
+        item_count = len(prompts)
+        if len(request_ids) != item_count or len(generate_configs) != item_count:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "batch prompts, request IDs, and generate configs must have equal length",
+            )
+        if input_urls is None:
+            input_urls = [[] for _ in prompts]
+        if len(input_urls) != item_count:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "batch prompts and multimodal inputs must have equal length",
+            )
+        if item_count == 0:
+            return []
+        request_headers = normalize_request_headers(headers)
+        effective_group_id = (
+            request_ids[0] if group_id is None and request_ids else group_id
+        )
+
         inputs = []
-        for i, prompt in enumerate(prompts):
+        for i, (prompt, request_id, generate_config, urls) in enumerate(
+            zip(prompts, request_ids, generate_configs, input_urls)
+        ):
+            if type(prompt) is not str:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "expect string prompt, actual: " + str(prompt),
+                )
             if len(prompt) == 0:
                 raise FtRuntimeException(
                     ExceptionType.EMPTY_PROMPT_ERROR,
                     "prompt should have at least one token!",
                 )
+            generate_config.is_streaming = False
+            parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
             token_ids = self.tokenizer.encode(prompt)
+            mm_inputs = [
+                MultimodalInput(
+                    url,
+                    MMUrlType.DEFAULT,
+                    torch.empty(0),
+                    MMPreprocessConfig(),
+                )
+                for url in urls or []
+            ]
 
             if generate_config.return_prompt_logits:
+                if mm_inputs:
+                    raise FtRuntimeException(
+                        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                        "prompt scoring does not support multimodal inputs",
+                    )
                 prompt_len = len(token_ids)
                 start = (
                     generate_config.prompt_logits_start
@@ -693,6 +759,13 @@ class Pipeline(object):
                         ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                         f"prompt_logits_start ({start}) >= prompt length ({prompt_len}) at batch index {i}",
                     )
+                end = (
+                    generate_config.prompt_logits_end
+                    if generate_config.prompt_logits_end >= 0
+                    else prompt_len
+                )
+                if end > prompt_len:
+                    generate_config.prompt_logits_end = prompt_len
 
             if generate_config.sp_advice_prompt != "":
                 generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
@@ -700,30 +773,34 @@ class Pipeline(object):
                 )
 
             input_tensor = torch.tensor(token_ids, dtype=torch.int)
-            # Shallow copy is enough: GenerateConfig is treated as immutable from here on,
-            # and at the RPC layer it is converted to a per-request protobuf so any brief
-            # list aliasing across siblings is dropped before it reaches the engine.
             gen_input = GenerateInput(
-                request_id=base_request_id + i,
+                request_id=request_id,
                 token_ids=input_tensor,
-                mm_inputs=[],
-                generate_config=copy.copy(generate_config),
+                mm_inputs=mm_inputs,
+                generate_config=generate_config,
                 tokenizer=self.tokenizer,
+                group_size=item_count,
+                group_id=effective_group_id if effective_group_id is not None else -1,
+                headers=request_headers,
             )
             inputs.append(gen_input)
 
         batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
-
-        stop_word_strs = generate_config.stop_words_str
-        stop_word_str_slices = get_stop_word_slices(stop_word_strs)
-        stop_word_ids = generate_config.stop_words_list
-        stop_word_id_slices = get_stop_word_slices(stop_word_ids)
+        if len(batch_outputs) != item_count:
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                f"batch RPC returned {len(batch_outputs)} outputs for {item_count} inputs",
+            )
 
         responses = []
-        for i, outputs in enumerate(batch_outputs):
+        for outputs, generate_config in zip(batch_outputs, generate_configs):
+            stop_word_strs = generate_config.stop_words_str
+            stop_word_str_slices = get_stop_word_slices(stop_word_strs)
+            stop_word_ids = generate_config.stop_words_list
+            stop_word_id_slices = get_stop_word_slices(stop_word_ids)
             (
                 generate_texts,
-                output_lens,
+                _,
                 _,
             ) = self.decode_non_incremental_tokens(
                 generate_config,

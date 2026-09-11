@@ -225,6 +225,7 @@ final class FlexlbConfigValidator {
     }
 
     private static void validateRouting(RoutingConfig routing) {
+        positive(routing.getBatchScheduleMaxCount(), "router.batchScheduleMaxCount");
         require(routing.getRoles() != null, "router.roles", "is required");
         PrefillConfig prefill = routing.getRoles().getPrefill();
         require(prefill != null, "router.roles.prefill", "is required");
@@ -337,6 +338,7 @@ final class FlexlbConfigValidator {
     }
 
     private static void validateWorkerRegistry(WorkerRegistryConfig workers) {
+        require(workers.getEngineType() != null, "workerRegistry.engineType", "is required");
         require(workers.getHealth() != null, "workerRegistry.health", "is required");
         positive(workers.getHealth().getStatusPollIntervalMs(),
                 "workerRegistry.health.statusPollIntervalMs");

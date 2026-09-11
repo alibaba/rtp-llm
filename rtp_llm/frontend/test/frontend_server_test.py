@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import torch
 from pydantic import BaseModel
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -14,9 +15,13 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     _selected_pd_separation,
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.frontend.frontend_worker import BatchPipelineResponse, FrontendWorker
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, FinisheReason
 from rtp_llm.ops import RoleType
-from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.structure.request_constants import request_id_field_name
+from rtp_llm.structure.request_extractor import Request, RequestExtractor
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -25,6 +30,10 @@ from rtp_llm.utils.concurrency_controller import init_controller, set_global_con
 
 class FakePipelinResponse(BaseModel):
     res: str
+
+
+class FakeBatchResponse(BaseModel):
+    response_batch: list[Any] = []
 
 
 class FakeFrontendWorker(object):
@@ -39,9 +48,14 @@ class FakeFrontendWorker(object):
     def __init__(self):
         self.backend_rpc_server_visitor = self.FakeBackendRpcServerVisitor()
         self.close_called = False
+        self.batch_calls = []
 
     async def close(self):
         self.close_called = True
+
+    async def batch_infer(self, **kwargs: Any):
+        self.batch_calls.append(kwargs)
+        return FakeBatchResponse()
 
     def inference(self, prompt: str, *args: Any, **kwargs: Any):
         response_generator = self._inference(prompt, *args, **kwargs)
@@ -57,6 +71,126 @@ class FakeFrontendWorker(object):
 
     def is_streaming(self, *args: Any, **kwargs: Any):
         return False
+
+
+class ForceBatchFrontendWorkerTest(TestCase):
+    def test_batch_endpoint_preserves_config_identity_and_headers(self):
+        for force in (True, False):
+            with self.subTest(force=force):
+                worker = FrontendWorker.__new__(FrontendWorker)
+                expected = BatchPipelineResponse(response_batch=[])
+
+                async def generate():
+                    yield expected
+
+                worker._inference = MagicMock(return_value=generate())
+                result = asyncio.run(
+                    worker.batch_infer(
+                        ["first", "second"],
+                        700,
+                        {"force_batch": force},
+                        headers={"x-request-id": "trace"},
+                    )
+                )
+                self.assertIs(expected, result)
+                request = worker._inference.call_args.args[0]
+                self.assertEqual(700, request.request_id)
+                self.assertEqual(
+                    [force, force], [gc.force_batch for gc in request.generate_configs]
+                )
+                self.assertFalse(request.is_streaming)
+                self.assertEqual(
+                    {"x-request-id": "trace"},
+                    worker._inference.call_args.kwargs["headers"],
+                )
+
+    def test_topology_and_force_flag_select_the_native_execution_path(self):
+        cases = [
+            (RoleType.PDFUSION, False, True, [], True),
+            (RoleType.PDFUSION, True, True, [], False),
+            (RoleType.FRONTEND, True, True, [], False),
+            (RoleType.FRONTEND, True, True, [RoleType.PDFUSION], True),
+            (RoleType.FRONTEND, True, True, [RoleType.PREFILL, RoleType.DECODE], False),
+            (RoleType.PREFILL, True, True, [], False),
+            (RoleType.PDFUSION, False, False, [], False),
+        ]
+        for role, scheduling, force, assignments, atomic in cases:
+            with self.subTest(
+                role=role, scheduling=scheduling, force=force, assignments=assignments
+            ):
+                request, _ = RequestExtractor(GenerateConfig()).extract_request(
+                    {
+                        request_id_field_name: 700,
+                        "prompt_batch": ["first", "second"],
+                        "generate_config": {"force_batch": force},
+                    }
+                )
+                for config in request.generate_configs:
+                    config.role_addrs = [
+                        RoleAddr(role=r, ip="be", http_port=80, grpc_port=81)
+                        for r in assignments
+                    ]
+                worker = FrontendWorker.__new__(FrontendWorker)
+                worker.backend_rpc_server_visitor = MagicMock()
+                worker.backend_rpc_server_visitor.pd_sep_config.role_type = role
+                worker.backend_rpc_server_visitor.host_service.service_available = (
+                    scheduling
+                )
+                worker._yield_batch_generate = MagicMock(return_value="atomic")
+                worker._yield_generate = MagicMock()
+                worker._parallel_batch_async_generators = MagicMock(
+                    return_value="per-item"
+                )
+                self.assertEqual(
+                    "atomic" if atomic else "per-item", worker._inference(request)
+                )
+                self.assertEqual(
+                    1 if atomic else 0, worker._yield_batch_generate.call_count
+                )
+                self.assertEqual(0 if atomic else 2, worker._yield_generate.call_count)
+                request = request._replace(is_streaming=True)
+                if force:
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        worker._inference(request)
+                    self.assertEqual(
+                        ExceptionType.UNSUPPORTED_OPERATION,
+                        raised.exception.exception_type,
+                    )
+
+    def test_prepared_batch_invokes_backend_once_with_group_identity(self):
+        from unittest.mock import AsyncMock
+
+        pipeline = Pipeline.__new__(Pipeline)
+        pipeline.tokenizer = MagicMock()
+        pipeline.tokenizer.encode.return_value = [1, 2]
+        pipeline.backend_rpc_server_visitor = MagicMock()
+        pipeline.backend_rpc_server_visitor.batch_enqueue = AsyncMock(
+            return_value=[GenerateOutputs(), GenerateOutputs()]
+        )
+        pipeline.decode_non_incremental_tokens = MagicMock(
+            side_effect=[(["one"], [1], []), (["two"], [1], [])]
+        )
+        configs = [GenerateConfig(aux_info=False), GenerateConfig(aux_info=False)]
+        responses = asyncio.run(
+            pipeline.batch_infer_prepared(
+                prompts=["first", "second"],
+                request_ids=[700, 10_700],
+                generate_configs=configs,
+                headers={"X-Request-ID": "trace", "ignored": "value"},
+                group_id=700,
+            )
+        )
+        self.assertEqual(2, len(responses))
+        pipeline.backend_rpc_server_visitor.batch_enqueue.assert_awaited_once()
+        inputs = pipeline.backend_rpc_server_visitor.batch_enqueue.call_args.args[0]
+        self.assertEqual([700, 10_700], [item.request_id for item in inputs])
+        self.assertEqual([2, 2], [item.group_size for item in inputs])
+        self.assertEqual([700, 700], [item.group_id for item in inputs])
+        self.assertEqual(
+            [{"x-request-id": "trace"}] * 2, [item.headers for item in inputs]
+        )
+        for config, item in zip(configs, inputs):
+            self.assertIs(config, item.generate_config)
 
 
 class FakeRawRequest(object):
@@ -109,6 +243,54 @@ class FrontendServerTest(TestCase):
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
         )
+
+    def test_batch_and_root_routing_credentials_are_checked_before_inference(self):
+        self.frontend_server._dispatcher_routing_token = "trusted-secret"
+        for endpoint, key, token in [
+            ("batch_infer", "generate_config", ""),
+            ("inference", "generation_config", ""),
+            ("batch_infer", "generate_config", "wrong"),
+            ("batch_infer", "generate_config", "trusted-secret"),
+        ]:
+            with self.subTest(endpoint=endpoint, token=token):
+                self.frontend_server._frontend_worker.batch_calls.clear()
+                config = {
+                    "role_addrs": [
+                        {
+                            "role": "PDFUSION",
+                            "ip": "be",
+                            "http_port": 80,
+                            "grpc_port": 81,
+                        }
+                    ]
+                }
+                request = {"prompt_batch": ["hello"], "prompt": "hello", key: config}
+                headers = {
+                    "x-rtp-llm-dispatcher-routing-token": token,
+                    "X-Request-ID": "trace",
+                    "ignored": "secret",
+                }
+                response = asyncio.run(
+                    getattr(self.frontend_server, endpoint)(
+                        request, FakeRawRequest(headers)
+                    )
+                )
+                if token == "trusted-secret":
+                    self.assertEqual(b'{"response_batch":[]}', response.body)
+                    call = self.frontend_server._frontend_worker.batch_calls[-1]
+                    self.assertEqual(config, call["generate_config"])
+                    self.assertEqual({"x-request-id": "trace"}, call["headers"])
+                else:
+                    self.assertEqual(
+                        ExceptionType.INVALID_PARAMS.value,
+                        json.loads(response.body)["error_code"],
+                    )
+                    self.assertEqual(
+                        [], self.frontend_server._frontend_worker.batch_calls
+                    )
+                self.assertEqual(
+                    0, self.frontend_server._global_controller.current_concurrency.value
+                )
 
     def test_response_chunk_event_is_streaming_only(self):
         try:

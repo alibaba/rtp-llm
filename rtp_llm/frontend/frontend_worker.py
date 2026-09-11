@@ -24,8 +24,9 @@ from rtp_llm.distribute.distributed_server import (
     get_world_info,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
+from rtp_llm.ops import ParallelismConfig, RoleType, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
@@ -141,61 +142,36 @@ class FrontendWorker:
         return token_ids, tokens
 
     async def batch_infer(
-        self, prompts: List[str], request_id: int, generate_config: dict
+        self,
+        prompts: List[str],
+        request_id: int,
+        generate_config: dict,
+        headers: Optional[Dict[str, Any]] = None,
     ) -> BatchPipelineResponse:
-        responses = await self.pipeline.batch_infer(
-            prompts=prompts,
-            base_request_id=request_id,
-            generate_config_json=generate_config,
-            generate_env_config=self.generate_env_config,
+        if not prompts:
+            return BatchPipelineResponse(response_batch=[])
+
+        # Keep /batch_infer on the same topology-aware path as root prompt_batch.
+        # PDFUSION retains its single BatchGenerateCall, while PD/multi-stage deployments and
+        # explicit force_batch=false use the established per-item handoff path.
+        effective_config = dict(generate_config)
+        effective_config.setdefault("force_batch", True)
+        effective_config["is_streaming"] = False
+        response = self.inference(
+            prompt_batch=prompts,
+            generate_config=effective_config,
+            headers=headers,
+            **{request_id_field_name: request_id},
         )
-        # Reconstruct GenerateConfig to check flags (aux_info, calculate_loss, etc.)
-        gc = self.pipeline.create_generate_config(
-            generate_config,
-            len(self.pipeline.tokenizer),
-            self.pipeline._special_tokens,
-            self.pipeline.tokenizer,
-            generate_env_config=self.generate_env_config,
-        )
-        pipeline_responses = []
-        for gen_response in responses:
-            out = gen_response.generate_outputs.generate_outputs[0]
-            generate_texts = gen_response.generate_texts
-            aux_info_dict: Dict[str, Any] = {}
-            if gc.aux_info:
-                aux = out.aux_info
-                if gc.has_num_beams():
-                    aux.beam_responses = generate_texts
-                aux_info_dict = asdict(aux)
-            prompt_logits_dict = (
-                build_prompt_logits_dict(out.prompt_logits)
-                if gc.return_prompt_logits
-                else None
+        async for _ in response:
+            pass
+        result = await response.gen_complete_response_once()
+        if not isinstance(result, BatchPipelineResponse):
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                "batch inference returned an unexpected response type",
             )
-            pipeline_responses.append(
-                PipelineResponse(
-                    response=generate_texts[0],
-                    finished=out.finished,
-                    aux_info=aux_info_dict,
-                    hidden_states=(
-                        out.hidden_states.tolist()
-                        if gc.return_hidden_states and out.hidden_states is not None
-                        else None
-                    ),
-                    loss=(
-                        out.loss.tolist()
-                        if gc.calculate_loss and out.loss is not None
-                        else None
-                    ),
-                    logits=(
-                        out.logits.tolist()
-                        if gc.return_logits and out.logits is not None
-                        else None
-                    ),
-                    prompt_logprobs=prompt_logits_dict,
-                )
-            )
-        return BatchPipelineResponse(response_batch=pipeline_responses)
+        return result
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
         default_generate_config = GenerateConfig()
@@ -221,6 +197,14 @@ class FrontendWorker:
         )
 
     def _inference(self, request: Request, **kwargs: Any):
+        if request.batch_infer and request.generate_configs[0].force_batch:
+            if request.is_streaming:
+                raise FtRuntimeException(
+                    ExceptionType.UNSUPPORTED_OPERATION,
+                    "force_batch only supports non-streaming prompt_batch requests",
+                )
+            if self._can_use_atomic_batch_rpc(request):
+                return self._yield_batch_generate(request, **kwargs)
         if (
             len(request.input_texts) > 1
             or request.batch_infer
@@ -259,6 +243,69 @@ class FrontendWorker:
                 generate_config=request.generate_configs[0],
                 **kwargs,
             )
+
+    def _can_use_atomic_batch_rpc(self, request: Request) -> bool:
+        """Use BatchGenerateCall only when every item targets single-stage PDFUSION."""
+        visitor = self.backend_rpc_server_visitor
+        if visitor.pd_sep_config.role_type not in (
+            RoleType.PDFUSION,
+            RoleType.FRONTEND,
+        ):
+            return False
+        item_role_addrs = [config.role_addrs for config in request.generate_configs]
+        if any(item_role_addrs):
+            return (
+                all(
+                    len(role_addrs) == 1 and role_addrs[0].role == RoleType.PDFUSION
+                    for role_addrs in item_role_addrs
+                )
+                and len(
+                    {
+                        (role_addrs[0].ip, role_addrs[0].grpc_port)
+                        for role_addrs in item_role_addrs
+                    }
+                )
+                == 1
+            )
+        return (
+            visitor.pd_sep_config.role_type == RoleType.PDFUSION
+            and not visitor.host_service.service_available
+        )
+
+    async def _yield_batch_generate(
+        self, request: Request, **kwargs: Any
+    ) -> AsyncGenerator[BatchPipelineResponse, None]:
+        headers = kwargs.pop("headers", None)
+        generate_configs = [
+            self.pipeline.create_generate_config(
+                generate_config,
+                len(self.pipeline.tokenizer),
+                self.pipeline._special_tokens,
+                self.pipeline.tokenizer,
+                generate_env_config=self.generate_env_config,
+                **kwargs,
+            )
+            for generate_config in request.generate_configs
+        ]
+        request_ids = [
+            request.request_id + index * 10000
+            for index in range(len(request.input_texts))
+        ]
+        responses = await self.pipeline.batch_infer_prepared(
+            prompts=request.input_texts,
+            request_ids=request_ids,
+            generate_configs=generate_configs,
+            input_urls=request.input_urls,
+            headers=headers,
+            group_id=request.request_id,
+            **kwargs,
+        )
+        yield BatchPipelineResponse(
+            response_batch=[
+                self._format_response_new(response, generate_config)
+                for response, generate_config in zip(responses, generate_configs)
+            ]
+        )
 
     def _format_response(
         self,
