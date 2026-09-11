@@ -14,6 +14,7 @@ final class MockPrefillSession {
     final int dpRank;
     final boolean autoFetch;
     final JavaMockEngineCluster.FastRpcService decode;
+    boolean remoteDecode;
     final long preparationStartedNanos;
     private boolean clientAttached;
     private boolean prefillDone;

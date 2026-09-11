@@ -118,6 +118,7 @@ public final class JavaMockEngineCluster {
 
     public static void main(String[] args) throws Exception {
         Config config = Config.parse(args);
+        WhaleMockMonitor whaleMonitor = config.kmonitor ? WhaleMockMonitor.create() : null;
         MockPerformanceModel performance = MockPerformanceModel.load(
                 config.performanceFile, config.masterConfigFile);
         if (config.blockSize > 0) {
@@ -148,7 +149,7 @@ public final class JavaMockEngineCluster {
             for (FastRpcService service : services.values()) {
                 service.setEngineEventLog(engineEventLog);
             }
-            writeDiscoveryFiles(config);
+            if (!config.whale) writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
             // domain→hosts mapping consumed by LocalServiceDiscovery on the master,
             // kept in sync by /add_engine + /remove_engine at runtime.
@@ -182,6 +183,16 @@ public final class JavaMockEngineCluster {
                     config.statsIntervalMs, config.statsIntervalMs, TimeUnit.MILLISECONDS);
         }
 
+        if (whaleMonitor != null) {
+            scheduler.scheduleAtFixedRate(() -> {
+                try {
+                    services.values().forEach(whaleMonitor::sample);
+                } catch (RuntimeException error) {
+                    System.err.println("Whale mock metric reporting failed: " + error);
+                }
+            }, config.statsIntervalMs, config.statsIntervalMs, TimeUnit.MILLISECONDS);
+        }
+
         scheduler.scheduleAtFixedRate(() -> {
             for (FastRpcService service : services.values()) {
                 service.checkLeakDrain(60_000_000_000L);
@@ -198,6 +209,7 @@ public final class JavaMockEngineCluster {
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             controlServer.stop();
+            if (whaleMonitor != null) whaleMonitor.close();
             // Drain BEFORE killing the scheduler: cancel every in-flight request
             // through the existing cancel() bookkeeping so counters net to zero
             // and checkLeakDrain stops evaluating. Without this, requests whose
@@ -319,10 +331,11 @@ public final class JavaMockEngineCluster {
                 poolTotalKvTokens, config.decodeMaxConcurrency);
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         service.setAutoFetch(config.autoFetch);
+        service.setWhaleRemote(config.whale);
         service.setFetchAttachTimeoutMs(config.fetchAttachTimeoutMs);
         services.put(grpcPort, service);
         try {
-            Server server = NettyServerBuilder.forPort(grpcPort)
+            Server server = NettyServerBuilder.forAddress(new java.net.InetSocketAddress(config.bindHost, grpcPort))
                     .bossEventLoopGroup(bossGroup)
                     .workerEventLoopGroup(workerGroup)
                     .channelType(NioServerSocketChannel.class)
@@ -506,6 +519,7 @@ public final class JavaMockEngineCluster {
      * remote eval hosts.
      */
     static String declaredHost(Config config, int engineIndex) {
+        if (config.whale) return config.host;
         return config.uniqueEngineIps ? derivedLoopbackIp(engineIndex) : config.host;
     }
 
@@ -561,6 +575,200 @@ public final class JavaMockEngineCluster {
     }
 
     static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
+        private volatile boolean whaleRemote;
+        private final Map<Long, Object> remoteDecodeLeaseOwners = new ConcurrentHashMap<>();
+        private final Map<Long, Runnable> remoteDecodeStops = new ConcurrentHashMap<>();
+        private final Map<String, io.grpc.ManagedChannel> remoteChannels = new ConcurrentHashMap<>();
+        private final Map<Long, RemotePrefillOwner> remotePrefillOwners = new ConcurrentHashMap<>();
+        private final ThreadLocal<Throwable> remotePreparationError = new ThreadLocal<>();
+        private final String processGeneration = java.util.UUID.randomUUID().toString();
+
+        private final class RemotePrefillOwner {
+            final MockPrefillSession session;
+            MockRemoteDecodeStream stream;
+            boolean admitted;
+            boolean closed;
+
+            RemotePrefillOwner(MockPrefillSession session) { this.session = session; }
+
+            synchronized void close() {
+                if (closed) return;
+                closed = true;
+                if (stream != null) stream.close();
+            }
+
+            synchronized void failed(Throwable error) {
+                if (closed || !admitted) return;
+                long id = session.shape.input().getRequestId();
+                if (!remotePrefillOwners.remove(id, this)) return;
+                closed = true;
+                EngineRpcService.GenerateOutputsPB failure = EngineRpcService.GenerateOutputsPB.newBuilder()
+                        .setRequestId(id).setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                .setErrorCodeValue(8209).setErrorMessage("P->D RemoteGenerate failed: "
+                                        + io.grpc.Status.fromThrowable(error))).build();
+                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(id);
+                if (queue != null) queue.offer(failure);
+                // Keep the failure in an unattached Fetch context, so a late
+                // Fetch observes the same typed terminal rather than success.
+                session.fail(failure);
+                requestStates.put(id, "failed");
+                continuePrefillSession(session);
+                releaseBlockLease(id);
+            }
+        }
+
+        private boolean prepareRemoteDecode(MockPerformanceModel.RequestShape shape, long batchId,
+                                            int dpRank, boolean automaticContinuation) {
+            EngineRpcService.RoleAddrPB target = shape.input().getGenerateConfig().getRoleAddrsList().stream()
+                    .filter(addr -> RoleTypeProtoConverter.fromRoleAddr(addr) == RoleType.DECODE)
+                    .findFirst().orElseThrow(() -> new IllegalArgumentException("Whale prefill requires a Decode route"));
+            if (target.getIp().isBlank() || target.getGrpcPort() < 1 || target.getGrpcPort() > 65535) {
+                throw new IllegalArgumentException("Whale Decode route requires IP and valid gRPC port");
+            }
+            String endpoint = target.getIp() + ":" + target.getGrpcPort();
+            io.grpc.ManagedChannel channel = remoteChannels.computeIfAbsent(endpoint,
+                    ignored -> io.grpc.ManagedChannelBuilder.forAddress(target.getIp(), target.getGrpcPort())
+                            .usePlaintext().disableRetry().build());
+            long id = shape.input().getRequestId();
+            MockPrefillSession session = new MockPrefillSession(shape, batchId, dpRank, automaticContinuation, null);
+            session.remoteDecode = true;
+            RemotePrefillOwner owner = new RemotePrefillOwner(session);
+            if (remotePrefillOwners.putIfAbsent(id, owner) != null) return false;
+            synchronized (owner) {
+                try {
+                    long requestedTimeout = shape.input().getGenerateConfig().getTimeoutMs();
+                    owner.stream = new MockRemoteDecodeStream(channel, shape.input(), processGeneration,
+                            requestedTimeout > 0 ? requestedTimeout : DEFAULT_RESPONSE_POLL_TIMEOUT_MS,
+                            value -> {
+                                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(id);
+                                if (queue != null) queue.offer(value);
+                            }, error -> responseExecutor.execute(() -> owner.failed(error)),
+                            () -> responseExecutor.execute(() -> {
+                                remotePrefillOwners.remove(id, owner);
+                                responseQueues.remove(id);
+                            }));
+                    owner.stream.allocated().get(30_000L, TimeUnit.MILLISECONDS);
+                    if (owner.closed || cancelledRequests.containsKey(id)) throw new IllegalStateException("Prefill cancelled");
+                    prefillSessions.put(id, session);
+                    owner.admitted = true;
+                    return true;
+                } catch (Exception error) {
+                    if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+                    remotePreparationError.set(error instanceof java.util.concurrent.ExecutionException
+                            && error.getCause() != null ? error.getCause() : error);
+                    remotePrefillOwners.remove(id, owner);
+                    owner.close();
+                    return false;
+                }
+            }
+        }
+
+        private void continueRemoteDecode(MockPrefillSession session) {
+            long id = session.shape.input().getRequestId();
+            RemotePrefillOwner owner = remotePrefillOwners.get(id);
+            if (owner == null) return;
+            owner.stream.load().whenCompleteAsync((ignored, error) -> {
+                if (error != null) { owner.failed(error); return; }
+                synchronized (owner) {
+                    if (owner.closed || cancelledRequests.containsKey(id)) return;
+                    try {
+                        owner.stream.generate(0);
+                        releaseBlockLease(id);
+                        prefillSessions.remove(id, session);
+                        session.close();
+                    } catch (RuntimeException failure) { owner.failed(failure); }
+                }
+            }, responseExecutor);
+        }
+
+        void setWhaleRemote(boolean enabled) {
+            whaleRemote = enabled;
+        }
+
+        boolean isWhaleRemote() { return whaleRemote; }
+
+        @Override
+        public StreamObserver<EngineRpcService.GenerateRequestPB> remoteGenerate(
+                StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
+            if (!whaleRemote || roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                return super.remoteGenerate(observer);
+            }
+            return new MockRemoteDecodeCall(this::allocateRemoteDecode, observer, responseExecutor);
+        }
+
+        private MockRemoteDecodeCall.Lease allocateRemoteDecode(
+                EngineRpcService.GenerateInputPB input, String clientId, Runnable stoppedCallback) {
+            long id = input.getRequestId();
+            Object owner = new Object();
+            MockPerformanceModel.RequestShape shape = performance.shape(input, cache);
+            synchronized (decodeQueueLock) {
+                if (stopped || shuttingDown || runningTasks.containsKey(id)
+                        || cancelledRequests.containsKey(id)
+                        || remoteDecodeLeaseOwners.putIfAbsent(id, owner) != null) {
+                    throw io.grpc.Status.ALREADY_EXISTS.withDescription("Decode request is already owned or closed")
+                            .asRuntimeException();
+                }
+                decodeAllocationInProgress.add(id);
+            }
+            boolean allocated = false;
+            try {
+                if (!reserveDecodeLease(id, shape)) {
+                    throw capacityError(602, "decode ALLOCATE: insufficient KV capacity after retry window");
+                }
+                synchronized (decodeQueueLock) {
+                    if (stopped || shuttingDown || cancelledRequests.containsKey(id)) {
+                        throw io.grpc.Status.CANCELLED.withDescription("Decode stopped during ALLOCATE")
+                                .asRuntimeException();
+                    }
+                    decodeWaitingForKv.add(id);
+                    remoteDecodeStops.put(id, stoppedCallback);
+                    runningTasks.put(id, task(shape, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED));
+                    pendingRequests.incrementAndGet();
+                    acceptedCount.incrementAndGet();
+                    requestStates.put(id, "waiting_for_kv");
+                    recordLifecycleStart(id, -1L, "remote_allocate");
+                    recordEventArrival(id);
+                    lastEnqueueTime.set(System.nanoTime());
+                    allocated = true;
+                }
+            } finally {
+                synchronized (decodeQueueLock) {
+                    decodeAllocationInProgress.remove(id);
+                    if (!allocated) {
+                        remoteDecodeLeaseOwners.remove(id, owner);
+                        releaseBlockLease(id);
+                    }
+                }
+            }
+            return new MockRemoteDecodeCall.Lease() {
+                @Override
+                public boolean start(LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> outputs) {
+                    synchronized (decodeQueueLock) {
+                        if (remoteDecodeLeaseOwners.get(id) != owner) {
+                            return false;
+                        }
+                        responseQueues.put(id, outputs);
+                        return scheduleDecodeCompletion(shape, -1L, outputs);
+                    }
+                }
+
+                @Override
+                public void cancel() {
+                    synchronized (decodeQueueLock) {
+                        if (remoteDecodeLeaseOwners.remove(id, owner)) {
+                            FastRpcService.this.cancel(id, false, false);
+                        }
+                    }
+                }
+
+                @Override
+                public void completed() {
+                    synchronized (decodeQueueLock) {
+                        if (remoteDecodeLeaseOwners.remove(id, owner)) remoteDecodeStops.remove(id);
+                    }
+                }
+            };
+        }
         /** Bound for the per-engine request_lifecycle map (Python _prune_lifecycle cap). */
         private static final int LIFECYCLE_CAP = 10_000;
         /** Bound for the cancelled_rids history exposed in the Python snapshot schema. */
@@ -966,6 +1174,9 @@ public final class JavaMockEngineCluster {
         // and generated). hit_tokens_total is cumulative and never drained
         // (the cache_saved_tokens source via final_snapshot).
         private final AtomicLong contextComputeTokens = new AtomicLong();
+        private final LongAdder lifetimeContextComputeTokens = new LongAdder();
+        private final LongAdder lifetimeContextTokens = new LongAdder();
+        private final LongAdder lifetimeGenerateTokens = new LongAdder();
         private final AtomicLong contextWithCacheTokens = new AtomicLong();
         private final AtomicLong generateTokens = new AtomicLong();
         private final AtomicLong hitTokensTotal = new AtomicLong();
@@ -1254,20 +1465,10 @@ public final class JavaMockEngineCluster {
                         FastRpcService decodeEngine = findDecodeEngine(input.getInput());
                         if (!prepareDecodeSession(decodeEngine, shape, request.getBatchId(), slot.getDpRank(), autoFetch)) {
                             releaseBlockLease(requestId);
-                            int decodeNeedBlocks =
-                                    decodeEngine.decodeDemandBlocks(shape.inputLen());
-                            String message = String.format(
-                                    "LACK_MEM (602, master-surface 8211): decode-side KV allocation "
-                                            + "rejected by D engine port=%d after its ALLOCATE retry window "
-                                            + "(need=%d blocks, avail=%d tokens, spb=%d)",
-                                    decodeEngine.getGrpcPort(), decodeNeedBlocks,
-                                    decodeEngine.getAvailableKvTokens(), seqSizePerBlock);
+                            EngineRpcService.ErrorDetailsPB error = decodePreparationError(decodeEngine, shape);
                             response.addErrorsBuilder()
                                     .setRequestId(requestId)
-                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                            .setErrorCode(DECODE_LACK_MEM_ERROR_CODE)
-                                            .setErrorMessage(message)
-                                            .build());
+                                    .setErrorInfo(error);
                             requestStates.put(requestId, "rejected");
                             continue;
                         }
@@ -1706,14 +1907,12 @@ public final class JavaMockEngineCluster {
                     releaseBlockLease(requestId);
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
-                    int decodeNeedBlocks =
-                            decodeEngine.decodeDemandBlocks(shape.inputLen());
-                    observer.onError(capacityError(8211, String.format(
-                            "LACK_MEM (602, master-surface 8211): decode-side KV allocation "
-                                    + "rejected by D engine port=%d after its ALLOCATE retry window "
-                                    + "(need=%d blocks, avail=%d tokens, spb=%d)",
-                            decodeEngine.getGrpcPort(), decodeNeedBlocks,
-                            decodeEngine.getAvailableKvTokens(), seqSizePerBlock)));
+                    EngineRpcService.ErrorDetailsPB error = decodePreparationError(decodeEngine, shape);
+                    io.grpc.Metadata trailers = new io.grpc.Metadata();
+                    trailers.put(io.grpc.Metadata.Key.of("grpc-status-details-bin", io.grpc.Metadata.BINARY_BYTE_MARSHALLER),
+                            error.toByteArray());
+                    observer.onError((error.getErrorCode() == 8211 ? io.grpc.Status.RESOURCE_EXHAUSTED : io.grpc.Status.UNAVAILABLE)
+                            .withDescription(error.getErrorMessage()).asRuntimeException(trailers));
                     return;
                 }
                 if (!admitDirectPrefill(shape)) {
@@ -1861,7 +2060,8 @@ public final class JavaMockEngineCluster {
                 queue = responseQueues.computeIfAbsent(requestId, k -> new MockResponseQueue());
             } else {
                 queue = responseQueues.get(requestId);
-                if (queue == null || downstreamDecodeOwners.containsKey(requestId)) {
+                if (queue == null || downstreamDecodeOwners.containsKey(requestId)
+                        || remotePrefillOwners.containsKey(requestId)) {
                     observer.onError(io.grpc.Status.NOT_FOUND
                             .withDescription("No unconsumed Fetch context")
                             .asRuntimeException());
@@ -1998,6 +2198,8 @@ public final class JavaMockEngineCluster {
         private EngineRpcService.TaskPhase cancel(long requestId,
                                                   boolean priorityPreemption,
                                                   boolean countRpc) {
+            Runnable remoteStop = remoteDecodeStops.remove(requestId);
+            if (remoteStop != null) remoteStop.run();
             if (countRpc) {
                 stats.cancelRpcs.increment();
                 rpcCancel.incrementAndGet();
@@ -2292,7 +2494,7 @@ public final class JavaMockEngineCluster {
                 return new CancelResult(false, null, false);
             }
             EngineRpcService.TaskInfoPB tracked = runningTasks.get(requestId);
-            if (tracked == null && prefillSessions.containsKey(requestId)
+            if (tracked == null && (prefillSessions.containsKey(requestId) || remotePrefillOwners.containsKey(requestId))
                     && !downstreamDecodeOwners.containsKey(requestId)) {
                 stats.cancelCensusTracked.increment();
                 cancel(requestId, true, false);
@@ -2547,7 +2749,8 @@ public final class JavaMockEngineCluster {
          * one to claim owns the terminal, later arrivals no-op.
          */
         private void handleClientGone(long requestId) {
-            if (runningTasks.containsKey(requestId) || prefillSessions.containsKey(requestId)) {
+            if (runningTasks.containsKey(requestId) || prefillSessions.containsKey(requestId)
+                    || remotePrefillOwners.containsKey(requestId)) {
                 stats.cancelCensusClientGone.increment();
                 cancel(requestId, false, false);
                 return;
@@ -3238,6 +3441,8 @@ public final class JavaMockEngineCluster {
                         long inputLen = shape.inputLen();
                         long hitTokens = shape.hitTokens();
                         contextComputeTokens.addAndGet(Math.max(0L, inputLen - hitTokens));
+                        lifetimeContextComputeTokens.add(Math.max(0L, inputLen - hitTokens));
+                        lifetimeContextTokens.add(inputLen);
                         contextWithCacheTokens.addAndGet(inputLen);
                         hitTokensTotal.addAndGet(hitTokens);
                     }
@@ -3416,7 +3621,35 @@ public final class JavaMockEngineCluster {
          * engine (P/D co-located topologies route decode in-process and get no
          * cross-engine reservation).
          */
+        private EngineRpcService.ErrorDetailsPB decodePreparationError(
+                FastRpcService decode, MockPerformanceModel.RequestShape shape) {
+            if (decode == null) {
+                Throwable error = remotePreparationError.get();
+                remotePreparationError.remove();
+                io.grpc.Status status = error == null ? io.grpc.Status.ALREADY_EXISTS : io.grpc.Status.fromThrowable(error);
+                String message = "Remote ALLOCATE failed: " + status;
+                io.grpc.Metadata trailers = error == null ? null : io.grpc.Status.trailersFromThrowable(error);
+                if (trailers != null) {
+                    byte[] bytes = trailers.get(io.grpc.Metadata.Key.of("grpc-status-details-bin", io.grpc.Metadata.BINARY_BYTE_MARSHALLER));
+                    if (bytes != null) {
+                        try { message = EngineRpcService.ErrorDetailsPB.parseFrom(bytes).getErrorMessage(); }
+                        catch (com.google.protobuf.InvalidProtocolBufferException ignored) { /* retain gRPC description */ }
+                    }
+                }
+                return EngineRpcService.ErrorDetailsPB.newBuilder()
+                        .setErrorCode(status.getCode() == io.grpc.Status.Code.RESOURCE_EXHAUSTED ? 8211 : 8207)
+                        .setErrorMessage(message).build();
+            }
+            return EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(DECODE_LACK_MEM_ERROR_CODE)
+                    .setErrorMessage(String.format("LACK_MEM (602, master-surface 8211): decode-side KV allocation "
+                            + "rejected by D engine port=%d after its ALLOCATE retry window "
+                            + "(need=%d blocks, avail=%d tokens, spb=%d)",
+                    decode.getGrpcPort(), decode.decodeDemandBlocks(shape.inputLen()),
+                    decode.getAvailableKvTokens(), seqSizePerBlock)).build();
+        }
+
         private FastRpcService findDecodeEngine(EngineRpcService.GenerateInputPB input) {
+            if (whaleRemote) return null;
             for (EngineRpcService.RoleAddrPB addr : input.getGenerateConfig().getRoleAddrsList()) {
                 if (RoleTypeProtoConverter.fromRoleAddr(addr)
                         != RoleType.DECODE) {
@@ -3441,6 +3674,8 @@ public final class JavaMockEngineCluster {
          * never became running streams.
          */
         private void releaseReservedDecode(long requestId) {
+            RemotePrefillOwner remote = remotePrefillOwners.remove(requestId);
+            if (remote != null) remote.close();
             FastRpcService decode = decodeReservationOwners.remove(requestId);
             if (decode != null) {
                 clearDecodeOwnership(requestId, decode);
@@ -3462,6 +3697,7 @@ public final class JavaMockEngineCluster {
         private boolean prepareDecodeSession(FastRpcService decode,
                 MockPerformanceModel.RequestShape shape, long batchId, int dpRank,
                 boolean automaticContinuation) {
+            if (whaleRemote) return prepareRemoteDecode(shape, batchId, dpRank, automaticContinuation);
             long id = shape.input().getRequestId();
             MockPrefillSession session = new MockPrefillSession(shape, batchId, dpRank,
                     automaticContinuation, decode);
@@ -3564,11 +3800,14 @@ public final class JavaMockEngineCluster {
                 releaseBlockLease(id);
                 return;
             }
-            if (queue != null && session.decode != null) {
+            if (queue != null && (session.decode != null || session.remoteDecode)) {
                 queue.offer(buildOutput(session.shape, false));
             }
             if (!session.isClosed() && !cancelledRequests.containsKey(id)) {
-                if (session.decode == null) {
+                if (session.remoteDecode) {
+                    continueRemoteDecode(session);
+                    return;
+                } else if (session.decode == null) {
                     completedCount.incrementAndGet();
                     requestStates.put(id, "completed");
                     if (queue != null) {
@@ -4066,6 +4305,7 @@ public final class JavaMockEngineCluster {
                 // numerator is the stream's accepted output token count
                 // (the MTP fold), not the decode batch size.
                 generateTokens.addAndGet(shape.outputLen());
+                lifetimeGenerateTokens.add(shape.outputLen());
             }
             // Completion does not depend on a client Fetch in auto-fetch mode;
             // strict mode reaches this point only after the client attached.
@@ -5088,6 +5328,10 @@ public final class JavaMockEngineCluster {
          * Shut down the dedicated response-polling executor.
          */
         void shutdown() {
+            remotePrefillOwners.values().forEach(RemotePrefillOwner::close);
+            remotePrefillOwners.clear();
+            remoteChannels.values().forEach(io.grpc.ManagedChannel::shutdownNow);
+            remoteChannels.clear();
             responseExecutor.shutdownNow();
         }
 
@@ -5113,6 +5357,7 @@ public final class JavaMockEngineCluster {
             synchronized (decodeQueueLock) {
                 this.stopped = s;
                 if (s && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                    remoteDecodeStops.values().forEach(Runnable::run);
                     // The mock has no P->D socket: explicitly model the broken
                     // RemoteGenerate stream before teardown discards its owners.
                     // Normal completion and downstream cancellation claim the
@@ -5147,6 +5392,26 @@ public final class JavaMockEngineCluster {
         void setGrpcServer(Server server) { this.grpcServer = server; }
         long getCrashEpoch() { return crashEpoch.get(); }
         boolean isStopped() { return stopped; }
+        Map<String, String> whaleMetricTags() {
+            return Map.of("engine", engineName, "role", roleType.name(),
+                    "generation", processGeneration, "backend", "mock");
+        }
+
+        Map<String, Number> whaleMetrics() {
+            return Map.ofEntries(
+                    Map.entry("mock_context_compute_tokens_total", lifetimeContextComputeTokens.sum()),
+                    Map.entry("mock_context_tokens_total", lifetimeContextTokens.sum()),
+                    Map.entry("mock_generate_tokens_total", lifetimeGenerateTokens.sum()),
+                    Map.entry("mock_kv_total_tokens", getTotalKvTokens()),
+                    Map.entry("mock_kv_available_tokens", getAvailableKvTokens()),
+                    Map.entry("mock_kv_occupied_tokens", getOccupiedKvTokens()),
+                    Map.entry("mock_prefill_waiting_requests", waitingPrefillRequests.get()),
+                    Map.entry("mock_prefill_running_requests", activePrefillRequests.get()),
+                    Map.entry("mock_decode_waiting_requests", decodePendingQueueSize() + decodeWaitingForKv.size()),
+                    Map.entry("mock_decode_running_requests", activeDecodeRequests.get()),
+                    Map.entry("mock_completed_requests_total", completedCount.get()),
+                    Map.entry("mock_cancelled_requests_total", cancelledCount.get()));
+        }
         int getGrpcPort() { return grpcPort; }
         int getDownstreamOwnershipCount() { return downstreamDecodeOwners.size(); }
         int getUpstreamOwnershipCount() { return upstreamPrefillOwners.size(); }
@@ -5216,6 +5481,8 @@ public final class JavaMockEngineCluster {
                     || decodePendingQueueSize() != 0
                     || directPrefillQueueSize() != 0
                     || !downstreamDecodeOwners.isEmpty()
+                    || !remoteDecodeLeaseOwners.isEmpty()
+                    || !remotePrefillOwners.isEmpty()
                     || !upstreamPrefillOwners.isEmpty();
         }
 
@@ -6002,6 +6269,8 @@ public final class JavaMockEngineCluster {
     }
 
     static final class Config {
+        boolean whale = false;
+        boolean kmonitor = false;
         // Package-private for direct assertions in ClusterConfigParamTest.
         int nPrefill = 2;
         int nDecode = 4;
@@ -6017,6 +6286,7 @@ public final class JavaMockEngineCluster {
         int prefillCacheBlocks = 0;
         int decodeCacheBlocks = 0;
         String host = "127.0.0.1";
+        String bindHost = "0.0.0.0";
         String prefillDomain = "mock.prefill.hosts.address";
         String decodeDomain = "mock.decode.hosts.address";
         String endpointFile;
@@ -6090,6 +6360,9 @@ public final class JavaMockEngineCluster {
                     case "--prefill-kv-pool-blocks" -> config.prefillCacheBlocks = Integer.parseInt(value);
                     case "--decode-kv-pool-blocks" -> config.decodeCacheBlocks = Integer.parseInt(value);
                     case "--host" -> config.host = value;
+                    case "--bind-host" -> config.bindHost = value;
+                    case "--whale" -> config.whale = parseBooleanFlag(value, key);
+                    case "--kmonitor" -> config.kmonitor = parseBooleanFlag(value, key);
                     case "--prefill-domain" -> config.prefillDomain = value;
                     case "--decode-domain" -> config.decodeDomain = value;
                     case "--endpoint-file" -> config.endpointFile = value;
@@ -6121,7 +6394,20 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException(
                         "--endpoint-file, --performance, and --master-config are required");
             }
-            if (config.discoveryFile == null) {
+            if (config.whale) {
+                if (config.nPrefill + config.nDecode != 1
+                        || config.host.equals("127.0.0.1") || config.host.equals("0.0.0.0")
+                        || config.host.isBlank()) {
+                    throw new IllegalArgumentException("Whale requires exactly one engine and an advertised Pod IP");
+                }
+                if (config.discoveryFile != null) {
+                    throw new IllegalArgumentException("Whale uses platform discovery, not --discovery-file");
+                }
+            }
+            if (config.kmonitor && !config.whale) {
+                throw new IllegalArgumentException("--kmonitor requires --whale true");
+            }
+            if (config.discoveryFile == null && !config.whale) {
                 config.discoveryFile = Path.of(config.endpointFile).toAbsolutePath()
                         .resolveSibling("discovery.json").toString();
             }

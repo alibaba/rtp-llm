@@ -27,6 +27,19 @@
         </dependency>
     </dependencies>
 
+    <profiles>
+        <!-- Private platform integration stays out of opensource,!internal. -->
+        <profile>
+            <id>internal</id>
+            <dependencies>
+                <dependency>
+                    <groupId>org.flexlb</groupId>
+                    <artifactId>kmonitor</artifactId>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
+
     <build>
         <plugins>
             <plugin>

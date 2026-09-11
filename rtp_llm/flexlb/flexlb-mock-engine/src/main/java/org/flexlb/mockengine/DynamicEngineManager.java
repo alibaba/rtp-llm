@@ -156,6 +156,7 @@ final class DynamicEngineManager {
      * @param explicitPort requested gRPC port, or null to auto-allocate max+1
      */
     AddedEngine addEngine(String role, Integer explicitPort) throws EngineOperationException, IOException {
+        if (config.whale) throw new EngineOperationException(409, "Whale scales Pods, not engines inside a Pod");
         String roleName = normalizeRole(role);
         synchronized (mutationLock) {
             int grpcPort = resolvePort(explicitPort);

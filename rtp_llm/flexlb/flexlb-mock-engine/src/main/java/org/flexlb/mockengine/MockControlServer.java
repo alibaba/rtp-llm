@@ -370,7 +370,11 @@ final class MockControlServer {
         response.put("status", "ok");
         response.put("healthy", healthy == total);
         response.put("engines", total);
-        sendJson(exchange, 200, response);
+        boolean whale = services.values().stream().anyMatch(JavaMockEngineCluster.FastRpcService::isWhaleRemote);
+        boolean ready = total == 1 && services.values().stream()
+                .allMatch(s -> !s.isStopped() && !s.isShuttingDown());
+        if (whale) response.put("status", ready ? "ok" : "unavailable");
+        sendJson(exchange, whale && !ready ? 503 : 200, response);
     }
 
     private void handleRequests(HttpExchange exchange) throws IOException {
