@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
     normalize_capture_buckets,
     pad_ktp_decode_inputs,
 )
+from rtp_llm.models_py.modules.kimi_k3.moe import validate_mega_moe_topology
 from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
     pack_ktp_projection_payload,
     reassemble_ktp_projection_payload,
@@ -29,6 +30,29 @@ from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
 
 
 class KtpStepPlanTest(unittest.TestCase):
+    def test_mega_moe_accepts_projection_ktp_and_ktp1_draft_layouts(self):
+        for ktp_size in (8, 1):
+            with self.subTest(ktp_size=ktp_size):
+                validate_mega_moe_topology(
+                    attention_tp_size=1,
+                    dp_size=8,
+                    ktp_size=ktp_size,
+                    ep_size=8,
+                    world_size=8,
+                    label="test",
+                )
+
+    def test_mega_moe_rejects_ambiguous_tp1_ep_layout(self):
+        with self.assertRaisesRegex(RuntimeError, "DP-local tokens"):
+            validate_mega_moe_topology(
+                attention_tp_size=1,
+                dp_size=1,
+                ktp_size=1,
+                ep_size=8,
+                world_size=8,
+                label="test",
+            )
+
     def test_projection_ktp_allows_supported_score_model_sessions(self):
         self.assertEqual(validate_projection_ktp_sp_type("eagle3"), "eagle3")
         self.assertEqual(validate_projection_ktp_sp_type(" EAGLE3 "), "eagle3")

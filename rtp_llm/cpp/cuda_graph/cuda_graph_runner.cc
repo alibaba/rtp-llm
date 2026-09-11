@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <unordered_set>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
@@ -608,6 +610,22 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
+        }
+        if (inputs.ktp_common_physical_batch > 0) {
+            static std::mutex              logged_graph_keys_mutex;
+            static std::unordered_set<int> logged_graph_keys;
+            bool                           should_log = false;
+            {
+                std::lock_guard<std::mutex> lock(logged_graph_keys_mutex);
+                should_log = logged_graph_keys.insert(state.current_real_graph_bs).second;
+            }
+            if (should_log) {
+                RTP_LLM_LOG_INFO("[K3_PROJECTION_KTP_GRAPH_REPLAY] graph_key=%d physical_batch=%d "
+                                 "local_real_batch=%ld",
+                                 state.current_real_graph_bs,
+                                 inputs.ktp_common_physical_batch,
+                                 inputs.ktp_local_real_batch);
+            }
         }
         // Target verify keeps the captured physical rows through post-layers:
         // its dense lm_output_indexes addresses every q-width fake-stream row
