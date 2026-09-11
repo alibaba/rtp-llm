@@ -72,11 +72,10 @@ private:
     std::unordered_map<int64_t, std::shared_ptr<OnflightTracker>> onflight_trackers_;
     autil::LoopThreadPtr                                          hang_diag_thread_;
     int64_t                                                       hang_diag_warn_threshold_ms_{60 * 1000};
-    int64_t                                                       local_rpc_port_{0};
 
     // Pre-computed gRPC addresses for all DP groups (tp_rank=0 entry points).
-    // Built once during init() from p2p_worker_addrs, eliminating fragile port
-    // arithmetic in GetPeerInfo(). Format: "host:grpc_port" or "[IPv6]:grpc_port".
+    // Built once during init() from p2p_worker_addrs.
+    // Format: "host:grpc_port" or "[IPv6]:grpc_port".
     std::vector<std::string> dp_grpc_addrs_;
 };
 

@@ -113,19 +113,13 @@ TEST_F(PrefillRpcServerTest, collectStreamOutputReturnsErrorForFailedBatchEnqueu
     ASSERT_EQ(err.code(), stream->statusInfo().code());
 }
 
-TEST_F(PrefillRpcServerTest, GetPeerInfoFallbackUsesTpZeroGrpcEntryPerDp) {
-    auto hasSuffix = [](const std::string& value, const std::string& suffix) {
-        return value.size() >= suffix.size()
-               && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-    };
-
+TEST_F(PrefillRpcServerTest, GetPeerInfoDoesNotInferDpAddrsFromRankOffsets) {
     PrefillRpcServerNew2 server;
     server.maga_init_params_.parallelism_config.tp_size = 4;
     server.maga_init_params_.parallelism_config.dp_size = 2;
     server.maga_init_params_.parallelism_config.tp_rank = 2;
     server.maga_init_params_.parallelism_config.dp_rank = 1;
     server.maga_init_params_.pd_sep_config.worker_port_offset = 8;
-    server.local_rpc_port_ = 9049;  // base rpc port 9001 + rank(1*4+2) * 8
     server.dp_grpc_addrs_.clear();
 
     grpc::ServerContext  context;
@@ -136,9 +130,7 @@ TEST_F(PrefillRpcServerTest, GetPeerInfoFallbackUsesTpZeroGrpcEntryPerDp) {
     ASSERT_TRUE(status.ok());
     ASSERT_EQ(response.tp_size(), 4);
     ASSERT_EQ(response.dp_size(), 2);
-    ASSERT_EQ(response.dp_grpc_addrs_size(), 2);
-    EXPECT_TRUE(hasSuffix(response.dp_grpc_addrs(0), ":9001"));
-    EXPECT_TRUE(hasSuffix(response.dp_grpc_addrs(1), ":9033"));
+    EXPECT_EQ(response.dp_grpc_addrs_size(), 0);
 }
 
 TEST_F(PrefillRpcServerTest, New2OnflightScopeTracksStepAndCleansOnReturn) {

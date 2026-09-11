@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "autil/NetUtil.h"
 #include <cerrno>
 #include <cstdlib>
 #include <utility>
@@ -157,17 +156,10 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
         return ret;
     }
 
-    {
-        pybind11::gil_scoped_acquire acquire;
-        local_rpc_port_ = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
-    }
-    RTP_LLM_LOG_INFO("PrefillRpcServerNew2::init: captured local_rpc_port=%ld", local_rpc_port_);
-
     // Pre-compute dp_grpc_addrs_ from p2p_worker_addrs.
     // Supported formats: "host:p2p_port:grpc_port", "[IPv6]:p2p_port:grpc_port",
     // and bare "IPv6:p2p_port:grpc_port".
     // For each DP group, the tp_rank=0 entry lives at index dp_rank * tp_size.
-    // This replaces the fragile port-arithmetic in GetPeerInfo().
     {
         const auto& pc    = maga_init_params_.parallelism_config;
         const auto& addrs = maga_init_params_.runtime_config.p2p_worker_addrs;
@@ -202,7 +194,7 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
                              addrs_str.c_str());
         } else {
             RTP_LLM_LOG_INFO("PrefillRpcServerNew2::init: p2p_worker_addrs empty or parallelism not set, "
-                             "dp_grpc_addrs_ will be computed from port arithmetic at GetPeerInfo time");
+                             "GetPeerInfo will return an empty DP address list");
         }
     }
 
@@ -375,47 +367,13 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
 ::grpc::Status PrefillRpcServerNew2::GetPeerInfo(::grpc::ServerContext*      context,
                                                  const GetPeerInfoRequestPB* request,
                                                  GetPeerInfoResponsePB*      response) {
-    const auto& pc  = maga_init_params_.parallelism_config;
-    const auto& pdc = maga_init_params_.pd_sep_config;
+    const auto& pc = maga_init_params_.parallelism_config;
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
     response->set_dp_size(static_cast<int32_t>(pc.dp_size));
     response->set_cp_size(static_cast<int32_t>(pc.prefill_cp_config.kv_cache_sharded ? pc.tp_size : 1));
 
-    if (!dp_grpc_addrs_.empty()) {
-        // Preferred path: use pre-computed addresses from p2p_worker_addrs.
-        for (const auto& addr : dp_grpc_addrs_) {
-            response->add_dp_grpc_addrs(addr);
-        }
-    } else {
-        // Fallback: port arithmetic (kept for backward compatibility when
-        // p2p_worker_addrs is not populated).
-        const int64_t  rank_stride        = pdc.worker_port_offset;
-        const __int128 dp_stride          = static_cast<__int128>(pc.tp_size) * rank_stride;
-        const __int128 current_rank_index = static_cast<__int128>(pc.dp_rank) * pc.tp_size + pc.tp_rank;
-        const __int128 current_rank_offset = current_rank_index * rank_stride;
-        const __int128 dp0_rpc_port        = static_cast<__int128>(local_rpc_port_) - current_rank_offset;
-        std::string    bind_ip             = autil::NetUtil::getBindIp();
-        for (int64_t i = 0; i < pc.dp_size; ++i) {
-            const __int128 port_value = dp0_rpc_port + static_cast<__int128>(i) * dp_stride;
-            if (port_value < 1 || port_value > 65535) {
-                RTP_LLM_LOG_WARNING("GetPeerInfo fallback skipped invalid grpc port "
-                                    "(dp_index=%ld, local_rpc_port=%ld, rank_stride=%ld, tp_size=%ld)",
-                                    i,
-                                    local_rpc_port_,
-                                    rank_stride,
-                                    pc.tp_size);
-                continue;
-            }
-            const int64_t port = static_cast<int64_t>(port_value);
-            auto addr = formatGrpcHostPort(bind_ip, port);
-            if (addr.empty()) {
-                RTP_LLM_LOG_WARNING("GetPeerInfo fallback skipped invalid bind_ip='%s' port=%ld",
-                                    bind_ip.c_str(),
-                                    port);
-                continue;
-            }
-            response->add_dp_grpc_addrs(std::move(addr));
-        }
+    for (const auto& addr : dp_grpc_addrs_) {
+        response->add_dp_grpc_addrs(addr);
     }
 
     RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d, dp_size=%ld, dp_addrs=[%s]",

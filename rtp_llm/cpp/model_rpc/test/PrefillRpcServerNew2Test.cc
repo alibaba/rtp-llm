@@ -7,15 +7,6 @@
 
 namespace rtp_llm {
 
-namespace {
-
-bool hasSuffix(const std::string& value, const std::string& suffix) {
-    return value.size() >= suffix.size()
-           && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-}  // namespace
-
 TEST(PrefillRpcServerNew2Test, ParseP2PWorkerGrpcAddrSupportsIpv4HostAndBracketIpv6) {
     std::string grpc_addr;
 
@@ -65,14 +56,13 @@ TEST(PrefillRpcServerNew2Test, GetPeerInfoUsesPrecomputedDpGrpcAddrs) {
     EXPECT_EQ(response.dp_grpc_addrs(1), "[::1]:9002");
 }
 
-TEST(PrefillRpcServerNew2Test, GetPeerInfoFallbackSkipsInvalidComputedPorts) {
+TEST(PrefillRpcServerNew2Test, GetPeerInfoReturnsEmptyDpAddrsWithoutPrecomputedAddresses) {
     PrefillRpcServerNew2 server;
     server.maga_init_params_.parallelism_config.tp_size = 4;
     server.maga_init_params_.parallelism_config.dp_size = 3;
     server.maga_init_params_.parallelism_config.tp_rank = 0;
     server.maga_init_params_.parallelism_config.dp_rank = 0;
     server.maga_init_params_.pd_sep_config.worker_port_offset = 40000;
-    server.local_rpc_port_ = 1000;
     server.dp_grpc_addrs_.clear();
 
     grpc::ServerContext  context;
@@ -81,9 +71,10 @@ TEST(PrefillRpcServerNew2Test, GetPeerInfoFallbackSkipsInvalidComputedPorts) {
 
     auto status = server.GetPeerInfo(&context, &request, &response);
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(response.tp_size(), 4);
+    EXPECT_EQ(response.dp_size(), 3);
     EXPECT_EQ(response.cp_size(), 1);
-    ASSERT_EQ(response.dp_grpc_addrs_size(), 1);
-    EXPECT_TRUE(hasSuffix(response.dp_grpc_addrs(0), ":1000"));
+    EXPECT_EQ(response.dp_grpc_addrs_size(), 0);
 }
 
 TEST(PrefillRpcServerNew2Test, OnflightScopeTracksStepAndCleansOnReturn) {
