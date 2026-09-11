@@ -1214,7 +1214,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
 static KVCachePoolMetricsSnapshot makeMergeAllocatorInput(
     const std::string& pool_name, size_t seed, size_t total_blocks, size_t free_blocks, size_t available_blocks) {
     KVCachePoolMetricsSnapshot snapshot;
-    snapshot.pool_index             = seed;
+    snapshot.pool_index                 = seed;
     snapshot.pool_name                  = pool_name;
     snapshot.block_size_bytes           = 1000 + seed;
     snapshot.total_blocks               = total_blocks;
@@ -1371,7 +1371,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeCachePoolMetricsSnapshotsPreservesRe
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DeviceCacheMinFreeBlocksAreDistributedByPoolCapacity) {
+TEST_F(HybridPoolKVCacheAllocatorTest, SchedulerReserveBlocksAreDistributedByPoolCapacity) {
     CacheConfig config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     std::shared_ptr<TestHybridPoolKVCacheAllocator> allocator =
         makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/0);
