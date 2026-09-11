@@ -10,10 +10,8 @@
 namespace rtp_llm {
 namespace telemetry {
 
-// Bailian Unitrace indexes the string request_id key for span search. The
-// numeric rtp_llm.request_id twin remains available for internal correlation.
-inline constexpr const char* kAttrRequestId       = "request_id";
-inline constexpr const char* kAttrRtpLlmRequestId = "rtp_llm.request_id";
+// Bailian Unitrace indexes the internal ID's string request_id key for span search.
+inline constexpr const char* kAttrRequestId = "request_id";
 
 // OTel GenAI usage attributes plus the legacy aliases consumed by Unitrace.
 inline constexpr const char* kAttrGenAiUsageInputTokens      = "gen_ai.usage.input_tokens";

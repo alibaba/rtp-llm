@@ -34,13 +34,10 @@ public final class FlexlbTrace {
     public static final String INSTRUMENTATION_NAME = "org.flexlb";
     /**
      * Platform-indexed span search key. Unitrace only indexes this unprefixed
-     * string spelling, so a span carrying just the numeric twin below cannot be
-     * found by request id. Mirrors kAttrRequestId / REQUEST_ID in the C++ and
+     * string spelling of the internal ID. Mirrors kAttrRequestId / REQUEST_ID in the C++ and
      * Python registries.
      */
     public static final String REQUEST_ID = "request_id";
-    /** Numeric twin, kept for internal correlation. */
-    public static final String RTP_LLM_REQUEST_ID = "rtp_llm.request_id";
     public static final String BATCH_ID = "rtp_llm.batch_id";
     public static final String BATCH_SIZE = "rtp_llm.batch_size";
     public static final String PREFILL_ADDRESS = "rtp_llm.prefill_address";
@@ -156,11 +153,8 @@ public final class FlexlbTrace {
     }
 
     public static void setRequestAttributes(Span span, long requestId) {
-        // Double-write, matching the C++ and Python registries: the platform
-        // indexes the string key for span search while the numeric twin stays for
-        // internal correlation.
+        // Match the C++ and Python registries without changing the business ID.
         setAttribute(span, REQUEST_ID, Long.toString(requestId));
-        setAttribute(span, RTP_LLM_REQUEST_ID, requestId);
     }
 
     public static void setAttribute(Span span, String key, long value) {

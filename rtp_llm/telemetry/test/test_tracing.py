@@ -577,14 +577,16 @@ class TestActiveRuntime(TracingTestCase):
         exporter = _start_in_memory_runtime()
         state = tracing.start_server_span("rtp_llm.http_server", {})
         assert state is not None
-        state.set_attribute("rtp_llm.request_id", 42)
+        state.set_attribute("request_id", "42")
         state.finish()
         tracing.shutdown_telemetry()
 
         spans = exporter.get_finished_spans()
         assert len(spans) == 1
         assert spans[0].name == "rtp_llm.http_server"
-        assert spans[0].attributes["rtp_llm.request_id"] == 42
+        assert spans[0].attributes["request_id"] == "42"
+        assert isinstance(spans[0].attributes["request_id"], str)
+        assert "rtp_llm.request_id" not in spans[0].attributes
 
     def test_master_route_internal_span_attributes(self):
         """PD node-selection span contract: INTERNAL kind (in-process routing

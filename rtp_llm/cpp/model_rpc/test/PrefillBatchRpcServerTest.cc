@@ -150,7 +150,6 @@ public:
             return status;
         }
         span_guard.setAttribute(telemetry::kAttrRequestId, std::to_string(request.request_id()));
-        span_guard.setAttribute(telemetry::kAttrRtpLlmRequestId, request.request_id());
         GenerateOutputsPB response;
         if (!stream->Write(response)) {
             status = grpc::Status(grpc::StatusCode::INTERNAL, "write allocate response failed");
@@ -1639,13 +1638,14 @@ TEST_F(PrefillBatchTraceTest, ConcurrentShutdownAndSlotFinalizationNeverReportsF
     auto spans    = finishTelemetry();
     auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
     ASSERT_EQ(logicals.size(), 2u);
-    std::set<int64_t> request_ids;
+    std::set<std::string> request_ids;
     for (const auto* logical : logicals) {
-        request_ids.insert(nostd::get<int64_t>(logical->GetAttributes().at("rtp_llm.request_id")));
+        request_ids.insert(nostd::get<std::string>(logical->GetAttributes().at("request_id")));
+        EXPECT_EQ(logical->GetAttributes().count("rtp_llm.request_id"), 0u);
         EXPECT_EQ(logical->GetStatus(), trace_api::StatusCode::kError)
             << "a request that failed during shutdown was closed as a success";
     }
-    EXPECT_EQ(request_ids, (std::set<int64_t>{6600, 6601}));
+    EXPECT_EQ(request_ids, (std::set<std::string>{"6600", "6601"}));
 }
 
 // prepareGroup()'s registration-failure exit, driven through the real method: it
@@ -1804,18 +1804,19 @@ TEST_F(PrefillBatchTraceTest, PriorityFinalizationUsesSnapshotBeforeReleasingStr
     auto spans    = finishTelemetry();
     auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
     ASSERT_EQ(logicals.size(), 2u);
-    std::set<int64_t> request_ids;
+    std::set<std::string> request_ids;
     for (const auto* logical : logicals) {
         EXPECT_EQ(logical->GetStatus(), trace_api::StatusCode::kError);
         EXPECT_EQ(logical->GetDescription(), "PRIORITY_PREEMPTED");
         const auto& logical_attributes = logical->GetAttributes();
-        request_ids.insert(nostd::get<int64_t>(logical_attributes.at("rtp_llm.request_id")));
+        request_ids.insert(nostd::get<std::string>(logical_attributes.at("request_id")));
+        EXPECT_EQ(logical_attributes.count("rtp_llm.request_id"), 0u);
         EXPECT_EQ(nostd::get<std::string>(logical_attributes.at("error.type")), "PRIORITY_PREEMPTED");
         EXPECT_EQ(nostd::get<int64_t>(logical_attributes.at("rtp_llm.error.code")),
                   static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
         EXPECT_EQ(nostd::get<std::string>(logical_attributes.at("rtp_llm.error.reason")), "PRIORITY_PREEMPTED");
     }
-    EXPECT_EQ(request_ids, (std::set<int64_t>{4351, 4352}));
+    EXPECT_EQ(request_ids, (std::set<std::string>{"4351", "4352"}));
     auto wait_spans = findSpans(spans, "wait");
     ASSERT_EQ(wait_spans.size(), 2u);
     for (const auto* wait : wait_spans) {

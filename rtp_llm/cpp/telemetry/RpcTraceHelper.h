@@ -254,7 +254,6 @@ startChildClientSpan(const std::string&                                         
         if (request_id >= 0) {
             request_id_string = std::to_string(request_id);
             attributes.emplace_back(kAttrRequestId, opentelemetry::nostd::string_view(request_id_string));
-            attributes.emplace_back(kAttrRtpLlmRequestId, request_id);
             attributes.emplace_back(kAttrRtpLlmRetryAttempt, retry_attempt);
         }
         if (endpoint_valid) {

@@ -371,7 +371,10 @@ class TestBackendRouteTrace(unittest.TestCase):
                 asyncio.run(visitor.route_ips(request))
 
         route_span.set_attribute.assert_any_call(trace_attrs.REQUEST_ID, "123")
-        route_span.set_attribute.assert_any_call(trace_attrs.RTP_LLM_REQUEST_ID, 123)
+        self.assertNotIn(
+            "rtp_llm.request_id",
+            [call.args[0] for call in route_span.set_attribute.call_args_list],
+        )
         route_span.set_attribute.assert_any_call(
             trace_attrs.RTP_LLM_ROUTE_QUEUE_LENGTH, 0
         )

@@ -145,7 +145,7 @@ TEST_F(PhaseSpanSynthesizerTest, FusionModeProducesThreeChildSpans) {
     EXPECT_EQ(wait->GetDuration().count(), int64_t(5000) * 1000);  // µs -> ns
     // Bailian index key: string request_id on every synthesized child span
     EXPECT_EQ(getStringAttribute(wait, "request_id"), "42");
-    EXPECT_EQ(getInt64Attribute(wait, "rtp_llm.request_id"), 42);
+    EXPECT_EQ(wait->GetAttributes().count("rtp_llm.request_id"), 0u);
     // Completed phases carry explicit OK rather than Unset.
     EXPECT_EQ(wait->GetStatus(), trace_api::StatusCode::kOk);
 
@@ -159,7 +159,7 @@ TEST_F(PhaseSpanSynthesizerTest, FusionModeProducesThreeChildSpans) {
     // duration = ttft - wait = 20000 - 5000 = 15000us
     EXPECT_EQ(prefill->GetDuration().count(), int64_t(15000) * 1000);
     EXPECT_EQ(getStringAttribute(prefill, "request_id"), "42");
-    EXPECT_EQ(getInt64Attribute(prefill, "rtp_llm.request_id"), 42);
+    EXPECT_EQ(prefill->GetAttributes().count("rtp_llm.request_id"), 0u);
     EXPECT_EQ(prefill->GetStatus(), trace_api::StatusCode::kOk);
 
     // Verify decode span
@@ -172,7 +172,7 @@ TEST_F(PhaseSpanSynthesizerTest, FusionModeProducesThreeChildSpans) {
     // duration = cost - ttft = 100000 - 20000 = 80000us
     EXPECT_EQ(decode->GetDuration().count(), int64_t(80000) * 1000);
     EXPECT_EQ(getStringAttribute(decode, "request_id"), "42");
-    EXPECT_EQ(getInt64Attribute(decode, "rtp_llm.request_id"), 42);
+    EXPECT_EQ(decode->GetAttributes().count("rtp_llm.request_id"), 0u);
     EXPECT_EQ(decode->GetStatus(), trace_api::StatusCode::kOk);
 }
 
@@ -457,7 +457,7 @@ TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanCoversLoadWindowOnSuccess) {
     EXPECT_EQ(load->GetStartTime().time_since_epoch().count(), int64_t(4000000) * 1000);
     EXPECT_EQ(load->GetDuration().count(), int64_t(69000) * 1000);
     EXPECT_EQ(getStringAttribute(load, "request_id"), "42");
-    EXPECT_EQ(getInt64Attribute(load, "rtp_llm.request_id"), 42);
+    EXPECT_EQ(load->GetAttributes().count("rtp_llm.request_id"), 0u);
     EXPECT_EQ(load->GetStatus(), trace_api::StatusCode::kOk);
     EXPECT_EQ(load->GetDescription(), "");
     EXPECT_EQ(load->GetAttributes().count("rtp_llm.error.code"), 0u);

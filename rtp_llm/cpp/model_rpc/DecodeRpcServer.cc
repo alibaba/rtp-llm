@@ -1631,7 +1631,6 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // `request_id` (string) is the Bailian Unitrace index key
             decode_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
                                                           std::to_string(decode_context.request_id));
-            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, decode_context.request_id);
         }
         CHECK_REQUEST_STOP(decode_context);
         decode_context.stat_info.nextStage();
