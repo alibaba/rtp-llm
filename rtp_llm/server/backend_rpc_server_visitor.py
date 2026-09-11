@@ -29,6 +29,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
     RequestInfo,
+    has_input_embeddings,
 )
 from rtp_llm.utils.time_util import Timer
 
@@ -45,6 +46,17 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+
+
+def disable_token_only_reuse_for_input_embeddings(input: GenerateInput) -> None:
+    if not has_input_embeddings(input):
+        return
+    input.generate_config.reuse_cache = False
+    input.generate_config.enable_device_cache = False
+    input.generate_config.enable_memory_cache = False
+    input.generate_config.enable_remote_cache = False
+
+
 _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
     {
         ExceptionType.PRIORITY_PREEMPTED,
@@ -74,6 +86,7 @@ class BackendRPCServerVisitor:
         parallelism_config=None,
         prefill_cp_config=None,
         source_role: str = "frontend",
+        trans_output_fn=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -90,6 +103,8 @@ class BackendRPCServerVisitor:
             parallelism_config: Optional ParallelismConfig for page-RR route cache keys
             prefill_cp_config: Optional PrefillCPConfig for page-RR route cache keys
             source_role: Caller role used for request-info correlation fields.
+            trans_output_fn: Custom function to transform protobuf outputs to Python objects.
+                Passed through to ModelRpcClient. If None, uses default implementation.
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
@@ -114,6 +129,7 @@ class BackendRPCServerVisitor:
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
+            trans_output_fn=trans_output_fn,
         )
 
         host_args = HostServiceArgs.create_from_env()
@@ -247,14 +263,17 @@ class BackendRPCServerVisitor:
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """
+        if has_input_embeddings(input):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "input_embeddings must use backend domain routing, not FlexLB scheduling",
+            )
         token_ids = (
             input.token_ids.tolist()[0]
             if len(input.token_ids.shape) == 2
             else input.token_ids.tolist()
         )
-        # Keep hash generation at the physical KV block granularity. Page-RR
-        # routing samples canonical keys from this full logical-block key list;
-        # it must not recompute request hashes with the virtual block size.
+        # Keep hash generation at the physical KV block granularity.
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
@@ -336,9 +355,15 @@ class BackendRPCServerVisitor:
 
     async def get_domain_route_addrs(self, input: GenerateInput):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
-        missing_roles = [
-            role for role in self.backend_role_list if role not in specified_roles
-        ]
+        if has_input_embeddings(input):
+            required_roles = self._input_embeddings_route_roles(input)
+            missing_roles = sorted(
+                required_roles - specified_roles, key=lambda role: role.value
+            )
+        else:
+            missing_roles = [
+                role for role in self.backend_role_list if role not in specified_roles
+            ]
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles
         )
@@ -415,7 +440,18 @@ class BackendRPCServerVisitor:
 
                 master_route_result: Optional[FlexlbResponse] = None
                 master_route_succeeded = False
-                if not role_addrs_specified and master_addr and not input_token_batched:
+                custom_embeddings = has_input_embeddings(input)
+                if custom_embeddings and input.enqueued_by_master:
+                    raise FtRuntimeException(
+                        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                        "input_embeddings cannot fetch a request enqueued by FlexLB",
+                    )
+                if (
+                    not role_addrs_specified
+                    and master_addr
+                    and not input_token_batched
+                    and not custom_embeddings
+                ):
                     with Timer() as master_route_timer:
                         master_route_result = await self.get_master_route_addrs(input)
                     kmonitor.report(
@@ -426,6 +462,15 @@ class BackendRPCServerVisitor:
                         # get_master_route_addrs returns None on success
                         master_route_succeeded = True
                         route_source = "master"
+                elif custom_embeddings:
+                    # Like batched token inputs, custom embeddings are sent by
+                    # this client. BATCH Master requires the complete payload,
+                    # which must not be inlined into its 16 MiB control plane.
+                    route_source = "input_embeddings_domain"
+                    route_logger.debug(
+                        "input_embeddings bypasses FlexLB Master, request_id=%s",
+                        input.request_id,
+                    )
                 elif not role_addrs_specified:
                     route_logger.warning(
                         "master address: %s or input token batched: %s is not valid, fallback to domain routing",
@@ -435,9 +480,12 @@ class BackendRPCServerVisitor:
                 specified_roles = {
                     addr.role for addr in input.generate_config.role_addrs
                 }
-                need_domain_routing = not set(self.backend_role_list).issubset(
-                    specified_roles
+                required_roles = (
+                    self._input_embeddings_route_roles(input)
+                    if custom_embeddings
+                    else set(self.backend_role_list)
                 )
+                need_domain_routing = not required_roles.issubset(specified_roles)
                 allow_domain_fallback = master_route_result is None or (
                     master_route_result.connection_failed
                 )
@@ -459,7 +507,14 @@ class BackendRPCServerVisitor:
                             else "domain_fallback"
                         )
                     )
-                route_logger.debug("routing to master done")
+                if custom_embeddings:
+                    self._validate_input_embeddings_route(input)
+                    route_source = (
+                        "input_embeddings_domain"
+                        if not role_addrs_specified
+                        else "input_embeddings_request"
+                    )
+                route_logger.debug("backend routing done")
 
             kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
             if not input.generate_config.role_addrs:
@@ -493,9 +548,68 @@ class BackendRPCServerVisitor:
             route_span.set_attribute(trace_attrs.RTP_LLM_ROUTE_SOURCE, route_source)
             route_span.finish()
 
+    def _input_embeddings_route_roles(self, input: GenerateInput):
+        configured = set(self.backend_role_list)
+        if self.pd_sep_config.role_type != RoleType.FRONTEND:
+            return configured
+        roles = {addr.role for addr in input.generate_config.role_addrs}
+        pd = {RoleType.PREFILL, RoleType.DECODE}
+        inference = pd | {RoleType.PDFUSION}
+        auxiliary = configured - inference
+        # Select one inference topology before filling domains. Explicit complete
+        # routes must not depend on the availability of an alternative topology.
+        if pd.issubset(roles):
+            return auxiliary | pd
+        if RoleType.PDFUSION in roles:
+            return auxiliary | {RoleType.PDFUSION}
+        if roles & pd:
+            return auxiliary | pd
+        # Without an explicit inference route, discover configured candidates.
+        return configured | (
+            {RoleType.PDFUSION} if not configured & inference else set()
+        )
+
+    def _validate_input_embeddings_route(self, input: GenerateInput) -> None:
+        valid_roles = {
+            addr.role
+            for addr in input.generate_config.role_addrs
+            if addr.ip and 0 < addr.grpc_port < 65536
+        }
+        required_roles = self._input_embeddings_route_roles(input)
+        invalid_address = any(
+            not addr.ip or not 0 < addr.grpc_port < 65536
+            for addr in input.generate_config.role_addrs
+        )
+        if (
+            invalid_address
+            or not valid_roles
+            or not required_roles.issubset(valid_roles)
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "input_embeddings requires valid backend domains or explicit role_addrs; "
+                "FlexLB BATCH scheduling cannot carry embedding payloads",
+            )
+
+        if self.pd_sep_config.role_type == RoleType.FRONTEND:
+            inference = {RoleType.PDFUSION, RoleType.PREFILL, RoleType.DECODE}
+            # Match the selected topology at the RPC consumer as well.
+            input.generate_config.role_addrs = [
+                addr
+                for addr in input.generate_config.role_addrs
+                if addr.role not in inference or addr.role in required_roles
+            ]
+
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
             return
+        # force_disable_sp_run does not replace the deployed speculative executor
+        # or its input contract. Keep this aligned with backend admission policy.
+        if has_input_embeddings(input):
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "input_embeddings is unsupported by speculative decoding deployments",
+            )
         if input.generate_config.force_disable_sp_run:
             return
 
@@ -611,6 +725,8 @@ class BackendRPCServerVisitor:
                 aux_info["pd_sep"] = {"PREFILL", "DECODE"}.issubset(roles)
             e.aux_info = aux_info
 
+        disable_token_only_reuse_for_input_embeddings(input)
+
         try:
             self.fill_request_info(input)
             input.generate_config.validate()
@@ -706,6 +822,7 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
             self.fill_request_info(input)
+            disable_token_only_reuse_for_input_embeddings(input)
             self._validate_input(input)
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)

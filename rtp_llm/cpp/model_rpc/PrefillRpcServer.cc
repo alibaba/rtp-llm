@@ -172,6 +172,14 @@ std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Stat
                 new_error_msg  = downstream_error->ToString();                                                         \
             } else {                                                                                                   \
                 new_error_msg += error_msg;                                                                            \
+                if (status.error_code() == grpc::StatusCode::INVALID_ARGUMENT) {                                       \
+                    new_error_code = ErrorCode::INVALID_PARAMS;                                                        \
+                }                                                                                                      \
+                if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED                                             \
+                    && prefill_context.rpc_context.request->input_embeddings().embeddings_size() > 0) {                \
+                    new_error_code = ErrorCode::INVALID_PARAMS;                                                        \
+                    new_error_msg  = "decode backend does not support input_embeddings: " + error_msg;                 \
+                }                                                                                                      \
                 if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                     \
                     new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                  \
                 }                                                                                                      \
@@ -222,6 +230,9 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 }
 
 void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context, const ErrorInfo& error_info) {
+    if (error_info.code() == ErrorCode::INVALID_PARAMS) {
+        prefill_context.setRetryable(false);
+    }
     prefill_context.error_info = error_info;
     prefill_context.error_status =
         serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info);
@@ -230,6 +241,9 @@ void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context, 
 void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context,
                                        const ErrorInfo&        error_info,
                                        const grpc::Status&     error_status) {
+    if (error_info.code() == ErrorCode::INVALID_PARAMS) {
+        prefill_context.setRetryable(false);
+    }
     prefill_context.error_info   = error_info;
     prefill_context.error_status = error_status;
 }
@@ -237,7 +251,7 @@ void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context,
 void PrefillRpcServer::prepareGenerateInput(PrefillGenerateContext& prefill_context) {
     if (!prefill_context.generate_input) {
         RTP_LLM_CHECK_WITH_INFO(engine_ != nullptr, "prefill rpc server engine is not initialized");
-        auto input                                   = QueryConverter::transQuery(prefill_context.rpc_context.request);
+        auto input                                   = convertGenerateInput(prefill_context.rpc_context.request);
         input->generate_config->pd_separation        = true;
         input->generate_config->force_disable_sp_run = !engine_->isMTPEagle();
         prefill_context.generate_input               = std::move(input);
@@ -250,7 +264,17 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     prefill_context.trace_server_address.clear();
     prefill_context.trace_server_port = 0;
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    prepareGenerateInput(prefill_context);
+    try {
+        prepareGenerateInput(prefill_context);
+    } catch (const std::exception& e) {
+        setContextError(prefill_context, QueryConverter::requestParsingError(e));
+        return;
+    }
+    auto support_res = validateInputRuntimeSupport(*prefill_context.generate_input);
+    if (!support_res.ok()) {
+        setContextError(prefill_context, support_res);
+        return;
+    }
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
 
@@ -383,6 +407,13 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
         for (size_t i = 0; i < input->input_ids.numel(); ++i) {
             new_request->add_token_ids(ids_ptr[i]);
         }
+        if (input->input_embeddings_locs.has_value()) {
+            auto* mutable_input_embeddings = new_request->mutable_input_embeddings();
+            mutable_input_embeddings->clear_embedding_locs();
+            for (int32_t loc : input->input_embeddings_locs.value()) {
+                mutable_input_embeddings->add_embedding_locs(loc);
+            }
+        }
     }
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(address);
@@ -401,7 +432,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         setContextError(prefill_context, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exhausted"));
         return;
     }
-    auto client_context = std::make_shared<ClientContext>();
+    // Select from the payload actually sent to Decode, including callers that
+    // have not materialized generate_input (plain-text allocation tests/paths).
+    const bool with_input_embeddings = prefill_context.rpc_context.request->input_embeddings().embeddings_size() > 0;
+    auto       client_context        = std::make_shared<ClientContext>();
     // P->D CLIENT span: each retry rebuilds ClientContext and opens a NEW
     // physical RemoteGenerate bidi stream (stub->RemoteGenerate
     // below), so one CLIENT span per attempt matches the OTel "one span per
@@ -419,14 +453,14 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
             prefill_context.pd_client_span_guard->finish(opentelemetry::trace::StatusCode::kError,
                                                          "Prefill-to-decode RPC attempt failed before a retry");
         }
-        auto client_span =
-            telemetry::startChildClientSpan("rtp_llm.remote_generate",
-                                            prefill_context.trace_span_guard->sharedSpan(),
-                                            prefill_context.trace_server_address,
-                                            prefill_context.trace_server_port,
-                                            prefill_context.request_id,
-                                            telemetry::retryAttemptFromExecutionCount(prefill_context.retry_times),
-                                            "RpcService/RemoteGenerate");
+        auto client_span = telemetry::startChildClientSpan(
+            "rtp_llm.remote_generate",
+            prefill_context.trace_span_guard->sharedSpan(),
+            prefill_context.trace_server_address,
+            prefill_context.trace_server_port,
+            prefill_context.request_id,
+            telemetry::retryAttemptFromExecutionCount(prefill_context.retry_times),
+            with_input_embeddings ? "RpcService/RemoteGenerateWithInputEmbeddings" : "RpcService/RemoteGenerate");
         if (client_span != nullptr) {
             prefill_context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(client_span);
             telemetry::injectSpanToClientContext(client_context.get(), client_span);
@@ -444,7 +478,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     }
     // With neither a request deadline nor max RPC timeout, gRPC keeps no deadline.
     prefill_context.client_stream =
-        std::move(prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get()));
+        with_input_embeddings ?
+            prefill_context.grpc_connection.stub->RemoteGenerateWithInputEmbeddings(client_context.get()) :
+            prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get());
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request = buildAllocateRequest(prefill_context);
 

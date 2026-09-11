@@ -243,6 +243,11 @@ message RequestInfoPB {
     string source_role = 5;
 }
 
+message InputEmbeddingsPB {
+    repeated TensorPB embeddings = 1;   // 和embedding_locs一一对应
+    repeated int32 embedding_locs = 2;  // embedding的在token ids中的起始位置
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -257,6 +262,7 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
+    InputEmbeddingsPB input_embeddings = 11;
 }
 
 message AuxInfoPB {
@@ -306,8 +312,10 @@ message FlattenOutputPB {
     TensorPB loss = 5;
     TensorPB logits = 6;
     TensorPB all_probs = 7;
-    TensorPB all_hidden_states = 8;
+    TensorPB all_hidden_states = 8; // Legacy [outputs, tokens, hidden] layout.
     PromptLogitsOutputPB prompt_logits = 9;
+    TensorPB all_softmax_probs = 10;
+    TensorPB shared_all_hidden_states = 11; // Shared [tokens, hidden] prompt states.
 }
 
 message GenerateOutputsPB {
@@ -600,6 +608,7 @@ message WorkerStatusPB {
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;
     int64 max_batch_tokens_size = 22;
+    bool supports_input_embeddings = 23; // Absent on older backends: fail closed.
 }
 
 message EmbeddingInputPB {
@@ -894,6 +903,10 @@ service RpcService {
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
+    // Input embeddings require these method names so legacy servers fail closed.
+    rpc GenerateStreamWithInputEmbeddings(GenerateInputPB) returns (stream GenerateOutputsPB);
+    rpc BatchGenerateWithInputEmbeddings(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
+    rpc RemoteGenerateWithInputEmbeddings(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 

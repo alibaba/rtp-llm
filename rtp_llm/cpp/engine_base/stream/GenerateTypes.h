@@ -70,6 +70,11 @@ public:
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
         input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        if (input_embeddings_locs) {
+            for (auto& loc : input_embeddings_locs.value()) {
+                loc += prefix_length;
+            }
+        }
     }
 
 public:
@@ -86,6 +91,9 @@ public:
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
+
+    std::optional<std::vector<torch::Tensor>> input_embeddings;
+    std::optional<std::vector<int32_t>>       input_embeddings_locs;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;
@@ -150,8 +158,10 @@ public:
     AuxInfo       aux_info;
     ErrorInfo     error_info;
 
-    std::optional<torch::Tensor>      hidden_states;
-    std::optional<torch::Tensor>      all_hidden_states;
+    std::optional<torch::Tensor> hidden_states;
+    std::optional<torch::Tensor> all_hidden_states;
+    // Internal metadata for the shared wire field; legacy states stay untouched.
+    int64_t                           shared_all_hidden_states_length = 0;
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
     std::optional<PromptLogitsOutput> prompt_logits;

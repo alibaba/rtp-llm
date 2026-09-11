@@ -277,7 +277,7 @@ int DecodeRpcServer::markLoadedCacheReuse(const std::shared_ptr<GenerateStream>&
 
     const int loaded_reuse_len = static_cast<int>(published_block_count) * seq_size_per_block;
     stream->setInitialReuseLength(std::max(stream->initialReuseLength(), loaded_reuse_len));
-    stream->setReuseLength(std::max(stream->reuseLength(), loaded_reuse_len));
+    stream->setHandoffReuseLength(std::max(stream->reuseLength(), loaded_reuse_len));
     stream->setLocalReuseLength(std::max(stream->localReuseLength(), loaded_reuse_len));
     return loaded_reuse_len;
 }
@@ -367,7 +367,26 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    std::shared_ptr<GenerateInput> input;
+    try {
+        input = convertGenerateInput(&decode_context.allocate_request.input());
+    } catch (const std::exception& e) {
+        decode_context.error_info = QueryConverter::requestParsingError(e);
+        decode_context.error_status =
+            grpc::Status(transErrorCodeToGrpc(decode_context.error_info.code()), decode_context.error_info.ToString());
+        if (decode_context.error_info.code() == ErrorCode::INVALID_PARAMS) {
+            decode_context.setRetryable(false);
+        }
+        return;
+    }
+    // Prefill already expanded MM token IDs and remapped embedding locations.
+    const auto support = validateInputRuntimeSupport(*input, /*force_token_range=*/true);
+    if (!support.ok()) {
+        decode_context.error_info   = ErrorInfo(ErrorCode::INVALID_PARAMS, support.ToString());
+        decode_context.error_status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, support.ToString());
+        decode_context.setRetryable(false);
+        return;
+    }
     decode_context.request_info = input->request_info;
     auto generate_stream        = engine_->makeStream(input);
     decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
@@ -1563,9 +1582,11 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
                                 max_retry_timeout_ms);
             // Retries are exhausted: this is the final failure point, report it to FlexLB so the
             // scheduler releases its inflight entry without waiting for TTL eviction.
-            auto& stream     = decode_context.getStream();
-            auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+            auto&      stream = decode_context.getStream();
+            const auto error_code =
+                static_cast<int64_t>(!decode_context.error_info.ok() ? decode_context.error_info.code() :
+                                     stream && stream->hasError()    ? stream->statusInfo().code() :
+                                                                       ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

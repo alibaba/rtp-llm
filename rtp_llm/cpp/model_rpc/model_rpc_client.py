@@ -1,12 +1,16 @@
 import asyncio
+import copy
 import functools
 import json
 import logging
 import math
 import time
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+from concurrent.futures import ThreadPoolExecutor
+from numbers import Integral
+from typing import Any, AsyncGenerator, Callable, Dict, Optional, Union
 
 import grpc
+import torch
 from google.protobuf.wrappers_pb2 import StringValue
 from grpc import StatusCode
 
@@ -38,6 +42,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
     RoleAddr,
+    has_input_embeddings,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import (
@@ -51,6 +56,16 @@ MAX_GRPC_TIMEOUT_SECONDS = 3600
 RPC_CLEANUP_TIMEOUT_SECONDS = 0.1
 RPC_SETTLE_TIMEOUT_SECONDS = 5.0
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
+
+
+def _remaining_rpc_timeout(deadline: float) -> float:
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise FtRuntimeException(
+            ExceptionType.GENERATE_TIMEOUT,
+            "request deadline expired before backend admission",
+        )
+    return remaining
 
 
 def _selected_pd_separation(
@@ -128,7 +143,7 @@ async def _wait_for_rpc_termination(
 async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle state machine
     response_iterator: Any,
     client_span: Any,
-    outputs: Optional[GenerateOutputs],
+    outputs: Any,
     abandoned_event: "asyncio.Event",
     active_deadline: Optional[float] = None,
     include_all_sequences: bool = True,
@@ -319,6 +334,28 @@ def _record_client_span_usage(
         pass
 
 
+def _span_outputs_from_response(response: GenerateOutputsPB) -> GenerateOutputs:
+    """Copy scalar telemetry only, independent of application output conversion."""
+    output = GenerateOutputs()
+    if len(response.flatten_output.finished) != len(response.flatten_output.aux_info):
+        return output
+    for finished, aux in zip(
+        response.flatten_output.finished, response.flatten_output.aux_info
+    ):
+        output.generate_outputs.append(
+            GenerateOutput(
+                finished=finished,
+                aux_info=AuxInfo(
+                    input_len=aux.input_len,
+                    output_len=aux.output_len,
+                    cost_time=aux.cost_time_us / 1000.0,
+                    first_token_cost_time=aux.first_token_cost_time_us / 1000.0,
+                ),
+            )
+        )
+    return output
+
+
 def _record_client_span_latency(
     client_span: Any, outputs: Optional[GenerateOutputs]
 ) -> None:
@@ -466,6 +503,7 @@ def trans_input(input_py: GenerateInput):
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
+    trans_embedding_inputs(input_py, input_pb)
     # Preserve main's regular GenerateConfig validation at the RPC boundary,
     # then assert (without mutating) that the request entrypoint prepared grammar.
     input_py.generate_config.validate()
@@ -672,6 +710,63 @@ def trans_multimodal_input(
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
+def _embedding_payload_bytes(input_py: GenerateInput) -> int:
+    """Validate metadata without copying tensor payloads; return a wire-size lower bound."""
+    payload = input_py.input_embeddings
+    if payload is None:
+        return 0
+    try:
+        if len(payload.embeddings) != len(payload.embedding_locs):
+            raise ValueError("input_embeddings count != embedding_locs count")
+        total = 0
+        previous_end = 0
+        width = None
+        for tensor, loc in zip(payload.embeddings, payload.embedding_locs):
+            if not isinstance(tensor, torch.Tensor) or tensor.layout != torch.strided:
+                raise ValueError("input_embeddings must contain strided tensors")
+            if tensor.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                raise ValueError("input_embeddings dtype must be FP16, BF16 or FP32")
+            if tensor.dim() not in (1, 2) or tensor.numel() == 0:
+                raise ValueError("input_embeddings must be nonempty 1D or 2D tensors")
+            if width is not None and tensor.shape[-1] != width:
+                raise ValueError("input_embeddings hidden sizes must match")
+            width = tensor.shape[-1]
+            if (
+                not isinstance(loc, Integral)
+                or isinstance(loc, bool)
+                or loc < previous_end
+            ):
+                raise ValueError(
+                    "embedding_locs must be ordered, nonnegative, nonoverlapping integers"
+                )
+            end = int(loc) + (tensor.shape[0] if tensor.dim() == 2 else 1)
+            if loc > 2147483647 or end > input_py.token_ids.numel():
+                raise ValueError("input_embeddings span exceeds input token range")
+            previous_end = end
+            total += tensor.numel() * tensor.element_size()
+        return total
+    except (ValueError, TypeError, AttributeError) as error:
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(error)
+        ) from error
+
+
+def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
+    _embedding_payload_bytes(input_py)
+    if input_py.input_embeddings is None:
+        return
+    try:
+        for emb in input_py.input_embeddings.embeddings:
+            trans_from_tensor(emb, input_pb.input_embeddings.embeddings.add())
+        input_pb.input_embeddings.embedding_locs.extend(
+            input_py.input_embeddings.embedding_locs
+        )
+    except (ValueError, TypeError) as error:
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(error)
+        ) from error
+
+
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
 # from .utils import trans_tensor
 
@@ -702,11 +797,14 @@ def trans_output(
         and output_pb.hidden_states.shape[0] > 0
         else None
     )
+    prompt_states_pb = (
+        output_pb.shared_all_hidden_states
+        if output_pb.HasField("shared_all_hidden_states")
+        else output_pb.all_hidden_states
+    )
     all_all_hidden_states = (
-        trans_tensor(output_pb.all_hidden_states)
-        if output_pb.HasField("all_hidden_states")
-        and len(output_pb.all_hidden_states.shape) > 0
-        and output_pb.all_hidden_states.shape[0] > 0
+        trans_tensor(prompt_states_pb)
+        if prompt_states_pb.shape and prompt_states_pb.shape[0] > 0
         else None
     )
     all_loss = (
@@ -810,7 +908,11 @@ def trans_output(
             output_py.hidden_states = all_hidden_states[i]
 
         if all_all_hidden_states is not None:
-            output_py.all_hidden_states = all_all_hidden_states[i]
+            output_py.all_hidden_states = (
+                all_all_hidden_states
+                if len(all_all_hidden_states.shape) == 2
+                else all_all_hidden_states[i]
+            )
 
         if all_loss is not None:
             loss_slice = all_loss[i]
@@ -856,6 +958,7 @@ class ModelRpcClient(object):
         client_config,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
+        trans_output_fn: Optional[Callable] = None,
     ):
         """Initialize ModelRpcClient with addresses.
 
@@ -865,10 +968,19 @@ class ModelRpcClient(object):
                 the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
                 (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
+            trans_output_fn: Custom function to transform protobuf outputs to Python objects.
+                Signature: (GenerateInput, GenerateOutputsPB, StreamState) -> GenerateOutputs.
+                If None, uses the default implementation.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
+        self._trans_output_fn = trans_output_fn or trans_output
+        self._max_send_message_length = int(
+            client_config.get("grpc.max_send_message_length", -1)
+        )
+        self._embedding_slots = asyncio.Semaphore(2)
+        self._embedding_executor = None
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -882,6 +994,9 @@ class ModelRpcClient(object):
 
     async def close(self) -> None:
         await self._channel_pool.close()
+        if self._embedding_executor is not None:
+            executor, self._embedding_executor = self._embedding_executor, None
+            await asyncio.to_thread(executor.shutdown, wait=True)
 
     def _compute_grpc_timeout(self, timeout_ms) -> float:
         rpc_timeout_ms = (
@@ -944,6 +1059,104 @@ class ModelRpcClient(object):
             else:
                 raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
 
+    def _validate_embedding_message_size(self, message) -> None:
+        limit = self._max_send_message_length
+        if limit > 0 and message.ByteSize() > limit:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"input_embeddings request size {message.ByteSize()} exceeds backend gRPC send limit {limit}",
+            )
+
+    async def _serialize_embeddings(self, inputs, deadline, *, batch=False):
+        # InputEmbeddings follows PyTorch's stream contract: producers on other
+        # streams must make writes visible to this thread's current stream first.
+        # Recording here carries that dependency into the serialization worker.
+        # Snapshot mutable request metadata. Tensor storage stays owned until the
+        # actual worker completes, even if its async consumer is cancelled.
+        snapshots = []
+        raw_bytes = 0
+        events = {}
+        for inp in inputs:
+            raw_bytes += _embedding_payload_bytes(inp)
+            if (
+                self._max_send_message_length > 0
+                and raw_bytes > self._max_send_message_length
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "input_embeddings payload exceeds backend gRPC send limit",
+                )
+            snapshot = copy.copy(inp)
+            snapshot.generate_config = copy.deepcopy(inp.generate_config)
+            snapshot.mm_inputs = list(inp.mm_inputs)
+            if inp.input_embeddings is not None:
+                snapshot.input_embeddings = copy.copy(inp.input_embeddings)
+                snapshot.input_embeddings.embeddings = list(
+                    inp.input_embeddings.embeddings
+                )
+                snapshot.input_embeddings.embedding_locs = list(
+                    inp.input_embeddings.embedding_locs
+                )
+            snapshots.append(snapshot)
+        for inp in snapshots:
+            tensors = [inp.token_ids]
+            if inp.input_embeddings is not None:
+                tensors.extend(inp.input_embeddings.embeddings)
+            for tensor in tensors:
+                if tensor.is_cuda and tensor.device not in events:
+                    event = torch.cuda.Event()
+                    event.record(torch.cuda.current_stream(tensor.device))
+                    events[tensor.device] = event
+
+        async def within_deadline(awaitable):
+            if deadline is None:
+                return await awaitable
+            try:
+                # wait_for also handles a deadline expiring before submission.
+                return await asyncio.wait_for(
+                    awaitable, max(0, deadline - asyncio.get_running_loop().time())
+                )
+            except asyncio.TimeoutError as error:
+                raise FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT,
+                    "request deadline expired while serializing input_embeddings",
+                ) from error
+
+        await within_deadline(self._embedding_slots.acquire())
+        try:
+            if self._embedding_executor is None:
+                self._embedding_executor = ThreadPoolExecutor(
+                    max_workers=2, thread_name_prefix="input-embedding"
+                )
+
+            def serialize():
+                for event in events.values():
+                    event.synchronize()
+                if batch:
+                    message = BatchGenerateInputPB()
+                    for inp in snapshots:
+                        message.inputs.append(trans_input(inp))
+                else:
+                    message = trans_input(snapshots[0])
+                self._validate_embedding_message_size(message)
+                return message
+
+            future = asyncio.get_running_loop().run_in_executor(
+                self._embedding_executor, serialize
+            )
+        except BaseException:
+            self._embedding_slots.release()
+            raise
+
+        def completed(result):
+            self._embedding_slots.release()
+            # A cancelled/timed-out caller no longer awaits worker exceptions.
+            if not result.cancelled():
+                result.exception()
+
+        future.add_done_callback(completed)
+        return await within_deadline(asyncio.shield(future))
+
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
@@ -961,12 +1174,35 @@ class ModelRpcClient(object):
             # matches the client gRPC deadline: engine-side timeout checks and
             # P2P deadlineMs() require a positive timeout_ms.
             input_py.generate_config.timeout_ms = int(effective_ms)
-        input_pb = trans_input(input_py)
+        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
+        if use_fetch_response:
+            input_py.generate_config.validate()
+            validate_engine_ready(input_py.generate_config)
+        has_embeddings = has_input_embeddings(input_py)
+        rpc_deadline = (
+            asyncio.get_running_loop().time() + effective_ms / 1000.0
+            if has_embeddings and effective_ms > 0
+            else None
+        )
+        if has_embeddings:
+            if use_fetch_response:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "input_embeddings requires route-only scheduling before backend admission",
+                )
+        input_pb = (
+            None
+            if use_fetch_response
+            else (
+                await self._serialize_embeddings([input_py], rpc_deadline)
+                if has_embeddings
+                else trans_input(input_py)
+            )
+        )
         response_iterator = None
         rpc_status = None
         stream_state = StreamState()
         include_all_sequences = not input_py.generate_config.has_num_beams()
-        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
         selected_role = None
 
         if use_fetch_response:
@@ -1008,8 +1244,6 @@ class ModelRpcClient(object):
         terminal_seen = False
         client_settlement_task = None
         client_settlement_abandoned = None
-        rpc_deadline = None
-
         trace_state = CURRENT_TRACE_STATE.get()
         pd_separation = _selected_pd_separation(selected_role, input_py.generate_config)
         if pd_separation is not None and trace_state is not None:
@@ -1029,37 +1263,56 @@ class ModelRpcClient(object):
                 trace_attrs.RTP_LLM_REQUEST_ID, input_py.request_id
             )
         last_output = None
+        last_response = None
 
         try:
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
-
             grpc_kwargs = {}
             if effective_ms > 0:
-                grpc_kwargs["timeout"] = effective_ms / 1000.0
+                grpc_kwargs["timeout"] = (
+                    _remaining_rpc_timeout(rpc_deadline)
+                    if rpc_deadline is not None
+                    else effective_ms / 1000.0
+                )
+            if has_embeddings and rpc_deadline is not None:
+                input_pb.generate_config.timeout_ms = max(
+                    1, int(grpc_kwargs["timeout"] * 1000)
+                )
             if trace_metadata:
                 # One injection point covers both channels: W3C traceparent
                 # rides gRPC metadata for FetchResponse and GenerateStreamCall.
                 grpc_kwargs["metadata"] = trace_metadata
-            if effective_ms > 0:
+            if effective_ms > 0 and rpc_deadline is None:
                 # grpc.aio starts this timeout when the call is created. The
                 # observer uses the same absolute boundary, so time spent
                 # receiving application frames is included.
                 rpc_deadline = asyncio.get_running_loop().time() + effective_ms / 1000.0
             if use_fetch_response:
                 response_iterator = stub.FetchResponse(
-                    FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
+                    FetchRequestPB(request_id=input_py.request_id), **grpc_kwargs
                 )
             else:
-                response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
+                generate = (
+                    stub.GenerateStreamWithInputEmbeddings
+                    if has_embeddings
+                    else stub.GenerateStreamCall
+                )
+                response_iterator = generate(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                output_py = trans_output(input_py, response, stream_state)
-                last_output = output_py
-                if use_fetch_response and _is_finished_response(response):
+                last_output = (
+                    _span_outputs_from_response(response)
+                    if client_span is not None
+                    else None
+                )
+                output_py = self._trans_output_fn(input_py, response, stream_state)
+                last_response = response
+                response_finished = _is_finished_response(response)
+                if response_finished:
                     terminal_seen = True
-                if _engine_reported_finished(output_py) and client_span is not None:
+                if response_finished and client_span is not None:
                     # The finished application frame is not the gRPC EOF. If it
                     # escapes first, an upstream renderer can close this generator
                     # while the server is still settling the RPC. The application
@@ -1070,7 +1323,7 @@ class ModelRpcClient(object):
                             _settle_client_span_after_rpc(
                                 response_iterator,
                                 client_span,
-                                output_py,
+                                last_output,
                                 client_settlement_abandoned,
                                 active_deadline=rpc_deadline,
                                 include_all_sequences=include_all_sequences,
@@ -1082,6 +1335,11 @@ class ModelRpcClient(object):
                 yield output_py
             stream_done = True
         except grpc.RpcError as e:
+            if has_embeddings and e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "backend does not implement input_embeddings generation; use a supported deployment",
+                ) from e
             rpc_status = e.code()
             if client_span is not None:
                 _record_client_rpc_status(client_span, rpc_status)
@@ -1095,7 +1353,7 @@ class ModelRpcClient(object):
             if response_iterator:
                 response_iterator.cancel()
             self._handle_grpc_error(
-                e, f"request: [{input_pb.request_id}]", target_address
+                e, f"request: [{input_py.request_id}]", target_address
             )
         except (asyncio.CancelledError, GeneratorExit) as e:
             # Client disconnect / stream teardown: these are BaseException
@@ -1109,7 +1367,9 @@ class ModelRpcClient(object):
             # closing a completed response arrive here as GeneratorExit. The
             # renderer milestone distinguishes those paths before root span
             # settlement; a root already settled OK remains a fallback.
-            engine_finished = _engine_reported_finished(last_output)
+            engine_finished = last_response is not None and _is_finished_response(
+                last_response
+            )
             if response_iterator:
                 if not engine_finished:
                     response_iterator.cancel()
@@ -1163,7 +1423,7 @@ class ModelRpcClient(object):
                 _record_client_span_latency(client_span, last_output)
                 client_span.finish(error=e)
             logging.error(
-                f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
+                f"request: [{input_py.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
             )
             raise e
         finally:
@@ -1231,12 +1491,22 @@ class ModelRpcClient(object):
         max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
         grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
 
-        batch_input_pb = BatchGenerateInputPB()
+        has_embeddings = any(has_input_embeddings(inp) for inp in inputs)
+        deadline = (
+            asyncio.get_running_loop().time() + grpc_timeout_seconds
+            if has_embeddings
+            else None
+        )
         for inp in inputs:
             inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-            input_pb = trans_input(inp)
-            batch_input_pb.inputs.append(input_pb)
-
+        if has_embeddings:
+            batch_input_pb = await self._serialize_embeddings(
+                inputs, deadline, batch=True
+            )
+        else:
+            batch_input_pb = BatchGenerateInputPB()
+            for inp in inputs:
+                batch_input_pb.inputs.append(trans_input(inp))
         target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
@@ -1245,9 +1515,20 @@ class ModelRpcClient(object):
         try:
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
-            response = await stub.BatchGenerateCall(
-                batch_input_pb, timeout=grpc_timeout_seconds
+            generate = (
+                stub.BatchGenerateWithInputEmbeddings
+                if has_embeddings
+                else stub.BatchGenerateCall
             )
+            remaining = (
+                _remaining_rpc_timeout(deadline)
+                if deadline is not None
+                else grpc_timeout_seconds
+            )
+            if has_embeddings:
+                for inp in batch_input_pb.inputs:
+                    inp.generate_config.timeout_ms = max(1, int(remaining * 1000))
+            response = await generate(batch_input_pb, timeout=remaining)
 
             results = []
             for i, result_pb in enumerate(response.results):
@@ -1260,11 +1541,18 @@ class ModelRpcClient(object):
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()
-                output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                output = self._trans_output_fn(
+                    inputs[i], result_pb.final_output, stream_state
+                )
                 results.append(output)
             return results
 
         except grpc.RpcError as e:
+            if has_embeddings and e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "backend does not implement input_embeddings generation; use a supported deployment",
+                ) from e
             self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
         except FtRuntimeException:
             raise

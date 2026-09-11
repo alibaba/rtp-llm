@@ -2,11 +2,15 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 
 #include <optional>
+#include <new>
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
 
 #include <numeric>
+#include <stdexcept>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
@@ -20,16 +24,15 @@ namespace rtp_llm {
 namespace {
 
 RoleType checkedRoleType(int value, const char* field_name) {
-    RTP_LLM_CHECK_WITH_INFO(value >= static_cast<int>(RoleType::PDFUSION)
-                                && value <= static_cast<int>(RoleType::FRONTEND),
-                            "unknown RoleAddrPB %s value: %d",
-                            field_name,
-                            value);
+    if (value < static_cast<int>(RoleType::PDFUSION) || value > static_cast<int>(RoleType::FRONTEND)) {
+        throw RequestValidationError(std::string("unknown RoleAddrPB ") + field_name
+                                     + " value: " + std::to_string(value));
+    }
     return static_cast<RoleType>(value);
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -49,17 +52,15 @@ RoleType checkedRoleString(const std::string& value) {
     if (role == "FRONTEND") {
         return RoleType::FRONTEND;
     }
-    RTP_LLM_FAIL("unknown RoleAddrPB role_str: %s", value.c_str());
+    throw RequestValidationError("unknown RoleAddrPB role_str: " + value);
 }
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
-        RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
-                                "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
-                                source,
-                                resolved.has_value() ? static_cast<int>(*resolved) : -1,
-                                static_cast<int>(candidate));
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
+        if (resolved.has_value() && *resolved != candidate) {
+            throw RequestValidationError(std::string("conflicting RoleAddrPB role from ") + source);
+        }
         resolved = candidate;
     };
 
@@ -232,6 +233,16 @@ RequestInfo QueryConverter::transRequestInfo(const RequestInfoPB& request_info_p
     return request_info;
 }
 
+ErrorInfo QueryConverter::requestParsingError(const std::exception& error) {
+    ErrorCode code = ErrorCode::UNKNOWN_ERROR;
+    if (dynamic_cast<const RequestValidationError*>(&error)) {
+        code = ErrorCode::INVALID_PARAMS;
+    } else if (dynamic_cast<const std::bad_alloc*>(&error) || isTorchCudaOom(error)) {
+        code = ErrorCode::MALLOC_FAILED;
+    }
+    return ErrorInfo(code, std::string("Request parsing error: ") + error.what());
+}
+
 std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id                    = input->request_id();
@@ -300,6 +311,32 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     }
     // Auto-TPM QoS priority (task40): 0 = not set; TPS metrics tagging only.
     generate_input->priority = input->priority();
+
+    // 转换 input_embeddings
+    if (input->has_input_embeddings()) {
+        const auto& input_embeddings_pb = input->input_embeddings();
+
+        std::vector<torch::Tensor> embeddings;
+        std::vector<int32_t>       embedding_locs;
+
+        // 转换 embeddings
+        for (int i = 0; i < input_embeddings_pb.embeddings_size(); i++) {
+            embeddings.push_back(transTensor(input_embeddings_pb.embeddings(i)));
+        }
+
+        // 转换 embedding_locs
+        embedding_locs.resize(input_embeddings_pb.embedding_locs_size());
+        memcpy(embedding_locs.data(),
+               input_embeddings_pb.embedding_locs().data(),
+               input_embeddings_pb.embedding_locs_size() * sizeof(int32_t));
+
+        generate_input->input_embeddings      = embeddings;
+        generate_input->input_embeddings_locs = embedding_locs;
+        auto status                           = validateAndNormalizeInputEmbeddings(*generate_input);
+        if (!status.ok()) {
+            throw RequestValidationError(status.ToString());
+        }
+    }
 
     return generate_input;
 }
@@ -450,12 +487,36 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 
+    if (dump_aux_info) {
+        // Keep writing the per-output AuxInfo field for rolling-upgrade compatibility.
+        // New clients consume this aggregate tensor and avoid deserializing one TensorPB per beam/output.
+        stackBuffersToTensorPB(flatten_output->mutable_all_softmax_probs(), source_outputs, [](const auto& r) {
+            return r.aux_info.softmax_probs;
+        });
+    }
+
     stackBuffersToTensorPB(flatten_output->mutable_loss(), source_outputs, [](const auto& r) { return r.loss; });
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
+    // Preserve the legacy per-output layout for clients that predate shared prompt states.
     stackBuffersToTensorPB(
         flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+    {
+        torch::Tensor all_hidden_states;
+        for (const auto& resp : source_outputs) {
+            if (resp.all_hidden_states.has_value()) {
+                all_hidden_states = resp.all_hidden_states.value();
+                if (resp.shared_all_hidden_states_length > 0) {
+                    all_hidden_states = all_hidden_states.narrow(0, 0, resp.shared_all_hidden_states_length);
+                }
+                break;
+            }
+        }
+        if (all_hidden_states.defined()) {
+            transTensorPB(flatten_output->mutable_shared_all_hidden_states(), all_hidden_states.contiguous());
+        }
+    }
 
     if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {
         auto*       pb = flatten_output->mutable_prompt_logits();

@@ -20,3 +20,25 @@ py_test (
     env = test_envs,
     exec_properties = {'gpu':'A10'},
 )
+
+py_test (
+    name = "apply_input_embeddings_test",
+    srcs = ["apply_input_embeddings_test.py"],
+    deps = py_test_deps,
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
+    name = "supports_input_embeddings_test",
+    srcs = ["supports_input_embeddings_test.py"],
+    deps = py_test_deps,
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test(
+    name = "apply_input_embeddings_multigpu_test",
+    srcs = ["apply_input_embeddings_multigpu_test.py", "apply_input_embeddings_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {"gpu": "H20", "gpu_count": "2"},
+)

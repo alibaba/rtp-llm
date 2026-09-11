@@ -1,9 +1,12 @@
 import itertools
+from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main
+from unittest.mock import Mock
 
 import torch
 from torch import dtype as _dtype
 
+from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalDeepstackInjector,
     MultimodalEmbeddingInjector,
@@ -154,6 +157,123 @@ class MultimodalEmbeddingTest(TestCase):
             output[2:],
             torch.zeros(2, 2, dtype=torch.half),
         )
+
+    def test_input_embeddings_are_applied_before_multimodal_features(self):
+        # Preserve the production forward and both injectors; replace only weights/layers.
+        model = MultimodalGenericModel.__new__(MultimodalGenericModel)
+        torch.nn.Module.__init__(model)
+        base = torch.arange(20, device="cuda", dtype=torch.bfloat16).reshape(5, 4)
+        model.embed_tokens = Mock(side_effect=lambda *args: base.clone())
+        model.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        model.layers = []
+        model.layer_num = 0
+        model.kv_cache = None
+        model.norm = Mock(side_effect=lambda hidden, residual: (hidden, residual))
+        custom = torch.full((3, 4), 3.25, device="cpu", dtype=torch.float32)
+        vision = torch.full((2, 4), 7.0, device="cuda", dtype=torch.bfloat16)
+        mask = torch.tensor([1, 1, 0, 0, 1], device="cuda", dtype=torch.int32)
+        for use_custom, use_vision in ((True, True), (True, False), (False, True)):
+            with self.subTest(custom=use_custom, vision=use_vision):
+                inputs = SimpleNamespace(
+                    input_ids=torch.arange(5, device="cuda", dtype=torch.int32),
+                    combo_position_ids=None,
+                    embedding_inputs=SimpleNamespace(
+                        combo_tokens_type_ids=None, text_tokens_mask=mask
+                    ),
+                    input_embeddings=[custom] if use_custom else None,
+                    input_embeddings_locs=torch.tensor(
+                        [1], device="cpu", dtype=torch.int32
+                    ),
+                    multimodal_inputs=SimpleNamespace(
+                        multimodal_features=[vision] if use_vision else [],
+                        mm_features_locs=torch.tensor(
+                            [2], device="cpu", dtype=torch.int32
+                        ),
+                    ),
+                )
+                output = model.forward(inputs, fmha_impl=object())
+                expected = base.clone()
+                if use_custom:
+                    expected[1:4] = custom.to(device="cuda", dtype=expected.dtype)
+                if use_vision:
+                    expected[2:4] = vision
+                torch.testing.assert_close(output.hidden_states, expected)
+                self.assertIs(model.embed_tokens.call_args.args[3], mask)
+
+    def test_injector_rejects_feature_location_count_mismatch(self):
+        injector = MultimodalEmbeddingInjector().cuda()
+        embeddings = torch.zeros(4, 4, device="cuda", dtype=torch.half)
+        features = [
+            torch.ones((1, 4), device="cuda", dtype=torch.half),
+            torch.ones((1, 4), device="cuda", dtype=torch.half),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "1 entries but 2 features"):
+            injector(
+                embeddings,
+                features,
+                torch.tensor([0], device="cuda", dtype=torch.int32),
+            )
+
+        # Producers may leave the tensor undefined, which arrives here as None.
+        with self.assertRaisesRegex(ValueError, "must be provided with features"):
+            injector(embeddings, features, None)
+
+    def test_deepstack_injector_normalizes_tensor_sequence_and_none_locations(self):
+        injector = MultimodalDeepstackInjector().cuda()
+        hidden = torch.zeros(4, 4, device="cuda", dtype=torch.half)
+        stacks = [torch.ones((1, 1, 4), device="cuda", dtype=torch.half)]
+
+        tensor_output = injector(
+            hidden.clone(),
+            stacks,
+            torch.tensor([1], device="cuda", dtype=torch.int32),
+            0,
+        )
+        sequence_output = injector(hidden.clone(), stacks, [1], 0)
+        torch.testing.assert_close(tensor_output, sequence_output)
+
+        with self.assertRaisesRegex(ValueError, "must be provided with deepstack"):
+            injector(hidden.clone(), stacks, None, 0)
+        with self.assertRaisesRegex(ValueError, "0 entries but 1 deepstack"):
+            injector(hidden.clone(), stacks, [], 0)
+
+    def test_injector_rejects_location_beyond_embeddings(self):
+        injector = MultimodalEmbeddingInjector().cuda()
+        embeddings = torch.zeros(4, 4, device="cuda", dtype=torch.half)
+        feature = torch.ones((1, 4), device="cuda", dtype=torch.half)
+
+        with self.assertRaisesRegex(IndexError, "cannot be placed at loc 4"):
+            injector(
+                embeddings,
+                [feature],
+                torch.tensor([4], device="cuda", dtype=torch.int32),
+            )
+
+    def test_injector_moves_host_features_to_embeddings_device(self):
+        injector = MultimodalEmbeddingInjector().cuda()
+        embeddings = torch.zeros(4, 4, device="cuda", dtype=torch.half)
+        cpu_feature = torch.tensor(
+            [[4.0, 3.0, 2.0, 1.0]], dtype=torch.half, device="cpu"
+        )
+        cpu_locs = torch.tensor([1], dtype=torch.int32, device="cpu")
+        self.assertEqual(cpu_feature.device.type, "cpu")
+        self.assertEqual(cpu_locs.device.type, "cpu")
+
+        injector(embeddings, [cpu_feature], cpu_locs)
+        torch.testing.assert_close(embeddings[1:2], cpu_feature.cuda())
+
+    def test_injector_rejects_dtype_mismatch(self):
+        injector = MultimodalEmbeddingInjector().cuda()
+        embeddings = torch.zeros(4, 4, device="cuda", dtype=torch.half)
+        feature = torch.ones((1, 4), device="cuda", dtype=torch.float32)
+
+        with self.assertRaisesRegex(TypeError, "dtype mismatch"):
+            injector(
+                embeddings,
+                [feature],
+                torch.tensor([0], device="cuda", dtype=torch.int32),
+            )
 
 
 if __name__ == "__main__":
