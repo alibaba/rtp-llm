@@ -26,14 +26,19 @@ bash mvnw -P'opensource,!internal' -pl flexlb-mock-engine -am package
 | --- | --- |
 | `FLEXLB_MOCK_WHALE=1` | 必填；缺失时启动包装拒绝运行 |
 | `ROLE_TYPE` | `PREFILL` 或 `DECODE` |
-| `POD_IP` | 平台通告的 Pod 地址，不能用 `0.0.0.0` |
+| `POD_IP` | 平台通告的 Pod 地址；未注入时取 `hostname -i` 的首个地址，不能用物理机 IP 或 `0.0.0.0` |
 | `START_PORT` | HTTP 健康/控制端口，gRPC 固定为其加一 |
 | `MOCK_PERFORMANCE_CONFIG` | 挂载的性能配置路径 |
 | `MOCK_MASTER_CONFIG` | 与 master 性能模型对应的配置路径 |
+| `MOCK_PERFORMANCE_CONFIG_JSON`、`MOCK_MASTER_CONFIG_JSON` | 无挂载时传入完整 JSON；由启动脚本写入运行目录，与对应路径变量互斥 |
 | `FETCH_OUTPUT_STREAM` | 默认 1；0 时 P 计算完成直接接续 D，不等 Fetch 或超时 |
 | `MOCK_KMONITOR_ENABLED` | Whale 包装默认 true；开源联调设 false |
 | `MOCK_RUN_DIR` | 事件日志目录，默认 `/tmp/flexlb-mock` |
 | `FLEXLB_MONITOR_SERVICE_NAME`、`FLEXLB_MONITOR_TENANT_NAME` | 复用 master 内部监控适配的环境配置 |
+
+平台启动命令使用 `sh /opt/flexlb/start.sh`，不要把带引号的 `sh -c` 脚本放进 `cmd`：Whale 会按空格拆分该字段。配置 JSON 通过上述环境变量传递，内容不会作为 shell 命令求值。
+
+Whale CPU inference 模板必须初始化 `resource_plan.meta_tag_list: []`，否则 PD gang 信息填充可能空指针。镜像实际由顶层 `image_infos` 选择，资源槽位的 `package_infos` 会被覆盖；frontend 的独立镜像保持在 `front_app_zone_plan`。资源池的容忍配置也必须与目标池匹配，即使 GPU 请求为 0。以最终 Carbon 计划确认这些字段，而非只检查提交模板。
 
 Whale 健康探测使用 `START_PORT` 的 `/health`；停止/排空状态返回 503。平台应把健康 P/D HTTP 地址注册到各自 VIP 域，master 使用已有 VipServerDiscovery 消费这些地址，并按 HTTP+1 访问 gRPC。mock P 不查询 VIP，也不自行选择 D，因此不需要引入 VipServer 客户端依赖。部署时需核实最终 Carbon launch plan 的地址、端口和健康检查配置，不能向生产 master 注入本地 `discovery.json`。
 
