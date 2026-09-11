@@ -123,6 +123,8 @@ final class FlexlbConfigValidator {
 
     private static void validateQueue(SchedulerConfig queue) {
         positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
+        require(Double.isFinite(queue.getScanBudgetMultiplier()) && queue.getScanBudgetMultiplier() >= 1.0,
+                "scheduler.scanBudgetMultiplier", "must be finite and at least 1.0");
         require(queue.getOrdering() != null, "scheduler.ordering", "is required for QUEUE");
         require(queue.getDecision() != null, "scheduler.decision", "is required for QUEUE");
         DecisionPolicyConfig decision = queue.getDecision();

@@ -10,6 +10,7 @@ import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -138,10 +139,11 @@ public final class RouteAdmission implements AutoCloseable {
     WorkerEndpoint blockedEndpoint() { return blockedEndpoint; }
 
     /**
-     * Whether a retry must wait for more capacity at this endpoint, using the
-     * current request's admission policy. Unknown capacity or a possible
-     * preemption returns false so normal routing can decide. Before parking,
-     * the caller must recheck that no newer capacity notification has arrived.
+     * Whether an ordered successor needs another capacity event at this
+     * endpoint. Unknown capacity or a possible preemption permits a wakeup.
+     * This only controls continuation of a retry chain; an already awakened
+     * request always routes across the fleet. The caller must revalidate the
+     * successor and capacity sequence before pausing the chain.
      */
     static boolean mustWaitForCapacity(BalanceContext context, WorkerEndpoint endpoint) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
@@ -149,7 +151,9 @@ public final class RouteAdmission implements AutoCloseable {
                 return false;
             }
             if (endpoint instanceof PrefillEndpoint prefill) {
-                return !prefill.canAcceptRequest();
+                return !prefill.canAcceptRequest()
+                        && !(context.getConfig().allowsPreemption(VictimStage.PREFILL_QUEUED)
+                            && prefill.canPreemptQueuedRequest(context.getPriority()));
             }
             if (!(endpoint instanceof DecodeEndpoint decode)) {
                 return false;

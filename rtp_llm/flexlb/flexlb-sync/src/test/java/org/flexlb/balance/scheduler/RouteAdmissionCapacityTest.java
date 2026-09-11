@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint.LayeredAdmissionView;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.junit.jupiter.api.Test;
@@ -39,11 +40,61 @@ class RouteAdmissionCapacityTest {
         WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
         when(endpoint.tryPinGeneration()).thenReturn(pin);
         when(endpoint.canAcceptRequest()).thenReturn(canAccept);
+        BalanceContext context = context(1L, 2L, 90L, 5L, 5L);
+        SchedulingTestConfig.disallowVictim(context.getConfig(), VictimStage.PREFILL_QUEUED);
 
         assertEquals(!canAccept,
-                RouteAdmission.mustWaitForCapacity(mock(BalanceContext.class), endpoint));
+                RouteAdmission.mustWaitForCapacity(context, endpoint));
 
         verify(endpoint).canAcceptRequest();
+        verify(pin).close();
+    }
+
+    @Test
+    void fullPrefillWithAllowedQueuedVictimsLeavesReclamationToFreshPlacement() {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
+        when(endpoint.tryPinGeneration()).thenReturn(pin);
+        when(endpoint.canAcceptRequest()).thenReturn(false);
+        BalanceContext context = context(1L, 2L, 90L, 5L, 5L);
+        SchedulingTestConfig.allowVictim(context.getConfig(), VictimStage.PREFILL_QUEUED);
+        when(endpoint.canPreemptQueuedRequest(context.getPriority())).thenReturn(true);
+
+        assertFalse(RouteAdmission.mustWaitForCapacity(context, endpoint));
+
+        verify(endpoint).canPreemptQueuedRequest(context.getPriority());
+        verify(pin).close();
+    }
+
+    @Test
+    void fullPrefillStillWaitsWhenQueuedPreemptionIsDisabled() {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
+        when(endpoint.tryPinGeneration()).thenReturn(pin);
+        when(endpoint.canAcceptRequest()).thenReturn(false);
+        BalanceContext context = context(1L, 2L, 90L, 5L, 5L);
+        SchedulingTestConfig.disallowVictim(context.getConfig(), VictimStage.PREFILL_QUEUED);
+        when(endpoint.canPreemptQueuedRequest(context.getPriority())).thenReturn(true);
+
+        assertTrue(RouteAdmission.mustWaitForCapacity(context, endpoint));
+
+        verify(endpoint, never()).canPreemptQueuedRequest(context.getPriority());
+        verify(pin).close();
+    }
+
+    @Test
+    void fullPrefillStillWaitsWhenNoQueuedVictimCanBePreempted() {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
+        when(endpoint.tryPinGeneration()).thenReturn(pin);
+        when(endpoint.canAcceptRequest()).thenReturn(false);
+        BalanceContext context = context(1L, 2L, 90L, 5L, 5L);
+        SchedulingTestConfig.allowVictim(context.getConfig(), VictimStage.PREFILL_QUEUED);
+        when(endpoint.canPreemptQueuedRequest(context.getPriority())).thenReturn(false);
+
+        assertTrue(RouteAdmission.mustWaitForCapacity(context, endpoint));
+
+        verify(endpoint).canPreemptQueuedRequest(context.getPriority());
         verify(pin).close();
     }
 

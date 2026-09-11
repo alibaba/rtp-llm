@@ -4,7 +4,10 @@ import org.flexlb.util.PriorityNormalizer;
 
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Comparator;
+import java.util.NavigableSet;
 import java.util.List;
+import java.util.TreeSet;
 import java.util.function.Predicate;
 
 /**
@@ -12,17 +15,25 @@ import java.util.function.Predicate;
  *
  * <p>The coordinator lock is the sole synchronization boundary. Entries are
  * intrusive nodes, so completion and cancellation unlink an arbitrary request
- * in O(1) without leaving a tombstone behind a blocked head.</p>
+ * in O(1) without leaving a tombstone behind a blocked head. Ready retries use
+ * a separate ordered index and share the scan budget with forward progress.</p>
  */
 final class OrderedRequestQueue {
 
     private static final int PRIORITY_LEVELS =
             PriorityNormalizer.MAX_PRIORITY + 1;
 
+    private static final Comparator<GlobalQueueEntry> SEQUENCE_ORDER =
+            Comparator.comparingLong(entry -> entry.sequence);
+    private static final Comparator<GlobalQueueEntry> PRIORITY_ORDER =
+            Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed()
+                    .thenComparing(SEQUENCE_ORDER);
+
     private final boolean priorityOrdering;
     private final Bucket fifo = new Bucket();
     private final Bucket[] priorityBuckets = new Bucket[PRIORITY_LEVELS];
     private final BitSet nonEmptyPriorities = new BitSet(PRIORITY_LEVELS);
+    private final BitSet pendingPriorities = new BitSet(PRIORITY_LEVELS);
     private int size;
     private long nextSequence;
 
@@ -45,6 +56,7 @@ final class OrderedRequestQueue {
             fifo.add(entry);
         }
         size++;
+        rewindScanTo(entry);
     }
 
     int size() {
@@ -62,53 +74,75 @@ final class OrderedRequestQueue {
         return bucket == null ? null : bucket.head;
     }
 
-    List<GlobalQueueEntry> snapshotPrefix(
-            int limit,
-            Predicate<GlobalQueueEntry> eligible) {
-        if (limit <= 0) {
+    /** Continue an ordered scan, counting every examined entry against the budget. */
+    List<GlobalQueueEntry> scanForPlanningCandidates(
+            int candidateLimit, int scanBudget, Predicate<GlobalQueueEntry> eligible) {
+        if (candidateLimit <= 0 || scanBudget <= 0) {
             return List.of();
         }
-        List<GlobalQueueEntry> result = new ArrayList<>(
-                Math.min(limit, size));
-        if (priorityOrdering) {
-            for (int priority = nonEmptyPriorities.previousSetBit(
-                            PRIORITY_LEVELS - 1);
-                    priority >= 0 && result.size() < limit;
-                    priority = nonEmptyPriorities.previousSetBit(priority - 1)) {
-                Bucket bucket = priorityBuckets[priority];
-                if (bucket == null) {
-                    continue;
-                }
-                appendEligible(bucket, result, limit, eligible);
+        List<GlobalQueueEntry> result = new ArrayList<>(Math.min(candidateLimit, size));
+        for (int checked = 0; checked < scanBudget && result.size() < candidateLimit; checked++) {
+            int priority = priorityOrdering
+                    ? pendingPriorities.previousSetBit(PRIORITY_LEVELS - 1) : -1;
+            Bucket bucket = priorityOrdering
+                    ? (priority < 0 ? null : priorityBuckets[priority]) : fifo;
+            if (bucket == null) {
+                break;
             }
-        } else {
-            appendEligible(fifo, result, limit, eligible);
+            GlobalQueueEntry entry = bucket.pollNextRequest();
+            if (entry == null) {
+                break;
+            }
+            if (priorityOrdering && !bucket.hasPendingRequests()) {
+                pendingPriorities.clear(priority);
+            }
+            if (!result.contains(entry) && eligible.test(entry)) {
+                result.add(entry);
+            }
         }
+        result.sort(priorityOrdering ? PRIORITY_ORDER : SEQUENCE_ORDER);
         return result;
     }
 
-    boolean hasHigherPriorityEntry(
-            GlobalQueueEntry entry,
-            Predicate<GlobalQueueEntry> eligible) {
-        if (!priorityOrdering) {
-            return false;
+    boolean hasUnscannedRequests() {
+        return priorityOrdering ? !pendingPriorities.isEmpty()
+                : fifo.hasPendingRequests();
+    }
+
+    /** Start scanning at this request, or keep an existing earlier scan position. */
+    private void rewindScanTo(GlobalQueueEntry entry) {
+        if (!entry.linked || entry.removed) {
+            return;
         }
-        for (int priority = nonEmptyPriorities.previousSetBit(
-                        PRIORITY_LEVELS - 1);
-                priority > entry.priority;
-                priority = nonEmptyPriorities.previousSetBit(priority - 1)) {
-            Bucket bucket = priorityBuckets[priority];
-            if (bucket != null) {
-                for (GlobalQueueEntry candidate = bucket.head;
-                        candidate != null;
-                        candidate = candidate.next) {
-                    if (eligible.test(candidate)) {
-                        return true;
-                    }
-                }
-            }
+        Bucket bucket = priorityOrdering ? priorityBuckets[entry.priority] : fifo;
+        if (bucket.nextToScan == null || entry.sequence < bucket.nextToScan.sequence) {
+            bucket.nextToScan = entry;
         }
-        return false;
+        if (priorityOrdering) {
+            pendingPriorities.set(entry.priority);
+        }
+    }
+
+    /** Make an awakened request directly available to the next bounded scan. */
+    void markRequestReadyForRetry(GlobalQueueEntry entry) {
+        if (!entry.linked || entry.removed) {
+            return;
+        }
+        Bucket bucket = priorityOrdering ? priorityBuckets[entry.priority] : fifo;
+        bucket.readyRetries.add(entry);
+        if (priorityOrdering) {
+            pendingPriorities.set(entry.priority);
+        }
+    }
+
+    boolean hasEarlierRequestsToScan(GlobalQueueEntry entry) {
+        int priority = priorityOrdering
+                ? pendingPriorities.previousSetBit(PRIORITY_LEVELS - 1) : -1;
+        Bucket bucket = priorityOrdering
+                ? (priority < 0 ? null : priorityBuckets[priority]) : fifo;
+        GlobalQueueEntry next = bucket == null ? null : bucket.peekNextRequest();
+        return next != null
+                && (priorityOrdering ? PRIORITY_ORDER : SEQUENCE_ORDER).compare(next, entry) < 0;
     }
 
     boolean remove(GlobalQueueEntry entry) {
@@ -159,6 +193,9 @@ final class OrderedRequestQueue {
                     "ordered queue bucket is missing");
         }
         bucket.remove(entry);
+        if (priorityOrdering && !bucket.hasPendingRequests()) {
+            pendingPriorities.clear(entry.priority);
+        }
         if (priorityOrdering && bucket.isEmpty()) {
             nonEmptyPriorities.clear(entry.priority);
         }
@@ -174,26 +211,35 @@ final class OrderedRequestQueue {
         }
     }
 
-    private static void appendEligible(
-            Bucket source,
-            List<GlobalQueueEntry> result,
-            int limit,
-            Predicate<GlobalQueueEntry> eligible) {
-        for (GlobalQueueEntry entry = source.head;
-                entry != null;
-                entry = entry.next) {
-            if (eligible.test(entry)) {
-                result.add(entry);
-                if (result.size() == limit) {
-                    break;
-                }
-            }
-        }
-    }
-
     private static final class Bucket {
         private GlobalQueueEntry head;
         private GlobalQueueEntry tail;
+        private GlobalQueueEntry nextToScan;
+        private final NavigableSet<GlobalQueueEntry> readyRetries =
+                new TreeSet<>(SEQUENCE_ORDER);
+
+        boolean hasPendingRequests() {
+            return nextToScan != null || !readyRetries.isEmpty();
+        }
+
+        GlobalQueueEntry peekNextRequest() {
+            GlobalQueueEntry retry = readyRetries.isEmpty() ? null : readyRetries.first();
+            if (retry == null) {
+                return nextToScan;
+            }
+            return nextToScan == null || retry.sequence < nextToScan.sequence ? retry : nextToScan;
+        }
+
+        GlobalQueueEntry pollNextRequest() {
+            GlobalQueueEntry entry = peekNextRequest();
+            if (entry != null) {
+                if (entry == nextToScan) {
+                    nextToScan = entry.next;
+                }
+                readyRetries.remove(entry);
+            }
+            return entry;
+        }
 
         void add(GlobalQueueEntry entry) {
             if (entry.linked || entry.previous != null || entry.next != null) {
@@ -211,8 +257,12 @@ final class OrderedRequestQueue {
         }
 
         void remove(GlobalQueueEntry entry) {
+            readyRetries.remove(entry);
             GlobalQueueEntry previous = entry.previous;
             GlobalQueueEntry next = entry.next;
+            if (nextToScan == entry) {
+                nextToScan = next;
+            }
             if (previous == null) {
                 if (head != entry) {
                     throw new IllegalStateException(

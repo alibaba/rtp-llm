@@ -140,6 +140,9 @@ class CostBasedPrefillSelectionMetricTest {
         PlacementResult<SelectedRole, RoleType> result = strategy.select(context, RoleType.PREFILL, null);
 
         assertEquals(expectedStatus, result.status());
+        if (expectedStatus == PlacementResult.Status.BLOCKED) {
+            verify(cache, Mockito.never()).findMatchingEngines(any(), any(), any());
+        }
         if (result.status() == PlacementResult.Status.SUCCESS) {
             try (SelectedRole selected = result.value()) {
                 assertEquals("10.0.0.1", selected.serverStatus().getServerIp());

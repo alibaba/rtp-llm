@@ -127,6 +127,38 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void scan_budget_defaults_to_two_and_accepts_finite_multipliers() {
+        assertEquals(2.0, new SchedulerConfig().getScanBudgetMultiplier());
+        assertEquals(2.0, ConfigTestFixtures.parse("{}").queueScheduler().getScanBudgetMultiplier());
+        for (String value : new String[]{"1", "1.1", "2.0", "4", "1e100"}) {
+            var config = ConfigTestFixtures.parse("""
+                    {"scheduler":{"type":"QUEUE","scanBudgetMultiplier":%s}}
+                    """.formatted(value));
+            assertEquals(Double.parseDouble(value), config.queueScheduler().getScanBudgetMultiplier());
+        }
+    }
+
+    @Test
+    void scan_budget_rejects_invalid_values_and_direct_configuration() {
+        for (String value : new String[]{"0", "0.99", "-2", "1e309", "\"2.0\"", "true", "null", "[]", "{}"}) {
+            var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                    {"scheduler":{"type":"QUEUE","scanBudgetMultiplier":%s}}
+                    """.formatted(value)), value);
+            assertTrue(error.getMessage().contains("scanBudgetMultiplier"), error.getMessage());
+        }
+        for (double value : new double[]{Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, 0.5}) {
+            var config = ConfigTestFixtures.parse("{}");
+            config.queueScheduler().setScanBudgetMultiplier(value);
+            assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
+        }
+        var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                {"scheduler":{"type":"DIRECT","scanBudgetMultiplier":2.0},
+                 "dispatcher":{"type":"NON_BATCH"}}
+                """));
+        assertTrue(error.getMessage().contains("scheduler.scanBudgetMultiplier"));
+    }
+
+    @Test
     void tagged_unions_reject_parameters_from_inactive_variants() {
         assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
                 {
