@@ -54,6 +54,10 @@ class ModelLoader:
         self._model_weights_info: Optional[ModelWeightInfo] = (
             self._weights_info.create_model_weight_info(database)
         )
+        if weights_info.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+            self._misc_weights_info = []
+            if self._model_weights_info is None:
+                self._model_weights_info = weights_info.get_weight_info()
         # Non-owning global tensors supplied by another live model. Descriptors
         # with these names are excluded before checkpoint iteration and the
         # resulting ModelWeights points directly at the owner's tensors.
@@ -225,8 +229,13 @@ class ModelLoader:
         weights = [{} for _ in range(num_layers)]
         global_weights = dict(self._global_weight_aliases)
         # 重新构建权重
+        prefixes = (layer_weight_prefix, global_weight_prefix)
+        visual_names = None
+        if self._load_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+            visual_names = {weight.name for weight in self._model_weights_info.weights}
+            prefixes = tuple(global_weight_prefix + name for name in visual_names)
         all_tensors = self._load_config.database.load_tensors_by_prefix(
-            (layer_weight_prefix, global_weight_prefix), device, direct_io=direct_io
+            prefixes, device, direct_io=direct_io
         )
         for key, tensor in all_tensors.items():
             if key.startswith(layer_weight_prefix):
@@ -239,6 +248,8 @@ class ModelLoader:
                 weights[layer_id][name] = tensor[0].to(device)
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix) :]
+                if visual_names is not None and name not in visual_names:
+                    continue
                 if name in self._global_weight_aliases:
                     continue
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
@@ -648,6 +659,8 @@ class ModelLoader:
 
     def create_eplb(self):
         weights_info = self._weights_info
+        if weights_info.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+            return None, None
 
         logging.info(
             "create eplb: expert_num: %d, phy_exp_num: %d",
@@ -685,6 +698,8 @@ class ModelLoader:
         return py_eplb, phy2log
 
     def _init_eplb_weight(self, weight: ModelWeights, device: str):
+        if self._load_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+            return
         expert_num = self._load_config.expert_num
         redundant_expert = self._load_config.phy_exp_num - expert_num
         layer_num = self._load_config.num_layers

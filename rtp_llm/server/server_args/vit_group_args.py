@@ -1,5 +1,6 @@
-import os
 import logging
+import os
+
 from rtp_llm.ops import VitSeparation
 
 
@@ -26,7 +27,7 @@ def _convert_vit_separation(value):
             return VitSeparation.VIT_SEPARATION_LOCAL
         elif value == "1" or value == "VitSeparation.VIT_SEPARATION_ROLE":
             return VitSeparation.VIT_SEPARATION_ROLE
-        elif  value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
+        elif value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
             return VitSeparation.VIT_SEPARATION_REMOTE
 
     raise ValueError(
@@ -45,6 +46,32 @@ def init_vit_group_args(parser, vit_config):
     # Vit Configuration
     ##############################################################################################################
     vit_group = parser.add_argument_group("Vit Configuration")
+    for name, default, description in (
+        (
+            "vit_batch_wait_ms",
+            5,
+            "Maximum wait to collect a ViT GPU batch (milliseconds)",
+        ),
+        (
+            "vit_max_batch_images",
+            8,
+            "Maximum images per ViT GPU forward; 1 disables batching",
+        ),
+        ("vit_max_batch_patches", 32768, "Maximum patches per ViT GPU forward"),
+        (
+            "vit_max_concurrent_requests",
+            32,
+            "Maximum in-flight requests per ViT worker",
+        ),
+    ):
+        vit_group.add_argument(
+            "--" + name,
+            env_name=name.upper(),
+            bind_to=(vit_config, name),
+            type=int,
+            default=default,
+            help=description,
+        )
     vit_group.add_argument(
         "--vit_separation",
         env_name="VIT_SEPARATION",

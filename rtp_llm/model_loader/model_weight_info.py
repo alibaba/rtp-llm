@@ -305,10 +305,24 @@ class ModelDeployWeightInfo:
         return ffn_config
 
     def get_weight_info(self) -> ModelWeightInfo:
-        weight_info = self._get_weight_info()
         # avoid circular import
         from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
 
+        if self.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+            if (
+                not isinstance(self, BaseMultiModalWeightInfo)
+                or self.vit_weights is None
+            ):
+                raise ValueError("ViT ROLE requires declared multimodal weights")
+            # Build only the visual descriptors. This also filters checkpoint
+            # shards before any load method reads weights, preserving each
+            # MMAtomicWeight's dtype override and avoiding LLM quantization.
+            weight_info = self._get_vit_info(ModelWeightInfo([], []))
+            if not weight_info.weights:
+                raise ValueError("ViT ROLE has no declared multimodal weights")
+            return weight_info
+
+        weight_info = self._get_weight_info()
         if (
             isinstance(self, BaseMultiModalWeightInfo)
             and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE

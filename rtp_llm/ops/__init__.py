@@ -211,6 +211,7 @@ _COMPUTE_SYMBOLS = {
 _ENGINE_SYMBOLS = {
     "EmbeddingCppOutput",
     "MultimodalInputCpp",
+    "get_multimodal_feature_hash",
     "RtpEmbeddingOp",
     "RtpLLMOp",
     "build_xgrammar_tokenizer_info_json",
@@ -270,6 +271,7 @@ def _load_compute_ops(required: bool = False) -> None:
 
 
 def _set_engine_fallbacks() -> None:
+    globals()["get_multimodal_feature_hash"] = EmptyClass
     globals()["MultimodalInputCpp"] = EmptyClass
     globals()["EmbeddingCppOutput"] = EmptyClass
     globals()["build_xgrammar_tokenizer_info_json"] = EmptyClass
@@ -295,8 +297,10 @@ def _load_engine_ops(required: bool = False) -> None:
                 RtpEmbeddingOp,
                 RtpLLMOp,
                 build_xgrammar_tokenizer_info_json,
+                get_multimodal_feature_hash,
             )
 
+            globals()["get_multimodal_feature_hash"] = get_multimodal_feature_hash
             globals()["EmbeddingCppOutput"] = EmbeddingCppOutput
             globals()["MultimodalInputCpp"] = MultimodalInputCpp
             globals()["RtpEmbeddingOp"] = RtpEmbeddingOp
