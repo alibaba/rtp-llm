@@ -6,7 +6,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.enums.TaskStateEnum;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -93,41 +92,4 @@ public class TaskInfo {
     private long kvcmP2pFetchTokens;
     @JsonIgnore
     private long kvcmP2pTotalMatchTokens;
-
-    // Task state related fields
-    private TaskStateEnum taskState = TaskStateEnum.CREATED;
-    private long lastActiveTimeUs = System.nanoTime() / 1000;
-    private long waitingConfirmTimeUs = -1;
-
-    public long estimatePrefillTime() {
-        return estimatePrefillTimeMs(inputLength, prefixLength);
-    }
-
-    public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
-        return tokens - hitCacheTokens;
-    }
-
-    /**
-     * Update task state
-     */
-    public void updateTaskState(TaskStateEnum newState) {
-        if (this.taskState != newState) {
-            this.taskState = newState;
-            this.lastActiveTimeUs = System.nanoTime() / 1000;
-        }
-    }
-
-    /**
-     * Check if task is lost
-     */
-    public boolean isLost() {
-        return taskState == TaskStateEnum.LOST;
-    }
-
-    /**
-     * Check if task is timed out
-     */
-    public boolean isTimeout(long currentTimeUs, long timeoutUs) {
-        return (currentTimeUs - lastActiveTimeUs) > timeoutUs;
-    }
 }
