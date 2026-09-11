@@ -5416,8 +5416,10 @@ public final class JavaMockEngineCluster {
         long getCrashEpoch() { return crashEpoch.get(); }
         boolean isStopped() { return stopped; }
         Map<String, String> whaleMetricTags() {
-            return Map.of("engine", engineName, "role", roleType.name(),
-                    "generation", processGeneration, "backend", "mock");
+            Map<String, String> tags = WhaleMockMonitor.engineTags(System.getenv(), host);
+            tags.putAll(Map.of("engine", engineName, "role", roleType.name(),
+                    "generation", processGeneration, "backend", "mock"));
+            return tags;
         }
 
         Map<String, Number> whaleMetrics() {
@@ -5433,7 +5435,19 @@ public final class JavaMockEngineCluster {
                     Map.entry("mock_decode_waiting_requests", decodePendingQueueSize() + decodeWaitingForKv.size()),
                     Map.entry("mock_decode_running_requests", activeDecodeRequests.get()),
                     Map.entry("mock_completed_requests_total", completedCount.get()),
-                    Map.entry("mock_cancelled_requests_total", cancelledCount.get()));
+                    Map.entry("mock_cancelled_requests_total", cancelledCount.get()),
+                    Map.entry("rtp_llm_running_stream_size", activePrefillRequests.get() + activeDecodeRequests.get()),
+                    Map.entry("rtp_llm_wait_stream_size", waitingPrefillRequests.get() + decodePendingQueueSize()),
+                    Map.entry("rtp_llm_remote_running_stream_size", decodeWaitingForKv.size()),
+                    Map.entry("rtp_llm_loading_cache_stream_size", decodeWaitingForKv.size()),
+                    Map.entry("rtp_llm_context_batch_size", activePrefillRequests.get()),
+                    Map.entry("rtp_llm_generate_batch_size", activeDecodeRequests.get()),
+                    Map.entry("rtp_llm_kv_cache_item_num", cache.lruKeyBlocks()),
+                    Map.entry("rtp_llm_kv_cache_free_blocks", cache.freeBlocks()),
+                    Map.entry("rtp_llm_kv_cache_available_blocks", cache.availableBlocks()),
+                    Map.entry("rtp_llm_kv_cache_left_seq", (long) cache.availableBlocks() * seqSizePerBlock),
+                    Map.entry("rtp_llm_kv_cache_used_ratio", cache.totalBlocks() == 0 ? 0.0
+                            : 100.0 * (cache.totalBlocks() - cache.availableBlocks()) / cache.totalBlocks()));
         }
         int getGrpcPort() { return grpcPort; }
         int getDownstreamOwnershipCount() { return downstreamDecodeOwners.size(); }

@@ -82,8 +82,14 @@ class MockRemoteDecodeEngineTest {
             stream.allocated().get(3, TimeUnit.SECONDS);
             assertEquals(1024, decode.getOccupiedKvTokens());
             assertEquals(0, decode.getActiveDecodeCount());
+            var metrics = decode.whaleMetrics();
+            assertEquals(7, metrics.get("rtp_llm_kv_cache_available_blocks").intValue());
+            assertEquals(12.5, metrics.get("rtp_llm_kv_cache_used_ratio").doubleValue());
+            assertEquals(7 * 1024L, metrics.get("rtp_llm_kv_cache_left_seq").longValue());
             stream.close();
             awaitDrain();
+            assertEquals(8, decode.whaleMetrics().get("rtp_llm_kv_cache_available_blocks").intValue());
+            assertEquals(0.0, decode.whaleMetrics().get("rtp_llm_kv_cache_used_ratio").doubleValue());
         }
     }
 

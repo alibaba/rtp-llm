@@ -87,7 +87,43 @@ class WhaleModeConfigurationTest {
         }
         try (WhaleMockMonitor monitor = WhaleMockMonitor.create()) {
             assertNotNull(monitor);
+            assertEquals("", Class.forName("com.taobao.kmonitor.impl.KMonitorConfig")
+                    .getMethod("getKMonitorServiceName").invoke(null),
+                    "engine series must not acquire the master whale-lb prefix");
         }
+    }
+
+    @Test
+    void engineLabelsMatchExistingGrafanaWildcardFilters() {
+        var tags = WhaleMockMonitor.engineTags(java.util.Map.of(
+                "HIPPO_APP", "whale_prod_test", "HIPPO_ROLE", "test.prefill-cpu_part0",
+                "HIPPO_SLAVE_IP", "10.0.0.1", "HIPPO_SERVICE_NAME", "test-group"), "10.1.0.2");
+        assertEquals("whale_prod_test", tags.get("hippo_app"));
+        assertEquals("test.prefill-cpu_part0", tags.get("hippo_role"));
+        assertEquals("10.0.0.1", tags.get("host_ip"));
+        assertEquals("10.1.0.2", tags.get("container_ip"));
+        for (String key : List.of("dp_rank", "priority", "mtp_model_type")) {
+            assertFalse(tags.get(key).isEmpty(), "wildcard filters require tag " + key);
+        }
+    }
+
+    @Test
+    void wallTpsUsesCounterDeltaAndReturnsToZeroWhenIdle() {
+        java.util.Map<String, Double> values = new java.util.HashMap<>();
+        var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("report") && args.length == 3)
+                        values.put((String) args[0], ((Number) args[2]).doubleValue());
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        long now = System.nanoTime();
+        monitor.sample(java.util.Map.of("mock_context_tokens_total", 0L), java.util.Map.of(), now);
+        monitor.sample(java.util.Map.of("mock_context_tokens_total", 400L), java.util.Map.of(), now + 2_000_000_000L);
+        assertEquals(200.0, values.get("rtp_llm_context_wall_tps_with_cache"));
+        monitor.sample(java.util.Map.of("mock_context_tokens_total", 400L), java.util.Map.of(), now + 3_000_000_000L);
+        assertEquals(0.0, values.get("rtp_llm_context_wall_tps_with_cache"));
     }
 
     @Test

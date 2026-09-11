@@ -48,4 +48,6 @@ Whale 健康探测使用 `START_PORT` 的 `/health`；停止/排空状态返回 
 
 Whale KMonitor 上报累计 context/generate token、KV tokens、waiting/running requests、completed/cancelled 数，以及按实际时间差计算的 TPS。所有指标带 engine、role、进程 generation、backend=mock 标签。累计 token 读数不被 HTTP 抓取消耗。
 
+引擎指标使用无 `whale-lb.` 前缀的 `rtp_llm_*` 名称，兼容现有引擎大盘。标签与 C++ 引擎一致：小写 hippo_app/hippo_role/hippo_group、host_ip（物理宿主）、container_ip（Pod）、dp_rank=0；mock 汇总吞吐使用 priority=0。队列、batch 和 KV 空闲/可用块等从 mock 状态读取，used_ratio 为不可用块占总量的百分比。mock 的 TPS 为采样窗口 token 增量除以墙钟时间，不代表真实 GPU step 的吞吐；不伪造 GPU 指标或优先级拆分。内部适配只复用 master 的 sink 初始化，mock 在自己的进程内创建不带 master 指标前缀的 reporter；生产 master 的监控代码和大盘无需修改。
+
 本地跨进程测试使用不同回环 IP 模拟 Pod，覆盖两个 D 同端口的地址路由、Fetch、显式无 Fetch、P 进程死亡和 D 进程死亡。真实 Whale 验收仍需核对镜像来源、平台注册、KMonitor 数据和 frontend→master→P→D→frontend；单测或镜像编译成功不能代替已部署验收。
