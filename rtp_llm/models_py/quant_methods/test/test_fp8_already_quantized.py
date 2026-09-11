@@ -1540,9 +1540,20 @@ class TestFp8AlreadyQuantizedForward(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be contiguous"):
             scaled_fp8_per_tensor_quant(non_contiguous)
 
-        misaligned = torch.ones(2, 3, dtype=torch.float16, device="cuda")
-        with self.assertRaisesRegex(ValueError, "native vector width"):
-            scaled_fp8_per_tensor_quant(misaligned)
+        # Per-tensor quantization supports scalar tails; only the per-token
+        # helper below retains its row-width alignment requirement.
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            with self.subTest(dtype=dtype):
+                misaligned = torch.linspace(
+                    -3.0, 2.0, 6, dtype=dtype, device="cuda"
+                ).reshape(2, 3)
+                output, scale = scaled_fp8_per_tensor_quant(misaligned)
+                expected_scale = (
+                    misaligned.float().abs().max() / torch.finfo(output.dtype).max
+                )
+                torch.testing.assert_close(scale.reshape(()), expected_scale)
+                expected = (misaligned.float() / expected_scale).to(output.dtype)
+                torch.testing.assert_close(output.float(), expected.float())
 
         invalid_width = torch.ones(2, 10, device="cuda")
         with self.assertRaisesRegex(ValueError, "divisible by 8"):
