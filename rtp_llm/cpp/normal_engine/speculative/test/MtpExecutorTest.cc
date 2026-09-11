@@ -2106,7 +2106,8 @@ TEST_P(MtpLinearCacheTest, testLinearKvCacheAsyncDispatchFeedsNextGather) {
     model.linear_attention_config.linear_conv_kernel_dim = 4;
     auto draft = model;
     draft.num_layers = 1;
-    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::SLIDING_WINDOW};
+    draft.attn_config.sliding_window = 8;
     ParallelismConfig parallelism;
     parallelism.tp_size = 8;
     parallelism.role_type = RoleType::DECODE;
@@ -2136,6 +2137,8 @@ TEST_P(MtpLinearCacheTest, testLinearKvCacheAsyncDispatchFeedsNextGather) {
     auto propose_params = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_EAGLE3, 4, std::move(mtp_params));
     MtpExecutor executor(params, propose_params, cache_manager);
     ASSERT_TRUE(executor.useAsyncLinearBlockSwap());
+    const auto draft_gid = cache_manager->getMTPModuleCacheLayerLayout(0).layer_to_groups[0];
+    EXPECT_EQ(executor.draft_kv_cache_group_types[draft_gid].item<int>(), static_cast<int>(CacheGroupType::SWA));
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     StreamSpecUpdateInfo first_token{torch::tensor({{3}}, torch::kInt32), 1, 4,

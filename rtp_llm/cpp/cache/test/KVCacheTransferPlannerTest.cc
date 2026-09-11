@@ -62,13 +62,31 @@ TEST(KVCacheTransferPlannerTest, FullGroupPreservesCpKeyOffsetMapping) {
     EXPECT_EQ(plan[2].offset_index, 3);
 }
 
-TEST(KVCacheTransferPlannerTest, RejectsInvalidRangeAndUnsupportedGroup) {
+TEST(KVCacheTransferPlannerTest, RejectsInvalidRange) {
     EXPECT_THROW(buildIncrementalCacheStoreBlockPlan(
                      4, 0, true, CacheGroupType::FULL, 0, 1, CacheStorePublishRange{3, 2, false}),
                  std::invalid_argument);
+}
+
+TEST(KVCacheTransferPlannerTest, SwaPublishesPhysicalWindowOnlyAfterTerminalWrite) {
+    for (bool hybrid : {false, true}) {
+        const auto intermediate = buildIncrementalCacheStoreBlockPlan(
+            8, 0, hybrid, CacheGroupType::SWA, 0, 1, CacheStorePublishRange{0, 6, false});
+        EXPECT_TRUE(intermediate.empty());
+        const auto terminal = buildIncrementalCacheStoreBlockPlan(
+            8, 0, hybrid, CacheGroupType::SWA, 0, 1, CacheStorePublishRange{6, 8, true});
+        ASSERT_EQ(terminal.size(), 2u);
+        for (int i = 0; i < 2; ++i) {
+            EXPECT_EQ(terminal[i].key_index, 6 + i);
+            EXPECT_EQ(terminal[i].offset_index, 6 + i);
+        }
+    }
     EXPECT_THROW(buildIncrementalCacheStoreBlockPlan(
-                     4, 0, true, CacheGroupType::SWA, 0, 1, CacheStorePublishRange{0, 2, false}),
+                     8, 0, true, CacheGroupType::SWA, 0, 1, CacheStorePublishRange{0, 7, true}),
                  std::invalid_argument);
+    EXPECT_TRUE(blockPositionsForCacheTransfer(0, 0, true, CacheGroupType::SWA).empty());
+    EXPECT_EQ(blockPositionsForCacheTransfer(1, 0, true, CacheGroupType::SWA),
+              (std::vector<size_t>{0}));
 }
 
 }  // namespace

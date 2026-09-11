@@ -1105,6 +1105,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     if (cache_manager) {
         target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
         draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
+        // Transfer keeps the allocator's SWA policy; the conversion below
+        // only exposes the same physical storage as MLA kernel pages.
+        draft_kv_cache_group_types = buildDraftCacheGroupTypes(cache_manager->cacheConfig(), draft_cache_layer_layout);
         if (propose_params->sp_type == SP_TYPE_EAGLE3) {
             // EAGLE-3's runtime layer is dense MLA even when its checkpoint
             // reuses a target config whose layer 0 is linear attention. The
@@ -1239,7 +1242,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         torch::empty({(int64_t)target_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32).pin_memory();
     draft_kv_cache_layer_to_group =
         torch::empty({(int64_t)draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32).pin_memory();
-    draft_kv_cache_group_types = buildDraftCacheGroupTypes(target_cache_config, draft_cache_layer_layout);
+    if (!cache_manager) {
+        draft_kv_cache_group_types = buildDraftCacheGroupTypes(target_cache_config, draft_cache_layer_layout);
+    }
 
     memcpy(target_kv_cache_layer_to_group.data_ptr<int>(),
            target_cache_layer_layout.layer_to_groups.data(),

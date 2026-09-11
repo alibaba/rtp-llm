@@ -305,8 +305,9 @@ protected:
         return config;
     }
 
-    CacheConfig makeIndependentHybridEagleConfig() {
-        auto make_model_config = [](uint32_t num_layers) {
+    CacheConfig makeIndependentHybridEagleConfig(bool use_mla = false, int cp_size = 1, int kernel_tokens = 4, int window = 3, bool decode = false, int tp_size = 0) {
+        const int model_tp_size = tp_size > 0 ? tp_size : cp_size;
+        auto make_model_config = [use_mla](uint32_t num_layers) {
             ModelConfig config;
             config.num_layers                   = static_cast<int64_t>(num_layers);
             config.max_seq_len                  = 128;
@@ -318,6 +319,11 @@ protected:
             config.attn_config.size_per_head    = 16;
             config.attn_config.tokens_per_block = 4;
             config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            if (use_mla) {
+                config.attn_config.use_mla = true;
+                config.attn_config.kv_lora_rank = 16;
+                config.attn_config.rope_head_dim = 8;
+            }
             return config;
         };
 
@@ -334,18 +340,22 @@ protected:
         propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
         propose_model_config.hybrid_attention_config.hybrid_attention_types            = {
             HybridAttentionType::SLIDING_WINDOW};
-        propose_model_config.attn_config.sliding_window = 8;
+        propose_model_config.attn_config.sliding_window = window;
         score_model_config.linear_attention_config.linear_conv_kernel_dim = 2;
         score_model_config.linear_attention_config.linear_key_head_dim    = 8;
         score_model_config.linear_attention_config.linear_value_head_dim  = 8;
-        score_model_config.linear_attention_config.linear_num_key_heads   = 2;
-        score_model_config.linear_attention_config.linear_num_value_heads = 2;
+        score_model_config.linear_attention_config.linear_num_key_heads   = 2 * model_tp_size;
+        score_model_config.linear_attention_config.linear_num_value_heads = 2 * model_tp_size;
 
         ParallelismConfig parallelism_config;
-        parallelism_config.tp_size = 1;
+        parallelism_config.tp_size = model_tp_size;
+        parallelism_config.role_type = decode ? RoleType::DECODE : RoleType::PREFILL;
+        parallelism_config.prefill_cp_config.kv_cache_sharded = !decode && cp_size > 1;
+        parallelism_config.decode_cp_kv_cache_sharded = decode && cp_size > 1;
         RuntimeConfig runtime_config;
         KVCacheConfig kv_cache_config;
         kv_cache_config.test_block_num = 8;
+        kv_cache_config.kernel_seq_size_per_block = kernel_tokens;
         SpeculativeExecutionConfig sp_config;
         sp_config.type              = SP_TYPE_EAGLE3;
         sp_config.gen_num_per_cycle = 3;
@@ -941,19 +951,49 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     }
 }
 
-TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) {
+using EagleDraftTransferCase = std::tuple<bool, int, int, int, int, int, int, int, int>;
+
+class EagleDraftTransferTest: public PdSepKVCacheReleaseTest,
+                              public testing::WithParamInterface<EagleDraftTransferCase> {};
+
+// Real writer -> CacheStore bytes -> DecodeRpcServer. CP-off still runs TP8;
+// distinguish source/destination ranks, P/K views, partial pages and reserve.
+INSTANTIATE_TEST_SUITE_P(CacheView, EagleDraftTransferTest,
+    testing::ValuesIn([] {
+        std::vector<EagleDraftTransferCase> cases{{false, 1, 4, 1, 3, 0, 0, 0, 16}};
+        for (int source_cp : {1, 8}) {
+            for (int destination_cp : {1, 8}) {
+                for (int kernel_page : {2, 4}) {
+                    for (int rank : {0, 3, 7}) {
+                        for (int length : {15, 16}) {
+                            cases.emplace_back(true, source_cp, kernel_page, destination_cp,
+                                               3, 5, rank, rank == 3 ? 7 : (rank == 7 ? 3 : 0), length);
+                        }
+                    }
+                }
+            }
+        }
+        cases.emplace_back(true, 8, 2, 1, 4, 5, 7, 3, 16);
+        cases.emplace_back(true, 8, 2, 8, 1, 5, 3, 7, 15);
+        return cases;
+    }()));
+
+TEST_P(EagleDraftTransferTest, testEagleDraftLoadUsesIndependentPhysicalGroup) {
     const int64_t request_id    = 9019;
     const size_t  draft_model_id = 1;
     const int     block_num      = 4;
 
-    auto config = makeIndependentHybridEagleConfig();
+    const auto [use_mla, cp_size, kernel_tokens, decode_cp_size, window, reserve, source_rank, destination_rank, token_count] = GetParam();
+    auto config = makeIndependentHybridEagleConfig(use_mla, cp_size, kernel_tokens, window, false, 8);
+    auto decode_config = makeIndependentHybridEagleConfig(use_mla, decode_cp_size, kernel_tokens, window, true, 8);
+    const size_t tail_blocks = 2;
     ASSERT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.group_types,
               std::vector<CacheGroupType>({CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}));
     ASSERT_EQ(config.layer_to_group_id[4], 2);
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
 
-    auto make_resource = [&config]() {
+    auto make_resource = [](const CacheConfig& config) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
         resource->initGroups(config.groupNums(),
@@ -965,37 +1005,54 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
         return resource;
     };
     const int spb = static_cast<int>(config.seq_size_per_block);
-    auto make_complete_tokens = [spb, block_num]() {
+    auto make_complete_tokens = [spb, block_num, token_count]() {
         auto input             = std::make_shared<GenerateInput>();
-        input->input_ids       = torch::arange(block_num * spb, torch::kInt32);
+        input->input_ids       = torch::arange(token_count, torch::kInt32);
         input->generate_config = std::make_shared<GenerateConfig>();
-        auto complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, (block_num + 1) * spb, spb);
+        auto complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, (block_num + 8) * spb, spb);
         complete_token_ids->init(input);
-        complete_token_ids->setSeqLength(block_num * spb);
+        complete_token_ids->setSeqLength(token_count);
         return complete_token_ids;
     };
 
-    auto prefill_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
-    auto decode_manager  = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    ParallelismConfig source_parallel, destination_parallel;
+    source_parallel.tp_size = destination_parallel.tp_size = 8;
+    source_parallel.tp_rank = source_rank;
+    source_parallel.role_type = RoleType::PREFILL;
+    source_parallel.prefill_cp_config.kv_cache_sharded = cp_size > 1;
+    destination_parallel.tp_rank = destination_rank;
+    destination_parallel.role_type = RoleType::DECODE;
+    destination_parallel.decode_cp_kv_cache_sharded = decode_cp_size > 1;
+    auto prefill_manager = std::make_shared<KVCacheManager>(config, true, nullptr, KVCacheConfig{}, source_parallel);
+    auto decode_manager = std::make_shared<KVCacheManager>(decode_config, true, nullptr, KVCacheConfig{}, destination_parallel);
+    // In-process peers retain real topology without a distributed allocation collective.
+    prefill_manager->config_.block_num = config.block_num;
+    decode_manager->config_.block_num = decode_config.block_num;
     ASSERT_TRUE(prefill_manager->init());
     ASSERT_TRUE(decode_manager->init());
 
-    auto prefill_resource = make_resource();
-    auto decode_resource  = make_resource();
-    ASSERT_TRUE(prefill_manager
-                    ->malloc({prefill_resource, make_complete_tokens(), request_id, true, false, false})
-                    .success);
-    ASSERT_TRUE(
-        decode_manager->malloc({decode_resource, make_complete_tokens(), request_id, true, false, false}).success);
+    auto prefill_resource = make_resource(config);
+    // Fragment the destination so matching logical pages cannot accidentally
+    // pass by sharing source physical IDs.
+    auto guard_resource = make_resource(decode_config);
+    auto guard_tokens = make_complete_tokens();
+    guard_tokens->setSeqLength(1);
+    ASSERT_TRUE(decode_manager->malloc({guard_resource, guard_tokens, 9018, true, false, false}).success);
+    auto decode_resource  = make_resource(decode_config);
+    MallocInfo prefill_malloc{prefill_resource, make_complete_tokens(), request_id, true, false, false};
+    prefill_malloc.reuse_cache = use_mla;
+    ASSERT_TRUE(prefill_manager->malloc(prefill_malloc).success);
+    auto decode_tokens = make_complete_tokens();
+    decode_tokens->setReserveStep(reserve);
+    ASSERT_TRUE(decode_manager->malloc({decode_resource, decode_tokens, request_id, true, false, false}).success);
 
     const int physical_draft_gid = config.layer_to_group_id[4];
     ASSERT_EQ(physical_draft_gid, 2);
     const auto& draft_blocks = prefill_resource->blocks(0, physical_draft_gid);
     ASSERT_EQ(draft_blocks.size(), static_cast<size_t>(block_num));
-    EXPECT_TRUE(isNullBlockIdx(draft_blocks[0]));
-    EXPECT_TRUE(isNullBlockIdx(draft_blocks[1]));
-    EXPECT_FALSE(isNullBlockIdx(draft_blocks[2]));
-    EXPECT_FALSE(isNullBlockIdx(draft_blocks[3]));
+    for (size_t page = 0; page < block_num; ++page) {
+        EXPECT_EQ(isNullBlockIdx(draft_blocks[page]), !use_mla && page < block_num - tail_blocks);
+    }
 
     std::vector<CacheKeyType> cache_keys;
     std::vector<std::string>  cache_key_strings;
@@ -1012,14 +1069,17 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
     auto draft_layout        = prefill_manager->getMTPModuleCacheLayerLayout(0);
     ASSERT_EQ(draft_layout.layer_to_groups, std::vector<int>({physical_draft_gid}));
     ASSERT_EQ(draft_layout.layers_to_kv_buffer_ptrs.size(), 1u);
-    draft_layout.layers_to_kv_buffer_ptrs[0].fill_(42);
+    draft_layout.layers_to_kv_buffer_ptrs[0].view(torch::kUInt8).fill_(0xCC);
+    for (size_t block_pos = block_num - tail_blocks; block_pos < block_num; ++block_pos) {
+        draft_layout.layers_to_kv_buffer_ptrs[0][draft_blocks[block_pos]].view(torch::kUInt8).fill_(42 + block_pos);
+    }
+    decode_manager->getMTPModuleCacheLayerLayout(0).layers_to_kv_buffer_ptrs[0].view(torch::kUInt8).fill_(0xEE);
 
-    CacheStoreInputs inputs;
-    inputs.input_lengths_host           = torch::tensor({block_num * spb}, torch::kInt32);
-    inputs.prefix_lengths_host          = torch::tensor({0}, torch::kInt32);
-    inputs.host_kv_cache_offset         = blockIdsTensor(prefill_resource, physical_draft_gid);
-    inputs.kv_cache_layer_to_group_host = torch::tensor({physical_draft_gid}, torch::kInt32);
-    inputs.kv_cache_group_types_host =
+    torch_ext::PyCacheStoreInputs inputs;
+    inputs.input_lengths_host          = torch::tensor({token_count}, torch::kInt32);
+    inputs.prefix_lengths_host         = torch::tensor({0}, torch::kInt32);
+    inputs.kv_cache_layer_to_group     = torch::tensor({physical_draft_gid}, torch::kInt32);
+    inputs.kv_cache_group_types =
         torch::from_blob(group_types.data(), {(int64_t)group_types.size()}, torch::kInt32).clone();
     inputs.context_batch_size          = 1;
     inputs.decoder_batch_size          = 0;
@@ -1034,20 +1094,54 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
     inputs.decode_entrance             = false;
     inputs.warmup                      = false;
     inputs.use_opaque_kv_cache_store   = draft_config.use_opaque_kv_cache_store;
-    inputs.layer_id                    = 0;
-    inputs.region_name                 = KVCacheRegionName::DEFAULT;
-
-    KvCacheInfo kv_cache_info;
-    kv_cache_info.kv_cache_buffer = draft_layout.layers_to_kv_buffer_ptrs[0];
+    inputs.cp_size                    = config.cp_size;
+    inputs.cp_rank                    = source_rank;
+    inputs.mla_kvcache                = config.use_mla;
+    torch_ext::KVCache runtime_cache;
+    runtime_cache.seq_size_per_block = spb;
+    runtime_cache.kernel_seq_size_per_block = kernel_tokens;
+    runtime_cache.use_mla = config.use_mla;
+    runtime_cache.kv_lora_rank = 16;
+    runtime_cache.rope_head_dim = 8;
+    runtime_cache.num_kv_heads = draft_config.cache_specs[0]->local_head_num_kv;
+    runtime_cache.head_dim = 16;
+    runtime_cache.kv_cache_base_by_layer = draft_layout.layers_to_kv_buffer_ptrs;
+    runtime_cache.layer_group_types = {CacheGroupType::FULL};  // Eagle3 runtime conversion, not transfer policy.
+    auto layer = runtime_cache.getLayerCache(0);
+    ASSERT_EQ(layer.seq_size_per_block, kernel_tokens);
+    EXPECT_EQ(layer.kv_cache_base.data_ptr(), draft_layout.layers_to_kv_buffer_ptrs[0].data_ptr());
     auto cache_store              = std::make_shared<MemoryBackedCacheStore>();
-    runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
+    inputs.cache_store = cache_store;
+    auto block_ids = blockIdsTensor(prefill_resource, physical_draft_gid);
+    auto write = [&](std::optional<torch_ext::PyCacheStorePublishPlan> plan) {
+        WriteCacheStoreOp(inputs.input_lengths_host, inputs.prefix_lengths_host, block_ids, inputs, layer, plan);
+    };
+    if (token_count % spb == 0) {
+        write(std::nullopt);
+    } else {
+        write(torch_ext::PyCacheStorePublishPlan{torch::tensor({0}, torch::kInt32),
+              torch::tensor({block_num}, torch::kInt32), torch::tensor({true}, torch::kBool)});
+    }
     ASSERT_EQ(cache_store->store_request_keys_.size(), 1u);
-    ASSERT_EQ(cache_store->stored_blocks_.size(), 4u);
+    const size_t parts_per_block = config.use_mla ? 1 : 2;
+    ASSERT_EQ(cache_store->stored_blocks_.size(), tail_blocks * parts_per_block);
+    // Real chunk publication must defer SWA until the terminal pass, then
+    // publish the same physical tail despite its smaller runtime kernel pages.
+    const auto legacy_bytes = cache_store->stored_blocks_;
+    cache_store->stored_blocks_.clear();
+    torch_ext::PyCacheStorePublishPlan publish{torch::tensor({0}, torch::kInt32),
+                                               torch::tensor({block_num}, torch::kInt32),
+                                               torch::tensor({false}, torch::kBool)};
+    write(publish);
+    EXPECT_TRUE(cache_store->stored_blocks_.empty());
+    publish.terminal_host.fill_(true);
+    write(publish);
+    EXPECT_EQ(cache_store->stored_blocks_, legacy_bytes);
 
     EngineInitParams params;
     params.model_id                 = 0;
     params.model_config_.num_layers = 0;
-    params.parallelism_config       = ParallelismConfig();
+    params.parallelism_config       = destination_parallel;
     auto mtp_model_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
     auto mtp_params        = std::make_unique<EngineInitParams>();
     mtp_params->model_id                 = draft_model_id;
@@ -1062,7 +1156,18 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
     server.propose_maga_init_params_ = propose_params.get();
     server.resource_.cache_store     = cache_store;
 
-    std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
+    std::vector<std::string> peer_addrs;
+    for (int peer = 0; peer < cp_size; ++peer) {
+        const auto ip = "127.0.0." + std::to_string(peer + 1);
+        peer_addrs.push_back(ip + ":12345:12346");
+        auto peer_store = std::make_shared<MemoryBackedCacheStore>();
+        if (peer == 0) {
+            peer_store->stored_blocks_ = cache_store->stored_blocks_;
+        }
+        // Other peers deliberately lack the keys: replicated SWA must not fan
+        // out like FULL owner-sharded KV.
+        cache_store->peer_stores_[ip] = std::move(peer_store);
+    }
     grpc::ServerContext                 server_context;
     DecodeRpcServer::LoadKVCacheContext load_context(request_id,
                                                      "eagle-independent-draft-pd",
@@ -1073,27 +1178,48 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
                                                      /*partition_id=*/0,
-                                                     &server_context);
+                                                     &server_context, cp_size);
     auto status = server.loadCache(load_context);
     ASSERT_TRUE(status.ok()) << status.ToString();
     ASSERT_EQ(cache_store->load_buffer_requests_.size(), 1u);
-    EXPECT_EQ(cache_store->load_buffer_requests_[0]->getBlocks().size(), 4u);
+    EXPECT_EQ(cache_store->load_buffer_requests_[0]->getBlocks().size(), tail_blocks * parts_per_block);
     EXPECT_EQ(cache_store->load_request_keys_.size(), 1u);
 
     std::unordered_set<void*> expected_destination_addrs;
     const auto&               decode_draft_blocks = decode_resource->blocks(0, physical_draft_gid);
-    for (size_t block_pos : {size_t{2}, size_t{3}}) {
+    if (reserve > 0) {
+        ASSERT_GT(decode_draft_blocks.size(), static_cast<size_t>(block_num));
+    }
+    for (size_t block_pos = block_num - tail_blocks; block_pos < block_num; ++block_pos) {
+        EXPECT_NE(decode_draft_blocks[block_pos], draft_blocks[block_pos]);
         auto parts = decode_manager->convertIndexToBuffer(
             decode_draft_blocks[block_pos], /*global_layer_id=*/4, /*partition_count=*/1, /*partition_id=*/0);
-        ASSERT_EQ(parts.size(), 2u);
-        expected_destination_addrs.insert(parts[0].addr);
-        expected_destination_addrs.insert(parts[1].addr);
+        ASSERT_EQ(parts.size(), parts_per_block);
+        for (const auto& part : parts) {
+            expected_destination_addrs.insert(part.addr);
+            auto actual_bytes = torch::from_blob(part.addr, {static_cast<int64_t>(part.size_bytes)},
+                                                 torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+            EXPECT_TRUE(actual_bytes.eq(42 + block_pos).all().item<bool>());
+        }
     }
     std::unordered_set<void*> actual_destination_addrs;
     for (const auto& [key, block] : cache_store->load_buffer_requests_[0]->getBlocks()) {
         actual_destination_addrs.insert(block->addr.get());
     }
     EXPECT_EQ(actual_destination_addrs, expected_destination_addrs);
+    for (size_t page = block_num; page < decode_draft_blocks.size(); ++page) {
+        if (!isNullBlockIdx(decode_draft_blocks[page])) {
+            auto parts = decode_manager->convertIndexToBuffer(decode_draft_blocks[page], 4, 1, 0);
+            for (const auto& part : parts) {
+                auto bytes = torch::from_blob(part.addr, {static_cast<int64_t>(part.size_bytes)},
+                    torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+                EXPECT_TRUE(bytes.eq(0xEE).all().item<bool>());
+            }
+        }
+    }
+    prefill_manager->free({prefill_resource, prefill_malloc.complete_token_ids});
+    decode_manager->free({decode_resource, decode_tokens});
+    decode_manager->free({guard_resource, guard_tokens});
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testCpMlaDirectLoadUsesGlobalKeysAndLocalDestinationRows) {

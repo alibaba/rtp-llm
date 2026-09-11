@@ -921,8 +921,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return layer_gids;
     };
-    auto groupType = [](const CacheConfig& cfg, bool use_hybrid, size_t gid) {
-        if (use_hybrid && gid < cfg.group_types.size()) {
+    auto groupType = [](const CacheConfig& cfg, size_t gid) {
+        if (gid < cfg.group_types.size()) {
             return cfg.group_types[gid];
         }
         return CacheGroupType::FULL;
@@ -1022,6 +1022,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                      CacheGroupType     group_type,
                                      KVCacheRegionName  region_name,
                                      size_t             gid) {
+        if (group_type == CacheGroupType::SWA && region_name == KVCacheRegionName::DEFAULT
+            && cfg.cache_specs[gid]->type == KVCacheSpecType::MultiHeadLatentAttention
+            && cfg.cache_specs[gid]->seq_size_per_block == cfg.seq_size_per_block) {
+            // The destination may have reserve rows beyond the transferred
+            // prefix. Choose the window from valid source keys, not those rows.
+            const size_t valid_blocks = std::min(block_num, load_context.cache_keys.size());
+            return blockPositionsForCacheTransfer(
+                valid_blocks, 0, /*use_hybrid=*/true, group_type);
+        }
         if (group_type == CacheGroupType::FULL && destination_cp_mapper) {
             // These positions index a local table; reuse is in global P-pages
             // and must be filtered after converting each position to a key.
@@ -1118,7 +1127,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 if (use_typed_regions && gid < cache_config.group_region_names.size()) {
                     region_name = cache_config.group_region_names[gid];
                 }
-                CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
+                CacheGroupType group_type = groupType(cache_config, gid);
 
                 RTP_LLM_CHECK_WITH_INFO(gid < cache_config.cache_specs.size(),
                                         "group id %zu is outside cache_specs size %zu",
@@ -1288,7 +1297,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto        block_num = block_ids.size();
                             size_t      model_id  = mtp_base_model_id;
 
-                            CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
+                            CacheGroupType group_type     = groupType(mtp_cache_cfg, gid);
                             auto           block_pos_list = blockPositionsForLoad(
                                 block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
 

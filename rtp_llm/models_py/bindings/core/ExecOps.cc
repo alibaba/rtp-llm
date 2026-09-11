@@ -309,6 +309,16 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
         }
 
+        // SWA retention does not imply CP-compacted rows: Eagle3 keeps
+        // ordinary physical pages, while existing compact SWA uses P*C.
+        int plan_cp_size = param.cp_size;
+        if (group_type == CacheGroupType::SWA && param.cache_view_tokens_per_block != 0) {
+            RTP_LLM_CHECK_WITH_INFO(param.cache_view_tokens_per_block == seq_size_per_block
+                                        || param.cache_view_tokens_per_block == seq_size_per_block * param.cp_size,
+                                    "SWA transfer row interval must be P or P*C");
+            plan_cp_size = static_cast<int>(param.cache_view_tokens_per_block / seq_size_per_block);
+        }
+
         // An explicit plan is authoritative: attention may execute a terminal
         // singleton at an unaligned prefix while CacheStore republishes the
         // complete physical block containing it. Legacy publication continues
@@ -454,7 +464,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 use_group_cache_transfer_policy,
                 group_type,
                 param.cp_rank,
-                param.cp_size,
+                plan_cp_size,
                 CacheStorePublishRange{static_cast<size_t>(publish_begin_block),
                                        static_cast<size_t>(publish_end_block),
                                        publish_plan.terminal_host.data_ptr<bool>()[batch_id]});
@@ -466,7 +476,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                                   use_group_cache_transfer_policy,
                                                   group_type,
                                                   param.cp_rank,
-                                                  param.cp_size);
+                                                  plan_cp_size);
         }
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);

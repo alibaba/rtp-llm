@@ -301,6 +301,9 @@ struct CacheStoreInputs {
     // Incremental chunked-Prefill publication starts after the already
     // published prefix. Legacy/non-chunked hybrid FULL groups start at zero.
     bool cache_store_full_from_begin = true;
+    // Logical interval of one transferred physical row, not the runtime
+    // kernel page. Zero preserves legacy direct C++ callers' CP mapping.
+    size_t cache_view_tokens_per_block = 0;
 };
 
 struct AttentionCommonInputs {

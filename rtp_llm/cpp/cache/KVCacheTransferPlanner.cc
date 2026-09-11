@@ -88,18 +88,18 @@ buildIncrementalCacheStoreBlockPlan(size_t                        total_logical_
         throw std::invalid_argument("incremental cache-store range is outside the logical block table");
     }
 
-    if (group_type == CacheGroupType::LINEAR) {
+    if (group_type == CacheGroupType::LINEAR || group_type == CacheGroupType::SWA) {
         if (!publish_range.terminal) {
             return {};
         }
         if (publish_range.end_block != total_logical_blocks) {
-            throw std::invalid_argument("terminal LINEAR publication must reach the final logical block");
+            throw std::invalid_argument("terminal LINEAR/SWA publication must reach the final logical block");
         }
         return buildCacheStoreBlockPlan(
             total_logical_blocks, reuse_block_size, /*use_hybrid=*/true, group_type, cp_rank, cp_size);
     }
     if (group_type != CacheGroupType::FULL) {
-        throw std::invalid_argument("incremental cache-store only supports FULL and LINEAR groups");
+        throw std::invalid_argument("incremental cache-store only supports FULL, LINEAR and SWA groups");
     }
 
     auto plan = buildCacheStoreBlockPlan(

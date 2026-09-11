@@ -133,6 +133,9 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 std::move(event),
                                 captured_cache_store.cache_store_full_from_begin};
 
+        inputs.cache_view_tokens_per_block = captured_kv_cache.cache_store_tensor_is_kernel_block_view ?
+                                                  store_tokens_per_block : captured_kv_cache.seq_size_per_block;
+
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;
         kv_cache_info.kv_scale_buffer =
