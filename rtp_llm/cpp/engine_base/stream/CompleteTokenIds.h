@@ -24,7 +24,11 @@ public:
     int batchSize();
 
     bool matchEosToken(int batch_id, int token_id);
-    bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words);
+    bool matchStopWordsList(int                     batch_id,
+                            const std::vector<int>& stop_words,
+                            int                     input_length = 0,
+                            bool                    in_think_mode = false,
+                            const std::vector<int>& end_think_token_ids = {});
     bool
     matchThinkEndToken(int batch_id, const std::vector<int>& end_think_token_ids, int input_length, int max_new_tokens);
 

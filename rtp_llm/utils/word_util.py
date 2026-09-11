@@ -117,6 +117,20 @@ def get_stop_word_slices(
     return result
 
 
+def stop_words_content_start(
+    token_ids: List[int], in_think_mode: bool, end_think_token_ids: List[int]
+) -> int:
+    """First token eligible for stop-word matching; protect an unfinished think block."""
+    if not in_think_mode:
+        return 0
+    if end_think_token_ids:
+        size = len(end_think_token_ids)
+        for i in range(len(token_ids) - size + 1):
+            if token_ids[i : i + size] == end_think_token_ids:
+                return i + size
+    return len(token_ids)
+
+
 def is_truncated(
     input_str: str, trunc_strs: List[str], is_streaming: bool, slice: bool = False
 ) -> bool:

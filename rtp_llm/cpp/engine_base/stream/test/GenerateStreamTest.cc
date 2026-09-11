@@ -442,7 +442,7 @@ TEST_F(GenerateStreamTest, testThinkingLogprobsContentBoundaryUsesFirstCloseToke
     EXPECT_EQ(stream->logprobsContentOffset(torch::tensor({{9}}, torch::kInt32), 1), 0);
 }
 
-TEST_F(GenerateStreamTest, testThinkingLogprobsPhaseIgnoresCloseTokenTrimmedAfterStop) {
+TEST_F(GenerateStreamTest, testThinkingLogprobsPhaseKeepsCloseTokenAfterIgnoredStop) {
     auto config                 = std::make_shared<GenerateConfig>();
     config->return_logprobs     = true;
     config->top_logprobs        = 1;
@@ -470,8 +470,8 @@ TEST_F(GenerateStreamTest, testThinkingLogprobsPhaseIgnoresCloseTokenTrimmedAfte
                     -1,
                     2});
 
-    EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{1, 7}));
-    EXPECT_FALSE(stream->hasLogprobsContentStarted());
+    EXPECT_EQ(stream->completeTokenIdsVec(), (std::vector<int>{1, 7, 8}));
+    EXPECT_TRUE(stream->hasLogprobsContentStarted());
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that
@@ -551,6 +551,59 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateBackCompatWrappers) {
     ASSERT_FALSE(stream->getAcceptTokensGpu().defined());
     ASSERT_FALSE(stream->getNextSeqLenGpu().defined());
     ASSERT_FALSE(stream->getProposeTokensGpu().defined());
+}
+
+
+// CPU token-matching regression cases, independent of model sampling.
+TEST(CompleteTokenIdsStopWordsTest, OnlyContentStopsThinkingRequests) {
+    auto input = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids = torch::tensor({8, 9, 7}, torch::kInt32);
+    CompleteTokenIds ids(1, 1, 64, 1);
+    ids.init(input);
+    const auto append = [&](std::vector<int> tokens) {
+        const int old_len = ids.seqLength();
+        std::copy(tokens.begin(), tokens.end(), ids.data(0) + old_len);
+        ids.setSeqLength(old_len + tokens.size());
+    };
+    append({7, 8});
+    // The prompt's closing marker and an incomplete generated marker do not count.
+    EXPECT_FALSE(ids.matchStopWordsList(0, {7}, 3, true, {8, 9}));
+    append({9, 6, 7, 5});
+    EXPECT_FALSE(ids.matchStopWordsList(0, {8, 9}, 3, true, {8, 9}));
+    EXPECT_FALSE(ids.matchStopWordsList(0, {9, 6}, 3, true, {8, 9}));
+    EXPECT_TRUE(ids.matchStopWordsList(0, {7}, 3, true, {8, 9}));
+    EXPECT_EQ(ids.completeTokenIdsVec(0), (std::vector<int>{8, 9, 7, 7, 8, 9, 6, 7}));
+}
+
+TEST(CompleteTokenIdsStopWordsTest, MultiTokenStopAcrossUpdatesAndMissingMarker) {
+    auto input = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids = torch::tensor({1}, torch::kInt32);
+    CompleteTokenIds ids(1, 1, 64, 1);
+    ids.init(input);
+    std::vector<int> tokens{7, 6, 8, 9, 7};
+    std::copy(tokens.begin(), tokens.end(), ids.data(0) + 1);
+    ids.setSeqLength(6);
+    EXPECT_FALSE(ids.matchStopWordsList(0, {7, 6}, 1, true, {8, 9}));
+    ids.data(0)[6] = 6;
+    ids.setSeqLength(7);
+    EXPECT_FALSE(ids.matchStopWordsList(0, {7, 6}, 1, true, {}));
+    EXPECT_TRUE(ids.matchStopWordsList(0, {7, 6}, 1, true, {8, 9}));
+    EXPECT_EQ(ids.seqLength(), 7);
+}
+
+TEST_F(GenerateStreamTest, StopWordsIgnoreThinkAndHonorMinTokens) {
+    auto config = std::make_shared<GenerateConfig>();
+    config->in_think_mode = true;
+    config->end_think_token_ids = {8, 9};
+    config->stop_words_list = {{7}};
+    config->min_new_tokens = 4;
+    auto stream = GenerateStreamBuilder().createContextStream({1}, config);
+    stream->update({torch::tensor({{7, 8, 9}}, torch::kInt32), 3});
+    EXPECT_FALSE(stream->isFinished());
+    stream->update({torch::tensor({{7}}, torch::kInt32), 1});
+    EXPECT_TRUE(stream->isFinished());
 }
 
 }  // namespace rtp_llm

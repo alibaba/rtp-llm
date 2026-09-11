@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, Mock
 
 import torch
 
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -15,6 +16,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RendererParams,
     StreamStatus,
+    StreamStatusSync,
 )
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
@@ -205,6 +207,7 @@ class ProcessStopWordsTest(TestCase):
         self.renderer._process_stop_words = (
             CustomChatRenderer._process_stop_words.__get__(self.renderer)
         )
+        self.renderer._stop_words_thinking_enabled = Mock(return_value=False)
         self.status = StreamStatus(Mock())
         self.status.finish_reason = None
 
@@ -529,11 +532,8 @@ class TestStopWordTruncation(_RendererTestBase):
         """String-level stop word that doesn't correspond to a token boundary.
         Token-level truncation doesn't fire; _process_stop_words handles it.
 
-        Known limitation: _process_streaming_tokens doesn't break on
-        finish_reason, so tokens after the string-level stop word still get
-        processed and emitted in the same chunk. In production this is masked
-        because the engine stops generating when it hits stop words at the
-        token level.  Here we test the actual (imperfect) renderer behavior."""
+        Tokens after the string-level stop must not be emitted, even when
+        they arrive in the same MTP chunk."""
         tokenizer = self._make_tokenizer({100: "Hello", 101: "<|end|>", 102: "world"})
         renderer = self._make_renderer(tokenizer, stop_word_ids_list=[])
         status = await self._make_status(renderer)
@@ -549,9 +549,8 @@ class TestStopWordTruncation(_RendererTestBase):
             stop_word_slice_list=stop_word_slice_list,
             is_streaming=True,
         )
-        # "world" leaks because the per-token loop doesn't break on finish_reason.
-        # In production the engine wouldn't generate token 102 after stop word.
-        self.assertEqual(delta.output_str, "Helloworld")
+        # Stop processing the rest of the MTP chunk after a textual stop.
+        self.assertEqual(delta.output_str, "Hello")
         self.assertEqual(status.finish_reason, FinisheReason.stop)
 
     async def test_string_level_stop_word_single_token_per_chunk(self):
@@ -643,6 +642,184 @@ class TestStopWordTruncation(_RendererTestBase):
             is_streaming=True,
         )
         self.assertEqual(delta2.output_str, "")
+
+
+class ThinkingStopWordsTest(_RendererTestBase):
+    def make_thinking_renderer(self):
+        tokenizer = self._make_tokenizer({i: chr(i) for i in range(1, 128)})
+        tokenizer.encode = lambda text, **kwargs: list(map(ord, text))
+        renderer = self._make_renderer(
+            tokenizer, stop_word_ids_list=[list(map(ord, "STOP"))]
+        )
+        renderer.in_think_mode = lambda request: True
+        renderer.think_end_tag = "</think>"
+        return renderer
+
+    async def test_token_stops_only_after_complete_think_end(self):
+        renderer = self.make_thinking_renderer()
+        request = (await self._make_status(renderer)).request
+        for text, expected in [
+            ("STOP", "STOP"),
+            ("STOP</think", "STOP</think"),
+            ("STOP</think>answerSTOPextra", "STOP</think>answer"),
+            ("STOP</think>answerSTOP", "STOP</think>answer"),
+        ]:
+            with self.subTest(text=text):
+                ids = list(map(ord, text))
+                actual = renderer._remove_stop_word_ids(ids, ids, request=request)
+                self.assertEqual(renderer.tokenizer.decode(actual), expected)
+                expected_finish = (
+                    FinisheReason.stop if text.endswith("answerSTOP") else None
+                )
+                self.assertEqual(
+                    renderer._check_finish_reason(ids, 0, request=request),
+                    expected_finish,
+                )
+
+        # The marker itself and a stop spanning the phase boundary are protected.
+        renderer.stop_words_id_list = [
+            list(map(ord, "</think>")),
+            list(map(ord, ">answer")),
+        ]
+        ids = list(map(ord, "STOP</think>answer"))
+        self.assertEqual(renderer._remove_stop_word_ids(ids, ids, request=request), ids)
+        self.assertIsNone(renderer._check_finish_reason(ids, 0, request=request))
+
+    async def test_text_stop_spans_chunks_after_split_think_end(self):
+        renderer = self.make_thinking_renderer()
+        status = await self._make_status(renderer)
+        slices = get_stop_word_slices(["STOP"])
+        for chunk in ["ST", "OP</thi"]:
+            result, buffered = renderer._process_stop_words(
+                chunk, ["STOP"], slices, True, status
+            )
+            self.assertEqual(result, chunk)
+            self.assertFalse(buffered)
+            self.assertIsNone(status.finish_reason)
+        # Replayed chunk contains the end of the closing tag and a partial stop.
+        result, buffered = renderer._process_stop_words(
+            "nk>answerST", ["STOP"], slices, True, status
+        )
+        self.assertTrue(buffered)
+        self.assertEqual(result, "nk>answerST")
+        result, buffered = renderer._process_stop_words(
+            "nk>answerSTOPextra", ["STOP"], slices, True, status
+        )
+        self.assertFalse(buffered)
+        self.assertEqual(result, "nk>answer")
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+
+    async def test_reasoning_and_content_in_same_mtp_chunk(self):
+        for streaming in [False, True]:
+            with self.subTest(streaming=streaming):
+                renderer = self.make_thinking_renderer()
+                status = await self._make_status(renderer)
+                delta = await renderer._update_single_status(
+                    status,
+                    self._create_output(list(map(ord, "STOP</think>answerSTOPextra"))),
+                    max_new_tokens=100,
+                    stop_words_str=["STOP"],
+                    stop_word_slice_list=get_stop_word_slices(["STOP"]),
+                    is_streaming=streaming,
+                )
+                self.assertEqual(delta.output_str, "STOP</think>answer")
+
+    async def test_string_stop_inside_token_ignores_think(self):
+        renderer = self.make_thinking_renderer()
+        renderer.stop_words_id_list = []
+        status = await self._make_status(renderer)
+        delta = await renderer._update_single_status(
+            status,
+            self._create_output(list(map(ord, "STOP</think>answerSTOPextra"))),
+            max_new_tokens=100,
+            stop_words_str=["STOP"],
+            stop_word_slice_list=get_stop_word_slices(["STOP"]),
+            is_streaming=True,
+        )
+        self.assertEqual(delta.output_str, "STOP</think>answer")
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+
+    async def test_sync_renderer_ignores_think_stops(self):
+        renderer = self.make_thinking_renderer()
+        request = (await self._make_status(renderer)).request
+        status = StreamStatusSync(request)
+        text = "STOP</think>answerSTOP"
+        delta = renderer._update_single_status_sync(
+            status,
+            1,
+            len(text),
+            0,
+            None,
+            None,
+            None,
+            torch.tensor([list(map(ord, text))]),
+            100,
+            ["STOP"],
+            get_stop_word_slices(["STOP"]),
+            True,
+        )
+        self.assertEqual(delta.output_str, "STOP</think>answer")
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+
+    async def test_reasoning_parser_preserves_ignored_stops(self):
+        from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import (
+            ReasoningParser,
+        )
+
+        for streaming in [False, True]:
+            with self.subTest(streaming=streaming):
+                renderer = self.make_thinking_renderer()
+                renderer._create_reasoning_parser = lambda request: ReasoningParser(
+                    model_type="deepseek-r1"
+                )
+                renderer.stop_words_id_list = []  # exercise the string-only stop path
+                status = await self._make_status(renderer)
+                delta = await renderer._update_single_status(
+                    status,
+                    self._create_output(list(map(ord, "STOP</think>answerSTOPextra"))),
+                    max_new_tokens=100,
+                    stop_words_str=["STOP"],
+                    stop_word_slice_list=get_stop_word_slices(["STOP"]),
+                    is_streaming=streaming,
+                )
+                self.assertEqual(delta.output_str.reasoning_content, "STOP")
+                content = (
+                    delta.output_str.content
+                    if streaming
+                    else status.delta_output_string
+                )
+                self.assertEqual(content, "answer")
+                self.assertEqual(status.finish_reason, FinisheReason.stop)
+
+    async def test_eos_and_disabled_thinking(self):
+        renderer = self.make_thinking_renderer()
+        request = (await self._make_status(renderer)).request
+        self.assertEqual(
+            renderer._remove_stop_word_ids([65, 0, 66], [], request=request), [65]
+        )
+        self.assertEqual(
+            renderer._check_finish_reason([65, 0], 0, request=request),
+            FinisheReason.stop,
+        )
+        request.enable_thinking = False
+        ids = list(map(ord, "STOP"))
+        self.assertEqual(renderer._remove_stop_word_ids(ids, ids, request=request), [])
+
+    async def test_request_config_and_independent_response_phases(self):
+        renderer = self.make_thinking_renderer()
+        first, second = await self._make_status(renderer), await self._make_status(
+            renderer
+        )
+        first.request.extra_configs = GenerateConfig(
+            in_think_mode=True, end_think_token_ids=[ord("|")]
+        )
+        result, _ = renderer._process_stop_words(
+            "STOP|answerSTOP", ["STOP"], [], False, first
+        )
+        self.assertEqual(result, "STOP|answer")
+        result, _ = renderer._process_stop_words("STOP", ["STOP"], [], True, second)
+        self.assertEqual(result, "STOP")
+        self.assertIsNone(second.finish_reason)
 
 
 if __name__ == "__main__":

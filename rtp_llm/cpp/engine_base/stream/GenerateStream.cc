@@ -1074,7 +1074,9 @@ void GenerateStream::matchStopWordsList(int batch_id) {
             && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
-        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
+        const auto& config = *generate_input_->generate_config;
+        if (complete_token_ids_->matchStopWordsList(
+                batch_id, stop_words, inputLength(), config.in_think_mode, config.end_think_token_ids)) {
             match = true;
             break;
         }
