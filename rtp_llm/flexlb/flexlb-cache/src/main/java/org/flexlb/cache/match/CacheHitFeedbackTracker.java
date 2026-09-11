@@ -21,8 +21,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 /** Bounded request/role/generation correlation, independent of scheduling ownership. */
@@ -78,8 +76,8 @@ final class CacheHitFeedbackTracker {
         String state = finished ? "FINISHED" : task.phase() == null ? "UNKNOWN" : task.phase().name();
         if (telemetry.prefixLengthValid() && (finished || task.phase() == TaskPhase.RUNNING)
                 && task.prefixLength() >= 0 && task.prefixLength() <= seed.inputTokens()) {
-            Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> comparison =
-                    prediction.comparison.getAndSet(null);
+            Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> comparison = prediction.comparison;
+            prediction.comparison = null;
             if (comparison != null && prediction.predictionAvailable) {
                 CacheHitFeedback feedback = new CacheHitFeedback(seed.eventType(), seed.requestId(),
                         seed.cacheMatchSource(), seed.role(), seed.group(), seed.workerIdentity(), state,
@@ -89,8 +87,8 @@ final class CacheHitFeedbackTracker {
                 results.add(comparison.apply(feedback));
             }
         }
-        if ((finished || telemetry.firstTokenTimeMs() > 0) && prediction.statusLogged.compareAndSet(false, true)) {
-            Map<String, Object> pv = new LinkedHashMap<>();
+        if ((finished || telemetry.firstTokenTimeMs() > 0) && !prediction.statusLogged) {
+            Map<String, Object> pv = new LinkedHashMap<>(32);
             pv.put("event", "prefill_worker_status");
             pv.put("requestId", task.requestId());
             pv.put("role", role.name());
@@ -128,6 +126,8 @@ final class CacheHitFeedbackTracker {
             pv.put("prefillNonfinalChunkTokensMin", positive(telemetry.prefillNonfinalChunkTokensMin()));
             pv.put("prefillNonfinalChunkTokensMax", positive(telemetry.prefillNonfinalChunkTokensMax()));
             PV.info(JsonUtils.toStringOrEmpty(pv));
+
+            prediction.statusLogged = true;
         }
     }
 
@@ -145,14 +145,14 @@ final class CacheHitFeedbackTracker {
     private static final class Prediction {
         private final CacheHitFeedback seed;
         private final boolean predictionAvailable;
-        private final AtomicReference<Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>>> comparison;
-        private final AtomicBoolean statusLogged = new AtomicBoolean();
+        private Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> comparison;
+        private boolean statusLogged = false;
 
         private Prediction(CacheHitFeedback seed,
                            Function<CacheHitFeedback, CompletableFuture<CacheHitComparisonResult>> comparison,
                            boolean predictionAvailable) {
             this.seed = seed;
-            this.comparison = new AtomicReference<>(comparison);
+            this.comparison = comparison;
             this.predictionAvailable = predictionAvailable;
         }
     }
