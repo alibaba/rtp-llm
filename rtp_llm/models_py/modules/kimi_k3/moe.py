@@ -25,6 +25,39 @@ _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 _K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
 
 
+def validate_mega_moe_topology(
+    *,
+    attention_tp_size: int,
+    dp_size: int,
+    ktp_size: int,
+    ep_size: int,
+    world_size: int,
+    label: str,
+) -> None:
+    """Validate the token-owner layout consumed by K3 MegaMoE."""
+
+    if ktp_size > 1:
+        if attention_tp_size == 1 and dp_size == ktp_size == ep_size == world_size:
+            return
+        raise RuntimeError(
+            f"{label} projection-KTP Decode requires attention TP=1 and "
+            "DP=KTP=EP=world; got "
+            f"TP={attention_tp_size}, DP={dp_size}, KTP={ktp_size}, "
+            f"EP={ep_size}, world={world_size}"
+        )
+
+    if attention_tp_size == ep_size == world_size:
+        return
+    if attention_tp_size == 1 and dp_size == ep_size == world_size:
+        return
+    raise RuntimeError(
+        f"{label} requires either TP=EP=world or DP-local tokens with "
+        "TP=1 and DP=EP=world; got "
+        f"TP={attention_tp_size}, DP={dp_size}, KTP={ktp_size}, "
+        f"EP={ep_size}, world={world_size}"
+    )
+
+
 def _transient_full_native_column_weight(
     local_weight: torch.Tensor,
     world_size: int,
@@ -111,10 +144,9 @@ class KimiK3LatentMoE(nn.Module):
     def _validate_mega_preconditions(self, label: str) -> None:
         """Check what both mega strategies require of the device and the world.
 
-        K3 hands every rank exactly one EP partition, so attention TP, EP and
-        the distributed world must all be the same size.  ``label`` names the
-        calling strategy so ``mega_moe`` and ``mega_moe_se`` stay
-        distinguishable in the error text.
+        K3 hands every rank exactly one distinct token-owner shard and one EP
+        partition. ``label`` names the calling strategy so ``mega_moe`` and
+        ``mega_moe_se`` stay distinguishable in the error text.
         """
 
         import torch.distributed as dist
@@ -124,23 +156,14 @@ class KimiK3LatentMoE(nn.Module):
         if not dist.is_initialized():
             raise RuntimeError(f"{label} requires torch.distributed initialization")
         world_size = int(dist.get_world_size())
-        if self.ktp_size > 1:
-            if not (
-                self.attn_tp_size == 1
-                and self.ktp_size == self.ep_size == world_size
-            ):
-                raise RuntimeError(
-                    f"{label} projection-KTP Decode requires attention TP=1 and "
-                    "KTP=EP=world; got "
-                    f"TP={self.attn_tp_size}, KTP={self.ktp_size}, "
-                    f"EP={self.ep_size}, world={world_size}"
-                )
-        elif self.attn_tp_size != self.ep_size or self.ep_size != world_size:
-            raise RuntimeError(
-                f"{label} requires attention TP, EP, and the full distributed "
-                "world to have the same size; got "
-                f"TP={self.attn_tp_size}, EP={self.ep_size}, world={world_size}"
-            )
+        validate_mega_moe_topology(
+            attention_tp_size=self.attn_tp_size,
+            dp_size=int(self.parallelism_config.dp_size),
+            ktp_size=self.ktp_size,
+            ep_size=self.ep_size,
+            world_size=world_size,
+            label=label,
+        )
 
     def _validate_shared_expert_weight_layout(self, hidden_size: int) -> None:
         intermediate = self.shared_intermediate_size

@@ -915,6 +915,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (load_context.cache_keys.empty()) {
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "K3 cache load has no cache keys");
         }
+        if (projection_ktp) {
+            RTP_LLM_LOG_INFO(
+                "[K3_PD_FAN_IN] request_id=%d peers=%d decode_dp_rank=%d mla_source_peer=%d "
+                "kda_partition_count=%d",
+                load_context.request_id,
+                peer_cnt,
+                static_cast<int>(maga_init_params_.parallelism_config.dp_rank),
+                mla_source_peer,
+                peer_cnt);
+        }
     }
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;

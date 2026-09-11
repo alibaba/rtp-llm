@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 import torch
@@ -15,6 +16,10 @@ from rtp_llm.models_py.distributed.collective_torch import (
 from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
     QuantizedActivation,
 )
+
+
+logger = logging.getLogger(__name__)
+_LOGGED_PROJECTION_LAYOUTS: set[tuple[int, int, int, int]] = set()
 
 
 def resolve_projection_local_heads(
@@ -223,6 +228,18 @@ def project_kda_inputs_ktp(
     physical_batch = int(hidden_states.shape[0])
     local_heads = total_heads // ktp_size
     local_projection_size = local_heads * head_dim
+    layout_key = (ktp_rank, ktp_size, physical_batch, local_heads)
+    if layout_key not in _LOGGED_PROJECTION_LAYOUTS:
+        logger.info(
+            "[K3_PROJECTION_KTP_LAYOUT] rank=%d size=%d physical_batch=%d "
+            "heads=%d local_heads=%d collectives=AllGather,AllToAll",
+            ktp_rank,
+            ktp_size,
+            physical_batch,
+            total_heads,
+            local_heads,
+        )
+        _LOGGED_PROJECTION_LAYOUTS.add(layout_key)
     gathered_hidden = _all_gather_projection_input(
         hidden_states,
         ktp_size=ktp_size,

@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
+import logging
 from typing import Iterable, Sequence
 
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+
+logger = logging.getLogger(__name__)
+_LOGGED_STEP_PLANS: set[tuple[object, ...]] = set()
 
 
 class KtpForwardMode(IntEnum):
@@ -28,6 +33,30 @@ class KtpStepPlan:
     all_idle: bool
     forward_mode: KtpForwardMode
     tokens_per_batch: int
+
+
+def _log_step_plan_once(plan: KtpStepPlan) -> None:
+    key = (
+        plan.valid_batch_sizes,
+        plan.common_physical_batch,
+        plan.common_graph_bucket,
+        plan.use_cuda_graph,
+        plan.forward_mode,
+        plan.tokens_per_batch,
+    )
+    if key in _LOGGED_STEP_PLANS:
+        return
+    logger.info(
+        "[K3_PROJECTION_KTP_STEP] valid_batch_sizes=%s physical_batch=%d "
+        "graph_bucket=%d use_cuda_graph=%s forward_mode=%s tokens_per_batch=%d",
+        list(plan.valid_batch_sizes),
+        plan.common_physical_batch,
+        plan.common_graph_bucket,
+        plan.use_cuda_graph,
+        plan.forward_mode.name,
+        plan.tokens_per_batch,
+    )
+    _LOGGED_STEP_PLANS.add(key)
 
 
 def normalize_capture_buckets(values: Iterable[int]) -> tuple[int, ...]:
@@ -293,7 +322,7 @@ def build_ktp_step_plan(
     use_graph = (
         not all_idle and graph_bucket > 0 and all(bool(row[1]) for row in rows)
     )
-    return KtpStepPlan(
+    plan = KtpStepPlan(
         valid_batch_sizes=batches,
         global_max_batch=global_max,
         common_physical_batch=graph_bucket if use_graph else global_max,
@@ -303,6 +332,8 @@ def build_ktp_step_plan(
         forward_mode=KtpForwardMode(next(iter(modes))),
         tokens_per_batch=next(iter(token_widths)),
     )
+    _log_step_plan_once(plan)
+    return plan
 
 
 def coordinate_ktp_step(
