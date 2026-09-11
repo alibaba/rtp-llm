@@ -5,6 +5,32 @@
 
 namespace rtp_llm {
 
+bool isK3PageRRToReplicatedDecode(int prefill_attention_tp,
+                                  int decode_attention_tp,
+                                  int source_shards,
+                                  int peer_count,
+                                  int configured_upstream_shards) {
+    return source_shards > 1 && source_shards == prefill_attention_tp && peer_count == source_shards
+           && source_shards == configured_upstream_shards && decode_attention_tp == 1;
+}
+
+K3CacheLoadSourcePlan planK3CacheLoadSource(
+    K3CacheLoadSourcePolicy policy, size_t block_position, int peer_index, int peer_count, int decode_dp_rank) {
+    if (peer_count <= 0 || peer_index < 0 || peer_index >= peer_count || decode_dp_rank < 0) {
+        throw std::invalid_argument("invalid K3 cache-load source coordinates");
+    }
+
+    switch (policy) {
+        case K3CacheLoadSourcePolicy::PAGE_OWNER:
+            return {block_position % static_cast<size_t>(peer_count) == static_cast<size_t>(peer_index), 1, 0};
+        case K3CacheLoadSourcePolicy::ALL_PEER_PARTITION:
+            return {true, peer_count, peer_index};
+        case K3CacheLoadSourcePolicy::SINGLE_REPLICA:
+            return {peer_index == decode_dp_rank % peer_count, 1, 0};
+    }
+    throw std::invalid_argument("unknown K3 cache-load source policy");
+}
+
 bool usesVirtualBlockCacheLayout(CacheGroupType group_type,
                                  size_t         physical_page_tokens,
                                  size_t         group_block_tokens,
@@ -53,7 +79,7 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
         throw std::invalid_argument("invalid cache-store CP rank/size");
     }
 
-    const bool sharded_full        = (cp_size > 1) && (group_type == CacheGroupType::FULL);
+    const bool sharded_full           = (cp_size > 1) && (group_type == CacheGroupType::FULL);
     const bool compact_virtual_blocks = (cp_size > 1) && virtual_block_cache_layout
                                         && (group_type == CacheGroupType::SWA || group_type == CacheGroupType::LINEAR);
     if (compact_virtual_blocks) {
