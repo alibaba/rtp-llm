@@ -1,0 +1,6 @@
+cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,block_m,ksplit,us1,kernelName1,err1,us2,kernelName2,err2,us,run_1stage,tflops,bw,_tag
+80,1,2048,128,256,8,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fnuz,torch.float8_e4m3fnuz,QuantType.per_Token,1,0,32,0,0.0,_ZN5aiter48fmoe_bf16_pertokenFp8_g1u1_vs_silu_1tg_ps_32x128E,0.0%,0.0,Null,0.0%,0.0,1,0.0,0.0,
+80,2,2048,128,256,8,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fnuz,torch.float8_e4m3fnuz,QuantType.per_Token,1,0,32,0,0.0,_ZN5aiter48fmoe_bf16_pertokenFp8_g1u1_vs_silu_1tg_ps_32x128E,0.0%,0.0,Null,0.0%,0.0,1,0.0,0.0,
+80,4,2048,128,256,8,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fnuz,torch.float8_e4m3fnuz,QuantType.per_Token,1,0,32,0,0.0,_ZN5aiter48fmoe_bf16_pertokenFp8_g1u1_vs_silu_1tg_ps_32x128E,0.0%,0.0,Null,0.0%,0.0,1,0.0,0.0,
+80,8,2048,128,256,8,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fnuz,torch.float8_e4m3fnuz,QuantType.per_Token,1,0,32,0,0.0,_ZN5aiter48fmoe_bf16_pertokenFp8_g1u1_vs_silu_1tg_ps_32x128E,0.0%,0.0,Null,0.0%,0.0,1,0.0,0.0,
+80,16,2048,128,256,8,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fnuz,torch.float8_e4m3fnuz,QuantType.per_Token,1,0,32,0,0.0,_ZN5aiter48fmoe_bf16_pertokenFp8_g1u1_vs_silu_1tg_ps_32x128E,0.0%,0.0,Null,0.0%,0.0,1,0.0,0.0,

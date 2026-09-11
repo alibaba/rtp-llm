@@ -4,6 +4,7 @@ from typing import Any, Optional
 import aiter
 import torch
 
+from rtp_llm.models_py.kernel_tuning import is_rocm_fp8_moe_deterministic_reduce_enabled
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
@@ -828,21 +829,30 @@ class AiterPrefillAttnOpPaged:
             device=self.graph_device, dtype=torch.int32
         )
         batch_size = fmha_params.cu_seqlens_q.shape[0] - 1
-        bt = fmha_params.kv_cache_block_id_device
-        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
-        required_shape = (batch_size, bt.shape[1] + extra_pages)
-        buffer = self.sanitized_bt_buf
-        if buffer is not None and (
-            buffer.shape != required_shape or buffer.device != self.graph_device
+        stability_enabled = is_rocm_fp8_moe_deterministic_reduce_enabled()
+        if self.seqlen_k_buf is None or (
+            not stability_enabled and self.seqlen_k_buf.shape[0] < batch_size
         ):
-            raise ValueError("Aiter graph buffer changed; recapture required")
-        if self.seqlen_k_buf is None or self.seqlen_k_buf.shape[0] < batch_size:
             self.seqlen_k_buf = torch.empty(
                 max(1, batch_size), dtype=torch.int32, device=self.graph_device
             )
-        if self.kv_indptr_buf is None or self.kv_indptr_buf.shape[0] < batch_size + 1:
+        elif self.seqlen_k_buf.shape[0] < batch_size:
+            raise ValueError(
+                "Aiter paged-prefill CUDA graph replay exceeds the captured "
+                f"seqlen_k capacity: capture={self.seqlen_k_buf.shape[0]}, "
+                f"replay={batch_size}"
+            )
+        if self.kv_indptr_buf is None or (
+            not stability_enabled and self.kv_indptr_buf.shape[0] < batch_size + 1
+        ):
             self.kv_indptr_buf = torch.zeros(
                 max(1, batch_size + 1), dtype=torch.int32, device=self.graph_device
+            )
+        elif self.kv_indptr_buf.shape[0] < batch_size + 1:
+            raise ValueError(
+                "Aiter paged-prefill CUDA graph replay exceeds the captured "
+                f"kv_indptr capacity: capture={self.kv_indptr_buf.shape[0]}, "
+                f"replay={batch_size + 1}"
             )
         if self.kv_page_indices_buf is None:
             self.kv_page_indices_buf = torch.zeros(
@@ -852,9 +862,40 @@ class AiterPrefillAttnOpPaged:
             self.descale_buf = torch.ones(
                 1, dtype=torch.float32, device=self.graph_device
             )
-        if self.sanitized_bt_buf is None:
+        # Pre-allocate a fixed-address buffer for the sanitized+padded block_table.
+        # CUDA graph replay requires stable tensor addresses; sanitize produces a
+        # new tensor each call, so we copy_ into this fixed buffer.
+        bt = fmha_params.kv_cache_block_id_device
+        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
+        max_cols = bt.shape[1] + extra_pages
+        if not stability_enabled:
+            required_shape = (batch_size, max_cols)
+            buffer = self.sanitized_bt_buf
+            if buffer is not None and (
+                buffer.shape != required_shape or buffer.device != self.graph_device
+            ):
+                raise ValueError("Aiter graph buffer changed; recapture required")
+            if buffer is None:
+                self.sanitized_bt_buf = torch.zeros(
+                    required_shape, dtype=torch.int32, device=self.graph_device
+                )
+        elif self.sanitized_bt_buf is None:
             self.sanitized_bt_buf = torch.zeros(
-                required_shape, dtype=torch.int32, device=self.graph_device
+                batch_size, max_cols, dtype=torch.int32, device=self.graph_device
+            )
+        elif (
+            self.sanitized_bt_buf.device != self.graph_device
+            or self.sanitized_bt_buf.dtype != torch.int32
+            or self.sanitized_bt_buf.shape[0] < batch_size
+            or self.sanitized_bt_buf.shape[1] < max_cols
+        ):
+            raise ValueError(
+                "Aiter paged-prefill CUDA graph replay exceeds or changes the "
+                "captured sanitized block-table buffer: "
+                f"capture_shape={tuple(self.sanitized_bt_buf.shape)}, "
+                f"replay_shape={(batch_size, max_cols)}, "
+                f"capture_device={self.sanitized_bt_buf.device}, "
+                f"replay_device={self.graph_device}"
             )
         self.cuda_graph_prepared = True
 
