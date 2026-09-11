@@ -19,6 +19,50 @@ protected:
     std::unique_ptr<Sampler> sampler_;
 };
 
+TEST_F(SamplerTest, compactBeamHistoryMatchesFullDeviceHistory) {
+    for (auto widths : {std::pair<size_t, size_t>{1, 4}, {4, 4}, {4, 7}, {7, 3}, {3, 1}}) {
+        constexpr size_t batches = 2, stride = 8, vocab = 64;
+        const size_t     in = widths.first, out = widths.second;
+        SamplerInputs    inputs{};
+        inputs.step           = stride - 1;
+        inputs.batch_size     = batches * in;
+        inputs.batch_size_out = batches * out;
+        std::vector<float>   logits(batches * in * vocab);
+        std::vector<int32_t> tokens(batches * in * stride);
+        std::vector<int32_t> lengths(batches * in);
+        for (size_t row = 0; row < batches * in; ++row) {
+            lengths[row] = row / in == 0 ? 3 : 6;
+            for (size_t col = 0; col < stride; ++col) {
+                tokens[row * stride + col] = int32_t((row * 13 + col) % vocab);
+            }
+            for (size_t col = 0; col < vocab; ++col) {
+                logits[row * vocab + col] = float((row * 11 + col * 7) % 61) / 11.0f;
+            }
+        }
+        inputs.logits    = createBuffer<float>({batches * in, vocab}, logits);
+        inputs.token_ids = createBuffer<int32_t>({batches * in, stride}, tokens, AllocationType::HOST);
+        inputs.input_lengths =
+            createBuffer<int32_t>({batches * in}, std::vector<int32_t>(batches * in, 2), AllocationType::HOST);
+        inputs.sequence_lengths = createBuffer<int32_t>({batches * in}, lengths, AllocationType::HOST);
+        inputs.num_beams_in =
+            createBuffer<uint64_t>({batches * in}, std::vector<uint64_t>(batches * in, in), AllocationType::HOST);
+        inputs.num_beams_out =
+            createBuffer<uint64_t>({batches * in}, std::vector<uint64_t>(batches * in, out), AllocationType::HOST);
+        inputs.cum_log_probs =
+            createBuffer<float>({batches * in}, std::vector<float>(batches * in, -1.0f), AllocationType::HOST);
+        inputs.compact_beam_output = false;
+        auto reference             = sampler_->forward(inputs);
+        auto reference_scores      = device_->clone({*reference.cum_log_probs, AllocationType::HOST});
+        inputs.cum_log_probs =
+            createBuffer<float>({batches * in}, std::vector<float>(batches * in, -1.0f), AllocationType::HOST);
+        inputs.compact_beam_output = true;
+        auto compact               = sampler_->forward(inputs);
+        EXPECT_EQ(getBufferValues<int32_t>(*compact.token_ids), getBufferValues<int32_t>(*reference.token_ids));
+        EXPECT_EQ(getBufferValues<int32_t>(*compact.beam_index), getBufferValues<int32_t>(*reference.beam_index));
+        EXPECT_EQ(getBufferValues<float>(*compact.cum_log_probs), getBufferValues<float>(*reference_scores));
+    }
+}
+
 TEST_F(SamplerTest, testGeneralSampling) {
     size_t    batch_size = 5;
     size_t    vocab_size = 8;

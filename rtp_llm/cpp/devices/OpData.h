@@ -917,6 +917,7 @@ struct BeamSearchParams {
     BufferPtr     sequence_lengths;  // [batch_size, num_beams_in]
     BufferPtr     cum_log_probs;     // [batch_size, num_beams_in]
     size_t        num_beams_out = 0;
+    bool          return_token_ids = true;
 };
 
 struct BeamSearchOutput {
@@ -925,6 +926,7 @@ struct BeamSearchOutput {
     BufferPtr sequence_lengths;  // [batch_size, num_beams_out]
     BufferPtr cum_log_probs;     // [batch_size, num_beams_out]
     BufferPtr beam_indices;      // [batch_size, num_beams_out]
+    BufferPtr new_tokens;        // optional [batch_size, num_beams_out], no history D2H
 };
 
 struct BroadcastParams {

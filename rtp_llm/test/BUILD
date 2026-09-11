@@ -46,6 +46,12 @@ py_test(
 )
 
 py_test(
+    name = "batch_decode_test",
+    srcs = ["batch_decode_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/test/model_test/test_util"],
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

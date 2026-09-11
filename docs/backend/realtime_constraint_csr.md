@@ -120,6 +120,45 @@ stable index ordering, while finite candidates retain their original ordering.
 Selected non-finite scores are still rejected; the optimization does not make
 masked candidates valid. The binary-search CSR mask kernel is unchanged.
 
+## Batched frontend and beam-history transport
+
+The optimized Worker requires no additional environment switches. Upgrade the
+Worker image as a unit (Python frontend and C++ engine); the Master/tree format is
+unchanged.
+
+- Python clients advertise `accept_batched_output` in the generation RPC. New
+  engines stack compatible token/score/optional tensors into the additive
+  `batched_output` field. Legacy clients still receive the existing per-output
+  tensors; new clients also accept legacy responses. Ragged or partially present
+  tensors fall back per field, without padding or dropping results. This preserves
+  this branch's legacy RPC schema; it does not promise compatibility with unrelated
+  releases that changed the meaning of protobuf field 2.
+- Beam detokenization uses the tokenizer's batch API, preserving SID lengths,
+  stop handling and custom tokenizer overrides. Non-beam incremental decoding
+  retains its existing state. Beam rows are not reused as stable identities after
+  parent reordering or width changes.
+- `generate_config.aux_info` defaults to `true`. Setting it to `false` omits
+  diagnostic metadata, **not requested cumulative/softmax scores or lengths
+  required by stop/logits-index processing**. Leave it enabled when collecting
+  latency metrics.
+- CUDA beam search returns selected tokens and parent IDs without constructing
+  and copying a full output history from GPU to CPU. The sampler restores the
+  existing CPU history contract. Backends without compact outputs retain the
+  full-history fallback. Request history allocation is bounded by input length
+  plus `max_new_tokens` and speculative reserve; mixed-length batches copy only
+  each request's valid history.
+- Access logs use the upstream asynchronous rotating handler with bounded queues,
+  drop counters and shutdown draining. Files are `access_r<R>_s<S>.log` and
+  `query_access_r<R>_s<S>.log`. Frontends use IDs `[0, frontend_server_count)` and
+  backend uses the next ID to avoid cross-process rotation. Update log collectors
+  to match these filenames; `aggregate_logs.py` is copied to the log directory for
+  manual inspection. Queue overflow may drop logs, not block inference.
+
+These changes do not alter CSR admission, snapshot pinning, version reconciliation
+or fail-closed behavior. Validate both full HTTP latency/throughput and engine
+latency before increasing traffic; a component microbenchmark is not a capacity
+test.
+
 ## Recovery and scope
 
 - Master current/backup are in memory, not durable storage. After Master restart,

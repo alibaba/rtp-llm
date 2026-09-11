@@ -94,8 +94,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
-        QueryConverter::transResponse(
-            &outputs_pb, &(result.value()), maga_init_params_.gpt_init_parameter.misc_config.aux_string);
+        QueryConverter::transResponse(&outputs_pb,
+                                      &(result.value()),
+                                      maga_init_params_.gpt_init_parameter.misc_config.aux_string,
+                                      stream->generateConfig()->accept_batched_output,
+                                      stream->generateConfig()->aux_info);
         if (context->IsCancelled()) {
             stream->cancel();
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());

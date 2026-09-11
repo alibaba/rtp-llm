@@ -95,6 +95,78 @@ class FakeModelRpcClient(ModelRpcClient):
 
 class ModelRpcClientTest(TestCase):
 
+    def test_batched_tensors_match_legacy_and_keep_requested_scores(self):
+        from rtp_llm.utils.grpc_util import trans_from_tensor
+
+        config = GenerateConfig(
+            num_beams=3, return_cum_log_probs=True, return_softmax_probs=True
+        )
+        request = GenerateInput(
+            request_id=42,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=config,
+        )
+        self.assertTrue(trans_input(request).generate_config.accept_batched_output)
+        self.assertTrue(trans_input(request).generate_config.aux_info.value)
+        legacy = GenerateOutputsPB()
+        tensors = {
+            "output_ids": torch.tensor(
+                [[[17, 21]], [[17, 22]], [[17, 23]]], dtype=torch.int32
+            ),
+            "logits": torch.arange(6, dtype=torch.float32).reshape(3, 1, 2),
+            "hidden_states": torch.arange(12, dtype=torch.float32).reshape(3, 2, 2),
+            "all_hidden_states": torch.ones(3, 2, 2),
+            "all_probs": torch.ones(3, 1, 2),
+            "loss": torch.arange(3, dtype=torch.float32).reshape(3, 1),
+            "cum_log_probs": torch.tensor([[-1.0], [-2.0], [-3.0]]),
+            "softmax_probs": torch.tensor([[0.5, 0.25], [0.4, 0.2], [0.3, 0.1]]),
+        }
+        for i in range(3):
+            row = legacy.generate_outputs.add()
+            row.finished = True
+            row.aux_info.output_len = 2
+            row.aux_info.cost_time_us = 1234
+            for name, tensor in tensors.items():
+                target = (
+                    row.aux_info if name in ("cum_log_probs", "softmax_probs") else row
+                )
+                getattr(target, name).CopyFrom(trans_from_tensor(tensor[i]))
+        batched = GenerateOutputsPB()
+        batched.CopyFrom(legacy)
+        for name, tensor in tensors.items():
+            getattr(batched.batched_output, name).CopyFrom(trans_from_tensor(tensor))
+            for row in batched.generate_outputs:
+                target = (
+                    row.aux_info if name in ("cum_log_probs", "softmax_probs") else row
+                )
+                target.ClearField(name)
+        for auxiliary in (True, False):
+            config.aux_info = auxiliary
+            self.assertEqual(
+                trans_input(request).generate_config.aux_info.value, auxiliary
+            )
+            expected = trans_output(request, legacy, StreamState()).generate_outputs
+            actual = trans_output(request, batched, StreamState()).generate_outputs
+            for a, b in zip(actual, expected):
+                self.assertEqual(a.finished, b.finished)
+                self.assertEqual(a.aux_info.model_dump(), b.aux_info.model_dump())
+                for name in tensors:
+                    if name not in ("cum_log_probs", "softmax_probs"):
+                        torch.testing.assert_close(getattr(a, name), getattr(b, name))
+                self.assertTrue(a.aux_info.cum_log_probs)
+                self.assertTrue(a.aux_info.softmax_probs)
+
+        # A ragged field can fall back independently while other fields stay batched.
+        batched.batched_output.ClearField("output_ids")
+        for i, row in enumerate(batched.generate_outputs):
+            row.output_ids.CopyFrom(trans_from_tensor(tensors["output_ids"][i, :, :1]))
+        actual = trans_output(request, batched, StreamState()).generate_outputs
+        self.assertEqual(actual[1].output_ids.tolist(), [[17]])
+        batched.batched_output.logits.CopyFrom(trans_from_tensor(torch.zeros(2, 1, 2)))
+        with self.assertRaisesRegex(ValueError, "RPC batch size"):
+            trans_output(request, batched, StreamState())
+
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         # self.client = FakeModelRpcClient()

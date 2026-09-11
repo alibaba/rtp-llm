@@ -1,9 +1,8 @@
 from typing import Any, List, Optional, Union
 
-import torch
 import numpy as np
 import numpy.typing as npt
-
+import torch
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
@@ -11,11 +10,11 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     IncrementDecodingUtils,
 )
 from rtp_llm.utils.word_util import (
-    remove_padding_eos_with_numpy,
     get_stop_word_slices,
+    match_stop_words,
+    remove_padding_eos_with_numpy,
     truncate_response_with_stop_words,
     truncate_token_with_stop_word_id,
-    match_stop_words,
 )
 
 
@@ -94,6 +93,60 @@ class TokenProcessorPerStream:
             self.token_buffers[i],
         )
         return output_len, text
+
+    def decode_tokens_batch(
+        self,
+        batch_token_ids: List[npt.NDArray[np.int32]],
+        batch_finished: List[bool],
+        print_stop_words: bool,
+        stop_word_str_list: List[str],
+        stop_word_ids: List[List[int]],
+        return_incremental: bool = False,
+    ):
+        if len(batch_token_ids) != len(batch_finished):
+            raise ValueError("Token batch and finished flags have different sizes")
+        if not self.has_num_beams:
+            # Keep the established incremental tokenizer semantics for non-beams.
+            results = [
+                self.decode_tokens(
+                    i,
+                    tokens,
+                    batch_finished[i],
+                    print_stop_words,
+                    stop_word_str_list,
+                    stop_word_ids,
+                    return_incremental,
+                )
+                for i, tokens in enumerate(batch_token_ids)
+            ]
+            return [r[0] for r in results], [r[1] for r in results]
+        tokens_to_decode, lengths = [], []
+        for tokens, finished in zip(batch_token_ids, batch_finished):
+            tokens = remove_padding_eos_with_numpy(
+                tokens.reshape(-1), self.special_tokens.eos_token_id
+            ).tolist()
+            lengths.append(len(tokens))
+            tokens_to_decode.append(
+                self.process_stop_id(print_stop_words, finished, tokens, stop_word_ids)
+            )
+        texts = self.tokenizer.batch_decode(tokens_to_decode)
+        if len(texts) != len(batch_token_ids):
+            raise ValueError("Tokenizer returned a different batch size")
+        # Row IDs are not stable across beam parent reordering.
+        self.token_buffers = [""] * len(texts)
+        final_texts = []
+        for i, text in enumerate(texts):
+            text, self.token_buffers[i] = self.process_stop_str(
+                batch_finished[i],
+                return_incremental,
+                print_stop_words,
+                text,
+                text,
+                stop_word_str_list,
+                "",
+            )
+            final_texts.append(text)
+        return lengths, final_texts
 
     def process_stop_id(
         self,

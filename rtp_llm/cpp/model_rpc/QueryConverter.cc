@@ -22,6 +22,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
            config_proto->variable_num_beams_size() * sizeof(int));
     generate_config->num_return_sequences     = config_proto->num_return_sequences();
     generate_config->return_logits            = config_proto->return_logits();
+    generate_config->accept_batched_output    = config_proto->accept_batched_output();
+    generate_config->aux_info                 = !config_proto->has_aux_info() || config_proto->aux_info().value();
     generate_config->return_incremental       = config_proto->return_incremental();
     generate_config->return_hidden_states     = config_proto->return_hidden_states();
     generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
@@ -247,53 +249,117 @@ void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
     t->set_data_type(data_type);
 }
 
+bool QueryConverter::stackBuffersToTensorPB(TensorPB* target, const std::vector<ConstBufferPtr>& buffers) {
+    // Reuse the upstream batch-stacking layout, with a legacy fallback for
+    // heterogeneous outputs (loss/logits and finished streaming sequences).
+    if (buffers.empty() || !buffers.front()) {
+        return false;
+    }
+    const auto& ref = buffers.front();
+    for (const auto& buffer : buffers) {
+        if (!buffer || buffer->shape() != ref->shape() || buffer->type() != ref->type()
+            || buffer->where() == MemoryType::MEMORY_GPU) {
+            return false;
+        }
+    }
+    std::vector<size_t> shape{buffers.size()};
+    shape.insert(shape.end(), ref->shape().begin(), ref->shape().end());
+    std::vector<char> storage(buffers.size() * ref->sizeBytes());
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        memcpy(storage.data() + i * ref->sizeBytes(), buffers[i]->data(), ref->sizeBytes());
+    }
+    Buffer stacked(MemoryType::MEMORY_CPU, ref->type(), shape, storage.data());
+    transTensorPB(target, &stacked);
+    return true;
+}
+
 void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                                    const GenerateOutputs* responses,
-                                   const std::string&     aux_string) {
+                                   const std::string&     aux_string,
+                                   bool                   batched_output,
+                                   bool                   dump_aux_info) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
+    BatchedOutputPB batch;
+    if (batched_output && !responses->generate_outputs.empty()) {
+        auto stack = [&](auto accessor, auto setter) {
+            std::vector<ConstBufferPtr> buffers;
+            buffers.reserve(responses->generate_outputs.size());
+            for (const auto& response : responses->generate_outputs) {
+                buffers.push_back(accessor(response));
+            }
+            TensorPB tensor;
+            if (stackBuffersToTensorPB(&tensor, buffers)) {
+                (batch.*setter)()->Swap(&tensor);
+            }
+        };
+        stack([](const auto& r) { return r.output_ids; }, &BatchedOutputPB::mutable_output_ids);
+        stack([](const auto& r) { return r.hidden_states.value_or(nullptr); }, &BatchedOutputPB::mutable_hidden_states);
+        stack([](const auto& r) { return r.loss.value_or(nullptr); }, &BatchedOutputPB::mutable_loss);
+        stack([](const auto& r) { return r.logits.value_or(nullptr); }, &BatchedOutputPB::mutable_logits);
+        stack([](const auto& r) { return r.all_hidden_states.value_or(nullptr); },
+              &BatchedOutputPB::mutable_all_hidden_states);
+        stack([](const auto& r) { return r.aux_info.all_probs.value_or(nullptr); },
+              &BatchedOutputPB::mutable_all_probs);
+        stack([](const auto& r) { return r.aux_info.cum_log_probs.value_or(nullptr); },
+              &BatchedOutputPB::mutable_cum_log_probs);
+        stack([](const auto& r) { return r.aux_info.softmax_probs.value_or(nullptr); },
+              &BatchedOutputPB::mutable_softmax_probs);
+    }
     for (size_t i = 0; i < responses->generate_outputs.size(); i++) {
         const auto&       response = responses->generate_outputs[i];
         GenerateOutputPB* output   = outputs->add_generate_outputs();
         output->set_finished(response.finished);
         auto aux_info = output->mutable_aux_info();
-        aux_info->set_cost_time_us(response.aux_info.cost_time_us);
-        aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
-        aux_info->set_wait_time_us(response.aux_info.wait_time_us);
-        aux_info->set_iter_count(response.aux_info.iter_count);
-        aux_info->set_fallback_tokens(response.aux_info.fallback_tokens);
-        aux_info->set_fallback_times(response.aux_info.fallback_times);
+        if (dump_aux_info) {
+            aux_info->set_cost_time_us(response.aux_info.cost_time_us);
+            aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
+            aux_info->set_wait_time_us(response.aux_info.wait_time_us);
+            aux_info->set_iter_count(response.aux_info.iter_count);
+            aux_info->set_fallback_tokens(response.aux_info.fallback_tokens);
+            aux_info->set_fallback_times(response.aux_info.fallback_times);
+            aux_info->set_input_len(response.aux_info.input_len);
+            aux_info->set_prefix_len(response.aux_info.prefix_len);
+            aux_info->set_output_len(response.aux_info.output_len);
+            aux_info->set_step_output_len(response.aux_info.step_output_len);
+            aux_info->set_pd_sep(response.aux_info.pd_sep);
+            aux_info->set_total_reuse_len(response.aux_info.reuse_len);
+            aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
+            aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
+            aux_info->set_aux_string(aux_string);
+        }
+        // Lengths drive stop/logits-index logic; requested scores are business
+        // results, not optional diagnostics. Keep both even with aux_info=false.
         aux_info->set_input_len(response.aux_info.input_len);
-        aux_info->set_prefix_len(response.aux_info.prefix_len);
         aux_info->set_output_len(response.aux_info.output_len);
         aux_info->set_step_output_len(response.aux_info.step_output_len);
-        aux_info->set_pd_sep(response.aux_info.pd_sep);
-        aux_info->set_total_reuse_len(response.aux_info.reuse_len);
-        aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
-        aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
-        aux_info->set_aux_string(aux_string);
-        if (response.aux_info.cum_log_probs.has_value()) {
+        if (response.aux_info.cum_log_probs.has_value() && !batch.has_cum_log_probs()) {
             transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
         }
-        if (response.aux_info.softmax_probs.has_value()) {
+        if (response.aux_info.softmax_probs.has_value() && !batch.has_softmax_probs()) {
             transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value().get());
         }
-        if (response.aux_info.all_probs.has_value()) {
+        if (response.aux_info.all_probs.has_value() && !batch.has_all_probs()) {
             transTensorPB(output->mutable_all_probs(), response.aux_info.all_probs.value().get());
         }
-        transTensorPB(output->mutable_output_ids(), response.output_ids.get());
-        if (response.hidden_states.has_value()) {
+        if (!batch.has_output_ids()) {
+            transTensorPB(output->mutable_output_ids(), response.output_ids.get());
+        }
+        if (response.hidden_states.has_value() && !batch.has_hidden_states()) {
             transTensorPB(output->mutable_hidden_states(), response.hidden_states.value().get());
         }
-        if (response.loss.has_value()) {
+        if (response.loss.has_value() && !batch.has_loss()) {
             transTensorPB(output->mutable_loss(), response.loss.value().get());
         }
-        if (response.logits.has_value()) {
+        if (response.logits.has_value() && !batch.has_logits()) {
             transTensorPB(output->mutable_logits(), response.logits.value().get());
         }
-        if (response.all_hidden_states.has_value()) {
+        if (response.all_hidden_states.has_value() && !batch.has_all_hidden_states()) {
             transTensorPB(output->mutable_all_hidden_states(), response.all_hidden_states.value().get());
         }
+    }
+    if (batched_output) {
+        outputs->mutable_batched_output()->Swap(&batch);
     }
     RTP_LLM_LOG_DEBUG("transResponse done");
 }

@@ -77,6 +77,29 @@ class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
 
+TEST_F(GenerateStreamTest, boundedHistoryAcceptsPaddedSamplerBatch) {
+    auto input                             = std::make_shared<GenerateInput>();
+    input->generate_config                 = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = 2;
+    input->input_ids                       = createBuffer<int32_t>({2}, {11, 12}, AllocationType::HOST);
+    CompleteTokenIds history(device_, 1, 4, 8192, 16);
+    history.init(input, 3);
+    EXPECT_EQ(history.completeTokenIds()->shape()[1], 7);
+    std::vector<int32_t> padded(4 * 20, 9);
+    for (size_t i = 0; i < 4; ++i) {
+        padded[i * 20]     = 11;
+        padded[i * 20 + 1] = 12;
+        padded[i * 20 + 2] = 20 + i;
+    }
+    auto tokens = createBuffer<int32_t>({4, 20}, padded, AllocationType::HOST);
+    int  error  = 0;
+    ASSERT_TRUE(history.update(tokens, 0, 1, 2, 4, 128, true, 42, error));
+    EXPECT_EQ(history.batchSize(), 4);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(history.completeTokenIdsVec(i), (std::vector<int>{11, 12, 20 + i}));
+    }
+}
+
 class RejectingLogitsProcessor: public BaseLogitsProcessor {
 public:
     explicit RejectingLogitsProcessor(DeviceBase* device): BaseLogitsProcessor(device) {}

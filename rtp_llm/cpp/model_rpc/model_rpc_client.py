@@ -58,6 +58,8 @@ def trans_input(input_py: GenerateInput):
     input_py.generate_config.validate()
 
     generate_config_pb = input_pb.generate_config
+    generate_config_pb.accept_batched_output = True
+    generate_config_pb.aux_info.value = input_py.generate_config.aux_info
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
@@ -197,61 +199,93 @@ def trans_output(
     logging.debug("outputs_pb = %s", outputs_pb)
     logits_index = input_py.generate_config.logits_index
     outputs_py = GenerateOutputs()
-    for i, output_pb in enumerate(outputs_pb.generate_outputs):
-        output_py = GenerateOutput()
-        output_py.finished = output_pb.finished
-        output_py.aux_info = AuxInfo(
-            cost_time=output_pb.aux_info.cost_time_us / 1000.0,
-            first_token_cost_time=output_pb.aux_info.first_token_cost_time_us / 1000.0,
-            wait_time=output_pb.aux_info.wait_time_us / 1000.0,
-            iter_count=output_pb.aux_info.iter_count,
-            input_len=output_pb.aux_info.input_len,
-            prefix_len=output_pb.aux_info.prefix_len,
-            output_len=output_pb.aux_info.output_len,
-            step_output_len=output_pb.aux_info.step_output_len,
-            fallback_tokens=output_pb.aux_info.fallback_tokens,
-            fallback_times=output_pb.aux_info.fallback_times,
-            pd_sep=output_pb.aux_info.pd_sep,
-            reuse_len=output_pb.aux_info.total_reuse_len,
-            local_reuse_len=output_pb.aux_info.local_reuse_len,
-            remote_reuse_len=output_pb.aux_info.remote_reuse_len,
-            prefill_total_reuse_len=output_pb.aux_info.prefill_total_reuse_len,
-            prefill_local_reuse_len=output_pb.aux_info.prefill_local_reuse_len,
-            prefill_remote_reuse_len=output_pb.aux_info.prefill_remote_reuse_len,
-            decode_total_reuse_len=output_pb.aux_info.decode_total_reuse_len,
-            decode_local_reuse_len=output_pb.aux_info.decode_local_reuse_len,
-            decode_remote_reuse_len=output_pb.aux_info.decode_remote_reuse_len,
-            aux_string=output_pb.aux_info.aux_string,
-            role_addrs=input_py.generate_config.role_addrs,
+    # Decode each batch tensor once. Legacy servers ignore the capability flag
+    # and continue returning per-output tensors, which remain supported below.
+    batches = {}
+    if outputs_pb.HasField("batched_output"):
+        for field, value in outputs_pb.batched_output.ListFields():
+            tensor = trans_tensor(value)
+            if tensor.ndim == 0 or tensor.shape[0] != len(outputs_pb.generate_outputs):
+                raise ValueError(f"Invalid RPC batch size for {field.name}")
+            batches[field.name] = (
+                tensor.tolist()
+                if field.name in ("cum_log_probs", "softmax_probs")
+                else tensor.unbind(0)
+            )
+    input_ids = input_py.token_ids.reshape(1, -1)
+
+    def tensor_for(name, index, output):
+        return (
+            batches[name][index]
+            if name in batches
+            else trans_tensor(getattr(output, name))
         )
-        # TODO(xinfei.sxf) cum_log_probs is not right, ignore it temporarily
-        if output_pb.aux_info.HasField("cum_log_probs"):
+
+    for i, output_pb in enumerate(outputs_pb.generate_outputs):
+        if input_py.generate_config.aux_info:
+            aux_info = AuxInfo(
+                cost_time=output_pb.aux_info.cost_time_us / 1000.0,
+                first_token_cost_time=output_pb.aux_info.first_token_cost_time_us
+                / 1000.0,
+                wait_time=output_pb.aux_info.wait_time_us / 1000.0,
+                iter_count=output_pb.aux_info.iter_count,
+                input_len=output_pb.aux_info.input_len,
+                prefix_len=output_pb.aux_info.prefix_len,
+                output_len=output_pb.aux_info.output_len,
+                step_output_len=output_pb.aux_info.step_output_len,
+                fallback_tokens=output_pb.aux_info.fallback_tokens,
+                fallback_times=output_pb.aux_info.fallback_times,
+                pd_sep=output_pb.aux_info.pd_sep,
+                reuse_len=output_pb.aux_info.total_reuse_len,
+                local_reuse_len=output_pb.aux_info.local_reuse_len,
+                remote_reuse_len=output_pb.aux_info.remote_reuse_len,
+                prefill_total_reuse_len=output_pb.aux_info.prefill_total_reuse_len,
+                prefill_local_reuse_len=output_pb.aux_info.prefill_local_reuse_len,
+                prefill_remote_reuse_len=output_pb.aux_info.prefill_remote_reuse_len,
+                decode_total_reuse_len=output_pb.aux_info.decode_total_reuse_len,
+                decode_local_reuse_len=output_pb.aux_info.decode_local_reuse_len,
+                decode_remote_reuse_len=output_pb.aux_info.decode_remote_reuse_len,
+                aux_string=output_pb.aux_info.aux_string,
+                role_addrs=input_py.generate_config.role_addrs,
+            )
+        else:
+            aux_info = AuxInfo(
+                input_len=output_pb.aux_info.input_len,
+                output_len=output_pb.aux_info.output_len,
+                step_output_len=output_pb.aux_info.step_output_len,
+            )
+        output_py = GenerateOutput(finished=output_pb.finished, aux_info=aux_info)
+        if "cum_log_probs" in batches:
+            output_py.aux_info.cum_log_probs = batches["cum_log_probs"][i]
+        elif output_pb.aux_info.HasField("cum_log_probs"):
             output_py.aux_info.cum_log_probs = trans_tensor(
                 output_pb.aux_info.cum_log_probs
             ).tolist()
-        if output_pb.aux_info.HasField("softmax_probs"):
+        if "softmax_probs" in batches:
+            output_py.aux_info.softmax_probs = batches["softmax_probs"][i]
+        elif output_pb.aux_info.HasField("softmax_probs"):
             output_py.aux_info.softmax_probs = trans_tensor(
                 output_pb.aux_info.softmax_probs
             ).tolist()
-        output_py.output_ids = trans_tensor(output_pb.output_ids)
-        output_py.input_ids = input_py.token_ids.reshape(1, -1)
-        if output_pb.HasField("hidden_states"):
-            output_py.hidden_states = trans_tensor(output_pb.hidden_states)
-        if output_pb.HasField("all_hidden_states"):
-            output_py.all_hidden_states = trans_tensor(output_pb.all_hidden_states)
-        if output_pb.HasField("loss"):
+        output_py.output_ids = tensor_for("output_ids", i, output_pb)
+        output_py.input_ids = input_ids
+        if "hidden_states" in batches or output_pb.HasField("hidden_states"):
+            output_py.hidden_states = tensor_for("hidden_states", i, output_pb)
+        if "all_hidden_states" in batches or output_pb.HasField("all_hidden_states"):
+            output_py.all_hidden_states = tensor_for("all_hidden_states", i, output_pb)
+        if "loss" in batches or output_pb.HasField("loss"):
             # when calculate_loss 1, result should be one element
             if input_py.generate_config.calculate_loss == 1:
-                output_py.loss = trans_tensor(output_pb.loss)[0]
+                output_py.loss = tensor_for("loss", i, output_pb)[0]
             else:
-                output_py.loss = trans_tensor(output_pb.loss)
-        if output_pb.HasField("logits"):
-            output_py.logits = trans_tensor(output_pb.logits)
-        if output_pb.HasField("all_probs"):
-            output_py.all_probs = trans_tensor(output_pb.all_probs)
+                output_py.loss = tensor_for("loss", i, output_pb)
+        if "logits" in batches or output_pb.HasField("logits"):
+            output_py.logits = tensor_for("logits", i, output_pb)
+        if "all_probs" in batches or output_pb.HasField("all_probs"):
+            output_py.all_probs = tensor_for("all_probs", i, output_pb)
         if (
             logits_index is not None
-            and output_pb.HasField("logits")
+            and ("logits" in batches or output_pb.HasField("logits"))
             and output_pb.aux_info.output_len == logits_index
         ):
             stream_state.cached_logits_dict[i] = output_py.logits

@@ -59,6 +59,7 @@ public:
 
     mutable rtp_llm::BufferPtr cum_log_probs;  // shape: [batch_size]
     mutable rtp_llm::BufferPtr all_probs;      // shape: [batch_size, vocab_size]
+    bool                       compact_beam_output = true;
 };
 
 struct SamplerOutput {

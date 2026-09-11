@@ -45,9 +45,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         has_num_beams ? device_->allocateBuffer({DataType::TYPE_INT32, {inputs.batch_size_out}, AllocationType::HOST}) :
                         nullptr;
     auto all_token_ids_out =
-        variable_num_beams ? device_->allocateBuffer(
-                                 {DataType::TYPE_INT32, {inputs.batch_size_out, max_seq_len}, AllocationType::HOST}) :
-                             inputs.token_ids;
+        (variable_num_beams || has_num_beams) ?
+            device_->allocateBuffer(
+                {DataType::TYPE_INT32, {inputs.batch_size_out, max_seq_len}, AllocationType::HOST}) :
+            inputs.token_ids;
     auto all_cum_log_probs_out =
         variable_num_beams && inputs.cum_log_probs ?
             device_->allocateBuffer({DataType::TYPE_FP32, {inputs.batch_size_out}, AllocationType::HOST}) :
@@ -128,12 +129,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                        inputs.do_sample ? (OptionalBufferRef)do_sample : nullopt});
             if (greedy_output.success) {
                 device_->copy({success, *greedy_output.success});
-                // TODO(zhangjianning.zjn): would be better to eliminate the copy
-                if (variable_num_beams) {
-                    device_->copy({token_ids_out, token_ids_in});
-                }
             } else {
                 std::fill(success.data<bool>(), success.data<bool>() + batch_size_in, true);
+            }
+            if (all_token_ids_out != inputs.token_ids) {
+                device_->copy({token_ids_out, token_ids_in});
             }
         } else {
             RTP_LLM_LOG_DEBUG("current_num_beams_in is %d", cur_num_beams_in);
@@ -166,11 +166,34 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                                      input_lengths_device,
                                                      sequence_lengths_device,
                                                      cum_log_probs_in_device,
-                                                     cur_num_beams_out});
+                                                     cur_num_beams_out,
+                                                     !inputs.compact_beam_output});
 
-            device_->copy({token_ids_out, *output.token_ids});
             device_->copy({cum_log_probs_out, *output.cum_log_probs});
             device_->copy({beam_indices, *output.beam_indices});
+            if (inputs.compact_beam_output && output.new_tokens) {
+                // Reuse the kernel's selected tokens and parent IDs. Reconstruct
+                // histories already resident on CPU, rather than round-tripping
+                // every prompt token through the GPU. Output never aliases input.
+                auto new_tokens = device_->clone({*output.new_tokens, AllocationType::HOST});
+                for (size_t i = 0; i < batch_size_out; ++i) {
+                    const int parent = beam_indices.data<int32_t>()[i];
+                    RTP_LLM_CHECK_WITH_INFO(parent >= 0 && size_t(parent) < cur_num_beams_in,
+                                            "invalid beam parent [%d] for width [%zu]",
+                                            parent,
+                                            cur_num_beams_in);
+                    const size_t source = (i / cur_num_beams_out) * cur_num_beams_in + parent;
+                    const int    length = sequence_lengths.data<int32_t>()[source];
+                    RTP_LLM_CHECK_WITH_INFO(
+                        length >= 0 && size_t(length) < max_seq_len, "invalid beam history length [%d]", length);
+                    auto       dst = token_ids_out.data<int32_t>() + i * max_seq_len;
+                    const auto src = token_ids_in.data<int32_t>() + source * max_seq_len;
+                    memcpy(dst, src, sizeof(int32_t) * max_seq_len);
+                    dst[length] = new_tokens->data<int32_t>()[i];
+                }
+            } else {
+                device_->copy({token_ids_out, *output.token_ids});
+            }
 
             std::fill(success.data<bool>(), success.data<bool>() + batch_size_in, true);
         }

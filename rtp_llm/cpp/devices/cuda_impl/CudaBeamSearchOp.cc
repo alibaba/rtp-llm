@@ -72,10 +72,12 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     cudaMemsetAsync(workspace->data(), 0, workspace->sizeBytes(), stream_);
 
     // allocate output buffer
-    auto token_ids_out = allocateBuffer({DataType::TYPE_INT32,
-                                         {(size_t)batch_size, (size_t)beam_width_out, (size_t)max_seq_len},
-                                         AllocationType::DEVICE},
-                                        {"token_ids_out"});
+    auto token_ids_out = params.return_token_ids ?
+                             allocateBuffer({DataType::TYPE_INT32,
+                                             {(size_t)batch_size, (size_t)beam_width_out, (size_t)max_seq_len},
+                                             AllocationType::DEVICE},
+                                            {"token_ids_out"}) :
+                             nullptr;
     auto beam_indices  = allocateBuffer(
         {DataType::TYPE_INT32, {(size_t)batch_size, (size_t)beam_width_out}, AllocationType::DEVICE}, {"beam_indices"});
     auto output_ids = allocateBuffer(
@@ -117,7 +119,7 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
     BH.cumLogProbsIn      = params.cum_log_probs->data<float>();
     BH.cumLogProbsOut     = cum_log_probs_out->data<float>();
     BH.tokenIdsIn         = params.token_ids->data<int>();
-    BH.tokenIdsOut        = token_ids_out->data<int>();
+    BH.tokenIdsOut        = token_ids_out ? token_ids_out->data<int>() : nullptr;
     BH.parentIdsPtr       = beam_indices->data<int>();
     BH.outputIdsPtr       = output_ids->data<int>();
 
@@ -137,7 +139,8 @@ BeamSearchOutput CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
                              std::move(input_lengths_out),
                              std::move(sequence_lengths_out),
                              std::move(cum_log_probs_out),
-                             std::move(beam_indices)});
+                             std::move(beam_indices),
+                             std::move(output_ids)});
 }
 
 }  // namespace rtp_llm

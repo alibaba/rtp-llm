@@ -49,6 +49,8 @@ public:
     int                           calculate_loss           = 0;
     int                           hidden_states_cut_dim    = 0;
     bool                          return_logits            = false;
+    bool                          accept_batched_output    = false;
+    bool                          aux_info                 = true;
     bool                          return_cum_log_probs     = false;
     bool                          return_incremental       = false;
     bool                          return_hidden_states     = false;

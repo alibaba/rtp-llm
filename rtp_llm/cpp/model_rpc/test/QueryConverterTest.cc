@@ -129,4 +129,66 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
 }
 
+TEST_F(QueryConverterTest, testBatchedOutputNegotiationAndLegacyFallback) {
+    GenerateInputPB input;
+    input.mutable_generate_config();
+    auto config = QueryConverter::transQuery(&input)->generate_config;
+    EXPECT_FALSE(config->accept_batched_output);
+    EXPECT_TRUE(config->aux_info);
+    input.mutable_generate_config()->set_accept_batched_output(true);
+    input.mutable_generate_config()->mutable_aux_info()->set_value(false);
+    config = QueryConverter::transQuery(&input)->generate_config;
+    EXPECT_TRUE(config->accept_batched_output);
+    EXPECT_FALSE(config->aux_info);
+
+    GenerateOutputs source;
+    source.request_id = 42;
+    for (int i = 0; i < 3; ++i) {
+        GenerateOutput row;
+        row.finished               = i == 2;
+        row.output_ids             = createBuffer<int32_t>({1, 2}, {17, 20 + i}, AllocationType::HOST);
+        row.aux_info.output_len    = 2;
+        row.aux_info.cost_time_us  = 12345;
+        row.aux_info.cum_log_probs = createBuffer<float>({1}, {-float(i)}, AllocationType::HOST);
+        row.aux_info.softmax_probs = createBuffer<float>({2}, {0.5f, 0.25f}, AllocationType::HOST);
+        row.logits                 = createBuffer<float>({1, 2}, {float(i), 1.0f}, AllocationType::HOST);
+        source.generate_outputs.push_back(row);
+    }
+    GenerateOutputsPB legacy, batched;
+    QueryConverter::transResponse(&legacy, &source, "metadata");
+    QueryConverter::transResponse(&batched, &source, "metadata", true, false);
+    EXPECT_FALSE(legacy.has_batched_output());
+    ASSERT_EQ(batched.generate_outputs_size(), 3);
+    ASSERT_TRUE(batched.batched_output().has_output_ids());
+    EXPECT_EQ(batched.batched_output().output_ids().shape(0), 3);
+    EXPECT_EQ(batched.batched_output().output_ids().shape(1), 1);
+    EXPECT_EQ(batched.batched_output().output_ids().shape(2), 2);
+    std::string tokens, scores, probabilities, logits;
+    for (int i = 0; i < 3; ++i) {
+        tokens += legacy.generate_outputs(i).output_ids().int32_data();
+        scores += legacy.generate_outputs(i).aux_info().cum_log_probs().fp32_data();
+        probabilities += legacy.generate_outputs(i).aux_info().softmax_probs().fp32_data();
+        logits += legacy.generate_outputs(i).logits().fp32_data();
+        EXPECT_FALSE(batched.generate_outputs(i).has_output_ids());
+        EXPECT_FALSE(batched.generate_outputs(i).aux_info().has_cum_log_probs());
+        EXPECT_EQ(batched.generate_outputs(i).aux_info().output_len(), 2);
+        EXPECT_EQ(batched.generate_outputs(i).aux_info().cost_time_us(), 0);
+        EXPECT_EQ(batched.generate_outputs(i).finished(), legacy.generate_outputs(i).finished());
+    }
+    EXPECT_EQ(batched.batched_output().output_ids().int32_data(), tokens);
+    EXPECT_EQ(batched.batched_output().cum_log_probs().fp32_data(), scores);
+    EXPECT_EQ(batched.batched_output().softmax_probs().fp32_data(), probabilities);
+    EXPECT_EQ(batched.batched_output().logits().fp32_data(), logits);
+
+    // Variable SID lengths / partially present optional tensors must remain exact.
+    source.generate_outputs[1].output_ids = createBuffer<int32_t>({1, 1}, {31}, AllocationType::HOST);
+    source.generate_outputs[2].logits.reset();
+    GenerateOutputsPB ragged;
+    QueryConverter::transResponse(&ragged, &source, "metadata", true);
+    EXPECT_FALSE(ragged.batched_output().has_output_ids());
+    EXPECT_FALSE(ragged.batched_output().has_logits());
+    EXPECT_EQ(ragged.generate_outputs(1).output_ids().shape(1), 1);
+    EXPECT_TRUE(ragged.batched_output().has_cum_log_probs());
+}
+
 }  // namespace rtp_llm

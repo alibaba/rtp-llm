@@ -15,8 +15,11 @@ class QueryConverter {
 public:
     static std::shared_ptr<GenerateInput> transQuery(const GenerateInputPB* input);
 
-    static void
-    transResponse(GenerateOutputsPB* outputs, const GenerateOutputs* response, const std::string& aux_string);
+    static void transResponse(GenerateOutputsPB*     outputs,
+                              const GenerateOutputs* response,
+                              const std::string&     aux_string,
+                              bool                   batched_output = false,
+                              bool                   dump_aux_info  = true);
 
     static std::vector<MultimodalInput> transMMInput(const MultimodalInputsPB* mm_inputs);
 
@@ -32,6 +35,8 @@ private:
     static torch::Tensor transTensor(const TensorPB& tensor_pb);
 
     static void transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer);
+
+    static bool stackBuffersToTensorPB(TensorPB* target, const std::vector<ConstBufferPtr>& buffers);
 
     static void transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig config);
 };

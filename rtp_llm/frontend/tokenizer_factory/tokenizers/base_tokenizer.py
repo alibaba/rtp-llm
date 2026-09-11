@@ -25,6 +25,12 @@ class BaseTokenizer:
     def apply_chat_template(self, messages, **kwargs):
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 
+    def batch_decode(self, token_ids: List[List[int]], **kwargs):
+        # Preserve custom wrappers that override decode (for example SID tokens).
+        if type(self).decode is not BaseTokenizer.decode:
+            return [self.decode(tokens, **kwargs) for tokens in token_ids]
+        return self.tokenizer.batch_decode(token_ids, **kwargs)
+
     @property
     def stop_words_id_list(self):
         return []

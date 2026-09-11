@@ -29,6 +29,7 @@ from rtp_llm.utils.word_util import (
     get_stop_word_slices,
     match_stop_words,
     remove_padding_eos,
+    remove_padding_eos_with_numpy,
     truncate_response_with_stop_words,
     truncate_token_with_stop_word_id,
 )
@@ -150,7 +151,7 @@ class Pipeline(object):
             self.tokenizer.vocab_size,
             self.model_config.special_tokens,
             self.tokenizer,
-            **kwargs
+            **kwargs,
         )
         mm_inputs = [MultimodalInput(url) for url in urls] if urls is not None else []
 
@@ -215,7 +216,7 @@ class Pipeline(object):
                 if not generate_config.print_stop_words:
                     text = text[:stop_idx]
                 else:
-                    text = text[:stop_idx + stop_len]
+                    text = text[: stop_idx + stop_len]
                 token_buffer = ""
                 generate_output.finished = True
 
@@ -223,7 +224,9 @@ class Pipeline(object):
             return text, token_buffer
 
         if generate_config.return_incremental or not generate_config.print_stop_words:
-            trunc_text = truncate_response_with_stop_words(text, stop_word_str_slices, generate_config.is_streaming, True)
+            trunc_text = truncate_response_with_stop_words(
+                text, stop_word_str_slices, generate_config.is_streaming, True
+            )
             if generate_config.return_incremental:
                 token_buffer = text[len(trunc_text) :]
             text = trunc_text
@@ -248,6 +251,59 @@ class Pipeline(object):
         texts = []
         all_texts = []
         output_lens = []
+        # Beam parents can change at every step, including grow/shrink schedules.
+        # Decode the complete batch once; never reuse incremental text by row ID.
+        if generate_config.has_num_beams():
+            outputs = generate_outputs.generate_outputs
+            token_lists = []
+            if outputs and all(
+                o.output_ids.shape == outputs[0].output_ids.shape for o in outputs
+            ):
+                token_arrays = (
+                    torch.cat([o.output_ids for o in outputs], dim=0).cpu().numpy()
+                )
+            else:
+                token_arrays = [o.output_ids.reshape(-1).cpu().numpy() for o in outputs]
+            for output, tokens in zip(outputs, token_arrays):
+                if not generate_config.ignore_eos:
+                    tokens = remove_padding_eos_with_numpy(
+                        tokens, self._special_tokens.eos_token_id
+                    )
+                output_lens.append(len(tokens))
+                token_lists.append(
+                    self.process_stop_id(
+                        generate_config,
+                        output,
+                        tokens.tolist(),
+                        stop_word_ids,
+                        stop_word_id_slices,
+                    )
+                )
+            decode_kwargs = dict(
+                kwargs,
+                generate_config=generate_config.model_dump(),
+                skip_special_tokens=generate_config.skip_special_tokens,
+            )
+            all_texts = self.tokenizer.batch_decode(token_lists, **decode_kwargs)
+            if len(all_texts) != len(outputs):
+                raise ValueError("Tokenizer returned a different batch size")
+            token_buffers = [""] * len(outputs)
+            for i, (output, text) in enumerate(zip(outputs, all_texts)):
+                text = text.rstrip("\uFFFD")
+                text, token_buffers[i] = self.process_stop_str(
+                    generate_config,
+                    output,
+                    text,
+                    text,
+                    stop_word_str_list,
+                    stop_word_str_slices,
+                    "",
+                    **kwargs,
+                )
+                texts.append((generate_config.out_prefix or "") + text)
+            return texts, output_lens, [None] * len(outputs), token_buffers, []
+
+        decode_config = generate_config.model_dump()
         if len(decoding_states) == 0:
             if not generate_config.has_num_beams() and generate_config.is_streaming:
                 decoding_states = [
@@ -314,12 +370,12 @@ class Pipeline(object):
 
             text, all_text = tokenids_decode_func(
                 tokens,
-                generate_config=generate_config.model_dump(),
+                generate_config=decode_config,
                 tokenizer=self.tokenizer,
                 decoding_state=decoding_states[i],
                 return_incremental=generate_config.return_incremental,
                 skip_special_tokens=generate_config.skip_special_tokens,
-                **kwargs
+                **kwargs,
             )
 
             text, token_buffers[i] = self.process_stop_str(
@@ -330,7 +386,7 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 token_buffers[i],
-                **kwargs
+                **kwargs,
             )
 
             if generate_config.out_prefix:
@@ -379,7 +435,10 @@ class Pipeline(object):
 
         # TODO(xinfei.sxf) add batch and stop test
         async for generate_outputs in stream:
-            if not generate_outputs_cache.generate_outputs:
+            if (
+                generate_config.has_num_beams()
+                or not generate_outputs_cache.generate_outputs
+            ):
                 generate_outputs_cache.generate_outputs = (
                     generate_outputs.generate_outputs
                 )
@@ -408,7 +467,7 @@ class Pipeline(object):
                 decoding_states,
                 token_buffers,
                 ouput_tokens_list,
-                **kwargs
+                **kwargs,
             )
 
             kmonitor.report(

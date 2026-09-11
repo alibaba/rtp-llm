@@ -50,7 +50,14 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     common_len_             = seq_length_;
     start_check_seq_length_ = seq_length_;
 
-    size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
+    // Reserve only the reachable request history, plus speculative scratch space.
+    // Use size_t before adding to avoid overflowing a client-supplied token limit.
+    size_t max_token_num = max_seq_len_;
+    if (generate_input->generate_config->max_new_tokens > 0) {
+        max_token_num =
+            std::min(max_token_num, size_t(seq_length_) + size_t(generate_input->generate_config->max_new_tokens));
+    }
+    max_token_num += extra_reserve_token_num;
 
     complete_token_ids_ = device_->allocateBuffer(
         {rtp_llm::DataType::TYPE_INT32, {(size_t)max_batch_size_, max_token_num}, rtp_llm::AllocationType::HOST}, {});
@@ -167,6 +174,9 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
     // # This differs from new_tokens.shape[-1] under beam search case,
     // # which needs to update all the generated tokens each update.
     RTP_LLM_CHECK(new_tokens->dim() == 2);
+    RTP_LLM_CHECK(num_new_tokens >= 0);
+    RTP_LLM_CHECK(size_t(seq_length_ + num_new_tokens) <= complete_token_ids_->shape()[1]);
+    RTP_LLM_CHECK(new_tokens->shape()[1] >= size_t(is_beam_search ? seq_length_ + num_new_tokens : num_new_tokens));
 
     auto       new_tokens_ptr     = new_tokens->data<int>();  // [batch_size, max_num_new_tokens]
     auto       max_num_new_tokens = new_tokens->shape()[1];
@@ -187,7 +197,9 @@ bool CompleteTokenIds::update(const rtp_llm::BufferPtr& new_tokens,
             }
         }
         if (is_beam_search) {
-            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * max_num_new_tokens);
+            // The sampler batch may be padded to a longer neighbouring request.
+            // Copy only this request's valid history into its bounded allocation.
+            memcpy(data(i), new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * (seq_length_ + num_new_tokens));
         } else {
             if (batch_size_ != new_batch_size && i > 0) {
                 memcpy(data(i), data(0), sizeof(int) * seq_length_);

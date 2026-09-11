@@ -94,6 +94,9 @@ message GenerateConfigPB {
     google.protobuf.StringValue trace_id = 50;
     bool return_all_hidden_states = 51;
     bool enable_memory_block_cache = 52;
+    // Additive negotiation: absent on legacy clients, which require field 2 tensors.
+    bool accept_batched_output = 53;
+    google.protobuf.BoolValue aux_info = 54;
 }
 
 message MMPreprocessConfigPB {
@@ -173,6 +176,19 @@ message GenerateOutputPB {
     TensorPB all_hidden_states = 8;
 }
 
+// Batched tensors use a leading output dimension; scalar metadata remains in
+// generate_outputs. A field falls back to per-output tensors if shapes differ.
+message BatchedOutputPB {
+    TensorPB output_ids = 1;
+    TensorPB hidden_states = 2;
+    TensorPB loss = 3;
+    TensorPB logits = 4;
+    TensorPB all_probs = 5;
+    TensorPB all_hidden_states = 6;
+    TensorPB cum_log_probs = 7;
+    TensorPB softmax_probs = 8;
+}
+
 message GenerateOutputsPB {
     int64 request_id = 1;
     repeated GenerateOutputPB generate_outputs = 2;
@@ -183,6 +199,7 @@ message GenerateOutputsPB {
     int64 begin_compute_time = 7;
     int64 compute_done_time = 8;
     RpcErrorPB error_info = 9;
+    BatchedOutputPB batched_output = 10;
 }
 
 // return to python client

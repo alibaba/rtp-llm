@@ -538,7 +538,14 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
         BufferPtr new_tokens = new_tokens_all->slice(batch_idx_out, next_batch_size);
         for (size_t i = 0; i < next_batch_size; ++i) {
             new_tokens->data<int32_t>()[i] =
-                new_all_token_ids->data<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+                new_all_token_ids->data<int32_t>()[(batch_idx_out + i) * token_stride
+                                                   + (has_beam_search ? stream->seqLength() : token_stride - 1)];
+            if (stream->hasNumBeams() && !has_beam_search) {
+                // A 1 -> 1 step uses greedy sampling, which writes at the batch
+                // padding boundary. Beam histories need the request-local offset.
+                batch_new_all_token_ids->data<int32_t>()[i * token_stride + stream->seqLength()] =
+                    new_tokens->data<int32_t>()[i];
+            }
         }
 
         BufferPtr batch_softmax_result;
