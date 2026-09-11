@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import grpc
 import torch
@@ -59,7 +60,9 @@ class VitRpcServerTest(unittest.TestCase):
 
     def server(self, result):
         model = SimpleNamespace(
-            model_config=SimpleNamespace(hidden_size=4, compute_dtype=torch.float32)
+            model_config=SimpleNamespace(
+                hidden_size=4, compute_dtype=torch.float32, max_seq_len=8192
+            )
         )
         return MultimodalRpcServer(
             SimpleNamespace(
@@ -73,6 +76,19 @@ class VitRpcServerTest(unittest.TestCase):
         return MultimodalInputsPB(
             multimodal_inputs=[MultimodalInputPB(multimodal_url="image")]
         )
+
+    def test_worker_status_has_a_positive_increasing_version(self):
+        server = self.server(MMEmbeddingRes([]))
+        with mock.patch(
+            "rtp_llm.server.vit_rpc_server.time.time_ns", return_value=123000
+        ):
+            first = server.GetWorkerStatus(None, None)
+            second = server.GetWorkerStatus(None, None)
+        self.assertTrue(first.alive)
+        self.assertEqual(first.role, "VIT")
+        self.assertEqual(first.max_seq_len, 8192)
+        self.assertGreater(first.status_version, 0)
+        self.assertGreater(second.status_version, first.status_version)
 
     def test_returns_batch_metrics_without_proto_changes(self):
         server = self.server(

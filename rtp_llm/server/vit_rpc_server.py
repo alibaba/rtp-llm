@@ -101,6 +101,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
         self._status_lock = threading.Lock()
         self._active = 0
+        self._status_version = 0
         self.rdma_encoder = rdma_encoder
         config = getattr(mm_process_engine, "vit_config", None)
         self.max_requests = (
@@ -124,6 +125,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def GetWorkerStatus(self, request, context):
         with self._status_lock:
             active = self._active
+            # FlexLB ignores version 0. Epoch microseconds also survive restarts.
+            self._status_version = max(self._status_version + 1, time.time_ns() // 1000)
+            version = self._status_version
         return WorkerStatusPB(
             role="VIT",
             role_type=ROLE_TYPE_VIT,
@@ -131,6 +135,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             tp_size=1,
             dp_size=1,
             running_query_len=active,
+            status_version=version,
             max_seq_len=self.engine.model.model_config.max_seq_len,
         )
 
