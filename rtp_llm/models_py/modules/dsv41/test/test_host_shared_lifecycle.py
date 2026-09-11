@@ -87,7 +87,9 @@ class HostSharedLifecycleTest(TestCase):
         self.assertNotEqual(os.geteuid(), 0)
         self.assertGreaterEqual(torch.cuda.device_count(), 2)
         self.shared_module, self.cuda_module = load_host_modules()
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(
+            dir=os.environ.get("DSV41_TEST_SHARED_ROOT")
+        )
         self.root = Path(self.temporary.name)
         self.slices = initialized_slices(self.root / "source", self.shared_module)
         self.store = self.shared_module.HostSharedWeightStore(self.root / "shared")

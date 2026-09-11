@@ -1,3 +1,14 @@
+py_test(
+    name = "test_compressor",
+    srcs = ["test_compressor.py", "official_compressor.py", "test_compact_writer.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {
+        "DSV41_OWNER_COMPRESSOR": "1",
+        "DSV41_NATIVE_COMPACT_READER": "1",
+        "DSV41_NATIVE_COMPACT_WRITER": "1",
+    },
+)
+
 py_library(
     name = "host_cuda_probe_support",
     srcs = ["host_cuda_test_support.py", "standalone_load.py"],
