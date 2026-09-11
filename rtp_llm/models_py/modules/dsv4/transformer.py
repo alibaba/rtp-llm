@@ -107,6 +107,10 @@ class V4Args:
     moe_tp_rank: int = 0
     moe_cp_size: int = 1
     moe_cp_enabled: bool = False
+    # Stage-local EP context (CP4EP4PP2). Set only when the resolved
+    # DSV4_PP_EP_* opt-in validated; None on every other launch, which keeps
+    # the pre-existing behaviour byte-identical.
+    moe_stage_context: Optional[object] = None
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers execute only the commit side: target
     # features are projected into the draft SWA pools and no query/FFN/mHC
@@ -185,6 +189,7 @@ def _block_kwargs(
         moe_tp_rank=args.moe_tp_rank,
         cp_size=args.moe_cp_size,
         cp_enabled=args.moe_cp_enabled,
+        stage_context=getattr(args, "moe_stage_context", None),
         fp8_kv_cache=args.fp8_kv_cache,
         commit_only=commit_only,
     )

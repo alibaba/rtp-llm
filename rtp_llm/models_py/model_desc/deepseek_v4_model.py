@@ -39,6 +39,7 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.distributed.ep_stage_context import resolve_pp_ep_opt_in
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
     dsv4_global_chunk_tokens_configured,
@@ -734,6 +735,32 @@ class DeepSeekV4Model(GptModelBase):
         self._v4_args.moe_tp_rank = physical_tp_rank
         self._v4_args.moe_cp_enabled = cp_enabled
         self._v4_args.moe_cp_size = physical_tp_size if cp_enabled else 1
+
+        # Experimental CP4EP4PP2: build the stage-local EP context ONCE here, at
+        # model construction, and hand it down to every MoE layer. The opt-in
+        # was already parsed and validated in set_parallelism_config against the
+        # authoritative RankLayout; this re-resolves the same strict parser so a
+        # model built without that setup step cannot silently proceed. `None`
+        # on every other launch keeps the existing behaviour untouched.
+        self._v4_args.moe_stage_context = None
+        pp_ep_enabled, _pp_ep_backend = (
+            resolve_pp_ep_opt_in(parallelism_config) if parallelism_config is not None else (False, "")
+        )
+        if pp_ep_enabled:
+            from rtp_llm.models_py.distributed.ep_stage_context import (
+                EpStageContext,
+                validate_pp_ep_shape,
+            )
+
+            validate_pp_ep_shape(parallelism_config)
+            self._v4_args.moe_stage_context = EpStageContext.build(
+                parallelism_config, backend=_pp_ep_backend
+            )
+            logging.info(
+                "[DeepSeekV4Model] stage-local EP enabled: %s",
+                self._v4_args.moe_stage_context,
+            )
+
         logging.info(
             "[DeepSeekV4Model] MoE physical topology: tp=%d rank=%d cp_enabled=%s cp_size=%d",
             self._v4_args.moe_tp_size,

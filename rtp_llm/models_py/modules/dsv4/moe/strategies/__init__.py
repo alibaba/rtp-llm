@@ -20,6 +20,9 @@ from .deepep import DeepEPStrategy  # noqa: F401  actual DeepEP only
 from .sm120_fused_moe import (  # noqa: F401  SM120 FusedMoe + collectives
     Sm120FusedMoeStrategy,
 )
+from .nccl_ep_mxfp8 import (  # noqa: F401  CP4EP4PP2 stage-local NCCL MXFP8
+    NcclEpMxfp8Strategy,
+)
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 
 __all__ = [

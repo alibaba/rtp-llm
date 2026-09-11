@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from typing import ClassVar, Dict, Optional, Type
 
 import torch
@@ -36,6 +36,13 @@ class MoeCfg:
     moe_tp_rank: int = 0
     cp_size: int = 1
     cp_enabled: bool = False
+    # Stage-local EP context (CP4EP4PP2).  Present only when the resolved
+    # DSV4_PP_EP_* opt-in validated, so a strategy can hand its hot helpers an
+    # explicit stage communicator instead of resolving one deep inside a
+    # collective.  Excluded from equality/repr: it wraps a live ProcessGroup.
+    stage_context: Optional[object] = dataclass_field(
+        default=None, compare=False, repr=False
+    )
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -291,6 +298,7 @@ def select_strategy(
                         "mega_se",
                         "deepep",
                         "sm120_fused_moe",
+                        "fork_nccl_mxfp8",
                     ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires a distributed strategy. "
@@ -311,6 +319,25 @@ def select_strategy(
             raise RuntimeError(f"Unknown MoE strategy {forced!r}. Available: {names}")
 
     if cfg.ep_size > 1:
+        # The resolved CP4EP4PP2 backend names the strategy, so an explicitly
+        # enabled launch gets the backend it declared instead of whichever
+        # distributed strategy happens to be healthy. `purecp_bf16` maps onto the
+        # existing SM120 FusedMoe + CP-router path.
+        declared = getattr(cfg.stage_context, "backend", None) if cfg.stage_context is not None else None
+        if declared is not None:
+            declared_cls = next((c for c in _STRATEGY_PRIORITY if c.name == declared), None)
+            if declared_cls is None:
+                raise RuntimeError(
+                    f"Resolved expert backend {declared!r} has no registered strategy "
+                    f"(layer_id={cfg.layer_id})."
+                )
+            if not declared_cls.can_handle(cfg):
+                raise RuntimeError(
+                    f"Resolved expert backend {declared!r} cannot handle this cfg "
+                    f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
+                )
+            return declared_cls
+
         mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
         if mega_cls is not None and mega_cls.can_handle(cfg):
             return mega_cls

@@ -168,6 +168,7 @@ class MoE(nn.Module):
         moe_tp_rank: int = 0,
         cp_size: int = 1,
         cp_enabled: bool = False,
+        stage_context: Optional[object] = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -232,6 +233,7 @@ class MoE(nn.Module):
             moe_tp_rank=moe_tp_rank,
             cp_size=cp_size,
             cp_enabled=cp_enabled,
+            stage_context=stage_context,
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
