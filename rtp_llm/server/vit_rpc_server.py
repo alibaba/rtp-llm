@@ -64,7 +64,9 @@ def trans_input(mutlimodal_inputs_pb: MultimodalInputsPB):
     return urls, types, tensors, configs
 
 
-def trans_output(res: MMEmbeddingRes, metadata_only=False, rdma_encoder=None):
+def trans_output(
+    res: MMEmbeddingRes, metadata_only=False, rdma_encoder=None, require_rdma=False
+):
     output_pb = MultimodalOutputsPB()
     handles = []
     if res.position_ids is not None and len(res.position_ids) != len(res.embeddings):
@@ -84,6 +86,10 @@ def trans_output(res: MMEmbeddingRes, metadata_only=False, rdma_encoder=None):
                 output.output_rdma.CopyFrom(MMRdmaDescPB.FromString(descriptor))
                 handles.append(output.output_rdma.handle)
             else:
+                if require_rdma:
+                    raise RuntimeError(
+                        "Strict ViT RDMA export failed; inline features are disabled"
+                    )
                 output.multimodal_embedding.CopyFrom(trans_from_tensor(embedding))
             if res.position_ids is not None and res.position_ids[i] is not None:
                 output.multimodal_pos_id.CopyFrom(
@@ -104,6 +110,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self._status_version = 0
         self.rdma_encoder = rdma_encoder
         config = getattr(mm_process_engine, "vit_config", None)
+        self.require_rdma = getattr(config, "mm_transport_mode", "grpc") == "rdma"
         self.max_requests = (
             getattr(config, "vit_max_concurrent_requests", 32)
             if getattr(mm_process_engine, "_scheduler", None) is not None
@@ -149,6 +156,15 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             context.abort(grpc.StatusCode.CANCELLED, "ViT request cancelled")
         remaining = context.time_remaining()
         deadline = time.monotonic() + remaining if remaining is not None else None
+        if (
+            self.require_rdma
+            and not multimodal_inputs.metadata_only
+            and not multimodal_inputs.support_rdma
+        ):
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "Strict ViT RDMA requires support_rdma",
+            )
         with self._status_lock:
             if self._active >= self.max_requests:
                 context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "ViT worker is busy")
@@ -181,6 +197,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 res,
                 multimodal_inputs.metadata_only,
                 self.rdma_encoder if multimodal_inputs.support_rdma else None,
+                require_rdma=self.require_rdma,
             )
             self.engine._check_request(deadline, cancelled)
             context.set_trailing_metadata(

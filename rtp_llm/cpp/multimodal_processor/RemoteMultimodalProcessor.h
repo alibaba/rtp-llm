@@ -67,9 +67,6 @@ private:
                 releasable.push_back(item.output_rdma().handle());
             }
         }
-        if (releasable.empty()) {
-            return QueryConverter::transMMOutput(&output_pb);
-        }
         auto release_slots = [&]() noexcept {
             try {
                 if (releasable.empty()) {
@@ -93,6 +90,16 @@ private:
                 RTP_LLM_LOG_WARNING("ViT slot cleanup failed: %s", error.what());
             }
         };
+        if (vit_config_.mm_transport_mode == "rdma"
+            && (output_pb.multimodal_outputs_size() != mm_inputs.size() || releasable.size() != mm_inputs.size())) {
+            // No READ has started. Reclaim descriptors from a mixed response
+            // before rejecting it; strict mode must never accept inline features.
+            release_slots();
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "Strict ViT RDMA requires a descriptor for every image");
+        }
+        if (releasable.empty()) {
+            return QueryConverter::transMMOutput(&output_pb);
+        }
         auto convert = [&]() -> ErrorResult<MultimodalOutput> {
             if (!rdma_transport_ || output_pb.multimodal_outputs_size() != mm_inputs.size()) {
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "Unexpected ViT RDMA output count or transport");

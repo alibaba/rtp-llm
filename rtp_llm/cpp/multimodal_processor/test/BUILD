@@ -31,6 +31,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ] + cuda13_torch_link_deps,

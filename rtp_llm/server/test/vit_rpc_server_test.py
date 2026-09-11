@@ -212,6 +212,44 @@ class VitRpcServerTest(unittest.TestCase):
         server.RemoteMultimodalEmbedding(request, Context())
         self.assertEqual(encoder.exports, 0)
 
+    def test_strict_rdma_requires_opt_in_but_allows_metadata(self):
+        server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))
+        server.require_rdma = True
+        server.engine.submit = mock.Mock(
+            return_value=MMEmbeddingRes([torch.ones((2, 4))])
+        )
+        context = Context()
+        with self.assertRaisesRegex(Aborted, "support_rdma"):
+            server.RemoteMultimodalEmbedding(self.request(), context)
+        self.assertEqual(context.code, grpc.StatusCode.FAILED_PRECONDITION)
+        server.engine.submit.assert_not_called()
+        request = self.request()
+        request.metadata_only = True
+        output = server.RemoteMultimodalEmbedding(request, Context())
+        self.assertTrue(output.multimodal_outputs[0].token_ids)
+        self.assertFalse(output.multimodal_outputs[0].HasField("multimodal_embedding"))
+
+    def test_strict_export_failure_releases_prior_slots_and_never_sends_bytes(self):
+        descriptor = MMRdmaDescPB(handle="first").SerializeToString()
+        encoder = FakeRdmaEncoder([descriptor, b""])
+        with self.assertRaisesRegex(RuntimeError, "inline features are disabled"):
+            trans_output(
+                MMEmbeddingRes([torch.ones((2, 4)), torch.ones((3, 4))]),
+                rdma_encoder=encoder,
+                require_rdma=True,
+            )
+        self.assertEqual(encoder.released, ["first"])
+
+    def test_strict_export_success_has_descriptors_only(self):
+        descriptor = MMRdmaDescPB(handle="first").SerializeToString()
+        output = trans_output(
+            MMEmbeddingRes([torch.ones((2, 4))]),
+            rdma_encoder=FakeRdmaEncoder([descriptor]),
+            require_rdma=True,
+        ).multimodal_outputs[0]
+        self.assertTrue(output.HasField("output_rdma"))
+        self.assertFalse(output.HasField("multimodal_embedding"))
+
     def test_embedding_limit_keeps_release_handler_available(self):
         encoder = FakeRdmaEncoder([])
         server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))

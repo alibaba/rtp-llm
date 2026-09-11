@@ -2,12 +2,56 @@
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
+#include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
+
+TEST_F(MultimodalProcessorTest, StrictRemoteRejectsInlineAndReleasesMixedOutputs) {
+    class FakeService: public MultimodalRpcService::Service {
+    public:
+        MultimodalOutputsPB      outputs;
+        std::vector<std::string> released;
+        grpc::Status             RemoteMultimodalEmbedding(grpc::ServerContext*,
+                                                           const MultimodalInputsPB*,
+                                                           MultimodalOutputsPB* response) override {
+            response->CopyFrom(outputs);
+            return grpc::Status::OK;
+        }
+        grpc::Status ReleaseEmbedding(grpc::ServerContext*, const ReleaseEmbeddingPB* request, EmptyPB*) override {
+            released.assign(request->handle().begin(), request->handle().end());
+            return grpc::Status::OK;
+        }
+    } service;
+    QueryConverter::transTensorPB(service.outputs.add_multimodal_outputs()->mutable_multimodal_embedding(),
+                                  torch::ones({2, 4}));
+    grpc::ServerBuilder builder;
+    int                 port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+    ASSERT_NE(server, nullptr);
+    RemoteMultimodalProcessor processor(py::none(), MMModelConfig{}, 32);
+    auto                      call = [&](const std::vector<MultimodalInput>& inputs) {
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        return processor.MultimodalEmbedding(inputs, "127.0.0.1:" + std::to_string(port), &context);
+    };
+    // Simulate an auto client without a usable provider; inline features remain supported.
+    processor.vit_config_.mm_transport_mode = "auto";
+    EXPECT_TRUE(call({MultimodalInput("a")}).ok());
+    processor.vit_config_.mm_transport_mode = "rdma";
+    EXPECT_FALSE(call({MultimodalInput("a")}).ok());
+    EXPECT_TRUE(service.released.empty());
+    service.outputs.add_multimodal_outputs()->mutable_output_rdma()->set_handle("unread-slot");
+    EXPECT_FALSE(call({MultimodalInput("a"), MultimodalInput("b")}).ok());
+    EXPECT_EQ(service.released, std::vector<std::string>({"unread-slot"}));
+    server->Shutdown();
+    server->Wait();
+}
 
 TEST_F(MultimodalProcessorTest, SameUrlDifferentImageFeaturesHaveDifferentCacheTokens) {
     auto processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 32);
