@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
@@ -7,12 +8,13 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorBackend.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
-#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/NetUtil.h"
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <unistd.h>
 #include <utility>
@@ -58,6 +60,96 @@ bool P2PConnectorDecode::init() {
         RTP_LLM_LOG_ERROR("decode connector init failed: worker init failed");
         return false;
     }
+    if (config_.p2p_writeback_enable) {
+        write_worker_ = std::make_unique<P2PWorkerDecodeWrite>(config_.worker_config, layer_block_converter_, sender);
+        if (!write_worker_->init()) {
+            RTP_LLM_LOG_ERROR("decode connector init failed: write worker init failed");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response) {
+    response.mutable_p2p_response()->Clear();
+    const auto reject = [&](const std::string& message) {
+        P2PConnector::setP2PResponse(response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message));
+        return false;
+    };
+    if (!write_worker_) {
+        return reject("decode writeback disabled");
+    }
+    switch (request.write_operation()) {
+        case WRITE_START: {
+            P2PWorkerRoutePlan plan;
+            plan.plan_digest = request.plan_digest();
+            for (const auto& pb : request.routes()) {
+                if (pb.partition_count() != 1 || pb.partition_id() != 0
+                    || pb.slice_mode() != static_cast<int>(CpBlockSliceMode::NONE) || pb.slice_count() != 1
+                    || pb.slice_index() != 0) {
+                    return reject("writeback currently requires symmetric whole-block routes");
+                }
+                const auto     local = RouteCodec::decode(pb);
+                P2PWorkerRoute route;
+                route.route_id  = local.route_id;
+                route.cache_tag = local.cache_tag;
+                route.partition = local.partition;
+                route.slice     = local.slice;
+                if (local.peer_index < 0 || local.peer_index >= request.peer_workers_size()) {
+                    return reject("write route peer index out of range");
+                }
+                const auto& peer = request.peer_workers(local.peer_index);
+                if (peer.ip().empty() || peer.cache_store_port() <= 0 || peer.cache_store_port() > 65535) {
+                    return reject("write route has invalid peer endpoint");
+                }
+                route.dst_ip   = peer.ip();
+                route.dst_port = peer.cache_store_port();
+                for (const auto& layer : pb.layer_blocks()) {
+                    if (layer.layer_id() > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                        || layer.cache_keys().empty() || layer.cache_keys_size() != layer.block_ids_size()) {
+                        return reject("write route has invalid layer or key/block pairs");
+                    }
+                    auto              buffer = std::make_shared<LayerCacheBuffer>(layer.layer_id(), layer.cache_tag());
+                    std::set<int64_t> keys;
+                    for (int i = 0; i < layer.cache_keys_size(); ++i) {
+                        if (layer.block_ids(i) == 0
+                            || layer.block_ids(i) > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                            || !keys.insert(layer.cache_keys(i)).second) {
+                            return reject("write request contains invalid block or duplicate key");
+                        }
+                        buffer->addBlockId(layer.cache_keys(i), layer.block_ids(i));
+                    }
+                    route.layer_buffers.push_back(std::move(buffer));
+                }
+                plan.routes.push_back(std::move(route));
+            }
+            const auto error =
+                write_worker_->write(request.request_id(), request.unique_key(), request.deadline_ms(), plan);
+            if (error.hasError()) {
+                WriteTaskStatus status;
+                if (write_worker_->queryWriteStatus(request.unique_key(), status)) {
+                    P2PConnector::fillWriteResponse(response, status);
+                }
+                P2PConnector::setP2PResponse(response, error);
+                return false;
+            }
+            break;
+        }
+        case WRITE_CANCEL:
+            if (!write_worker_->cancelWrite(request.unique_key(), request.deadline_ms())) {
+                return reject("invalid write key");
+            }
+            break;
+        case WRITE_QUERY:
+            break;
+        default:
+            return reject("invalid write operation");
+    }
+    WriteTaskStatus status;
+    if (!write_worker_->queryWriteStatus(request.unique_key(), status)) {
+        return reject("unknown write task");
+    }
+    P2PConnector::fillWriteResponse(response, status);
     return true;
 }
 
@@ -103,27 +195,6 @@ void P2PConnectorDecode::cancelRead(const std::shared_ptr<AsyncContext>& context
     scheduler_->cancel(std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context));
 }
 
-namespace {
-
-void setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info) {
-    auto* p2p_response = response.mutable_p2p_response();
-    if (error_info.hasError()) {
-        p2p_response->set_error_code(transErrorCodeToRPC(error_info.code()));
-        p2p_response->set_error_message(error_info.ToString());
-    } else {
-        p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
-        p2p_response->set_error_message("");
-    }
-}
-
-void setP2PResponseOk(FunctionResponsePB& response) {
-    auto* p2p_response = response.mutable_p2p_response();
-    p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
-    p2p_response->set_error_message("");
-}
-
-}  // namespace
-
 bool P2PConnectorDecode::readPerRank(int64_t                                 request_id,
                                      const std::string&                      unique_key,
                                      int64_t                                 deadline_ms,
@@ -131,7 +202,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
                                      FunctionResponsePB&                     response) {
     auto reject_read = [&response](const std::string& message) {
         ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message);
-        setP2PResponse(response, error_info);
+        P2PConnector::setP2PResponse(response, error_info);
         return false;
     };
     if (unique_key.empty()) {
@@ -146,7 +217,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
         RTP_LLM_LOG_DEBUG("executeRead: no routes for this worker, request_id=%ld, unique_key=%s",
                           request_id,
                           unique_key.c_str());
-        setP2PResponseOk(response);
+        P2PConnector::setP2PResponse(response);
         return true;
     }
 
@@ -221,7 +292,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
                             unique_key.c_str(),
                             error_info.ToString().c_str());
     }
-    setP2PResponse(response, error_info);
+    P2PConnector::setP2PResponse(response, error_info);
     return error_info.ok();
 }
 
@@ -229,7 +300,7 @@ bool P2PConnectorDecode::cancelReadPerRank(const std::string& unique_key,
                                            int64_t            request_deadline_ms,
                                            FunctionResponsePB& response) {
     bool ret = worker_->cancelRead(unique_key, request_deadline_ms);
-    setP2PResponseOk(response);
+    P2PConnector::setP2PResponse(response);
     return ret;
 }
 

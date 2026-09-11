@@ -22,12 +22,13 @@ struct P2PWorkerRoute {
     PartitionSpec partition;
     SliceSpec     slice;
 
-    /// Decode 方向：本 route 覆盖的每层 buffer（cache_key -> block_id 已由 rank0 解析好）。
-    /// Prefill 方向为空 —— prefill worker 用自己 writeByLayer 产出的本地投影，
-    /// 在所有被允许的 CP 形态下它恰好等于该 route 的键集。
+    /// 本 route 的本侧每层 buffer（cache_key -> block_id 已由 rank0 解析好）。
+    /// Read 的 Decode 接收侧、Write 的 Decode 发送侧和 Prefill 接收侧均显式提供。
+    /// Read 的 Prefill 发送侧为空，使用 writeByLayer 产出的本地投影，与该 route 键集对应。
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_buffers;
 
-    /// Prefill 方向：目的端点（由 peer_index 在 peer_workers 里解析而来）。
+    /// 发送侧目的端点（由 peer_index 在 peer_workers 里解析）：Read 的 Prefill / Write 的 Decode。
+    /// 接收侧不使用这两个字段。
     std::string dst_ip;
     uint32_t    dst_port = 0;
 };
@@ -42,7 +43,7 @@ struct P2PWorkerRoutePlan {
         return routes.empty();
     }
 
-    /// 某个 tag 上有多少条 route —— prefill 侧用它把 outstanding 阈值按「层」而非
+    /// 某个 tag 上有多少条 route —— Read 的 Prefill 发送侧用它把 outstanding 阈值按「层」而非
     /// 「传输次数」计量，否则一层的 route 会填满窗口、per-layer overlap 塌成 1 层。
     int routeCountForTag(const std::string& tag) const {
         int n = 0;

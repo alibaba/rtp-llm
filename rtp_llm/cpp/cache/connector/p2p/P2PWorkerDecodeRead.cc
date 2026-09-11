@@ -203,7 +203,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
 
     const int64_t read_start_time_us = currentTimeUs();
     auto          task_group         = std::make_shared<ReadTaskGroup>();
-    task_group->lease                = std::make_shared<DecodeTargetWriteLease>();
+    task_group->lease                = std::make_shared<P2PTransferLease>();
     int total_block_count            = 0;
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
@@ -231,7 +231,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
         if (has_inflight_task) {
             task_group->lease->seal();
             std::lock_guard<std::mutex> lock(lease_map_mutex_);
-            lease_map_[unique_key] = LeaseMapEntry{task_group, 0, currentTimeMs()};
+            lease_map_[unique_key] = LeaseMapEntry{task_group, currentTimeMs()};
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
                              build_result.ToString() + "; registered recv task is still stopping");
         }
@@ -247,7 +247,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     }
     {
         std::lock_guard<std::mutex> lock(lease_map_mutex_);
-        lease_map_[unique_key] = LeaseMapEntry{task_group, 0, currentTimeMs()};
+        lease_map_[unique_key] = LeaseMapEntry{task_group, currentTimeMs()};
     }
 
     if (pending_cancel) {
@@ -427,9 +427,9 @@ bool P2PWorkerDecodeRead::queryLeaseStatus(
         return false;
     }
 
-    LeaseMapEntry&                entry      = it->second;
-    const auto&                   task_group = entry.task_group;
-    const DecodeTargetWriteLease& lease      = *task_group->lease;
+    LeaseMapEntry&          entry      = it->second;
+    const auto&             task_group = entry.task_group;
+    const P2PTransferLease& lease      = *task_group->lease;
 
     // Count how many tasks have completed since last query and advance lease counters.
     int done_now = 0;
@@ -438,13 +438,7 @@ bool P2PWorkerDecodeRead::queryLeaseStatus(
             ++done_now;
         }
     }
-    const int newly_done = done_now - entry.finish_counted;
-    if (newly_done > 0) {
-        for (int i = 0; i < newly_done; ++i) {
-            task_group->lease->onTransferFinished();
-        }
-        entry.finish_counted = done_now;
-    }
+    task_group->lease->updateFinishedOps(done_now);
 
     sealed       = lease.isSealed();
     started_ops  = lease.startedOps();

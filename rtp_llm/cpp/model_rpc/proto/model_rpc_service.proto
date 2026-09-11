@@ -546,6 +546,15 @@ enum P2PConnectorBroadcastType {
     CANCEL_HANDLE_READ = 3;
     QUERY_LEASE_STATUS = 4;
     HANDLE_READ_NO_TRANSFER = 5;
+    HANDLE_WRITE = 6;
+    WRITE = 7;
+}
+
+enum P2PWriteOperationPB {
+    // START acknowledges submission; QUERY/CANCEL also report physical completion.
+    WRITE_START = 0;
+    WRITE_QUERY = 1;
+    WRITE_CANCEL = 2;
 }
 
 // One transfer route as minted by KVCacheTransferPlanner, projected onto the side that
@@ -606,6 +615,8 @@ message P2PConnectorBroadcastTpRequestPB {
     // plans diverged (config drift) fail as "no matching recv task within deadline" rather
     // than silently copying into the wrong byte range.
     uint64 plan_digest = 12;
+    // Write workers acknowledge registration separately from physical completion.
+    P2PWriteOperationPB write_operation = 13;
 }
 
 // GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
@@ -626,8 +637,10 @@ message GetPeerInfoResponsePB {
 message P2PConnectorBroadcastTpResponsePB {
     ErrorCodePB error_code = 1;
     string error_message = 2;
-    // Populated when request type == QUERY_LEASE_STATUS
+    // Populated for QUERY_LEASE_STATUS and Write worker operations.
     LeaseStatusResponsePB lease_status = 3;
+    // True only after every Write task completed successfully without cancellation.
+    bool write_success = 4;
 }
 
 message LeaseStatusResponsePB {
@@ -635,6 +648,25 @@ message LeaseStatusResponsePB {
     int32 started_ops = 2;
     int32 finished_ops = 3;
     bool stopped = 4;      // sealed && started_ops == finished_ops
+}
+
+message P2PConnectorStartWriteRequestPB {
+    int64 request_id = 1;
+    string unique_key = 2;
+    int64 deadline_ms = 3;
+    repeated int64 cache_keys = 4;
+    int32 decode_tp_size = 5;
+    uint64 layout_digest = 6;
+    repeated int32 token_ids = 9;
+    int32 input_length = 10;
+}
+
+message P2PConnectorStartWriteResponsePB {
+    int32 error_code = 1;
+    string error_message = 2;
+    int32 accepted_start_block = 3;
+    int32 accepted_block_count = 4;
+    repeated string prefill_worker_transfer_addrs = 5;
 }
 
 message P2PConnectorStartLoadRequestPB {
@@ -770,6 +802,7 @@ service RpcService {
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
+    rpc StartWrite(P2PConnectorStartWriteRequestPB) returns (P2PConnectorStartWriteResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
 }
 

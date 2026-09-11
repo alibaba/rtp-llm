@@ -917,6 +917,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_rdma_enable_h2d_copy", &CacheStoreConfig::p2p_rdma_enable_h2d_copy)
         .def_readwrite("p2p_rdma_staging_block_count", &CacheStoreConfig::p2p_rdma_staging_block_count)
         .def_readwrite("p2p_rdma_staging_block_size_bytes", &CacheStoreConfig::p2p_rdma_staging_block_size_bytes)
+        .def_readwrite("p2p_writeback_enable", &CacheStoreConfig::p2p_writeback_enable)
+        .def_readwrite("p2p_writeback_timeout_ms", &CacheStoreConfig::p2p_writeback_timeout_ms)
+        .def_readwrite("p2p_writeback_max_inflight", &CacheStoreConfig::p2p_writeback_max_inflight)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -948,10 +951,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.rdma_transfer_worker_queue_size,
                                       self.p2p_rdma_enable_h2d_copy,
                                       self.p2p_rdma_staging_block_count,
-                                      self.p2p_rdma_staging_block_size_bytes);
+                                      self.p2p_rdma_staging_block_size_bytes,
+                                      self.p2p_writeback_enable,
+                                      self.p2p_writeback_timeout_ms,
+                                      self.p2p_writeback_max_inflight);
             },
             [](py::tuple t) {
-                if (t.size() != 20 && t.size() != 23 && t.size() != 26 && t.size() != 29)
+                if (t.size() != 20 && t.size() != 23 && t.size() != 26 && t.size() != 29 && t.size() != 32)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -974,7 +980,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.p2p_layer_cache_buffer_store_timeout_ms      = t[16].cast<int64_t>();
                     c.p2p_cancel_broadcast_timeout_ms              = t[17].cast<int64_t>();
                     int idx = 18;
-                    if (t.size() == 26 || t.size() == 29) {
+                    if (t.size() >= 26) {
                         c.p2p_prefill_resource_hold_ms = t[idx++].cast<int64_t>();
                         c.p2p_max_transfer_deadline_ms = t[idx++].cast<int64_t>();
                         c.p2p_cancelled_keys_ttl_ms    = t[idx++].cast<int64_t>();
@@ -986,10 +992,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.rdma_transfer_worker_thread_count      = t[idx++].cast<int>();
                         c.rdma_transfer_worker_queue_size        = t[idx++].cast<int>();
                     }
-                    if (t.size() == 29) {
+                    if (t.size() >= 29) {
                         c.p2p_rdma_enable_h2d_copy          = t[idx++].cast<bool>();
                         c.p2p_rdma_staging_block_count      = t[idx++].cast<int>();
                         c.p2p_rdma_staging_block_size_bytes = t[idx++].cast<int64_t>();
+                    }
+                    if (t.size() == 32) {
+                        c.p2p_writeback_enable       = t[idx++].cast<bool>();
+                        c.p2p_writeback_timeout_ms   = t[idx++].cast<int64_t>();
+                        c.p2p_writeback_max_inflight = t[idx++].cast<int>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());

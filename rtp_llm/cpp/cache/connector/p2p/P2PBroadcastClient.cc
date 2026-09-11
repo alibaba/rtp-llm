@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "autil/NetUtil.h"
+#include <limits>
 
 namespace rtp_llm {
 
@@ -115,22 +116,36 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
         return nullptr;
     }
 
-    // Define the RPC call lambda for ExecuteFunction
-    auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
-                       std::shared_ptr<grpc::ClientContext>& client_context,
-                       const FunctionRequestPB&              request,
-                       grpc::CompletionQueue*                cq) {
-        return stub->AsyncExecuteFunction(client_context.get(), request, cq);
-    };
-
-    auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(timeout_ms), rpc_call);
+    auto result = broadcastRpc(requests, timeout_ms);
     if (!result) {
         RTP_LLM_LOG_WARNING("broadcast failed, cannot create broadcast result");
         return nullptr;
     }
 
     return std::make_shared<Result>(unique_key, result);
+}
+
+std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>
+P2PBroadcastClient::broadcastRpc(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms) {
+    if (!tp_broadcast_manager_ || timeout_ms <= 0 || timeout_ms > std::numeric_limits<int>::max()) {
+        RTP_LLM_LOG_WARNING("P2P broadcast unavailable or invalid timeout_ms=%ld", timeout_ms);
+        return nullptr;
+    }
+    auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
+                       std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB&              request,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(context.get(), request, cq); };
+    return tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, static_cast<int>(timeout_ms), rpc_call);
+}
+
+std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>
+P2PBroadcastClient::broadcastRpcAndWait(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms) {
+    auto result = broadcastRpc(requests, timeout_ms);
+    if (!result || !result->waitDone(static_cast<int>(timeout_ms)) || !result->success()) {
+        return nullptr;
+    }
+    return result;
 }
 
 void P2PBroadcastClient::genBroadcastRequest(
@@ -232,18 +247,7 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
         requests.push_back(std::move(request));
     }
 
-    int64_t timeout_ms = cancel_broadcast_timeout_ms_;
-
-    // Define the RPC call lambda for ExecuteFunction
-    auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
-                       std::shared_ptr<grpc::ClientContext>& client_context,
-                       const FunctionRequestPB&              request,
-                       grpc::CompletionQueue*                cq) {
-        return stub->AsyncExecuteFunction(client_context.get(), request, cq);
-    };
-
-    auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(timeout_ms), rpc_call);
+    auto result = broadcastRpc(requests, cancel_broadcast_timeout_ms_);
     if (!result) {
         RTP_LLM_LOG_WARNING("P2PBroadcastClient cancel: broadcast failed, unique_key: %s", unique_key.c_str());
         return nullptr;
@@ -317,23 +321,8 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
         requests.push_back(std::move(request));
     }
 
-    auto rpc_call = [](std::shared_ptr<RpcService::Stub>&    stub,
-                       std::shared_ptr<grpc::ClientContext>& client_context,
-                       const FunctionRequestPB&              request,
-                       grpc::CompletionQueue*                cq) {
-        return stub->AsyncExecuteFunction(client_context.get(), request, cq);
-    };
-
-    auto tp_result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(poll_timeout_ms), rpc_call);
+    auto tp_result = broadcastRpcAndWait(requests, poll_timeout_ms);
     if (!tp_result) {
-        RTP_LLM_LOG_WARNING("queryLeaseStatus: broadcast failed to create result, unique_key=%s", unique_key.c_str());
-        return result;
-    }
-
-    // Block until all workers respond (with the given timeout).
-    const bool all_done = tp_result->waitDone(static_cast<int>(poll_timeout_ms));
-    if (!all_done || !tp_result->success()) {
         RTP_LLM_LOG_WARNING("queryLeaseStatus: broadcast timed out or failed, unique_key=%s", unique_key.c_str());
         return result;
     }
@@ -358,6 +347,65 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
         result.ranks.push_back(rs);
     }
     result.success = true;
+    return result;
+}
+
+bool P2PBroadcastClient::WriteStatusResult::allStopped() const {
+    if (ranks.empty()) {
+        return false;
+    }
+    for (const auto& rank : ranks) {
+        if (!rank.has_lease_status()) {
+            return false;
+        }
+        const auto& lease = rank.lease_status();
+        if (!lease.sealed() || !lease.stopped() || lease.started_ops() != lease.finished_ops()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool P2PBroadcastClient::WriteStatusResult::allSucceeded() const {
+    if (!allStopped()) {
+        return false;
+    }
+    for (const auto& rank : ranks) {
+        if (rank.error_code() != ErrorCodePB::NONE_ERROR || !rank.write_success()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+P2PBroadcastClient::WriteStatusResult P2PBroadcastClient::controlWrite(const std::string&        unique_key,
+                                                                       P2PConnectorBroadcastType type,
+                                                                       P2PWriteOperationPB       operation,
+                                                                       int64_t                   transfer_deadline_ms,
+                                                                       int64_t                   control_timeout_ms) {
+    WriteStatusResult result;
+    if (!tp_broadcast_manager_ || unique_key.empty() || (type != WRITE && type != HANDLE_WRITE)
+        || (operation != WRITE_CANCEL && operation != WRITE_QUERY)) {
+        return result;
+    }
+    std::vector<FunctionRequestPB> requests(tp_broadcast_manager_->workerNum());
+    for (auto& request : requests) {
+        auto* p2p = request.mutable_p2p_request();
+        p2p->set_unique_key(unique_key);
+        p2p->set_type(type);
+        p2p->set_write_operation(operation);
+        p2p->set_deadline_ms(transfer_deadline_ms);
+    }
+    auto broadcast = broadcastRpcAndWait(requests, control_timeout_ms);
+    if (!broadcast) {
+        return result;
+    }
+    for (const auto& response : broadcast->responses()) {
+        if (!response.has_p2p_response()) {
+            return {};
+        }
+        result.ranks.push_back(response.p2p_response());
+    }
     return result;
 }
 

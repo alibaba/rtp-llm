@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PTransferLease.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
@@ -738,7 +738,6 @@ TEST_F(DecodeLeaseRaceTest, D1_QueryLeaseStatus_IncrementalFinishCounting) {
 }
 
 // D2: Multiple calls to queryLeaseStatus with no new completions between calls.
-//     finish_counted must not double-count.
 TEST_F(DecodeLeaseRaceTest, D2_QueryLeaseStatus_NoDoubleCount) {
     const std::string key         = "d2_no_double_count";
     auto              buffers     = makeBuffers(2);
@@ -1210,26 +1209,26 @@ TEST_F(DecodeLeaseRaceTest, F4_RapidQueryDuringAsyncCompletion) {
 }
 
 // =============================================================================
-// GROUP G: DecodeTargetWriteLease unit tests (standalone, no Worker involved)
+// GROUP G: P2PTransferLease unit tests (standalone, no Worker involved)
 // =============================================================================
 
-TEST(DecodeTargetWriteLeaseTest, InitialState_NotSealedNotStopped) {
-    DecodeTargetWriteLease lease;
+TEST(P2PTransferLeaseTest, InitialState_NotSealedNotStopped) {
+    P2PTransferLease lease;
     EXPECT_FALSE(lease.isSealed());
     EXPECT_FALSE(lease.isStopped());
     EXPECT_EQ(lease.startedOps(), 0);
     EXPECT_EQ(lease.finishedOps(), 0);
 }
 
-TEST(DecodeTargetWriteLeaseTest, SealWithZeroOps_ImmediatelyStopped) {
-    DecodeTargetWriteLease lease;
+TEST(P2PTransferLeaseTest, SealWithZeroOps_ImmediatelyStopped) {
+    P2PTransferLease lease;
     lease.seal();
     EXPECT_TRUE(lease.isSealed());
     EXPECT_TRUE(lease.isStopped());
 }
 
-TEST(DecodeTargetWriteLeaseTest, SealWithPendingOps_NotStoppedUntilAllFinish) {
-    DecodeTargetWriteLease lease;
+TEST(P2PTransferLeaseTest, SealWithPendingOps_NotStoppedUntilAllFinish) {
+    P2PTransferLease lease;
     lease.onTransferStarted();
     lease.onTransferStarted();
     lease.onTransferStarted();
@@ -1251,8 +1250,8 @@ TEST(DecodeTargetWriteLeaseTest, SealWithPendingOps_NotStoppedUntilAllFinish) {
     EXPECT_EQ(lease.finishedOps(), 3);
 }
 
-TEST(DecodeTargetWriteLeaseTest, FinishBeforeSeal_StoppedOnceSealCalled) {
-    DecodeTargetWriteLease lease;
+TEST(P2PTransferLeaseTest, FinishBeforeSeal_StoppedOnceSealCalled) {
+    P2PTransferLease lease;
     lease.onTransferStarted();
     lease.onTransferFinished();
 
@@ -1262,8 +1261,8 @@ TEST(DecodeTargetWriteLeaseTest, FinishBeforeSeal_StoppedOnceSealCalled) {
     EXPECT_TRUE(lease.isStopped());  // now sealed and started==finished
 }
 
-TEST(DecodeTargetWriteLeaseTest, ConcurrentStartAndFinish_EventuallyConverges) {
-    DecodeTargetWriteLease lease;
+TEST(P2PTransferLeaseTest, ConcurrentStartAndFinish_EventuallyConverges) {
+    P2PTransferLease lease;
     constexpr int          N = 100;
 
     std::vector<std::thread> starters, finishers;
@@ -1286,6 +1285,51 @@ TEST(DecodeTargetWriteLeaseTest, ConcurrentStartAndFinish_EventuallyConverges) {
 
     EXPECT_TRUE(lease.isStopped());
     EXPECT_EQ(lease.finishedOps(), N);
+}
+
+TEST(P2PTransferLeaseTest, RepeatedAndOlderSnapshotsDoNotDoubleCountOrRegress) {
+    P2PTransferLease lease;
+    for (int i = 0; i < 3; ++i) {
+        lease.onTransferStarted();
+    }
+    lease.seal();
+
+    for (const auto completed_ops : {2, 2, 1, 0}) {
+        lease.updateFinishedOps(completed_ops);
+        EXPECT_EQ(lease.finishedOps(), 2);
+        EXPECT_FALSE(lease.isStopped());
+    }
+    lease.updateFinishedOps(3);
+    lease.updateFinishedOps(2);
+    EXPECT_EQ(lease.finishedOps(), 3);
+    EXPECT_TRUE(lease.isStopped());
+}
+
+TEST(P2PTransferLeaseTest, ConcurrentSnapshotsPreserveMaximumCompletedCount) {
+    P2PTransferLease lease;
+    constexpr int    operation_count = 32;
+    for (int i = 0; i < operation_count; ++i) {
+        lease.onTransferStarted();
+    }
+    lease.seal();
+
+    std::atomic<bool>        start{false};
+    std::vector<std::thread> observers;
+    for (int i = 0; i < operation_count; ++i) {
+        observers.emplace_back([&lease, &start, i]() {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            lease.updateFinishedOps(i + 1);
+            lease.updateFinishedOps(i);
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& observer : observers) {
+        observer.join();
+    }
+    EXPECT_EQ(lease.finishedOps(), operation_count);
+    EXPECT_TRUE(lease.isStopped());
 }
 
 }  // namespace test

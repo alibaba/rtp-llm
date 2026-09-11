@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWriteWorkerUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <utility>
@@ -92,9 +93,7 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
     prefill_->processRead(request, response, std::move(is_cancelled));
 }
 
-namespace {
-
-void setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info) {
+void P2PConnector::setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info) {
     auto* p2p_response = response.mutable_p2p_response();
     if (error_info.hasError()) {
         p2p_response->set_error_code(transErrorCodeToRPC(error_info.code()));
@@ -105,7 +104,17 @@ void setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info) {
     }
 }
 
-}  // namespace
+void P2PConnector::fillWriteResponse(FunctionResponsePB& response, const WriteTaskStatus& status) {
+    auto* out = response.mutable_p2p_response();
+    out->Clear();
+    auto* lease = out->mutable_lease_status();
+    lease->set_sealed(status.sealed);
+    lease->set_started_ops(status.started_ops);
+    lease->set_finished_ops(status.finished_ops);
+    lease->set_stopped(status.stopped);
+    out->set_write_success(status.write_success);
+    setP2PResponse(response, status.error);
+}
 
 bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (!prefill_ && !decode_) {
@@ -124,6 +133,7 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
     int64_t     deadline_ms = p2p_request.deadline_ms();
 
     const auto reject_role = [&response, &p2p_request]() {
+        response.mutable_p2p_response()->Clear();
         ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                              "P2P request type does not match connector role: "
                                  + std::to_string(p2p_request.type()));
@@ -132,6 +142,10 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
     };
 
     switch (p2p_request.type()) {
+        case P2PConnectorBroadcastType::HANDLE_WRITE:
+            return prefill_ ? prefill_->processWritePerRank(p2p_request, response) : reject_role();
+        case P2PConnectorBroadcastType::WRITE:
+            return decode_ ? decode_->writePerRank(p2p_request, response) : reject_role();
         case P2PConnectorBroadcastType::HANDLE_READ:
             return prefill_ ?
                        prefill_->processReadPerRank(request_id, unique_key, deadline_ms, p2p_request, response) :

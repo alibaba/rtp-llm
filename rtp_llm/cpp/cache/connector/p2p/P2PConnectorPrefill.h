@@ -21,6 +21,7 @@ class PrefillResultStore;
 class P2PSchedulerPrefillRead;
 class LayerBlockConverter;
 class P2PWorkerPrefillRead;
+class P2PWorkerPrefillWrite;
 struct P2PConnectorResourceEntry;
 
 class P2PConnectorPrefill {
@@ -62,6 +63,7 @@ public:
                                   FunctionResponsePB&                     response);
 
     bool cancelProcessReadPerRank(const std::string& unique_key, FunctionResponsePB& response);
+    bool processWritePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response);
 
     std::shared_ptr<P2PConnectorResourceStore> resourceStore() const {
         return stream_store_;
@@ -90,6 +92,7 @@ private:
     std::shared_ptr<P2PWorkerPrefillRead>          worker_;
     std::shared_ptr<P2PConnectorResourceStore>    stream_store_;
     std::shared_ptr<PrefillResultStore>            result_store_;
+    std::unique_ptr<P2PWorkerPrefillWrite>         write_worker_;
 };
 
 }  // namespace rtp_llm

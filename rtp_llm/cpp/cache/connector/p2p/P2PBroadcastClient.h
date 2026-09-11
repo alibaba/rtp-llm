@@ -116,7 +116,28 @@ public:
     /// @param poll_timeout_ms 单次 broadcast 的 gRPC 超时（毫秒）
     LeaseStatusResult queryLeaseStatus(const std::string& unique_key, int64_t poll_timeout_ms);
 
+    struct WriteStatusResult {
+        // Empty if any control RPC failed. A business error can still carry a valid stopped status.
+        std::vector<P2PConnectorBroadcastTpResponsePB> ranks;
+        bool                                           allStopped() const;
+        bool                                           allSucceeded() const;
+    };
+
+    // START failure (including timeout/missing response) never proves that worker tasks stopped.
+    // CANCEL/QUERY every possibly contacted rank and retain buffers until allStopped(). Unknown
+    // QUERY is inconclusive; CANCEL installs a tombstone that prevents a delayed START.
+    // control_timeout_ms bounds this RPC independently of the original transfer deadline.
+    WriteStatusResult controlWrite(const std::string&        unique_key,
+                                   P2PConnectorBroadcastType type,
+                                   P2PWriteOperationPB       operation,
+                                   int64_t                   transfer_deadline_ms,
+                                   int64_t                   control_timeout_ms);
+
 private:
+    std::shared_ptr<TpBroadcastResult> broadcastRpc(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms);
+    std::shared_ptr<TpBroadcastResult> broadcastRpcAndWait(const std::vector<FunctionRequestPB>& requests,
+                                                           int64_t                               timeout_ms);
+
     std::shared_ptr<Result> broadcastRequests(std::vector<FunctionRequestPB> requests,
                                               const std::string&             unique_key,
                                               int64_t                        deadline_ms);

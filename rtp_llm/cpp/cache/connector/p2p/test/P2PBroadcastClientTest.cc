@@ -1,3 +1,4 @@
+#include <limits>
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
@@ -159,6 +160,48 @@ TEST_F(P2PBroadcastClientTest, BroadcastPerRankRejectsMismatchedWorkerCount) {
                                         currentTimeMs() + 5000,
                                         P2PConnectorBroadcastType::READ),
               nullptr);
+}
+
+TEST_F(P2PBroadcastClientTest, ReadAndWriteControlsRejectInvalidTimeoutWithoutSending) {
+    const int64_t              deadline_ms      = currentTimeMs() + 5000;
+    const std::vector<int64_t> invalid_timeouts = {0, -1, int64_t(std::numeric_limits<int>::max()) + 1};
+    for (const auto timeout_ms : invalid_timeouts) {
+        SCOPED_TRACE(timeout_ms);
+        const auto read_status = client_->queryLeaseStatus("invalid-timeout", timeout_ms);
+        EXPECT_FALSE(read_status.success);
+        EXPECT_TRUE(read_status.ranks.empty());
+        EXPECT_FALSE(read_status.allStopped());
+
+        for (const auto type : {WRITE, HANDLE_WRITE}) {
+            for (const auto operation : {WRITE_CANCEL, WRITE_QUERY}) {
+                const auto write_status =
+                    client_->controlWrite("invalid-timeout", type, operation, deadline_ms, timeout_ms);
+                EXPECT_TRUE(write_status.ranks.empty());
+                EXPECT_FALSE(write_status.allStopped());
+            }
+        }
+
+        P2PBroadcastClient invalid_client(server_addrs_, timeout_ms);
+        ASSERT_TRUE(invalid_client.init());
+        EXPECT_EQ(invalid_client.cancel("invalid-timeout", CANCEL_READ, deadline_ms), nullptr);
+    }
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+        EXPECT_EQ(server->service()->getBroadcastTpCancelCallCount(), 0);
+    }
+}
+
+TEST_F(P2PBroadcastClientTest, BroadcastRejectsTimeoutOverflowWithoutSending) {
+    EXPECT_EQ(client_->broadcast(1013,
+                                 {createLayerCacheBuffer(0, 1)},
+                                 {},
+                                 "overflow-timeout",
+                                 currentTimeMs() + int64_t(std::numeric_limits<int>::max()) + 60000,
+                                 READ),
+              nullptr);
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+    }
 }
 
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {

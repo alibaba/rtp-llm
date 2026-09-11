@@ -296,7 +296,7 @@ Write 侧是**轻量新类，不是复制 Read 侧**：方向通用的收发机�
 | WorkerDecode / WorkerPrefill → `P2PWorkerDecodeRead` / `P2PWorkerPrefillRead` | 纯改名 |
 | 新增四个 Write 类 | 见 §5.2 |
 | `RouteCodec::encodeForPrefill/encodeForDecode` → `encodeForSender/encodeForReceiver` | 保留此项——codec 编码的本来就是 route 发送端/接收端字段，方向是它的本质维度 |
-| 协议词汇 | 不变：`StartWrite`/`handleWrite`、`PREFILL_HANDLE_WRITE`/`DECODE_EXECUTE_WRITE`、`_wb_` 前缀、`p2p_writeback_*` 配置、`PrefillResultStore`（§4） |
+| 协议词汇 | 不变：`StartWrite`/`handleWrite`、`HANDLE_WRITE`/`WRITE`、`_wb_` 前缀、`p2p_writeback_*` 配置、`PrefillResultStore`（§4） |
 
 ### 5.4 基建校正：接住被丢弃的半个 backend
 
@@ -304,7 +304,7 @@ Write 侧是**轻量新类，不是复制 Read 侧**：方向通用的收发机�
 
 ### 5.5 落地
 
-Read 侧改名是纯重构，与 §4 同属 Slice 0 批次（§7.8）；保留 backend 另一半、增加两个轻量 Write worker 并完成接线归入 Slice 1，两个 Write scheduler 的编排逻辑分别在 Slice 2/3 落地。回归：现有 P2PConnectorTest 全量 + 正向 smoke。
+Read 侧改名是纯重构，与 §4 同属 Slice 0 批次（§7.8）；保留 backend 另一半、增加两个轻量 Write worker 并完成接线归入 Slice 1，两个 Write scheduler 的编排逻辑分别在 Slice 2/3 独立落地和验证，生产请求收尾触发及真实两端接通单独归入 Slice 4。回归：现有 P2PConnectorTest 全量 + 正向 smoke。
 
 ---
 
@@ -424,8 +424,8 @@ message P2PConnectorStartWriteResponsePB {
 
 **第 2 层：集群内控制面（rank0 → 本侧 workers）**。复用 `ExecuteFunction` 广播通道，`FunctionRequestPB` 新增两个 function type。这一层约定的内容是 route：每个 worker 收到"和对面哪个 rank、传哪个 tag、块内哪段字节"（对称版 route 平凡：对角线 + 整块）。
 
-- `PREFILL_HANDLE_WRITE`：P0 → Pw，携带 recv routes + 分配好的 block_ids（落点）——接收方只登记落点，不需要知道对端地址；
-- `DECODE_EXECUTE_WRITE`：D0 → Dw，携带 send routes + 对端（prefill workers）传输端点 + 本地 block_ids。对端端点来自 StartWrite 应答的 `prefill_worker_transfer_addrs`（见第 1 层）——decode 本地的 routing context 里没有它。
+- `HANDLE_WRITE`：P0 → Pw，携带 recv routes + 分配好的 block_ids（落点）——接收方只登记落点，不需要知道对端地址；
+- `WRITE`：D0 → Dw，携带 send routes + 对端（prefill workers）传输端点 + 本地 block_ids。对端端点来自 StartWrite 应答的 `prefill_worker_transfer_addrs`（见第 1 层）——decode 本地的 routing context 里没有它。
 
 **第 3 层：数据面（worker ↔ worker）——零新增**。完全沿用 TransferTask 的 rendezvous 契约，对方向无感，写回只是把"谁注册、谁 push"换了边：
 
@@ -494,7 +494,9 @@ prefill 侧（响应）
 - `DecodeWriteCaller`：照抄 `DecodeLoadHelper`（正向 StartLoad caller）的异步 RPC 骨架；
 - decode 侧 `asyncWriteBack()`：照抄 `asyncRead` 的编排模式（hold → plan → RPC → 广播 → 回调收尾）；
 - prefill 侧 `handleWrite()`：照抄 decode 收侧的 settle 模式；
-- 两侧 worker 的 `executeWrite` / `handleWriteRoutes`：照抄对侧 worker 的收发实现。
+- 两侧 worker 的 `write` / `handleWrite`：复用对侧 worker 的收发基础；connector 解析协议并传入 `P2PWorkerRoutePlan`，worker 启动入口返回 `ErrorInfo`，取消和状态查询使用独立接口。`handleWrite` 登记接收任务即返回，不等待发送或接收完成。
+
+任务状态沿用 group + lease 的组织方式：Decode Read 与两侧 Write 共用 `P2PTransferLease`（原 `DecodeTargetWriteLease`），统一任务计数与停止判定；Write group 另行保存业务结果及终态。lease 不提供数据拷贝回滚或插树原子性，完整发布和资源归还仍由 scheduler/settle 负责。
 
 一块"勿抄"牌：正向 `handleRead` 的收尾有一半是 side channel（first token / reuse len / MTP）的等待与清理记账——`waitAndFillResponse` 的阻塞等待（P2PConnector.cc:504 起）加散布全函数的十来处 `clearSideChannelData`。写回没有 side channel：`handleWrite` 填完 `{p, k, 接收端点}` 即返回，数据面成败由 settle 与 deadline 收尾。§4 的解耦（Slice 0）落地后这套记账整体移入 `PrefillResultStore`，handleWrite 天然碰不到。
 
@@ -574,12 +576,17 @@ Metrics（挂 `P2PConnectorMetrics`）：写回发起/跳过（分原因）/成�
 4. 接收引用账本：分配后仅一份引用；部分分配/登记失败回到原始空闲块数；成功插树后仅保留树引用；并发 DEVICE 重复结果对应的新块归零；超时但仍在途时不得提前释放。
 5. 后缀冲突：prompt 在 GPU、response 后缀在 HOST/DISK 时准入拒绝；准入后后缀降级时 settle 零发布；较早的空节点后接 HOST/忙碌节点时，前面的空节点也不得被部分填充；完整 DEVICE 重复前缀可安全复用并继续插入新后缀。
 
-实现切片（每片独立可编译、可测）：
+实现切片共五片（Slice 0～4，每片独立可编译、可测）：
 
-0. Slice 0（重构）：§4 side channel 拆分 + §5 现有 scheduler/worker 改为 Read 侧命名，纯重构不改行为，正向回归通过后再开工写回；
-1. Slice 1（基建）：proto + 两个轻量 Write worker（`P2PWorkerDecodeWrite` / `P2PWorkerPrefillWrite`）；保留 init 中原本被丢弃的 backend 另一半，分别交给 decode 的 Write sender 和 prefill 的 Write receiver。新增 `executeWrite`/`handleWriteRoutes` 及对应角色 connector 的入口和分发，通过单测验证双向收发可用；沿用现有 backend 创建与内存注册流程，接收端监听由保留的 receiver 维持，此片尚不接入请求收尾触发点；
-2. Slice 2（prefill 收侧）：handleWrite 全流程（纯探测/owning 分配/recv/settle/insert），包括原始分配引用交接、HOST/DISK 后缀冲突拒绝，以及同锁完整预检与发布，用测试 RPC 驱动；
-3. Slice 3（decode 发侧 + 接通）：asyncWriteBack + tryReleaseKVBlock 接入 + 端到端 smoke。
+| 切片 | 实现范围 | 验证边界 |
+| --- | --- | --- |
+| Slice 0：Read 重构 | §4 side channel 拆分及 §5 现有 scheduler/worker 改为 Read 命名 | 现有正向路径回归 |
+| Slice 1：写回基础设施 | proto、两个轻量 Write worker、backend 另一半持有、角色分发和广播控制接口；Decode 使用 `writePerRank → P2PWorkerDecodeWrite::write`，Prefill 使用 `processWritePerRank → P2PWorkerPrefillWrite::handleWrite`；connector 负责协议与操作分发，worker 接收内部 route plan | 显式下发任务验证注册、发送、查询和取消；真实 RPC/TCP 验证，无生产请求触发 |
+| Slice 2：Prefill 接收与插树 | `StartWrite` 服务处理、`handleWrite` / `processWrite`、`P2PSchedulerPrefillWrite`；准入与范围协商、owning 分配、接收汇总、settle/insert、失败释放；包括原始分配引用交接、HOST/DISK 后缀冲突拒绝和同锁完整预检与发布 | 测试发起方驱动完整接收流程，验证引用账本和失败收尾 |
+| Slice 3：Decode 发起与收尾 | `P2PConnector::asyncWrite` / `P2PConnectorDecode::write`、Write caller 和 `P2PSchedulerDecodeWrite`；源块保活上下文、握手、routes 发送、并发与超时管理、CANCEL/QUERY 和释放 | 模拟 Prefill 服务驱动完整发起流程；使用测试提供的源块 hold 验证生命周期，不接入请求收尾触发 |
+| Slice 4：生产链路接通 | `KVCacheManager::asyncWriteBack`、`tryReleaseKVBlock` 触发接线，在 free 前同步建立源块 hold 并交给 Slice 3 上下文；确认 KV 就绪及 routing context 生命周期，连接真实两端 | 端到端集成、资源交接和异常路径测试、正向回归及写回 smoke |
+
+Slice 2/3 开工前先明确共同契约：StartWrite 的接受范围、拒绝/`k=0` 与接收端点语义，任务标识、keys/digest/routes 对齐，worker START 失败后的 CANCEL/QUERY，以及源块和接收块的所有权交接与物理停止条件。两个 scheduler 围绕相同契约分别实现和验证；Slice 4 验证生产触发与真实两端协作。涉及尚待讨论的接口时，先确认对应条目。实现进度、当前命名与验证记录见[实现文档 §1](decode_kvcache_writeback_implementation.md#1-当前范围与实现计划)。
 
 ---
 

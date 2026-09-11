@@ -64,6 +64,7 @@ struct P2PConnectorSchedulerConfig {
 struct P2PConnectorWorkerConfig {
     transfer::TransferBackendConfig transfer_backend_config;
 
+    int     p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_read_steal_before_deadline_ms       = 250;
     int64_t p2p_read_return_before_deadline_ms      = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
@@ -84,6 +85,8 @@ struct P2PConnectorWorkerConfig {
                                            uint32_t                 layer_all_num,
                                            bool                     is_mla = false) {
         P2PConnectorWorkerConfig config;
+        config.p2p_resource_store_timeout_check_interval_ms =
+            cache_store_config.p2p_resource_store_timeout_check_interval_ms;
         config.transfer_backend_config.cache_store_rdma_mode         = pd_sep_config.cache_store_rdma_mode;
         config.transfer_backend_config.rdma_transfer_wait_timeout_ms = cache_store_config.rdma_transfer_wait_timeout_ms;
         config.transfer_backend_config.messager_io_thread_count      = cache_store_config.messager_io_thread_count;
@@ -121,6 +124,7 @@ struct P2PConnectorWorkerConfig {
 };
 
 struct P2PConnectorConfig {
+    bool     p2p_writeback_enable = false;
     RoleType role_type = RoleType::PDFUSION;
     int      tp_rank   = 0;
 
@@ -134,6 +138,7 @@ struct P2PConnectorConfig {
                                      uint32_t                 layer_all_num,
                                      bool                     is_mla = false) {
         P2PConnectorConfig config;
+        config.p2p_writeback_enable = cache_store_config.p2p_writeback_enable;
         config.role_type = pd_sep_config.role_type;
         config.tp_rank   = parallelism_config.tp_rank;
         config.scheduler_config =

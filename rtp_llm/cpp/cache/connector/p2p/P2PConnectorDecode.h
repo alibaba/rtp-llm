@@ -15,6 +15,7 @@ class LayerBlockConverter;
 class P2PBroadcastClient;
 class P2PSchedulerDecodeRead;
 class P2PWorkerDecodeRead;
+class P2PWorkerDecodeWrite;
 
 class P2PConnectorDecode {
 public:
@@ -43,6 +44,7 @@ public:
                            FunctionResponsePB& response);
 
     bool queryLeaseStatusPerRank(const std::string& unique_key, FunctionResponsePB& response);
+    bool writePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response);
 
 private:
     const P2PConnectorConfig                      config_;
@@ -51,6 +53,7 @@ private:
     std::shared_ptr<P2PBroadcastClient>           tp_broadcast_client_;
     std::unique_ptr<P2PSchedulerDecodeRead>       scheduler_;
     std::unique_ptr<P2PWorkerDecodeRead>          worker_;
+    std::unique_ptr<P2PWorkerDecodeWrite>         write_worker_;
 };
 
 }  // namespace rtp_llm

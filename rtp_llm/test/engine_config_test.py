@@ -1,5 +1,8 @@
+import os
+import pickle
 from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from rtp_llm.config.engine_config import setup_pd_sep_config, update_worker_addrs
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -198,18 +201,19 @@ class EngineConfigTest(TestCase):
 
     def test_cache_store_config_accepts_legacy_20_field_pickle_state(self):
         config = CacheStoreConfig()
+        config.cache_store_tcp_anet_rpc_thread_num = 7
+        config.cache_store_tcp_anet_rpc_queue_num = 123
         state = config.__getstate__()
-        self.assertEqual(len(state), 29)
+        self.assertEqual(len(state), 32)
 
         # Legacy state before the three p2p deadline fields and three worker
         # queue fields were added: first 18 fields + TCP anet thread/queue.
         legacy_state = state[:18] + state[21:23]
         self.assertEqual(len(legacy_state), 20)
 
-        restored = CacheStoreConfig()
-        maybe_restored = restored.__setstate__(legacy_state)
-        if maybe_restored is not None:
-            restored = maybe_restored
+        # pybind's __setstate__ initializes a new instance, as pickle does.
+        restored = CacheStoreConfig.__new__(CacheStoreConfig)
+        restored.__setstate__(legacy_state)
 
         defaults = CacheStoreConfig()
         self.assertEqual(
@@ -239,16 +243,44 @@ class EngineConfigTest(TestCase):
         config.p2p_rdma_staging_block_count = 8
         config.p2p_rdma_staging_block_size_bytes = 4 * 1024 * 1024
 
-        restored = CacheStoreConfig()
-        maybe_restored = restored.__setstate__(config.__getstate__())
-        if maybe_restored is not None:
-            restored = maybe_restored
+        restored = pickle.loads(pickle.dumps(config))
 
         self.assertTrue(restored.p2p_rdma_enable_h2d_copy)
         self.assertEqual(restored.p2p_rdma_staging_block_count, 8)
         self.assertEqual(
             restored.p2p_rdma_staging_block_size_bytes, 4 * 1024 * 1024
         )
+
+    def test_cache_store_config_preserves_writeback_fields(self):
+        config = CacheStoreConfig()
+        config.p2p_writeback_enable = True
+        config.p2p_writeback_timeout_ms = 1234
+        config.p2p_writeback_max_inflight = 2
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored.p2p_writeback_enable)
+        self.assertEqual(restored.p2p_writeback_timeout_ms, 1234)
+        self.assertEqual(restored.p2p_writeback_max_inflight, 2)
+
+    def test_cache_store_config_legacy_pickle_defaults_writeback_off(self):
+        config = CacheStoreConfig()
+        config.thread_count = 7
+        config.p2p_writeback_enable = True
+        state = config.__getstate__()
+        legacy_states = [
+            state[:18] + state[21:23],
+            state[:18] + state[21:26],
+            state[:26],
+            state[:29],
+        ]
+        for legacy_state in legacy_states:
+            with self.subTest(fields=len(legacy_state)):
+                restored = CacheStoreConfig.__new__(CacheStoreConfig)
+                restored.__setstate__(legacy_state)
+                self.assertEqual(restored.thread_count, 7)
+                self.assertFalse(restored.p2p_writeback_enable)
+                self.assertEqual(restored.p2p_writeback_timeout_ms, 5000)
+                self.assertEqual(restored.p2p_writeback_max_inflight, 4)
 
 
 class SetupPdSepConfigTest(TestCase):
@@ -339,6 +371,47 @@ class SetupPdSepConfigTest(TestCase):
 
 
 class CacheStoreGroupArgsBindingTest(TestCase):
+    def test_writeback_args_defaults_environment_and_cli_override(self):
+        environment = {
+            "P2P_WRITEBACK_ENABLE": "true",
+            "P2P_WRITEBACK_TIMEOUT_MS": "1234",
+            "P2P_WRITEBACK_MAX_INFLIGHT": "2",
+        }
+        cases = [
+            ({}, [], (False, 5000, 4)),
+            (environment, [], (True, 1234, 2)),
+            (
+                environment,
+                [
+                    "--p2p_writeback_enable",
+                    "false",
+                    "--p2p_writeback_timeout_ms",
+                    "2345",
+                    "--p2p_writeback_max_inflight",
+                    "3",
+                ],
+                (False, 2345, 3),
+            ),
+        ]
+        for env, args, expected in cases:
+            with self.subTest(args=args, environment=env), patch.dict(
+                os.environ, env, clear=True
+            ):
+                py_env_configs = PyEnvConfigs()
+                parser = EnvArgumentParser(add_help=False)
+                parser.set_root_config(py_env_configs)
+                init_cache_store_group_args(parser, py_env_configs.cache_store_config)
+                parser.parse_args(args)
+                config = py_env_configs.cache_store_config
+                self.assertEqual(
+                    (
+                        config.p2p_writeback_enable,
+                        config.p2p_writeback_timeout_ms,
+                        config.p2p_writeback_max_inflight,
+                    ),
+                    expected,
+                )
+
     def test_new_p2p_deadline_args_bind_to_cache_store_config(self):
         py_env_configs = PyEnvConfigs()
         parser = EnvArgumentParser(add_help=False)

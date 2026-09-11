@@ -7,6 +7,30 @@ def init_cache_store_group_args(parser, cache_store_config):
     ##############################################################################################################
     cache_store_group = parser.add_argument_group("Cache Store")
     cache_store_group.add_argument(
+        "--p2p_writeback_enable",
+        env_name="P2P_WRITEBACK_ENABLE",
+        bind_to=(cache_store_config, "p2p_writeback_enable"),
+        type=str2bool,
+        default=False,
+        help="Enable decode KV cache writeback to prefill.",
+    )
+    cache_store_group.add_argument(
+        "--p2p_writeback_timeout_ms",
+        env_name="P2P_WRITEBACK_TIMEOUT_MS",
+        bind_to=(cache_store_config, "p2p_writeback_timeout_ms"),
+        type=int,
+        default=5000,
+        help="Timeout for a decode KV cache writeback request in milliseconds.",
+    )
+    cache_store_group.add_argument(
+        "--p2p_writeback_max_inflight",
+        env_name="P2P_WRITEBACK_MAX_INFLIGHT",
+        bind_to=(cache_store_config, "p2p_writeback_max_inflight"),
+        type=int,
+        default=4,
+        help="Maximum number of concurrent decode KV cache writeback requests.",
+    )
+    cache_store_group.add_argument(
         "--cache_store_rdma_mode",
         env_name="CACHE_STORE_RDMA_MODE",
         bind_to=(cache_store_config, "cache_store_rdma_mode"),

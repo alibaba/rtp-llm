@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
-#include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PTransferLease.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerRoute.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -51,7 +51,7 @@ private:
         std::vector<std::string>                   partition_keys;
         std::vector<transfer::IKVCacheRecvTaskPtr> tasks;
         std::atomic<bool>                          cancelled{false};
-        std::shared_ptr<DecodeTargetWriteLease>    lease;
+        std::shared_ptr<P2PTransferLease>          lease;
     };
 
     enum class ReadWaitOutcome {
@@ -102,7 +102,6 @@ private:
     // Completed entries are removed by queries; all entries also have a periodic hard TTL.
     struct LeaseMapEntry {
         std::shared_ptr<ReadTaskGroup> task_group;
-        int                            finish_counted{0};  // how many tasks have been counted as finished so far
         int64_t                        create_time_ms{0};
     };
 

@@ -101,11 +101,14 @@ cc_test(
     name = "p2p_connector_worker_test",
     srcs = [
         "P2PConnectorWorkerTest.cc",
+        "P2PConnectorWriteWorkerTest.cc",
         "main.cc",
     ],
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",

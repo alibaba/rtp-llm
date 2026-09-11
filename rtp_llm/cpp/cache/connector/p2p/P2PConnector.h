@@ -7,6 +7,7 @@
 #include <c10/core/Event.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
 #include <functional>
 #include <memory>
@@ -20,6 +21,7 @@ class P2PConnectorPrefill;
 class P2PConnectorDecode;
 class P2PConnectorResourceStore;
 class PrefillResultStore;
+struct WriteTaskStatus;
 
 /**
  * Q: 如何保证kvcache不被写坏
@@ -67,6 +69,9 @@ public:
 
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
     void cancelRead(const std::shared_ptr<AsyncContext>& context);
+
+    static void setP2PResponse(FunctionResponsePB& response, const ErrorInfo& error_info = ErrorInfo::OkStatus());
+    static void fillWriteResponse(FunctionResponsePB& response, const WriteTaskStatus& status);
 
 private:
     const P2PConnectorConfig             config_;
