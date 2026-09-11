@@ -30,10 +30,7 @@ from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
 from smoke.dash_grpc_comparer import DASH_ENDPOINT, DashGrpcComparer
-from smoke.dash_sc_grpc_comparer import (
-    DASH_SC_GRPC_ENDPOINT,
-    DashScGrpcComparer,
-)
+from smoke.dash_sc_grpc_comparer import DASH_SC_GRPC_ENDPOINT, DashScGrpcComparer
 from smoke.embedding_comparer import EmbeddingComparer
 from smoke.gpu_diagnostics import (
     ExceptionType,
@@ -374,8 +371,7 @@ class CaseRunner(object):
             ["H", "O", "C"],
         ),
         (
-            "List the months of summer in the Northern Hemisphere, "
-            "one per line.",
+            "List the months of summer in the Northern Hemisphere, " "one per line.",
             ["June", "August"],
         ),
         (
@@ -1085,6 +1081,10 @@ class CaseRunner(object):
                     task_states.err_msg = f"{config['role_name']} server start cancelled because another server failed"
                     results[config["role_name"]] = (None, task_states)
                 except Exception as e:
+                    logging.exception(
+                        "Unexpected exception starting server %s",
+                        config["role_name"],
+                    )
                     task_states = TaskStates()
                     task_states.ret = False
                     task_states.err_msg = (

@@ -47,6 +47,27 @@ cc_library(
             # "torch/lib/lib*amd*.so*",
         ]),
         "//conditions:default": [],
+    }) + select({
+        # Torch 2.11 CUDA 13 splits NVSHMEM out of libtorch_cuda. Declare
+        # both libraries so C++ links and Bazel runfiles carry the dependency.
+        "@//:using_cuda13_x86": [
+            "torch/lib/libtorch_nvshmem.so",
+            "@pip_gpu_cuda13_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+        ],
+        "@//:using_cuda13_arm": [
+            "torch/lib/libtorch_nvshmem.so",
+            "@pip_cuda13_arm_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+            # The ARM wheel bundles these libtorch_cpu dependencies under
+            # torch/lib, not the torch.libs directory used by older wheels.
+            "torch/lib/libarm_compute.so",
+            "torch/lib/libarm_compute_graph.so",
+            "torch/lib/libgfortran.so.5",
+            "torch/lib/libnvpl_blas_core.so.0",
+            "torch/lib/libnvpl_blas_lp64_gomp.so.0",
+            "torch/lib/libnvpl_lapack_core.so.0",
+            "torch/lib/libnvpl_lapack_lp64_gomp.so.0",
+        ],
+        "//conditions:default": [],
     }),
     hdrs = glob([
         "torch/include/*.h",

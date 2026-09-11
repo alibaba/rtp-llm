@@ -13,6 +13,7 @@ import sys
 import types
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -378,15 +379,16 @@ def test_cp_sharded_fill_dataflow_cp1_passthrough():
     )
     reader = PR.CPShardedPoolReader(cfg)
     out = torch.full((1, 8, 2), -1.0)
-    reader.fill(
-        out=out,
-        k_cache=torch.zeros((4, 4, 2)),
-        seq_lens=torch.tensor([8]),
-        gather_lens=None,
-        block_table=torch.zeros((1, 2), dtype=torch.int32),
-        block_size=block_size,
-        offset=0,
-    )
+    with patch.object(PR, "all_gather", side_effect=lambda local, group: local):
+        reader.fill(
+            out=out,
+            k_cache=torch.zeros((4, 4, 2)),
+            seq_lens=torch.tensor([8]),
+            gather_lens=None,
+            block_table=torch.zeros((1, 2), dtype=torch.int32),
+            block_size=block_size,
+            offset=0,
+        )
     # stub dequant zeros local_packed → restored is zeros → out becomes zeros.
     assert torch.equal(out[0, 0:8], torch.zeros((8, 2)))
     assert len(_DEQUANT_CALLS) == 1, "exactly one dequant call per fill"
@@ -539,12 +541,8 @@ def test_restore_prefers_fused_path_without_materializing_fallback():
     old_fused = PR.try_restore_dequantize_scatter_packed_k_cache_flat
     old_dequant = PR.dequantize_packed_k_cache_flat
 
-    def fake_fused(
-        dst, src, restore_indices, seq_lens, offset, *, seq_lens_total
-    ):
-        calls.append(
-            (dst, src, restore_indices, seq_lens, offset, seq_lens_total)
-        )
+    def fake_fused(dst, src, restore_indices, seq_lens, offset, *, seq_lens_total):
+        calls.append((dst, src, restore_indices, seq_lens, offset, seq_lens_total))
         dst[0, offset : offset + 2].fill_(7)
         return True
 

@@ -419,6 +419,10 @@ click==8.2.1 \
     #   flashinfer-python
     #   typer
     #   uvicorn
+cloudpickle==3.1.2 \
+    --hash=sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414 \
+    --hash=sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a
+    # via tilelang
 concurrent-log-handler==0.9.28 \
     --hash=sha256:4cc27969b3420239bd153779266f40d9713ece814e312b7aa753ce62c6eacdb8 \
     --hash=sha256:65db25d05506651a61573937880789fc51c7555e7452303042b5a402fd78939c
@@ -3396,6 +3400,12 @@ tiktoken==0.7.0 \
     --hash=sha256:e54be9a2cd2f6d6ffa3517b064983fb695c9a9d8aa7d574d1ef3c3f931a99225 \
     --hash=sha256:fffdcb319b614cf14f04d02a52e26b1d1ae14a570f90e9b55461a72672f7b13d
     # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
+tilelang==0.1.9 \
+    --hash=sha256:00ed594fdeb229c5505b9ffa895c3c5daeb28641c78f783fa1f724cf1e08cecd \
+    --hash=sha256:287f727c913bb648fcf6c1968809ba3390e55eeed257a5c6bb9a80bc05966af4 \
+    --hash=sha256:4bbccfe9035aed775ffafb6dc25a5994504b24e2c5d95d0f39643edfafa7bf12 \
+    --hash=sha256:77ab0ee2f40f66ea015b6b21426d482751e28cbc635ef9d1198cbd6502454a7c
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 timm==0.9.12 \
     --hash=sha256:2a828afac5b710a80ec66d0f85807e171e342faf5c0703b33102d8aa206f19dc \
     --hash=sha256:9121d1cf320f7f32490d893340fd33117bda0a0270eb8282dfd52ae5fd3e1af6

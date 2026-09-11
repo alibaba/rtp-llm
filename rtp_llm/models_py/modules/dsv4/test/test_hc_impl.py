@@ -281,12 +281,9 @@ class TestHCImpl(unittest.TestCase):
         )
         with torch.inference_mode():
             ref_y, ref_post, ref_comb = fallback.pre(x)
-            try:
-                tk_y, tk_post, tk_comb = tilelang.pre(x)
-                ref_out = fallback.post(sublayer, x, ref_post, ref_comb)
-                tk_out = tilelang.post(sublayer, x, tk_post, tk_comb)
-            except RuntimeError as exc:
-                self.skipTest(str(exc))
+            tk_y, tk_post, tk_comb = tilelang.pre(x)
+            ref_out = fallback.post(sublayer, x, ref_post, ref_comb)
+            tk_out = tilelang.post(sublayer, x, tk_post, tk_comb)
         torch.testing.assert_close(tk_y, ref_y, atol=2e-2, rtol=2e-2)
         torch.testing.assert_close(
             tk_post.float(), ref_post.float(), atol=5e-3, rtol=5e-3
@@ -374,13 +371,10 @@ class TestHCImpl(unittest.TestCase):
         residual_fresh = residual.clone()
         residual_alias = residual.clone()
         with torch.inference_mode():
-            try:
-                out_fresh = tk_mhc_post(x, residual_fresh, post, comb, hc_mult=hc)
-                out_alias = tk_mhc_post(
-                    x, residual_alias, post, comb, hc_mult=hc, out=residual_alias
-                )
-            except RuntimeError as exc:
-                self.skipTest(str(exc))
+            out_fresh = tk_mhc_post(x, residual_fresh, post, comb, hc_mult=hc)
+            out_alias = tk_mhc_post(
+                x, residual_alias, post, comb, hc_mult=hc, out=residual_alias
+            )
 
         assert out_fresh is not None and out_alias is not None
         # fresh path allocated a new buffer; aliased path wrote into residual
@@ -417,10 +411,7 @@ class TestHCImpl(unittest.TestCase):
         )
         with torch.inference_mode():
             ref_y = fallback.head(x)
-            try:
-                tk_y = tilelang.head(x)
-            except RuntimeError as exc:
-                self.skipTest(str(exc))
+            tk_y = tilelang.head(x)
         torch.testing.assert_close(tk_y, ref_y, atol=2e-2, rtol=2e-2)
 
 

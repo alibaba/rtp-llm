@@ -88,3 +88,11 @@ cc_test(
     copts = copts(),
     deps = google_test_deps + ["//rtp_llm/cpp/utils:torch_cuda_oom"],
 )
+
+cc_test(
+    name = "torch_cuda_oom_diagnostics_test",
+    srcs = ["TorchCudaOomDiagnosticsTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:torch_cuda_oom"],
+    timeout = "short",
+)

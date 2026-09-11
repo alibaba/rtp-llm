@@ -1,4 +1,5 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
 load("@arch_config//:arch_select.bzl", "requirement")
 
@@ -86,13 +87,23 @@ cuda13_sm100_py_test(
     ],
 )
 
-cuda13_sm100_py_test(
+dsv4_sm100_py_test(
     name = "test_mega_moe_se_input_pack",
-    srcs = ["test_mega_moe_se_input_pack.py"],
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
+    visibility = ["//visibility:public"],
+)
+
+dsv4_sm100_py_test(
+    name = "test_mega_moe_gate_pack_cuda13",
+    src = "test_mega_moe_gate_pack.py",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 cuda13_sm100_py_test(

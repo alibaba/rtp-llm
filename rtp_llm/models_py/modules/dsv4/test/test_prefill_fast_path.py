@@ -163,6 +163,44 @@ class _PrefillForwardTestBase(unittest.TestCase):
 
 
 class PrefillFastPathTest(_PrefillForwardTestBase):
+    def test_fast_forward_keeps_layer_ranges_with_nested_ranges_disabled(self):
+        v4 = _FakeV4()
+        with patch.object(_profiler, "_RANGES_ENABLED", True), patch.dict(
+            prefill_forward.os.environ, {"DSV4_PREFILL_FAST_PATH": "1"}
+        ), patch.object(prefill_forward._rt, "ENABLED", False), patch.object(
+            prefill_forward._fwd_dbg, "enabled", return_value=False
+        ), patch.object(
+            prefill_forward, "PrefillWorkspace"
+        ), patch.object(
+            prefill_forward, "build_and_propagate_prefill_meta_fp8"
+        ), patch.object(
+            prefill_forward, "clear_prefill_meta_shared_fp8"
+        ), torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            result = prefill_forward.forward_layers(
+                v4,
+                kv_cache=None,
+                input_ids=torch.tensor([3, 4]),
+                positions=torch.tensor([7, 8]),
+                cu_seqlens=torch.tensor([0, 2]),
+                block_tables_by_type=None,
+            )
+
+        self.assertEqual(
+            [call[0] for call in v4.calls], ["fast", "fast", "head_reduce"]
+        )
+        torch.testing.assert_close(
+            result, torch.tensor([[106.0, 106.5], [107.0, 107.5]])
+        )
+        layers = [
+            event for event in prof.events() if event.name.startswith("forward(layer=")
+        ]
+        self.assertEqual(
+            [event.name for event in layers], ["forward(layer=0)", "forward(layer=1)"]
+        )
+        self.assertTrue(all(not event.is_user_annotation for event in layers))
+
     def test_workspace_is_allocated_before_cp_setup_and_embedding(self):
         v4 = _FakeV4()
         events = []
