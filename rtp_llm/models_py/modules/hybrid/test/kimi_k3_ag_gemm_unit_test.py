@@ -6,7 +6,8 @@ import torch
 from torch import nn
 
 import rtp_llm.models_py.model_desc.kimi_k3 as kimi_k3
-import rtp_llm.models_py.modules.factory.linear.parallel as sequence_parallel
+import rtp_llm.models_py.distributed.sequence_parallel as sequence_parallel
+import rtp_llm.models_py.modules.factory.linear.parallel as parallel_linear
 import rtp_llm.models_py.modules.hybrid.test.collective_gemm_reference as reference
 import rtp_llm.models_py.modules.kimi_k3.all_gather_gemm as kimi_k3_ag_gemm
 import rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter as kimi_k3_gemm_reduce_scatter
@@ -21,6 +22,20 @@ from rtp_llm.models_py.model_desc.kimi_k3 import (
     KimiK3Model,
 )
 from rtp_llm.utils.model_weight import W
+
+
+def _sp_layout(logical_tokens: int, world_size: int, rank: int):
+    physical_tokens = (logical_tokens + world_size - 1) // world_size * world_size
+    return sequence_parallel.sequence_parallel_layout(
+        mode="prefill",
+        logical_requests=1,
+        physical_requests=1,
+        tokens_per_request=0,
+        logical_tokens=logical_tokens,
+        physical_tokens=physical_tokens,
+        world_size=world_size,
+        rank=rank,
+    )
 
 
 class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
@@ -133,7 +148,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 )
                 actual = module._project_fused_kda_inputs(
                     hidden,
-                    prefill_sp_layout=None,
+                    sp_layout=None,
                 )
                 for actual_tensor, expected_tensor in zip(actual, expected):
                     torch.testing.assert_close(
@@ -195,14 +210,14 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         torch.testing.assert_close(actual_ids, expected_ids, rtol=0, atol=0)
         torch.testing.assert_close(actual_weights, expected_weights, rtol=0, atol=0)
 
-    def test_nondivisible_kda_projection_restores_logical_token_domain(
+    def test_nondivisible_kda_projection_keeps_physical_token_domain(
         self,
     ) -> None:
         module = self._packed_kda_stub(8)
-        layout = sequence_parallel.token_shard_layout(9, 8, 0)
+        layout = _sp_layout(9, 8, 0)
         local_hidden = torch.randn(2, 16, dtype=torch.bfloat16)
         projected = torch.randn(
-            9,
+            16,
             module.kda_fused_w.shape[1],
             dtype=torch.bfloat16,
         )
@@ -214,24 +229,22 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         ) as project:
             outputs = module._project_fused_kda_inputs(
                 local_hidden,
-                prefill_sp_layout=layout,
+                sp_layout=layout,
             )
 
         project.assert_called_once_with(
             local_hidden,
             [module.kda_fused_w],
-            logical_m=9,
+            logical_m=16,
         )
         for output in outputs:
-            self.assertEqual(output.shape[0], 9)
+            self.assertEqual(output.shape[0], 16)
 
     def test_sharded_mla_projection_uses_loader_packed_weight(self) -> None:
         module = KimiK3MLA.__new__(KimiK3MLA)
         nn.Module.__init__(module)
-        module._sp_prefill_input_is_sharded = True
-        module._sp_prefill_layout_for_forward = sequence_parallel.token_shard_layout(
-            3, 2, 0
-        )
+        module._sp_active_for_forward = True
+        module._sp_layout_for_forward = _sp_layout(3, 2, 0)
         module.attn_tp_size = 2
         module.q_lora_rank = 3
         module.kv_lora_rank = 2
@@ -245,7 +258,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         module._packed_qkv_gate_w = packed_weight
         module.weights = {W.mla_fusedqkrope_w: packed_weight}
         local_input = torch.randn(2, 5)
-        projected = torch.randn(3, 14)
+        projected = torch.randn(4, 14)
 
         with patch.object(
             kimi_k3_mla,
@@ -257,7 +270,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         project.assert_called_once_with(
             local_input,
             [packed_weight],
-            logical_m=3,
+            logical_m=4,
         )
         torch.testing.assert_close(actual_qkv_a, projected[:, :6], rtol=0, atol=0)
         torch.testing.assert_close(actual_gate, projected[:, 6:], rtol=0, atol=0)
@@ -294,14 +307,11 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 "gemm_reduce_scatter",
                 return_value=fused_output,
             ) as gemm_rs,
-            patch.object(kimi_k3_kda, "row_parallel_linear") as fallback,
         ):
             actual = module._project_output(
                 torch.empty(1, dtype=torch.bfloat16, device="cuda"),
                 output_gate,
-                is_target_verify=False,
                 sequence_parallel=True,
-                hidden_states=hidden_states,
                 mode="prefill",
             )
 
@@ -312,15 +322,12 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         self.assertIs(gemm_rs_weight, module.weights[W.linear_attn_out_w])
         self.assertIs(gemm_rs_group, group)
         self.assertEqual(gemm_rs.call_args.kwargs, {"pad_rows": False})
-        fallback.assert_not_called()
 
     def test_mla_prefill_o_proj_uses_gemm_reduce_scatter(self) -> None:
         module = KimiK3MLA.__new__(KimiK3MLA)
         nn.Module.__init__(module)
         module.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 8)
         module._sp_active_for_forward = True
-        module._sp_padded_for_forward = False
-        module._sp_prefill_input_is_sharded = True
         module._o_w = torch.empty((8, 16))
         attn_output = torch.empty((32768, 8))
         fused_output = torch.empty((4096, 16))
@@ -333,7 +340,6 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 "gemm_reduce_scatter",
                 return_value=fused_output,
             ) as gemm_rs,
-            patch.object(kimi_k3_mla, "row_parallel_linear") as fallback,
         ):
             actual = module._project_output(attn_output)
 
@@ -344,7 +350,6 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         self.assertIs(gemm_rs_weight, module._o_w)
         self.assertIs(gemm_rs_group, group)
         self.assertEqual(gemm_rs.call_args.kwargs, {"pad_rows": False})
-        fallback.assert_not_called()
 
     def test_all_gather_gemm_fuses_small_and_large_prefill(self):
         if not torch.cuda.is_available():
@@ -481,15 +486,18 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             logical_sizes = (*range(1, 2 * tp_size + 2), 32761, 32768, 32769)
             for logical_tokens in logical_sizes:
                 source = torch.arange(logical_tokens * 3).reshape(logical_tokens, 3)
+                physical_tokens = (
+                    (logical_tokens + tp_size - 1) // tp_size * tp_size
+                )
+                padded = source.new_zeros((physical_tokens, 3))
+                padded[:logical_tokens].copy_(source)
                 shards = []
                 valid_tokens = 0
                 for tp_rank in range(tp_size):
-                    layout = sequence_parallel.token_shard_layout(
-                        logical_tokens,
-                        tp_size,
-                        tp_rank,
+                    layout = _sp_layout(logical_tokens, tp_size, tp_rank)
+                    shards.append(
+                        sequence_parallel.shard_physical_tokens(padded, layout)
                     )
-                    shards.append(sequence_parallel.shard_tokens(source, layout))
                     valid_tokens += layout.local_valid_tokens
 
                 gathered = torch.cat(shards)
@@ -605,7 +613,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             ),
             patch.object(sequence_parallel, "reduce_scatter_padded") as legacy_padding,
         ):
-            actual = sequence_parallel.row_parallel_linear(
+            actual = parallel_linear.row_parallel_linear(
                 x,
                 weight,
                 world_size=8,
@@ -637,7 +645,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             ) as reduce_scatter,
             patch.object(sequence_parallel, "_matmul_with_padded_rows") as padded_mm,
         ):
-            actual = sequence_parallel.row_parallel_linear(
+            actual = parallel_linear.row_parallel_linear(
                 x,
                 weight,
                 world_size=8,
@@ -779,10 +787,10 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                     get_attn_tp_size=lambda: 2,
                     get_attn_tp_rank=lambda: 0,
                 )
-                self.received_prefill_layout = None
+                self.received_sp_layout = None
 
             def forward(self, *args, **kwargs):
-                self.received_prefill_layout = kwargs["prefill_sp_layout"]
+                self.received_sp_layout = kwargs["sp_layout"]
                 raise RuntimeError("stop after attention dispatch")
 
         layer = KimiK3DecoderLayer.__new__(KimiK3DecoderLayer)
@@ -802,13 +810,13 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         )
         layer.weights = {W.pre_ln_gamma: torch.ones_like(hidden[0])}
         cu_seqlens = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
-        layout = sequence_parallel.token_shard_layout(8, 2, 0)
+        layout = _sp_layout(8, 2, 0)
 
         attn_meta = kimi_k3.KimiK3DecoderMetadata(
             cu_seqlens=cu_seqlens,
             mode="prefill",
             sequence_parallel=True,
-            prefill_sp_layout=layout,
+            sp_layout=layout,
         )
         with self.assertRaisesRegex(RuntimeError, "stop after attention dispatch"):
             layer(
@@ -817,7 +825,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 attn_meta=attn_meta,
             )
 
-        self.assertIs(layer.self_attn.received_prefill_layout, layout)
+        self.assertIs(layer.self_attn.received_sp_layout, layout)
 
     def test_prefill_layer_passes_explicit_valid_rows_to_moe(self) -> None:
         class StubAttention(nn.Module):
@@ -874,13 +882,13 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             K3W.MLP_RES_NORM: torch.empty(0),
             K3W.MLP_RES_PROJ: torch.empty(0),
         }
-        layout = sequence_parallel.token_shard_layout(9, 8, 4)
+        layout = _sp_layout(9, 8, 4)
 
         attn_meta = kimi_k3.KimiK3DecoderMetadata(
             cu_seqlens=torch.tensor([0, 9], dtype=torch.int32),
             mode="prefill",
             sequence_parallel=True,
-            prefill_sp_layout=layout,
+            sp_layout=layout,
         )
         output = layer(
             hidden,
@@ -1079,6 +1087,8 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required")
         module = self._packed_kda_stub(8)
+        module.attn_tp_size = 1
+        module.attn_tp_rank = 0
         module.kda_fused_w = module.kda_fused_w.cuda()
         module.weights[W.linear_attn_f_b_w] = module.weights[W.linear_attn_f_b_w].cuda()
         hidden = torch.randn(16, 16, dtype=torch.bfloat16, device="cuda")
@@ -1087,14 +1097,14 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         with torch.cuda.stream(warmup_stream):
             module._project_fused_kda_inputs(
                 hidden,
-                prefill_sp_layout=None,
+                sp_layout=None,
             )
         torch.cuda.current_stream().wait_stream(warmup_stream)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured = module._project_fused_kda_inputs(
                 hidden,
-                prefill_sp_layout=None,
+                sp_layout=None,
             )
         graph.replay()
         expected_packed = torch.mm(hidden, module.kda_fused_w)
