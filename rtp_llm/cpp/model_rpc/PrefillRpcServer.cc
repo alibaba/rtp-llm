@@ -196,21 +196,24 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input                   = QueryConverter::transQuery(prefill_context.rpc_context.request);
-    prefill_context.request_info = input->request_info;
-    if (applyTimelineGate(prefill_context.request_key,
-                          input->generate_config->gen_timeline,
-                          input->generate_config->profile_step,
-                          input->generate_config->profile_trace_name)) {
-        input->generate_config->gen_timeline = true;
+    if (!prefill_context.generate_input) {
+        auto input                   = QueryConverter::transQuery(prefill_context.rpc_context.request);
+        prefill_context.request_info = input->request_info;
+        if (applyTimelineGate(prefill_context.request_key,
+                              input->generate_config->gen_timeline,
+                              input->generate_config->profile_step,
+                              input->generate_config->profile_trace_name)) {
+            input->generate_config->gen_timeline = true;
+        }
+        input->generate_config->pd_separation = true;
+        if (engine_->isMTPEagle()) {
+            input->generate_config->force_disable_sp_run = false;
+        } else {
+            input->generate_config->force_disable_sp_run = true;
+        }
+        input->begin_time_us           = prefill_context.request_begin_time_us;
+        prefill_context.generate_input = input;
     }
-    input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle()) {
-        input->generate_config->force_disable_sp_run = false;
-    } else {
-        input->generate_config->force_disable_sp_run = true;
-    }
-    prefill_context.generate_input = input;
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
 
@@ -267,42 +270,53 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
 
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (prefill_context.prepared_request) {
+        return;
+    }
     auto& input = prefill_context.generate_input;
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        auto result = mm_processor_->updateMultimodalFeatures(input);
-        CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
-
-        auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
-        mutable_request->clear_token_ids();
-        // TODO(xinfei.sxf) optimize copy
-        auto* ids_ptr = input->input_ids.data_ptr<int32_t>();
-        for (size_t i = 0; i < input->input_ids.numel(); i++) {
-            mutable_request->add_token_ids(ids_ptr[i]);
+        std::shared_ptr<ClientContext> vit_context =
+            prefill_context.server_context ? grpc::ClientContext::FromServerContext(*prefill_context.server_context) :
+                                             std::make_unique<ClientContext>();
+        std::atomic_store(&prefill_context.client_context, vit_context);
+        if (prefill_context.cancel_state->load(std::memory_order_seq_cst)) {
+            vit_context->TryCancel();
         }
+        auto result = mm_processor_->updateMultimodalFeatures(input, vit_context.get());
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
     }
-    if (prefill_context.hasError()) {
-        logPrefillFailureTrace("multimodal_process_failed", prefill_context);
+    auto prepared_request = std::make_unique<GenerateInputPB>(*prefill_context.rpc_context.request);
+    prepared_request->clear_token_ids();
+    auto* ids_ptr = input->input_ids.data_ptr<int32_t>();
+    for (int64_t i = 0; i < input->input_ids.numel(); i++) {
+        prepared_request->add_token_ids(ids_ptr[i]);
     }
+    prefill_context.prepared_request = std::move(prepared_request);
 }
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
-    auto    client_context     = std::make_shared<ClientContext>();
-    auto    request_timeout_ms = prefill_context.request_timeout_ms;
-    auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
-    if (final_timeout_ms > 0) {
-        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-        client_context->set_deadline(deadline);
+    std::shared_ptr<ClientContext> client_context =
+        prefill_context.server_context ? grpc::ClientContext::FromServerContext(*prefill_context.server_context) :
+                                         std::make_unique<ClientContext>();
+    auto       deadline           = client_context->deadline();
+    const auto max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+    if (max_rpc_timeout_ms > 0) {
+        deadline = std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(max_rpc_timeout_ms));
     }
+    if (prefill_context.request_timeout_ms > 0) {
+        const auto begin =
+            std::chrono::system_clock::time_point(std::chrono::microseconds(prefill_context.request_begin_time_us));
+        deadline = std::min(deadline, begin + std::chrono::milliseconds(prefill_context.request_timeout_ms));
+    }
+    client_context->set_deadline(deadline);
     std::atomic_store(&prefill_context.client_context, client_context);
     // Close the publish-before-cancel window: either requestPriorityPreempt()
     // observes this ClientContext, or this check observes its cancel latch.
     if (prefill_context.cancel_state->load(std::memory_order_seq_cst)) {
         client_context->TryCancel();
     }
-    // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
     prefill_context.client_stream =
         std::move(prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
@@ -311,7 +325,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_client_id(process_id_);
     alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
-    GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
+    GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.prepared_request);
     new_request->clear_group_size();
     new_request->clear_group_id();
     new_request->mutable_generate_config()->clear_group_timeout();

@@ -1,5 +1,8 @@
 import unittest
+from types import SimpleNamespace
 from typing import List
+
+import torch
 
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -68,6 +71,30 @@ class RecordingDeployWeightInfo(ModelDeployWeightInfo):
 
 
 class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
+    def test_vit_role_builds_only_visual_descriptors_preserving_norm_dtype(self):
+        from rtp_llm.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
+        from rtp_llm.ops import VitSeparation
+
+        class VisionOnlyWeights(ModelDeployWeightInfo, BaseMultiModalWeightInfo):
+            def __init__(self):
+                self.vit_separation = VitSeparation.VIT_SEPARATION_ROLE
+                self.vit_weights = SimpleNamespace(
+                    weight_names=["vision.norm.weight", "image_start"],
+                    ckpt_prefix="",
+                    weight_dtypes={"vision.norm.weight": torch.float32},
+                )
+
+            def _get_weight_info(self):
+                raise AssertionError("ViT ROLE must not build LLM descriptors")
+
+        weights = VisionOnlyWeights().get_weight_info()
+        self.assertEqual(
+            [weight.name for weight in weights.weights],
+            ["vision.norm.weight", "image_start"],
+        )
+        self.assertEqual(weights.layer_weights, [])
+        self.assertEqual(weights.weights[0].data_type, torch.float32)
+
     def test_ckpt_tensor_name_regex_matches_layer_and_expert_placeholders(self):
         pattern = ModelDeployWeightInfo._ckpt_tensor_name_to_regex(
             "model.layers.{i_1}.mlp.experts.{expert_id}.down_proj.weight"
@@ -84,9 +111,7 @@ class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
         )
 
     def test_ckpt_tensor_name_regex_escapes_literal_dots(self):
-        pattern = ModelDeployWeightInfo._ckpt_tensor_name_to_regex(
-            "lm_head.weight"
-        )
+        pattern = ModelDeployWeightInfo._ckpt_tensor_name_to_regex("lm_head.weight")
 
         self.assertIsNotNone(pattern.fullmatch("lm_head.weight"))
         self.assertIsNone(pattern.fullmatch("lm_headXweight"))
@@ -113,7 +138,9 @@ class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
         self.assertTrue(
             any(pattern.fullmatch("model.embed_tokens.weight") for pattern in patterns)
         )
-        self.assertTrue(any(pattern.fullmatch("lm_head.weight") for pattern in patterns))
+        self.assertTrue(
+            any(pattern.fullmatch("lm_head.weight") for pattern in patterns)
+        )
         self.assertTrue(
             any(
                 pattern.fullmatch("model.layers.0.self_attn.q_proj.weight")
@@ -177,9 +204,7 @@ class CkptDatabaseFilterTest(unittest.TestCase):
             ["irrelevant.weight"],
         )
         database = make_database([original_file])
-        patterns = [
-            ModelDeployWeightInfo._ckpt_tensor_name_to_regex("required.weight")
-        ]
+        patterns = [ModelDeployWeightInfo._ckpt_tensor_name_to_regex("required.weight")]
 
         database.filter_by_tensor_name_regexes(patterns)
 
@@ -202,9 +227,7 @@ class CkptDatabaseFilterTest(unittest.TestCase):
             FakeCkptFileInfo("b.safetensors", ["b.weight"]),
         ]
         database = make_database(files)
-        patterns = [
-            ModelDeployWeightInfo._ckpt_tensor_name_to_regex("missing.weight")
-        ]
+        patterns = [ModelDeployWeightInfo._ckpt_tensor_name_to_regex("missing.weight")]
 
         database.filter_by_tensor_name_regexes(patterns)
 
@@ -227,9 +250,7 @@ class CreateModelWeightInfoFilterOrderTest(unittest.TestCase):
         )
         returned_weight_info = ModelWeightInfo(
             weights=[],
-            layer_weights=[
-                [FakeWeight(["mtp.layers.{i}.self_attn.q_proj.weight"])]
-            ],
+            layer_weights=[[FakeWeight(["mtp.layers.{i}.self_attn.q_proj.weight"])]],
         )
         weight_info = RecordingDeployWeightInfo(database, returned_weight_info)
 

@@ -945,6 +945,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = torch::Tensor();
         }
+        if (is_dspark_) {
+            // DSpARK commits target hidden states; ViT tensors belong only to the target forward.
+            model_input.multimodal_features.reset();
+            model_input.mm_features_locs  = torch::Tensor();
+            model_input.mm_features_spans = torch::Tensor();
+            model_input.text_tokens_mask  = torch::Tensor();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();

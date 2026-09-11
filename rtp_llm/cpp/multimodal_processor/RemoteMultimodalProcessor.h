@@ -29,7 +29,8 @@ private:
     std::string       vit_cluster_name_;
 
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+                                                      std::string                                 ip_port = "",
+                                                      grpc::ClientContext* rpc_context                    = nullptr) {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
         }
@@ -41,10 +42,14 @@ private:
 
         auto                stub = connection.stub;
         MultimodalOutputsPB output_pb;
-        grpc::ClientContext context;
-        auto status = stub->RemoteMultimodalEmbedding(&context, QueryConverter::transMMInputsPB(mm_inputs), &output_pb);
+        grpc::ClientContext local_context;
+        auto                status = stub->RemoteMultimodalEmbedding(
+            rpc_context ? rpc_context : &local_context, QueryConverter::transMMInputsPB(mm_inputs), &output_pb);
         if (!status.ok()) {
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
+            auto code = status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED ? ErrorCode::GENERATE_TIMEOUT :
+                        status.error_code() == grpc::StatusCode::CANCELLED         ? ErrorCode::CANCELLED :
+                                                                                     ErrorCode::MM_PROCESS_ERROR;
+            return ErrorInfo(code, status.error_message());
         }
         return QueryConverter::transMMOutput(&output_pb);
     }

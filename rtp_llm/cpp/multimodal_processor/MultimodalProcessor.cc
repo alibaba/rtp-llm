@@ -6,30 +6,11 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
 
 namespace py = pybind11;
 
 namespace rtp_llm {
-
-ErrorInfo MultimodalProcessor::getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len) {
-    int url_len = url.length(), data_size_scale = std::max(int(sizeof(int32_t) / sizeof(int32_t)), 1);
-    if (mm_emb_len / data_size_scale <= 0) {
-        std::stringstream exception_str;
-        exception_str << "length of multimodal input is too short, at least " << data_size_scale << ", get "
-                      << mm_emb_len;
-        return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, exception_str.str());
-    }
-    int                    substr_len = (url_len - 1) / (mm_emb_len / data_size_scale) + 1;
-    int                    now_idx    = 0;
-    std::hash<std::string> hasher;
-    while (now_idx * substr_len < url_len && now_idx * data_size_scale < mm_emb_len) {
-        int32_t hash_res =
-            hasher(url.substr(now_idx * substr_len, std::min(url_len - now_idx * substr_len, substr_len)));
-        memcpy(token_ids + now_idx * data_size_scale, &hash_res, sizeof(int32_t));
-        now_idx++;
-    }
-    return ErrorInfo::OkStatus();
-}
 
 ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>& mm_embedding,
                                                                 const torch::Tensor&              token_ids,
@@ -38,11 +19,6 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
     if (mm_embedding.size() == 0) {
         return ExpandedOutput(token_ids, token_type_ids);
     }
-    std::vector<std::string> urls;
-    for (auto& mm_input : mm_inputs) {
-        urls.push_back(mm_input.url);
-    }
-
     assert(token_ids.dim() == 1);
     int              expanded_len = token_ids.size(0);
     std::vector<int> embed_len    = {};
@@ -70,8 +46,7 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
                   expanded_token_type_ids.data_ptr<int32_t>() + expanded_token_type_ids.numel(),
                   0);
     }
-    int  new_loc_idx = 0, old_loc_idx = 0;
-    bool hash_urls = urls.size() == mm_num;
+    int new_loc_idx = 0, old_loc_idx = 0;
     for (int i = 0; i < mm_num; i++) {
         auto& loc      = locs[i];
         int   copy_len = loc.first - old_loc_idx;
@@ -87,12 +62,14 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
         }
         *(new_locs.data_ptr<int32_t>() + i) = copy_len + new_loc_idx;
 
-        if (hash_urls) {
-            auto hash_status = getStrHash(
-                expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len, urls[i], mm_embedding[i].sizes()[0]);
-            if (!hash_status.ok()) {
-                return hash_status;
-            }
+        // A ViT row depends on the complete image. URL fragments cannot
+        // identify an image prefix safely when reusing KV inside its block.
+        try {
+            auto hashes = getMultimodalFeatureHash(mm_embedding[i]);
+            memcpy(
+                expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len, hashes.data_ptr<int32_t>(), hashes.nbytes());
+        } catch (const std::exception& error) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
         }
 
         new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
@@ -205,7 +182,19 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
     return ErrorInfo::OkStatus();
 }
 
-ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
+ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
+                                                        grpc::ClientContext*                     rpc_context) {
+    grpc::ClientContext local_context;
+    if (!rpc_context) {
+        rpc_context = &local_context;
+    }
+    if (input->generate_config && input->generate_config->timeout_ms > 0) {
+        const auto begin = input->begin_time_us > 0 ?
+                               std::chrono::system_clock::time_point(std::chrono::microseconds(input->begin_time_us)) :
+                               std::chrono::system_clock::now();
+        rpc_context->set_deadline(
+            std::min(rpc_context->deadline(), begin + std::chrono::milliseconds(input->generate_config->timeout_ms)));
+    }
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
@@ -220,7 +209,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     }
 
     CHECK_AND_RETURN_REF(phased_inputs, setImageBlockStartPhases(input->input_ids, input->multimodal_inputs.value()));
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(phased_inputs, ip_port));
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(phased_inputs, ip_port, rpc_context));
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     CHECK_AND_RETURN_REF(expanded_ids,

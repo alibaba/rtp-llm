@@ -1,4 +1,19 @@
 py_library(
+    name = "vit_rpc_benchmark_lib",
+    srcs = ["vit_rpc_benchmark.py"],
+    deps = ["//rtp_llm:sdk"],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "vit_rpc_benchmark",
+    srcs = ["vit_rpc_benchmark.py"],
+    deps = [":vit_rpc_benchmark_lib"],
+    main = "vit_rpc_benchmark.py",
+    tags = ["manual"],
+)
+
+py_library(
     name = "perf_test_lib",
     srcs = [
         "batch_decode_test.py",

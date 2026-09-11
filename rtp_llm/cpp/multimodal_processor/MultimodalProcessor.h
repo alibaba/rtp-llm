@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include "grpc++/grpc++.h"
 #include <torch/python.h>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
@@ -42,10 +43,9 @@ private:
     bool                              include_sep_tokens_;
     int64_t                           max_seq_len_;
 
-    ErrorInfo getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len);
-
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                              std::string ip_port = "") = 0;
+                                                              std::string                                 ip_port = "",
+                                                              grpc::ClientContext* rpc_context = nullptr) = 0;
 
     ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,
                                                const torch::Tensor&                        token_ids,
@@ -60,7 +60,8 @@ private:
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
 public:
-    ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input);
+    ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
+                                       grpc::ClientContext*                     rpc_context = nullptr);
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs);

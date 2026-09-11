@@ -240,6 +240,10 @@ class VitConfig:
         self.download_headers: str = ""
         self.mm_cache_item_num: int = 10
         self.url_cache_item_num: int = 100
+        self.vit_batch_wait_ms: int = 5
+        self.vit_max_batch_images: int = 8
+        self.vit_max_batch_patches: int = 32768
+        self.vit_max_concurrent_requests: int = 32
         self.use_igraph_cache: bool = True
         self.igraph_search_dom: str = "com.taobao.search.igraph.common"
         self.igraph_vipserver: int = 0
@@ -255,6 +259,10 @@ class VitConfig:
             f"download_headers: {self.download_headers}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
+            f"vit_batch_wait_ms: {self.vit_batch_wait_ms}\n"
+            f"vit_max_batch_images: {self.vit_max_batch_images}\n"
+            f"vit_max_batch_patches: {self.vit_max_batch_patches}\n"
+            f"vit_max_concurrent_requests: {self.vit_max_concurrent_requests}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"

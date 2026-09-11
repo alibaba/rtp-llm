@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+import grpc
 import psutil
 import requests
 
@@ -100,16 +101,29 @@ class MagaServerManager(object):
             return None
 
     def wait_sever_done(self, timeout: int = 1600):
-        # currently we can not check vit server health, assume it is ready, xieshui will fix it
         if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
-            return True
+            result = False
+            deadline = time.monotonic() + timeout
+            with grpc.insecure_channel(f"127.0.0.1:{int(self._port) + 1}") as channel:
+                ready = grpc.channel_ready_future(channel)
+                while (
+                    time.monotonic() < deadline and self._server_process.poll() is None
+                ):
+                    try:
+                        ready.result(
+                            timeout=max(0.0, min(1.0, deadline - time.monotonic()))
+                        )
+                        result = True
+                        break
+                    except grpc.FutureTimeoutError:
+                        continue
+                ready.cancel()
+        else:
+            from rtp_llm.utils.util import wait_sever_done
 
-        from rtp_llm.utils.util import wait_sever_done
-
-        # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
-        result = wait_sever_done(
-            self._server_process, int(self._port), timeout, self._health_check_path
-        )
+            result = wait_sever_done(
+                self._server_process, int(self._port), timeout, self._health_check_path
+            )
         if not result:
             rc = self._server_process.poll() if self._server_process else None
             self._exit_code = rc

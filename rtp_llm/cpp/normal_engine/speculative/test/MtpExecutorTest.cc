@@ -57,6 +57,7 @@ struct MtpExecutorTestConfig {
     size_t vocab_size          = 4;
     size_t num_layers          = 1;
     size_t gen_num_per_cycle   = 4;
+    bool   is_multimodal       = false;
     size_t vocab_size_override = 0;  // 0 means use vocab_size
 
     SpeculativeType sp_type              = SP_TYPE_MTP;
@@ -178,6 +179,10 @@ public:
         if (expected_is_target_verify_.has_value()) {
             EXPECT_EQ(inputs.is_target_verify, expected_is_target_verify_.value());
         }
+        EXPECT_EQ(inputs.multimodal_features.has_value(), expected_inputs.multimodal_features.has_value());
+        checkTensorField("text_tokens_mask", inputs.text_tokens_mask, expected_inputs.text_tokens_mask);
+        checkTensorField("mm_features_locs", inputs.mm_features_locs, expected_inputs.mm_features_locs);
+        checkTensorField("mm_features_spans", inputs.mm_features_spans, expected_inputs.mm_features_spans);
         checkTensorField("combo_tokens", inputs.combo_tokens, expected_inputs.combo_tokens);
         checkTensorField("input_lengths", inputs.input_lengths, expected_inputs.input_lengths);
         checkTensorField("sequence_lengths", inputs.sequence_lengths, expected_inputs.sequence_lengths);
@@ -468,9 +473,10 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.max_seq_len = test_config.max_seq_len;
-        model_config.vocab_size  = test_config.vocab_size;
-        model_config.num_layers  = test_config.num_layers;
+        model_config.mm_model_config.is_multimodal = test_config.is_multimodal;
+        model_config.max_seq_len                   = test_config.max_seq_len;
+        model_config.vocab_size                    = test_config.vocab_size;
+        model_config.num_layers                    = test_config.num_layers;
 
         sp_config.type                    = test_config.sp_type;
         sp_config.gen_num_per_cycle       = test_config.gen_num_per_cycle;
@@ -665,6 +671,7 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
 
 TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
     MtpExecutorTestConfig test_config;
+    test_config.is_multimodal        = true;
     test_config.gen_num_per_cycle    = 3;
     test_config.vocab_size_override  = test_config.vocab_size;
     test_config.sp_type              = SP_TYPE_DSPARK;
@@ -680,6 +687,15 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
     target_input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
 
+    auto image_feature                           = torch::ones({2, 2});
+    stream->generateInput()->multimodal_features = std::vector<torch::Tensor>{image_feature};
+    stream->generateInput()->text_tokens_mask    = torch::tensor({1, 0, 0, 1}, torch::kInt32);
+    stream->generateInput()->mm_locs             = torch::tensor({1}, torch::kInt32);
+    target_input.multimodal_features             = std::vector<torch::Tensor>{image_feature};
+    target_input.text_tokens_mask                = stream->generateInput()->text_tokens_mask.value();
+    target_input.mm_features_locs                = torch::tensor({1}, torch::kInt32);
+    target_input.mm_features_spans               = torch::tensor({0, 1, 3}, torch::kInt64).reshape({1, 3});
+
     GptModelOutputs target_output;
     target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
     target_output.all_hidden_states =
@@ -687,7 +703,11 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
-    GptModelInputs commit_input     = target_input;
+    GptModelInputs commit_input = target_input;
+    commit_input.multimodal_features.reset();
+    commit_input.text_tokens_mask   = torch::Tensor();
+    commit_input.mm_features_locs   = torch::Tensor();
+    commit_input.mm_features_spans  = torch::Tensor();
     commit_input.last_hidden_states = target_output.all_hidden_states;
     components.fake_draft_prefill_model->setInputs({commit_input});
     components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});

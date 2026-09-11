@@ -1,6 +1,8 @@
 """DeepSeek-V4 Flash Vision encoder and image-token layout."""
 
+import io
 import math
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, List
 
@@ -12,6 +14,11 @@ from torch import nn
 
 from rtp_llm.models.multimodal.multimodal_mixin import BaseVitWeights
 from rtp_llm.utils.multimodal_util import get_bytes_io_from_url, vit_emb_cache_
+
+try:
+    from torch.nn.attention.varlen import varlen_attn
+except ImportError:
+    varlen_attn = None
 
 IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
 COMPRESS_PAD_TO = 4
@@ -158,6 +165,25 @@ def build_image_block(n_llm_h: int, n_llm_w: int, start_pos: int):
     return types, perm
 
 
+@dataclass
+class PreparedImage:
+    patches: torch.Tensor
+    n_vit_h: int
+    n_vit_w: int
+    n_llm_h: int
+    n_llm_w: int
+    start_mod4: int
+
+    @property
+    def num_patches(self) -> int:
+        return self.n_vit_h * self.n_vit_w
+
+    @property
+    def output_tokens(self) -> int:
+        rows, row_len = self.n_llm_h + self.n_llm_h % 2, self.n_llm_w + 1
+        return 3 - self.start_mod4 + 2 + rows * row_len + rows // 2 * row_len % 2 * 2
+
+
 @lru_cache(32)
 def _vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float, device: str):
     inv_freq = 1.0 / (
@@ -210,13 +236,20 @@ class Attention(nn.Module):
         self.wqkv = nn.Linear(dim, 3 * dim)
         self.wo = nn.Linear(dim, dim)
 
-    def forward(self, x, cos, sin):
+    def forward(self, x, cos, sin, cu_seqlens=None, max_seqlen=0):
         n = x.size(0)
         q, k, v = (
             t.view(n, self.n_heads, self.head_dim)
             for t in self.wqkv(x).chunk(3, dim=-1)
         )
         q, k = apply_rotary(q, cos, sin), apply_rotary(k, cos, sin)
+        if cu_seqlens is not None:
+            if varlen_attn is None:
+                raise RuntimeError(
+                    "Batched DeepSeek ViT requires PyTorch varlen attention"
+                )
+            out = varlen_attn(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen)
+            return self.wo(out.reshape(n, -1))
         out = F.scaled_dot_product_attention(
             q.transpose(0, 1).unsqueeze(0),
             k.transpose(0, 1).unsqueeze(0),
@@ -244,8 +277,8 @@ class Block(nn.Module):
         self.norm1, self.attn = RMSNorm(dim), Attention(config)
         self.norm2, self.mlp = RMSNorm(dim), MLP(config)
 
-    def forward(self, x, cos, sin):
-        x = x + self.attn(self.norm1(x), cos, sin)
+    def forward(self, x, cos, sin, cu_seqlens=None, max_seqlen=0):
+        x = x + self.attn(self.norm1(x), cos, sin, cu_seqlens, max_seqlen)
         return x + self.mlp(self.norm2(x))
 
 
@@ -269,6 +302,24 @@ class ViT(nn.Module):
             x = block(x, cos, sin)
         return self.norm(x)
 
+    def forward_batch(self, patches, grids):
+        x = self.patch_embed(patches)
+        lengths = [h * w for h, w in grids]
+        offsets = [0]
+        rotary = []
+        for (h, w), length in zip(grids, lengths):
+            offsets.append(offsets[-1] + length)
+            rotary.append(
+                _vision_cos_sin(h, w, self.rope_dim, self.rope_theta, str(x.device))
+            )
+        cu_seqlens = torch.tensor(offsets, dtype=torch.int32, device=x.device)
+        cos = torch.cat([pair[0] for pair in rotary])
+        sin = torch.cat([pair[1] for pair in rotary])
+        max_seqlen = max(lengths)
+        for block in self.blocks:
+            x = block(x, cos, sin, cu_seqlens, max_seqlen)
+        return self.norm(x)
+
 
 class Aligner(nn.Module):
     def __init__(self, config):
@@ -278,17 +329,29 @@ class Aligner(nn.Module):
         self.w1 = nn.Linear(in_dim, config["hidden_size"])
         self.w2 = nn.Linear(config["hidden_size"], config["hidden_size"])
 
-    def forward(self, x, n_h, n_w):
+    def merge_patches(self, x, n_h, n_w):
         ratio = self.downsample_ratio
         x = x.view(n_h, n_w, -1).permute(2, 0, 1)
         x = F.pad(x, (0, -n_w % ratio, 0, -n_h % ratio))
         channels, height, width = x.shape
-        x = (
+        return (
             x.reshape(channels, height // ratio, ratio, width // ratio, ratio)
             .permute(1, 3, 0, 2, 4)
             .reshape(-1, channels * ratio * ratio)
         )
-        return self.w2(F.gelu(self.w1(x)))
+
+    def forward(self, x, n_h, n_w):
+        return self.w2(F.gelu(self.w1(self.merge_patches(x, n_h, n_w))))
+
+    def forward_batch(self, x, grids):
+        lengths = [h * w for h, w in grids]
+        merged = [
+            self.merge_patches(part, h, w)
+            for part, (h, w) in zip(x.split(lengths), grids)
+        ]
+        output_lengths = [part.shape[0] for part in merged]
+        projected = self.w2(F.gelu(self.w1(torch.cat(merged))))
+        return projected.split(output_lengths)
 
 
 class DeepSeekV4VisionEmbedding(nn.Module):
@@ -315,6 +378,60 @@ class DeepSeekV4VisionEmbedding(nn.Module):
 
     def _mm_preprocess(self, data, **kwargs):
         return Image.open(data).convert("RGB")
+
+    def preprocess_embedding(
+        self, url, mm_type, download_headers="", configs=None
+    ) -> PreparedImage:
+        if int(mm_type) not in (0, 1):
+            raise ValueError("DeepSeek-V4 ViT supports image inputs only")
+        start_mod4 = int(getattr(configs, "image_block_start_mod4", -1))
+        if not 0 <= start_mod4 < COMPRESS_PAD_TO:
+            raise ValueError(
+                "DeepSeek-V4 image input is missing image_block_start_mod4"
+            )
+        data = get_bytes_io_from_url(url, download_headers=download_headers)
+        # URL cache entries share a BytesIO cursor; each handler needs its own.
+        image = self._mm_preprocess(io.BytesIO(data.getvalue()), mm_type=mm_type)
+        return PreparedImage(
+            *preprocess_image(image, self.mm_related_params.config), start_mod4
+        )
+
+    def _build_embedding_block(self, embeds, n_llm_h, n_llm_w, start_pos):
+        types, perm = build_image_block(n_llm_h, n_llm_w, start_pos)
+        types, perm = types.to(self._device), perm.to(self._device)
+        params = torch.stack(
+            [
+                self.image_start,
+                self.image_pad,
+                self.image_pad,
+                self.image_newline,
+                self.image_end,
+            ]
+        )
+        block = params[types]
+        block[types == IMAGE] = embeds[perm]
+        return block.to(self._data_type).contiguous()
+
+    @torch.inference_mode()
+    def batch_embedding(self, images: List[PreparedImage]):
+        if not images:
+            return []
+        grids = [(image.n_vit_h, image.n_vit_w) for image in images]
+        patches = torch.cat([image.patches for image in images]).to(
+            device=self._device, dtype=self._data_type
+        )
+        embeddings = self.aligner.forward_batch(
+            self.vision.forward_batch(patches, grids), grids
+        )
+        return [
+            (
+                self._build_embedding_block(
+                    embeds, image.n_llm_h, image.n_llm_w, image.start_mod4
+                ),
+                None,
+            )
+            for embeds, image in zip(embeddings, images)
+        ]
 
     @torch.inference_mode()
     def mm_embedding(
@@ -359,19 +476,7 @@ class DeepSeekV4VisionEmbedding(nn.Module):
             embeds = self.aligner(
                 self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w
             )
-            types, perm = build_image_block(n_llm_h, n_llm_w, start_pos)
-            types, perm = types.to(self._device), perm.to(self._device)
-            params = torch.stack(
-                [
-                    self.image_start,
-                    self.image_pad,
-                    self.image_pad,
-                    self.image_newline,
-                    self.image_end,
-                ]
-            )
-            block = params[types]
-            block[types == IMAGE] = embeds[perm]
+            block = self._build_embedding_block(embeds, n_llm_h, n_llm_w, start_pos)
             outputs.append(block)
             start_pos += block.size(0)
         return outputs

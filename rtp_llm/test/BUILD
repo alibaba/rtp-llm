@@ -1,4 +1,18 @@
 py_test(
+    name = "vit_rpc_stress_test",
+    srcs = ["vit_rpc_stress_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:vit_rpc_benchmark_lib",
+        "//rtp_llm/test/utils:test_util",
+    ],
+    data = ["//rtp_llm:sdk"],
+    timeout = "eternal",
+    tags = ["manual"],
+    exec_properties = {"gpu": "SM100_X86"},
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",
