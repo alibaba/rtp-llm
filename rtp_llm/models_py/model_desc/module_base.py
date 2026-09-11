@@ -112,5 +112,9 @@ class GptModelBase(nn.Module):
         """Model hook: None means every attention-input tag requires FMHA."""
         return None
 
+    def prepare_forward_commit(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        """Commit uses the normal attention preparation unless the model overrides it."""
+        return self.prepare_fmha_impl(inputs, is_cuda_graph)
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

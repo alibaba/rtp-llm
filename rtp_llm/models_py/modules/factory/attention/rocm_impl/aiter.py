@@ -631,7 +631,7 @@ class AiterPrefillAttnOp:
             kv_page_indices,
             max_seqlen_q,
             max_seqlen_k,
-            causal=True,
+            causal=self.is_causal,
             block_table=block_table,
             seqlen_k=seqlen_k,
             q_descale=q_descale,
@@ -774,6 +774,7 @@ class AiterPrefillAttnOpPaged:
     """Paged prefill attention"""
 
     def __init__(self, attn_configs: AttentionConfigs):
+        self.is_causal = attn_configs.is_causal
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
@@ -952,7 +953,7 @@ class AiterPrefillAttnOpPaged:
             kv_page_indices,
             max_seqlen_q,
             max_seqlen_k,
-            causal=True,
+            causal=self.is_causal,
             block_table=block_table,
             seqlen_k=seqlen_k,
             q_descale=q_descale,
@@ -1700,7 +1701,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
 class AiterPrefillImplPaged(FMHAImplBase):
     """Paged prefill impl: dispatches between CK batch-prefill and Triton PA at runtime.
 
-    - seq_len <= 4: Triton PA (short query optimization)
+    - causal seq_len <= 4: Triton PA (short query optimization)
     - Otherwise: CK batch-prefill (general paged prefill)
     """
 
@@ -1711,6 +1712,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.is_causal = attn_configs.is_causal
         self.head_num_kv = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
@@ -1746,13 +1748,17 @@ class AiterPrefillImplPaged(FMHAImplBase):
         input_lengths = attn_inputs.input_lengths
         batch_size = input_lengths.numel()
         max_q_len = int(input_lengths.max().item()) if batch_size > 0 else 0
-        return batch_size > 0 and 0 < max_q_len <= self.max_triton_q_len
+        # The decode-oriented Triton backend applies a causal query mask.
+        return (
+            self.is_causal and batch_size > 0 and 0 < max_q_len <= self.max_triton_q_len
+        )
 
     def _select_backend(self, attn_inputs: PyAttentionInputs) -> str:
         return "triton" if self._use_triton_paged_prefill(attn_inputs) else "batch"
 
     def support_cuda_graph(self) -> bool:
-        return self.backend == "triton"
+        # Both dispatched backends implement prepare_cuda_graph().
+        return self.backend in ("triton", "batch")
 
     def _prepare_backend(self, backend: str) -> FMHAParams:
         if backend == "triton":

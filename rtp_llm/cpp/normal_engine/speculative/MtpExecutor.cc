@@ -653,10 +653,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
                                 "dspark requires sp_dspark_mask_token_id, got %ld",
                                 params.sp_config.sp_dspark_mask_token_id);
-        RTP_LLM_CHECK_WITH_INFO(draft_vocab_size_ == vocab_size_,
-                                "dspark requires identical draft/target vocabularies, got %zu and %zu",
-                                draft_vocab_size_,
-                                vocab_size_);
         // The draft rides the standard prefill-CP split for its commit calls.
         // Its fixed-width decode-phase blocks (propose, tail commit) must stay
         // unsplit, so an enabled split is only legal on a pure prefill role:
@@ -859,10 +855,25 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 "DSpARK requires markov_w1 and markov_w2 weights");
         RTP_LLM_CHECK_WITH_INFO(dspark_markov_w1_.is_cuda() && dspark_markov_w2_.is_cuda()
                                     && dspark_markov_w1_.dim() == 2 && dspark_markov_w2_.dim() == 2
-                                    && dspark_markov_w1_.sizes() == dspark_markov_w2_.sizes()
-                                    && dspark_markov_w1_.size(0) == static_cast<int64_t>(draft_vocab_size_)
+                                    && dspark_markov_w1_.size(1) == dspark_markov_w2_.size(1)
+                                    && dspark_markov_w1_.size(1) > 0
+                                    && dspark_markov_w1_.size(0) >= static_cast<int64_t>(vocab_size_)
+                                    && dspark_markov_w2_.size(0) == static_cast<int64_t>(draft_vocab_size_)
                                     && dspark_markov_w1_.scalar_type() == dspark_markov_w2_.scalar_type(),
-                                "DSpARK Markov weights must be matching CUDA [vocab,rank] tensors");
+                                "DSpARK Markov weights must be CUDA [target_vocab,rank] and [draft_vocab,rank]");
+        RTP_LLM_CHECK_WITH_INFO(d2t_map_.defined() || draft_vocab_size_ == vocab_size_,
+                                "DSpARK reduced draft vocabulary requires a d2t map");
+        if (d2t_map_.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(d2t_map_.is_cuda() && d2t_map_.dim() == 1
+                                        && d2t_map_.scalar_type() == torch::kLong && draft_vocab_size_ > 0
+                                        && d2t_map_.numel() == static_cast<int64_t>(draft_vocab_size_),
+                                    "DSpARK d2t map must be int64 [draft_vocab]");
+            auto sorted_ids = std::get<0>(d2t_map_.sort());
+            RTP_LLM_CHECK_WITH_INFO(sorted_ids[0].item<int64_t>() >= 0
+                                        && sorted_ids[-1].item<int64_t>() < static_cast<int64_t>(vocab_size_)
+                                        && (sorted_ids.slice(0, 1) != sorted_ids.slice(0, 0, -1)).all().item<bool>(),
+                                    "DSpARK d2t map must contain unique in-range target ids");
+        }
     } else if (dspark_prefill_commit_only_) {
         RTP_LLM_LOG_INFO("[speculative decoding] DSpARK PREFILL commit-only worker: skipping proposal/Markov weights");
     }

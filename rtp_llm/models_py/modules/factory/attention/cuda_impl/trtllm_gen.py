@@ -331,6 +331,8 @@ class FlashInferTRTLLMPrefillOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
+        if not self.attn_configs.is_causal:
+            return False
         # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a
         # (Blackwell consumer, e.g. RTX 5000 Pro) has no binding and the
         # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
@@ -445,6 +447,8 @@ class FlashInferTRTLLMDecodeOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
+        if not self.attn_configs.is_causal:
+            return False
         if not is_blackwell():
             return False
         # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a

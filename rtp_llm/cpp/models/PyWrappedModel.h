@@ -135,6 +135,7 @@ private:
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
     py::object py_forward_method_;
+    py::object py_prepare_method_;
     py::object held_attn_pyobj_;
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
@@ -251,6 +252,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                       "forward";
     py_forward_method_             = py_model_.attr(forward_method);
+    const char* prepare_method = dspark_model_role_ == DSparkModelRole::COMMIT ?
+                                     "prepare_forward_commit" : "prepare_fmha_impl";
+    py_prepare_method_ = py_model_.attr(prepare_method);
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
     const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
                                              || py_model_class_name == "DeepSeekV4MtpModel"
@@ -312,7 +316,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // | Model Type                | is_prefill_cuda_graph    | sp_config.type | model_id | num_tokens_per_bs       |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // | Embedding Model (prefill) | true                     | SP_TYPE_NONE   | -        | max_seq_len             |
-        // | DSpARK proposal (decode)  | false                    | DSpARK         | 1        | gen_num_per_cycle       |
+        // | DSpARK proposal (decode)  | false                    | DSpARK         | 1        | gamma + optional anchor |
         // | DSpARK commit (decode)    | false                    | DSpARK         | 1        | gen_num_per_cycle + 1   |
         // | Draft commit (prefill)    | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
         // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
@@ -322,7 +326,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // clang-format on
 
         if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
+            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle
+                                            + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
         } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
         } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
@@ -348,7 +353,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
-        graph_runner_ = new CudaGraphRunner(graph_params, py_instance, forward_method, params.metrics_reporter);
+        graph_runner_ = new CudaGraphRunner(
+            graph_params, py_instance, forward_method, params.metrics_reporter, prepare_method);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();

@@ -7,6 +7,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.speculative.aux_hidden_capture import AuxHiddenCaptureMixin
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
@@ -79,7 +80,7 @@ class Qwen3DecoderLayer(nn.Module):
         return hidden_states
 
 
-class Qwen3Model(GptModelBase):
+class Qwen3Model(AuxHiddenCaptureMixin, GptModelBase):
     def __init__(
         self,
         config: ModelConfig,
@@ -134,6 +135,7 @@ class Qwen3Model(GptModelBase):
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+            self.capture_aux_hidden(i, hidden_states)
         hidden_states = self.norm(hidden_states)
         return PyModelOutputs(hidden_states)
 
