@@ -26,6 +26,14 @@ py_library(
 )
 
 py_test(
+    name = "test_pointer_boundaries",
+    srcs = ["test_pointer_boundaries.py"],
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [":triton", ":torch", ":einops", ":packaging"],
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
     name = "test_gdn_block_prefill",
     srcs = [
         "test_gdn_block_prefill.py"

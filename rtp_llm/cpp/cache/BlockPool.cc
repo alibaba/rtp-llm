@@ -6,6 +6,9 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_ROCM
+#include <torch/cuda.h>
+#endif
 
 #include <cstdlib>
 #include <cerrno>
@@ -187,6 +190,20 @@ void BlockPool::initializeCacheBuffer() {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
+#if USING_ROCM
+    // Gluon PA may load allocated but logically unused V-cache lanes. Zero
+    // attention probabilities do not suppress NaN/Inf in those lanes. Start
+    // each ROCm pool with finite bytes before any layer writes or cache copies.
+    // Finite KV writes and pool reuse then preserve this invariant; this does
+    // not sanitize non-finite *valid* model activations or imported cache data.
+    // Initialize host backing too, since its blocks can later be copied to GPU.
+    // This is startup-only, outside graph capture and the per-token hot path.
+    cache_aligned_buffer_.zero_();
+    if (cache_aligned_buffer_.is_cuda()) {
+        // Publish initialized storage before another thread/stream uses it.
+        torch::cuda::synchronize(cache_aligned_buffer_.get_device());
+    }
+#endif
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
     const bool              is_cuda     = cache_aligned_buffer_.is_cuda();
