@@ -8,6 +8,55 @@
 
 namespace rtp_llm {
 
+TEST(SyncContextTest, ErrorSnapshotSurvivesLaterCompletion) {
+    auto context = std::make_shared<LoadContext>(nullptr, false);
+    auto request = std::make_shared<RequestBlockBuffer>("error-snapshot");
+    context->updateResult(false, CacheStoreErrorCode::LoadBufferTimeout, request);
+
+    const auto& snapshot = context->getErrorInfo();
+    const auto  message  = snapshot.ToString();
+    ASSERT_EQ(snapshot.code(), ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT);
+
+    // A late callback may replace the context's error, but not the caller's snapshot.
+    context->updateResult(false, CacheStoreErrorCode::LoadConnectFailed, request);
+    EXPECT_EQ(context->getErrorInfo().code(), ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED);
+    EXPECT_EQ(snapshot.code(), ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT);
+    EXPECT_EQ(snapshot.ToString(), message);
+}
+
+TEST(SyncContextTest, RetirementWaitRequiresEveryCallbackAfterCancelOrTimeout) {
+    class PendingContext: public SyncContext {
+    public:
+        PendingContext(const std::shared_ptr<RequestBlockBuffer>& first,
+                       const std::shared_ptr<RequestBlockBuffer>& second,
+                       bool                                       cancelled):
+            SyncContext(nullptr, false) {
+            request_block_buffers_ = {first, second};
+            expect_layer_cnt_      = 2;
+            start_time_ms_         = autil::TimeUtility::currentTimeInMilliSeconds();
+            deadline_ms_           = start_time_ms_ + (cancelled ? 10000 : 0);
+            check_cancel_func_     = [cancelled] { return cancelled; };
+        }
+        bool doCall(const std::shared_ptr<RequestBlockBuffer>&, int64_t) override {
+            return true;
+        }
+    };
+    for (bool cancelled : {false, true}) {
+        SCOPED_TRACE(cancelled);
+        auto first   = std::make_shared<RequestBlockBuffer>("first");
+        auto second  = std::make_shared<RequestBlockBuffer>("second");
+        auto context = std::make_shared<PendingContext>(first, second, cancelled);
+        context->waitDone();
+        EXPECT_EQ(context->getErrorInfo().code(),
+                  cancelled ? ErrorCode::CANCELLED : ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT);
+        EXPECT_FALSE(context->waitAllCallbacksDone(std::chrono::steady_clock::now()));
+        context->updateResult(true, CacheStoreErrorCode::None, first);
+        EXPECT_FALSE(context->waitAllCallbacksDone(std::chrono::steady_clock::now()));
+        context->updateResult(true, CacheStoreErrorCode::None, second);
+        EXPECT_TRUE(context->waitAllCallbacksDone(std::chrono::steady_clock::now()));
+    }
+}
+
 class NormalCacheStoreTest: public CacheStoreTestBase {
 protected:
     bool initCacheStores();

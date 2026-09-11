@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <condition_variable>
 #include <exception>
+#include <cstdlib>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
@@ -30,6 +31,7 @@ using grpc::ClientAsyncResponseReader;
 
 const int LOAD_TIMEOUT_MS         = 5 * 1000;
 const int EXTRA_TIMEOUT_MS        = 100;
+const int CACHE_LOAD_RETIRE_TIMEOUT_MS = 5000;
 const int RDMA_CONNECT_RETRY_TIME = 3;
 
 namespace {
@@ -484,8 +486,13 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         min_timeout_ms = std::min(min_timeout_ms, max_rpc_timeout_ms);
     }
     if (request_timeout_ms > 0) {
-        min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
+        const auto remaining_request_ms = request_timeout_ms - decode_context.executeTimeMs();
+        if (remaining_request_ms <= 0) {
+            return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline expired before cache load");
+        }
+        min_timeout_ms = std::min(min_timeout_ms, remaining_request_ms);
     }
+    const auto load_begin_time_us = currentTimeUs();
 
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,
@@ -501,8 +508,16 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
+        // The request can be cancelled before CacheStore finishes writing.
+        // Its buffers retain this allocation reference through the callbacks.
+        const auto& resource  = generate_stream->kvCachePtr()->cacheResource(0);
+        auto        cache_ref = engine_->resourceContext().cache_manager->incrKVCacheRef(resource, cache_keys);
         for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; i++) {
-            auto error_info = loadCache(load_context);
+            load_context.timeout_ms = min_timeout_ms - (currentTimeUs() - load_begin_time_us) / 1000;
+            if (load_context.timeout_ms <= 0) {
+                return ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "cache load deadline expired before retry");
+            }
+            auto error_info = loadCache(load_context, cache_ref);
             if (error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
                 && error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
                 return error_info;
@@ -510,6 +525,10 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         }
     }
 
+    load_context.timeout_ms = min_timeout_ms - (currentTimeUs() - load_begin_time_us) / 1000;
+    if (load_context.timeout_ms <= 0) {
+        return ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "cache load deadline expired before worker submission");
+    }
     return loadCacheAsyncForTp(decode_context, load_context);
 }
 
@@ -526,13 +545,64 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         Status                            status;
         std::shared_ptr<RpcService::Stub> stub;
         std::shared_ptr<ClientContext>    client_context;
+        bool                              submitted = false;
+        bool                              completed = false;
     };
 
     uint32_t                 worker_size = resource_.grpc_workers.size();
     vector<WorkerRpcContext> all_context(worker_size);
     uint32_t                 cq_size = worker_size % 2 == 0 ? worker_size / 2 : worker_size / 2 + 1;
     vector<CompletionQueue>  completion_queues(cq_size);
-    vector<int>              each_finished_count(cq_size, 0);
+    struct RpcCleanup {
+        vector<WorkerRpcContext>&             contexts;
+        vector<CompletionQueue>&              queues;
+        std::chrono::system_clock::time_point deadline;
+        const std::string&                    request_key;
+        bool                                  has_allocation;
+        ~RpcCleanup() {
+            // Keep the caller's allocation alive until workers confirm that
+            // writes ended. Cancelling these RPCs would discard that confirmation.
+            if (!has_allocation) {
+                for (auto& context : contexts) {
+                    context.client_context->TryCancel();
+                }
+            }
+            for (auto& queue : queues) {
+                queue.Shutdown();
+            }
+            for (auto& queue : queues) {
+                void* tag;
+                bool  ok;
+                auto  result = queue.AsyncNext(&tag, &ok, deadline);
+                while (result == CompletionQueue::GOT_EVENT) {
+                    contexts[reinterpret_cast<uintptr_t>(tag)].completed = ok;
+                    result                                               = queue.AsyncNext(&tag, &ok, deadline);
+                }
+                if (result != CompletionQueue::SHUTDOWN) {
+                    RTP_LLM_LOG_ERROR("request [%s] KV worker retirement timed out; cannot release allocation",
+                                      request_key.c_str());
+                    std::abort();
+                }
+            }
+            for (size_t rank = 0; rank < contexts.size(); ++rank) {
+                const auto& context = contexts[rank];
+                if (has_allocation && context.submitted && (!context.completed || !context.status.ok())) {
+                    RTP_LLM_LOG_ERROR(
+                        "request [%s] KV worker %zu completion unconfirmed: %s; cannot release allocation",
+                        request_key.c_str(),
+                        rank,
+                        context.status.error_message().c_str());
+                    std::abort();
+                }
+            }
+        }
+    } rpc_cleanup{all_context,
+                  completion_queues,
+                  std::chrono::system_clock::now()
+                      + std::chrono::milliseconds(load_context.timeout_ms + 2 * CACHE_LOAD_RETIRE_TIMEOUT_MS),
+                  load_context.request_key,
+                  !load_context.block_ids_by_group.empty()};
+    vector<uint32_t> each_finished_count(cq_size, 0);
     if (worker_size == 0 || cq_size == 0) {
         RTP_LLM_LOG_WARNING("request:[%s] cq_size or worker_size is 0, worker size = %d, cq size = %d",
                             decode_context.request_key.c_str(),
@@ -540,9 +610,15 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
                             cq_size);
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker size or cq size is 0");
     }
-    auto worker_size_per_queue = worker_size / completion_queues.size();
+    vector<uint32_t> expected_responses(cq_size, 0);
+    for (uint32_t rank = 0; rank < worker_size; ++rank) {
+        ++expected_responses[rank % cq_size];
+    }
     RTP_LLM_LOG_DEBUG("request:[%s] start to async remote load for all rank", decode_context.request_key.c_str());
     for (int i = 0; i < worker_size; i++) {
+        if (load_context.server_context->IsCancelled()) {
+            return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
+        }
         auto& worker         = resource_.grpc_workers[i];
         auto  connect_status = resource_.rpc_pool.getConnection(worker);
         if (!connect_status.ok()) {
@@ -558,6 +634,12 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
         }
+        const auto remaining_ms = load_context.timeout_ms - (currentTimeUs() - load_cache_begin_time_us) / 1000;
+        if (remaining_ms <= 0) {
+            return ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "cache load deadline expired before worker submission");
+        }
+        load_request.set_timeout_ms(remaining_ms);
+        rpc_context.submitted = true;
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
             rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
         reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
@@ -593,20 +675,21 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         void* got_tag;
         bool  ok = false;
         for (uint32_t i = 0; i < completion_queues.size(); i++) {
-            if (each_finished_count[i] == worker_size_per_queue) {
+            if (each_finished_count[i] == expected_responses[i]) {
                 continue;
             }
-            if (completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline)
-                == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            const auto result = completion_queues[i].AsyncNext(&got_tag, &ok, once_deadline);
+            if (result == CompletionQueue::TIMEOUT) {
                 RTP_LLM_LOG_DEBUG("request [%s] async next timeout", decode_context.request_key.c_str());
                 continue;
             }
             each_finished_count[i]++;
-            if (!ok) {
+            if (result != CompletionQueue::GOT_EVENT || !ok) {
                 string error_msg = "async get next event from grpc completion queue failed";
                 return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
             }
             auto        rank             = reinterpret_cast<uintptr_t>(got_tag);
+            all_context[rank].completed  = true;
             const auto& status           = all_context[rank].status;
             const auto& response         = all_context[rank].response;
             const auto& pb_error_code    = response.error_info().error_code();
@@ -631,10 +714,6 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         if (finished_count == worker_size) {
             break;
         }
-    }
-
-    for (auto& completion_queue : completion_queues) {
-        completion_queue.Shutdown();
     }
 
     if (finished_count != worker_size) {
@@ -726,7 +805,8 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
     return ErrorInfo::OkStatus();
 }
 
-ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
+ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext&               load_context,
+                                     const std::shared_ptr<KVCacheResource>& cache_ref) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
     const auto& request_key   = load_context.request_key;
@@ -759,6 +839,30 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
+    struct LoadCleanup {
+        const std::vector<std::shared_ptr<LoadContext>>& contexts;
+        const std::shared_ptr<KVCacheResource>&          cache_ref;
+        std::chrono::steady_clock::time_point            deadline;
+        const std::string&                               request_key;
+        ~LoadCleanup() {
+            if (cache_ref) {
+                return;  // Local transport buffers retain their own allocation lease.
+            }
+            // A worker has no reference to the coordinator's allocator. Its
+            // RPC response must follow all actual data-plane completions.
+            for (const auto& context : contexts) {
+                if (!context->waitAllCallbacksDone(deadline)) {
+                    RTP_LLM_LOG_ERROR("request [%s] KV transport retirement timed out; cannot confirm completion",
+                                      request_key.c_str());
+                    std::abort();
+                }
+            }
+        }
+    } load_cleanup{load_contexts,
+                   cache_ref,
+                   std::chrono::steady_clock::now()
+                       + std::chrono::milliseconds(load_context.timeout_ms + CACHE_LOAD_RETIRE_TIMEOUT_MS),
+                   request_key};
     const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
@@ -988,7 +1092,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
-                        std::shared_ptr<void> addr(block.addr, [](void*) {});
+                        std::shared_ptr<void> addr(cache_ref, block.addr);
                         load_layer_cache->addBlock(
                             key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                     };
@@ -1137,7 +1241,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.size_bytes > 0, "zero block size for key=%s", key.c_str());
-                                    std::shared_ptr<void> addr(block.addr, [](void*) {});
+                                    std::shared_ptr<void> addr(cache_ref, block.addr);
                                     load_layer_cache->addBlock(
                                         key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                                 };
@@ -1175,12 +1279,20 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip");
         }
 
+        if (cancel_check_func()) {
+            return ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");
+        }
+        const auto remaining_ms = load_context.timeout_ms - (currentTimeUs() - start_load_time_us) / 1000;
+        if (remaining_ms <= 0) {
+            return ErrorInfo(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT,
+                             "cache load deadline expired before peer submission");
+        }
         auto layer_cache_load_context =
             resource_.cache_store->loadBuffers(layer_caches,
                                                ip_parts[0],
                                                autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0),
                                                autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),
-                                               load_context.timeout_ms,
+                                               remaining_ms,
                                                cancel_check_func,
                                                load_context.partition_count,
                                                load_context.partition_id);

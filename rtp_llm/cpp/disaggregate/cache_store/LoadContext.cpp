@@ -104,6 +104,11 @@ void SyncContext::waitDone() {
     }
 }
 
+bool SyncContext::waitAllCallbacksDone(std::chrono::steady_clock::time_point deadline) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cond_.wait_until(lock, deadline, [this] { return done_layer_cnt_ == expect_layer_cnt_; });
+}
+
 bool SyncContext::success() const {
     std::unique_lock<std::mutex> lock(mutex_);
     return error_info_.ok();
@@ -114,7 +119,7 @@ std::string SyncContext::getErrorInfoString() const {
     return error_info_.ToString();
 }
 
-const ErrorInfo& SyncContext::getErrorInfo() const {
+ErrorInfo SyncContext::getErrorInfo() const {
     std::unique_lock<std::mutex> lock(mutex_);
     return error_info_;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <chrono>
 #include <mutex>
 #include <memory>
 #include <functional>
@@ -26,9 +27,11 @@ public:
                                        CheckCancelFunc                                         check_cancel_func);
 
     void waitDone();
+    // Unlike waitDone(), cancellation and the request timeout do not end this wait.
+    bool waitAllCallbacksDone(std::chrono::steady_clock::time_point deadline);
 
     bool             success() const;
-    const ErrorInfo& getErrorInfo() const;
+    ErrorInfo        getErrorInfo() const;
     std::string      getErrorInfoString() const;
 
     void

@@ -22,6 +22,15 @@
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "autil/NetUtil.h"
+
+#include <algorithm>
+#include <csignal>
+#include <future>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -339,6 +348,443 @@ protected:
     std::shared_ptr<KVCacheManager>       cache_manager_;
     size_t                                initial_free_blocks_ = 0;
 };
+
+TEST(DecodeRpcServerDeathTest, UnconfirmedWorkerCannotReleaseAllocation) {
+    const auto previous_style               = ::testing::FLAGS_gtest_death_test_style;
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    for (bool missing_response : {false, true}) {
+        SCOPED_TRACE(missing_response);
+        EXPECT_EXIT(
+            {
+                // Exercise the real process-fatal path without generating a GPU core file.
+                rlimit core_limit{};
+                setrlimit(RLIMIT_CORE, &core_limit);
+                dup2(STDERR_FILENO, STDOUT_FILENO);
+                rtp_llm::initLogger();
+                class WorkerService: public RpcService::Service {
+                public:
+                    bool missing_response = false;
+                    grpc::Status
+                    RemoteLoad(grpc::ServerContext*, const BroadcastLoadRequestPB*, BroadcastLoadResponsePB*) override {
+                        if (missing_response) {
+                            std::this_thread::sleep_for(std::chrono::seconds(20));
+                        }
+                        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "worker completion lost");
+                    }
+                } worker;
+                worker.missing_response  = missing_response;
+                int                 port = 0;
+                grpc::ServerBuilder builder;
+                builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+                builder.RegisterService(&worker);
+                auto grpc_server = builder.BuildAndStart();
+                if (!grpc_server) {
+                    _exit(2);
+                }
+                auto             config  = test::makeSimpleMhaCacheConfig(1, 16, 8, rtp_llm::DataType::TYPE_FP16);
+                auto             manager = std::make_shared<KVCacheManager>(config, false, nullptr);
+                EngineInitParams params;
+                params.pd_sep_config.decode_polling_kv_cache_step_ms = 10;
+                DecodeRpcServer loader;
+                loader.engine_           = std::make_shared<MinimalEngine>(params, manager);
+                loader.maga_init_params_ = params;
+                loader.resource_.workers.resize(2);
+                loader.resource_.grpc_workers.assign(2, "127.0.0.1:" + std::to_string(port));
+                grpc::ServerContext            incoming;
+                DecodeRpcContext               rpc{nullptr};
+                kmonitor::MetricsReporterPtr   metrics;
+                DecodeGenerateContext          decode(rpc, 100, &incoming, metrics, nullptr);
+                const std::vector<std::string> peers{"127.0.0.1:12345:12346"};
+                decode.peer_addrs = peers;
+                const std::vector<CacheKeyType> keys{7};
+                GroupBlockIds                   blocks{std::make_shared<BlockIds>()};
+                blocks[0]->assign(BlockIndicesType{1});
+                DecodeRpcServer::LoadKVCacheContext load(
+                    71, decode.request_key, peers, keys, blocks, 0, 100, 1, 0, &incoming);
+                loader.loadCacheAsyncForTp(decode, load);
+                _exit(0);  // An unconfirmed write must not return to the allocation owner.
+            },
+            ::testing::KilledBySignal(SIGABRT),
+            "cannot release allocation");
+    }
+    ::testing::FLAGS_gtest_death_test_style = previous_style;
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testAsyncRemoteLoadCleansUpOutstandingRpcOnTimeout) {
+    class WorkerService: public RpcService::Service {
+    public:
+        grpc::Status RemoteLoad(grpc::ServerContext*          context,
+                                const BroadcastLoadRequestPB* request,
+                                BroadcastLoadResponsePB*      response) override {
+            entered.fetch_add(1);
+            if (request->request_id() == 2) {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                while (!context->IsCancelled() && std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (context->IsCancelled()) {
+                    cancelled.fetch_add(1);
+                }
+            }
+            response->set_done_time_us(currentTimeUs());
+            finished.fetch_add(1);
+            return request->request_id() == 1 ? grpc::Status(grpc::StatusCode::INTERNAL, "worker failed") :
+                                                grpc::Status::OK;
+        }
+        std::atomic<int> entered{0};
+        std::atomic<int> finished{0};
+        std::atomic<int> cancelled{0};
+    } worker;
+    int                 port = 0;
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&worker);
+    auto grpc_server = builder.BuildAndStart();
+    ASSERT_NE(grpc_server, nullptr);
+
+    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), false, nullptr);
+    EngineInitParams params;
+    params.model_id                                      = 0;
+    params.parallelism_config                            = ParallelismConfig();
+    params.pd_sep_config.decode_polling_kv_cache_step_ms = 10;
+    DecodeRpcServer server;
+    server.engine_           = std::make_shared<MinimalEngine>(params, manager);
+    server.maga_init_params_ = params;
+    server.resource_.workers.resize(3);
+    server.resource_.grpc_workers.assign(3, "127.0.0.1:" + std::to_string(port));
+    const std::vector<std::string>  peers{"127.0.0.1:12345:12346"};
+    const std::vector<CacheKeyType> keys;
+    const GroupBlockIds             blocks;
+    grpc::ServerContext             incoming;
+    DecodeRpcContext                rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr    metrics;
+
+    // Exercise the production RPC owner, including fresh calls after an early
+    // return. The workers are real TCP gRPC calls, not a mocked CQ or DMA test.
+    for (const int mode : {0, 1, 2, 0}) {
+        SCOPED_TRACE(mode);
+        const int             before = worker.finished.load();
+        DecodeGenerateContext decode(rpc_context, 1000, &incoming, metrics, nullptr);
+        decode.stat_info  = {};
+        decode.peer_addrs = peers;
+        DecodeRpcServer::LoadKVCacheContext load(
+            mode, decode.request_key, peers, keys, blocks, 0, mode == 2 ? 100 : 2000, 1, 0, &incoming);
+        auto status = server.loadCacheAsyncForTp(decode, load);
+        EXPECT_EQ(status.code(),
+                  mode == 2 ? ErrorCode::LOAD_CACHE_TIMEOUT :
+                  mode == 1 ? ErrorCode::LOAD_KV_CACHE_FAILED :
+                              ErrorCode::NONE_ERROR);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (worker.finished.load() < before + 3 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        EXPECT_EQ(worker.finished.load(), before + 3);
+        if (mode == 2) {
+            EXPECT_EQ(worker.cancelled.load(), 3);
+        }
+    }
+    EXPECT_EQ(worker.entered.load(), 12);
+    grpc_server->Shutdown();
+    grpc_server->Wait();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testCancelledPdLoadCannotOverwriteReallocatedBlocks) {
+    const bool rdma_mode = autil::EnvUtil::getEnv("CACHE_STORE_RDMA_MODE", false);
+    SCOPED_TRACE(rdma_mode);
+    class ObservedStore: public NormalCacheStore {
+    public:
+        std::shared_ptr<LoadContext> loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers,
+                                                 const std::string&                                      ip,
+                                                 uint32_t                                                port,
+                                                 uint32_t                                                rdma_port,
+                                                 int64_t                                                 timeout_ms,
+                                                 LoadContext::CheckCancelFunc                            cancel,
+                                                 int                                                     partitions,
+                                                 int partition) override {
+            auto context = NormalCacheStore::loadBuffers(
+                buffers, ip, port, rdma_port, timeout_ms, std::move(cancel), partitions, partition);
+            submitted_timeout_ms = timeout_ms;
+            pending              = context;
+            issued.set_value();
+            return context;
+        }
+        std::weak_ptr<LoadContext> pending;
+        std::promise<void>         issued;
+        int64_t                    submitted_timeout_ms = 0;
+    };
+    for (const auto& [worker_count, publish_all] :
+         std::vector<std::pair<int, bool>>{{1, true}, {2, true}, {2, false}, {3, true}}) {
+        SCOPED_TRACE(worker_count);
+        SCOPED_TRACE(publish_all);
+        CacheStoreInitParams transport;
+        transport.rdma_mode     = rdma_mode;
+        transport.device_id     = 0;
+        transport.enable_metric = false;
+        std::vector<std::shared_ptr<ObservedStore>>    receivers;
+        std::vector<std::shared_ptr<NormalCacheStore>> sources;
+        std::vector<std::string>                       peers;
+        for (int rank = 0; rank < worker_count; ++rank) {
+            auto receiver              = std::make_shared<ObservedStore>();
+            transport.listen_port      = autil::NetUtil::randomPort();
+            transport.rdma_listen_port = rdma_mode ? autil::NetUtil::randomPort() : 0;
+            ASSERT_TRUE(receiver->init(transport));
+            ASSERT_EQ(receiver->getMemoryUtil()->isRdmaMode(), rdma_mode);
+            receivers.push_back(receiver);
+            transport.listen_port      = autil::NetUtil::randomPort();
+            transport.rdma_listen_port = rdma_mode ? autil::NetUtil::randomPort() : 0;
+            auto source                = NormalCacheStore::createNormalCacheStore(transport);
+            ASSERT_NE(source, nullptr);
+            ASSERT_EQ(source->getMemoryUtil()->isRdmaMode(), rdma_mode);
+            sources.push_back(source);
+            peers.push_back(autil::NetUtil::getBindIp() + ":" + std::to_string(transport.listen_port) + ":"
+                            + std::to_string(transport.rdma_listen_port));
+        }
+
+        ModelConfig model;
+        model.num_layers           = 3;
+        model.max_seq_len          = 2048;
+        model.data_type            = rtp_llm::DataType::TYPE_FP16;
+        model.attn_config.head_num = model.attn_config.kv_head_num = worker_count;
+        model.attn_config.size_per_head                            = 8;
+        model.attn_config.tokens_per_block                         = 8;
+        KVCacheConfig kv_config;
+        kv_config.seq_size_per_block = kv_config.kernel_seq_size_per_block = 8;
+        kv_config.test_block_num                                           = 16;
+        ParallelismConfig parallel;
+        parallel.role_type = RoleType::DECODE;
+        parallel.tp_size   = worker_count;
+        const auto config  = CacheConfigCreator::createConfig(model, parallel, RuntimeConfig{}, kv_config);
+        prepareStreamWithConfig({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}, config, 8, RoleType::DECODE);
+        ASSERT_TRUE(stream_->streamCacheResource().initKVBlock().ok());
+        // allocateResource leaves the stream WAITING, before localGenerate enqueues it.
+        stream_->generate_status_->status = StreamState::WAITING;
+        const auto old_ids                = stream_->kvCachePtr()->cacheResource(0).blocks(0);
+        const auto old_keys               = stream_->cacheKeys(0);
+        ASSERT_EQ(old_ids.size(), old_keys.size());
+        ASSERT_FALSE(old_ids.empty());
+        std::weak_ptr<GenerateStream> old_stream = stream_;
+
+        EngineInitParams params;
+        params.model_id                            = 0;
+        params.model_config_                       = model;
+        params.parallelism_config                  = parallel;
+        params.pd_sep_config.load_cache_timeout_ms = 10000;
+        params.pd_sep_config.max_rpc_timeout_ms    = 10000;
+        DecodeRpcServer loader;
+        loader.engine_               = std::make_shared<MinimalEngine>(params, cache_manager_);
+        loader.maga_init_params_     = params;
+        loader.resource_.cache_store = receivers[0];
+        loader.resource_.workers.resize(worker_count);
+        std::vector<std::shared_ptr<KVCacheManager>> managers{cache_manager_};
+        class WorkerService: public RpcService::Service {
+        public:
+            DecodeRpcServer loader;
+            grpc::Status    RemoteLoad(grpc::ServerContext*          context,
+                                       const BroadcastLoadRequestPB* request,
+                                       BroadcastLoadResponsePB*      response) override {
+                return loader.RemoteLoad(context, request, response);
+            }
+        };
+        std::vector<std::unique_ptr<WorkerService>> workers;
+        std::vector<std::unique_ptr<grpc::Server>>  worker_servers;
+        if (worker_count > 1) {
+            for (int rank = 0; rank < worker_count; ++rank) {
+                if (rank) {
+                    auto manager = std::make_shared<KVCacheManager>(config, false, nullptr);
+                    ASSERT_TRUE(manager->init());
+                    managers.push_back(manager);
+                }
+                auto worker                      = std::make_unique<WorkerService>();
+                worker->loader.engine_           = std::make_shared<MinimalEngine>(params, managers[rank]);
+                worker->loader.maga_init_params_ = params;
+                worker->loader.maga_init_params_.parallelism_config.tp_rank = rank;
+                worker->loader.resource_.cache_store                        = receivers[rank];
+                int                 port                                    = 0;
+                grpc::ServerBuilder builder;
+                builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+                builder.RegisterService(worker.get());
+                auto server = builder.BuildAndStart();
+                ASSERT_NE(server, nullptr);
+                loader.resource_.grpc_workers.push_back("127.0.0.1:" + std::to_string(port));
+                workers.push_back(std::move(worker));
+                worker_servers.push_back(std::move(server));
+            }
+        }
+
+        if (rdma_mode) {
+            for (size_t rank = 0; rank < managers.size(); ++rank) {
+                managers[rank]->regUserMr(0, receivers[rank]);
+            }
+        }
+        class RootService: public RpcService::Service {
+        public:
+            std::function<grpc::Status(grpc::ServerContext*)> run;
+            grpc::Status
+            RemoteLoad(grpc::ServerContext* context, const BroadcastLoadRequestPB*, BroadcastLoadResponsePB*) override {
+                return run(context);
+            }
+        } root;
+        std::promise<ErrorCode> released;
+        auto                    released_future = released.get_future();
+        root.run = [&, owned_stream = std::move(stream_)](grpc::ServerContext* context) mutable {
+            ErrorCode result;
+            {
+                DecodeRpcContext             rpc{nullptr};
+                kmonitor::MetricsReporterPtr metrics;
+                DecodeGenerateContext decode(rpc, 10000, context, metrics, std::make_shared<RpcServerRuntimeMeta>());
+                decode.request_begin_time_us -= 2000 * 1000;  // Earlier request stages consumed this budget.
+                decode.setStream(owned_stream);
+                owned_stream.reset();
+                decode.request_id = 71;
+                decode.peer_addrs = peers;
+                result            = loader.loadCacheForAllRank(decode).code();
+            }
+            released.set_value(result);
+            return grpc::Status::OK;
+        };
+        int                 port = 0;
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&root);
+        auto grpc_server = builder.BuildAndStart();
+        ASSERT_NE(grpc_server, nullptr);
+        auto stub = RpcService::NewStub(
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext client;
+        client.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+        std::vector<std::future<void>> issued;
+        for (const auto& receiver : receivers) {
+            issued.push_back(receiver->issued.get_future());
+        }
+        auto call = std::async(std::launch::async, [&] {
+            BroadcastLoadRequestPB  request;
+            BroadcastLoadResponsePB response;
+            return stub->RemoteLoad(&client, request, &response);
+        });
+        for (auto& submitted : issued) {
+            ASSERT_EQ(submitted.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+        }
+        for (const auto& receiver : receivers) {
+            EXPECT_GT(receiver->submitted_timeout_ms, 0);
+            EXPECT_LE(receiver->submitted_timeout_ms, 8000);
+        }
+        client.TryCancel();
+        EXPECT_EQ(call.get().error_code(), grpc::StatusCode::CANCELLED);
+        // A remote coordinator may keep its handler alive until worker writes end;
+        // the caller is already cancelled. Either form must keep the old IDs pinned.
+        auto root_status = released_future.wait_for(std::chrono::seconds(3));
+        if (worker_count == 1) {
+            ASSERT_EQ(root_status, std::future_status::ready);
+            ASSERT_TRUE(old_stream.expired());
+        }
+        const int remaining_blocks = initial_free_blocks_ - static_cast<int>(old_ids.size());
+        const int available_blocks = cache_manager_->freeBlocksNum();
+        EXPECT_EQ(available_blocks, remaining_blocks);
+        for (const auto& receiver : receivers) {
+            ASSERT_FALSE(receiver->pending.expired());
+        }
+
+        ResourceContext resource_context;
+        resource_context.cache_manager = cache_manager_;
+        resource_context.role_type     = RoleType::DECODE;
+        auto input                     = std::make_shared<GenerateInput>();
+        input->generate_config         = std::make_shared<GenerateConfig>();
+        input->input_ids               = torch::arange(1000, 1000 + available_blocks * 8 - 1, torch::kInt32);
+        auto next_stream =
+            std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resource_context, nullptr);
+        ASSERT_TRUE(next_stream->streamCacheResource().initKVBlock().ok());
+        const auto& new_ids = next_stream->kvCachePtr()->cacheResource(0).blocks(0);
+        for (auto id : old_ids) {
+            EXPECT_EQ(std::find(new_ids.begin(), new_ids.end(), id), new_ids.end());
+        }
+        ASSERT_EQ(cache_manager_->freeBlocksNum(), 0);
+        std::vector<torch::Tensor> new_destinations;
+        for (const auto& manager : managers) {
+            for (int layer = 0; layer < 3; ++layer) {
+                for (auto id : new_ids) {
+                    for (const auto& block : manager->convertIndexToBuffer(id, layer, 1, 0)) {
+                        auto options = torch::TensorOptions(torch::kUInt8).device(torch::kCUDA);
+                        new_destinations.push_back(torch::from_blob(block.addr, {(int64_t)block.size_bytes}, options));
+                        new_destinations.back().fill_(0x33);
+                    }
+                }
+            }
+        }
+        std::vector<std::pair<torch::Tensor, int>> destinations;
+        for (int rank = 0; rank < worker_count; ++rank) {
+            auto late = std::make_shared<RequestBlockBuffer>("71");
+            for (int layer = 0; layer < 3; ++layer) {
+                for (size_t index = 0; index < old_ids.size(); ++index) {
+                    auto blocks = managers[rank]->convertIndexToBuffer(old_ids[index], layer, 1, 0);
+                    ASSERT_EQ(blocks.size(), 2u);
+                    for (size_t part = 0; part < blocks.size(); ++part) {
+                        const auto& block    = blocks[part];
+                        auto        options  = torch::TensorOptions(torch::kUInt8).device(torch::kCUDA);
+                        const int   expected = publish_all || rank == 0 ? 0x77 + rank : 0x33;
+                        destinations.emplace_back(torch::from_blob(block.addr, {(int64_t)block.size_bytes}, options),
+                                                  expected);
+                        destinations.back().first.fill_(0x33);
+                        auto payload     = torch::full({(int64_t)block.size_bytes}, 0x77 + rank, options);
+                        auto memory_util = sources[rank]->getMemoryUtil();
+                        if (rdma_mode) {
+                            ASSERT_TRUE(memory_util->regUserMr(payload.data_ptr(), block.size_bytes, true));
+                        }
+                        std::shared_ptr<void> owner(payload.data_ptr(),
+                                                    [payload, memory_util, rdma_mode](void* address) {
+                                                        if (rdma_mode) {
+                                                            memory_util->deregUserMr(address, true);
+                                                        }
+                                                    });
+                        late->addBlock((part == 0 ? "k_" : "v_")
+                                           + makeCacheKey(0, std::to_string(old_keys[index]), layer),
+                                       owner,
+                                       block.size_bytes,
+                                       true,
+                                       true);
+                    }
+                }
+            }
+            runtimeSyncAndCheck();
+            std::promise<bool> published;
+            auto               published_future = published.get_future();
+            if (publish_all || rank == 0) {
+                sources[rank]->store(late, [&](bool success, CacheStoreErrorCode) { published.set_value(success); });
+                ASSERT_TRUE(published_future.get());
+            }
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(publish_all ? 5 : 12);
+        for (const auto& receiver : receivers) {
+            while (!receiver->pending.expired() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            ASSERT_TRUE(receiver->pending.expired());
+        }
+        ASSERT_EQ(released_future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+        EXPECT_EQ(released_future.get(), ErrorCode::CANCELLED);
+        EXPECT_TRUE(old_stream.expired());
+        runtimeSyncAndCheck();
+        for (const auto& [destination, value] : destinations) {
+            EXPECT_TRUE(destination.eq(value).all().item<bool>()) << "old transfer must actually complete";
+        }
+        for (const auto& destination : new_destinations) {
+            EXPECT_TRUE(destination.eq(0x33).all().item<bool>()) << "late PD write changed another request's KV";
+        }
+        // A LoadContext weak reference can expire just before its members release
+        // their buffer ownership. Wait for the actual allocator reference to retire.
+        while (cache_manager_->freeBlocksNum() == 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), old_ids.size());
+        next_stream.reset();
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), initial_free_blocks_);
+        grpc_server->Shutdown();
+        grpc_server->Wait();
+        for (auto& server : worker_servers) {
+            server->Shutdown();
+            server->Wait();
+        }
+    }
+}
 
 // =============================================================================
 // Test 1: Normal release without PD sep hold
