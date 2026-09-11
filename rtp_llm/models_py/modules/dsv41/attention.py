@@ -178,6 +178,7 @@ class V41AttentionContext:
             self.epoch,
             self.start,
             self.end,
+            self.replay_floor,
         )
 
     @property
@@ -195,6 +196,7 @@ class V41AttentionContext:
                 self.epoch,
                 self.start,
                 self.end,
+                self.replay_floor,
             )
         ):
             raise ValueError(
@@ -533,9 +535,9 @@ class V41Attention(nn.Module):
                 if global_kv is not None:
                     owner = self.source.global_owner
                     if owner not in context.planar_globals:
-                        context.planar_globals[owner] = (
-                            PlanarGlobalBinding.from_compact(global_kv)
-                        )
+                        context.planar_globals[
+                            owner
+                        ] = PlanarGlobalBinding.from_compact(global_kv)
                     planar_global = context.planar_globals[owner]
             outputs = []
             # Earlier queries must read the old ring before later writes wrap it.

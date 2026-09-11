@@ -1,8 +1,7 @@
-"""Full target execution over explicitly bound V4.1 components.
+"""Full target and explicit prefill stages over bound V4.1 components.
 
-This module is the diagnostic forty-layer path. It neither registers a
-service backend nor supplies CP, PD, Graph or bounded-replay scheduling.
-Attention receives the same opaque, caller-owned context at every layer.
+Decode always uses the forty-layer path. The prefill executor owns the L20
+tail and attention context; distributed scheduling remains caller-owned.
 """
 
 from collections.abc import Mapping, Sequence
@@ -103,6 +102,13 @@ class V41TargetOutput:
     aux_hidden_states: torch.Tensor | None
     aux_row_indices: torch.Tensor | None
     aux_layer_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class V41L20Output:
+    rows: V41ModelRows
+    hidden_states: torch.Tensor
+    pre_mix: torch.Tensor
 
 
 class V41TargetModel(nn.Module):
@@ -262,6 +268,109 @@ class V41TargetModel(nn.Module):
             raise RuntimeError("V4.1 vision weights have not been bound")
         return V41ImageFeatures.from_prepared(self.vision, prepared)
 
+    def _embed_rows(self, rows, image_features):
+        rows.validate()
+        if rows.token_ids.device != self.embedding.device:
+            raise ValueError(
+                "V4.1 target rows and installed weights must share a device"
+            )
+        ids = rows.token_ids.masked_fill(~rows.valid, self.config.pad_token_id)
+        embedded = F.embedding(ids, self.embedding)
+        if image_features is None:
+            torch._assert_async(
+                ~rows.image_mask.any(), "V4.1 image rows require vision features"
+            )
+        else:
+            image_features.validate(rows, self.hidden_size)
+            embedded.index_copy_(0, image_features.row_indices, image_features.values)
+        embedded.masked_fill_(~rows.valid[:, None], 0)
+        hidden = embedded.unsqueeze(1).repeat(1, self.hc_mult, 1)
+        return hidden, identity_pre_mix(hidden)
+
+    def _run_blocks(
+        self,
+        rows,
+        hidden,
+        pre_mix,
+        context,
+        first,
+        last,
+        aux_row_indices=None,
+        lookup_outputs=None,
+    ):
+        hashes = rows.engram_hashes(self.token_hasher) if first < 15 else None
+        if hashes is not None and (
+            hashes.shape != (rows.token_ids.numel(), 2, 24)
+            or hashes.dtype != torch.int64
+        ):
+            raise ValueError(
+                "V4.1 target hasher must provide both complete Engram head sets"
+            )
+        aux = []
+        for layer in range(first, last):
+            if layer in (1, 14):
+                hidden = self.engrams[str(layer)](
+                    hidden,
+                    hashes[:, (0 if layer == 1 else 1), :].contiguous(),
+                    rows.text_mask,
+                    lookup_output=(
+                        None if lookup_outputs is None else lookup_outputs[layer]
+                    ),
+                )
+            if aux_row_indices is not None and layer in self.aux_layer_ids:
+                # DSpark captures HC means at the block input, after Engram.
+                aux.append(hidden.index_select(0, aux_row_indices).mean(dim=1))
+            hidden, pre_mix = self.blocks[layer](
+                hidden, pre_mix, context, rows.image_mask
+            )
+            hidden = hidden.masked_fill(~rows.valid[:, None, None], 0)
+        return hidden, pre_mix, aux
+
+    def _finish(self, hidden, pre_mix, aux, aux_row_indices):
+        return V41TargetOutput(
+            rms_norm(hc_pre(hidden, pre_mix), self.norm),
+            pre_mix,
+            torch.cat(aux, dim=-1) if aux_row_indices is not None else None,
+            aux_row_indices.clone() if aux_row_indices is not None else None,
+            self.aux_layer_ids if aux_row_indices is not None else (),
+        )
+
+    @torch.inference_mode()
+    def prefill_encoder(
+        self, rows, context, *, image_features=None, lookup_outputs=None
+    ):
+        """Materialize all new L0-L20 rows before selecting decoder consumers."""
+        hidden, pre_mix = self._embed_rows(rows, image_features)
+        hidden, pre_mix, _ = self._run_blocks(
+            rows, hidden, pre_mix, context, 0, 21, lookup_outputs=lookup_outputs
+        )
+        return V41L20Output(rows, hidden, pre_mix)
+
+    @torch.inference_mode()
+    def prefill_decoder(self, l20: V41L20Output, context):
+        """Execute only retained late rows; every returned aux row is computed."""
+        l20.rows.validate()
+        count = l20.rows.token_ids.numel()
+        if (
+            l20.hidden_states.shape != (count, self.hc_mult, self.hidden_size)
+            or l20.hidden_states.dtype != torch.bfloat16
+            or l20.hidden_states.device != self.embedding.device
+            or l20.pre_mix.shape != (count, self.hc_mult)
+            or l20.pre_mix.dtype != torch.float32
+            or l20.pre_mix.device != self.embedding.device
+        ):
+            raise ValueError(
+                "retained L20 HC/pre_mix has a different geometry or device"
+            )
+        torch._assert_async(
+            l20.rows.valid.all(), "late prefill cannot consume padding aux"
+        )
+        selected = torch.arange(count, dtype=torch.int64, device=self.embedding.device)
+        hidden, pre_mix, aux = self._run_blocks(
+            l20.rows, l20.hidden_states, l20.pre_mix, context, 21, 40, selected
+        )
+        return self._finish(hidden, pre_mix, aux, selected)
+
     @torch.inference_mode()
     def forward(
         self,
@@ -277,11 +386,7 @@ class V41TargetModel(nn.Module):
             raise ValueError(
                 "this target component only implements explicit full execution"
             )
-        rows.validate()
-        if rows.token_ids.device != self.embedding.device:
-            raise ValueError(
-                "V4.1 target rows and installed weights must share a device"
-            )
+        hidden, pre_mix = self._embed_rows(rows, image_features)
         if aux_row_indices is not None:
             indices = aux_row_indices
             if (
@@ -301,47 +406,10 @@ class V41TargetModel(nn.Module):
             torch._assert_async(
                 rows.valid[indices].all(), "V4.1 aux rows cannot include padding"
             )
-        ids = rows.token_ids.masked_fill(~rows.valid, self.config.pad_token_id)
-        embedded = F.embedding(ids, self.embedding)
-        if image_features is None:
-            torch._assert_async(
-                ~rows.image_mask.any(), "V4.1 image rows require vision features"
-            )
-        else:
-            image_features.validate(rows, self.hidden_size)
-            embedded.index_copy_(0, image_features.row_indices, image_features.values)
-        embedded.masked_fill_(~rows.valid[:, None], 0)
-        hidden = embedded.unsqueeze(1).repeat(1, self.hc_mult, 1)
-        pre_mix = identity_pre_mix(hidden)
-        hashes = rows.engram_hashes(self.token_hasher)
-        if hashes.shape != (ids.numel(), 2, 24) or hashes.dtype != torch.int64:
-            raise ValueError(
-                "V4.1 target hasher must provide both complete Engram head sets"
-            )
-        aux = []
-        for layer, block in enumerate(self.blocks):
-            if layer in (1, 14):
-                hidden = self.engrams[str(layer)](
-                    hidden,
-                    hashes[:, (0 if layer == 1 else 1), :].contiguous(),
-                    rows.text_mask,
-                    lookup_output=(
-                        None if lookup_outputs is None else lookup_outputs[layer]
-                    ),
-                )
-            if aux_row_indices is not None and layer in self.aux_layer_ids:
-                # Official DSpark captures HC means at the block input after Engram.
-                aux.append(hidden.index_select(0, aux_row_indices).mean(dim=1))
-            hidden, pre_mix = block(hidden, pre_mix, context, rows.image_mask)
-            hidden = hidden.masked_fill(~rows.valid[:, None, None], 0)
-        result = rms_norm(hc_pre(hidden, pre_mix), self.norm)
-        return V41TargetOutput(
-            result,
-            pre_mix,
-            torch.cat(aux, dim=-1) if aux_row_indices is not None else None,
-            aux_row_indices.clone() if aux_row_indices is not None else None,
-            self.aux_layer_ids if aux_row_indices is not None else (),
+        hidden, pre_mix, aux = self._run_blocks(
+            rows, hidden, pre_mix, context, 0, 40, aux_row_indices, lookup_outputs
         )
+        return self._finish(hidden, pre_mix, aux, aux_row_indices)
 
     @torch.inference_mode()
     def logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

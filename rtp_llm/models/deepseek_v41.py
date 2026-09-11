@@ -156,6 +156,72 @@ class DeepSeekV41Weight(ModelDeployWeightInfo):
         return ModelWeightInfo(weights=globals_, layer_weights=layers)
 
 
+class DeepSeekV41PrefillDraftWeight(DeepSeekV41Weight):
+    """Selective draft weights for P commit-only execution.
+
+    The shared embedding/head descriptors preserve the ordinary ModelLoader
+    interface. Pass target-owned global_weight_aliases when loading this
+    descriptor so they retain the target storage without checkpoint I/O.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._num_layers = 3
+        self.moe_layer_index_ = []
+        self.enable_eplb_ = False
+
+    @property
+    def host_weight_specs(self):
+        return {}
+
+    def _get_weight_info(self) -> ModelWeightInfo:
+        config = self.model_config.dsv41_config
+        config.validate_parallelism(tp_size=self.tp_size, ep_size=self.ep_size)
+        if self.tp_size != 1 or config.text["num_nextn_predict_layers"] != 3:
+            raise ValueError("V4.1 P draft weights require TP1 and three stages")
+        specs = build_v41_manifest(config)
+
+        def descriptor(name, key):
+            spec = specs[name]
+            return V41AtomicWeight(
+                "v41." + key,
+                [spec],
+                identity,
+                _CHECKPOINT_DTYPES[spec.dtype],
+            )
+
+        globals_ = [
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo("embed.weight", identity)],
+                identity,
+                data_type=torch.bfloat16,
+            ),
+            AtomicWeight(
+                W.lm_head,
+                [CkptWeightInfo("head.weight", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+        ]
+        globals_.extend(
+            descriptor("mtp.0." + name, "mtp.0." + name)
+            for name in ("main_proj.weight", "main_proj.scale", "main_norm.weight")
+        )
+        layers = [
+            [
+                descriptor(f"mtp.{stage}." + name, name)
+                for name in (
+                    "attn.wkv.weight",
+                    "attn.wkv.scale",
+                    "attn.kv_norm.weight",
+                )
+            ]
+            for stage in range(3)
+        ]
+        return ModelWeightInfo(weights=globals_, layer_weights=layers)
+
+
 class DeepSeekV41(DeepSeekV2):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
