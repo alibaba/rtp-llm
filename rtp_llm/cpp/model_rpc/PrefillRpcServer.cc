@@ -311,18 +311,12 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         alloc_request.add_peer_addrs(addrs);
     }
 
-    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-
-    // The existing shard-count field identifies the Prefill page-RR owners.
-    if (maga_init_params_.parallelism_config.kv_page_rr_enabled()) {
-        const auto tp_size = static_cast<size_t>(maga_init_params_.parallelism_config.tp_size);
-        RTP_LLM_CHECK_WITH_INFO(prefill_context.prefill_worker_cache_store_addrs.size() == tp_size,
-                                "page-RR Prefill requires one rank-ordered cache-store peer per TP rank, "
-                                "got peers=%zu TP=%zu",
-                                prefill_context.prefill_worker_cache_store_addrs.size(),
-                                tp_size);
+    // Propagate CP size so decode knows prefill used context-parallel page-RR.
+    const auto& cp_cfg = maga_init_params_.parallelism_config.prefill_cp_config;
+    if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
         alloc_request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
     }
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
     alloc_request.set_prefill_seq_size_per_block(static_cast<int32_t>(cache_config.seq_size_per_block));
     alloc_request.set_prefill_kernel_seq_size_per_block(static_cast<int32_t>(cache_config.kernel_seq_size_per_block));
     alloc_request.set_prefill_attention_tp_size(
