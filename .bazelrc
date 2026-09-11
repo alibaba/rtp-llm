@@ -243,10 +243,6 @@ test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda31
 test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
 test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
-test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 # The toolset lib64 must lead LD_LIBRARY_PATH (its ld needs libctf LIBCTF_1.1
 # ahead of the system one); test_env carries it because remotely executed

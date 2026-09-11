@@ -110,6 +110,18 @@ class MMWorkEstimate:
             attention_work=self.attention_work + other.attention_work,
         )
 
+    def scaled(self, count: int) -> "MMWorkEstimate":
+        if count < 0:
+            raise ValueError(f"count must be >= 0, got {count}")
+        return MMWorkEstimate(
+            input_patches=self.input_patches * count,
+            output_tokens=self.output_tokens * count,
+            estimated_workspace_bytes=self.estimated_workspace_bytes * count,
+            # This is a maximum, not an additive quantity.
+            max_attention_segment=self.max_attention_segment,
+            attention_work=self.attention_work * count,
+        )
+
     def fits_within(self, budget: "MMWorkEstimate") -> bool:
         additive_fields = (
             "input_patches",

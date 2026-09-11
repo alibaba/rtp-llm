@@ -118,6 +118,7 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
+    "pynvvideocodec",
     "av",
     # add qwen agent package
     "pydantic",
@@ -297,6 +298,8 @@ py_library(
         ":torchvision",
         ":protobuf",
         ":pyOpenSSL",
+        ":flash-attn-4",
+        ":pynvvideocodec",
     ] + select({
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],

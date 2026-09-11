@@ -51,6 +51,7 @@ class VitMetricsTest(TestCase):
                 }
             )
         )
+        processor.video_processor.size = {"longest_edge": 25165824}
         video = torch.zeros((2, 3, 10, 12))
 
         with patch.object(
@@ -77,9 +78,11 @@ class VitMetricsTest(TestCase):
             b"video",
             mm_input.mm_preprocess_config,
             vit_metrics_tags={"model": "qwen3_vl", "mm_type": "video"},
+            factor=32,
+            max_total_pixels=25165824,
         )
         processor.video_processor.assert_called_once_with(
-            video, return_tensors="pt", do_resize=True
+            video, return_tensors="pt", do_resize=False, do_sample_frames=False
         )
 
     def test_qwen3_image_preprocess_uses_image_media_tag(self):
@@ -382,10 +385,9 @@ class VitMetricsTest(TestCase):
                 self.frame_count = frame_count
 
             def asnumpy(self):
-                return [
-                    [[[0, 0, 0] for _ in range(6)] for _ in range(4)]
-                    for _ in range(self.frame_count)
-                ]
+                return torch.zeros(
+                    (self.frame_count, 4, 6, 3), dtype=torch.uint8
+                ).numpy()
 
         class FakeVideoReader:
             def __init__(self, *args, **kwargs):

@@ -17,6 +17,10 @@ if __name__ == "__main__":
     if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker":
         enter_worker_cgroup()
     configure_numa_interleave()
+from rtp_llm.utils.jit_toolchain import configure_bazel_jit_toolchain
+
+# Resolve runtime compiler paths before importing/starting backend JIT users.
+configure_bazel_jit_toolchain()
 
 import requests
 import torch

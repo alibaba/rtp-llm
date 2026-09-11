@@ -163,12 +163,14 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                 video_data,
                 mm_input.mm_preprocess_config,
                 vit_metrics_tags=tags,
+                factor=factor,
+                max_total_pixels=processor.video_processor.size.get("longest_edge"),
             )
             with vit_preprocess_timer(
                 GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
             ):
                 res = processor.video_processor(
-                    video, return_tensors="pt", do_resize=True
+                    video, return_tensors="pt", do_resize=False, do_sample_frames=False
                 )
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:

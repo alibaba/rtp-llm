@@ -26,6 +26,16 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
 def requirement(names):
     for name in names:
+        if name == "pynvvideocodec":
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         if name in ("quack-kernels", "flash-attn-4"):
             native.py_library(
                 name = name,
@@ -105,6 +115,7 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@rtp_llm//:using_cuda13_x86": [
+            "pynvvideocodec@https://mirrors.aliyun.com/pypi/packages/3d/8b/aa04d63c7b74a1c20a7a1e8de93949a2097af02dc08a7446cfe5ee2faf67/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_x86_64.whl",
             "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
             "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
             "nvidia-cutlass-dsl==4.7.1",
@@ -241,7 +252,10 @@ def telemetry_test_deps():
     return []
 
 def jit_deps():
-    return []
+    return select({
+        "@rtp_llm//:using_cuda13_x86": ["@cuda13_jit_gcc//:runtime"],
+        "//conditions:default": [],
+    })
 
 def select_py_bindings():
     return select({

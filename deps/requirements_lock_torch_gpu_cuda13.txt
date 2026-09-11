@@ -4044,3 +4044,7 @@ zstandard==0.25.0 \
     --hash=sha256:fd7a5004eb1980d3cefe26b2685bcb0b17989901a70a1040d1ac86f1d898c551 \
     --hash=sha256:ffef5a74088f1e09947aecf91011136665152e0b4b359c42be3373897fb39b01
     # via -r deps/requirements_base.txt
+
+pynvvideocodec @ https://mirrors.aliyun.com/pypi/packages/3d/8b/aa04d63c7b74a1c20a7a1e8de93949a2097af02dc08a7446cfe5ee2faf67/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_x86_64.whl \
+    --hash=sha256:5bed2e612acb93b9e628a3793456ffeaa3c7780ff00be5546c7b87270b85a009
+    # via -r requirements_torch_gpu_cuda13.txt

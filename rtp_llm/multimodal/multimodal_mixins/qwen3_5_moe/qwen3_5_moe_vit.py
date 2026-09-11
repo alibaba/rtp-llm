@@ -1,4 +1,5 @@
 import logging
+from functools import lru_cache
 from typing import Callable
 
 import torch
@@ -12,18 +13,63 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
 
-from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
-default_attn_impl = "sdpa"
-try:
-    if can_use_flash_attn():
-        from flash_attn import flash_attn_varlen_func  # noqa: F401
+@lru_cache(maxsize=1)
+def _flash_attention_backends():
+    fa4, fa2 = None, None
+    try:
+        # Bazel subprocesses do not execute wheel .pth files.
+        import os
+        import sys
 
-        default_attn_impl = "flash_attention_2"
-except Exception as e:
-    logging.info(
-        f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen3_5_moe vit"
-    )
+        import nvidia_cutlass_dsl
+
+        for package_dir in nvidia_cutlass_dsl.__path__:
+            extra = os.path.join(package_dir, "python_packages")
+            if os.path.isdir(extra) and extra not in sys.path:
+                sys.path.insert(0, extra)
+        from flash_attn.cute import flash_attn_varlen_func
+
+        fa4 = flash_attn_varlen_func
+    except ImportError as error:
+        logging.info("Qwen3.5 ViT FA4 unavailable: %s", error)
+    try:
+        from flash_attn import flash_attn_varlen_func
+
+        fa2 = flash_attn_varlen_func
+    except ImportError:
+        pass
+    return fa4, fa2
+
+
+def _select_attention_backend(tensor, requested="auto"):
+    if requested not in ("auto", "sdpa", "fa4", "flash_attention_2"):
+        raise ValueError(f"unknown Qwen3.5 vision attention backend: {requested}")
+    if requested == "sdpa":
+        return "sdpa"
+    if not tensor.is_cuda or tensor.dtype not in (torch.float16, torch.bfloat16):
+        if requested == "auto":
+            return "sdpa"
+        raise ValueError(f"vision backend {requested} requires CUDA FP16/BF16 input")
+    capability = torch.cuda.get_device_capability(tensor.device)
+    fa4, fa2 = _flash_attention_backends()
+    if (
+        requested in ("auto", "fa4")
+        and fa4 is not None
+        and capability in ((9, 0), (10, 0), (10, 3), (11, 0))
+    ):
+        return "fa4"
+    if (
+        requested in ("auto", "flash_attention_2")
+        and fa2 is not None
+        and capability[0] in (8, 9)
+    ):
+        return "flash_attention_2"
+    if requested != "auto":
+        raise RuntimeError(
+            f"requested vision backend {requested} is unavailable on {capability}"
+        )
+    return "sdpa"
 
 
 class Qwen3_5MoeVisionConfig(PretrainedConfig):
@@ -284,55 +330,56 @@ class Qwen3_5MoeVisionAttention(nn.Module):
             query_states, key_states, cos, sin
         )
 
-        query_states = query_states.transpose(0, 1).unsqueeze(0)
-        key_states = key_states.transpose(0, 1).unsqueeze(0)
-        value_states = value_states.transpose(0, 1).unsqueeze(0)
-
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get(
-            self.config._attn_implementation, eager_attention_forward
-        )
-
-        if default_attn_impl == "flash_attention_2":
-            # Flash Attention: Use cu_seqlens for variable length attention
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-            attn_output, _ = attention_interface(
-                self,
+        backend = kwargs.pop("attention_backend", None)
+        lengths = kwargs.pop("segment_lengths", None)
+        if lengths is None:
+            lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        if backend is None:
+            backend = _select_attention_backend(
+                query_states, getattr(self.config, "vit_attention_backend", "auto")
+            )
+        self.last_backend = backend
+        if backend in ("fa4", "flash_attention_2"):
+            fa4, fa2 = _flash_attention_backends()
+            kernel = fa4 if backend == "fa4" else fa2
+            extra = {} if backend == "fa4" else {"dropout_p": 0.0}
+            attn_output = kernel(
                 query_states,
                 key_states,
                 value_states,
-                attention_mask=None,
-                scaling=self.scaling,
-                dropout=0.0 if not self.training else self.attention_dropout,
-                cu_seq_lens_q=cu_seqlens,
-                cu_seq_lens_k=cu_seqlens,
-                max_length_q=max_seqlen,
-                max_length_k=max_seqlen,
-                is_causal=False,
-                **kwargs,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max(lengths),
+                max_seqlen_k=max(lengths),
+                causal=False,
+                softmax_scale=self.scaling,
+                **extra,
             )
+            if isinstance(attn_output, tuple):
+                attn_output = attn_output[0]
         else:
-            # Other implementations: Process each chunk separately
-            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            # The SDPA reference retains segment isolation. Lengths are prepared
+            # once on CPU per forward, not copied from CUDA for Q/K/V each layer.
             splits = [
-                torch.split(tensor, lengths.tolist(), dim=2)
+                tensor.split(lengths, dim=0)
                 for tensor in (query_states, key_states, value_states)
             ]
-
-            attn_outputs = [
-                attention_interface(
-                    self,
-                    q,
-                    k,
-                    v,
-                    attention_mask=None,
-                    scaling=self.scaling,
-                    dropout=0.0 if not self.training else self.attention_dropout,
-                    is_causal=False,
-                    **kwargs,
-                )[0]
-                for q, k, v in zip(*splits)
-            ]
-            attn_output = torch.cat(attn_outputs, dim=1)
+            attn_output = torch.cat(
+                [
+                    F.scaled_dot_product_attention(
+                        q.transpose(0, 1).unsqueeze(0),
+                        k.transpose(0, 1).unsqueeze(0),
+                        v.transpose(0, 1).unsqueeze(0),
+                        dropout_p=0.0,
+                        is_causal=False,
+                        scale=self.scaling,
+                    )
+                    .squeeze(0)
+                    .transpose(0, 1)
+                    for q, k, v in zip(*splits)
+                ],
+                dim=0,
+            )
 
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
         attn_output = self.proj(attn_output)
@@ -542,6 +589,16 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         Returns:
             `torch.Tensor`: hidden_states.
         """
+        grid_thw = grid_thw.cpu()
+        segment_lengths = [h * w for t, h, w in grid_thw.tolist() for _ in range(t)]
+        if not segment_lengths:
+            raise ValueError("empty vision grid")
+        attention_backend = _select_attention_backend(
+            hidden_states, getattr(self.config, "vit_attention_backend", "auto")
+        )
+        if getattr(self, "last_backend", None) != attention_backend:
+            logging.info("Qwen3.5 ViT attention backend: %s", attention_backend)
+        self.last_backend = attention_backend
         hidden_states = self.patch_embed(hidden_states)
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
@@ -555,23 +612,20 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
         position_embeddings = (emb.cos(), emb.sin())
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).cumsum(
-            dim=0,
-            # Select dtype based on the following factors:
-            #  - FA2 requires that cu_seqlens_q must have dtype int32
-            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
-            # See https://github.com/huggingface/transformers/pull/34852 for more information
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+        offsets = [0]
+        for length in segment_lengths:
+            offsets.append(offsets[-1] + length)
+        cu_seqlens = torch.tensor(
+            offsets, dtype=torch.int32, device=hidden_states.device
         )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 position_embeddings=position_embeddings,
+                segment_lengths=segment_lengths,
+                attention_backend=attention_backend,
                 **kwargs,
             )
 
