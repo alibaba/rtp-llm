@@ -1,0 +1,105 @@
+schema_version: 2
+case: trace_scale_out
+profiles: [single-batch, batch-window]
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  perf_preset: default
+execution:
+  timeout_s: 300
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+metadata:
+  description: Java background load survives Python phase boundaries and Decode scale-out.
+  category: elastic
+variants:
+- id: prepared_background
+  program: prepared_background
+parameters:
+  setup_timeout_s: 180
+  background:
+    group_id: background
+    phase_id: preparation
+    poll_s: 0.1
+    jvm_xms: 1g
+    jvm_xmx: 1g
+    trace:
+      seed: 91001
+      count: 16
+      interval_ms: 125
+      block_size: 1024
+      families:
+      - name: occupied_decode
+        prefix_tokens: []
+        suffix_length: 1024
+        token_max: 10000
+        output_len: 64
+        priority: 50
+    client:
+      SEND_MODE: uniform
+      SEND_MODE_QPS: '8'
+      DURATION_S: '90'
+      MAX_CONCURRENCY: '16'
+      TIMEOUT_MS: '30000'
+      RESPONSE_TIMEOUT: '45'
+      LOOP: 'true'
+      REPLAY_SPEED: '1'
+      REPLAY_UNIQUE_PREFIX: 'false'
+      FETCH_OUTPUT_STREAM: 'true'
+      N_CHANNELS: '2'
+      EVENT_LOOP_THREADS: '4'
+      SKIP_SERVER_LATENCY: 'true'
+      PRIORITY: '50'
+  prepared:
+    min_started: 8
+    min_terminal: 1
+    min_decode_inflight: 1
+  formal:
+    group_id: formal
+    phase_id: verification
+    poll_s: 0.1
+    jvm_xms: 1g
+    jvm_xmx: 1g
+    trace:
+      seed: 91002
+      count: 240
+      interval_ms: 100
+      block_size: 1024
+      families:
+      - name: short
+        prefix_tokens: []
+        suffix_length: 1024
+        token_max: 10000
+        output_len: 8
+        priority: 50
+    client:
+      SEND_MODE: replay
+      DURATION_S: '30'
+      MAX_CONCURRENCY: '16'
+      TIMEOUT_MS: '30000'
+      RESPONSE_TIMEOUT: '45'
+      LOOP: 'false'
+      REPLAY_SPEED: '1'
+      REPLAY_UNIQUE_PREFIX: 'false'
+      FETCH_OUTPUT_STREAM: 'true'
+      N_CHANNELS: '2'
+      EVENT_LOOP_THREADS: '4'
+      SKIP_SERVER_LATENCY: 'true'
+      PRIORITY: '50'
+  formal_active:
+    min_started: 10
+    min_terminal: 1
+    min_decode_inflight: 1
+  add_decode:
+    role: decode
+  new_decode_serving:
+    min_started: 20
+    min_terminal: 1
+    min_decode_inflight: 0
+  background_persisted:
+    min_started: 24
+    min_terminal: 1
+    min_decode_inflight: 1
+  check:
+    min_success_rate: 1.0

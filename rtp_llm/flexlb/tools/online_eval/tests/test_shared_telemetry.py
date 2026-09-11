@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -7,6 +8,30 @@ from online_eval.telemetry import SharedMetricSource, http_text
 
 
 class SharedTelemetryTest(unittest.TestCase):
+    def test_timed_out_stop_releases_only_after_outstanding_read_exits(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def fetch():
+            entered.set()
+            release.wait(2)
+            return "value 1\n"
+
+        with tempfile.TemporaryDirectory() as d:
+            source = SharedMetricSource("http://mock/blocked", d, 60, fetch)
+            source.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                with self.assertRaises(TimeoutError):
+                    source.stop(0)
+                with self.assertRaises(RuntimeError):
+                    SharedMetricSource(source.url, d, 60, fetch).start()
+            finally:
+                release.set()
+                source.thread.join(2)
+            replacement = SharedMetricSource(source.url, d, 60, lambda: "value 2\n")
+            replacement.start()
+            replacement.stop(2)
+
     def test_bounded_history_replays_old_samples_and_errors_without_scraping(self):
         from online_eval.telemetry import shared_samples_since
 

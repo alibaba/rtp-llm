@@ -49,6 +49,14 @@ def compare(a, b):
             row = dict(
                 phase=phase,
                 metric=metric,
+                metric_kind=(
+                    "derived_statistic"
+                    if metric.startswith("statistics/")
+                    else "raw_monitoring"
+                ),
+                statistic_sources=[
+                    report.get("statistic_sources", {}).get(metric) for report in (a, b)
+                ],
                 baseline=left,
                 candidate=right,
                 verdict="DESCRIPTIVE_ONLY",
@@ -90,7 +98,7 @@ def compare(a, b):
         schema_version=1,
         id=a["id"],
         verdict="DESCRIPTIVE_ONLY",
-        ranking="absolute relative change of raw sample means within matching stages; zero baselines are unranked",
+        ranking="absolute relative change of raw or mature derived series means within matching stages; per-second percentiles are not pooled percentiles; zero baselines are unranked",
         baseline_validity=a["workload"]["runtime_validity"],
         candidate_validity=b["workload"]["runtime_validity"],
         changes=rows,

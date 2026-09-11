@@ -172,3 +172,18 @@ PRIORITY 省略 preemption 会启用默认抢占，不能用省略字段构造�
 读取 Mock 指标时使用公共 `online_eval.telemetry.http_text` 或共享序列 API。不要直接请求会清空计数的指标接口。内存保留条数由 `suites.yaml` 的 `sample_history_limit` 决定；较早样本从原始日志流式回放。每个环境、每个 master 都有独立采集日志和采集生命周期；首尾缺采、断采、缺失数据源或失败收尾都不能当作有效运行。
 
 一个功能合同可以只发送几笔请求验证边界，不需要为了生成压测图而延长等待。一个复杂场景则必须提供足够的持续负载与观测窗口。参考 `balance_distribution` 的 `sustained_mix` 和 `elastic_concurrent_mutation`，同时检查请求完成、资源清理、时间序列与恢复质量。
+
+## 添加由 Java 发流量的场景
+
+参考 `scenarios/workload/trace_scale_out.yaml` 与 `case_programs/trace_scale_out.py`。YAML 中 `background`、`formal` 是配置块，调用顺序完全由 Python 决定。
+
+1. 在 YAML 为每组声明 `group_id`、`phase_id`、`poll_s`、JVM 内存、`trace` 和 `client`。`trace` 要提供种子、数量、毫秒间隔、block size，以及各 family 的精确 prefix token、随机 suffix 长度与 token 上界、输出长度和优先级。
+2. Python 调用 `java_flow_start`，取得 `java_flow` 句柄。Java 使用现有 ClientOps 启动，环境地址与运行目录由框架绑定，不能在 YAML 写死远端端口。
+3. 使用 `java_flow_checkpoint` 确认真实发送、完成和 Decode 在途数量。扩容后可绑定 `elastic_add` 返回的 engine，确认它已有接收记录。其他前提仍由相应 Python action 按真实证据判断。
+4. 构造忙碌状态的背景组跨阶段继续运行；不要在每个 checkpoint 排空。有限准备组是否排空由 Python 用例明确安排。
+5. `java_flow_stop` 停止接纳新请求，`java_flow_drain` 等待终态和进程退出，`java_flow_check` 分别断言完整性与 YAML 指定的成功率。
+6. 在 `suites.yaml` 登记为 workload；独立结果检查使用 `case.observe`，前提检查使用 `case.step`。缺前提时应中止依赖步骤并保留部分证据。
+
+场景客户端必须显式配置 `REPLAY_UNIQUE_PREFIX: 'false'`、`FETCH_OUTPUT_STREAM: 'true'`、正的 `DURATION_S` 和 `MAX_CONCURRENCY`。未知环境变量名会被拒绝，例如响应收尾预算的正式名称是 `RESPONSE_TIMEOUT`。正常停发不使用 `ClientOps.stop_async` 的终止进程路径。
+
+`flow-input.json` 与 trace manifest 保留配置和摘要；`client_lifecycle.jsonl` 支持运行中定位，`client_events.jsonl` 是自然退出的完整请求产物。根据 run/group/rid 和实际时间选择请求集合，保留失败原因与未完成请求；同一请求跨阶段存在时不要重复算入全场分母。

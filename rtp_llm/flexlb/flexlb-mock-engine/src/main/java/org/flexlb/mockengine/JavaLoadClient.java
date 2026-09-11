@@ -128,6 +128,7 @@ public final class JavaLoadClient {
     final List<RequestResult> completedResults = Collections.synchronizedList(new ArrayList<>());
     private volatile ScheduledExecutorService pushgatewayExecutor;
     private ClientEventJournal liveJournal;
+    private FlowControl flowControl;
     private volatile double lastGradientLogS = -10.0;
     final List<String> fallbackPrefillAddrs = new ArrayList<>();
     final List<String> fallbackDecodeAddrs = new ArrayList<>();
@@ -190,6 +191,11 @@ public final class JavaLoadClient {
     }
 
     void run() throws Exception {
+        boolean controlled = !System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank();
+        if (controlled && (config.maxInputLen > 0 || config.maxOutputLen > 0
+                || config.replayUniquePrefix || config.forcePriority > 0)) {
+            throw new IllegalArgumentException("controlled traces forbid truncation, prefix salting and priority overrides");
+        }
         List<TraceRecord> records = loadTrace(config.traceFile);
         if (records.isEmpty()) {
             throw new RuntimeException("no replayable requests loaded from " + config.traceFile);
@@ -240,7 +246,15 @@ public final class JavaLoadClient {
         }
 
         Files.createDirectories(Path.of(config.outputDir));
-        if ("true".equalsIgnoreCase(System.getenv("LIVE_CLIENT_EVENTS"))) {
+        String controlDirectory = System.getenv("FLOW_CONTROL_DIR");
+        if (controlDirectory != null && !controlDirectory.isBlank()) {
+            flowControl = new FlowControl(Path.of(controlDirectory),
+                    System.getenv().getOrDefault("FLOW_RUN_ID", ""),
+                    System.getenv().getOrDefault("FLOW_GROUP_ID", ""),
+                    System.getenv().getOrDefault("FLOW_PHASE_ID", ""));
+            flowControl.publish("STARTING", 0, 0, 0);
+        }
+        if (flowControl != null || "true".equalsIgnoreCase(System.getenv("LIVE_CLIENT_EVENTS"))) {
             liveJournal = new ClientEventJournal(Path.of(config.outputDir, "client_lifecycle.jsonl"));
         }
         if (!config.skipServerLatency) {
@@ -292,8 +306,11 @@ public final class JavaLoadClient {
         double uniformIntervalS = config.isUniform()
                 ? config.numShards / config.sendModeQps : 0.0;
 
+        if (flowControl != null) flowControl.publish("SENDING", 0, 0, 0);
+        sending:
         while (true) {
             for (TraceRecord record : records) {
+                if (flowControl != null && flowControl.stopRequested()) break sending;
                 if (cyclic && config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
                         break;
@@ -338,7 +355,11 @@ public final class JavaLoadClient {
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
-                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        if (flowControl != null) {
+                            if (!flowControl.awaitDue(dueNanos)) break sending;
+                        } else {
+                            Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        }
                     }
                 } else if (currentSpeed > 0 && record.tsMs > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
@@ -346,7 +367,11 @@ public final class JavaLoadClient {
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
-                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        if (flowControl != null) {
+                            if (!flowControl.awaitDue(dueNanos)) break sending;
+                        } else {
+                            Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                        }
                     }
                 }
 
@@ -363,9 +388,22 @@ public final class JavaLoadClient {
                     loopRecord = record;
                 }
                 final double dueS = dueSeconds;
-                futures.add(executor.submit(() -> handleRequest(loopRecord, semaphore, dueS)));
+                boolean permitHeld = false;
+                if (flowControl != null) {
+                    while (!semaphore.tryAcquire(50, TimeUnit.MILLISECONDS)) {
+                        if (flowControl.stopRequested()) break sending;
+                    }
+                    if (flowControl.stopRequested()) {
+                        semaphore.release();
+                        break sending;
+                    }
+                    permitHeld = true;
+                }
+                final boolean acquiredBySender = permitHeld;
+                futures.add(executor.submit(() -> handleRequest(loopRecord, semaphore, dueS, acquiredBySender)));
                 sentCount++;
                 sentTotal.set(sentCount);
+                if (flowControl != null) flowControl.progress(sentCount, actualSentCount.get(), responseCount.get());
             }
 
             if (!cyclic) {
@@ -401,6 +439,8 @@ public final class JavaLoadClient {
                     + " requests, elapsed " + (System.nanoTime() - replayStartedNanos) / 1_000_000_000L + "s");
         }
 
+        if (flowControl != null) flowControl.publish("DRAINING", sentCount,
+                actualSentCount.get(), responseCount.get());
         sendEndNanos = System.nanoTime();
         double sendDurationS = (sendEndNanos - sendStartNanos) / 1_000_000_000.0;
         System.out.println("sending complete: sent=" + sentCount + " requests dispatched in "
@@ -432,6 +472,9 @@ public final class JavaLoadClient {
         JsonNode serverLatency = config.skipServerLatency ? MAPPER.createObjectNode() : fetchServerLatency();
         writePerRequestResults();
         writeServerLatencySnapshot(serverLatency);
+        if (flowControl != null) flowControl.publish(
+                responseCount.get() == sentCount ? "DRAINED" : "INCOMPLETE",
+                sentCount, actualSentCount.get(), responseCount.get());
         stopPushgateway();
     }
 
@@ -590,6 +633,10 @@ public final class JavaLoadClient {
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
+        return handleRequest(record, semaphore, dueS, false);
+    }
+
+    private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS, boolean acquiredBySender) {
         long startedNanos = System.nanoTime();
         double sendDueEpochMs = replayStartedEpochMs + dueS * 1000.0;
 
@@ -612,7 +659,7 @@ public final class JavaLoadClient {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB scheduleResponse = null;
 
         try {
-            semaphore.acquire();
+            if (!acquiredBySender) semaphore.acquire();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             result.status = "exception";
@@ -634,7 +681,9 @@ public final class JavaLoadClient {
                 result.pacingLagMs = Math.max(0.0, sendStartEpochMs - sendDueEpochMs);
                 actualSentCount.incrementAndGet();
                 if (liveJournal != null) {
-                    liveJournal.record("issued", perRequestNode(result));
+                    ObjectNode event = perRequestNode(result);
+                    if (flowControl != null) flowControl.identify(event);
+                    liveJournal.record("issued", event);
                 }
 
                 inputPb = buildGenerateInput(record);
@@ -869,7 +918,9 @@ public final class JavaLoadClient {
 
     private void tallyResult(RequestResult result) {
         if (liveJournal != null) {
-            liveJournal.record("terminal", perRequestNode(result));
+            ObjectNode event = perRequestNode(result);
+            if (flowControl != null) flowControl.identify(event);
+            liveJournal.record("terminal", event);
         }
         completedResults.add(result);
         if ("ok".equals(result.status) || "scheduled".equals(result.status)) {
@@ -1154,22 +1205,67 @@ public final class JavaLoadClient {
 
     private List<TraceRecord> loadTrace(String path) throws IOException {
         List<TraceRecord> records = new ArrayList<>();
+        java.util.Set<Long> controlledIds = new java.util.HashSet<>();
         for (String line : Files.readAllLines(Path.of(path))) {
             if (line.isBlank()) {
                 continue;
             }
             try {
                 JsonNode raw = MAPPER.readTree(line);
+                if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()) validateControlledTrace(raw);
                 TraceRecord record = parseTraceRecord(raw);
                 if (record != null) {
+                    if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()
+                            && !controlledIds.add(record.requestId)) {
+                        throw new IOException("duplicate controlled trace request identity");
+                    }
                     records.add(record);
                 }
             } catch (Exception e) {
+                if (!System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()) {
+                    throw new IOException("invalid controlled trace; no rows may be silently filtered", e);
+                }
                 System.err.println("skipping malformed trace line: " + e.getMessage());
             }
         }
         records.sort(Comparator.comparingLong(r -> r.tsMs));
         return records;
+    }
+
+    static void validateControlledTrace(JsonNode raw) {
+        int il = raw.path("il").asInt(0);
+        if (!raw.path("il").isIntegralNumber() || il <= 0
+                || !raw.path("ol").isIntegralNumber() || raw.path("ol").asInt() <= 0
+                || !raw.path("input_ids").isArray() || raw.path("input_ids").size() != il
+                || raw.path("rid").asText().isBlank()
+                || !raw.path("ts").isIntegralNumber() || raw.path("ts").asLong() < 0
+                || raw.path("cache_key_block_size").asInt() != BLOCK_SIZE
+                || !raw.path("priority").isIntegralNumber()
+                || !PriorityNormalizer.isValid(raw.path("priority").asInt())) {
+            throw new IllegalArgumentException("controlled trace requires exact shape, identity, tokens, timing, block size and priority");
+        }
+        for (JsonNode token : raw.path("input_ids")) {
+            if (!token.isIntegralNumber() || !token.canConvertToInt() || token.asInt() < 0) {
+                throw new IllegalArgumentException("invalid controlled trace token");
+            }
+        }
+        // Hash the actual tokens with the same client implementation. Do not
+        // permit an unrelated cache identity to disguise the requested prefix.
+        if (raw.has("bh") || raw.has("block_cache_keys")) {
+            JsonNode supplied = raw.has("bh") ? raw.get("bh") : raw.get("block_cache_keys");
+            List<Integer> tokens = new ArrayList<>();
+            raw.path("input_ids").forEach(t -> tokens.add(t.asInt()));
+            List<Long> expected = computeBlockKeys(tokens, BLOCK_SIZE);
+            if (!supplied.isArray() || supplied.size() != expected.size()) {
+                throw new IllegalArgumentException("controlled trace cache key count mismatch");
+            }
+            for (int i = 0; i < expected.size(); i++) {
+                if (!supplied.get(i).isIntegralNumber() || !supplied.get(i).canConvertToLong()
+                        || supplied.get(i).asLong() != expected.get(i)) {
+                    throw new IllegalArgumentException("controlled trace keys disagree with tokens");
+                }
+            }
+        }
     }
 
     // Package-visible for per-record priority parsing assertions in tests.
@@ -1370,7 +1466,9 @@ public final class JavaLoadClient {
         Path perRequestPath = Path.of(config.outputDir, "client_events.jsonl");
         try (BufferedWriter writer = Files.newBufferedWriter(perRequestPath)) {
             for (RequestResult result : results) {
-                writer.write(perRequestNode(result).toString());
+                ObjectNode row = perRequestNode(result);
+                if (flowControl != null) flowControl.identify(row);
+                writer.write(row.toString());
                 writer.newLine();
             }
         }

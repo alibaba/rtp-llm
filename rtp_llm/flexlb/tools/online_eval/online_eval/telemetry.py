@@ -47,6 +47,7 @@ class SharedMetricSource:
         self.fetch = fetch or self._fetch
         self.condition = threading.Condition()
         self.stop_event = threading.Event()
+        self.stopping = False
         self.body = None
         self.error = None
         self.fatal_error = None
@@ -160,8 +161,16 @@ class SharedMetricSource:
                 self.fatal_error = self.error
                 self.sequence += 1
                 self.condition.notify_all()
+        finally:
+            # Retain ownership while an outstanding destructive read is alive.
+            # A timed-out stop must still release it when that read exits.
+            if self.stopping:
+                with _REGISTRY_LOCK:
+                    if _REGISTRY.get(self.url) is self:
+                        del _REGISTRY[self.url]
 
     def stop(self, timeout):
+        self.stopping = True
         self.stop_event.set()
         with self.condition:
             self.condition.notify_all()

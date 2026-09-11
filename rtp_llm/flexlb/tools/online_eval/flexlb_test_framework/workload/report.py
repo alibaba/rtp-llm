@@ -194,6 +194,47 @@ def collection_gaps(directory, anchor, max_gap_s):
     return gaps
 
 
+def mature_series(aggregates, workload_epoch_s):
+    """Reuse the exact derived curves rendered by the mature stress report."""
+    series, sources, issues = {}, {}, []
+    for entry in aggregates:
+        if entry["status"] != "GENERATED":
+            continue
+        path = Path(entry["path"])
+        try:
+            aggregate = json.loads(path.read_text())
+            rows = [
+                json.loads(line)
+                for line in (path.parent / "client_events.jsonl")
+                .read_text()
+                .splitlines()
+                if line.strip()
+            ]
+            times = [
+                r["send_start_epoch_ms"] for r in rows if r.get("send_start_epoch_ms")
+            ]
+            if not times:
+                raise ValueError("mature statistics lack their request time origin")
+            offset = min(times) / 1000 - workload_epoch_s
+            for row in aggregate.get("per_second", []):
+                for metric, value in row.items():
+                    if metric == "t" or (
+                        value is not None and type(value) not in (int, float)
+                    ):
+                        continue
+                    key = f"statistics/{entry['env_epoch']}/per_second/{metric}"
+                    series.setdefault(key, []).append([offset + row["t"], value])
+                    sources[key] = dict(
+                        path=str(path),
+                        field="per_second." + metric,
+                        time_basis="request send second",
+                        window_statistic="mean of per-second derived values; not a pooled percentile",
+                    )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            issues.append(dict(path=str(path), error=str(exc)))
+    return series, sources, issues
+
+
 def write_report(directory, result, evidence):
     directory = Path(directory)
     max_gap_s = (
@@ -202,6 +243,14 @@ def write_report(directory, result, evidence):
         .get("max_sample_gap_s")
     )
     series = read_series(directory, evidence["clock_anchor"]["epoch_s"], max_gap_s)
+    derived, statistic_sources, statistic_issues = mature_series(
+        result["workload"].get("stress_aggregates", []),
+        evidence["clock_anchor"]["epoch_s"],
+    )
+    series.update(derived)
+    if statistic_issues:
+        result["workload"]["statistics_issues"] = statistic_issues
+        result["workload"]["runtime_validity"] = "INVALID"
     gaps = {
         key: [t for t, value in points if value is None]
         for key, points in series.items()
@@ -274,6 +323,7 @@ def write_report(directory, result, evidence):
         clock_anchor=evidence["clock_anchor"],
         phases=evidence["phases"],
         series=series,
+        statistic_sources=statistic_sources,
         configuration_sha256=result.get("implementation", {}).get(
             "configuration_sha256"
         ),

@@ -7,6 +7,9 @@ workload_runtime:
   max_sample_gap_s: 5.0
   collector_shutdown_s: 10.0
 cases:
+  trace_scale_out::prepared_background:
+    kind: workload
+    reason: Java background traffic persists across Python checkpoints and Decode scale-out
   balance_distribution::sustained_mix:
     kind: workload
     reason: Twelve paced windows with full request completion and continuous telemetry

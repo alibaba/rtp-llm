@@ -214,7 +214,16 @@ class LiveClientEvents:
                     != self.issued[rid]["send_start_epoch_ms"]
                 ):
                     raise ValueError("live terminal does not match issue")
-                if row.get("status") not in {"ok", "schedule_error", "exception"}:
+                if row.get("status") not in {
+                    "ok",
+                    "schedule_error",
+                    "exception",
+                    "engine_error",
+                    "empty_response",
+                    "incomplete_response",
+                    "timeout",
+                    "scheduled",
+                }:
                     raise ValueError("live terminal is not a completed stream outcome")
                 if (
                     row.get("route_path") not in {"master", "fallback", "failed"}

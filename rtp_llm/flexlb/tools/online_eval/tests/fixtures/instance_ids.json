@@ -393,5 +393,7 @@
   "status_protocol::zombie_fake_running::batch-window",
   "status_protocol::zombie_fake_running::single-batch",
   "status_protocol::zombie_fake_running::single-nonbatch",
-  "status_protocol::zombie_fake_running::window-nonbatch"
+  "status_protocol::zombie_fake_running::window-nonbatch",
+  "trace_scale_out::prepared_background::batch-window",
+  "trace_scale_out::prepared_background::single-batch"
 ]

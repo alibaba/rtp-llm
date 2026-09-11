@@ -92,4 +92,4 @@ class WorkloadRuntimeTests(unittest.TestCase):
             )
         )
         self.assertTrue(any("::sustained_mix::" in identity for identity in w))
-        self.assertEqual(len(plans), 386)
+        self.assertEqual(len(plans), 388)

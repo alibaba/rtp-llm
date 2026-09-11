@@ -50,6 +50,27 @@ class JournalTest(unittest.TestCase):
     def write(self, rows):
         self.path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
+    def test_legal_failed_terminals_do_not_drop_following_requests(self):
+        statuses = [
+            "engine_error",
+            "empty_response",
+            "incomplete_response",
+            "timeout",
+            "scheduled",
+        ]
+        rows = []
+        for index, status in enumerate(statuses):
+            issue = row(str(index), "issued", 2 * index + 1)
+            terminal = row(str(index), "terminal", 2 * index + 2)
+            terminal.update(status=status, error="failure evidence")
+            rows.extend([issue, terminal])
+        self.write(rows)
+        self.journal.read()
+        self.assertEqual(len(statuses), len(self.journal.terminal))
+        self.assertEqual(
+            statuses, [r["status"] for r in self.journal.terminal.values()]
+        )
+
     def test_partial_tail_is_retried_and_completed_once(self):
         issue, terminal = row("x", "issued", 1), row("x", "terminal", 2)
         data = json.dumps(terminal)
