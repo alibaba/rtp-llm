@@ -28,10 +28,11 @@ def read_metrics(url):
 
 def observe(mock, windows, interval, out):
     before = read_metrics(mock)
-    required = {"decode.mock_engine_completed_total", "decode.mock_engine_generate_tokens_total",
+    required = {"decode.mock_engine_completed_total", "decode.rtp_llm_generate_tps",
                 "prefill.fetch_response", "decode.fetch_response"}
     if not required.issubset(before):
         raise ValueError("missing completion/token/Fetch counters")
+    counters = required - {"decode.rtp_llm_generate_tps"}
     records = []
     previous, sampled_at = before, time.monotonic()
     for _ in range(windows):
@@ -40,15 +41,15 @@ def observe(mock, windows, interval, out):
         delta = now - sampled_at
         if not required.issubset(current):
             raise ValueError("missing counters during sampling")
-        if any(current[k] < previous[k] for k in required):
+        if any(current[k] < previous[k] for k in counters):
             raise ValueError("counters reset during sampling; retry after restart")
         records.append({"window_s": delta, "metrics": current,
                         "engine_completed_qps": (current["decode.mock_engine_completed_total"] - previous["decode.mock_engine_completed_total"]) / delta,
-                        "generate_tps": (current["decode.mock_engine_generate_tokens_total"] - previous["decode.mock_engine_generate_tokens_total"]) / delta})
+                        "generate_tps": current["decode.rtp_llm_generate_tps"]})
         previous, sampled_at = current, now
     report = {"baseline": before, "windows": records,
-              "zero_fetch_rpc": all(previous[k] == before[k] for k in required if k.endswith("fetch_response")),
-              "note": "Window QPS is not a matched-request success rate."}
+              "zero_fetch_rpc": all(previous[k] == before[k] == 0 for k in counters if k.endswith("fetch_response")),
+              "note": "Window QPS is not a matched-request success rate. generate_tps is the engine-reported rate, not a counter delta."}
     out.write_text(json.dumps(report, indent=2))
     return report
 
