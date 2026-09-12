@@ -111,14 +111,17 @@ class WhaleIndependentProcessTest {
             var frames = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
                     .fetchResponse(EngineRpcService.FetchRequestPB.newBuilder().setRequestId(id).build());
             int count = 0;
+            long tokens = 0;
             boolean terminal = false;
             while (frames.hasNext()) {
                 var frame = frames.next();
                 assertFalse(frame.hasErrorInfo(), frame.toString());
                 terminal |= frame.getFlattenOutput().getFinishedList().contains(true);
+                tokens += frame.getFlattenOutput().getOutputIds().getShape(2);
                 count++;
             }
-            assertEquals(2, count);
+            assertTrue(count > 2, "decode must emit progress before its terminal frame");
+            assertEquals(5, tokens, "streamed frames must preserve the requested token budget");
             assertTrue(terminal);
         }
         var first = new ObjectMapper().readTree(get("127.0.0.3", base + 20, "/requests")).elements().next();

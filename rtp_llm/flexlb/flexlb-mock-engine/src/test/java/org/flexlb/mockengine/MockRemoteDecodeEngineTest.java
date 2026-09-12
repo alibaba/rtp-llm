@@ -51,7 +51,11 @@ class MockRemoteDecodeEngineTest {
         return new MockRemoteDecodeStream(channel, EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(id).addAllTokenIds(List.of(1, 2, 3))
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(4))
-                .build(), "p-generation", 10_000, result::complete, result::completeExceptionally, () -> {});
+                .build(), "p-generation", 10_000, frame -> {
+                    if (frame.hasErrorInfo() || frame.getFlattenOutput().getFinishedList().contains(true)) {
+                        result.complete(frame);
+                    }
+                }, result::completeExceptionally, () -> {});
     }
 
     private void awaitDrain() throws Exception {
