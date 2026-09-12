@@ -114,8 +114,7 @@ def rocm_oss_suites():
     )
 
     # ROCm Qwen3.6 dense MTP: TP1 PD separation with decode CUDA Graph.
-    # Keep this suite standalone until Qwen3.6-27B is provisioned on the shared
-    # ROCm CI workers; run it directly on an MI308X host with that checkpoint.
+    # Keep this as a dedicated suite so CI and local runs can select it directly.
     # The fixture intentionally mixes short/long prompts and repeats the long
     # prompt with reuse_cache enabled so both the fresh and reused KV paths are
     # exercised while gen_num_per_cycle=3 checks the requested MTP step.
