@@ -127,6 +127,30 @@ class WhaleModeConfigurationTest {
     }
 
     @Test
+    void shortPrefillBetweenPollsIsReportedAndIdleReturnsToZero() {
+        List<Double> running = new ArrayList<>();
+        var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("report") && args.length == 3
+                            && args[0].equals("rtp_llm_running_stream_size"))
+                        running.add(((Number) args[2]).doubleValue());
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        long now = System.nanoTime();
+        var idle = java.util.Map.<String, Number>of("rtp_llm_running_stream_size", 0);
+        monitor.sample(idle, java.util.Map.of(), now);
+        // Both batches finish before the next five-second polling boundary.
+        monitor.reportScheduler(java.util.Map.of("rtp_llm_running_stream_size", 3), java.util.Map.of());
+        monitor.reportScheduler(java.util.Map.of("rtp_llm_running_stream_size", 1), java.util.Map.of());
+        monitor.sample(idle, java.util.Map.of(), now + 5_000_000_000L);
+        assertEquals(List.of(0.0, 3.0, 1.0), running);
+        monitor.sample(idle, java.util.Map.of(), now + 10_000_000_000L);
+        assertEquals(List.of(0.0, 3.0, 1.0, 0.0), running);
+    }
+
+    @Test
     void wrapperRefusesImplicitActivationAndMapsWhalePortsAndFetch() throws Exception {
         Path script = Path.of("whale/start.sh").toAbsolutePath();
         ProcessBuilder refused = new ProcessBuilder("sh", script.toString()).redirectErrorStream(true);

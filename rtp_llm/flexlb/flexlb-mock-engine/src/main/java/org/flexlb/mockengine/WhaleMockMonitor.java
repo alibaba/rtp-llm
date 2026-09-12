@@ -14,6 +14,9 @@ final class WhaleMockMonitor implements AutoCloseable {
     private final FlexMonitor monitor;
     private final Map<String, Long> previous = new HashMap<>();
     private final java.util.Set<String> registered = new java.util.HashSet<>();
+    private static final java.util.Set<String> STEP_METRICS = java.util.Set.of(
+            "rtp_llm_running_stream_size", "rtp_llm_context_batch_size", "rtp_llm_generate_batch_size");
+    private boolean schedulerReported;
     private long sampledAt = System.nanoTime();
 
     static WhaleMockMonitor create() {
@@ -45,11 +48,28 @@ final class WhaleMockMonitor implements AutoCloseable {
         sample(service.whaleMetrics(), service.whaleMetricTags(), System.nanoTime());
     }
 
-    void sample(Map<String, Number> metrics, Map<String, String> labels, long now) {
+    synchronized void reportScheduler(Map<String, Number> metrics, Map<String, String> labels) {
+        FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
+        for (var entry : metrics.entrySet()) {
+            if (!STEP_METRICS.contains(entry.getKey()))
+                throw new IllegalArgumentException("Not a scheduler metric: " + entry.getKey());
+            if (registered.add(entry.getKey())) monitor.register(entry.getKey(), FlexMetricType.GAUGE);
+            monitor.report(entry.getKey(), tags, entry.getValue().doubleValue());
+        }
+        schedulerReported = true;
+    }
+
+    synchronized void sample(Map<String, Number> metrics, Map<String, String> labels, long now) {
         double seconds = Math.max(1e-9, (now - sampledAt) / 1e9);
         sampledAt = now;
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
+        boolean hadSchedulerSteps = schedulerReported;
+        schedulerReported = false;
         metrics.forEach((name, value) -> {
+            // Preserve execution-round samples. A periodic zero between two
+            // short P batches must not dilute them. With no rounds this period,
+            // retain the instantaneous gauge so idle engines return to zero.
+            if (hadSchedulerSteps && STEP_METRICS.contains(name)) return;
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             monitor.report(name, tags, value.doubleValue());
             String rate = switch (name) {

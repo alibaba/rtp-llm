@@ -150,6 +150,8 @@ public final class JavaMockEngineCluster {
                     config.nPrefill, config.nDecode, "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE);
             for (FastRpcService service : services.values()) {
                 service.setEngineEventLog(engineEventLog);
+                if (whaleMonitor != null) service.schedulerMetricReporter =
+                        values -> whaleMonitor.reportScheduler(values, service.whaleMetricTags());
             }
             if (!config.whale) writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
@@ -3504,6 +3506,7 @@ public final class JavaMockEngineCluster {
                 // its running slot (admission or drain). Cancelled members stay
                 // counted until the batch finishes — the batch keeps executing.
                 activePrefillRequests.addAndGet(-shapes.size());
+                reportSchedulerStep(executingPrefillRequests.addAndGet(-shapes.size()), 0);
                 pendingRequests.addAndGet(-activeCount);
                 // Drain one queued batch under the same lock that guards admission,
                 // handing this completion's freed slot to a queued batch atomically.
@@ -3591,7 +3594,26 @@ public final class JavaMockEngineCluster {
             }, delayNanos, TimeUnit.NANOSECONDS);
         }
 
+        // Optional Whale sink: local test mode has no monitoring dependency.
+        private volatile java.util.function.Consumer<Map<String, Number>> schedulerMetricReporter;
+        private final AtomicInteger executingPrefillRequests = new AtomicInteger();
+
+        private void reportSchedulerStep(int prefill, int decode) {
+            var reporter = schedulerMetricReporter;
+            if (reporter == null) return;
+            try {
+                reporter.accept(Map.of(
+                        "rtp_llm_running_stream_size", prefill + decode,
+                        "rtp_llm_context_batch_size", prefill,
+                        "rtp_llm_generate_batch_size", decode));
+            } catch (RuntimeException error) {
+                // Observability must never prevent execution or strand a lease.
+                System.err.println("Whale scheduler metric reporting failed: " + error);
+            }
+        }
+
         private void startPrefillBatch(List<BatchMember> members) {
+            reportSchedulerStep(executingPrefillRequests.addAndGet(members.size()), 0);
             // activePrefillBatches is reserved at admission (schedulePrefillCompletion)
             // and drain time, not here, so maxPrefillConcurrency acts as a real hard
             // gate rather than a report-only value.
@@ -4152,6 +4174,7 @@ public final class JavaMockEngineCluster {
             if (decodeStepScheduled || decodeRunning.isEmpty() || shuttingDown) {
                 return;
             }
+            reportSchedulerStep(0, decodeRunning.size());
             long delayMs = performance.decodeStepDelayMs(decodeRunning.size());
             pendingStepDelayMs = delayMs; // lock in this step's price at arm time
             decodeStepScheduled = true;
@@ -5306,6 +5329,7 @@ public final class JavaMockEngineCluster {
             waitingPrefillRequests.set(0);
             activePrefillBatches.set(0);
             activePrefillRequests.set(0);
+            executingPrefillRequests.set(0);
             activeDecodeRequests.set(0);
             // Fresh process: lane time axes start from "available now" and the
             // observability counters restart from zero.
