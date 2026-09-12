@@ -198,13 +198,15 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                     linear_spec->local_num_v_heads);
         }
         RTP_LLM_LOG_INFO("[K3_PD] request=%s cache_mapping=P%d_to_D%d peers=%zu physical_block=%zu "
-                         "kernel_block=%zu",
+                         "kernel_block=%zu prefill_cache_cp=%d decode_ktp=%d",
                          decode_context.request_key.c_str(),
                          decode_context.prefill_attention_tp_size,
                          decode_attention_tp,
                          decode_context.peer_addrs.size(),
                          cache_config.seq_size_per_block,
-                         cache_config.kernel_seq_size_per_block);
+                         cache_config.kernel_seq_size_per_block,
+                         decode_context.prefill_cp_size,
+                         decode_ktp);
     }
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
         && maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
@@ -901,21 +903,23 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     // and chooses a single replicated MLA source for its Decode DP rank.
     const bool hybrid_linear_fan_in =
         use_mla && !is_page_level_rr && peer_cnt > 1 && hasSegmentedLinearCacheGroup(cache_config);
-    const bool projection_ktp = hybrid_linear_fan_in
-                                && maga_init_params_.parallelism_config.get_ktp_size() > 1
-                                && maga_init_params_.parallelism_config.get_attn_tp_size() == 1;
+    const bool ktp_topology = use_mla && maga_init_params_.parallelism_config.get_ktp_size() > 1
+                             && maga_init_params_.parallelism_config.get_attn_tp_size() == 1
+                             && hasSegmentedLinearCacheGroup(cache_config);
+    const bool projection_ktp = hybrid_linear_fan_in && ktp_topology;
     const int mla_source_peer =
         projection_ktp ? static_cast<int>(maga_init_params_.parallelism_config.dp_rank % peer_cnt) : 0;
-    if (projection_ktp) {
+    if (ktp_topology) {
         RTP_LLM_CHECK_WITH_INFO(!destination_cp_mapper || destination_cp_mapper->cpSize() == 1,
                                 "Projection-KTP requires replicated Decode cache placement");
         RTP_LLM_LOG_INFO("[K3_PD_FAN_IN] request_id=%d peers=%d decode_dp_rank=%ld mla_source_peer=%d "
-                         "kda_partition_count=%d",
+                         "kda_partition_count=%d prefill_cache_cp=%d",
                          load_context.request_id,
                          peer_cnt,
                          maga_init_params_.parallelism_config.dp_rank,
-                         mla_source_peer,
-                         peer_cnt);
+                         is_page_level_rr ? -1 : mla_source_peer,
+                         peer_cnt,
+                         load_context.prefill_cp_size);
     }
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
@@ -947,8 +951,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             return true;
         }
         if (group_type == CacheGroupType::LINEAR) {
-            // Checkpoint state is head-sharded, not replicated token KV.
-            return peer_idx == maga_init_params_.parallelism_config.tp_rank;
+            // KTP holds every head; Page-RR changes checkpoint rows, not head ownership.
+            return ktp_topology || peer_idx == maga_init_params_.parallelism_config.tp_rank;
         }
         // These DSV4 fixed/SWA pools are CP-sliced inside one logical block on
         // prefill, while decode still owns the full block. Pull every peer
@@ -1177,10 +1181,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     auto cache_key = makeCacheKey(
                         model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, region_name);
 
-                    const int local_part_cnt = hybrid_linear_fan_in ? (segmented_linear_group ? peer_cnt : 1) :
-                                                                      (is_page_level_rr ? 1 : peer_cnt);
-                    const int local_part_id =
-                        hybrid_linear_fan_in ? (segmented_linear_group ? i : 0) : (is_page_level_rr ? 0 : i);
+                    const bool kda_fan_in = segmented_linear_group && (hybrid_linear_fan_in || ktp_topology);
+                    const bool whole_block = !kda_fan_in && (hybrid_linear_fan_in || is_page_level_rr);
+                    const int local_part_cnt = whole_block ? 1 : peer_cnt;
+                    const int local_part_id = whole_block ? 0 : i;
                     auto parts =
                         (region_name != KVCacheRegionName::DEFAULT) ?
                             cache_manager->convertIndexToBuffer(
