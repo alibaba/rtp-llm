@@ -61,6 +61,25 @@ cc_library(
 )
 
 cc_test(
+    name = "hybrid_pool_config_creator_test",
+    srcs = ["HybridPoolConfigCreatorTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+        "//rtp_llm/models_py/bindings/core:exec_ctx_state",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+    exec_properties = select({
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {"gpu": "A10"},
+    }),
+)
+
+cc_test(
     name = "cache_topology_test",
     srcs = ["CacheTopologyTest.cc"],
     copts = test_copts,
@@ -210,6 +229,37 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "block_pool_device_malloc_test",
+    srcs = [
+        "BlockPoolDeviceMallocTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
+        "//conditions:default": [],
+    }),
+    exec_properties = select({
+        "@//:using_cuda": {"gpu": "H20"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {},
+    }),
 )
 
 cc_test(

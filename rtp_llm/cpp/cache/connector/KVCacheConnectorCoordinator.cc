@@ -25,7 +25,8 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
                                                          const std::shared_ptr<KVCacheAllocator>& allocator,
                                                          const kmonitor::MetricsReporterPtr&      metrics_reporter,
                                                          const PDSepConfig&                       pd_sep_config,
-                                                         const CacheStoreConfig&                  cache_store_config):
+                                                         const CacheStoreConfig&                  cache_store_config,
+                                                         std::function<void()>                    capacity_release_callback):
     cache_config_(cache_config),
     kv_cache_config_(kv_cache_config),
     runtime_config_(runtime_config),
@@ -34,7 +35,8 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
     allocator_(allocator),
     metrics_reporter_(metrics_reporter),
     pd_sep_config_(pd_sep_config),
-    cache_store_config_(cache_store_config) {}
+    cache_store_config_(cache_store_config),
+    capacity_release_callback_(std::move(capacity_release_callback)) {}
 
 KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
     stop_.store(true);
@@ -133,7 +135,8 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
         ref_keys     = ref_resource.cacheKeys();
     }
-    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
+    auto resource = allocator_->incrKVCacheRefWithReleaseCallback(
+        ref_resource, ref_keys, true, capacity_release_callback_);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -183,7 +186,8 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
         ref_keys     = ref_resource.cacheKeys();
     }
-    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
+    auto resource = allocator_->incrKVCacheRefWithReleaseCallback(
+        ref_resource, ref_keys, true, capacity_release_callback_);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());

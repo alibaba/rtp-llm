@@ -52,9 +52,10 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseCudaMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config,
+                                         const CacheStoreConfig& cache_store_config) {
     // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
-    // raw cudaMalloc backing out of direct KVCacheManager users and non-RDMA
+    // raw device allocation backing out of direct KVCacheManager users and non-RDMA
     // paths so PyTorch allocator behavior is unchanged elsewhere.
     const bool pd_role = pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE;
     const bool has_cache_store_server = pd_sep_config.cache_store_listen_port > 0
@@ -395,8 +396,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    auto cache_config =
+        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
     cache_config.block_num = 5;
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
@@ -461,7 +462,8 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const bool use_device_malloc_block_pool =
+        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,
@@ -482,8 +484,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       sp_config,
                                                                       pd_sep_config,
                                                                       cache_store_config,
-                                                                      use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+                                                                      use_device_malloc_block_pool);
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -507,8 +509,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       SpeculativeExecutionConfig{},
                                                                       pd_sep_config,
                                                                       cache_store_config,
-                                                                      use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+                                                                      use_device_malloc_block_pool);
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -577,6 +579,11 @@ absl::Status NormalEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    // DecodeRpcServer calls makeStream() before enqueue() so it can allocate the
+    // destination KV table before P/D cache handoff.  Install engine-owned stream
+    // invariants here as well; otherwise that first allocation is planned without
+    // the speculative-round headroom.
+    stream->setReserveStep(reserve_step_);
     return stream;
 }
 

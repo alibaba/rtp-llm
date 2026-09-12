@@ -189,6 +189,16 @@ TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumPrefix) {
     EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({}), 0u);
 }
 
+TEST(DecodeRpcServerTest, EmptyRemoteLoadTopologyFailsBeforePartitionArithmetic) {
+    EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/0, /*peer_size=*/1).code(),
+              ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/1, /*peer_size=*/0).code(),
+              ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_TRUE(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/4, /*peer_size=*/2).ok());
+    EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/3, /*peer_size=*/2).code(),
+              ErrorCode::LOAD_KV_CACHE_FAILED);
+}
+
 TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
     EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(3), (std::vector<size_t>{2, 1}));
     EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(5), (std::vector<size_t>{2, 2, 1}));

@@ -896,16 +896,17 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             observed_pad_query,
         )
 
-    def test_cuda_graph_supports_only_triton_backend(self):
-        for input_lengths, expected_backend in (([4, 1], "triton"), ([5, 1], "batch")):
+    def test_cuda_graph_supports_triton_and_batch_backends(self):
+        for input_lengths, expected_backend in (
+            ([4, 1], "triton"),
+            ([8, 8], "batch"),
+        ):
             with self.subTest(expected_backend=expected_backend):
                 impl, batch_impl, triton_impl, *_ = self._make_impl_with_mocked_prepare(
                     input_lengths, True
                 )
                 self.assertEqual(impl.backend, expected_backend)
-                self.assertEqual(
-                    impl.support_cuda_graph(), expected_backend == "triton"
-                )
+                self.assertTrue(impl.support_cuda_graph())
                 selected = triton_impl if expected_backend == "triton" else batch_impl
                 rejected = batch_impl if expected_backend == "triton" else triton_impl
                 selected.prepare.assert_called_once_with(impl.attn_inputs)
@@ -1303,6 +1304,60 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         self.assertIsNone(kernel.call_args.args[11])
         self.assertIsNone(kernel.call_args.args[12])
         self.assertIsNone(kernel.call_args.args[13])
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
+class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
+    """Regression tests for fixed-address batch-prefill graph workspace."""
+
+    def test_repeated_prepare_keeps_captured_workspace_addresses(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        cfg.kernel_tokens_per_block = 16
+        op = AiterPrefillAttnOpPaged(cfg)
+        device = torch.device("cuda")
+        block_table = torch.zeros(3, 4, dtype=torch.int32, device=device)
+        fmha_params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor(
+                [0, 8, 16, 24], dtype=torch.int32, device=device
+            ),
+            cu_seqlens_k=torch.tensor(
+                [0, 40, 80, 120], dtype=torch.int32, device=device
+            ),
+            kv_cache_block_id_device=block_table,
+        )
+        attn_inputs = SimpleNamespace(
+            input_lengths_device=torch.full(
+                (3,), 8, dtype=torch.int32, device=device
+            ),
+            prefix_lengths_device=torch.full(
+                (3,), 32, dtype=torch.int32, device=device
+            ),
+            kv_cache_kernel_block_id_device=block_table,
+            kv_cache_block_id_device=block_table,
+        )
+
+        op.prepare_cuda_graph(fmha_params, attn_inputs)
+        captured_ptrs = {
+            "seqlen_k": op.seqlen_k_buf.data_ptr(),
+            "kv_indptr": op.kv_indptr_buf.data_ptr(),
+            "kv_page_indices": op.kv_page_indices_buf.data_ptr(),
+            "descale": op.descale_buf.data_ptr(),
+            "sanitized_block_table": op.sanitized_bt_buf.data_ptr(),
+        }
+
+        op.prepare_cuda_graph(fmha_params, attn_inputs)
+
+        replay_ptrs = {
+            "seqlen_k": op.seqlen_k_buf.data_ptr(),
+            "kv_indptr": op.kv_indptr_buf.data_ptr(),
+            "kv_page_indices": op.kv_page_indices_buf.data_ptr(),
+            "descale": op.descale_buf.data_ptr(),
+            "sanitized_block_table": op.sanitized_bt_buf.data_ptr(),
+        }
+        self.assertEqual(replay_ptrs, captured_ptrs)
 
 
 @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
@@ -1712,6 +1767,47 @@ class TestCompactGatherReshape(unittest.TestCase):
 
         self.assertTrue(op.linear_v)
         self.assertEqual(full_reshape.call_count, 1)
+
+    def test_paged_prefill_forwards_noncausal_semantics(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(
+            head_num=2, head_num_kv=1, head_dim=8, tokens_per_block=8
+        )
+        cfg.is_causal = False
+        op = AiterPrefillAttnOp(cfg)
+        query = torch.zeros(2, 2, 8, dtype=torch.float16)
+        cache = SimpleNamespace(
+            kv_cache_base=torch.zeros(2, 2, 1, 8, 8, dtype=torch.float16)
+        )
+        block_table = torch.tensor([[0]], dtype=torch.int32)
+        params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            prefill_seqlen_k_int32=torch.tensor([2], dtype=torch.int32),
+            max_seqlen_q=2,
+            max_seqlen_k=2,
+            token_q_num=2,
+            sanitized_block_table=block_table,
+        )
+        k_cache = torch.zeros(2, 1, 1, 8, 8, dtype=torch.float16)
+        v_cache = torch.zeros(2, 1, 1, 8, 8, dtype=torch.float16)
+        seen_causal = []
+
+        def fake_prefill(*args, **kwargs):
+            seen_causal.append(kwargs["causal"])
+            return torch.zeros_like(query)
+
+        prefill_func = (
+            "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter."
+            "aiter.mha_batch_prefill_func"
+        )
+        with patch.object(
+            op, "_reshape_kv_cache_vectorized", return_value=(k_cache, v_cache)
+        ), patch(prefill_func, side_effect=fake_prefill):
+            output = op._forward_paged(query, cache, params)
+
+        self.assertEqual(tuple(output.shape), (2, 16))
+        self.assertEqual(seen_causal, [False])
 
     # ---- block table sanitization ------------------------------------------
 

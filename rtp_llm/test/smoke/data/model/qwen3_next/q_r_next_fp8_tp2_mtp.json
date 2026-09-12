@@ -48,7 +48,7 @@
                 "debug_info": null,
                 "aux_info": {
                     "cost_time": 3143.197,
-                    "iter_count": 25,
+                    "iter_count": 27,
                     "prefix_len": 0,
                     "input_len": 18,
                     "output_len": 100,
@@ -169,7 +169,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
+                "response": "<think>\n\n</think>\n\n这是一份经过深度润色和逻辑重构的文本。我提供了两个版本",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
@@ -193,7 +193,7 @@
                     "decode_memory_reuse_len": 0,
                     "output_len": 20,
                     "step_output_len": 20,
-                    "iter_count": 6,
+                    "iter_count": 7,
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "pd_sep": false,

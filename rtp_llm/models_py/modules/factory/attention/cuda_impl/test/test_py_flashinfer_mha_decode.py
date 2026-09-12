@@ -2,12 +2,14 @@ import logging
 import math
 import sys
 import unittest
+from types import SimpleNamespace
 from typing import List
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl import py_flashinfer_mha
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )
@@ -20,6 +22,63 @@ from rtp_llm.ops.compute_ops import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+class TestPyFlashinferWorkspacePlanning(unittest.TestCase):
+    def test_fa2_graph_plan_uses_exact_split_k_workspace(self) -> None:
+        heads = 12
+        padded_batch_size = 80
+        cta_tile_q = 16
+        head_dim = 256
+        partial_rows = heads * padded_batch_size * cta_tile_q
+        value_offset = 256
+        value_bytes = partial_rows * head_dim * 4
+        lse_offset = value_offset + value_bytes
+
+        plan_info = [0] * 15
+        plan_info[0] = padded_batch_size
+        plan_info[3] = cta_tile_q
+        plan_info[10] = value_offset
+        plan_info[11] = lse_offset
+        plan_info[14] = 1
+        wrapper = SimpleNamespace(_backend="fa2", _plan_info=plan_info)
+
+        expected = py_flashinfer_mha._round_workspace_size(
+            lse_offset + partial_rows * 4
+        )
+        self.assertEqual(
+            py_flashinfer_mha._planned_flashinfer_workspace_size(
+                wrapper, heads, head_dim
+            ),
+            expected,
+        )
+
+    def test_fa3_graph_plan_needs_no_float_scratch(self) -> None:
+        wrapper = SimpleNamespace(_backend="fa3", _plan_info=[0] * 8)
+        self.assertEqual(
+            py_flashinfer_mha._planned_flashinfer_workspace_size(wrapper, 12, 256),
+            py_flashinfer_mha._FLASHINFER_WORKSPACE_ALIGNMENT,
+        )
+
+    def test_unknown_fa3_plan_keeps_flashinfer_default(self) -> None:
+        wrapper = SimpleNamespace(_backend="fa3", _plan_info=[0] * 9)
+        self.assertIsNone(
+            py_flashinfer_mha._planned_flashinfer_workspace_size(wrapper, 12, 256)
+        )
+
+    def test_unknown_backend_keeps_flashinfer_default(self) -> None:
+        wrapper = SimpleNamespace(_backend="future_backend", _plan_info=[])
+        self.assertIsNone(
+            py_flashinfer_mha._planned_flashinfer_workspace_size(wrapper, 12, 256)
+        )
+
+    def test_workspace_pool_is_size_aware(self) -> None:
+        first = py_flashinfer_mha.get_py_flashinfer_workspace_buffer("cpu", 513)
+        self.assertEqual(first.numel(), 768)
+        py_flashinfer_mha.release_py_flashinfer_workspace_buffer(first)
+        reused = py_flashinfer_mha.get_py_flashinfer_workspace_buffer("cpu", 513)
+        self.assertIs(reused, first)
+        py_flashinfer_mha.release_py_flashinfer_workspace_buffer(reused)
 
 
 class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):

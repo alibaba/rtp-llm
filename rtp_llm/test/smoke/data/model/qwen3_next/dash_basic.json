@@ -15,7 +15,7 @@
                 "request_id": "smoke_dash_basic"
             },
             "result": {
-                "response": "\n\nThis is a simple example of a web application built with the\n[Fl",
+                "response": "\n\nThis is a simple example of a web application using the\n[Flask",
                 "finish_reason": 1,
                 "prompt_token_num": 4,
                 "prompt_cached_token_num": 0
@@ -34,7 +34,7 @@
                 "request_id": "smoke_dash_return_input_ids"
             },
             "result": {
-                "response": "\n\n\nThis PR adds a check to the",
+                "response": "\n\n\nThis PR adds a check to ensure",
                 "finish_reason": 1,
                 "prompt_token_ids": [
                     40860,
@@ -82,7 +82,7 @@
                 "request_id": "smoke_dash_cancel_after_first_response"
             },
             "result": {
-                "response": "",
+                "response": "\n",
                 "cancelled": true
             }
         }

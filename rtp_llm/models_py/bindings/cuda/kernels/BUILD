@@ -209,11 +209,18 @@ cc_library(
     name = "cuda_graph_prepare",
     srcs = ["cuda_graph_prepare.cu"],
     hdrs = ["cuda_graph_prepare.h"],
-    deps = [
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps(),
-    copts = cuda_copts(),
+    deps = torch_deps() + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = any_cuda_copts(),
     visibility = ["//visibility:public"],
 )
 

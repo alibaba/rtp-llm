@@ -43,16 +43,22 @@ class FusedRopeKVCachePrefillOpBase:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
 
+    def prepare_kv_cache_offset(
+        self, attn_inputs: PyAttentionInputs
+    ) -> Optional[torch.Tensor]:
+        """Build the device KV-offset table without preparing host scalars.
+
+        CUDA-graph replay only needs to refresh the page-table-derived offset.
+        Re-running ``prepare`` would also read length maxima back to the host,
+        although the captured RoPE launch geometry is unchanged.
+        """
+        block_ids = attn_inputs.kv_cache_kernel_block_id_device
+        if block_ids is None or block_ids.numel() == 0:
+            return None
+        return _get_fused_rope_kvcache().convert_offset_to_block_array(block_ids)
+
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
-        if (
-            attn_inputs.kv_cache_kernel_block_id_device is not None
-            and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
-        ):
-            kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
-                attn_inputs.kv_cache_kernel_block_id_device
-            )
-        else:
-            kv_cache_offset = None
+        kv_cache_offset = self.prepare_kv_cache_offset(attn_inputs)
         kv_cache_offset_h = None  # not used
 
         # CP remaps explicit position IDs alongside the local token shard. Keep

@@ -1,6 +1,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/bf214ca22625e311a2c4c0dfbf7af19128f4919c/vllm/distributed/device_communicators/symm_mem.py
 import logging
 import math
+import os
 from datetime import timedelta
 from typing import Optional, Union
 
@@ -346,6 +347,12 @@ class TorchSymmMemCommunicator:
 _symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
 
 
+def _custom_all_reduce_enabled() -> bool:
+    """Honor the server-wide custom AllReduce kill switch."""
+    value = os.getenv("FT_DISABLE_CUSTOM_AR")
+    return value is None or value.strip().lower() not in ("1", "true", "on", "yes")
+
+
 def init_symm_mem_communicator(
     tp_group: ProcessGroup,
 ) -> Optional[TorchSymmMemCommunicator]:
@@ -362,6 +369,12 @@ def init_symm_mem_communicator(
     startup fails fast, on every rank, with the real reason.
     """
     global _symm_mem_comm
+    if not _custom_all_reduce_enabled():
+        logging.info(
+            "TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR"
+        )
+        _symm_mem_comm = None
+        return None
     symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())
     if symm_mem_comm.disabled:
         logging.warning("TorchSymmMemCommunicator is disabled, skipping initialization")

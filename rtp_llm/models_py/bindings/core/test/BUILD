@@ -68,6 +68,27 @@ cc_test(
 )
 
 cc_test(
+    name = "sample_from_probs_test",
+    srcs = ["SampleFromProbsTest.cc"],
+    deps = [
+        # ExecOps state references the platform implementations even though
+        # this test only exercises sampleFromProbs. Keep ops before state so
+        # the standalone binary closes both sides of that dependency under
+        # the toolchain's as-needed linking.
+        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+        "//rtp_llm/models_py/bindings/core:exec_ctx_state",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    tags = ["rocm"],
+    target_compatible_with = select({
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+cc_test(
     name = "distributed_comm_test",
     deps = [
         "//rtp_llm/cpp/testing:distributed_test",
