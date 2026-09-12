@@ -309,6 +309,50 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
+    void hybridLogicalCapacityAdmitsMillionAndBoundaryWithoutBypassingLimits() {
+        configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
+        var availability = configService.loadBalanceConfig().getRouter()
+                .getRoles().getDecode().getAvailability();
+        availability.setMaxEngineRequests(2L);
+        availability.setMaxKvUsagePercent(90L);
+        registerWorker("127.0.0.1", 4_194_304L, 4_194_304L);
+        EndpointRegistry registry = decodeRegistry();
+        CostBasedDecodeStrategy strategy = availableStrategy(registry);
+        DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
+
+        for (var scheduler : new SchedulerConfig[]{new SchedulerConfig(), SchedulerConfig.direct()}) {
+            configService.loadBalanceConfig().setScheduler(scheduler);
+            for (long length : new long[]{1_000_000L, 1_048_567L}) {
+                var result = strategy.select(context(length, length), RoleType.DECODE, null);
+                Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
+                Assertions.assertEquals(4_194_304L, result.value().decodeTotalKv());
+                result.value().close();
+            }
+        }
+        reservePinned(endpoint, 101L, 1_000_000L, 1_000_512L, 50);
+        reservePinned(endpoint, 102L, 1_000_000L, 1_000_512L, 50);
+        Assertions.assertFalse(CostBasedDecodeStrategy.hasDecodeCapacity(
+                configService.loadBalanceConfig(), endpoint.routingView(), false),
+                "logical context capacity must not remove the request-count gate");
+        var full = strategy.select(context(1_000_000L, 103L), RoleType.DECODE, null);
+        Assertions.assertEquals(PlacementResult.Status.BLOCKED, full.status());
+        var oversized = strategy.select(context(4_194_305L, 104L), RoleType.DECODE, null);
+        Assertions.assertEquals(PlacementResult.Status.REJECTED, oversized.status());
+    }
+
+    @Test
+    void hybridLogicalAvailabilityRoutesAwayFromOccupiedFullPools() {
+        configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
+        registerWorker("127.0.0.1", 4_194_304L, 999_999L);
+        registerWorker("127.0.0.2", 4_194_304L, 2_194_304L);
+        var result = availableStrategy(decodeRegistry()).select(
+                context(1_000_000L, 105L), RoleType.DECODE, null);
+        Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        Assertions.assertEquals("127.0.0.2", result.value().serverStatus().getServerIp());
+        result.value().close();
+    }
+
+    @Test
     void queuePlanningSelectsExactEndpointWithoutTakingCapacity() {
         registerWorker("127.0.0.1", 1_000, 1_000);
         EndpointRegistry registry = decodeRegistry();

@@ -18,6 +18,8 @@ namespace rtp_llm {
 
 class CPSlotMapper;
 struct KVCacheTokenCapacity {
+    // Logical context tokens backed by the pools that grow with sequence length.
+    // This scalar does not replace per-group allocation/concurrency checks.
     size_t total_tokens     = 0;
     size_t available_tokens = 0;
 };

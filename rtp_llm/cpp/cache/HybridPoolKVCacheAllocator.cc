@@ -558,23 +558,11 @@ size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
 
 KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
     (void)default_seq_size_per_block;
-    if (group_block_pools_.empty()) {
-        return {};
-    }
-    size_t total_tokens     = std::numeric_limits<size_t>::max();
-    size_t available_tokens = std::numeric_limits<size_t>::max();
-    bool   has_pool         = false;
-    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        const auto& pool = group_block_pools_[gid];
-        if (!pool) {
-            continue;
-        }
-        const size_t seq_size = config_.seqSizePerBlockForGroup(gid);
-        total_tokens          = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
-        available_tokens      = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
-        has_pool              = true;
-    }
-    return has_pool ? KVCacheTokenCapacity{total_tokens, available_tokens} : KVCacheTokenCapacity{};
+    // FlexLB compares these values with logical request lengths. Fixed SWA/state
+    // pools bound concurrent per-request state, not context length; their exact
+    // demand remains enforced by evaluateInitCapacity and allocation. FULL pools
+    // grow with context and must use the same CP-aware units as token admission.
+    return {totalTokensNum(), availableTokensNum()};
 }
 
 std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsSnapshots() const {

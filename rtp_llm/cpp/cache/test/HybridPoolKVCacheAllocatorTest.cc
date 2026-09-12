@@ -469,6 +469,103 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForF
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
+    EXPECT_EQ(allocator->tokenCapacity(4).total_tokens, 7u * 8u);
+    EXPECT_EQ(allocator->tokenCapacity(4).available_tokens, 7u * 8u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, LogicalCapacityAllowsMillionTokenDecodeWithFixedStatePools) {
+    for (const uint32_t fixed_blocks : {512u, 768u}) {
+        auto mc = makeTinyDSV4ModelConfig();
+        for (const auto& tag : {"swa_kv", "indexer_state", "csa_state", "hca_state"}) {
+            setDsv4ExplicitPoolBlocks(mc, tag, fixed_blocks);
+        }
+        ParallelismConfig pc;
+        pc.role_type = RoleType::DECODE;
+        pc.tp_size = 1;
+        pc.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+        pc.prefill_cp_config.kv_cache_sharded = true;
+        pc.prefill_cp_config.prefill_cp_size = 4;
+        auto config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+        config.finalizeBlockNums(8193, RuntimeConfig{});
+        auto allocator = makeAllocator(config, RoleType::DECODE);
+        ASSERT_TRUE(allocator->init());
+        const auto initial = allocator->tokenCapacity(config.seq_size_per_block);
+        ASSERT_EQ(initial.total_tokens, 1048576u);
+        ASSERT_EQ(initial.available_tokens, initial.total_tokens);
+        const auto fixed_gid = config.groupIdForTag("swa_kv");
+        ASSERT_GE(fixed_gid, 0);
+        EXPECT_EQ(config.seqSizePerBlockForGroup(fixed_gid), 512u);
+        EXPECT_EQ(allocator->groupBlockPools()[fixed_gid]->totalBlocksNum(), fixed_blocks - 1u);
+
+        for (const int length : {1000000, 1048567}) {
+            SCOPED_TRACE(::testing::Message() << "fixed_blocks=" << fixed_blocks << " length=" << length);
+            auto resource = makeBatchResource(1, config);
+            auto tokens = makeCompleteTokenIds(1, length, config.seq_size_per_block);
+            MallocInfo info{resource, tokens};
+            // Decode owns the active state; prefill owns reusable history.
+            info.enable_device_cache = false;
+            info.reuse_cache = false;
+            ASSERT_TRUE(allocator->malloc(info).success);
+            EXPECT_LT(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, initial.available_tokens);
+            for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+                if (config.typeForGroup(gid) != CacheGroupType::FULL) {
+                    EXPECT_LT(allocator->groupBlockPools()[gid]->requestRefBlocksNum(), fixed_blocks);
+                }
+            }
+            allocator->free(FreeInfo{resource, tokens});
+            EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, initial.available_tokens);
+        }
+
+        // A request for complete state history still cannot fit a fixed pool.
+        // Logical token reporting must not weaken that per-group verdict.
+        auto history_resource = makeBatchResource(1, config);
+        auto history_tokens = makeCompleteTokenIds(1, 1000000, config.seq_size_per_block);
+        MallocInfo history_info{history_resource, history_tokens};
+        history_info.enable_device_cache = true;
+        history_info.reuse_cache = true;
+        EXPECT_EQ(allocator->malloc(history_info).status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+        EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+
+        auto oversized = makeBatchResource(1, config);
+        auto tokens = makeCompleteTokenIds(1, 1048577, config.seq_size_per_block);
+        MallocInfo info{oversized, tokens};
+        info.enable_device_cache = false;
+        info.reuse_cache = false;
+        EXPECT_EQ(allocator->malloc(info).status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+        EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, LogicalCapacityPreservesFixedPoolConcurrencyBackpressure) {
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/2, /*full_block_num=*/16);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    const auto initial = allocator->tokenCapacity(4);
+    ASSERT_EQ(initial.total_tokens, 60u);
+
+    auto holder = makeBatchResource(1, config);
+    auto holder_tokens = makeCompleteTokenIds(1, 20, 4);
+    MallocInfo holder_info{holder, holder_tokens};
+    holder_info.enable_device_cache = false;
+    holder_info.reuse_cache = false;
+    ASSERT_TRUE(allocator->malloc(holder_info).success);
+
+    auto waiting = makeBatchResource(1, config);
+    auto waiting_tokens = makeCompleteTokenIds(1, 20, 4);
+    MallocInfo waiting_info{waiting, waiting_tokens};
+    waiting_info.enable_device_cache = false;
+    waiting_info.reuse_cache = false;
+    EXPECT_GE(allocator->tokenCapacity(4).available_tokens, 20u);
+    const auto occupied = snapshotPoolCounters(allocator);
+    EXPECT_EQ(allocator->malloc(waiting_info).status, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(waiting->curBlocksNum(), 0u);
+    expectPoolCountersEq(allocator, occupied);
+
+    allocator->free(FreeInfo{holder, holder_tokens});
+    ASSERT_TRUE(allocator->malloc(waiting_info).success);
+    allocator->free(FreeInfo{waiting, waiting_tokens});
+    EXPECT_EQ(allocator->tokenCapacity(4).available_tokens, initial.available_tokens);
+    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsFallBackToGlobalSeqSize) {

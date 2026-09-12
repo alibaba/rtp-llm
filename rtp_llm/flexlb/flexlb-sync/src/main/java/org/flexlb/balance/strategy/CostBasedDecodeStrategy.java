@@ -116,6 +116,9 @@ public class CostBasedDecodeStrategy {
     private Response validateFleet(
             CandidateBuffer snapshots,
             long requiredKv) {
+        // Worker KV capacity is expressed in logical context tokens, including
+        // CP geometry. Fixed hybrid state pools are checked by engine allocation;
+        // they must not be interpreted as a maximum request sequence length here.
         if (!snapshots.physicalKvUnknown
                 && Math.max(0L, requiredKv)
                         > snapshots.maximumPhysicalKv) {
@@ -135,7 +138,7 @@ public class CostBasedDecodeStrategy {
                 StrategyErrorType.RESOURCE_EXHAUSTED,
                 AdmissionRejectReason.RESOURCE_EXHAUSTED);
         String detail = "Decode request seq_len=" + requiredKv
-                + " exceeds max known physical KV=" + maximumPhysicalKv;
+                + " exceeds max known logical KV capacity=" + maximumPhysicalKv;
         response.setErrorMessage(StrategyErrorType.RESOURCE_EXHAUSTED
                 .buildErrorMessage(detail));
         return response;
