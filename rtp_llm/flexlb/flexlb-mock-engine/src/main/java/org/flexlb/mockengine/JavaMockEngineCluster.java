@@ -1029,6 +1029,7 @@ public final class JavaMockEngineCluster {
              * admission (MTP fold — every step emits tokensPerStep tokens).
              * Decremented once per step. */
             int remainingSteps;
+            int emittedOutputTokens;
             /** Total step budget at admission — with remainingSteps it yields
              * tokens generated so far (tokensPerStep x (total - remaining)),
              * which drives the per-step KV block growth (production incrMalloc). */
@@ -4135,6 +4136,17 @@ public final class JavaMockEngineCluster {
                     if (stream.remainingSteps <= 0) {
                         it.remove();
                         finished.add(stream);
+                    } else if (whaleRemote && stream.responseQueue != null) {
+                        // P already emitted token one. Publish D progress while
+                        // it runs so Fetch sees activity before its idle timeout.
+                        int previous = Math.max(1, stream.emittedOutputTokens);
+                        int generated = Math.min(stream.shape.outputLen() - 1, (int) Math.ceil(
+                                performance.tokensPerStep() * (stream.totalSteps - stream.remainingSteps)));
+                        if (generated > previous) {
+                            stream.responseQueue.offer(buildOutput(
+                                    stream.shape, false, generated, generated - previous));
+                            stream.emittedOutputTokens = generated;
+                        }
                     }
                 }
                 for (DecodeStream stream : finished) {
@@ -4336,7 +4348,14 @@ public final class JavaMockEngineCluster {
             // Completion does not depend on a client Fetch in auto-fetch mode;
             // strict mode reaches this point only after the client attached.
             if (stream.responseQueue != null && !alreadyCancelled) {
-                stream.responseQueue.offer(buildOutput(shape, true));
+                if (whaleRemote) {
+                    int previous = shape.outputLen() > 1
+                            ? Math.max(1, stream.emittedOutputTokens) : 0;
+                    stream.responseQueue.offer(buildOutput(
+                            shape, true, shape.outputLen(), shape.outputLen() - previous));
+                } else {
+                    stream.responseQueue.offer(buildOutput(shape, true));
+                }
             }
             responseQueues.remove(requestId);
             cancelledRequests.remove(requestId);
@@ -4618,6 +4637,12 @@ public final class JavaMockEngineCluster {
             int stepOutputLen = whaleRemote && finished
                     && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE && outputLen > 1
                     ? outputLen - 1 : outputLen;
+            return buildOutput(shape, finished, outputLen, stepOutputLen);
+        }
+
+        private EngineRpcService.GenerateOutputsPB buildOutput(MockPerformanceModel.RequestShape shape,
+                                                               boolean finished, int outputLen,
+                                                               int stepOutputLen) {
             var flatten = EngineRpcService.FlattenOutputPB.newBuilder()
                     .addFinished(finished)
                     .addAuxInfo(EngineRpcService.AuxInfoPB.newBuilder()

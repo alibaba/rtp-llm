@@ -65,13 +65,13 @@ class WhaleRemotePrefillTest {
         CollectedStream stream = fetch(prefill, requestId, 10_000);
 
         assertNull(stream.error.get(), "stream must not error");
-        assertEquals(2, stream.frames.size(),
-                "fetch_response must deliver BOTH frames, got " + stream.frames.size());
+        assertEquals(8, stream.frames.size(),
+                "fetch_response must stream every generated token, got " + stream.frames.size());
         assertFalseFrame(stream.frames.get(0), "frame 0 must be the prefill first-token frame");
-        assertTrueFrame(stream.frames.get(1), "frame 1 must be the decode terminal frame");
+        assertTrueFrame(stream.frames.get(7), "last frame must be terminal");
         assertFrontendTensor(stream.frames.get(0), 1, 9);
-        assertFrontendTensor(stream.frames.get(1), 7, 9);
-        assertEquals(8, stream.frames.get(1).getFlattenOutput().getAuxInfo(0).getOutputLen());
+        for (var frame : stream.frames) assertFrontendTensor(frame, 1, 9);
+        assertEquals(8, stream.frames.get(7).getFlattenOutput().getAuxInfo(0).getOutputLen());
         assertEquals(8, stream.frames.stream().mapToLong(frame ->
                 frame.getFlattenOutput().getOutputIds().getShape(2)).sum(),
                 "frontend concatenation must produce exactly max_new_tokens");
@@ -116,10 +116,10 @@ class WhaleRemotePrefillTest {
                 inputWithDecode(requestId, 10, decode.getGrpcPort()), 10_000);
 
         assertNull(stream.error.get(), "stream must not error");
-        assertEquals(2, stream.frames.size(),
-                "generate_stream must deliver BOTH frames, got " + stream.frames.size());
+        assertEquals(8, stream.frames.size(),
+                "generate_stream must stream every generated token, got " + stream.frames.size());
         assertFalseFrame(stream.frames.get(0), "frame 0 must be the prefill first-token frame");
-        assertTrueFrame(stream.frames.get(1), "frame 1 must be the decode terminal frame");
+        assertTrueFrame(stream.frames.get(7), "last frame must be terminal");
         assertTtftStrictlyBeforeE2e(stream);
     }
 
@@ -127,9 +127,9 @@ class WhaleRemotePrefillTest {
 
     @Test
     @Timeout(30)
-    void fetchResponseTimeoutAfterFirstFrameCompletesStreamWithoutError() throws Exception {
-        // decode = 8 tokens x 50 ms = 400 ms; poll timeout 150 ms fires between
-        // the first-token frame (~100 ms) and the terminal frame (~500 ms).
+    void decodeProgressKeepsFetchAlivePastIdleTimeout() throws Exception {
+        // Total decode time exceeds the idle timeout, but progress frames
+        // keep the stream alive through its terminal output.
         startCluster("100", 50.0);
         prefill.setResponsePollTimeoutMs(150);
         decode.setResponsePollTimeoutMs(150);
@@ -141,13 +141,9 @@ class WhaleRemotePrefillTest {
 
         CollectedStream stream = fetch(prefill, requestId, 10_000);
 
-        // Timeout terminates the stream WITHOUT error — the client keeps its
-        // own empty_response detection (zero frames + onCompleted) and its
-        // terminalNanos==null fallback for truncated streams.
-        assertNull(stream.error.get(), "timeout must complete the stream, not error it");
-        assertEquals(1, stream.frames.size(),
-                "only the first-token frame may arrive before the injected timeout");
-        assertFalseFrame(stream.frames.get(0), "the delivered frame is the first-token frame");
+        assertNull(stream.error.get(), "progress must keep Fetch alive");
+        assertEquals(8, stream.frames.size());
+        assertTrueFrame(stream.frames.get(7), "must finish despite total time exceeding idle timeout");
     }
 
     @Test
