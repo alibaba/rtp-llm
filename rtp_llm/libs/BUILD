@@ -5,6 +5,31 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
 
+# CUDA13 still links the C++ FlashInfer kernels. They must accompany the RTP
+# libraries in installed wheels, where Bazel's _solib tree is unavailable.
+cuda13_flashinfer_libs = [
+    "@flashinfer_cpp_cu13//:flashinfer_single_decode",
+    "@flashinfer_cpp_cu13//:flashinfer_single_decode_256",
+    "@flashinfer_cpp_cu13//:flashinfer_single_prefill",
+    "@flashinfer_cpp_cu13//:flashinfer_single_prefill_256",
+    "@flashinfer_cpp_cu13//:flashinfer_batch_paged_prefill",
+    "@flashinfer_cpp_cu13//:flashinfer_batch_paged_prefill_256",
+    "@flashinfer_cpp_cu13//:flashinfer_batch_paged_decode",
+    "@flashinfer_cpp_cu13//:flashinfer_batch_paged_decode_256",
+    "@flashinfer_cpp_cu13//:flashinfer_batch_ragged_prefill",
+    "@flashinfer_cpp_cu13//:flashinfer_batch_ragged_prefill_256",
+    "@flashinfer_cpp_cu13//:flashinfer_sm90",
+]
+
+copy_files(
+    name = "copy_cuda13_flashinfer_libs",
+    srcs = select({
+        "//:using_cuda13_x86": cuda13_flashinfer_libs,
+        "//:using_cuda13_arm": cuda13_flashinfer_libs,
+        "//conditions:default": [],
+    }),
+)
+
 # copy 3fs libs
 copy_files(
     name = "copy_hf3fs_libs",
@@ -46,6 +71,7 @@ filegroup(
     srcs = [],
     data = [
         ":copy_acclep_libs",
+        ":copy_cuda13_flashinfer_libs",
         ":copy_hf3fs_libs",
         ":libmm_rdma_exporter_so",
         ":librtp_compute_ops_so",
