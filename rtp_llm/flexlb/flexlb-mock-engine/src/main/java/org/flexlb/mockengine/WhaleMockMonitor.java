@@ -55,6 +55,14 @@ final class WhaleMockMonitor implements AutoCloseable {
         sample(service.whaleMetrics(), service.whaleMetricTags(), System.nanoTime());
     }
 
+    synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels) {
+        FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
+        metrics.forEach((name, value) -> {
+            if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
+            monitor.report(name, tags, value.doubleValue());
+        });
+    }
+
     synchronized void reportScheduler(Map<String, Number> metrics, Map<String, String> labels) {
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
         for (var entry : metrics.entrySet()) {

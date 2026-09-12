@@ -148,6 +148,7 @@ final class MockPerformanceModel {
 
     private volatile int blockSize;
     private MockEosModel eosModel;
+    boolean nativeTokenCacheKeys;
     private final double sleepScale;
     private final double prefillScale;
     // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
@@ -264,6 +265,7 @@ final class MockPerformanceModel {
                 tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
         // Explicit overrides installed before startup are part of that engine's initial settings.
         copy.eosModel = eosModel;
+        copy.nativeTokenCacheKeys = nativeTokenCacheKeys;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
         copy.overrideDecodeStepMs = overrideDecodeStepMs;
         copy.overrideDecodeScale = overrideDecodeScale;
@@ -403,6 +405,7 @@ final class MockPerformanceModel {
         int inputLen = input.getTokenIdsCount();
         int outputLen = Math.max(1, input.getGenerateConfig().getMaxNewTokens());
         boolean explicitOutputLength = false;
+        boolean explicitCacheKeys = false;
         List<Long> blockKeys = new ArrayList<>();
         String uniqueKey = input.getGenerateConfig().getUniqueKey();
         if (uniqueKey.startsWith("flexlb_eval:")) {
@@ -414,11 +417,23 @@ final class MockPerformanceModel {
                 inputLen = meta.path("input_len").asInt(inputLen);
                 outputLen = meta.path("output_len").asInt(outputLen);
                 explicitOutputLength = meta.has("output_len");
+                explicitCacheKeys = meta.has("block_cache_keys");
                 for (JsonNode key : meta.path("block_cache_keys")) {
                     blockKeys.add(key.bigIntegerValue().longValue());
                 }
             } catch (IOException ignored) {
                 // Fall back to protobuf lengths when metadata is absent or malformed.
+            }
+        }
+        boolean nativeKeys = nativeTokenCacheKeys && !explicitCacheKeys && inputLen == input.getTokenIdsCount();
+        if (nativeKeys) {
+            // HashUtil.h / KVCacheHashUtil.cc: signed rolling Jenkins hash.
+            // Publish only complete blocks; partial blocks are not reusable.
+            long hash = 0;
+            for (int i = 0; i < inputLen; i++) {
+                hash ^= (long) input.getTokenIds(i) + 0x9e3779b97f4a7c15L
+                        + (hash << 12) + (hash >> 32);
+                if ((i + 1) % blockSize == 0) blockKeys.add(hash);
             }
         }
         // hitBlocks carries the RAW prefix-match run length (key count) — the
@@ -432,7 +447,7 @@ final class MockPerformanceModel {
         hitTokens = Math.min(hitTokens, inputLen);
         outputLen = eosModel.outputLength(input, Math.max(1, outputLen), explicitOutputLength);
         return new RequestShape(input, inputLen, outputLen, List.copyOf(blockKeys),
-                hitTokens, hitBlocks);
+                hitTokens, hitBlocks, nativeKeys);
     }
 
     long prefillMs(List<RequestShape> requests) {
@@ -655,7 +670,7 @@ final class MockPerformanceModel {
                         int outputLen,
                         List<Long> blockKeys,
                         long hitTokens,
-                        int hitBlocks) {
+                        int hitBlocks, boolean nativeKeys) {
     }
 
     private record DecodePoint(int batchSize, double stepMs) {

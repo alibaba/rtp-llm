@@ -72,6 +72,11 @@ final class MockLruBlockCache {
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
     private long evictions;
+    private java.util.function.DoubleConsumer evictionLifetimeListener = ignored -> {};
+
+    synchronized void setEvictionLifetimeListener(java.util.function.DoubleConsumer listener) {
+        evictionLifetimeListener = listener;
+    }
     // Test-only idle-cache quota. Active leases retain the full physical pool.
     private int retentionBlocks;
     private long retentionEvictions;
@@ -397,6 +402,7 @@ final class MockLruBlockCache {
         for (Long key : keys) {
             Integer ref = blocks.get(key);
             if (ref != null && ref == 0 && blocks.remove(key) != null) {
+                reportEvictionLifetime(key);
                 removeNode(key);
                 evictions++;
                 changed = true;
@@ -547,6 +553,7 @@ final class MockLruBlockCache {
     }
 
     private static final class TreeNode {
+        final long createdNanos = System.nanoTime();
         Long parent;
         final Set<Long> children = new HashSet<>();
         long sequence;
@@ -604,6 +611,12 @@ final class MockLruBlockCache {
         }
     }
 
+    private void reportEvictionLifetime(Long key) {
+        TreeNode node = tree.get(key);
+        if (node != null) evictionLifetimeListener.accept(
+                Math.max(0L, System.nanoTime() - node.createdNanos) / 1_000_000.0);
+    }
+
     private void removeNode(Long key) {
         TreeNode node = tree.remove(key);
         if (node == null) return;
@@ -640,6 +653,7 @@ final class MockLruBlockCache {
                 key = chain.get(i);
                 if (!Integer.valueOf(0).equals(blocks.get(key))) continue;
                 blocks.remove(key);
+                reportEvictionLifetime(key);
                 removeNode(key);
                 removed++;
             }

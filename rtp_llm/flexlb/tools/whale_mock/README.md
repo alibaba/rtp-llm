@@ -53,3 +53,24 @@ Whale bundle 也可通过 `MOCK_EOS_CONFIG_JSON` 传入上述 `eos` 对象。
 验证使用实际 D 完成计数及 `mock_generate_tokens_total` 增量，输入侧用
 `mock_context_tokens_total` / `mock_context_compute_tokens_total`；这些累计计数不受抓取窗口重置影响。
 前端 schedule acknowledgement 仍不是推理完成，不能当端到端成功率。
+
+
+### Cache and request metrics
+
+Whale mock requests without explicit `unique_key.block_cache_keys` derive rolling
+block hashes from token IDs using the production `HashUtil.h` rule. Only full
+blocks are indexed for reuse; a partial final block still consumes physical KV.
+Explicit test metadata (including an empty key list) retains its original meaning.
+This models token-prefix reuse for the current single-model deployment; it does
+not model multimodal embedding identity or multiple LoRA cache namespaces.
+
+KMonitor reports request input length at P completion and input/actual output
+length at D completion, plus reuse/effective context length. KV eviction lifetime
+is sampled per removed block, and direct eviction block count per chain event;
+there is no simulated memory-tier writeback. Cumulative eviction and cache-key
+hit/request counters are also exposed by the Whale metric adapter.
+
+In bundled mode `hippo_role` identifies the physical master Pod. Split logical
+engines by `role=ROLE_TYPE_PREFILL|ROLE_TYPE_DECODE` and `engine`/`dp_rank`; do not
+interpret a role-merged running-stream series as the P batch size. The existing
+running/context/generate batch metrics are emitted for both logical roles.

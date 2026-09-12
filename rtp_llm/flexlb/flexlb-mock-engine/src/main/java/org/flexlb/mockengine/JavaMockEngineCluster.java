@@ -152,6 +152,8 @@ public final class JavaMockEngineCluster {
                 service.setEngineEventLog(engineEventLog);
                 if (whaleMonitor != null) service.schedulerMetricReporter =
                         values -> whaleMonitor.reportScheduler(values, service.whaleMetricTags());
+                if (whaleMonitor != null) service.eventMetricReporter =
+                        values -> whaleMonitor.reportEvent(values, service.whaleMetricTags());
             }
             if (!config.whale || config.whaleBundle) writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
@@ -339,6 +341,7 @@ public final class JavaMockEngineCluster {
         // callbacks so P cannot block those event loops awaiting D RPC admission.
         service.setWhaleRemote(config.whale && !config.whaleBundle);
         service.whaleBundle = config.whaleBundle;
+        service.performance.nativeTokenCacheKeys = config.whale;
         service.whalePodIp = config.host;
         service.setFetchAttachTimeoutMs(config.fetchAttachTimeoutMs);
         services.put(grpcPort, service);
@@ -2184,7 +2187,10 @@ public final class JavaMockEngineCluster {
         /** Wire the cluster-shared engine_events.jsonl writer (null disables). */
         void setEngineEventLog(EngineEventLog engineEventLog) {
             this.engineEventLog = engineEventLog;
+            cache.setEvictionLifetimeListener(ms -> reportMetricEvent(
+                    Map.of("rtp_llm_kv_cache_evicted_block_lifetime_ms", ms)));
             cache.setEvictionListener(event -> {
+                reportMetricEvent(Map.of("rtp_llm_kv_cache_direct_evicted_block_count", event.blocksFreed()));
                 if (engineEventLog == null) return;
                 ObjectNode row = OBJECT_MAPPER.createObjectNode();
                 row.put("event", "evict_chain");
@@ -3459,6 +3465,9 @@ public final class JavaMockEngineCluster {
                         contextComputeTokens.addAndGet(Math.max(0L, inputLen - hitTokens));
                         lifetimeContextComputeTokens.add(Math.max(0L, inputLen - hitTokens));
                         lifetimeContextTokens.add(inputLen);
+                        reportMetricEvent(Map.of("rtp_llm_input_token_length", inputLen,
+                                "rtp_llm_reuse_length", hitTokens,
+                                "rtp_llm_effective_context_length", Math.max(0L, inputLen - hitTokens)));
                         contextWithCacheTokens.addAndGet(inputLen);
                         hitTokensTotal.addAndGet(hitTokens);
                     }
@@ -3608,6 +3617,15 @@ public final class JavaMockEngineCluster {
 
         // Optional Whale sink: local test mode has no monitoring dependency.
         private volatile java.util.function.Consumer<Map<String, Number>> schedulerMetricReporter;
+        private volatile java.util.function.Consumer<Map<String, Number>> eventMetricReporter;
+
+        private void reportMetricEvent(Map<String, Number> metrics) {
+            var reporter = eventMetricReporter;
+            if (reporter != null) {
+                try { reporter.accept(metrics); }
+                catch (RuntimeException error) { System.err.println("Whale event metric reporting failed: " + error); }
+            }
+        }
         private final AtomicInteger executingPrefillRequests = new AtomicInteger();
 
         private void reportSchedulerStep(int prefill, int decode) {
@@ -4355,6 +4373,8 @@ public final class JavaMockEngineCluster {
                 // (the MTP fold), not the decode batch size.
                 generateTokens.addAndGet(shape.outputLen());
                 lifetimeGenerateTokens.add(shape.outputLen());
+                reportMetricEvent(Map.of("rtp_llm_input_token_length", shape.inputLen(),
+                        "rtp_llm_output_token_length", shape.outputLen()));
             }
             // Completion does not depend on a client Fetch in auto-fetch mode;
             // strict mode reaches this point only after the client attached.
@@ -4734,7 +4754,7 @@ public final class JavaMockEngineCluster {
          */
         private int needBlocks(MockPerformanceModel.RequestShape shape) {
             List<Long> keys = shape.blockKeys();
-            if (!keys.isEmpty()) {
+            if (!keys.isEmpty() && !shape.nativeKeys()) {
                 return keys.size();
             }
             return (shape.inputLen() + seqSizePerBlock - 1) / seqSizePerBlock;
@@ -5503,6 +5523,9 @@ public final class JavaMockEngineCluster {
                     Map.entry("mock_decode_running_requests", activeDecodeRequests.get()),
                     Map.entry("mock_completed_requests_total", completedCount.get()),
                     Map.entry("mock_cancelled_requests_total", cancelledCount.get()),
+                    Map.entry("mock_kv_evicted_blocks_total", cache.evictions()),
+                    Map.entry("mock_cache_key_hits_total", cacheKeyHits.sum()),
+                    Map.entry("mock_cache_keys_requested_total", cacheKeysRequested.sum()),
                     Map.entry("rtp_llm_running_stream_size", activePrefillRequests.get() + activeDecodeRequests.get()),
                     Map.entry("rtp_llm_wait_stream_size", waitingPrefillRequests.get() + decodePendingQueueSize()),
                     Map.entry("rtp_llm_remote_running_stream_size", decodeWaitingForKv.size()),
