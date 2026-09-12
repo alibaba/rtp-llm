@@ -189,13 +189,13 @@ class WhaleModeConfigurationTest {
         var a = java.util.Map.of("engine", "decode-0");
         var b = java.util.Map.of("engine", "decode-1");
         long now = System.nanoTime();
-        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 100L), a, now);
-        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 800L), b, now);
+        monitor.sample(java.util.Map.of("mock_decode_step_tokens_total", 100L), a, now);
+        monitor.sample(java.util.Map.of("mock_decode_step_tokens_total", 800L), b, now);
         rates.clear();
-        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 300L), a, now + 2_000_000_000L);
-        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 1400L), b, now + 2_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_decode_step_tokens_total", 300L), a, now + 2_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_decode_step_tokens_total", 1400L), b, now + 2_000_000_000L);
         assertEquals(List.of(100.0, 300.0), rates);
-        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 300L), a, now + 3_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_decode_step_tokens_total", 300L), a, now + 3_000_000_000L);
         assertEquals(0.0, rates.get(2));
     }
 
@@ -241,11 +241,13 @@ class WhaleModeConfigurationTest {
                 });
         var monitor = new WhaleMockMonitor(sink);
         long now = System.nanoTime();
-        monitor.sample(java.util.Map.of("mock_context_tokens_total", 0L), java.util.Map.of(), now);
-        monitor.sample(java.util.Map.of("mock_context_tokens_total", 400L), java.util.Map.of(), now + 2_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_context_tokens_total", 0L, "mock_context_with_cache_ms_total", 0L), java.util.Map.of(), now);
+        monitor.sample(java.util.Map.of("mock_context_tokens_total", 400L, "mock_context_with_cache_ms_total", 10L), java.util.Map.of(), now + 2_000_000_000L);
         assertEquals(200.0, values.get("rtp_llm_context_wall_tps_with_cache"));
-        monitor.sample(java.util.Map.of("mock_context_tokens_total", 400L), java.util.Map.of(), now + 3_000_000_000L);
+        assertEquals(40000.0, values.get("rtp_llm_context_tps_with_cache"));
+        monitor.sample(java.util.Map.of("mock_context_tokens_total", 400L, "mock_context_with_cache_ms_total", 10L), java.util.Map.of(), now + 3_000_000_000L);
         assertEquals(0.0, values.get("rtp_llm_context_wall_tps_with_cache"));
+        assertEquals(0.0, values.get("rtp_llm_context_tps_with_cache"));
     }
 
     @Test

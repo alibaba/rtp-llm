@@ -1191,6 +1191,9 @@ public final class JavaMockEngineCluster {
         private final LongAdder lifetimeContextComputeTokens = new LongAdder();
         private final LongAdder lifetimeContextTokens = new LongAdder();
         private final LongAdder lifetimeGenerateTokens = new LongAdder();
+        private final LongAdder lifetimeDecodeStepTokens = new LongAdder();
+        private final LongAdder lifetimeContextComputeMs = new LongAdder();
+        private final LongAdder lifetimeContextWithCacheMs = new LongAdder();
         private final AtomicLong contextWithCacheTokens = new AtomicLong();
         private final AtomicLong generateTokens = new AtomicLong();
         private final AtomicLong hitTokensTotal = new AtomicLong();
@@ -3416,6 +3419,7 @@ public final class JavaMockEngineCluster {
                 // One wall-clock stamp for the whole batch: every member shares
                 // the same completion instant (the batch is the execution unit).
                 long doneTsMs = System.currentTimeMillis();
+                boolean computedContext = false, processedContext = false;
                 for (BatchMember member : members) {
                     MockPerformanceModel.RequestShape shape = member.shape();
                     long requestId = shape.input().getRequestId();
@@ -3462,6 +3466,8 @@ public final class JavaMockEngineCluster {
                         // DeepSeek-style "input tokens/s incl. cache hits").
                         long inputLen = shape.inputLen();
                         long hitTokens = shape.hitTokens();
+                        computedContext |= inputLen > hitTokens;
+                        processedContext |= inputLen > 0;
                         contextComputeTokens.addAndGet(Math.max(0L, inputLen - hitTokens));
                         lifetimeContextComputeTokens.add(Math.max(0L, inputLen - hitTokens));
                         lifetimeContextTokens.add(inputLen);
@@ -3522,6 +3528,9 @@ public final class JavaMockEngineCluster {
                         releaseReservedDecode(requestId);
                     }
                 }
+                // Execution duration belongs to the batch, not each member.
+                if (computedContext) lifetimeContextComputeMs.add(executionMs);
+                if (processedContext) lifetimeContextWithCacheMs.add(executionMs);
                 activePrefillBatches.decrementAndGet();
                 // Mirror the addAndGet(shapes.size()) made when this batch reserved
                 // its running slot (admission or drain). Cancelled members stay
@@ -3618,6 +3627,14 @@ public final class JavaMockEngineCluster {
         // Optional Whale sink: local test mode has no monitoring dependency.
         private volatile java.util.function.Consumer<Map<String, Number>> schedulerMetricReporter;
         private volatile java.util.function.Consumer<Map<String, Number>> eventMetricReporter;
+        private final WhalePrefillMatchMetrics prefillMatchMetrics =
+                new WhalePrefillMatchMetrics(WhalePrefillMatchMetrics.configuredWindow());
+
+        private void reportPrefillMatch(MockPerformanceModel.RequestShape shape) {
+            if (eventMetricReporter != null && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                reportMetricEvent(prefillMatchMetrics.record(shape.blockKeys(), shape.inputLen(),
+                        shape.hitTokens(), seqSizePerBlock, System.currentTimeMillis()));
+        }
 
         private void reportMetricEvent(Map<String, Number> metrics) {
             var reporter = eventMetricReporter;
@@ -3660,6 +3677,7 @@ public final class JavaMockEngineCluster {
                             task(member.shape(), member.batchId(), member.dpRank(),
                                     EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
                 }
+                reportPrefillMatch(member.shape());
                 // engine_events.jsonl: execution-start stamp (lane serialization
                 // actually begins for this batch member).
                 recordEventStart(member.shape().input().getRequestId());
@@ -4162,6 +4180,11 @@ public final class JavaMockEngineCluster {
                         kvFailed.add(stream);
                         continue;
                     }
+                    int generated = Math.min(stream.shape.outputLen(), (int) Math.ceil(
+                            performance.tokensPerStep() * (stream.totalSteps - stream.remainingSteps)));
+                    int previousGenerated = Math.min(stream.shape.outputLen(), (int) Math.ceil(
+                            performance.tokensPerStep() * (stream.totalSteps - stream.remainingSteps - 1)));
+                    lifetimeDecodeStepTokens.add(Math.max(0, generated - previousGenerated));
                     if (stream.remainingSteps <= 0) {
                         it.remove();
                         finished.add(stream);
@@ -4169,12 +4192,12 @@ public final class JavaMockEngineCluster {
                         // P already emitted token one. Publish D progress while
                         // it runs so Fetch sees activity before its idle timeout.
                         int previous = Math.max(1, stream.emittedOutputTokens);
-                        int generated = Math.min(stream.shape.outputLen() - 1, (int) Math.ceil(
+                        int streamed = Math.min(stream.shape.outputLen() - 1, (int) Math.ceil(
                                 performance.tokensPerStep() * (stream.totalSteps - stream.remainingSteps)));
-                        if (generated > previous) {
+                        if (streamed > previous) {
                             stream.responseQueue.offer(buildOutput(
-                                    stream.shape, false, generated, generated - previous));
-                            stream.emittedOutputTokens = generated;
+                                    stream.shape, false, streamed, streamed - previous));
+                            stream.emittedOutputTokens = streamed;
                         }
                     }
                 }
@@ -5514,6 +5537,9 @@ public final class JavaMockEngineCluster {
                     Map.entry("mock_context_compute_tokens_total", lifetimeContextComputeTokens.sum()),
                     Map.entry("mock_context_tokens_total", lifetimeContextTokens.sum()),
                     Map.entry("mock_generate_tokens_total", lifetimeGenerateTokens.sum()),
+                    Map.entry("mock_decode_step_tokens_total", lifetimeDecodeStepTokens.sum()),
+                    Map.entry("mock_context_compute_ms_total", lifetimeContextComputeMs.sum()),
+                    Map.entry("mock_context_with_cache_ms_total", lifetimeContextWithCacheMs.sum()),
                     Map.entry("mock_kv_total_tokens", getTotalKvTokens()),
                     Map.entry("mock_kv_available_tokens", getAvailableKvTokens()),
                     Map.entry("mock_kv_occupied_tokens", getOccupiedKvTokens()),

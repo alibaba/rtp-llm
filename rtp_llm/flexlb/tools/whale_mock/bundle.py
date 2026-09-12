@@ -22,6 +22,13 @@ def run():
         raise ValueError("test-only bundle requires RTP_LLM_MOCK_BUNDLE=1")
     cfg_path = Path(os.environ.get("MOCK_BUNDLE_CONFIG_PATH", ROOT / "bundle.yaml"))
     cfg = yaml.safe_load(cfg_path.read_text())
+    overrides = yaml.safe_load(os.environ.get("MOCK_BUNDLE_OVERRIDES_YAML", "{}"))
+    if not isinstance(overrides, dict) or set(overrides) - {"prefill", "decode", "mock_heap", "master_heap"}:
+        raise ValueError("bundle overrides support only prefill/decode and JVM heaps")
+    for role in ("prefill", "decode"):
+        if role in overrides and (type(overrides[role]) is not int or overrides[role] <= 0):
+            raise ValueError(f"{role} must be a positive integer")
+    cfg.update(overrides)
     if os.environ.get("FETCH_OUTPUT_STREAM", "0") != "0":
         raise ValueError("bundle mode requires FETCH_OUTPUT_STREAM=0")
     if cfg["profile"] not in {"single-batch", "batch-window"}:

@@ -81,6 +81,13 @@ final class WhaleMockMonitor implements AutoCloseable {
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
         boolean hadSchedulerSteps = sample.schedulerReported;
         sample.schedulerReported = false;
+        Map<String, Long> deltas = new HashMap<>();
+        metrics.forEach((name, value) -> {
+            if (name.endsWith("_total")) {
+                Long before = sample.previous.put(name, value.longValue());
+                deltas.put(name, before == null ? 0L : Math.max(0, value.longValue() - before));
+            }
+        });
         metrics.forEach((name, value) -> {
             // Preserve execution-round samples. A periodic zero between two
             // short P batches must not dilute them. With no rounds this period,
@@ -91,13 +98,20 @@ final class WhaleMockMonitor implements AutoCloseable {
             String rate = switch (name) {
                 case "mock_context_compute_tokens_total" -> "rtp_llm_context_tps";
                 case "mock_context_tokens_total" -> "rtp_llm_context_tps_with_cache";
-                case "mock_generate_tokens_total" -> "rtp_llm_generate_tps";
+                case "mock_decode_step_tokens_total" -> "rtp_llm_generate_tps";
                 default -> null;
             };
             if (rate != null) {
-                Long before = sample.previous.put(name, value.longValue());
                 if (registered.add(rate)) monitor.register(rate, FlexMetricType.GAUGE);
-                double tps = before == null ? 0 : Math.max(0, value.longValue() - before) / seconds;
+                double wallTps = deltas.getOrDefault(name, 0L) / seconds;
+                String duration = switch (name) {
+                    case "mock_context_compute_tokens_total" -> "mock_context_compute_ms_total";
+                    case "mock_context_tokens_total" -> "mock_context_with_cache_ms_total";
+                    default -> null;
+                };
+                long executionMs = duration == null ? 0 : deltas.getOrDefault(duration, 0L);
+                double tps = duration == null ? wallTps : executionMs > 0
+                        ? deltas.getOrDefault(name, 0L) * 1000.0 / executionMs : 0;
                 monitor.report(rate, tags, tps);
                 String wall = switch (name) {
                     case "mock_context_compute_tokens_total" -> "rtp_llm_context_wall_tps";
@@ -106,7 +120,7 @@ final class WhaleMockMonitor implements AutoCloseable {
                 };
                 if (wall != null) {
                     if (registered.add(wall)) monitor.register(wall, FlexMetricType.GAUGE);
-                    monitor.report(wall, tags, tps);
+                    monitor.report(wall, tags, wallTps);
                 }
             }
         });

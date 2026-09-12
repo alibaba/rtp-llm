@@ -21,7 +21,7 @@ master 通过本地 discovery 文件发现各引擎，不依赖 P/D VIP。
 
 分别核对调度接受 QPS、decode 完成 QPS、失败数、输出 token 数、Fetch RPC=0、队列与 KV 归零。
 调度确认不代表推理完成。现有复制流量的 gRPC 入口通过显式 `RTP_LLM_MOCK_SCHEDULE_ONLY=1` 开关调用测试侧的 schedule_only.py；返回带 schedule_accepted=true、inference_completed=false 的确认帧，不输出 token 或推理完成标志。未开启时走原推理路径。
-当前 max_new_tokens 被模拟器视为实际输出长度，缺少 EOS 模型；超大上限请求仍可能长期占用资源。
+默认未开启 EOS 时，max_new_tokens 被模拟器视为实际输出长度；超大上限请求可能长期占用资源。可选模型见下文。
 未完成真实复制流量验证之前，不宣称成功率或性能已对齐。
 
 Bundle jars use the explicit Maven profile `opensource,!internal,whale-bundle`: KMonitor is included, while engine discovery remains local to the Pod. VipServer is intentionally absent from these test jars; the default internal profile is unchanged.
@@ -74,3 +74,32 @@ In bundled mode `hippo_role` identifies the physical master Pod. Split logical
 engines by `role=ROLE_TYPE_PREFILL|ROLE_TYPE_DECODE` and `engine`/`dp_rank`; do not
 interpret a role-merged running-stream series as the P batch size. The existing
 running/context/generate batch metrics are emitted for both logical roles.
+
+### 按负载扩缩逻辑引擎
+
+Whale master zone 可设置 `MOCK_BUNDLE_OVERRIDES_YAML`，重启 bundle 后生效：
+
+```yaml
+prefill: 48
+decode: 1024
+mock_heap: 32g
+```
+
+只允许覆盖 P/D 数量与两 JVM 堆大小，不设置时保留 bundle.yaml 默认值。
+这是同 Pod 内的逻辑引擎扩容；每引擎容量、执行上限、流量内容与 EOS 分布不变。
+需同时检查 Pod 内存、CPU、运行数、排队与完成率。1024 不是默认生产规模，
+只是针对当前复制流量的起始容量实验，不能通过降低 running 指标值伪造空闲。
+
+### Prefill 匹配率与 TPS 口径
+
+`rtp_llm_prefill_worker_recent_cache_key_hit_ratio` 与真实引擎一样，按请求统计
+最近历史窗口内出现过的完整块占输入 token 的比例（0–1）。窗口默认 30 分钟，
+可用 `PREFILL_CACHE_HIT_TIME_WINDOW_MS` 或后备 `CACHE_HIT_TIME_WINDOW_MS` 配置。
+同请求重复 key 不会自命中；`theory_cache_all_hit_ratio` 按累计 token 加权。
+这些是历史理论匹配率，缓存驱逐后历史仍然存在；实际池复用率单独上报
+`mock_prefill_kv_match_ratio`，不能拿理论值解释实际计算量。
+
+`rtp_llm_context_tps` / `_with_cache` 使用每批执行时间的累计增量，
+`rtp_llm_context_wall_tps` / `_with_cache` 使用实际采样墙钟时间。
+`rtp_llm_generate_tps` 使用逐步生成 token 的增量，包括尚未结束的请求；
+`mock_generate_tokens_total` 仍专门统计已完成请求输出，供完成性验收使用。
