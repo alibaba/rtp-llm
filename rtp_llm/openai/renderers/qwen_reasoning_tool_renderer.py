@@ -1,4 +1,3 @@
-import logging
 from typing import Optional
 
 from typing_extensions import override
@@ -22,7 +21,8 @@ class QwenReasoningToolRenderer(ReasoningToolBaseRenderer):
 
     def _setup_stop_words(self):
         """设置额外的停止词，子类可以重写"""
-        self.add_extra_stop_word_ids([[151643]])  # <|endoftext|>
+        # 旧实现写死 151643（151K 词表上的 <|endoftext|>），词表不同会注册错 token。
+        self.add_extra_stop_word_ids(self.encode_extra_stop_words(["<|endoftext|>"]))
 
     @override
     def _create_detector(
@@ -31,12 +31,8 @@ class QwenReasoningToolRenderer(ReasoningToolBaseRenderer):
         if request.tools:
             detector = Qwen25Detector()
             # 对于qwen3-thinking的模型，注意到tool_call_separator需要设置为"\n\n"
-            try:
-                rendered_result = self.render_chat(request)
-                if rendered_result.rendered_prompt.endswith(self.think_start_tag):
-                    detector.tool_call_separator = "\n\n"
-            except Exception as e:
-                logging.error(f"Failed to render chat in _create_detector: {e}")
+            if self._resolve_think_anchor(request):
+                detector.tool_call_separator = "\n\n"
             return detector
         else:
             return None
@@ -45,18 +41,15 @@ class QwenReasoningToolRenderer(ReasoningToolBaseRenderer):
     def _create_reasoning_parser(
         self, request: ChatCompletionRequest
     ) -> Optional[ReasoningParser]:
-        """当处于think模式时，默认创建qwen3的ReasoningParser, 但是对于qwen3-thinking的模型，需要创建qwen3-thinking的ReasoningParser, 判断方式为渲染的prompt是否以think_start_tag结尾"""
-        if not self.in_think_mode(request):
+        """默认创建 qwen3 的 ReasoningParser；若渲染的 prompt 以 think_start_tag 结尾，
+        说明模板已注入思考锚点，改创建 qwen3-thinking 的 ReasoningParser。"""
+        # 锚点存在即意味着模型会输出思考内容，此时即便请求侧 thinking_mode 为
+        # DISABLED 也必须建解析器，否则思考块会泄漏进可见回复。
+        anchored = self._resolve_think_anchor(request)
+        if not anchored and not self.in_think_mode(request):
             return None
 
-        model_type = "qwen3"
-        try:
-            rendered_result = self.render_chat(request)
-            if rendered_result.rendered_prompt.endswith(self.think_start_tag):
-                model_type = "qwen3-thinking"
-        except Exception as e:
-            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
-        return ReasoningParser(model_type=model_type)
+        return ReasoningParser(model_type="qwen3-thinking" if anchored else "qwen3")
 
 
 register_renderer("qwen_tool", QwenReasoningToolRenderer)

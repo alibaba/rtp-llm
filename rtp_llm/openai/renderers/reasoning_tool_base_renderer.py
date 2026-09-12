@@ -8,6 +8,7 @@ from typing import List, Optional, Tuple
 from jinja2 import BaseLoader, Environment
 from typing_extensions import override
 
+from rtp_llm.config.response_format import prompt_ends_with_think_anchor
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -100,6 +101,26 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """创建Resoning解析器，子类可选实现"""
         return None
 
+    def _prompt_ends_with_think_anchor(self, rendered_prompt: str) -> bool:
+        return prompt_ends_with_think_anchor(rendered_prompt, self.think_start_tag)
+
+    def _resolve_think_anchor(self, request: ChatCompletionRequest) -> bool:
+        """Whether the template injected a think anchor at the end of the prompt.
+
+        The endpoint records this while rendering, so the common path costs
+        nothing. Paths that never rendered through the endpoint fall back to
+        rendering here, which is why this stays tolerant of render failures.
+        """
+        recorded = request.prompt_has_think_anchor()
+        if recorded is not None:
+            return recorded
+        try:
+            rendered_result = self.render_chat(request)
+        except Exception as e:
+            logging.error(f"Failed to render chat while resolving think anchor: {e}")
+            return False
+        return self._prompt_ends_with_think_anchor(rendered_result.rendered_prompt)
+
     def _effective_tools(
         self, request: ChatCompletionRequest
     ) -> Optional[List[GPTToolDefinition]]:
@@ -115,7 +136,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         """创建状态列表"""
-        if (request.tools or self.in_think_mode(request)) and not request.logprobs:
+        if self.needs_reasoning_tool_status(request) and not request.logprobs:
             return [
                 ReasoningToolStreamStatus(
                     request,
