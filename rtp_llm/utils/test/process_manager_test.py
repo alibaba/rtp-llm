@@ -1619,6 +1619,25 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.assertEqual(kills, [], "rank exited within budget and must not be killed")
         self.assertFalse(self.manager.failure_detected)
 
+    def test_exited_children_do_not_wait_for_force_kill_window(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                manager = ProcessManager(shutdown_timeout=30, monitor_interval=0.01)
+                rank = _FakeProc("rank-0", dies_on_terminate=True)
+                manager.add_process(rank)
+                manager.shutdown_requested = True
+                manager.failure_detected = failure
+
+                with patch("time.sleep") as sleep, patch("os.kill") as kill:
+                    manager._monitor_processes_health()
+                    manager._join_all_processes()
+
+                self.assertTrue(rank.terminated)
+                self.assertFalse(rank.is_alive())
+                self.assertEqual(manager.failure_detected, failure)
+                sleep.assert_not_called()
+                kill.assert_not_called()
+
     # --- _join_all_processes always uses POST_KILL_REAP_WINDOW --------------
 
     def test_join_uses_post_kill_reap_window_regardless_of_state(self):

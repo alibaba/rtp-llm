@@ -241,6 +241,11 @@ def setup_jit_cache_env() -> tuple[tuple[Component, ...], bool]:
         local = str(item.local_dir)
         resolved = os.environ.setdefault(item.env_name, local)
         if resolved == local:
+            if item.name == "triton":
+                os.environ.setdefault(
+                    "TRITON_CACHE_MANAGER",
+                    "rtp_llm.utils.jit_cache_triton:RelocatableFileCacheManager",
+                )
             managed.append(item)
         else:
             logging.warning(

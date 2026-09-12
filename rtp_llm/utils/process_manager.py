@@ -715,8 +715,9 @@ class ProcessManager:
                 logging.error("Some processes died unexpectedly, terminating all...")
                 self._terminate_processes(drain_timeout=0, staged=False)
 
-            time.sleep(self.POST_KILL_REAP_WINDOW)
-            self._force_kill_processes()
+            if self._is_any_process_alive():
+                time.sleep(self.POST_KILL_REAP_WINDOW)
+                self._force_kill_processes()
             break
 
     def monitor_and_release_processes(self):
