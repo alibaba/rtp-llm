@@ -249,6 +249,13 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         value = env_default(name)
         if value is not None:
             result[name] = value
+    sp_type = result.setdefault("SP_TYPE", "mtp")
+    model_types = {"mtp": "kimi_k3_mtp", "eagle3": "kimi_k3_mla_swa_eagle3"}
+    if sp_type not in model_types:
+        raise ValueError("this smoke requires SP_TYPE=mtp or eagle3")
+    model_type = result.setdefault("SP_MODEL_TYPE", model_types[sp_type])
+    if model_type != model_types[sp_type]:
+        raise ValueError(f"SP_MODEL_TYPE does not match SP_TYPE={sp_type}")
     artifact_root = env_default(f"{role.upper()}_SMOKE_ARTIFACT_ROOT")
     if artifact_root is not None:
         result["SMOKE_ARTIFACT_ROOT"] = artifact_root

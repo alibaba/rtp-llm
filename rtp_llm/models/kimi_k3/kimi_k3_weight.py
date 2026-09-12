@@ -35,7 +35,7 @@ from rtp_llm.model_loader.weight_module import (
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3RotaryEmbedding,
 )
-from rtp_llm.ops import HybridAttentionType, MlaOpsType, RoleType
+from rtp_llm.ops import HybridAttentionType, KvCacheDataType, MlaOpsType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -915,6 +915,20 @@ class KimiK3MtpWeight(KimiK3Weight):
         }
 
     def _get_weight_info(self):
+        config = self.model_config
+        if (
+            config.compute_dtype != torch.bfloat16
+            or config.k3_attention_quant_config is not None
+            or config.quant_config is not None
+            or config.quant_algo.isQuant()
+            or config.attn_config.mla_fp8_compute
+            or config.attn_config.kv_cache_dtype != KvCacheDataType.BASE
+        ):
+            raise ValueError(
+                "K3 MTP requires native BF16 attention and BASE KV cache without "
+                "runtime quantization; checkpoint-native MXFP4 experts retain "
+                "the existing MegaMoE compute path"
+            )
         info = super()._get_weight_info()
         source_layer = self.model_config.k3_runtime_config.mtp_source_layer
         if source_layer is None:

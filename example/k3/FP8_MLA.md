@@ -4,7 +4,7 @@ This opt-in path uses ordinary E4M3 cache and FP8 attention operands. It is inde
 
 ## Configuration
 
-- `KIMI_K3_MLA_FP8=1`: target MLA cache and attention compute. Default `0`; Eagle3 draft retains its existing policy.
+- `KIMI_K3_MLA_FP8=1`: target MLA cache and attention compute. Default `0`; Eagle3 draft retains its existing policy. K3 MTP attention and KV cache stay native BF16 even when this switch or global FP8/INT8 cache flags are enabled. Native MXFP4 experts and MegaMoE internal FP8 activation compute are unchanged.
 - `KIMI_K3_MLA_FP8_Q_SCALE=1`, `KIMI_K3_MLA_FP8_KV_SCALE=1`: fixed dequantization factors (`real = fp8 * scale`). These are not dynamically calibrated group scales.
 - `KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block`: separate existing online weight quantization switch.
 - Use the existing dense FlashMLA Prefill adapter and TokenSpeed Decode adapter. With MLA FP8 enabled, the Prefill adapter invokes TokenSpeed FP8 Prefill; unsupported backends fail rather than selecting BF16 attention.

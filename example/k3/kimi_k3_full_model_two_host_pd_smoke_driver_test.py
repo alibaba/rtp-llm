@@ -9,6 +9,29 @@ from unittest import mock
 from example.k3 import kimi_k3_full_model_two_host_pd_smoke_driver as driver
 
 class ForwardedOptionalEnvironmentTest(unittest.TestCase):
+    def test_draft_mode_defaults_and_explicit_overrides(self) -> None:
+        for settings, expected in (
+            ({}, ("mtp", "kimi_k3_mtp")),
+            ({"SP_TYPE": "", "SP_MODEL_TYPE": ""}, ("mtp", "kimi_k3_mtp")),
+            ({"SP_TYPE": "mtp"}, ("mtp", "kimi_k3_mtp")),
+            ({"SP_TYPE": "eagle3"}, ("eagle3", "kimi_k3_mla_swa_eagle3")),
+        ):
+            with self.subTest(settings=settings), mock.patch.dict(os.environ, settings, clear=True):
+                for role in ("prefill", "decode"):
+                    env = driver.forwarded_optional_environment(role)
+                    self.assertEqual((env["SP_TYPE"], env["SP_MODEL_TYPE"]), expected)
+
+    def test_invalid_draft_modes_fail_before_remote_launch(self) -> None:
+        for settings in (
+            {"SP_TYPE": "none"},
+            {"SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3"},
+            {"SP_TYPE": "eagle3", "SP_MODEL_TYPE": "kimi_k3_mtp"},
+        ):
+            with self.subTest(settings=settings), mock.patch.dict(os.environ, settings, clear=True):
+                for role in ("prefill", "decode"):
+                    with self.assertRaises(ValueError):
+                        driver.forwarded_optional_environment(role)
+
     def test_precision_modes_and_prefix_budget_reach_both_role_commands(self) -> None:
         args = argparse.Namespace(
             prefill_repo_root="/data1/prefill",
@@ -47,6 +70,8 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
                             tokens = shlex.split(inner)
                             for key, value in settings.items():
                                 self.assertIn(f"{key}={value}", tokens)
+                            self.assertIn("SP_TYPE=mtp", tokens)
+                            self.assertIn("SP_MODEL_TYPE=kimi_k3_mtp", tokens)
                             self.assertEqual(tokens[-2:], [driver.ROLE_SCRIPT, role])
 
     def test_forwards_mtp_mode_to_both_roles(self) -> None:
@@ -116,7 +141,7 @@ class ForwardedOptionalEnvironmentTest(unittest.TestCase):
 
 
 class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
-    def test_parse_args_requires_both_eagle3_checkpoints(self):
+    def test_parse_args_requires_both_draft_checkpoints(self):
         argv = [
             "driver",
             "--prefill-ssh-target",

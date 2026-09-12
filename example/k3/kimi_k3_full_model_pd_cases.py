@@ -82,6 +82,10 @@ def parse_args() -> argparse.Namespace:
             "repeat once per DP rank"
         ),
     )
+    parser.add_argument(
+        "--decode-dp-size", type=int,
+        help="number of Decode DP owners; TP-only uses 1",
+    )
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument(
         "--suite",
@@ -150,9 +154,12 @@ def parse_args() -> argparse.Namespace:
         )
     if args.rdma_prewarm_attempts < 0:
         parser.error("--rdma-prewarm-attempts must be non-negative")
-    if args.suite == "all" and len(args.decode_role_addrs) not in (8, 16):
+    if args.decode_dp_size is not None and args.decode_dp_size <= 0:
+        parser.error("--decode-dp-size must be positive")
+    expected_owners = (args.decode_dp_size,) if args.decode_dp_size is not None else (8, 16)
+    if args.suite == "all" and len(args.decode_role_addrs) not in expected_owners:
         parser.error(
-            "--suite=all requires exactly 8 or 16 ordered --decode-role-addr values"
+            f"--suite=all requires {expected_owners} ordered --decode-role-addr values"
         )
     for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
         if getattr(args, key) < 0:
@@ -549,7 +556,7 @@ class Runner:
                     timeout_s=min(
                         self.args.timeout, self.args.rdma_prewarm_timeout
                     ),
-                    decode_owner_rank=idx,
+                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
                 )
                 for idx in range(self.args.batch_size)
             ]
@@ -632,7 +639,10 @@ class Runner:
 
     def run_all(self) -> None:
         self.prewarm_rdma_pool()
-        batch_owner_ranks = [0, 0] + list(range(1, self.args.batch_size - 1))
+        batch_owner_ranks = [
+            rank % max(1, len(self.decode_role_addrs))
+            for rank in [0, 0] + list(range(1, self.args.batch_size - 1))
+        ]
         self.run_stage(
             "identity_miss",
             [
@@ -829,7 +839,7 @@ class Runner:
 
         uneven_owner_ranks = [0] * 4 + [1] * 3 + [2] * 2 + [3]
         self.run_stage(
-            "dp_uneven_local_batch",
+            "dp_uneven_local_batch" if len(self.decode_role_addrs) > 1 else "single_owner_concurrent_batch",
             [
                 Case(
                     f"dp_uneven_local_batch_{idx}",
@@ -841,7 +851,7 @@ class Runner:
                     ),
                     numbered_answer_pattern((90 + idx) ** 2),
                     "miss",
-                    decode_owner_rank=owner_rank,
+                    decode_owner_rank=owner_rank % max(1, len(self.decode_role_addrs)),
                 )
                 for idx, owner_rank in enumerate(uneven_owner_ranks)
             ],
@@ -961,7 +971,7 @@ class Runner:
                     numbered_answer_pattern((70 + idx) ** 2),
                     "miss",
                     require_chunk=True,
-                    decode_owner_rank=idx,
+                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
                 )
                 for idx, prompt in enumerate(chunk_prompts)
             ],
@@ -976,7 +986,7 @@ class Runner:
                     numbered_answer_pattern((70 + idx) ** 2),
                     "hit",
                     require_chunk=True,
-                    decode_owner_rank=idx,
+                    decode_owner_rank=idx % max(1, len(self.decode_role_addrs)),
                 )
                 for idx, prompt in enumerate(chunk_prompts)
             ],
