@@ -61,6 +61,17 @@ class GenerateConfigTest(TestCase):
             "max_new_tokens": 20,
         }
 
+    def _qwen_tokenizer(self):
+        return QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+
+    def _special_tokens_with_gg(self):
+        special_tokens = SpecialTokens()
+        special_tokens.stop_words_id_list = [[1233, 19912]]
+        special_tokens.stop_words_str_list = ["gg"]
+        return special_tokens
+
     def test_simple(self):
         special_tokens = SpecialTokens()
         generate_config = Pipeline.create_generate_config(
@@ -125,9 +136,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.max_new_tokens, 20)
 
     def test_stop_words_merge(self):
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
+        special_tokens = self._special_tokens_with_gg()
         generate_config = Pipeline.create_generate_config(
             generate_config=self._create_generate_config(),
             vocab_size=100,
@@ -141,12 +150,8 @@ class GenerateConfigTest(TestCase):
         )
 
     def test_stop_words_merge_with_toeknizer(self):
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
+        special_tokens = self._special_tokens_with_gg()
+        tokenizer = self._qwen_tokenizer()
         generate_config = Pipeline.create_generate_config(
             generate_config=self._create_generate_config(),
             vocab_size=100,
@@ -183,10 +188,43 @@ class GenerateConfigTest(TestCase):
                 generate_env_config=GenerateEnvConfig(),
             )
 
+    def test_select_tokens_preserves_order_and_multiplicity(self):
+        tokenizer = self._qwen_tokenizer()
+        self.assertEqual(tokenizer.encode("1"), [16])
+        self.assertEqual(tokenizer.encode("what's your name"), [12555, 594, 697, 829])
+
+        config = GenerateConfig(
+            select_tokens_id=[16],
+            select_tokens_str=["1", "1", "what's your name"],
+        )
+        config.convert_select_tokens(vocab_size=200000, tokenizer=tokenizer)
+
+        self.assertEqual(config.select_tokens_id, [16, 16, 16, 12555, 594, 697, 829])
+
+    def test_select_tokens_validation_failure_leaves_state_unchanged(self):
+        tokenizer = self._qwen_tokenizer()
+        config = GenerateConfig(select_tokens_str=["1"], select_tokens_id=[0])
+        config.convert_select_tokens(vocab_size=200000, tokenizer=tokenizer)
+        self.assertEqual(config.select_tokens_id, [0, 16])
+
+        # A failed retry must not append another encoded token to visible state.
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            config.convert_select_tokens(vocab_size=16, tokenizer=tokenizer)
+        self.assertEqual(config.select_tokens_id, [0, 16])
+
+        negative_config = GenerateConfig(select_tokens_id=[-1])
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            negative_config.convert_select_tokens(
+                vocab_size=200000, tokenizer=tokenizer
+            )
+        self.assertEqual(negative_config.select_tokens_id, [-1])
+
     def test_same(self):
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
+        special_tokens = self._special_tokens_with_gg()
 
         a = Pipeline.create_generate_config(
             generate_config=self._create_generate_config(),
@@ -211,9 +249,7 @@ class GenerateConfigTest(TestCase):
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
         special_tokens = SpecialTokens()
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
+        tokenizer = self._qwen_tokenizer()
         generate_config_dict = self._create_generate_config()
         generate_config_dict.update({"max_thinking_tokens": 109})
         generate_config = Pipeline.create_generate_config(
@@ -382,6 +418,33 @@ class OpenaiGenerateConfigTest(TestCase):
             backend_rpc_server_visitor=None,
         )
         return openai_endpoint._extract_generation_config(request)
+
+    def test_select_tokens_preserves_order_and_multiplicity(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(
+                select_tokens_id=[16],
+                select_tokens_str=["1", "1", "what's your name"],
+            ),
+        )
+
+        config = self._extract_openai_generation_config(request)
+
+        self.assertEqual(config.select_tokens_id, [16, 16, 16, 12555, 594, 697, 829])
+
+    def test_select_tokens_validation_failure_leaves_state_unchanged(self):
+        invalid_id = len(self.tokenizer)
+        extra_configs = GenerateConfig(
+            select_tokens_id=[invalid_id], select_tokens_str=["1"]
+        )
+        request = ChatCompletionRequest(messages=[], extra_configs=extra_configs)
+
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(extra_configs.select_tokens_id, [invalid_id])
 
     def _assert_reasoning_envelope_wraps_json_object(self, config: GenerateConfig):
         """in_think_mode moves the final constraint inside the reasoning tag."""

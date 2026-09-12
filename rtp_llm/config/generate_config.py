@@ -569,16 +569,16 @@ class GenerateConfig(BaseModel):
         return config
 
     def convert_select_tokens(self, vocab_size, tokenizer):
+        # Validate the complete result before replacing caller-visible state.
+        merged = list(self.select_tokens_id)
         for token_str in self.select_tokens_str:
-            self.select_tokens_id += tokenizer.encode(token_str)
-        if not all(
-            token_id < vocab_size and token_id >= 0
-            for token_id in self.select_tokens_id
-        ):
+            merged += tokenizer.encode(token_str)
+        if not all(token_id < vocab_size and token_id >= 0 for token_id in merged):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                f"token_id in select_tokens_id {self.select_tokens_id} should be less than vocab_size {vocab_size}, and shoud not be negative",
+                f"token_id in select_tokens_id {merged} should be less than vocab_size {vocab_size}, and shoud not be negative",
             )
+        self.select_tokens_id = merged
 
     def add_special_tokens(self, special_tokens: Any):
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
