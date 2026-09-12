@@ -765,6 +765,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.v41_token_valid      = inputs.v41_token_valid.to(torch::kCUDA, true);
             py_model_inputs.engram_history_ids   = inputs.engram_history_ids.to(torch::kCUDA, true);
             py_model_inputs.engram_history_valid = inputs.engram_history_valid.to(torch::kCUDA, true);
+            py_model_inputs.request_id           = inputs.v41_request_id;
+            py_model_inputs.v41_state_ready      = inputs.v41_state_ready;
+            py_model_inputs.v41_is_fake          = inputs.v41_is_fake;
         }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;

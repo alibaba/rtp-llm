@@ -15,7 +15,7 @@ namespace rtp_llm {
 namespace {
 
 using TensorField = std::pair<const char*, torch::Tensor GptModelInputs::*>;
-const std::array<TensorField, 11> kTensorFields{{
+const std::array<TensorField, 18> kTensorFields{{
     {"combo_tokens", &GptModelInputs::combo_tokens},
     {"input_lengths", &GptModelInputs::input_lengths},
     {"sequence_lengths", &GptModelInputs::sequence_lengths},
@@ -27,6 +27,13 @@ const std::array<TensorField, 11> kTensorFields{{
     {"mm_features_spans", &GptModelInputs::mm_features_spans},
     {"request_id", &GptModelInputs::request_id},
     {"request_pd_separation", &GptModelInputs::request_pd_separation},
+    {"v41_token_types", &GptModelInputs::v41_token_types},
+    {"v41_token_valid", &GptModelInputs::v41_token_valid},
+    {"engram_history_ids", &GptModelInputs::engram_history_ids},
+    {"engram_history_valid", &GptModelInputs::engram_history_valid},
+    {"v41_request_id", &GptModelInputs::v41_request_id},
+    {"v41_state_ready", &GptModelInputs::v41_state_ready},
+    {"v41_is_fake", &GptModelInputs::v41_is_fake},
 }};
 
 using BoolField = std::pair<const char*, bool GptModelInputs::*>;

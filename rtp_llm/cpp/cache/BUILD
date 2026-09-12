@@ -68,7 +68,6 @@ cc_library(
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
         "SharedBlockCache.cc",
-        "DSV41SharedBlockCache.cc",
     ],
     hdrs = [
         "BlockCache.h",
@@ -208,7 +207,7 @@ cc_library(
 
 cc_library(
     name = "dsv41_checkpoint_state",
-    hdrs = ["DSV41CacheState.h", "DSV41GpuCheckpointCache.h"],
+    hdrs = ["DSV41CacheState.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
 )

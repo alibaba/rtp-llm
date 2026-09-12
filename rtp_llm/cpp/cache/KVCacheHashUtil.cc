@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/utils/HashUtil.h"
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 
 namespace rtp_llm {
 
@@ -18,7 +19,8 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->clearCacheKeys(i);
 
-        int64_t rolling_hash = 0;
+        const auto& state        = batch_kv_cache_resource->cacheResource(i).dsv41CacheState();
+        int64_t     rolling_hash = state ? state->view().identity.cacheKeySeed() : 0;
         auto*   token_ids    = complete_token_ids->data(i);
         for (int index = 0; index < desired_blocks; ++index) {
             const int pos       = index * seq_size_per_block;
@@ -57,7 +59,8 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         }
 
         auto*   token_ids = complete_token_ids->data(i);
-        int64_t hash      = keys.empty() ? 0 : keys.back();
+        const auto& state     = batch_kv_cache_resource->cacheResource(i).dsv41CacheState();
+        int64_t     hash      = keys.empty() ? (state ? state->view().identity.cacheKeySeed() : 0) : keys.back();
         int     start_idx = static_cast<int>(keys.size());
 
         for (int index = start_idx; index < total_blocks; ++index) {

@@ -95,7 +95,8 @@ private:
     std::shared_ptr<P2PConnector>                     p2p_connector_;
     mutable std::mutex                                update_mutex_;
     std::list<std::shared_ptr<FusedAsyncReadContext>> fused_async_read_context_list_;
-    std::list<std::shared_ptr<FusedAsyncContext>>     fused_async_write_context_list_;
+    std::list<std::pair<std::shared_ptr<FusedAsyncContext>, std::shared_ptr<KVCacheConnectorReadWriteContext>>>
+                                                      fused_async_write_context_list_;
     autil::LoopThreadPtr                              update_thread_;
     const int                                         update_interval_ms_{1};
     std::atomic<bool>                                 stop_{false};

@@ -12,6 +12,7 @@ public:
 public:
     virtual const std::shared_ptr<Meta>& meta() const            = 0;
     virtual const KVCacheResource&       kvCacheResource() const = 0;
+    virtual void                         onWriteComplete(bool) const {}
 };
 
 }  // namespace rtp_llm

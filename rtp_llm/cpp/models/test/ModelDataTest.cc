@@ -53,6 +53,30 @@ public:
 
 class ModelDataTest: public DeviceTestBase {};
 
+namespace {
+
+const std::array<torch::Tensor GptModelInputs::*, 3> kV41ExecutionFields{
+    &GptModelInputs::v41_request_id, &GptModelInputs::v41_state_ready, &GptModelInputs::v41_is_fake};
+
+GptModelInputs makeV41DecodeInputs() {
+    GptModelInputs inputs;
+    inputs.combo_tokens         = torch::tensor({101, 202}, torch::kInt32);
+    inputs.input_lengths        = torch::tensor({4, 7}, torch::kInt32);
+    inputs.sequence_lengths     = torch::tensor({11, 22}, torch::kInt32);
+    inputs.prefix_lengths       = torch::empty({0}, torch::kInt32);
+    inputs.request_id           = torch::empty({0}, torch::kInt64);
+    inputs.v41_token_types      = torch::full({2}, -1, torch::kInt32);
+    inputs.v41_token_valid      = torch::ones({2}, torch::kBool);
+    inputs.engram_history_ids   = torch::arange(6, torch::kInt32).reshape({2, 3});
+    inputs.engram_history_valid = torch::ones({2, 3}, torch::kBool);
+    inputs.v41_request_id       = torch::tensor({(int64_t{1} << 40) + 17, (int64_t{1} << 40) + 23}, torch::kInt64);
+    inputs.v41_state_ready      = torch::ones({2}, torch::kBool);
+    inputs.v41_is_fake          = torch::zeros({2}, torch::kBool);
+    return inputs;
+}
+
+}  // namespace
+
 TEST_F(ModelDataTest, testConstruct) {
     SamplerDataBuilder builder;
     SamplerInputs      sampler_inputs   = builder.allocate({4, 1024, 1024});
@@ -125,6 +149,96 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(5, 2), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
+}
+
+TEST_F(ModelDataTest, testV41ExecutionShapeHintsIncludeDecodeRequests) {
+    auto inputs = makeV41DecodeInputs();
+    auto hints  = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::inputLengths], 2);
+    EXPECT_EQ(hints[GptModelInputIndex::gptModelRequestLength], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::v41InputsPresent], 1);
+    EXPECT_EQ(hints[GptModelInputIndex::v41ExecutionPresent], 1);
+    const auto wire = makeModelInputShapeHintsTensor(inputs);
+    EXPECT_EQ(wire.data_ptr<int64_t>()[GptModelInputIndex::v41ExecutionPresent], 1);
+
+    for (const auto member : kV41ExecutionFields) {
+        inputs.*member = torch::Tensor();
+    }
+    hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::v41InputsPresent], 1);
+    EXPECT_EQ(hints[GptModelInputIndex::v41ExecutionPresent], 0);
+    EXPECT_EQ(getModelInputShapeHints(GptModelInputs{})[GptModelInputIndex::v41ExecutionPresent], 0);
+}
+
+TEST_F(ModelDataTest, testV41ExecutionMetadataMustBeCompleteAndCanonical) {
+    for (int present_mask = 1; present_mask < 7; ++present_mask) {
+        SCOPED_TRACE(present_mask);
+        auto inputs = makeV41DecodeInputs();
+        for (size_t index = 0; index < kV41ExecutionFields.size(); ++index) {
+            if (!(present_mask & (1 << index))) {
+                inputs.*kV41ExecutionFields[index] = torch::Tensor();
+            }
+        }
+        EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+    }
+    auto inputs                 = makeV41DecodeInputs();
+    inputs.v41_token_types      = torch::Tensor();
+    inputs.v41_token_valid      = torch::Tensor();
+    inputs.engram_history_ids   = torch::Tensor();
+    inputs.engram_history_valid = torch::Tensor();
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+}
+
+TEST_F(ModelDataTest, testV41ExecutionMetadataRejectsWrongShapeTypeAndStorage) {
+    for (size_t index = 0; index < kV41ExecutionFields.size(); ++index) {
+        SCOPED_TRACE(index);
+        const auto member = kV41ExecutionFields[index];
+        auto       inputs = makeV41DecodeInputs();
+        inputs.*member    = (inputs.*member).to(torch::kInt32);
+        EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+
+        inputs         = makeV41DecodeInputs();
+        inputs.*member = (inputs.*member).narrow(0, 0, 1);
+        EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+
+        inputs         = makeV41DecodeInputs();
+        inputs.*member = (inputs.*member).reshape({1, 2});
+        EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+
+        inputs         = makeV41DecodeInputs();
+        inputs.*member = torch::zeros({4}, (inputs.*member).options()).slice(0, 0, 4, 2);
+        EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+
+        inputs         = makeV41DecodeInputs();
+        inputs.*member = (inputs.*member).to(torch::kCUDA);
+        EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+    }
+    auto inputs          = makeV41DecodeInputs();
+    inputs.input_lengths = torch::Tensor();
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+    inputs.input_lengths = torch::zeros({1, 2}, torch::kInt32);
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+}
+
+TEST_F(ModelDataTest, testEmptyV41ExecutionMetadataRemainsExplicitlyPresent) {
+    auto inputs = makeV41DecodeInputs();
+    for (const auto member : {&GptModelInputs::combo_tokens,
+                              &GptModelInputs::input_lengths,
+                              &GptModelInputs::sequence_lengths,
+                              &GptModelInputs::v41_token_types,
+                              &GptModelInputs::v41_token_valid,
+                              &GptModelInputs::engram_history_ids,
+                              &GptModelInputs::engram_history_valid,
+                              &GptModelInputs::v41_request_id,
+                              &GptModelInputs::v41_state_ready,
+                              &GptModelInputs::v41_is_fake}) {
+        inputs.*member = (inputs.*member).narrow(0, 0, 0);
+    }
+    const auto hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::comboTokens], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::inputLengths], 0);
+    EXPECT_EQ(hints[GptModelInputIndex::v41InputsPresent], 1);
+    EXPECT_EQ(hints[GptModelInputIndex::v41ExecutionPresent], 1);
 }
 
 }  // namespace rtp_llm

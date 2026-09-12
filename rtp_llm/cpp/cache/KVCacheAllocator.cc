@@ -12,6 +12,32 @@
 
 namespace rtp_llm {
 
+void KVCacheAllocator::restoreBlocksToCache(const BatchKVCacheResourcePtr& batch) {
+    if (!batch || !shared_block_cache_)
+        return;
+    for (int b = 0; b < batch->batchSize(); ++b) {
+        const auto& resource = batch->cacheResource(b);
+        for (size_t index = 0; index < resource.cacheKeys().size(); ++index) {
+            std::vector<BlockIdxType> slots(resource.groupNums(), NULL_BLOCK_IDX);
+            for (int group = 0; group < resource.groupNums(); ++group) {
+                if (index < resource.blocks(group).size())
+                    slots[group] = resource.blocks(group)[index];
+            }
+            const auto& deps = resource.blockDependencies();
+            const auto  dep =
+                index < deps.size() ? deps[index] : BlockDependency{false, 0, static_cast<uint32_t>(index)};
+            shared_block_cache_->put(resource.cacheKeys()[index],
+                                     slots,
+                                     false,
+                                     resource.cacheKeysAreCpCanonical() ? SharedBlockCache::kGpuCpCanonicalNamespace :
+                                                                          SharedBlockCache::kGpuLogicalNamespace,
+                                     dep,
+                                     {},
+                                     resource.dsv41RecoveryMetadata(index));
+        }
+    }
+}
+
 bool KVCacheAllocator::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 

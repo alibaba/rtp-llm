@@ -1,11 +1,12 @@
 """Two local GPU component regression for the production ModelTypes tpSync.
 
 This is exact transport/state testing, not CP8 or disaggregated model acceptance.
-All six rounds use the production NCCL callbacks, including CPU shape metadata.
+All rounds use the production NCCL callbacks, including CPU shape metadata.
 """
 
 import ctypes
 import hashlib
+import importlib
 import json
 import multiprocessing as mp
 import os
@@ -20,6 +21,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+
 from rtp_llm.test.utils.port_util import PortManager
 
 _WORLD_SIZE = 2
@@ -31,7 +33,35 @@ _ROUND_SPECS = (
     ("image_to_text_with_positions", 4, 401, (), 0, torch.float32),
     ("text_without_positions", 6, None, (), 0, torch.float32),
     ("text_to_image_bf16", 8, 701, (1, 2), 3, torch.bfloat16),
+    ("v41_prefill_two_requests", 6, None, (), 0, torch.float32),
+    ("v41_decode_three_requests", 3, None, (), 0, torch.float32),
+    ("v41_decode_one_request", 1, None, (), 0, torch.float32),
+    ("v41_empty_batch", 0, None, (), 0, torch.float32),
+    ("v41_canonical_only", 2, None, (), 0, torch.float32),
+    ("text_after_v41_without_metadata", 3, None, (), 0, torch.float32),
 )
+_V41_FIELDS = (
+    "v41_token_types",
+    "v41_token_valid",
+    "engram_history_ids",
+    "engram_history_valid",
+    "v41_request_id",
+    "v41_state_ready",
+    "v41_is_fake",
+)
+# Input lengths, prefix lengths, sequence lengths, restored state, fake requests.
+_V41_EXECUTION_ROUNDS = {
+    "v41_prefill_two_requests": ((2, 4), (0, 16), (), (False, True), (False, False)),
+    "v41_decode_three_requests": (
+        (4, 5, 6),
+        (),
+        (33, 1, 91),
+        (True, False, True),
+        (False, True, False),
+    ),
+    "v41_decode_one_request": ((4,), (), (34,), (True,), (False,)),
+    "v41_empty_batch": ((), (), (), (), ()),
+}
 _DEVICE_MAP_FIELDS = (
     "combo_tokens",
     "input_lengths",
@@ -83,6 +113,7 @@ def _expected_round(index):
         "need_all_hidden_states": bool((index + 1) % 2),
         "is_fake_stream": bool(index == 2),
     }
+    expected.update({field: None for field in _V41_FIELDS})
     devices = {key: "cpu" for key, value in expected.items() if torch.is_tensor(value)}
     for field_index, field in enumerate(_DEVICE_MAP_FIELDS):
         devices[field] = "cuda" if (field_index + index) % 2 else "cpu"
@@ -109,6 +140,41 @@ def _expected_round(index):
         devices.update(
             text_tokens_mask="cpu", mm_features_locs="cpu", mm_features_spans="cpu"
         )
+    if name in _V41_EXECUTION_ROUNDS or name == "v41_canonical_only":
+        valid = torch.ones(token_count, dtype=torch.bool)
+        if name in _V41_EXECUTION_ROUNDS:
+            lengths, prefixes, sequences, ready, fake = _V41_EXECUTION_ROUNDS[name]
+            batch_size = len(lengths)
+            expected["input_lengths"] = torch.tensor(lengths, dtype=torch.int32)
+            expected["prefix_lengths"] = torch.tensor(prefixes, dtype=torch.int32)
+            expected["sequence_lengths"] = torch.tensor(sequences, dtype=torch.int32)
+            expected["request_id"] = torch.arange(len(prefixes), dtype=torch.int64) + (
+                1 << 40
+            )
+            expected["request_pd_separation"] = torch.zeros(
+                len(prefixes), dtype=torch.bool
+            )
+            expected["v41_request_id"] = (
+                torch.arange(batch_size, dtype=torch.int64) + (1 << 48) + index * 10
+            )
+            expected["v41_state_ready"] = torch.tensor(ready, dtype=torch.bool)
+            expected["v41_is_fake"] = torch.tensor(fake, dtype=torch.bool)
+            expected["v41_request_id"][expected["v41_is_fake"]] = 0
+            row_counts = torch.tensor(
+                lengths if prefixes else (1,) * batch_size, dtype=torch.int64
+            )
+            expected["lm_output_indexes"] = (row_counts.cumsum(0) - 1).to(torch.int32)
+            valid = torch.repeat_interleave(~expected["v41_is_fake"], row_counts)
+        expected["v41_token_types"] = torch.full((token_count,), -1, dtype=torch.int32)
+        expected["v41_token_valid"] = valid
+        expected["engram_history_ids"] = (
+            torch.arange(token_count * 3, dtype=torch.int32).reshape(token_count, 3)
+            + index * 100
+        )
+        expected["engram_history_valid"] = valid[:, None].expand(-1, 3).contiguous()
+        for field in _V41_FIELDS:
+            if torch.is_tensor(expected[field]):
+                devices[field] = "cpu"
     return name, expected, devices
 
 
@@ -195,7 +261,7 @@ def _worker(rank, port, uds_dir, output_dir):
         # Register config types before compute-op default arguments use them.
         from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
-        import librtp_compute_ops
+        librtp_compute_ops = importlib.import_module("librtp_compute_ops")
 
         # Resolve the test bridge against the production communication registry.
         runtime_library = ctypes.CDLL(

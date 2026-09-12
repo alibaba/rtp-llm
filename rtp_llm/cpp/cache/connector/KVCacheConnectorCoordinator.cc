@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
@@ -70,6 +71,10 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
                         group_types,
                         cache_config.layer_region_to_group_id);
     selected.setCacheKeys(selected_keys);
+    if (cache_config.dsv41_cache_layout_version != 0) {
+        selected.setCacheKeysAreCpCanonical(true);
+        selected.setBlockIdsKeyAligned(true);
+    }
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
     selected.setLastBlockAligned(selected_aligned);
 
@@ -311,7 +316,7 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
     auto fused_write_context = std::make_shared<FusedAsyncContext>(std::move(write_contexts));
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
-        fused_async_write_context_list_.push_back(fused_write_context);
+        fused_async_write_context_list_.emplace_back(fused_write_context, connector_context);
     }
     return fused_write_context;
 }
@@ -367,6 +372,11 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
 }
 
 int KVCacheConnectorCoordinator::cpSize() const {
+    if (cache_config_.dsv41_cache_layout_version != 0) {
+        const auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs.at(5));
+        if (spec && !spec->prefill_byte_slice)
+            return 1;
+    }
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
     if (!cp_cfg.kv_cache_sharded) {
         return 1;
@@ -411,15 +421,20 @@ void KVCacheConnectorCoordinator::processReadContexts() {
 }
 
 void KVCacheConnectorCoordinator::processWriteContexts() {
-    std::lock_guard<std::mutex> lock(update_mutex_);
-    for (auto it = fused_async_write_context_list_.begin(); it != fused_async_write_context_list_.end();) {
-        auto fused_write_context = *it;
-        if (fused_write_context->done()) {
-            it = fused_async_write_context_list_.erase(it);
-            continue;
+    decltype(fused_async_write_context_list_) completed;
+    {
+        std::lock_guard<std::mutex> lock(update_mutex_);
+        for (auto it = fused_async_write_context_list_.begin(); it != fused_async_write_context_list_.end();) {
+            if (it->first->done()) {
+                auto done = it++;
+                completed.splice(completed.end(), fused_async_write_context_list_, done);
+            } else {
+                ++it;
+            }
         }
-        it = std::next(it);
     }
+    for (const auto& item : completed)
+        item.second->onWriteComplete(item.first->success());
 }
 
 // this function is called under lock

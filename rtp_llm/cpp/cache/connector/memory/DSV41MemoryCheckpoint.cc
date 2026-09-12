@@ -2,75 +2,37 @@
 
 #include <algorithm>
 #include <cstring>
-#include <map>
 #include <set>
-#include <sstream>
 
 #include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 namespace {
 
-class DSV41CompletedContext final: public AsyncContext {
+class DSV41ProtectedSnapshot final: public DSV41CheckpointSnapshot {
 public:
-    explicit DSV41CompletedContext(bool success): success_(success) {}
-    void waitDone() override {}
-    bool done() const override {
-        return true;
-    }
-    bool success() const override {
-        return success_;
-    }
+    DSV41ProtectedSnapshot(const DSV41CheckpointMetadata&          metadata,
+                           std::shared_ptr<KVCacheMemoryConnector> owner,
+                           std::shared_ptr<void>                   copy_plan):
+        DSV41CheckpointSnapshot(metadata), owner_(std::move(owner)), copy_plan_(std::move(copy_plan)) {}
 
 private:
-    bool success_;
+    // CopyPlan releases pins through its owner, so destroy the plan first.
+    std::shared_ptr<KVCacheMemoryConnector> owner_;
+    std::shared_ptr<void>                   copy_plan_;
 };
-
-struct DSV41ReadLease {
-    std::shared_ptr<PrefixTreeMemoryBlockCache> tree;
-    DSV41CacheIdentity                          identity;
-    PrefixTreeMemoryBlockCache::DSV41Match      match;
-    std::mutex                                  read_mutex;
-    bool                                        consumed{false};
-    ~DSV41ReadLease() {
-        tree->releaseDsv41InFlight(identity, match);
-    }
-};
-
-bool copyFinished(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result) {
-    if (!result)
-        return false;
-    result->waitDone();
-    if (!result->success())
-        return false;
-    for (const auto& response : result->responses()) {
-        if (!response.has_mem_response() || !response.mem_response().success())
-            return false;
-    }
-    return true;
-}
 
 }  // namespace
 
-struct KVCacheMemoryConnector::DSV41StagedSnapshot final: public DSV41CheckpointSnapshot {
-    DSV41StagedSnapshot(const DSV41CheckpointMetadata&                      metadata,
-                        std::shared_ptr<CopyPlan>                           plan,
-                        std::shared_ptr<PrefixTreeMemoryBlockCache>         tree,
-                        std::vector<PrefixTreeMemoryBlockCache::DSV41Entry> entries):
-        DSV41CheckpointSnapshot(metadata), plan(std::move(plan)), tree(std::move(tree)), entries(std::move(entries)) {}
-    std::shared_ptr<CopyPlan>                           plan;
-    std::shared_ptr<PrefixTreeMemoryBlockCache>         tree;
-    std::vector<PrefixTreeMemoryBlockCache::DSV41Entry> entries;
-};
-
 bool KVCacheMemoryConnector::isDsv41TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const {
-    if (cache_config_.dsv41_cache_layout_version != 1 || cache_config_.layer_all_num != 43
-        || cache_config_.cache_specs.size() != 6 || slots.size() != 54 || !cache_config_.use_typed_cache_regions
-        || !cache_config_.use_opaque_kv_cache_store || !cache_config_.use_independent_block_pools)
+    if (cache_config_.dsv41_cache_layout_version != 1
+        || (cache_config_.layer_all_num != 40 && cache_config_.layer_all_num != 43)
+        || cache_config_.cache_specs.size() != 6 || slots.size() != cache_config_.layer_all_num + 11
+        || !cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store
+        || !cache_config_.use_independent_block_pools)
         return false;
     std::set<int> global, index, pair, swa;
     for (const auto& slot : slots) {
@@ -98,31 +60,29 @@ bool KVCacheMemoryConnector::isDsv41TypedCacheLayout(const std::vector<LayerRegi
         }
     }
     return global == std::set<int>({2, 8, 14, 20}) && index == global && pair == std::set<int>({2, 8, 14})
-           && swa.size() == 43 && *swa.begin() == 0 && *swa.rbegin() == 42;
+           && swa.size() == cache_config_.layer_all_num && *swa.begin() == 0
+           && *swa.rbegin() == static_cast<int>(cache_config_.layer_all_num) - 1;
 }
 
 std::string KVCacheMemoryConnector::dsv41LayoutFingerprint() const {
     const auto slots = layerRegionSlots();
     if (!isDsv41TypedCacheLayout(slots))
         throw std::logic_error("invalid V4.1 memory layout");
-    std::ostringstream output;
-    output << "dsv41-memory-v1:target40:draft3:";
-    for (size_t group = 0; group < cache_config_.cache_specs.size(); ++group) {
-        output << group << ':' << cache_config_.cache_specs[group]->debugString() << ":owners=";
-        for (const auto& slot : slots) {
-            if (static_cast<size_t>(slot.group_id) == group)
-                output << slot.layer_id << ',';
-        }
-        output << ';';
-    }
-    return output.str();
+    return cache_config_.dsv41LayoutFingerprint();
 }
 
 size_t KVCacheMemoryConnector::dsv41ReuseUnit() const {
     auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs.at(5));
     if (!spec)
-        throw std::logic_error("V4.1 checkpoint has no typed SWA spec");
+        throw std::logic_error("V4.1 cache has no typed SWA spec");
     return cache_config_.seq_size_per_block * spec->cp_size;
+}
+
+size_t KVCacheMemoryConnector::dsv41DataUnit() const {
+    const auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs.at(5));
+    if (!spec)
+        throw std::logic_error("V4.1 cache has no typed SWA spec");
+    return cache_config_.seq_size_per_block * (spec->prefill_byte_slice ? spec->cp_size : 1);
 }
 
 DSV41CacheIdentity KVCacheMemoryConnector::dsv41CacheIdentity(const std::string& model_revision,
@@ -133,378 +93,145 @@ DSV41CacheIdentity KVCacheMemoryConnector::dsv41CacheIdentity(const std::string&
     return identity;
 }
 
-std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
-KVCacheMemoryConnector::createDsv41CopyPlan(std::vector<CopyInfoPerKey> infos, CopyDirection direction) {
-    auto compressed = compressed_pool_;
-    auto state      = state_swa_pool_;
-    auto deleter    = [compressed, state](CopyPlan* plan) {
-        for (const auto& info : plan->copy_infos) {
-            if (info.mem_block > 0) {
-                auto pool = info.kind == CacheBlockKind::COMPRESSED_KV ? compressed : state;
-                pool->requestFree(info.mem_block);
-            }
-        }
-        delete plan;
-    };
-    auto result        = std::shared_ptr<CopyPlan>(new CopyPlan(), std::move(deleter));
-    result->copy_infos = std::move(infos);
-    result->direction  = direction;
-    return result;
+bool KVCacheMemoryConnector::dsv41ResourceCompatible(const KVCacheResource& resource) const {
+    const auto spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs.at(5));
+    if (!spec || (spec->cp_size > 1 && spec->prefill_byte_slice && !resource.cacheKeysAreCpCanonical()))
+        return false;
+    if (resource.dsv41CacheState()) {
+        const auto view = resource.dsv41CacheState()->view();
+        return view.identity == dsv41CacheIdentity(view.identity.model_revision, view.identity.replay_mode);
+    }
+    return resource.blockIdsAreKeyAligned();
 }
 
-bool KVCacheMemoryConnector::allocateDsv41Backings(std::vector<CopyInfoPerKey>& infos) {
-    size_t compressed = 0, state = 0;
-    for (const auto& info : infos) {
-        if (info.kind == CacheBlockKind::COMPRESSED_KV)
-            ++compressed;
-        else
-            ++state;
-    }
-    if (compressed > compressed_pool_->totalBlocksNum() || state > state_swa_pool_->totalBlocksNum())
+bool KVCacheMemoryConnector::validDsv41Recovery(const KVCacheResource&                                resource,
+                                                size_t                                                block_index,
+                                                const std::shared_ptr<const DSV41CheckpointMetadata>& metadata) const {
+    if (!metadata || (!resource.dsv41CacheState() && !resource.blockIdsAreKeyAligned())
+        || block_index >= resource.blockDependencies().size())
         return false;
-    while (compressed_pool_->freeBlocksNum() < compressed || state_swa_pool_->freeBlocksNum() < state) {
-        const auto evicted = prefix_block_cache_->popOldestDsv41JointEvictable();
-        if (evicted.empty())
-            return false;
-        for (const auto& item : evicted) {
-            memoryPoolFor(item.kind)->blockCacheFree(item.block_index);
-            reportEvictionLifetime(item.kind, item.backing_type, item.created_time_us);
-        }
+    try {
+        metadata->validate(dsv41ReuseUnit());
+        const auto& dependency = resource.blockDependencies()[block_index];
+        return metadata->identity
+                   == dsv41CacheIdentity(metadata->identity.model_revision, metadata->identity.replay_mode)
+               && (!resource.dsv41CacheState() || metadata->identity == resource.dsv41CacheState()->view().identity)
+               && metadata->materialized_end
+                      == static_cast<int64_t>((uint64_t{dependency.ordinal} + 1) * dsv41DataUnit());
+    } catch (const std::exception&) {
+        return false;
     }
-    std::vector<size_t> allocated;
-    for (size_t i = 0; i < infos.size(); ++i) {
-        auto blocks = memoryPoolFor(infos[i].kind)->malloc(1);
-        if (blocks.size() != 1 || blocks.front() <= 0) {
-            for (auto index : allocated) {
-                memoryPoolFor(infos[index].kind)->requestFree(infos[index].mem_block);
-                infos[index].mem_block = NULL_BLOCK_IDX;
+}
+
+std::optional<size_t> KVCacheMemoryConnector::dsv41SlotIndex(const KVCacheResource& resource,
+                                                             size_t                 key_index,
+                                                             const LayerRegionSlot& slot) const {
+    if (resource.blockIdsAreKeyAligned() || kindForSlot(slot) == CacheBlockKind::COMPRESSED_KV)
+        return key_index;
+    if (key_index >= resource.blockDependencies().size())
+        return std::nullopt;
+    const uint64_t end = (uint64_t{resource.blockDependencies()[key_index].ordinal} + 1) * dsv41DataUnit();
+    if (end == 0 || end % dsv41ReuseUnit() != 0)
+        return std::nullopt;
+    return end / dsv41ReuseUnit() - 1;
+}
+
+bool KVCacheMemoryConnector::bindDsv41ReadPlan(CopyPlan&                           plan,
+                                               const KVCacheResource&              resource,
+                                               const std::vector<LayerRegionSlot>& slots) {
+    for (auto it = plan.copy_infos.begin(); it != plan.copy_infos.end();) {
+        auto&      info  = *it;
+        const auto found = std::find(resource.cacheKeys().begin(), resource.cacheKeys().end(), info.cache_key);
+        if (found == resource.cacheKeys().end())
+            return false;
+        const size_t index  = found - resource.cacheKeys().begin();
+        bool         usable = info.kind != CacheBlockKind::STATE_SWA_KV
+                      || (resource.dsv41CacheState() && validDsv41Recovery(resource, index, info.recovery_metadata));
+        info.gpu_blocks.assign(slots.size(), NULL_BLOCK_IDX);
+        for (size_t s = 0; s < slots.size(); ++s) {
+            if (kindForSlot(slots[s]) != info.kind)
+                continue;
+            const auto& blocks     = resource.blocks(slots[s].layer_id, slots[s].region_name);
+            const auto  slot_index = dsv41SlotIndex(resource, index, slots[s]);
+            if (!slot_index || *slot_index >= blocks.size() || blocks[*slot_index] <= 0) {
+                usable = false;
+                break;
             }
-            return false;
+            info.gpu_blocks[s] = blocks[*slot_index];
         }
-        infos[i].mem_block = blocks.front();
-        allocated.push_back(i);
+        if (!usable) {
+            if (info.kind != CacheBlockKind::STATE_SWA_KV)
+                return false;
+            auto release = createCopyPlan({info}, CopyDirection::H2D);
+            it           = plan.copy_infos.erase(it);
+        } else {
+            ++it;
+        }
     }
-    return true;
+    return !plan.copy_infos.empty();
 }
 
 bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheResource>& resource,
-                                                  const std::function<void()>&            wait_for_producer) {
-    if (!resource || !resource->dsv41CacheState() || !wait_for_producer || stop_.load())
+                                                  const std::function<void()>&            wait_for_producer,
+                                                  const std::shared_ptr<Meta>&            meta) {
+    if (!resource || !resource->dsv41CacheState() || !wait_for_producer || !meta || stop_.load())
         return false;
-    auto state = resource->dsv41CacheState();
-    auto view  = state->view();
-    if (!view.completed || view.finished || view.cancelled
+    auto owner = weak_from_this().lock();
+    if (!owner)
+        return false;
+    const auto state = resource->dsv41CacheState();
+    const auto view  = state->view();
+    if (!view.completed || view.finished || view.cancelled || !dsv41ResourceCompatible(*resource)
         || view.encoder_materialized_end != view.decoder_checkpoint_end
-        || view.completed->materialized_end != view.decoder_checkpoint_end
-        || !(view.identity == dsv41CacheIdentity(view.identity.model_revision, view.identity.replay_mode)))
-        return false;
-    const auto unit     = dsv41ReuseUnit();
-    const auto swa_spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs[5]);
-    if (swa_spec->cp_size > 1 && !swa_spec->prefill_byte_slice) {
-        throw std::logic_error("V4.1 decode memory requires explicit eight-shard global copy planning");
-    }
-    view.completed->validate(unit);
-    const size_t count = view.completed->materialized_end / unit;
-    if (count == 0 || resource->cacheKeys().size() < count)
-        return false;
-    // CP8 uses the existing canonical last-rank-key resource. D-side gathering
-    // of all eight CP shards is provided by its runtime coordinator, not guessed.
-    if (unit != cache_config_.seq_size_per_block && !resource->cacheKeysAreCpCanonical())
+        || view.completed->materialized_end != view.decoder_checkpoint_end)
         return false;
     resource->ensureLinearBlockDependencies();
-    const auto& dependencies = resource->blockDependencies();
-    if (dependencies.size() < count)
-        return false;
-    const auto                  slots = layerRegionSlots();
-    std::vector<CopyInfoPerKey> infos;
-    for (size_t key_index = 0; key_index < count; ++key_index) {
-        const auto& dep = dependencies[key_index];
-        if (dep.ordinal != key_index || dep.has_parent != (key_index > 0)
-            || (key_index > 0 && dep.parent_key != resource->cacheKeys()[key_index - 1]))
-            return false;
-        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
-            if (kind == CacheBlockKind::STATE_SWA_KV && key_index + 1 != count)
-                continue;
-            CopyInfoPerKey info;
-            info.cache_key  = resource->cacheKeys()[key_index];
-            info.kind       = kind;
-            info.block_size = prefixKindBlockSize(kind, slots);
-            info.gpu_blocks.resize(slots.size(), NULL_BLOCK_IDX);
-            info.slot_valid_mask.resize(slots.size(), 0);
-            for (size_t slot_index = 0; slot_index < slots.size(); ++slot_index) {
-                const auto& slot = slots[slot_index];
-                if (kindForSlot(slot) != kind)
-                    continue;
-                const auto& blocks = resource->blocks(slot.layer_id, slot.region_name);
-                if (key_index >= blocks.size() || blocks[key_index] <= 0)
-                    return false;
-                info.gpu_blocks[slot_index]      = blocks[key_index];
-                info.slot_valid_mask[slot_index] = 1;
-            }
-            infos.push_back(std::move(info));
+    size_t count = 0;
+    for (size_t i = 0; i < resource->cacheKeys().size(); ++i) {
+        if (static_cast<int64_t>((uint64_t{resource->blockDependencies()[i].ordinal} + 1) * dsv41DataUnit())
+            == view.completed->materialized_end) {
+            count = i + 1;
+            break;
         }
     }
+    if (count == 0)
+        return false;
+    auto source = std::make_shared<KVCacheResource>(*resource);
+    source->setCacheKeys(CacheKeysType(resource->cacheKeys().begin(), resource->cacheKeys().begin() + count));
+    source->setBlockDependencies(
+        BlockDependenciesType(resource->blockDependencies().begin(), resource->blockDependencies().begin() + count));
+    source->setCacheKeysAreCpCanonical(resource->cacheKeysAreCpCanonical());
+    source->setLastBlockAligned(true);
+    source->clearDsv41RecoveryMetadata();
+    source->setDsv41RecoveryMetadata(count - 1, std::make_shared<DSV41CheckpointMetadata>(*view.completed));
     try {
         wait_for_producer();
-        std::shared_ptr<CopyPlan> plan;
-        {
-            std::lock_guard<std::mutex> lock(dsv41_transaction_mutex_);
-            if (!allocateDsv41Backings(infos))
-                return false;
-            plan = createDsv41CopyPlan(std::move(infos), CopyDirection::D2H);
-        }
-        if (!copyFinished(sendCopyPlan(plan)))
+        const auto current = state->view();
+        if (!current.completed || !(*current.completed == *view.completed)
+            || current.encoder_materialized_end != view.completed->materialized_end)
             return false;
-        std::vector<PrefixTreeMemoryBlockCache::DSV41Entry> entries;
-        for (size_t index = 0; index < count; ++index) {
-            const auto&                            info = plan->copy_infos[index];
-            PrefixTreeMemoryBlockCache::DSV41Entry entry;
-            entry.global.cache_key       = info.cache_key;
-            entry.global.kind            = info.kind;
-            entry.global.block_index     = info.mem_block;
-            entry.global.block_size      = info.block_size;
-            entry.global.slot_valid_mask = info.slot_valid_mask;
-            entry.dependency             = dependencies[index];
-            entries.push_back(std::move(entry));
-        }
-        const auto& swa           = plan->copy_infos.back();
-        auto        item          = entries.back().global;
-        item.kind                 = CacheBlockKind::STATE_SWA_KV;
-        item.block_index          = swa.mem_block;
-        item.block_size           = swa.block_size;
-        item.slot_valid_mask      = swa.slot_valid_mask;
-        entries.back().swa        = item;
-        entries.back().checkpoint = view.completed;
-        state->protect(
-            std::make_shared<DSV41StagedSnapshot>(*view.completed, plan, prefix_block_cache_, std::move(entries)));
+        auto write = asyncWrite(source, meta);
+        if (!write)
+            return false;
+        write->waitDone();
+        if (!write->success())
+            return false;
+        const auto slots = layerRegionSlots();
+        auto       plan  = buildPrefixCopyPlanForRead(source->cacheKeys(),
+                                               source->blockDependencies(),
+                                               resourceLayerRegionBlocks(*source, slots),
+                                               slots,
+                                               0,
+                                               count,
+                                               source.get());
+        if (!plan || plan->copy_infos.empty() || !plan->copy_infos.back().recovery_metadata
+            || !(*plan->copy_infos.back().recovery_metadata == *view.completed))
+            return false;
+        state->protect(std::make_shared<DSV41ProtectedSnapshot>(*view.completed, std::move(owner), plan));
         return true;
     } catch (const std::exception& error) {
-        RTP_LLM_LOG_WARNING("V4.1 checkpoint staging failed: %s", error.what());
+        RTP_LLM_LOG_WARNING("V4.1 optional checkpoint protection failed: %s", error.what());
         return false;
-    }
-}
-
-std::shared_ptr<AsyncContext> KVCacheMemoryConnector::dsv41Write(const std::shared_ptr<KVCacheResource>& resource) {
-    if (!resource->dsv41CacheState())
-        throw std::logic_error("V4.1 memory write requires typed checkpoint state");
-    if (resource->isDsv41GpuTransfer()) {
-        const auto& lease = resource->dsv41GpuLease();
-        if (!lease)
-            return std::make_shared<DSV41CompletedContext>(false);
-        const auto& data = lease->data;
-        try {
-            data.validateProducer(resource->dsv41CacheState()->view());
-            if (data.keys != resource->cacheKeys())
-                return std::make_shared<DSV41CompletedContext>(false);
-            for (size_t group = 0; group < data.blocks.size(); ++group) {
-                const auto& ids = resource->blocks(group);
-                if (ids.size() != data.keys.size())
-                    return std::make_shared<DSV41CompletedContext>(false);
-                if (group < 4 ? ids != data.blocks[group] : ids.back() != data.blocks[group].front())
-                    return std::make_shared<DSV41CompletedContext>(false);
-            }
-            // The GPU entry owns immutable completed pages. Stage them into a
-            // separate CPU transaction; backend publication flags are independent.
-            auto staged = std::make_shared<KVCacheResource>(*resource);
-            staged->setDsv41GpuLease({});
-            auto state = std::make_shared<DSV41CacheState>(data.metadata.identity);
-            state->advanceEncoder(data.metadata.materialized_end);
-            state->completeDecoder(data.metadata, data.reuse_unit);
-            staged->setDsv41CacheState(state);
-            if (!stageDsv41Checkpoint(staged, [] { runtimeSyncAndCheck(); }))
-                return std::make_shared<DSV41CompletedContext>(false);
-            state->finish(data.metadata.materialized_end);
-            auto result = dsv41Write(staged);
-            if (result->success())
-                resource->completeDsv41GpuTransfer();
-            return result;
-        } catch (const std::exception& error) {
-            RTP_LLM_LOG_WARNING("V4.1 GPU to memory checkpoint transfer failed: %s", error.what());
-            return std::make_shared<DSV41CompletedContext>(false);
-        }
-    }
-    const bool success = resource->dsv41CacheState()->publishSnapshots([this](const DSV41CacheState::View& view) {
-        if (view.snapshots.empty())
-            return view.protected_prefix_end == 0;
-        std::lock_guard<std::mutex> lock(dsv41_transaction_mutex_);
-        auto                        same_item_bytes = [this](const PrefixTreeMemoryBlockCache::CacheItem& lhs,
-                                      const PrefixTreeMemoryBlockCache::CacheItem& rhs) {
-            if (lhs.kind != rhs.kind || lhs.block_size != rhs.block_size || lhs.slot_valid_mask != rhs.slot_valid_mask)
-                return false;
-            const auto left  = memoryPoolFor(lhs.kind)->convertIndexToBuffer(0, lhs.block_index);
-            const auto right = memoryPoolFor(rhs.kind)->convertIndexToBuffer(0, rhs.block_index);
-            return left.size() == 1 && right.size() == 1 && left[0].size_bytes == right[0].size_bytes
-                   && std::memcmp(left[0].addr, right[0].addr, left[0].size_bytes) == 0;
-        };
-        std::map<size_t, PrefixTreeMemoryBlockCache::DSV41Entry> merged;
-        for (const auto& snapshot : view.snapshots) {
-            auto staged = std::dynamic_pointer_cast<DSV41StagedSnapshot>(snapshot);
-            if (!staged || staged->tree != prefix_block_cache_ || !(snapshot->metadata().identity == view.identity))
-                return false;
-            for (size_t i = 0; i < staged->entries.size(); ++i) {
-                auto [it, inserted] = merged.emplace(i, staged->entries[i]);
-                if (!inserted) {
-                    if (it->second.global.cache_key != staged->entries[i].global.cache_key
-                        || !same_item_bytes(it->second.global, staged->entries[i].global)
-                        || (it->second.swa && staged->entries[i].swa
-                            && (!same_item_bytes(*it->second.swa, *staged->entries[i].swa)
-                                || !(*it->second.checkpoint == *staged->entries[i].checkpoint))))
-                        return false;
-                    if (staged->entries[i].swa && !it->second.swa) {
-                        it->second.swa        = staged->entries[i].swa;
-                        it->second.checkpoint = staged->entries[i].checkpoint;
-                    }
-                }
-            }
-        }
-        std::vector<PrefixTreeMemoryBlockCache::DSV41Entry> entries;
-        for (auto& [_, entry] : merged)
-            entries.push_back(std::move(entry));
-        auto committed =
-            prefix_block_cache_->putDsv41Committed(view.identity, entries, [&](const auto& lhs, const auto& rhs) {
-                return same_item_bytes(lhs.global, rhs.global)
-                       && (!lhs.swa || !rhs.swa || same_item_bytes(*lhs.swa, *rhs.swa));
-            });
-        if (!committed.success)
-            return false;
-        for (const auto& item : committed.retained)
-            memoryPoolFor(item.kind)->blockCacheReference(item.block_index);
-        return true;
-    });
-    return std::make_shared<DSV41CompletedContext>(success);
-}
-
-std::shared_ptr<AsyncMatchContext>
-KVCacheMemoryConnector::dsv41Match(const std::shared_ptr<KVCacheResource>& resource) {
-    if (!resource->dsv41CacheState())
-        throw std::logic_error("V4.1 memory match requires mode and layout identity");
-    auto view = resource->dsv41CacheState()->view();
-    if (view.cancelled || view.finished
-        || !(view.identity == dsv41CacheIdentity(view.identity.model_revision, view.identity.replay_mode)))
-        return nullptr;
-    const auto swa_spec = std::dynamic_pointer_cast<DSV41KVCacheSpec>(cache_config_.cache_specs[5]);
-    if (swa_spec->cp_size > 1 && !swa_spec->prefill_byte_slice) {
-        throw std::logic_error("V4.1 decode memory requires explicit eight-shard global copy planning");
-    }
-    if (dsv41ReuseUnit() != cache_config_.seq_size_per_block && !resource->cacheKeysAreCpCanonical())
-        return nullptr;
-    resource->ensureLinearBlockDependencies();
-    const size_t                limit = resource->cacheKeys().empty() ? 0 : resource->cacheKeys().size() - 1;
-    std::lock_guard<std::mutex> lock(dsv41_transaction_mutex_);
-    auto                        lease = std::make_shared<DSV41ReadLease>();
-    lease->tree                       = prefix_block_cache_;
-    lease->identity                   = view.identity;
-    lease->match                      = prefix_block_cache_->matchDsv41AndMarkInFlight(
-        view.identity, resource->cacheKeys(), resource->blockDependencies(), limit);
-    const size_t count = lease->match.matched_blocks;
-    const size_t start = resource->reuseBlockNum();
-    if (count <= start)
-        return nullptr;
-    const auto metadata = *lease->match.chain.back().checkpoint;
-    metadata.validate(dsv41ReuseUnit());
-    if (metadata.materialized_end != static_cast<int64_t>(count * dsv41ReuseUnit()))
-        return nullptr;
-    // The lease protects the complete chain while CP selects a common boundary
-    // and the allocator assigns its destination pages. No stale GPU IDs persist.
-    auto plan              = createDsv41CopyPlan({}, CopyDirection::H2D);
-    plan->dsv41_checkpoint = metadata;
-    plan->dsv41_keys.assign(resource->cacheKeys().begin(), resource->cacheKeys().begin() + count);
-    plan->dsv41_lease = lease;
-    return std::make_shared<MemoryAsyncMatchContext>(
-        count, static_cast<int>(start), static_cast<int>(count - start), plan);
-}
-
-std::vector<int64_t>
-KVCacheMemoryConnector::dsv41MatchedCheckpointEnds(const std::shared_ptr<AsyncMatchContext>& match_context) const {
-    auto match = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match_context);
-    if (!match || !match->readCopyPlan())
-        return {};
-    auto plan = std::static_pointer_cast<CopyPlan>(match->readCopyPlan());
-    if (!plan->dsv41_checkpoint || !plan->dsv41_lease)
-        return {};
-    auto                 lease = std::static_pointer_cast<DSV41ReadLease>(plan->dsv41_lease);
-    std::vector<int64_t> ends;
-    for (size_t i = static_cast<size_t>(match->startReadBlockIndex()); i < lease->match.chain.size(); ++i) {
-        const auto& entry = lease->match.chain[i];
-        if (entry.checkpoint)
-            ends.push_back(entry.checkpoint->materialized_end);
-    }
-    return ends;
-}
-
-std::shared_ptr<AsyncContext> KVCacheMemoryConnector::dsv41Read(const std::shared_ptr<KVCacheResource>&   resource,
-                                                                const std::shared_ptr<AsyncMatchContext>& match_context,
-                                                                int                                       start_index,
-                                                                int                                       read_num) {
-    auto match  = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match_context);
-    auto failed = std::make_shared<DSV41CompletedContext>(false);
-    if (!match || !match->readCopyPlan() || !resource->dsv41CacheState() || read_num <= 0
-        || start_index < match->startReadBlockIndex() || start_index < 0
-        || static_cast<size_t>(start_index) != resource->reuseBlockNum())
-        return failed;
-    auto         matched_plan = std::static_pointer_cast<CopyPlan>(match->readCopyPlan());
-    const size_t end_index    = static_cast<size_t>(start_index) + static_cast<size_t>(read_num);
-    if (!matched_plan->dsv41_checkpoint || !matched_plan->dsv41_lease || end_index > matched_plan->dsv41_keys.size()
-        || end_index > resource->cacheKeys().size()
-        || !std::equal(matched_plan->dsv41_keys.begin(),
-                       matched_plan->dsv41_keys.begin() + end_index,
-                       resource->cacheKeys().begin()))
-        return failed;
-    auto                        lease = std::static_pointer_cast<DSV41ReadLease>(matched_plan->dsv41_lease);
-    std::lock_guard<std::mutex> read_lock(lease->read_mutex);
-    if (lease->tree != prefix_block_cache_ || end_index > lease->match.chain.size() || lease->consumed
-        || !lease->match.chain[end_index - 1].checkpoint)
-        return failed;
-    const auto metadata = *lease->match.chain[end_index - 1].checkpoint;
-    try {
-        metadata.validate(dsv41ReuseUnit());
-        const auto view = resource->dsv41CacheState()->view();
-        if (view.finished || view.cancelled || !(view.identity == metadata.identity)
-            || view.encoder_materialized_end != view.decoder_checkpoint_end
-            || view.encoder_materialized_end != static_cast<int64_t>(start_index * dsv41ReuseUnit())
-            || metadata.materialized_end != static_cast<int64_t>(end_index * dsv41ReuseUnit()))
-            return failed;
-        const auto                  slots = layerRegionSlots();
-        std::vector<CopyInfoPerKey> infos;
-        for (size_t index = static_cast<size_t>(start_index); index < end_index; ++index) {
-            const auto&                                        entry = lease->match.chain[index];
-            std::vector<PrefixTreeMemoryBlockCache::CacheItem> items{entry.global};
-            if (index + 1 == end_index)
-                items.push_back(*entry.swa);
-            for (const auto& item : items) {
-                CopyInfoPerKey info;
-                info.cache_key       = item.cache_key;
-                info.kind            = item.kind;
-                info.mem_block       = item.block_index;
-                info.block_size      = item.block_size;
-                info.generation      = item.generation;
-                info.slot_valid_mask = item.slot_valid_mask;
-                info.gpu_blocks.resize(slots.size(), NULL_BLOCK_IDX);
-                for (size_t s = 0; s < slots.size(); ++s) {
-                    if (kindForSlot(slots[s]) != info.kind)
-                        continue;
-                    const auto& blocks = resource->blocks(slots[s].layer_id, slots[s].region_name);
-                    if (index >= blocks.size() || blocks[index] <= 0)
-                        return failed;
-                    info.gpu_blocks[s] = blocks[index];
-                }
-                infos.push_back(std::move(info));
-            }
-        }
-        for (const auto& info : infos)
-            memoryPoolFor(info.kind)->requestReference(info.mem_block);
-        auto plan         = createDsv41CopyPlan(std::move(infos), CopyDirection::H2D);
-        plan->dsv41_lease = lease;
-        if (!copyFinished(sendCopyPlan(plan)))
-            return failed;
-        resource->dsv41CacheState()->restore(metadata, dsv41ReuseUnit());
-        resource->setMemoryReuseBlockNum(resource->memoryReuseBlockNum() + read_num);
-        lease->consumed = true;
-        match->clearReadCopyPlan();
-        return std::make_shared<DSV41CompletedContext>(true);
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_WARNING("V4.1 checkpoint restore failed: %s", error.what());
-        return failed;
     }
 }
 
@@ -572,11 +299,10 @@ bool KVCacheMemoryConnector::copyDsv41MemoryItems(const MemoryOperationRequestPB
             return false;
     }
     try {
-        // Prefix boundaries are even. A restored request starts with no pending
-        // ratio2 pair; clear all seven snapshots, including speculative slack.
+        // Aligned boundaries have no pending ratio2 pair, including speculative slack.
         for (const auto& [pointer, bytes] : zero_pairs)
             std::memset(pointer, 0, bytes);
-        execNoBlockCopy(params);  // Dedicated copy stream is synchronized before return.
+        execNoBlockCopy(params);
         return true;
     } catch (const std::exception& error) {
         RTP_LLM_LOG_WARNING("V4.1 memory byte copy failed: %s", error.what());

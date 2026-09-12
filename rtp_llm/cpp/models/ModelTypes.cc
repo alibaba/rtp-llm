@@ -84,8 +84,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
     }
-    shape_hints[GptModelInputIndex::tensorDeviceMap]  = static_cast<int64_t>(device_bits);
-    shape_hints[GptModelInputIndex::v41InputsPresent] = inputs.v41_token_types.defined();
+    shape_hints[GptModelInputIndex::tensorDeviceMap]     = static_cast<int64_t>(device_bits);
+    shape_hints[GptModelInputIndex::v41InputsPresent]    = inputs.v41_token_types.defined();
+    shape_hints[GptModelInputIndex::v41ExecutionPresent] = inputs.v41_request_id.defined();
     RTP_LLM_CHECK_WITH_INFO(inputs.v41_token_types.defined() == inputs.v41_token_valid.defined()
                                 && inputs.v41_token_types.defined() == inputs.engram_history_ids.defined()
                                 && inputs.v41_token_types.defined() == inputs.engram_history_valid.defined(),
@@ -105,6 +106,26 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
                 && inputs.engram_history_valid.scalar_type() == torch::kBool
                 && inputs.engram_history_valid.sizes() == inputs.engram_history_ids.sizes(),
             "V4.1 canonical model rows must carry matching types, validity and three predecessors");
+    }
+    RTP_LLM_CHECK_WITH_INFO(inputs.v41_request_id.defined() == inputs.v41_state_ready.defined()
+                                && inputs.v41_request_id.defined() == inputs.v41_is_fake.defined(),
+                            "V4.1 execution metadata must be present or absent together");
+    if (inputs.v41_request_id.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.v41_token_types.defined(),
+                                "V4.1 execution metadata requires canonical model rows");
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_lengths.defined() && inputs.input_lengths.dim() == 1,
+                                "V4.1 execution metadata requires one input length per request");
+        const int64_t batch_size = inputs.input_lengths.numel();
+        RTP_LLM_CHECK_WITH_INFO(
+            inputs.v41_request_id.device().is_cpu() && inputs.v41_request_id.is_contiguous()
+                && inputs.v41_request_id.scalar_type() == torch::kInt64 && inputs.v41_request_id.dim() == 1
+                && inputs.v41_request_id.numel() == batch_size && inputs.v41_state_ready.device().is_cpu()
+                && inputs.v41_state_ready.is_contiguous() && inputs.v41_state_ready.scalar_type() == torch::kBool
+                && inputs.v41_state_ready.sizes() == inputs.v41_request_id.sizes()
+                && inputs.v41_is_fake.device().is_cpu() && inputs.v41_is_fake.is_contiguous()
+                && inputs.v41_is_fake.scalar_type() == torch::kBool
+                && inputs.v41_is_fake.sizes() == inputs.v41_request_id.sizes(),
+            "V4.1 execution metadata requires contiguous CPU int64 IDs and bool readiness/fake flags for every request");
     }
     return shape_hints;
 }
@@ -201,9 +222,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto mm_features_locs_size   = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
     const auto mm_features_spans_size  = checkedHint(GptModelInputIndex::mmFeaturesSpans, "mmFeaturesSpans");
     const auto hidden_states_size      = checkedHint(GptModelInputIndex::mtpHiddenStates, "mtpHiddenStates");
-    const auto request_length = checkedHint(GptModelInputIndex::gptModelRequestLength, "gptModelRequestLength");
-    const auto has_v41        = checkedHint(GptModelInputIndex::v41InputsPresent, "v41InputsPresent");
+    const auto request_length    = checkedHint(GptModelInputIndex::gptModelRequestLength, "gptModelRequestLength");
+    const auto has_v41           = checkedHint(GptModelInputIndex::v41InputsPresent, "v41InputsPresent");
+    const auto has_v41_execution = checkedHint(GptModelInputIndex::v41ExecutionPresent, "v41ExecutionPresent");
     RTP_LLM_CHECK_WITH_INFO(has_v41 <= 1, "invalid V4.1 input presence flag");
+    RTP_LLM_CHECK_WITH_INFO(has_v41_execution <= 1 && (!has_v41_execution || has_v41),
+                            "invalid V4.1 execution presence flag or missing canonical model rows");
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<int64_t>    dims,
@@ -324,6 +348,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.engram_history_ids   = torch::Tensor();
             inputs.engram_history_valid = torch::Tensor();
         }
+        if (has_v41_execution) {
+            const auto batch_size  = checkedHint(GptModelInputIndex::inputLengths, "inputLengths");
+            inputs.v41_request_id  = allocBuf(rtp_llm::DataType::TYPE_INT64, {batch_size});
+            inputs.v41_state_ready = allocBuf(rtp_llm::DataType::TYPE_BOOL, {batch_size});
+            inputs.v41_is_fake     = allocBuf(rtp_llm::DataType::TYPE_BOOL, {batch_size});
+        } else {
+            inputs.v41_request_id  = torch::Tensor();
+            inputs.v41_state_ready = torch::Tensor();
+            inputs.v41_is_fake     = torch::Tensor();
+        }
         if (mm_features_locs_size) {
             inputs.mm_features_locs = allocBuf(rtp_llm::DataType::TYPE_INT32, {mm_features_locs_size});
         } else {
@@ -391,6 +425,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         collect(inputs.v41_token_valid);
         collect(inputs.engram_history_ids);
         collect(inputs.engram_history_valid);
+    }
+    if (has_v41_execution) {
+        collect(inputs.v41_request_id);
+        collect(inputs.v41_state_ready);
+        collect(inputs.v41_is_fake);
     }
     if (mm_features_locs_size) {
         collect(inputs.mm_features_locs);

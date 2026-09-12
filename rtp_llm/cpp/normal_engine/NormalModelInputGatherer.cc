@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -294,10 +295,17 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     static const auto cuda_i32    = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
 
     GptModelInputs model_input;
-    const auto     is_v41 = [](const auto& stream) { return stream->generateInput()->v41_inputs != nullptr; };
-    const bool     has_v41 =
-        std::any_of(stream_groups.contextStreams().begin(), stream_groups.contextStreams().end(), is_v41)
-        || std::any_of(stream_groups.decodeStreams().begin(), stream_groups.decodeStreams().end(), is_v41);
+    const auto     is_v41 = [](const auto& stream) {
+        return stream->isFakeStream() || stream->generateInput()->v41_inputs != nullptr;
+    };
+    const bool has_v41 =
+        config_.is_v41
+        || std::any_of(stream_groups.contextStreams().begin(),
+                       stream_groups.contextStreams().end(),
+                       [](const auto& stream) { return stream->generateInput()->v41_inputs != nullptr; })
+        || std::any_of(stream_groups.decodeStreams().begin(),
+                       stream_groups.decodeStreams().end(),
+                       [](const auto& stream) { return stream->generateInput()->v41_inputs != nullptr; });
     if (has_v41) {
         RTP_LLM_CHECK_WITH_INFO(
             std::all_of(stream_groups.contextStreams().begin(), stream_groups.contextStreams().end(), is_v41)
@@ -307,6 +315,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         model_input.v41_token_valid      = torch::zeros({static_cast<int64_t>(current_tokens_size)}, pinned_bool);
         model_input.engram_history_ids   = torch::zeros({static_cast<int64_t>(current_tokens_size), 3}, pinned_i32);
         model_input.engram_history_valid = torch::zeros({static_cast<int64_t>(current_tokens_size), 3}, pinned_bool);
+        model_input.v41_request_id       = torch::zeros({static_cast<int64_t>(total_batch_size)}, pinned_i64);
+        model_input.v41_state_ready      = torch::zeros({static_cast<int64_t>(total_batch_size)}, pinned_bool);
+        model_input.v41_is_fake          = torch::zeros({static_cast<int64_t>(total_batch_size)}, pinned_bool);
     }
     model_input.combo_tokens          = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
@@ -411,7 +422,14 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.trace_ids.push_back(stream->traceId());
-            if (model_input.v41_token_types.defined()) {
+            if (model_input.v41_request_id.defined()) {
+                model_input.v41_request_id.data_ptr<int64_t>()[ctx.batch_idx] = stream->streamId();
+                model_input.v41_is_fake.data_ptr<bool>()[ctx.batch_idx]       = stream->isFakeStream();
+                const auto state = kv_cache.cacheResource(i).dsv41CacheState();
+                model_input.v41_state_ready.data_ptr<bool>()[ctx.batch_idx] =
+                    !stream->isFakeStream() && state && state->view().target_ready_end == stream->seqLength() - 1;
+            }
+            if (model_input.v41_token_types.defined() && !stream->isFakeStream()) {
                 RTP_LLM_CHECK_WITH_INFO(
                     !stream->hasPendingAsyncBookkeeping(),
                     "V4.1 canonical history requires committed token bookkeeping before decode gather");
@@ -504,7 +522,16 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             model_input.trace_ids.push_back(stream->traceId());
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
-            if (model_input.v41_token_types.defined()) {
+            if (model_input.v41_request_id.defined()) {
+                model_input.v41_request_id.data_ptr<int64_t>()[ctx.batch_idx] = stream->streamId();
+                model_input.v41_is_fake.data_ptr<bool>()[ctx.batch_idx]       = stream->isFakeStream();
+                const auto state = kv_cache.cacheResource(i).dsv41CacheState();
+                model_input.v41_state_ready.data_ptr<bool>()[ctx.batch_idx] =
+                    !stream->isFakeStream()
+                    && (stream->prefixLength() == 0
+                        || (state && state->view().target_ready_end == stream->prefixLength()));
+            }
+            if (model_input.v41_token_types.defined() && !stream->isFakeStream()) {
                 stream->generateInput()->v41_inputs->validateChunk(stream->prefixLength(),
                                                                    stream->prefixLength() + input_tokens.size());
                 stream->completeTokenIdsPtr()->writeV41Rows(

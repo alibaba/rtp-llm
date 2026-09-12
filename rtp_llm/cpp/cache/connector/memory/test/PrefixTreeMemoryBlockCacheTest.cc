@@ -1,8 +1,11 @@
 #include "gtest/gtest.h"
 
+#include <future>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/connector/memory/PrefixTreeMemoryBlockCache.h"
 
 namespace rtp_llm::test {
@@ -686,6 +689,246 @@ TEST(PrefixTreeMemoryBlockCacheTest, StateIndependentEvictionFallsBackToWholeCha
     EXPECT_EQ(evicted[2].cache_key, 1);
     EXPECT_EQ(evicted[2].kind, CacheBlockKind::COMPRESSED_KV);
     EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, JointEvictionDoesNotRemoveSiblingBranchesOrSharedParent) {
+    PrefixTreeMemoryBlockCache cache;
+    for (auto key : {1, 2, 3}) {
+        const auto dep = key == 1 ? rootDep() : childDep(1, 1);
+        ASSERT_TRUE(cache.putCommitted(key, dep, item(key, CacheBlockKind::COMPRESSED_KV, key + 10)).first);
+        ASSERT_TRUE(cache.putCommitted(key, dep, item(key, CacheBlockKind::STATE_SWA_KV, key + 100)).first);
+    }
+
+    const auto evicted = cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(evicted.size(), 2u);
+    EXPECT_EQ(evicted[0].cache_key, 2);
+    EXPECT_EQ(evicted[0].kind, CacheBlockKind::COMPRESSED_KV);
+    EXPECT_EQ(evicted[1].cache_key, 2);
+    EXPECT_EQ(evicted[1].kind, CacheBlockKind::STATE_SWA_KV);
+    for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+        EXPECT_FALSE(cache.contains(2, kind));
+        EXPECT_TRUE(cache.contains(1, kind));
+        EXPECT_TRUE(cache.contains(3, kind));
+    }
+
+    const auto sibling = cache.popOldestJointEvictable(CacheBlockKind::STATE_SWA_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(sibling.size(), 2u);
+    EXPECT_EQ(sibling[0].cache_key, 3);
+    EXPECT_EQ(sibling[1].cache_key, 3);
+    const auto parent = cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(parent.size(), 2u);
+    EXPECT_EQ(parent[0].cache_key, 1);
+    EXPECT_EQ(parent[1].cache_key, 1);
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, JointEvictionProtectsEitherResidentKind) {
+    for (auto resident_kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+        PrefixTreeMemoryBlockCache cache;
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, kind, 11, {}, kind == resident_kind)).first);
+        }
+        EXPECT_TRUE(cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY).empty());
+        EXPECT_TRUE(cache.popOldestJointEvictable(CacheBlockKind::STATE_SWA_KV, CacheBackingType::MEMORY).empty());
+        EXPECT_TRUE(cache.contains(1, CacheBlockKind::COMPRESSED_KV));
+        EXPECT_TRUE(cache.contains(1, CacheBlockKind::STATE_SWA_KV));
+    }
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, JointEvictionProtectsConcurrentReaderWithoutPinningSibling) {
+    for (auto read_kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+        PrefixTreeMemoryBlockCache cache;
+        for (auto key : {1, 2, 3}) {
+            const auto dep = key == 1 ? rootDep() : childDep(1, 1);
+            ASSERT_TRUE(cache.putCommitted(key, dep, item(key, CacheBlockKind::COMPRESSED_KV, key + 10)).first);
+            ASSERT_TRUE(cache.putCommitted(key, dep, item(key, CacheBlockKind::STATE_SWA_KV, key + 100)).first);
+        }
+        std::promise<PrefixTreeMemoryBlockCache::MatchResult> pinned;
+        std::promise<void>                                    release;
+        auto                                                  allow_release = release.get_future();
+        std::thread                                           reader([&] {
+            const auto held = cache.matchAndMarkInFlight(2, read_kind);
+            pinned.set_value(held);
+            allow_release.wait();
+            cache.releaseInFlight(2, read_kind, held.backing_type, held.block_index, held.disk_slot, held.generation);
+        });
+        const auto                                            held = pinned.get_future().get();
+        EXPECT_TRUE(held.found);
+        const auto sibling = cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY);
+        EXPECT_EQ(sibling.size(), 2u);
+        for (const auto& evicted : sibling) {
+            EXPECT_EQ(evicted.cache_key, 3);
+        }
+        EXPECT_TRUE(cache.popOldestJointEvictable(CacheBlockKind::STATE_SWA_KV, CacheBackingType::MEMORY).empty());
+        EXPECT_TRUE(cache.contains(2, CacheBlockKind::COMPRESSED_KV));
+        EXPECT_TRUE(cache.contains(2, CacheBlockKind::STATE_SWA_KV));
+        release.set_value();
+        reader.join();
+
+        const auto evicted = cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY);
+        ASSERT_EQ(evicted.size(), 2u);
+        EXPECT_EQ(evicted[0].cache_key, 2);
+        EXPECT_EQ(evicted[1].cache_key, 2);
+        EXPECT_TRUE(cache.contains(1, CacheBlockKind::COMPRESSED_KV));
+    }
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, JointEvictionWaitsForEveryReaderOfRetiredGeneration) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::STATE_SWA_KV, 12, {1, 0})).first);
+    const auto first  = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV);
+    const auto second = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV);
+    ASSERT_TRUE(first.found);
+    ASSERT_TRUE(second.found);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::STATE_SWA_KV, 13, {1, 1})).first);
+    EXPECT_TRUE(cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY).empty());
+
+    EXPECT_FALSE(cache
+                     .releaseInFlight(1,
+                                      CacheBlockKind::STATE_SWA_KV,
+                                      first.backing_type,
+                                      first.block_index,
+                                      first.disk_slot,
+                                      first.generation)
+                     .has_value());
+    EXPECT_TRUE(cache.popOldestJointEvictable(CacheBlockKind::STATE_SWA_KV, CacheBackingType::MEMORY).empty());
+    const auto retired = cache.releaseInFlight(
+        1, CacheBlockKind::STATE_SWA_KV, second.backing_type, second.block_index, second.disk_slot, second.generation);
+    ASSERT_TRUE(retired.has_value());
+    EXPECT_EQ(retired->block_index, 12);
+    const auto evicted = cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(evicted.size(), 2u);
+    EXPECT_EQ(evicted[0].block_index, 11);
+    EXPECT_EQ(evicted[1].block_index, 13);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, JointEvictionProtectsDetachedRetiredKind) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::STATE_SWA_KV, 12)).first);
+    const auto held = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV);
+    ASSERT_TRUE(held.found);
+    EXPECT_FALSE(
+        cache
+            .detachIfMatch(
+                1, CacheBlockKind::STATE_SWA_KV, held.backing_type, held.block_index, held.disk_slot, held.generation)
+            .has_value());
+    EXPECT_TRUE(cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY).empty());
+    ASSERT_TRUE(
+        cache
+            .releaseInFlight(
+                1, CacheBlockKind::STATE_SWA_KV, held.backing_type, held.block_index, held.disk_slot, held.generation)
+            .has_value());
+    const auto evicted = cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(evicted.size(), 1u);
+    EXPECT_EQ(evicted[0].block_index, 11);
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, StatePressureEvictsBoundaryPairAndPreservesLaterKvBlocks) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::STATE_SWA_KV, 12)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 22)).first);
+    ASSERT_TRUE(cache.putCommitted(3, childDep(1, 1), item(3, CacheBlockKind::COMPRESSED_KV, 33)).first);
+
+    const auto boundary = cache.popOldestJointEvictable(CacheBlockKind::STATE_SWA_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(boundary.size(), 2u);
+    EXPECT_EQ(boundary[0].cache_key, 1);
+    EXPECT_EQ(boundary[0].kind, CacheBlockKind::COMPRESSED_KV);
+    EXPECT_EQ(boundary[1].cache_key, 1);
+    EXPECT_EQ(boundary[1].kind, CacheBlockKind::STATE_SWA_KV);
+    EXPECT_FALSE(cache.contains(1, CacheBlockKind::COMPRESSED_KV));
+    EXPECT_FALSE(cache.contains(1, CacheBlockKind::STATE_SWA_KV));
+    EXPECT_TRUE(cache.contains(3, CacheBlockKind::COMPRESSED_KV));
+
+    const auto later = cache.matchAndMarkInFlight(2, CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(later.found);
+    EXPECT_EQ(later.block_index, 22);
+    EXPECT_EQ(later.recovery_metadata, nullptr);
+    const auto sibling = cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(sibling.size(), 1u);
+    EXPECT_EQ(sibling[0].cache_key, 3);
+    EXPECT_TRUE(cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY).empty());
+    EXPECT_FALSE(cache
+                     .releaseInFlight(2,
+                                      CacheBlockKind::COMPRESSED_KV,
+                                      later.backing_type,
+                                      later.block_index,
+                                      later.disk_slot,
+                                      later.generation)
+                     .has_value());
+    const auto final_block = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(final_block.has_value());
+    EXPECT_EQ(final_block->cache_key, 2);
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, JointEvictionFiltersRequestedBackingAndKeepsPairsTogether) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), diskItem(1, CacheBlockKind::COMPRESSED_KV, 7)).first);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::STATE_SWA_KV, 12)).first);
+    EXPECT_TRUE(cache.popOldestJointEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY).empty());
+    const auto evicted = cache.popOldestJointEvictable(CacheBlockKind::STATE_SWA_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(evicted.size(), 2u);
+    EXPECT_EQ(evicted[0].cache_key, 1);
+    EXPECT_EQ(evicted[0].backing_type, CacheBackingType::DISK);
+    EXPECT_EQ(evicted[0].disk_slot, 7);
+    EXPECT_EQ(evicted[1].cache_key, 1);
+    EXPECT_EQ(evicted[1].backing_type, CacheBackingType::MEMORY);
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, RecoveryMetadataFollowsBackingGenerationAndRetiredReaders) {
+    PrefixTreeMemoryBlockCache cache;
+    auto                       old_metadata = std::make_shared<DSV41CheckpointMetadata>();
+    old_metadata->materialized_end          = 128;
+    auto old_item                           = item(1, CacheBlockKind::STATE_SWA_KV, 11, {1, 0});
+    old_item.recovery_metadata              = old_metadata;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), old_item).first);
+    const auto held = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV);
+    ASSERT_TRUE(held.found);
+    EXPECT_EQ(held.recovery_metadata, old_metadata);
+
+    auto new_metadata              = std::make_shared<DSV41CheckpointMetadata>();
+    new_metadata->materialized_end = 256;
+    auto new_item                  = item(1, CacheBlockKind::STATE_SWA_KV, 12, {1, 1});
+    new_item.recovery_metadata     = new_metadata;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), new_item).first);
+    const auto current = cache.match(1, CacheBlockKind::STATE_SWA_KV);
+    ASSERT_TRUE(current.found);
+    EXPECT_NE(current.generation, held.generation);
+    EXPECT_EQ(current.recovery_metadata, new_metadata);
+    EXPECT_EQ(held.recovery_metadata->materialized_end, 128);
+
+    const auto retired = cache.releaseInFlight(
+        1, CacheBlockKind::STATE_SWA_KV, held.backing_type, held.block_index, held.disk_slot, held.generation);
+    ASSERT_TRUE(retired.has_value());
+    EXPECT_EQ(retired->recovery_metadata, old_metadata);
+    const auto evicted = cache.popOldestJointEvictable(CacheBlockKind::STATE_SWA_KV, CacheBackingType::MEMORY);
+    ASSERT_EQ(evicted.size(), 1u);
+    EXPECT_EQ(evicted[0].recovery_metadata, new_metadata);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, DuplicateBackingCannotRelabelRecoveryMetadata) {
+    PrefixTreeMemoryBlockCache cache;
+    auto                       metadata = std::make_shared<DSV41CheckpointMetadata>();
+    auto                       original = item(1, CacheBlockKind::STATE_SWA_KV, 11, {1});
+    original.recovery_metadata          = metadata;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), original).first);
+    auto duplicate              = item(1, CacheBlockKind::STATE_SWA_KV, 12, {1});
+    duplicate.recovery_metadata = std::make_shared<DSV41CheckpointMetadata>();
+    EXPECT_FALSE(cache.putCommitted(1, rootDep(), duplicate).first);
+    const auto matched = cache.match(1, CacheBlockKind::STATE_SWA_KV);
+    ASSERT_TRUE(matched.found);
+    EXPECT_EQ(matched.block_index, 11);
+    EXPECT_EQ(matched.recovery_metadata, metadata);
+
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 22)).first);
+    const auto kv_only = cache.match(2, CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(kv_only.found);
+    EXPECT_EQ(kv_only.recovery_metadata, nullptr);
 }
 
 }  // namespace rtp_llm::test

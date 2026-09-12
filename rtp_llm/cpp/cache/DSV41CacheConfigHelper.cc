@@ -79,6 +79,9 @@ void DSV41CacheConfigHelper::applyConfig(CacheConfig&             config,
 
     config.dsv41_cache_layout_version = 1;
     config.dsv41_draft_cache          = is_draft;
+    config.dsv41_model_revision       = model_config.dsv41_model_revision;
+    config.dsv41_replay_mode          = model_config.dsv41_replay_mode;
+    config.dsv41_tail_policy_version  = model_config.dsv41_tail_policy_version;
     config.layer_num = config.layer_all_num         = layers;
     config.use_mla                                  = false;
     config.is_sparse                                = true;

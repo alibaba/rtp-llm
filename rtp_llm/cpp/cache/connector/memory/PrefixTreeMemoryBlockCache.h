@@ -2,9 +2,7 @@
 
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <memory>
-#include <map>
 #include <optional>
 #include <set>
 #include <shared_mutex>
@@ -13,11 +11,12 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cache/connector/memory/CacheBlockKind.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryDiskBlockCache.h"
 
 namespace rtp_llm {
+
+struct DSV41CheckpointMetadata;
 
 class PrefixTreeMemoryBlockCache {
 public:
@@ -37,6 +36,8 @@ public:
         uint32_t             in_flight_ref{0};
         uint32_t             subtree_ref_count{0};
         std::vector<uint8_t> slot_valid_mask;
+
+        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
     };
 
     struct CacheItem {
@@ -50,6 +51,8 @@ public:
         uint64_t             generation{0};
         int64_t              created_time_us{0};
         std::vector<uint8_t> slot_valid_mask;
+        // Published with this backing generation; KV matches do not require it.
+        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
     };
 
     struct MatchResult {
@@ -61,6 +64,8 @@ public:
         uint64_t             generation{0};
         int64_t              created_time_us{0};
         std::vector<uint8_t> slot_valid_mask;
+
+        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
     };
 
     bool contains(CacheKeyType cache_key, CacheBlockKind kind) const;
@@ -86,63 +91,18 @@ public:
                                              int32_t          disk_slot,
                                              uint64_t         generation);
 
-    std::optional<CacheItem>  popOldestEvictable(CacheBlockKind kind);
-    std::optional<CacheItem>  popOldestEvictable(CacheBlockKind kind, CacheBackingType backing_type);
+    std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind);
+    std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind, CacheBackingType backing_type);
+    // Select by the requested kind/backing, then remove both kinds at that key.
+    // Any resident, in-flight or retired reference protects the whole pair.
+    // Only the requested kind must be a leaf; descendants remain independently usable.
+    std::vector<CacheItem>    popOldestJointEvictable(CacheBlockKind kind, CacheBackingType backing_type);
     std::vector<CacheItem>    popOldestStateOrChainEvictable(CacheBackingType backing_type);
     std::vector<CacheKeyType> cacheKeys() const;
     std::vector<CacheKeyType> cacheKeysUnorderedForStatus() const;
     size_t                    size() const;
 
-    struct DSV41Entry {
-        CacheItem                              global;
-        BlockDependency                        dependency;
-        std::optional<CacheItem>               swa;
-        std::optional<DSV41CheckpointMetadata> checkpoint;
-    };
-    struct DSV41Match {
-        size_t                  matched_blocks{0};
-        uint64_t                generation{0};
-        std::vector<DSV41Entry> chain;
-    };
-    struct DSV41Commit {
-        bool                   success{false};
-        std::vector<CacheItem> retained;
-    };
-
-    // V4.1 operations publish and protect complete transactions. None of these
-    // entries participate in the legacy independently evictable kind indexes.
-    DSV41Commit               putDsv41Committed(const DSV41CacheIdentity&                                        identity,
-                                                const std::vector<DSV41Entry>&                                   entries,
-                                                const std::function<bool(const DSV41Entry&, const DSV41Entry&)>& same_bytes);
-    DSV41Match                matchDsv41AndMarkInFlight(const DSV41CacheIdentity&    identity,
-                                                        const CacheKeysType&         keys,
-                                                        const BlockDependenciesType& dependencies,
-                                                        size_t                       limit);
-    void                      releaseDsv41InFlight(const DSV41CacheIdentity& identity, const DSV41Match& match);
-    std::vector<CacheItem>    popOldestDsv41JointEvictable();
-    std::vector<CacheKeyType> dsv41CacheKeys() const;
-
 private:
-    struct DSV41Key {
-        DSV41CacheIdentity identity;
-        CacheKeyType       key{0};
-        bool               operator<(const DSV41Key& rhs) const {
-            if (identity < rhs.identity)
-                return true;
-            if (rhs.identity < identity)
-                return false;
-            return key < rhs.key;
-        }
-    };
-    struct DSV41Node {
-        DSV41Entry   entry;
-        CacheKeyType root_key{0};
-        uint64_t     generation{0};
-        uint64_t     last_access_seq{0};
-        uint32_t     in_flight_ref{0};
-    };
-    std::map<DSV41Key, DSV41Node> dsv41_nodes_;
-
     struct RetiredItem {
         CacheItem item;
         uint32_t  in_flight_ref{0};

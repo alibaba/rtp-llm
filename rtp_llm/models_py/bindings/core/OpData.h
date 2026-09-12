@@ -71,6 +71,9 @@ struct GptModelInputs {
     torch::Tensor v41_token_valid;       // bool [tokens], excludes CP/graph padding.
     torch::Tensor engram_history_ids;    // int32 [tokens, 3], canonical predecessors before CP remap.
     torch::Tensor engram_history_valid;  // bool [tokens, 3], excludes image spans and missing predecessors.
+    torch::Tensor v41_request_id;        // int64 [all requests], including decode.
+    torch::Tensor v41_state_ready;       // bool [all requests], target state at execution start.
+    torch::Tensor v41_is_fake;           // bool [all requests], scheduler-only placeholders.
 
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index

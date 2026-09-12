@@ -3,6 +3,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
+#include <future>
 #include <map>
 #include <numeric>
 
@@ -92,6 +93,10 @@ protected:
         return 1;
     }
 
+    virtual ParallelismConfig parallelism() const {
+        return {};
+    }
+
     void SetUp() override {
         cudaDeviceProp properties{};
         ASSERT_EQ(cudaGetDeviceProperties(&properties, 0), cudaSuccess);
@@ -109,7 +114,7 @@ protected:
         spec.type              = SP_TYPE_DSPARK;
         spec.gen_num_per_cycle = 5;
         config_                = CacheConfigCreator::createSpConfig(
-            model(false), model(true), ParallelismConfig(), RuntimeConfig(), kv_, spec, std::nullopt, true, false);
+            model(false), model(true), parallelism(), RuntimeConfig(), kv_, spec, std::nullopt, true, false);
         allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config_, AllocationType::DEVICE);
         allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
         ASSERT_TRUE(allocator_->init());
@@ -164,6 +169,8 @@ protected:
         auto&         result = batch->cacheResource(0);
         CacheKeysType keys(count + 1);
         std::iota(keys.begin(), keys.end(), 100);
+        for (auto& key : keys)
+            key ^= identity(mode).cacheKeySeed();
         result.setCacheKeys(keys);
         result.setLastBlockAligned(false);
         result.setDsv41CacheState(std::make_shared<DSV41CacheState>(identity(mode)));
@@ -172,11 +179,13 @@ protected:
                 auto ids = allocator_->groupBlockPools()[group]->malloc(group < 4 ? count : 1);
                 if (ids.size() != (group < 4 ? count : 1))
                     throw std::runtime_error("fixture GPU allocation failed");
-                BlockIndicesType mapping(count + 1, NULL_BLOCK_IDX);
+                const size_t group_count = (count * 128 + config_.group_seq_size_per_block[group] - 1)
+                                           / config_.group_seq_size_per_block[group];
+                BlockIndicesType mapping(group_count + 1, NULL_BLOCK_IDX);
                 if (group < 4)
                     std::copy(ids.begin(), ids.end(), mapping.begin());
                 else
-                    mapping[count - 1] = ids.front();
+                    mapping[group_count - 1] = ids.front();
                 result.mutableBlockIds(group).assign(std::move(mapping));
             }
         }
@@ -186,7 +195,7 @@ protected:
     void ready(const BatchKVCacheResourcePtr& batch, size_t count) {
         auto& state = batch->cacheResource(0).dsv41CacheState();
         state->advanceEncoder(count * 128);
-        state->completeDecoder(metadata(state->view().identity, count), 128);
+        state->completeDecoder(metadata(state->view().identity, count), config_.group_seq_size_per_block[5]);
         state->finish(count * 128);
     }
 
@@ -269,44 +278,55 @@ TEST_F(DSV41GpuCacheAllocatorTest, SameKeysKeepModeIdentityAndRestoreExactBytesI
         auto destination = resource(1, mode, false);
         auto result      = allocator_->malloc(MallocInfo{destination, tokens(129)});
         ASSERT_TRUE(result.success);
-        EXPECT_EQ(result.reuse_len, 128);
-        EXPECT_EQ(destination->blocks(0, 0)[0], source_global);
+        EXPECT_EQ(destination->cacheResource().deviceReuseBlockNum(), 1);
+        EXPECT_EQ(result.reuse_len, mode == DSV41ReplayMode::FULL ? 128 : 0);
+        if (mode == DSV41ReplayMode::FULL) {
+            EXPECT_EQ(destination->blocks(0, 0)[0], source_global);
+        } else {
+            EXPECT_NE(destination->blocks(0, 0)[0], source_global);
+        }
         EXPECT_NE(destination->blocks(0, 5)[0], source_swa);
         EXPECT_EQ(bytes(destination->cacheResource(), 1), expected);
         EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().decoder_checkpoint_end, 128);
-        EXPECT_FALSE(destination->cacheResource().dsv41GpuRestorePending());
-        const auto lease = destination->cacheResource().dsv41GpuLease();
-        ASSERT_TRUE(lease);
+        const auto key   = identity(mode).cacheKeySeed() ^ 100;
+        auto       lease = allocator_->sharedBlockCache()->matchAndReference(key, {0, 1, 2, 3, 4, 5});
+        ASSERT_TRUE(lease.found);
         for (int owner : config_.global_layer_ids[5]) {
             for (const auto& segment :
                  allocator_->convertIndexToBuffer(owner, KVCacheRegionName::SWA_KV, destination->blocks(0, 5)[0]))
                 cudaCheck(cudaMemset(segment.addr, 233, segment.size_bytes));
         }
-        auto cached = allocator_->popBlocksFromCache(1);
-        if (cached) {
-            EXPECT_FALSE(cached->cacheResource().dsv41CacheState()->view().identity == identity(mode));
-            allocator_->blockCacheFree(cached);
-        }
+        KVCacheResource retained;
+        retained.initGroups(6, 43, config_.layer_to_group_id, 1, config_.group_types, config_.layer_region_to_group_id);
+        for (size_t group = 0; group < 6; ++group)
+            retained.mutableBlockIds(group).assign({lease.group_blocks[group]});
+        EXPECT_EQ(bytes(retained, 1), expected);
+        for (size_t group = 0; group < 6; ++group)
+            allocator_->groupBlockPools()[group]->requestFree(lease.group_blocks[group]);
         free(destination);
     }
-    auto full    = allocator_->sharedBlockCache()->matchDsv41Checkpoint(identity(), {100}, 128, 1);
-    auto bounded = allocator_->sharedBlockCache()->matchDsv41Checkpoint(
-        identity(DSV41ReplayMode::BOUNDED_CHECKPOINT_V1), {100}, 128, 1);
-    ASSERT_TRUE(full);
-    ASSERT_TRUE(bounded);
-    EXPECT_NE(full->data.blocks[5], bounded->data.blocks[5]);
+    auto full = allocator_->sharedBlockCache()->match(identity().cacheKeySeed() ^ 100);
+    auto bounded =
+        allocator_->sharedBlockCache()->match(identity(DSV41ReplayMode::BOUNDED_CHECKPOINT_V1).cacheKeySeed() ^ 100);
+    ASSERT_TRUE(full.found);
+    ASSERT_TRUE(bounded.found);
+    EXPECT_NE(full.group_blocks[5], bounded.group_blocks[5]);
 }
 
-TEST_F(DSV41GpuCacheAllocatorTest, IncompleteOrStaleProducerNeverPublishesAllocatedRegions) {
+TEST_F(DSV41GpuCacheAllocatorTest, ValidKvBlocksDoNotRequireCompleteTailAndStaleTailIsNotPublished) {
     auto incomplete = resource(1);
     fill(incomplete, 11);
     const auto before = allocator_->blockCacheRefBlocksNum();
     incomplete->cacheResource().dsv41CacheState()->advanceEncoder(128);
-    EXPECT_THROW(allocator_->insertIntoCache(InsertInfo{incomplete, tokens(129), false}), std::invalid_argument);
-    EXPECT_EQ(allocator_->blockCacheRefBlocksNum(), before);
+    allocator_->insertIntoCache(InsertInfo{incomplete, tokens(129), false});
+    EXPECT_EQ(allocator_->blockCacheRefBlocksNum(), before + 4);
+    auto matched = allocator_->sharedBlockCache()->match(identity().cacheKeySeed() ^ 100);
+    ASSERT_TRUE(matched.found);
+    EXPECT_FALSE(matched.recovery_metadata);
     free(incomplete);
 
     auto stale = resource(2);
+    fill(stale, 29);
     auto state = stale->cacheResource().dsv41CacheState();
     state->requireProtectedPrefix(256, 385);
     state->advanceEncoder(256);
@@ -316,9 +336,44 @@ TEST_F(DSV41GpuCacheAllocatorTest, IncompleteOrStaleProducerNeverPublishesAlloca
     state->advanceEncoder(385);
     state->completeHandoff(385, true, true, true);
     state->finish(385);
-    EXPECT_THROW(allocator_->insertIntoCache(InsertInfo{stale, tokens(385), false}), std::invalid_argument);
-    EXPECT_FALSE(allocator_->sharedBlockCache()->hasDsv41Checkpoints());
+    allocator_->insertIntoCache(InsertInfo{stale, tokens(385), false});
+    matched = allocator_->sharedBlockCache()->match(identity().cacheKeySeed() ^ 101);
+    ASSERT_TRUE(matched.found);
+    EXPECT_FALSE(matched.recovery_metadata);
+    EXPECT_EQ(matched.group_blocks[4], NULL_BLOCK_IDX);
+    EXPECT_EQ(matched.group_blocks[5], NULL_BLOCK_IDX);
     free(stale);
+}
+
+TEST_F(DSV41GpuCacheAllocatorTest, DivergingSuffixKeepsSharedKvHitWithoutInventingTailReadiness) {
+    auto source = resource(2);
+    fill(source, 17);
+    const auto source_block = source->blocks(0, 0)[0];
+    ready(source, 2);
+    allocator_->insertIntoCache(InsertInfo{source, tokens(257), false});
+    free(source);
+    auto destination = resource(2, DSV41ReplayMode::FULL, false);
+    auto keys        = destination->cacheKeys(0);
+    keys[1] ^= 0x5678;
+    keys[2] ^= 0x8765;
+    destination->cacheResource(0).setCacheKeys(keys);
+    auto result = allocator_->malloc(MallocInfo{destination, tokens(257)});
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(destination->cacheResource().deviceReuseBlockNum(), 1);
+    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().target_ready_end, 0);
+    EXPECT_NE(destination->blocks(0, 0)[0], source_block);
+    EXPECT_FALSE(destination->cacheResource().dsv41RecoveryMetadata(0));
+    free(destination);
+}
+
+TEST_F(DSV41GpuCacheAllocatorTest, UnmaterializedAllocationCannotPublishKv) {
+    auto source = resource(2);
+    fill(source, 13);
+    allocator_->insertIntoCache(InsertInfo{source, tokens(257), false});
+    EXPECT_FALSE(allocator_->sharedBlockCache()->contains(identity().cacheKeySeed() ^ 100));
+    EXPECT_EQ(allocator_->blockCacheRefBlocksNum(), 0);
+    free(source);
 }
 
 TEST_F(DSV41GpuCacheAllocatorTest, FixedCopyAllocationFailureRollsBackRefsPagesAndBothProgressAxes) {
@@ -338,11 +393,47 @@ TEST_F(DSV41GpuCacheAllocatorTest, FixedCopyAllocationFailureRollsBackRefsPagesA
     EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().encoder_materialized_end, 0);
     EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().decoder_checkpoint_end, 0);
     EXPECT_EQ(freeCounts(), before);
-    EXPECT_TRUE(allocator_->sharedBlockCache()->hasDsv41Checkpoints());
+    EXPECT_TRUE(allocator_->sharedBlockCache()->contains(identity().cacheKeySeed() ^ 100));
     pool->requestFree(held);
     ASSERT_TRUE(allocator_->malloc(MallocInfo{destination, tokens(129)}).success);
     EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().decoder_checkpoint_end, 128);
     free(destination);
+}
+
+TEST_F(DSV41GpuCacheAllocatorTest, ConcurrentEvictionCannotReleaseMatchedReaderBytes) {
+    auto source = resource(1);
+    fill(source, 71);
+    const auto expected = bytes(source->cacheResource(), 1);
+    ready(source, 1);
+    allocator_->insertIntoCache(InsertInfo{source, tokens(129), false});
+    free(source);
+    std::promise<void> acquired;
+    std::promise<void> evicted;
+    auto               may_read = evicted.get_future();
+    auto               reader   = std::async(std::launch::async, [&] {
+        auto match =
+            allocator_->sharedBlockCache()->matchAndReference(identity().cacheKeySeed() ^ 100, {0, 1, 2, 3, 4, 5});
+        if (!match.found)
+            throw std::runtime_error("expected reader hit");
+        KVCacheResource retained;
+        retained.initGroups(6, 43, config_.layer_to_group_id, 1, config_.group_types, config_.layer_region_to_group_id);
+        for (size_t group = 0; group < 6; ++group)
+            retained.mutableBlockIds(group).assign({match.group_blocks[group]});
+        acquired.set_value();
+        may_read.get();
+        auto actual = bytes(retained, 1);
+        for (size_t group = 0; group < 6; ++group)
+            allocator_->groupBlockPools()[group]->requestFree(match.group_blocks[group]);
+        return actual;
+    });
+    acquired.get_future().get();
+    auto removed = allocator_->popBlocksFromCache(1);
+    EXPECT_TRUE(removed);
+    allocator_->blockCacheFree(removed);
+    EXPECT_EQ(allocator_->requestRefBlocksNum(), 6);
+    evicted.set_value();
+    EXPECT_EQ(reader.get(), expected);
+    EXPECT_EQ(allocator_->requestRefBlocksNum(), 0);
 }
 
 TEST_F(DSV41GpuCacheAllocatorTest, UntypedLegacyEntryCannotSupplyTypedReuse) {
@@ -369,16 +460,25 @@ TEST_F(DSV41GpuCacheAllocatorTest, MemoryTransferKeepsGpuCheckpointOnFailureAndP
     free(source);
     auto evicted = allocator_->popBlocksFromCache(1);
     ASSERT_TRUE(evicted);
-    ASSERT_TRUE(evicted->cacheResource().isDsv41GpuTransfer());
+    ASSERT_TRUE(evicted->cacheResource().dsv41RecoveryMetadata(1));
     auto       transfer = std::make_shared<KVCacheResource>(evicted->cacheResource());
     const auto before   = freeCounts();
     service_.fail_next  = true;
-    EXPECT_FALSE(memory_->asyncWrite(transfer, meta_)->success());
+    auto failed         = memory_->asyncWrite(transfer, meta_);
+    ASSERT_TRUE(failed);
+    failed->waitDone();
+    EXPECT_FALSE(failed->success());
     EXPECT_EQ(freeCounts(), before);
     EXPECT_TRUE(memory_->cacheKeys().empty());
-    EXPECT_TRUE(allocator_->sharedBlockCache()->hasDsv41Checkpoints());
-    ASSERT_TRUE(memory_->asyncWrite(transfer, meta_)->success());
-    EXPECT_FALSE(allocator_->sharedBlockCache()->hasDsv41Checkpoints());
+    allocator_->restoreBlocksToCache(evicted);
+    allocator_->blockCacheFree(evicted);
+    evicted = allocator_->popBlocksFromCache(1);
+    ASSERT_TRUE(evicted);
+    transfer     = std::make_shared<KVCacheResource>(evicted->cacheResource());
+    auto retried = memory_->asyncWrite(transfer, meta_);
+    ASSERT_TRUE(retried);
+    retried->waitDone();
+    ASSERT_TRUE(retried->success());
     allocator_->blockCacheFree(evicted);
     transfer.reset();
     evicted.reset();
@@ -386,9 +486,52 @@ TEST_F(DSV41GpuCacheAllocatorTest, MemoryTransferKeepsGpuCheckpointOnFailureAndP
     auto input       = std::make_shared<KVCacheResource>(destination->cacheResource());
     auto match       = memory_->asyncMatch(input, meta_);
     ASSERT_TRUE(match);
-    ASSERT_TRUE(memory_->asyncRead(input, meta_, match, 0, 2)->success());
+    auto read = memory_->asyncRead(input, meta_, match, 0, 2);
+    ASSERT_TRUE(read);
+    read->waitDone();
+    ASSERT_TRUE(read->success());
     EXPECT_EQ(bytes(*input, 2), expected);
     EXPECT_EQ(input->dsv41CacheState()->view().decoder_checkpoint_end, 256);
+    free(destination);
+}
+
+class DSV41GpuDecodeCP8Test: public DSV41GpuCacheAllocatorTest {
+protected:
+    ParallelismConfig parallelism() const override {
+        ParallelismConfig value;
+        value.role_type                          = RoleType::DECODE;
+        value.prefill_cp_config.kv_cache_sharded = true;
+        value.prefill_cp_config.prefill_cp_size  = 8;
+        return value;
+    }
+};
+
+TEST_F(DSV41GpuDecodeCP8Test, FullDataPagesAndCP8FixedStateUseDifferentOrdinals) {
+    auto source = resource(8);
+    fill(source, 31);
+    ready(source, 8);
+    const auto global = source->blocks(0, 0)[7];
+    const auto swa    = source->blocks(0, 5)[0];
+    allocator_->insertIntoCache(InsertInfo{source, tokens(1025), false});
+    auto match = allocator_->sharedBlockCache()->match(identity().cacheKeySeed() ^ 107);
+    ASSERT_TRUE(match.found);
+    ASSERT_TRUE(match.recovery_metadata);
+    EXPECT_EQ(match.group_blocks[0], global);
+    EXPECT_EQ(match.group_blocks[5], swa);
+    auto selected = allocator_->incrKVCacheRef(source->cacheResource(), {identity().cacheKeySeed() ^ 107}, true);
+    ASSERT_TRUE(selected);
+    EXPECT_EQ(selected->blocks(5).at(0), swa);
+    EXPECT_TRUE(selected->blockIdsAreKeyAligned());
+    selected.reset();
+    free(source);
+    auto       destination = resource(8, DSV41ReplayMode::FULL, false);
+    const auto result      = allocator_->malloc(MallocInfo{destination, tokens(1025)});
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(destination->cacheResource().deviceReuseBlockNum(), 8);
+    EXPECT_EQ(result.reuse_len, 1024);
+    EXPECT_EQ(destination->blocks(0, 0)[7], global);
+    EXPECT_NE(destination->blocks(0, 5)[0], swa);
+    EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().target_ready_end, 1024);
     free(destination);
 }
 
@@ -414,14 +557,16 @@ TEST_F(DSV41GpuLongSuffixTest, InitialAllocationRetainsExactCheckpointAcrossShor
             auto      destination = resource((total - 1) / 128, mode, false);
             auto      result      = allocator_->malloc(MallocInfo{destination, tokens(total)});
             ASSERT_TRUE(result.success);
-            ASSERT_EQ(result.reuse_len, 128);
+            ASSERT_EQ(result.reuse_len, mode == DSV41ReplayMode::FULL ? 128 : 0);
+            ASSERT_EQ(destination->cacheResource().deviceReuseBlockNum(), 1);
             ASSERT_GT(destination->blocks(0, 4)[0], 0);
             ASSERT_GT(destination->blocks(0, 5)[0], 0);
             EXPECT_EQ(bytes(destination->cacheResource(), 1), expected);
             EXPECT_EQ(destination->cacheResource().dsv41CacheState()->view().decoder_checkpoint_end, 128);
-            auto lease = destination->cacheResource().dsv41GpuLease();
-            ASSERT_TRUE(lease);
-            EXPECT_NE(destination->blocks(0, 5)[0], lease->data.blocks[5][0]);
+            auto lease = allocator_->sharedBlockCache()->matchAndReference(identity(mode).cacheKeySeed() ^ 100,
+                                                                           {0, 1, 2, 3, 4, 5});
+            ASSERT_TRUE(lease.found);
+            EXPECT_NE(destination->blocks(0, 5)[0], lease.group_blocks[5]);
             for (int owner : config_.global_layer_ids[5]) {
                 for (const auto& segment :
                      allocator_->convertIndexToBuffer(owner, KVCacheRegionName::SWA_KV, destination->blocks(0, 5)[0]))
@@ -431,8 +576,10 @@ TEST_F(DSV41GpuLongSuffixTest, InitialAllocationRetainsExactCheckpointAcrossShor
             retained.initGroups(
                 6, 43, config_.layer_to_group_id, 1, config_.group_types, config_.layer_region_to_group_id);
             for (size_t group = 0; group < 6; ++group)
-                retained.mutableBlockIds(group).assign(lease->data.blocks[group]);
+                retained.mutableBlockIds(group).assign({lease.group_blocks[group]});
             EXPECT_EQ(bytes(retained, 1), expected);
+            for (size_t group = 0; group < 6; ++group)
+                allocator_->groupBlockPools()[group]->requestFree(lease.group_blocks[group]);
             free(destination);
             EXPECT_EQ(freeCounts(), before);
         }

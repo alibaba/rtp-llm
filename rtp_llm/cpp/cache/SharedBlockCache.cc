@@ -23,12 +23,13 @@ void SharedBlockCache::put(CacheKeyType cache_key, const std::vector<BlockIdxTyp
     put(cache_key, group_slots, is_resident, kDefaultNamespace, dependency);
 }
 
-void SharedBlockCache::put(CacheKeyType                     cache_key,
-                           const std::vector<BlockIdxType>& group_slots,
-                           bool                             is_resident,
-                           NamespaceId                      namespace_id,
-                           const BlockDependency&           dependency,
-                           const std::vector<bool>&         matchable_slots) {
+void SharedBlockCache::put(CacheKeyType                                   cache_key,
+                           const std::vector<BlockIdxType>&               group_slots,
+                           bool                                           is_resident,
+                           NamespaceId                                    namespace_id,
+                           const BlockDependency&                         dependency,
+                           const std::vector<bool>&                       matchable_slots,
+                           std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
 
@@ -70,6 +71,10 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                     updated                            = true;
                 }
             }
+            if (recovery_metadata && !existing_item.recovery_metadata && existing_item.slots == group_slots) {
+                existing_item.recovery_metadata = std::move(recovery_metadata);
+                updated                         = true;
+            }
             if (updated || existing_item.is_resident || dependency_updated) {
                 lru_cache_.put(cache_key, existing_item);
                 ++version_;
@@ -88,6 +93,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     item.cache_key          = cache_key;
     item.is_resident        = is_resident;
     item.slots              = group_slots;
+    item.recovery_metadata  = std::move(recovery_metadata);
     item.created_time_us    = now_us;
     item.matchable_slots.resize(group_slots.size(), true);
     item.slot_created_time_us.resize(group_slots.size(), 0);
@@ -122,7 +128,36 @@ SharedBlockCache::MatchResult SharedBlockCache::match(CacheKeyType cache_key) {
         return {false, {}};
     }
     touchTreeAliasesLocked(cache_key);
-    return {true, item.slots};
+    return {true, item.slots, item.recovery_metadata};
+}
+
+SharedBlockCache::MatchResult SharedBlockCache::matchAndReference(CacheKeyType            cache_key,
+                                                                  const std::vector<int>& required_groups) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto [found, item] = lru_cache_.get(cache_key);
+    if (!found)
+        return {};
+    for (int gid : required_groups) {
+        if (gid < 0 || static_cast<size_t>(gid) >= item.slots.size() || !slotMatchable(item, gid)
+            || isNullBlockIdx(item.slots[gid]))
+            return {};
+    }
+    size_t referenced = 0;
+    try {
+        for (; referenced < item.slots.size(); ++referenced) {
+            if (!slotMatchable(item, referenced))
+                item.slots[referenced] = NULL_BLOCK_IDX;
+            if (!isNullBlockIdx(item.slots[referenced]))
+                group_pools_.at(referenced)->requestReference(item.slots[referenced]);
+        }
+    } catch (...) {
+        for (size_t gid = 0; gid < referenced; ++gid)
+            if (!isNullBlockIdx(item.slots[gid]))
+                group_pools_[gid]->requestFree(item.slots[gid]);
+        throw;
+    }
+    touchTreeAliasesLocked(cache_key);
+    return {true, std::move(item.slots), std::move(item.recovery_metadata)};
 }
 
 BlockIdxType SharedBlockCache::matchGroup(CacheKeyType cache_key, int group_id) {
@@ -173,6 +208,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
                 if (result.evicted_slots.find(tree_key.cache_key) == result.evicted_slots.end()) {
                     result.evicted_keys.push_back(tree_key.cache_key);
                     result.evicted_slots[tree_key.cache_key] = removed_item.slots;
+                    result.recovery_metadata[tree_key.cache_key] = removed_item.recovery_metadata;
                     result.evicted_lifetime_ms[tree_key.cache_key] =
                         std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
                     result.evicted_namespaces[tree_key.cache_key] =
@@ -218,6 +254,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
 
         result.evicted_keys.push_back(cache_key);
         result.evicted_slots[cache_key] = removed_item.slots;
+        result.recovery_metadata[cache_key] = removed_item.recovery_metadata;
         result.evicted_lifetime_ms[cache_key] =
             std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
         result.evicted_namespaces[cache_key] =
@@ -292,6 +329,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
                     if (result.evicted_slots.find(tree_key.cache_key) == result.evicted_slots.end()) {
                         result.evicted_keys.push_back(tree_key.cache_key);
                         result.evicted_slots[tree_key.cache_key] = removed_item.slots;
+                        result.recovery_metadata[tree_key.cache_key] = removed_item.recovery_metadata;
                         result.evicted_lifetime_ms[tree_key.cache_key] =
                             std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
                         result.evicted_namespaces[tree_key.cache_key] =
@@ -340,6 +378,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
 
         result.evicted_keys.push_back(cache_key);
         result.evicted_slots[cache_key] = removed_item.slots;
+        result.recovery_metadata[cache_key] = removed_item.recovery_metadata;
         result.evicted_lifetime_ms[cache_key] =
             std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
         result.evicted_namespaces[cache_key] =
@@ -362,14 +401,12 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
 size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
 
-    size_t freed = evictDsv41AndFree(-1, min_blocks);
-    if (freed >= min_blocks)
-        return freed;
-    auto evict_result = selectAndEvict(min_blocks - freed);
+    auto evict_result = selectAndEvict(min_blocks);
     if (evict_result.evicted_keys.empty()) {
-        return freed;
+        return 0;
     }
 
+    size_t freed = 0;
     for (size_t i = 0; i < evict_result.evicted_keys.size(); ++i) {
         const auto  cache_key = evict_result.evicted_keys[i];
         const auto& slots     = evict_result.evicted_slots.at(cache_key);
@@ -387,20 +424,15 @@ size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
 size_t SharedBlockCache::evictAndFreeForGroup(int group_id, size_t min_blocks, EvictResult* evict_result_out) {
     RTP_LLM_PROFILE_FUNCTION();
 
-    size_t freed = hasDsv41Checkpoints() ? evictDsv41AndFree(group_id, min_blocks) : 0;
-    if (freed >= min_blocks) {
-        if (evict_result_out)
-            *evict_result_out = {};
-        return freed;
-    }
-    auto evict_result = selectAndEvictForGroup(group_id, min_blocks - freed);
+    auto evict_result = selectAndEvictForGroup(group_id, min_blocks);
     if (evict_result.evicted_keys.empty()) {
         if (evict_result_out) {
             *evict_result_out = std::move(evict_result);
         }
-        return freed;
+        return 0;
     }
 
+    size_t freed = 0;
     for (size_t i = 0; i < evict_result.evicted_keys.size(); ++i) {
         const auto  cache_key = evict_result.evicted_keys[i];
         const auto& slots     = evict_result.evicted_slots.at(cache_key);
@@ -856,6 +888,7 @@ void SharedBlockCache::removeSlotFromItemLocked(CacheKeyType cache_key, int grou
     result.evicted_state_only_group[cache_key] = group_id;
 
     item.slots[static_cast<size_t>(group_id)] = NULL_BLOCK_IDX;
+    item.recovery_metadata.reset();
     if (static_cast<size_t>(group_id) < item.matchable_slots.size()) {
         item.matchable_slots[static_cast<size_t>(group_id)] = false;
     }

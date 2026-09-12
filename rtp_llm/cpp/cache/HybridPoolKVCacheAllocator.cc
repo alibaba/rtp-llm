@@ -472,8 +472,6 @@ size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
 }
 
 BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
-    if (config_.dsv41_cache_layout_version != 0)
-        return min_blocks_to_free ? leaseDsv41ForMemoryTransfer() : nullptr;
     if (min_blocks_to_free == 0 || !shared_block_cache_) {
         return nullptr;
     }
@@ -516,6 +514,9 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
         const auto  cache_key = evict_result.evicted_keys[evicted_idx];
         const auto& slots     = evict_result.evicted_slots.at(cache_key);
         evicted_keys.push_back(cache_key);
+        auto metadata = evict_result.recovery_metadata.find(cache_key);
+        if (metadata != evict_result.recovery_metadata.end())
+            batch_resource->cacheResource(0).setDsv41RecoveryMetadata(evicted_idx, metadata->second);
         auto dep_it = evict_result.evicted_dependencies.find(cache_key);
         if (dep_it != evict_result.evicted_dependencies.end()) {
             evicted_dependencies.push_back(dep_it->second);
@@ -540,16 +541,14 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     // Under CP this can be a mixed batch of canonical paged keys and logical
     // state/SWA keys, so coordinator must not remap the whole batch again.
     batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
+    batch_resource->cacheResource(0).setBlockIdsKeyAligned(true);
+    if (config_.dsv41_cache_layout_version != 0)
+        batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(dsv41DataUnit() != config_.seq_size_per_block);
     return batch_resource;
 }
 
 void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
     if (!batch_kv_cache_resource) {
-        return;
-    }
-    if (config_.dsv41_cache_layout_version != 0) {
-        for (int batch = 0; batch < batch_kv_cache_resource->batchSize(); ++batch)
-            batch_kv_cache_resource->cacheResource(batch).setDsv41GpuLease({});
         return;
     }
     for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {

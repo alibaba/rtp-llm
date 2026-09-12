@@ -22,6 +22,7 @@ struct NormalModelInputGathererConfig {
     size_t                      input_vocab_size{};
     bool                        has_positional_encoding{};
     bool                        is_multimodal{};
+    bool                        is_v41{};
     PositionIdsStyle            mm_position_ids_style{};
     size_t                      position_id_len_factor{};
     RoleType                    role_type{};

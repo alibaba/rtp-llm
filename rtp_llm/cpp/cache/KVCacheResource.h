@@ -1,19 +1,18 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/DSV41GpuCheckpointCache.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
 class DSV41CacheState;
+struct DSV41CheckpointMetadata;
 
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
@@ -91,31 +90,22 @@ public:
     const std::shared_ptr<DSV41CacheState>& dsv41CacheState() const {
         return dsv41_cache_state_;
     }
-    void setDsv41GpuLease(DSV41GpuCheckpointCache::Lease lease, bool restore_pending = false) {
-        dsv41_gpu_lease_           = std::move(lease);
-        dsv41_gpu_restore_pending_ = restore_pending;
-        dsv41_gpu_transfer_commit_ = {};
+    std::shared_ptr<const DSV41CheckpointMetadata> dsv41RecoveryMetadata(size_t block) const {
+        return block < dsv41_recovery_metadata_.size() ? dsv41_recovery_metadata_[block] : nullptr;
     }
-    const DSV41GpuCheckpointCache::Lease& dsv41GpuLease() const {
-        return dsv41_gpu_lease_;
+    void setDsv41RecoveryMetadata(size_t block, std::shared_ptr<const DSV41CheckpointMetadata> metadata) {
+        if (dsv41_recovery_metadata_.size() <= block)
+            dsv41_recovery_metadata_.resize(block + 1);
+        dsv41_recovery_metadata_[block] = std::move(metadata);
     }
-    bool dsv41GpuRestorePending() const {
-        return dsv41_gpu_restore_pending_;
+    void clearDsv41RecoveryMetadata() {
+        dsv41_recovery_metadata_.clear();
     }
-    void completeDsv41GpuRestore() {
-        dsv41_gpu_restore_pending_ = false;
+    bool blockIdsAreKeyAligned() const {
+        return block_ids_are_key_aligned_;
     }
-    void setDsv41GpuTransferCommit(std::function<void()> commit) {
-        dsv41_gpu_transfer_commit_ = std::move(commit);
-    }
-    bool isDsv41GpuTransfer() const {
-        return static_cast<bool>(dsv41_gpu_transfer_commit_);
-    }
-    void completeDsv41GpuTransfer() {
-        if (!dsv41_gpu_transfer_commit_)
-            throw std::logic_error("V4.1 GPU transfer has no pending commit");
-        dsv41_gpu_transfer_commit_();
-        dsv41_gpu_transfer_commit_ = {};
+    void setBlockIdsKeyAligned(bool value) {
+        block_ids_are_key_aligned_ = value;
     }
 
     void initGroups(int                                  group_num,
@@ -195,9 +185,7 @@ public:
 
 private:
     std::shared_ptr<DSV41CacheState> dsv41_cache_state_;
-    DSV41GpuCheckpointCache::Lease   dsv41_gpu_lease_;
-    bool                             dsv41_gpu_restore_pending_{false};
-    std::function<void()>            dsv41_gpu_transfer_commit_;
+    std::vector<std::shared_ptr<const DSV41CheckpointMetadata>> dsv41_recovery_metadata_;
     // layer_id -> block_indices
     LayerBlockIds layer_block_ids;
     // layer_id -> region_name -> block_indices
@@ -207,6 +195,8 @@ private:
     CacheKeysType         cache_keys;
     BlockDependenciesType block_dependencies;
     bool                  cache_keys_are_cp_canonical_{false};
+    // Connector selections use one slot per key; live SWA groups use their own token unit.
+    bool block_ids_are_key_aligned_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

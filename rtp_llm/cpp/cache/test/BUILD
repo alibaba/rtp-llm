@@ -352,17 +352,6 @@ cc_test(
 )
 
 cc_test(
-    name = "dsv41_gpu_checkpoint_cache_test",
-    srcs = ["DSV41GpuCheckpointCacheTest.cc"],
-    copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/cache:dsv41_checkpoint_state",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_test(
     name = "dsv41_gpu_cache_allocator_test",
     srcs = ["DSV41GpuCacheAllocatorTest.cc"],
     copts = test_copts,

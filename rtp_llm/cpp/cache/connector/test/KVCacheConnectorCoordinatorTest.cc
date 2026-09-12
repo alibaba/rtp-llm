@@ -3,6 +3,8 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/MockKVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
@@ -1027,6 +1029,79 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
     coordinator->connectors_.clear();
     resource.reset();     // trigger auto-decr while allocator_ is alive
     coordinator.reset();  // ensure no lingering references before next tests
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, V41FullPagesKeepEveryDataBlockWhilePrefillUsesCP8CanonicalKeys) {
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+        const bool  prefill              = role == RoleType::PREFILL;
+        CacheConfig cache                = cache_config_;
+        cache.dsv41_cache_layout_version = 1;
+        cache.cache_specs.resize(6);
+        cache.cache_specs[5] =
+            std::make_shared<DSV41KVCacheSpec>(KVCacheRegionName::SWA_KV, 43, 0, 136, 1024, 8, prefill);
+        ParallelismConfig parallel;
+        parallel.role_type                          = role;
+        parallel.tp_size                            = prefill ? 8 : 1;
+        parallel.prefill_cp_config.kv_cache_sharded = true;
+        parallel.prefill_cp_config.prefill_cp_size  = 8;
+        KVCacheConnectorCoordinator coordinator(
+            cache, KVCacheConfig{}, RuntimeConfig{}, parallel, SpeculativeExecutionConfig{}, allocator_);
+        EXPECT_EQ(coordinator.cpSize(), prefill ? 8 : 1);
+    }
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, EvictedWriteKeepsAllocatorAndBlocksWithoutKeepingManagerAlive) {
+    auto manager        = std::make_shared<KVCacheManager>(cache_config_);
+    manager->allocator_ = allocator_;
+    auto resource       = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(1, 1, {0});
+    const auto ids = allocator_->block_pool_->malloc(1);
+    ASSERT_EQ(ids.size(), 1);
+    allocator_->block_pool_->blockCacheReference(ids[0]);
+    allocator_->block_pool_->requestFree(ids[0]);
+    resource->mutableBlockIds(0, 0).assign(ids);
+    const auto                          before        = allocator_->block_pool_->freeBlocksNum();
+    auto                                complete      = manager->evictedWriteCompletion(resource);
+    std::weak_ptr<KVCacheManager>       weak_manager  = manager;
+    std::weak_ptr<BatchKVCacheResource> weak_resource = resource;
+    manager.reset();
+    resource.reset();
+    EXPECT_TRUE(weak_manager.expired());
+    EXPECT_FALSE(weak_resource.expired());
+    EXPECT_EQ(allocator_->block_pool_->freeBlocksNum(), before);
+    complete(true);
+    EXPECT_EQ(allocator_->block_pool_->freeBlocksNum(), before + 1);
+    complete = {};
+    EXPECT_TRUE(weak_resource.expired());
+}
+
+TEST_F(KVCacheConnectorCoordinatorTest, WriteCompletionKeepsOwnerUntilDoneAndCallsOnceOutsideQueueLock) {
+    for (bool success : {false, true}) {
+        auto write = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+        auto owner = std::make_shared<testing::StrictMock<MockKVCacheConnectorReadWriteContext>>();
+        std::weak_ptr<MockKVCacheConnectorReadWriteContext> weak_owner = owner;
+        bool                                                done       = false;
+        ON_CALL(*write, done()).WillByDefault(testing::Invoke([&] { return done; }));
+        ON_CALL(*write, success()).WillByDefault(testing::Return(success));
+        EXPECT_CALL(*owner, onWriteComplete(success)).WillOnce(testing::Invoke([&](bool) {
+            const bool unlocked = coordinator_->update_mutex_.try_lock();
+            EXPECT_TRUE(unlocked);
+            if (unlocked)
+                coordinator_->update_mutex_.unlock();
+        }));
+        coordinator_->fused_async_write_context_list_.emplace_back(
+            std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{write}), owner);
+        owner.reset();
+        coordinator_->processWriteContexts();
+        EXPECT_FALSE(weak_owner.expired());
+        EXPECT_EQ(coordinator_->fused_async_write_context_list_.size(), 1);
+        done = true;
+        coordinator_->processWriteContexts();
+        EXPECT_TRUE(weak_owner.expired());
+        EXPECT_TRUE(coordinator_->fused_async_write_context_list_.empty());
+        coordinator_->processWriteContexts();
+    }
 }
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenHasWriteContext) {

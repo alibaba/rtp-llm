@@ -37,6 +37,13 @@ struct DSV41CacheIdentity {
     bool operator<(const DSV41CacheIdentity& rhs) const {
         return fields() < rhs.fields();
     }
+    int64_t cacheKeySeed() const {
+        validate();
+        return static_cast<int64_t>(std::hash<std::string>{}(
+            model_revision + ':' + layout_fingerprint + ':' + std::to_string(static_cast<int>(replay_mode)) + ':'
+            + std::to_string(tail_policy_version) + ':' + std::to_string(replay_window) + ':'
+            + std::to_string(physical_swa_entries)));
+    }
     void validate() const {
         if (model_revision.empty() || layout_fingerprint.empty() || tail_policy_version != 1 || replay_window != 128
             || physical_swa_entries < replay_window
@@ -157,12 +164,11 @@ public:
         DSV41CacheIdentity                                    identity;
         int64_t                                               encoder_materialized_end{0};
         int64_t                                               decoder_checkpoint_end{0};
+        int64_t                                               target_ready_end{0};
         int64_t                                               protected_prefix_end{0};
         int64_t                                               final_handoff_end{0};
         bool                                                  finished{false};
         bool                                                  cancelled{false};
-        bool                                                  published{false};
-        bool                                                  gpu_published{false};
         std::optional<DSV41CheckpointMetadata>                completed;
         std::vector<std::shared_ptr<DSV41CheckpointSnapshot>> snapshots;
     };
@@ -209,6 +215,17 @@ public:
         }
         state_.decoder_checkpoint_end = metadata.materialized_end;
         state_.completed              = metadata;
+        state_.target_ready_end = state_.identity.replay_mode == DSV41ReplayMode::FULL ? metadata.materialized_end : 0;
+    }
+    void markTargetReady(int64_t end) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active();
+        if (state_.identity.replay_mode != DSV41ReplayMode::FULL || end < state_.encoder_materialized_end || end <= 0
+            || end > 1048576
+            || (state_.protected_prefix_end > 0 && end > state_.protected_prefix_end && !prefixProtected()))
+            throw std::invalid_argument("V4.1 target completion has an invalid execution boundary");
+        state_.encoder_materialized_end = end;
+        state_.target_ready_end         = end;
     }
     void protect(const std::shared_ptr<DSV41CheckpointSnapshot>& snapshot) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -250,39 +267,15 @@ public:
         state_.encoder_materialized_end = metadata.materialized_end;
         state_.decoder_checkpoint_end   = metadata.materialized_end;
         state_.completed                = metadata;
+        state_.target_ready_end = state_.identity.replay_mode == DSV41ReplayMode::FULL ? metadata.materialized_end : 0;
     }
     void cancel() {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_.published || state_.gpu_published) {
-            throw std::logic_error("V4.1 cannot cancel a successfully published request");
-        }
         state_.cancelled = true;
         state_.finished  = false;
         state_.snapshots.clear();
         state_.completed.reset();
-    }
-    bool publishSnapshots(const std::function<bool(const View&)>& publish) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!state_.finished || state_.cancelled)
-            return false;
-        if (state_.published)
-            return true;
-        if (!publish(state_))
-            return false;
-        state_.snapshots.clear();
-        state_.published = true;
-        return true;
-    }
-    bool publishGpuCheckpoint(const std::function<bool(const View&)>& publish) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!state_.finished || state_.cancelled)
-            return false;
-        if (state_.gpu_published)
-            return true;
-        if (!publish(state_))
-            return false;
-        state_.gpu_published = true;
-        return true;
+        state_.target_ready_end = 0;
     }
 
 private:

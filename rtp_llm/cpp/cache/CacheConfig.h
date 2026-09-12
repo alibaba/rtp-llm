@@ -41,9 +41,24 @@ struct CacheConfig {
     bool                           disable_decode_first_malloc_device_reuse = false;
     int                            dsv41_cache_layout_version               = 0;
     bool                           dsv41_draft_cache                        = false;
+    std::string                    dsv41_model_revision;
+    std::string                    dsv41_replay_mode         = "full";
+    uint32_t                       dsv41_tail_policy_version = 1;
     // Physical owner IDs are distinct from reader layer IDs and pool group IDs.
     std::vector<std::vector<int>> layer_region_to_owner;
     std::vector<int>              dsv41_topk_owner;
+
+    std::string dsv41LayoutFingerprint() const {
+        std::ostringstream output;
+        output << "dsv41-memory-v1:target40:draft" << (layer_all_num > 40 ? layer_all_num - 40 : 0) << ':';
+        for (size_t group = 0; group < cache_specs.size(); ++group) {
+            output << group << ':' << cache_specs[group]->debugString() << ":owners=";
+            for (int owner : global_layer_ids.at(group))
+                output << owner << ',';
+            output << ';';
+        }
+        return output.str();
+    }
 
     int physicalOwner(int layer, KVCacheRegionName region) const {
         if (dsv41_cache_layout_version == 0 || region == KVCacheRegionName::DEFAULT) {

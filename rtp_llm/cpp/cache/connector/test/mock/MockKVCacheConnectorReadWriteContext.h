@@ -14,6 +14,7 @@ public:
 public:
     MOCK_METHOD(const KVCacheResource&, kvCacheResource, (), (const, override));
     MOCK_METHOD(const std::shared_ptr<Meta>&, meta, (), (const, override));
+    MOCK_METHOD(void, onWriteComplete, (bool), (const, override));
 };
 
 }  // namespace rtp_llm

@@ -204,6 +204,9 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
+        .def_readwrite("request_id", &PyModelInputs::request_id)
+        .def_readwrite("v41_state_ready", &PyModelInputs::v41_state_ready)
+        .def_readwrite("v41_is_fake", &PyModelInputs::v41_is_fake)
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(

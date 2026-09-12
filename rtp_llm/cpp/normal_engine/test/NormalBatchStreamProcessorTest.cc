@@ -1,6 +1,9 @@
 #include <memory>
+#include <numeric>
 #include "torch/all.h"
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 
 #define private public
 #define protected public
@@ -522,6 +525,187 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherSlicesReusedPrefix) {
     ASSERT_TRUE(model_input.multimodal_features.has_value());
     ASSERT_EQ(model_input.multimodal_features->size(), 1);
     EXPECT_TRUE(torch::equal(model_input.multimodal_features->at(0).cpu(), full_feature.slice(0, 1, 3)));
+}
+
+class V41BatchStreamProcessorTest: public NormalBatchStreamProcessorTest {
+protected:
+    void SetUp() override {
+        NormalBatchStreamProcessorTest::SetUp();
+        model_config_.max_seq_len = 4096;
+        model_config_.vocab_size = model_config_.input_vocab_size = 129280;
+        model_config_.num_layers                                  = 40;
+        model_config_.attn_config.tokens_per_block                = 128;
+        model_config_.attn_config.dsv41_cache_layout_version      = 1;
+        cache_config_.seq_size_per_block = cache_config_.kernel_seq_size_per_block = 128;
+        cache_config_.layer_num = cache_config_.layer_all_num = 40;
+        cache_config_.group_types                             = {CacheGroupType::FULL};
+        cache_config_.layer_to_group_id.assign(40, 0);
+        processor_ = std::make_unique<NormalBatchStreamProcessor>(
+            model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
+    }
+
+    GenerateStreamPtr
+    makeStream(const std::vector<int32_t>& tokens, int64_t id, int choices = 1, bool canonical = true) {
+        auto input                                   = std::make_shared<GenerateInput>();
+        input->input_ids                             = hostIntBuffer(tokens);
+        input->request_id                            = id;
+        input->need_release_resource                 = false;
+        input->fake_query                            = !canonical;
+        input->generate_config                       = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens       = 8;
+        input->generate_config->num_return_sequences = choices;
+        input->generate_config->ignore_eos           = true;
+        if (canonical) {
+            auto prepared         = std::make_shared<V41RequestInputs>();
+            prepared->token_types = torch::full({static_cast<int64_t>(tokens.size())}, -1, torch::kInt32);
+            prepared->image_mask  = torch::zeros({static_cast<int64_t>(tokens.size())}, torch::kBool);
+            input->v41_inputs     = prepared;
+        }
+        auto stream =
+            std::make_shared<NormalGenerateStream>(input, model_config_, RuntimeConfig{}, ResourceContext{}, nullptr);
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(choices);
+        resource.initGroups(1, 40, cache_config_.layer_to_group_id);
+        for (int batch = 0; batch < choices; ++batch) {
+            resource.setBatchBlocks(batch, 0, {1 + 4 * batch, 2 + 4 * batch, 3 + 4 * batch, 4 + 4 * batch});
+            resource.cacheResource(batch).setDsv41CacheState(std::make_shared<DSV41CacheState>(
+                DSV41CacheIdentity{std::string(40, 'a'), std::string(64, 'b'), DSV41ReplayMode::FULL, 1, 128, 128}));
+        }
+        stream->setKVCache(resource);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    }
+
+    static std::shared_ptr<DSV41CacheState> state(const GenerateStreamPtr& stream, int batch = 0) {
+        return stream->kvCachePtr()->cacheResource(batch).dsv41CacheState();
+    }
+
+    static MergedOutput sampled(const std::vector<int32_t>& tokens) {
+        MergedOutput output;
+        output.sampler_output.token_ids = hostIntBuffer(tokens).reshape({static_cast<int64_t>(tokens.size()), 1});
+        return output;
+    }
+
+    ModelConfig                                 model_config_;
+    CacheConfig                                 cache_config_;
+    std::unique_ptr<NormalBatchStreamProcessor> processor_;
+};
+
+TEST_F(V41BatchStreamProcessorTest, PrefillDispatchMakesEverySequenceReadyForItsNextDecode) {
+    const int64_t                first_id  = (1LL << 40) + 17;
+    const int64_t                second_id = (1LL << 40) + 23;
+    auto                         first     = makeStream({11, 12, 13}, first_id, 2);
+    auto                         second    = makeStream({21, 22}, second_id);
+    std::list<GenerateStreamPtr> streams{first, second};
+    StreamGroups                 prefill(streams);
+    TensorHolder                 holder;
+    auto                         gathered = processor_->gatherModelInput(prefill, holder);
+    ASSERT_TRUE(gathered.ok());
+    EXPECT_EQ(toVec<int64_t>(gathered->v41_request_id), (std::vector<int64_t>{first_id, first_id, second_id}));
+    EXPECT_EQ(toVec<int>(gathered->input_lengths), (std::vector<int>{3, 3, 2}));
+    EXPECT_EQ(toVec<bool>(gathered->v41_state_ready), (std::vector<bool>{true, true, true}));
+    EXPECT_EQ(toVec<bool>(gathered->v41_is_fake), (std::vector<bool>{false, false, false}));
+    EXPECT_EQ(toVec<int>(gathered->combo_tokens), (std::vector<int>{11, 12, 13, 11, 12, 13, 21, 22}));
+    EXPECT_EQ(state(first, 0)->view().target_ready_end, 0);
+    EXPECT_EQ(state(first, 1)->view().target_ready_end, 0);
+
+    ASSERT_TRUE(processor_->dispatch(prefill, sampled({31, 32, 41})).ok());
+    EXPECT_FALSE(first->isContextStream());
+    EXPECT_EQ(first->seqLength(), 4);
+    EXPECT_EQ(second->seqLength(), 3);
+    EXPECT_EQ(state(first, 0)->view().target_ready_end, 3);
+    EXPECT_EQ(state(first, 1)->view().target_ready_end, 3);
+    EXPECT_EQ(state(second)->view().target_ready_end, 2);
+    StreamGroups decode(streams);
+    gathered = processor_->gatherModelInput(decode, holder);
+    ASSERT_TRUE(gathered.ok());
+    EXPECT_EQ(gathered->request_id.numel(), 0);
+    EXPECT_EQ(toVec<int64_t>(gathered->v41_request_id), (std::vector<int64_t>{first_id, first_id, second_id}));
+    EXPECT_EQ(toVec<int>(gathered->sequence_lengths), (std::vector<int>{3, 3, 2}));
+    EXPECT_EQ(toVec<int>(gathered->combo_tokens), (std::vector<int>{31, 32, 41}));
+    EXPECT_EQ(toVec<bool>(gathered->v41_state_ready), (std::vector<bool>{true, true, true}));
+    EXPECT_EQ(toVec<int>(gathered->engram_history_ids), (std::vector<int>{11, 12, 13, 11, 12, 13, 0, 21, 22}));
+    EXPECT_EQ(toVec<bool>(gathered->engram_history_valid),
+              (std::vector<bool>{true, true, true, true, true, true, false, true, true}));
+
+    ASSERT_TRUE(processor_->dispatch(decode, sampled({33, 34, 42})).ok());
+    EXPECT_EQ(state(first, 0)->view().target_ready_end, 4);
+    EXPECT_EQ(state(first, 1)->view().target_ready_end, 4);
+    EXPECT_EQ(state(second)->view().target_ready_end, 3);
+    first->kvCachePtr()->cacheResource(1).setDsv41CacheState(nullptr);
+    StreamGroups next_decode(streams);
+    gathered = processor_->gatherModelInput(next_decode, holder);
+    ASSERT_TRUE(gathered.ok());
+    EXPECT_EQ(toVec<bool>(gathered->v41_state_ready), (std::vector<bool>{true, false, true}));
+}
+
+TEST_F(V41BatchStreamProcessorTest, FakeRankRowsStayInvalidAndDoNotPublishTargetState) {
+    auto fake = makeStream({7}, 0, 1, false);
+    fake->setIsFakeStream(true);
+    fake->update({.new_tokens = hostIntBuffer({0}).reshape({1, 1}), .num_new_tokens = 1});
+    state(fake)->markTargetReady(1);
+    std::list<GenerateStreamPtr> streams{fake};
+    StreamGroups                 groups(streams);
+    TensorHolder                 holder;
+    auto                         gathered = processor_->gatherModelInput(groups, holder);
+    ASSERT_TRUE(gathered.ok());
+    ASSERT_TRUE(gathered->is_fake_stream);
+    EXPECT_EQ(toVec<int>(gathered->sequence_lengths), (std::vector<int>{1}));
+    EXPECT_EQ(toVec<int64_t>(gathered->v41_request_id), (std::vector<int64_t>{0}));
+    EXPECT_EQ(toVec<bool>(gathered->v41_is_fake), (std::vector<bool>{true}));
+    EXPECT_EQ(toVec<bool>(gathered->v41_state_ready), (std::vector<bool>{false}));
+    EXPECT_EQ(toVec<int>(gathered->v41_token_types), (std::vector<int>{-1}));
+    EXPECT_EQ(toVec<bool>(gathered->v41_token_valid), (std::vector<bool>{false}));
+    EXPECT_EQ(toVec<int>(gathered->engram_history_ids), (std::vector<int>{0, 0, 0}));
+    EXPECT_EQ(toVec<bool>(gathered->engram_history_valid), (std::vector<bool>{false, false, false}));
+    ASSERT_TRUE(processor_->dispatch(groups, sampled({9})).ok());
+    EXPECT_EQ(state(fake)->view().target_ready_end, 1);
+    EXPECT_EQ(state(fake)->view().encoder_materialized_end, 1);
+}
+
+TEST_F(V41BatchStreamProcessorTest, CacheDataHitsCannotAdvancePastRestoredTargetState) {
+    std::vector<int32_t> tokens(300);
+    std::iota(tokens.begin(), tokens.end(), 1);
+    auto  stream   = makeStream(tokens, 101);
+    auto& resource = stream->streamCacheResource();
+    // Only block geometry is needed here; no allocator or physical KV pool is initialized.
+    resource.resource_context_.cache_manager = std::make_shared<KVCacheManager>(cache_config_, true);
+    auto restored = std::make_shared<KVCacheResource>(stream->kvCachePtr()->cacheResource(0));
+    restored->setDeviceReuseBlockNum(1);
+    restored->setMemoryReuseBlockNum(1);
+    auto matches = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{});
+    auto loaded  = std::make_shared<FusedAsyncReadContext>(matches, restored, nullptr);
+    loaded->setFusedReadContext(nullptr);
+    resource.waitLoadCacheDone(loaded);
+    EXPECT_EQ(restored->reuseBlockNum(), 2);
+    EXPECT_EQ(stream->reuseLength(), 0);
+    EXPECT_EQ(stream->initialReuseLength(), 0);
+
+    restored->setDsv41CacheState(nullptr);
+    resource.waitLoadCacheDone(loaded);
+    EXPECT_EQ(stream->reuseLength(), 0);
+    EXPECT_EQ(stream->initialReuseLength(), 0);
+    std::list<GenerateStreamPtr> streams{stream};
+    TensorHolder                 holder;
+    StreamGroups                 unrecovered(streams);
+    auto                         gathered = processor_->gatherModelInput(unrecovered, holder);
+    ASSERT_TRUE(gathered.ok());
+    EXPECT_EQ(toVec<int>(gathered->prefix_lengths), (std::vector<int>{0}));
+    EXPECT_EQ(toVec<int>(gathered->combo_tokens), tokens);
+
+    restored->setDsv41CacheState(state(stream));
+    state(stream)->markTargetReady(128);
+    resource.waitLoadCacheDone(loaded);
+    EXPECT_EQ(restored->reuseBlockNum(), 2);
+    EXPECT_EQ(stream->reuseLength(), 128);
+    EXPECT_EQ(stream->initialReuseLength(), 128);
+    StreamGroups recovered(streams);
+    gathered = processor_->gatherModelInput(recovered, holder);
+    ASSERT_TRUE(gathered.ok());
+    EXPECT_EQ(toVec<int>(gathered->prefix_lengths), (std::vector<int>{128}));
+    EXPECT_EQ(toVec<int>(gathered->combo_tokens), (std::vector<int32_t>(tokens.begin() + 128, tokens.end())));
+    EXPECT_EQ(toVec<bool>(gathered->v41_state_ready), (std::vector<bool>{true}));
+    EXPECT_EQ(toVec<int>(gathered->engram_history_ids.narrow(0, 0, 1)), (std::vector<int>{126, 127, 128}));
 }
 
 }  // namespace rtp_llm

@@ -8,15 +8,96 @@ This is particularly useful in testing environments where you want to use
 a specific version of flashinfer different from the system-installed one.
 """
 
+import hashlib
 import importlib.metadata
+import json
 import logging
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from filelock import FileLock
+
+
+def _copy_tilelang_with_lock(cache_dir):
+    try:
+        distribution = importlib.metadata.distribution("tilelang")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    if ".dsv41." not in distribution.version:
+        return None
+
+    # Bazel runfiles contain file symlinks, not one installed package directory.
+    source_init = Path(distribution.locate_file("tilelang/__init__.py"))
+    source_package = source_init.resolve(strict=True).parent
+    source_site = source_package.parent
+    metadata_dirs = [
+        path
+        for path in source_site.glob("*.dist-info")
+        if importlib.metadata.Distribution.at(path).metadata["Name"] == "tilelang"
+    ]
+    if len(metadata_dirs) != 1:
+        raise RuntimeError("TileLang requires one matching native wheel distribution")
+    source_metadata = metadata_dirs[0]
+    selected_metadata = Path(
+        distribution.locate_file(source_metadata.name + "/METADATA")
+    )
+    if not selected_metadata.samefile(source_metadata / "METADATA"):
+        raise RuntimeError("TileLang package and metadata come from different wheels")
+    native_distribution = importlib.metadata.Distribution.at(source_metadata)
+    if native_distribution.version != distribution.version:
+        raise RuntimeError("TileLang package and metadata versions differ")
+    manifest_payload = (source_package / "rtp_build_manifest.json").read_bytes()
+    if json.loads(manifest_payload)["version"] != distribution.version:
+        raise RuntimeError("TileLang manifest and distribution versions differ")
+    metadata_payload = (source_metadata / "METADATA").read_bytes()
+    identity = hashlib.sha256(manifest_payload + b"\0" + metadata_payload).hexdigest()
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target_base = cache_dir / (
+        f"tilelang_python-native-{sys.implementation.cache_tag}-{identity}"
+    )
+    target_site = target_base / "site-packages"
+    completion_marker = target_base / ".copy_complete"
+
+    with FileLock(str(cache_dir / ("." + target_base.name + ".lock")), timeout=300):
+        if completion_marker.exists():
+            if (
+                completion_marker.read_text() != identity + "\n"
+                or not (target_site / "tilelang/__init__.py").is_file()
+                or (target_site / "tilelang/__init__.py").is_symlink()
+                or (target_site / "tilelang/rtp_build_manifest.json").read_bytes()
+                != manifest_payload
+                or (target_site / source_metadata.name / "METADATA").read_bytes()
+                != metadata_payload
+            ):
+                raise RuntimeError("Completed TileLang native package cache is invalid")
+            return str(target_site)
+
+        with tempfile.TemporaryDirectory(
+            prefix="." + target_base.name + ".", dir=cache_dir
+        ) as temporary:
+            staged_base = Path(temporary) / "package"
+            staged_site = staged_base / "site-packages"
+            staged_site.mkdir(parents=True)
+            shutil.copytree(source_package, staged_site / "tilelang", symlinks=False)
+            shutil.copytree(
+                source_metadata, staged_site / source_metadata.name, symlinks=False
+            )
+            (staged_base / ".copy_complete").write_text(identity + "\n")
+            if target_base.exists():
+                shutil.rmtree(target_base)
+            staged_base.rename(target_base)
+    logging.info(
+        "[Package Copy] Materialized TileLang v%s from %s at %s",
+        distribution.version,
+        source_site,
+        target_site,
+    )
+    return str(target_site)
 
 
 def get_package_info(package_name):
@@ -64,6 +145,11 @@ def copy_package_with_lock(package_name, cache_dir):
     Uses file lock to prevent concurrent copies.
     Returns the path to the copied package's site-packages directory.
     """
+    if package_name == "tilelang":
+        native_path = _copy_tilelang_with_lock(cache_dir)
+        if native_path is not None:
+            return native_path
+
     logging.info(f"[Package Copy] Processing {package_name}...")
 
     # Get package version and source path
@@ -213,7 +299,8 @@ def setup_jit_cache(cache_dir=None, packages=None):
     # Use defaults if not provided
     if cache_dir is None:
         cache_dir = Path.home().as_posix() + "/.cache"
-    if packages is None:
+    use_defaults = packages is None
+    if use_defaults:
         packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
 
     runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
@@ -224,6 +311,12 @@ def setup_jit_cache(cache_dir=None, packages=None):
         site_packages_path = copy_package_with_lock(package_name, cache_dir)
         if site_packages_path:
             copied_paths.append(site_packages_path)
+
+    # The existing package discovery above adds Bazel's pip roots to sys.path.
+    if use_defaults:
+        native_path = _copy_tilelang_with_lock(cache_dir)
+        if native_path is not None:
+            copied_paths.append(native_path)
 
     if not copied_paths:
         logging.info("[Package Setup] Warning: No packages were successfully copied")

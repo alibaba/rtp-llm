@@ -74,7 +74,8 @@ PrefixTreeMemoryBlockCache::match(CacheKeyType                 cache_key,
             state.block_size,
             state.generation,
             state.created_time_us,
-            state.slot_valid_mask};
+            state.slot_valid_mask,
+            state.recovery_metadata};
 }
 
 PrefixTreeMemoryBlockCache::MatchResult
@@ -106,7 +107,8 @@ PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType                 ca
             state.block_size,
             state.generation,
             state.created_time_us,
-            state.slot_valid_mask};
+            state.slot_valid_mask,
+            state.recovery_metadata};
 }
 
 std::pair<bool, std::optional<PrefixTreeMemoryBlockCache::CacheItem>>
@@ -148,6 +150,8 @@ PrefixTreeMemoryBlockCache::putCommitted(CacheKeyType            cache_key,
     state.created_time_us = input_item.created_time_us > 0 ? input_item.created_time_us : currentTimeUs();
     state.in_flight_ref   = 0;
     state.slot_valid_mask = input_item.slot_valid_mask;
+
+    state.recovery_metadata = input_item.recovery_metadata;
     insertEvictKeyLocked(node, input_item.kind);
     return {true, old_item};
 }
@@ -320,6 +324,67 @@ PrefixTreeMemoryBlockCache::popOldestEvictable(CacheBlockKind kind, CacheBacking
         return item;
     }
     return std::nullopt;
+}
+
+std::vector<PrefixTreeMemoryBlockCache::CacheItem>
+PrefixTreeMemoryBlockCache::popOldestJointEvictable(CacheBlockKind kind, CacheBackingType backing_type) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (!validKind(kind)) {
+        return {};
+    }
+    auto& lru = leaf_lru_[kindIndex(kind)];
+    for (auto it = lru.begin(); it != lru.end();) {
+        auto node_it = nodes_.find(it->cache_key);
+        if (node_it == nodes_.end()) {
+            it = lru.erase(it);
+            continue;
+        }
+        auto&       node      = node_it->second;
+        const auto& candidate = node.kinds[kindIndex(kind)];
+        if (!candidate.has_value || candidate.detached || candidate.last_access_seq != it->last_access_seq
+            || candidate.generation != it->generation) {
+            it = lru.erase(it);
+            continue;
+        }
+        bool evictable = candidate.backing_type == backing_type && isKindLeafLocked(node, kind);
+        for (auto member_kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            const size_t index = kindIndex(member_kind);
+            const auto&  state = node.kinds[index];
+            if (state.is_resident || state.in_flight_ref > 0) {
+                evictable = false;
+            }
+            for (const auto& retired : node.retired_items[index]) {
+                if (retired.in_flight_ref > 0) {
+                    evictable = false;
+                }
+            }
+        }
+        if (!evictable) {
+            ++it;
+            continue;
+        }
+
+        std::vector<CacheItem> items;
+        items.reserve(kKindCount);
+        for (auto member_kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            const auto& state = node.kinds[kindIndex(member_kind)];
+            if (state.has_value && !state.detached) {
+                items.push_back(*toItemLocked(node, member_kind));
+            }
+        }
+        for (const auto& item : items) {
+            eraseEvictKeyLocked(node, item.kind);
+            auto& state    = node.kinds[kindIndex(item.kind)];
+            state.detached = true;
+            decrementAncestorsLocked(item.cache_key, item.kind);
+            const auto descendant_ref_count = state.subtree_ref_count;
+            state                           = KindState{};
+            state.subtree_ref_count         = descendant_ref_count;
+        }
+        pruneLocked(node_it->first);
+        return items;
+    }
+    return {};
 }
 
 std::vector<PrefixTreeMemoryBlockCache::CacheItem>
@@ -633,9 +698,17 @@ PrefixTreeMemoryBlockCache::toItemLocked(const Node& node, CacheBlockKind kind) 
     if (!state.has_value) {
         return std::nullopt;
     }
-    return CacheItem{
-        node.cache_key, kind, state.backing_type, state.block_index, state.disk_slot, state.block_size,
-        state.is_resident, state.generation, state.created_time_us, state.slot_valid_mask};
+    return CacheItem{node.cache_key,
+                     kind,
+                     state.backing_type,
+                     state.block_index,
+                     state.disk_slot,
+                     state.block_size,
+                     state.is_resident,
+                     state.generation,
+                     state.created_time_us,
+                     state.slot_valid_mask,
+                     state.recovery_metadata};
 }
 
 bool PrefixTreeMemoryBlockCache::isKindLeafLocked(const Node& node, CacheBlockKind kind) const {

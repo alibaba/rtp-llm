@@ -121,6 +121,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/cache:dsv41_checkpoint_state",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},

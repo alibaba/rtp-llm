@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
+#include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
@@ -22,8 +24,9 @@ namespace rtp_llm {
 class KVCacheConnectorReadWriteContextImpl: public KVCacheConnectorReadWriteContext {
 public:
     KVCacheConnectorReadWriteContextImpl(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
-                                         const std::shared_ptr<Meta>&                 meta):
-        batch_resource_(batch_resource), meta_(meta) {}
+                                         const std::shared_ptr<Meta>&                 meta,
+                                         std::function<void(bool)>                    done = {}):
+        batch_resource_(batch_resource), meta_(meta), done_(std::move(done)) {}
     ~KVCacheConnectorReadWriteContextImpl() override = default;
 
 public:
@@ -33,10 +36,15 @@ public:
     const std::shared_ptr<Meta>& meta() const override {
         return meta_;
     }
+    void onWriteComplete(bool success) const override {
+        if (done_)
+            done_(success);
+    }
 
 private:
     std::shared_ptr<BatchKVCacheResource> batch_resource_;
     std::shared_ptr<Meta>                 meta_;
+    std::function<void(bool)>             done_;
 };
 
 class MetaImpl: public Meta {
@@ -262,6 +270,33 @@ void StreamCacheResource::init(int batch_size) {
 
     batch_kv_cache_resource_->initGroups(
         group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types, layer_region_to_group);
+    if (resource_context_.cache_manager) {
+        const auto& config = resource_context_.cache_manager->cacheConfig();
+        if (config.dsv41_cache_layout_version != 0) {
+            const auto& revision = config.dsv41_model_revision;
+            RTP_LLM_CHECK_WITH_INFO(
+                revision.size() == 40
+                    && std::all_of(revision.begin(),
+                                   revision.end(),
+                                   [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }),
+                "V4.1 cache requires a fixed 40-hex model revision");
+            RTP_LLM_CHECK_WITH_INFO(config.dsv41_replay_mode == "full"
+                                        || config.dsv41_replay_mode == "bounded_checkpoint_v1",
+                                    "unsupported V4.1 replay mode");
+            auto swa = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config.cache_specs.at(5));
+            RTP_LLM_CHECK_WITH_INFO(swa != nullptr, "V4.1 cache requires its physical SWA spec");
+            DSV41CacheIdentity identity{revision,
+                                        config.dsv41LayoutFingerprint(),
+                                        config.dsv41_replay_mode == "full" ? DSV41ReplayMode::FULL :
+                                                                             DSV41ReplayMode::BOUNDED_CHECKPOINT_V1,
+                                        config.dsv41_tail_policy_version,
+                                        128,
+                                        swa->entries_per_block};
+            for (int batch = 0; batch < batch_size; ++batch)
+                batch_kv_cache_resource_->cacheResource(batch).setDsv41CacheState(
+                    std::make_shared<DSV41CacheState>(identity));
+        }
+    }
     resource_released_ = false;
 }
 
@@ -699,7 +734,13 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
     const int block_tokens     = reuseBlockTokens();
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
+    const int   data_reuse_len   = read_context->resource()->reuseBlockNum() * block_tokens;
+    const auto& state            = read_context->resource()->dsv41CacheState();
+    const bool  is_v41           = state || stream_->generateInput()->v41_inputs
+                        || (resource_context_.cache_manager
+                            && resource_context_.cache_manager->cacheConfig().dsv41_cache_layout_version != 0);
+    const int total_reuse_len =
+        is_v41 ? (state ? std::min<int64_t>(data_reuse_len, state->view().target_ready_end) : 0) : data_reuse_len;
     const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
     const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
     const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
@@ -764,8 +805,17 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
         min_free_blocks,
         need_blocks,
         evicted_resource->cacheKeys(0).size());
-    storeCacheAsync(evicted_resource, /*enable_memory_cache=*/true, /*enable_remote_cache=*/false);
-    resource_context_.cache_manager->blockCacheFree(evicted_resource);
+    if (resource_context_.cache_manager->cacheConfig().dsv41_cache_layout_version != 0) {
+        auto manager  = resource_context_.cache_manager;
+        auto complete = manager->evictedWriteCompletion(evicted_resource);
+        auto meta     = std::make_shared<MetaImpl>(true, false, stream_->traceId());
+        auto context  = std::make_shared<KVCacheConnectorReadWriteContextImpl>(evicted_resource, meta, complete);
+        if (!manager->asyncStoreCache(context))
+            complete(false);
+    } else {
+        storeCacheAsync(evicted_resource, /*enable_memory_cache=*/true, /*enable_remote_cache=*/false);
+        resource_context_.cache_manager->blockCacheFree(evicted_resource);
+    }
 }
 
 void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context) {

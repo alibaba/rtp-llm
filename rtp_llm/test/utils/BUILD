@@ -48,3 +48,12 @@ py_test(
         ":test_util",
     ],
 )
+
+py_test(
+    name = "jit_sys_path_setup_test",
+    srcs = [
+        "jit_sys_path_setup.py",
+        "jit_sys_path_setup_test.py",
+    ],
+    deps = [":filelock"],
+)

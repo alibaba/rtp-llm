@@ -1,4 +1,13 @@
 py_test(
+    name = "test_engine_adapter",
+    srcs = ["test_engine_adapter.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:models",
+    ],
+)
+
+py_test(
     name = "test_flashmla_compact",
     srcs = ["test_flashmla_compact.py", "test_flashmla.py", "official_flashmla.py", "test_compact_reader.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

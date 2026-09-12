@@ -137,7 +137,7 @@ public:
     void clearBlocks() {
         resizeBlocks(0, 0);
         for (auto& resource : batch_resource)
-            resource.setDsv41GpuLease({});
+            resource.clearDsv41RecoveryMetadata();
     }
 
     const CacheKeysType& cacheKeys(int batch_id = 0) const {

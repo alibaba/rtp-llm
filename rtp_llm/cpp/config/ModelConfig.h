@@ -42,6 +42,9 @@ public:
     // model variant params used in ft
     int64_t num_layers  = 0;
     int64_t hidden_size = 0;
+    std::string dsv41_model_revision;
+    std::string dsv41_replay_mode         = "full";
+    int64_t     dsv41_tail_policy_version = 1;
 
     // Attention configuration - contains all attention-related params
     AttentionConfigs      attn_config;

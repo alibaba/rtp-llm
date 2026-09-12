@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/DSV41KVCacheSpec.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -245,7 +246,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 }
             }
             if (!valid.empty()) {
-                referenceBlocksInGroup(gid, valid);
+                if (config_.dsv41_cache_layout_version == 0)
+                    referenceBlocksInGroup(gid, valid);
                 referenced_blocks[static_cast<size_t>(gid)] = std::move(valid);
             }
         }
@@ -536,6 +538,8 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
+    selected_resource->clearDsv41RecoveryMetadata();
+    selected_resource->setBlockIdsKeyAligned(true);
     selected_resource->initGroups(kvcache_resource.groupNums(),
                                   static_cast<int>(config_.layer_all_num),
                                   config_.layer_to_group_id,
@@ -560,7 +564,15 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
         std::vector<BlockIdxType> blocks_for_key(static_cast<size_t>(kvcache_resource.groupNums()), NULL_BLOCK_IDX);
         for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
             const auto& src_blocks                   = kvcache_resource.blocks(gid);
-            const auto  block                        = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
+            size_t      source_pos                   = pos;
+            if (config_.dsv41_cache_layout_version != 0 && gid >= 4 && !kvcache_resource.blockIdsAreKeyAligned()) {
+                const auto   spec       = std::dynamic_pointer_cast<DSV41KVCacheSpec>(config_.cache_specs.at(gid));
+                const size_t data_unit  = config_.seq_size_per_block * (spec->prefill_byte_slice ? spec->cp_size : 1);
+                const size_t end        = (pos + 1) * data_unit;
+                const size_t fixed_unit = config_.group_seq_size_per_block.at(gid);
+                source_pos              = end % fixed_unit == 0 ? end / fixed_unit - 1 : src_blocks.size();
+            }
+            const auto block = source_pos < src_blocks.size() ? src_blocks[source_pos] : NULL_BLOCK_IDX;
             blocks_for_key[static_cast<size_t>(gid)] = block;
             any_valid_block                          = any_valid_block || (!isNullBlockIdx(block) && block > 0);
         }
@@ -570,6 +582,8 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
             continue;
         }
         selected_keys.push_back(key);
+        selected_resource->setDsv41RecoveryMetadata(selected_keys.size() - 1,
+                                                    kvcache_resource.dsv41RecoveryMetadata(pos));
         selected_dependencies.push_back(
             pos < source_dependencies.size() ?
                 source_dependencies[pos] :

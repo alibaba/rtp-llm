@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/cache/DSV41CacheState.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
@@ -221,6 +222,15 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
+
+    if (!stream->isFakeStream() && stream->generateInput()->v41_inputs) {
+        const int64_t end = stream->seqLength();
+        for (int batch = 0; batch < cur_batch_size; ++batch) {
+            auto state = stream->kvCachePtr()->cacheResource(batch).dsv41CacheState();
+            if (state && state->view().identity.replay_mode == DSV41ReplayMode::FULL)
+                state->markTargetReady(end);
+        }
+    }
 
     stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
                     1,

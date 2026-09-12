@@ -1,8 +1,6 @@
-"""V4.1 configuration and checkpoint descriptors for the existing model factory.
+"""V4.1 descriptors and complete-page eager target in the existing model factory."""
 
-The runtime guard is intentional until the typed cache, shared Engram mapping
-and V4.1 attention driver are connected. V4's ratio dispatch is incompatible.
-"""
+import os
 
 import torch
 
@@ -229,6 +227,19 @@ class DeepSeekV41(DeepSeekV2):
         t = parsed.text
         config = ModelConfig()
         config.dsv41_config = parsed
+        revision = os.environ.get("DSV41_HF_REVISION", "")
+        if revision and (
+            len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision)
+        ):
+            raise ValueError("DSV41_HF_REVISION must identify the immutable checkpoint")
+        mode = os.environ.get("DSV41_REPLAY_MODE", "full")
+        if mode not in ("full", "bounded_checkpoint_v1"):
+            raise ValueError(
+                "DSV41_REPLAY_MODE must identify a supported replay policy"
+            )
+        config.dsv41_model_revision = revision
+        config.dsv41_replay_mode = mode
+        config.dsv41_tail_policy_version = 1
         config.model_type = "deepseek_v41"
         config.num_layers = t["num_hidden_layers"]
         config.hidden_size = t["hidden_size"]
@@ -295,13 +306,69 @@ class DeepSeekV41(DeepSeekV2):
         return config
 
     @classmethod
-    def from_config(cls, *args, **kwargs):
-        raise NotImplementedError(
-            "V4.1 runtime requires its typed cache/attention and host-shared Engram integration; V4 execution is not compatible"
+    def from_config(cls, model_config, *args, **kwargs):
+        revision = model_config.dsv41_model_revision
+        if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
+            raise ValueError("DSV41_HF_REVISION must identify the immutable checkpoint")
+        if model_config.dsv41_replay_mode != "full":
+            raise NotImplementedError("V4.1 standard bounded replay is not connected")
+        return super().from_config(model_config, *args, **kwargs)
+
+    def support_cuda_graph(self) -> bool:
+        return False
+
+    def init_multimodal(self, mm_model_config, vit_config, device):
+        # The ordinary model loader owns these tensors; bind them after loading.
+        self.mm_part = None
+
+    def load_mm_weight(self, model_config, ctype, tp_size, tp_rank, device):
+        from rtp_llm.models.multimodal.deepseek_v41_vision import (
+            DeepSeekV41VisionEmbedding,
+        )
+
+        self.mm_part = DeepSeekV41VisionEmbedding.from_model_weights(
+            model_config.dsv41_config, self.weight.global_weights
         )
 
     def _create_python_model(self):
-        raise NotImplementedError("V4.1 runtime integration is incomplete")
+        from rtp_llm.model_loader.host_shared_cuda import SharedEngramLookup
+        from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+        from rtp_llm.ops import VitSeparation
+
+        if self.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_REMOTE:
+            raise NotImplementedError("V4.1 prepared-image remote ViT is not connected")
+        max_tokens = int(os.environ["DSV41_MAX_TOKENS_PER_RANK"])
+        if max_tokens <= 0:
+            raise ValueError("DSV41_MAX_TOKENS_PER_RANK must be positive")
+        lookup = SharedEngramLookup.from_checkpoint(
+            self.model_config.ckpt_path,
+            os.environ["DSV41_ENGRAM_STORE_ROOT"],
+            os.environ["DSV41_HF_REVISION"],
+            device=self._get_device_str(),
+        )
+        try:
+            if (
+                lookup.shared.manifest["revision"]
+                != self.model_config.dsv41_model_revision
+            ):
+                raise ValueError("V4.1 shared Engram and model revisions disagree")
+            self.py_model = DeepSeekV41Model(
+                self.model_config,
+                self.parallelism_config,
+                self.weight,
+                tokenizer=self.tokenizer,
+                shared_lookup=lookup,
+                kv_cache_config=self.kv_cache_config,
+                max_tokens_per_rank=max_tokens,
+                max_generate_batch_size=self.max_generate_batch_size,
+                fmha_config=self.fmha_config,
+                py_hw_kernel_config=self.hw_kernel_config,
+                device_resource_config=self.device_resource_config,
+                vision=getattr(self, "mm_part", None),
+            )
+        except BaseException:
+            lookup.close()
+            raise
 
     @staticmethod
     def get_weight_cls():

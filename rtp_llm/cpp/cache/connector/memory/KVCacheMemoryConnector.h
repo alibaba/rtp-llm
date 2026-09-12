@@ -31,7 +31,7 @@ class KVCacheAllocator;
 class MemoryAsyncContext;
 struct StagedMemoryCopyScratch;
 
-class KVCacheMemoryConnector: public KVCacheConnector {
+class KVCacheMemoryConnector: public KVCacheConnector, public std::enable_shared_from_this<KVCacheMemoryConnector> {
 public:
     KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                            const KVCacheConfig&                     kv_cache_config,
@@ -51,14 +51,14 @@ public:
 
     std::string        dsv41LayoutFingerprint() const;
     size_t             dsv41ReuseUnit() const;
+    size_t             dsv41DataUnit() const;
     DSV41CacheIdentity dsv41CacheIdentity(const std::string& model_revision, DSV41ReplayMode replay_mode) const;
-    // Token boundaries, not a min-of-longest approximation: CP ranks intersect
-    // these sets before asyncRead selects a complete destination boundary.
-    std::vector<int64_t> dsv41MatchedCheckpointEnds(const std::shared_ptr<AsyncMatchContext>& match_context) const;
     // Called at the real N boundary, before any writer can overwrite its ring.
     // The producer barrier must cover target/draft and all source ready events.
+    // The caller keeps the live ring stable until this synchronous protection returns.
     bool stageDsv41Checkpoint(const std::shared_ptr<KVCacheResource>& resource,
-                              const std::function<void()>&            wait_for_producer);
+                              const std::function<void()>&            wait_for_producer,
+                              const std::shared_ptr<Meta>&            meta);
 
     std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
                                                   const std::shared_ptr<Meta>&            meta) override;
@@ -102,33 +102,29 @@ private:
         bool                      request_released{false};
         uint64_t                  generation{0};
         uint64_t                  src_generation{0};
+
+        std::shared_ptr<const DSV41CheckpointMetadata> recovery_metadata;
     };
     enum class CopyDirection {
         H2D = 0,
         D2H = 1
     };
     struct CopyPlan {
-        std::vector<CopyInfoPerKey>            copy_infos;
-        CopyDirection                          direction;
-        std::optional<DSV41CheckpointMetadata> dsv41_checkpoint;
-        CacheKeysType                          dsv41_keys;
-        std::shared_ptr<void>                  dsv41_lease;
+        std::vector<CopyInfoPerKey> copy_infos;
+        CopyDirection               direction;
     };
 
-    struct DSV41StagedSnapshot;
-    std::shared_ptr<AsyncMatchContext> dsv41Match(const std::shared_ptr<KVCacheResource>& resource);
-    std::shared_ptr<AsyncContext>      dsv41Read(const std::shared_ptr<KVCacheResource>&   resource,
-                                                 const std::shared_ptr<AsyncMatchContext>& match_context,
-                                                 int                                       start_index,
-                                                 int                                       read_num);
-    std::shared_ptr<AsyncContext>      dsv41Write(const std::shared_ptr<KVCacheResource>& resource);
-    std::shared_ptr<CopyPlan>          createDsv41CopyPlan(std::vector<CopyInfoPerKey> infos, CopyDirection direction);
-    bool                               allocateDsv41Backings(std::vector<CopyInfoPerKey>& infos);
-    bool                               isDsv41TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
-    bool                               copyDsv41MemoryItems(const MemoryOperationRequestPB&     request,
-                                                            CopyDirection                       direction,
-                                                            const std::vector<LayerRegionSlot>& slots);
-    mutable std::mutex                 dsv41_transaction_mutex_;
+    bool dsv41ResourceCompatible(const KVCacheResource& resource) const;
+    bool validDsv41Recovery(const KVCacheResource&                                resource,
+                            size_t                                                block_index,
+                            const std::shared_ptr<const DSV41CheckpointMetadata>& metadata) const;
+    bool bindDsv41ReadPlan(CopyPlan& plan, const KVCacheResource& resource, const std::vector<LayerRegionSlot>& slots);
+    std::optional<size_t>
+         dsv41SlotIndex(const KVCacheResource& resource, size_t key_index, const LayerRegionSlot& slot) const;
+    bool isDsv41TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
+    bool copyDsv41MemoryItems(const MemoryOperationRequestPB&     request,
+                              CopyDirection                       direction,
+                              const std::vector<LayerRegionSlot>& slots);
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&                cache_keys,
                                                    const LayerAttnBlockIds&            layer_attn_block_ids,
@@ -204,21 +200,24 @@ private:
     std::vector<uint8_t>         prefixSlotValidMask(const LayerAttnBlockIds&            layer_attn_block_ids,
                                                      const std::vector<LayerRegionSlot>& slots,
                                                      size_t                              key_index,
-                                                     CacheBlockKind                      kind) const;
+                                                     CacheBlockKind                      kind,
+                                                     bool                                require_all = false) const;
     size_t                    prefixKindBlockSize(CacheBlockKind kind, const std::vector<LayerRegionSlot>& slots) const;
-    std::shared_ptr<CopyPlan> buildPrefixCopyPlanForRead(const CacheKeysType&                cache_keys,
-                                                         const BlockDependenciesType&        dependencies,
-                                                         const LayerAttnBlockIds&            layer_attn_block_ids,
-                                                         const std::vector<LayerRegionSlot>& slots,
-                                                         int                                 start_index,
-                                                         int                                 read_num);
-    std::shared_ptr<CopyPlan> buildPrefixCopyPlanForWrite(const CacheKeysType&                cache_keys,
-                                                          const BlockDependenciesType&        dependencies,
-                                                          const LayerAttnBlockIds&            layer_attn_block_ids,
-                                                          const std::vector<LayerRegionSlot>& slots,
-                                                          int                                 start_index,
-                                                          int                                 write_num,
-                                                          bool&                               no_need_write);
+    std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForRead(const CacheKeysType&                cache_keys,
+                                                            const BlockDependenciesType&        dependencies,
+                                                            const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                            const std::vector<LayerRegionSlot>& slots,
+                                                            int                                 start_index,
+                                                            int                                 read_num,
+                                                            const KVCacheResource*              resource = nullptr);
+    std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForWrite(const CacheKeysType&                cache_keys,
+                                                             const BlockDependenciesType&        dependencies,
+                                                             const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                             const std::vector<LayerRegionSlot>& slots,
+                                                             int                                 start_index,
+                                                             int                                 write_num,
+                                                             bool&                               no_need_write,
+                                                             const KVCacheResource*              resource = nullptr);
     bool                      allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
     bool                      allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
     bool                      preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);

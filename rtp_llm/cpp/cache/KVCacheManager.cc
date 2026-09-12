@@ -611,6 +611,14 @@ void KVCacheManager::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cach
     allocator_->blockCacheFree(batch_kv_cache_resource);
 }
 
+std::function<void(bool)> KVCacheManager::evictedWriteCompletion(const BatchKVCacheResourcePtr& resource) {
+    return [allocator = allocator_, resource](bool success) {
+        if (!success)
+            allocator->restoreBlocksToCache(resource);
+        allocator->blockCacheFree(resource);
+    };
+}
+
 size_t KVCacheManager::availableTokensNum() const {
     return allocator_->availableTokensNum();
 }

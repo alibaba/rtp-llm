@@ -91,6 +91,7 @@ public:
     size_t                  notInUseBlocksNum() const;
     BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
     void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
+    std::function<void(bool)> evictedWriteCompletion(const BatchKVCacheResourcePtr& resource);
     size_t                  availableTokensNum() const;
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
