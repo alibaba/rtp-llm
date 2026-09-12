@@ -91,6 +91,66 @@ class WhaleModeConfigurationTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(15)
+    void bundleCompletesWithoutFetchWithOneSharedNetworkWorker() throws Exception {
+        var cfg = config("--whale", "true", "--whale-bundle", "true", "--auto-fetch", "true",
+                "--host", "10.1.2.3", "--n-prefill", "1", "--n-decode", "1");
+        Path perf = directory.resolve("bundle-perf.json");
+        Path master = directory.resolve("bundle-master.json");
+        Files.writeString(perf, "{\"block_size\":1024,\"sleep_scale\":1,\"jitter_pct\":0,"
+                + "\"prefill\":{\"scale\":1},\"decode\":{\"scale\":1,\"tokens_per_step\":1,"
+                + "\"step_ms_by_batch\":[[1,2]]}}");
+        MockMasterConfig.writeWithPrefillExpression(master, "2");
+        var model = MockPerformanceModel.load(perf.toString(), master.toString());
+        var boss = new io.netty.channel.nio.NioEventLoopGroup(1);
+        var worker = new io.netty.channel.nio.NioEventLoopGroup(1);
+        var scheduler = java.util.concurrent.Executors.newScheduledThreadPool(2);
+        var services = new java.util.concurrent.ConcurrentHashMap<Integer, JavaMockEngineCluster.FastRpcService>();
+        var servers = new java.util.concurrent.ConcurrentHashMap<Integer, io.grpc.Server>();
+        io.grpc.ManagedChannel channel = null;
+        int port = Integer.parseInt(System.getenv().getOrDefault("FLEXLB_PORT_BASE", "62600")) + 10;
+        try {
+            var stats = new JavaMockEngineCluster.ClusterStats();
+            var p = JavaMockEngineCluster.startEngine(cfg, model, servers, boss, worker, services,
+                    scheduler, stats, "prefill", "prefill-0", port, 0);
+            var d = JavaMockEngineCluster.startEngine(cfg, model, servers, boss, worker, services,
+                    scheduler, stats, "decode", "decode-0", port + 1, 1);
+            channel = io.grpc.ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
+            var input = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                    .setRequestId(42).addTokenIds(123)
+                    .setGenerateConfig(org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB.newBuilder()
+                            .setMaxNewTokens(8)
+                            .addRoleAddrs(org.flexlb.engine.grpc.EngineRpcService.RoleAddrPB.newBuilder()
+                                    .setRole(org.flexlb.engine.grpc.EngineRpcService.RoleAddrPB.RoleType.DECODE)
+                                    .setRoleStr("DECODE").setIp(d.getHost()).setGrpcPort(port + 1)));
+            var batch = org.flexlb.engine.grpc.EngineRpcService.EnqueueBatchRequestPB.newBuilder()
+                    .setBatchId(42).addDpSlots(org.flexlb.engine.grpc.EngineRpcService.EnqueueBatchDpSlotPB.newBuilder()
+                            .setDpRank(0).addRequests(org.flexlb.engine.grpc.EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
+                                    .setInput(input))).build();
+            var ack = org.flexlb.engine.grpc.RpcServiceGrpc.newBlockingStub(channel)
+                    .withDeadlineAfter(2, TimeUnit.SECONDS).enqueueBatch(batch);
+            assertEquals(0, ack.getErrorsCount());
+            assertEquals(1, ack.getSuccessesCount());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while ((d.getCompletedCount() != 1 || d.whaleMetrics().get("mock_generate_tokens_total").longValue() != 8)
+                    && System.nanoTime() < deadline) Thread.sleep(10);
+            assertEquals(1, d.getCompletedCount(), "D must complete without any Fetch RPC");
+            assertEquals(0, d.getCancelledCount());
+            assertEquals(0, d.getRunningCount());
+            assertEquals(8, d.whaleMetrics().get("mock_generate_tokens_total").longValue());
+            assertFalse(p.isWhaleRemote());
+            assertFalse(d.isWhaleRemote());
+        } finally {
+            if (channel != null) channel.shutdownNow();
+            for (var server : servers.values()) server.shutdownNow();
+            for (var service : services.values()) service.shutdown();
+            scheduler.shutdownNow();
+            boss.shutdownGracefully(0, 1, TimeUnit.SECONDS).syncUninterruptibly();
+            worker.shutdownGracefully(0, 1, TimeUnit.SECONDS).syncUninterruptibly();
+        }
+    }
+
+    @Test
     void bundledEnginesNeverShareCounterDeltaOrSamplingClock() {
         List<Double> rates = new ArrayList<>();
         var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(

@@ -335,7 +335,9 @@ public final class JavaMockEngineCluster {
                 poolTotalKvTokens, config.decodeMaxConcurrency);
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         service.setAutoFetch(config.autoFetch);
-        service.setWhaleRemote(config.whale);
+        // Bundled P/D share one JVM and event loop group. Use local ownership
+        // callbacks so P cannot block those event loops awaiting D RPC admission.
+        service.setWhaleRemote(config.whale && !config.whaleBundle);
         service.whaleBundle = config.whaleBundle;
         service.whalePodIp = config.host;
         service.setFetchAttachTimeoutMs(config.fetchAttachTimeoutMs);
