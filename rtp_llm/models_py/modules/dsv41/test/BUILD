@@ -1,4 +1,17 @@
 py_test(
+    name = "test_flashmla_compact",
+    srcs = ["test_flashmla_compact.py", "test_flashmla.py", "official_flashmla.py", "test_compact_reader.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"DSV41_FLASHMLA": "1"},
+)
+
+py_test(
+    name = "test_host_shared_deadline",
+    srcs = ["test_host_shared_deadline.py", "test_host_shared_lifecycle.py", "host_cuda_test_support.py", "standalone_load.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
     name = "test_cprr_reader_native",
     main = "test_cprr_reader.py",
     srcs = ["test_cprr_reader.py", "test_compact_reader.py"],

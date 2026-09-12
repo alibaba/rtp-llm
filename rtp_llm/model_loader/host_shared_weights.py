@@ -7,11 +7,13 @@ store is not proof of mapped-pinned or ATS GPU lookup support.
 import fcntl
 import hashlib
 import json
+import math
 import mmap
 import os
 import shutil
 import struct
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -96,6 +98,20 @@ class HostSharedWeightStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
+    def _lock_until(lock, operation: int, deadline: float) -> None:
+        while True:
+            try:
+                fcntl.flock(lock, operation | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "timed out waiting for shared weight lock"
+                    ) from None
+                time.sleep(min(0.05, remaining))
+
+    @staticmethod
     def identity(revision: str, slices: list[SharedWeightSlice]) -> str:
         if len(revision) != 40 or any(
             char not in "0123456789abcdef" for char in revision
@@ -115,7 +131,16 @@ class HostSharedWeightStore:
         slices: list[SharedWeightSlice],
         *,
         chunk_bytes: int = 16 * 1024 * 1024,
+        lock_timeout_seconds: float = 1800.0,
     ) -> HostSharedWeights:
+        if (
+            isinstance(lock_timeout_seconds, bool)
+            or not isinstance(lock_timeout_seconds, (int, float))
+            or not math.isfinite(lock_timeout_seconds)
+            or lock_timeout_seconds <= 0
+        ):
+            raise ValueError("shared weight lock timeout must be finite and positive")
+        deadline = time.monotonic() + lock_timeout_seconds
         if (
             chunk_bytes <= 0
             or not slices
@@ -135,7 +160,7 @@ class HostSharedWeightStore:
         key = self.identity(revision, slices)
         destination = self.root / key
         with (self.root / (key + ".lock")).open("a+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            self._lock_until(lock, fcntl.LOCK_EX, deadline)
             for abandoned in self.root.glob(key + ".loading-*"):
                 if abandoned.is_dir() and not abandoned.is_symlink():
                     shutil.rmtree(abandoned)
@@ -214,7 +239,11 @@ class HostSharedWeightStore:
                 if (destination / record["file"]).stat().st_size != item.nbytes:
                     raise ValueError(f"shared backing size mismatch: {item.name}")
             lease = (destination / "lease").open("rb")
-            fcntl.flock(lease, fcntl.LOCK_SH)
+            try:
+                self._lock_until(lease, fcntl.LOCK_SH, deadline)
+            except BaseException:
+                lease.close()
+                raise
         return HostSharedWeights(destination, lease, manifest)
 
     def remove_if_unused(self, identity: str) -> bool:
@@ -224,7 +253,10 @@ class HostSharedWeightStore:
             raise ValueError("invalid shared backing identity")
         destination = self.root / identity
         with (self.root / (identity + ".lock")).open("a+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
             if not destination.exists():
                 return True
             with (destination / "lease").open("rb") as lease:

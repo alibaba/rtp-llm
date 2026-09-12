@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.cache_layout import ENCODINGS, CacheRegion
 from rtp_llm.models_py.modules.dsv41.compact_reader import (
     CompactPages,
@@ -66,6 +65,8 @@ class PlanarPages:
 
 def to_planar(pages: CompactPages, *, out: PlanarPages | None = None) -> PlanarPages:
     """Copy interleaved rows to upstream page planes without decoding any byte."""
+    if out is not None and not isinstance(out, PlanarPages):
+        raise TypeError("planar destination must be explicit PlanarPages")
     _require_enabled(pages.data)
     pages.validate(pages.data.device)
     if not isinstance(pages, CompactPages) or pages.region not in (
@@ -326,7 +327,37 @@ def build_indices(
     )
 
 
-def flashmla_attention(
+def _pack_selected_rows(pages: CompactPages, indices: torch.Tensor):
+    """Retain raw KV bytes in one bounded planar page per query."""
+    rows, _, slots = indices.shape
+    row_bytes = ENCODINGS[pages.region].entry_bytes
+    payload = 512 if pages.region == CacheRegion.SWA else 256
+    entries = pages.entries_per_page
+    stride = (slots * row_bytes + 511) // 512 * 512
+    packed = PlanarPages(
+        torch.zeros((rows + 1, stride), device=pages.data.device, dtype=torch.uint8),
+        pages.region,
+        slots,
+    )
+    physical = indices[:, 0].to(torch.int64)
+    safe = physical.clamp_min(0)
+    source = pages.data[:, : entries * row_bytes].view(-1, entries, row_bytes)
+    selected = source[safe // entries, safe % entries]
+    selected.masked_fill_((physical < 0).unsqueeze(-1), 0)
+    packed.data[1:, : slots * payload].view(rows, slots, payload).copy_(
+        selected[:, :, :payload]
+    )
+    packed.data[1:, slots * payload : slots * row_bytes].view(
+        rows, slots, row_bytes - payload
+    ).copy_(selected[:, :, payload:])
+    addresses = (
+        torch.arange(rows, device=indices.device, dtype=torch.int64)[:, None] + 1
+    ) * slots + torch.arange(slots, device=indices.device, dtype=torch.int64)
+    remapped = torch.where(physical >= 0, addresses, -1).to(torch.int32).unsqueeze(1)
+    return packed, remapped
+
+
+def _flashmla_attention(
     query,
     request_ids,
     query_positions,
@@ -339,6 +370,7 @@ def flashmla_attention(
     output=None,
     lse=None,
     status=None,
+    compact=False,
 ) -> ReaderResult:
     """Return the compact-reader output/LSE contract before inverse RoPE.
 
@@ -366,10 +398,26 @@ def flashmla_attention(
         or not sinks.is_contiguous()
     ):
         raise ValueError("FlashMLA attention sinks must be contiguous FP32 [heads]")
-    if not isinstance(swa, PlanarSwaBinding) or (
-        global_kv is not None and not isinstance(global_kv, PlanarGlobalBinding)
+    swa_type, global_type = (
+        (SwaBinding, GlobalBinding)
+        if compact
+        else (PlanarSwaBinding, PlanarGlobalBinding)
+    )
+    if not isinstance(swa, swa_type) or (
+        global_kv is not None and not isinstance(global_kv, global_type)
     ):
-        raise TypeError("FlashMLA requires explicit planar cache bindings")
+        kind = "compact" if compact else "planar"
+        raise TypeError(f"FlashMLA requires explicit {kind} cache bindings")
+    if compact:
+        for pages in (swa.pages, None if global_kv is None else global_kv.pages):
+            if pages is not None and (
+                not isinstance(pages, CompactPages)
+                or pages.data.shape[0] * pages.entries_per_page
+                > torch.iinfo(torch.int32).max
+            ):
+                raise ValueError(
+                    "compact FlashMLA requires explicit pages with int32 physical rows"
+                )
     if request_ids.device != device or request_ids.shape != (rows,):
         raise ValueError("FlashMLA query and request rows must share shape/device")
     metadata = build_indices(
@@ -401,6 +449,16 @@ def flashmla_attention(
         ),
     )
     if rows:
+        main_pages = swa.pages
+        extra_pages = None if global_kv is None else global_kv.pages
+        if compact:
+            main_pages, main_indices = _pack_selected_rows(swa.pages, metadata.main)
+            extra_indices = None
+            if extra_pages is not None:
+                extra_pages, extra_indices = _pack_selected_rows(
+                    extra_pages, metadata.extra
+                )
+            metadata = replace(metadata, main=main_indices, extra=extra_indices)
         from flash_mla.flash_mla_interface import (
             FlashMLASchedMeta,
             flash_mla_with_kvcache,
@@ -408,7 +466,7 @@ def flashmla_attention(
 
         native_output, native_lse = flash_mla_with_kvcache(
             query.view(rows, 1, heads, 512),
-            swa.pages.kernel_view(),
+            main_pages.kernel_view(),
             None,
             None,
             512,
@@ -418,7 +476,7 @@ def flashmla_attention(
             is_fp8_kvcache=True,
             indices=metadata.main,
             attn_sink=sinks,
-            extra_k_cache=None if global_kv is None else global_kv.pages.kernel_view(),
+            extra_k_cache=None if extra_pages is None else extra_pages.kernel_view(),
             extra_indices_in_kvcache=metadata.extra,
             topk_length=metadata.main_lengths,
             extra_topk_length=metadata.extra_lengths,
@@ -436,3 +494,68 @@ def flashmla_attention(
         lse.copy_(torch.where(active, combined_lse, -torch.inf))
         status.copy_(metadata.status[:, None].expand(-1, heads))
     return ReaderResult(output, status, lse)
+
+
+def flashmla_attention(
+    query,
+    request_ids,
+    query_positions,
+    replay_floors,
+    swa: PlanarSwaBinding,
+    sinks,
+    *,
+    global_kv: PlanarGlobalBinding | None = None,
+    global_indices=None,
+    output=None,
+    lse=None,
+    status=None,
+) -> ReaderResult:
+    return _flashmla_attention(
+        query,
+        request_ids,
+        query_positions,
+        replay_floors,
+        swa,
+        sinks,
+        global_kv=global_kv,
+        global_indices=global_indices,
+        output=output,
+        lse=lse,
+        status=status,
+    )
+
+
+def flashmla_compact_attention(
+    query,
+    request_ids,
+    query_positions,
+    replay_floors,
+    swa: SwaBinding,
+    sinks,
+    *,
+    global_kv: GlobalBinding | None = None,
+    global_indices=None,
+    output=None,
+    lse=None,
+    status=None,
+) -> ReaderResult:
+    """Gather only selected raw rows; temporary storage is independent of capacity.
+
+    Capture includes mapping, byte copies and the native scheduler. The captured
+    allocations belong to the Graph pool and changed page IDs/lengths are read
+    on every replay. Source leases must span the same-stream reader completion.
+    """
+    return _flashmla_attention(
+        query,
+        request_ids,
+        query_positions,
+        replay_floors,
+        swa,
+        sinks,
+        global_kv=global_kv,
+        global_indices=global_indices,
+        output=output,
+        lse=lse,
+        status=status,
+        compact=True,
+    )

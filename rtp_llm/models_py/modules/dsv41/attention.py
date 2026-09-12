@@ -12,8 +12,6 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-
 from rtp_llm.models_py.modules.dsv41.cache_layout import (
     SWA_WINDOW,
     CacheIdentity,
@@ -43,6 +41,7 @@ from rtp_llm.models_py.modules.dsv41.indexer import (
     select_index_positions,
 )
 from rtp_llm.models_py.modules.dsv41.math import grouped_wo_a, rms_norm
+from torch import nn
 
 
 def is_supported(hidden: torch.Tensor) -> bool:
@@ -168,7 +167,6 @@ class V41AttentionContext:
     published_sources: set[int] = field(default_factory=set)
     completed_layers: set[int] = field(default_factory=set)
     observations: list[dict] = field(default_factory=list)
-    planar_globals: dict = field(default_factory=dict)
     _identity: tuple = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -573,23 +571,10 @@ class V41Attention(nn.Module):
                 if self.source.ratio
                 else None
             )
-            planar_swa = planar_global = None
             if backend == "flashmla":
                 from rtp_llm.models_py.modules.dsv41.flashmla import (
-                    PlanarGlobalBinding,
-                    PlanarSwaBinding,
-                    flashmla_attention,
-                    to_planar,
+                    flashmla_compact_attention,
                 )
-
-                planar_swa = PlanarSwaBinding.from_compact(swa)
-                if global_kv is not None:
-                    owner = self.source.global_owner
-                    if owner not in context.planar_globals:
-                        context.planar_globals[owner] = (
-                            PlanarGlobalBinding.from_compact(global_kv)
-                        )
-                    planar_global = context.planar_globals[owner]
             outputs = []
             # Earlier queries must read the old ring before later writes wrap it.
             tile_rows = min(QUERY_TILE, swa.pages.entries_per_page - SWA_WINDOW + 1)
@@ -614,12 +599,7 @@ class V41Attention(nn.Module):
                 reader = compact_attention
                 reader_swa, reader_global = swa, global_kv
                 if backend == "flashmla":
-                    to_planar(swa.pages, out=planar_swa.pages)
-                    reader, reader_swa, reader_global = (
-                        flashmla_attention,
-                        planar_swa,
-                        planar_global,
-                    )
+                    reader = flashmla_compact_attention
                 result = reader(
                     query[first:last].contiguous(),
                     torch.zeros_like(pos, dtype=torch.int32),

@@ -350,6 +350,7 @@ class SharedEngramLookup:
         *,
         device=None,
         chunk_bytes=16 * 1024 * 1024,
+        lock_timeout_seconds=1800.0,
     ):
         from rtp_llm.config.dsv41_config import V41Config
         from rtp_llm.model_loader.host_shared_weights import (
@@ -372,7 +373,10 @@ class SharedEngramLookup:
             )
         slices = engram_checkpoint_slices(checkpoint, config)
         shared = HostSharedWeightStore(store_root).open_or_publish(
-            revision, slices, chunk_bytes=chunk_bytes
+            revision,
+            slices,
+            chunk_bytes=chunk_bytes,
+            lock_timeout_seconds=lock_timeout_seconds,
         )
         try:
             return cls(shared, device=device)
