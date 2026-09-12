@@ -393,6 +393,14 @@ struct PyAttentionInputs {
     torch::Tensor decode_cu_seqlens_host;
     int           context_total_kv_length = 0;
     int           total_tokens            = 0;
+    // Parallel model-boundary layout. TP and Projection-KTP are mutually
+    // exclusive: logical counts describe real work and physical counts
+    // describe the final model/collective shape. A zero physical count means
+    // a legacy caller did not publish the layout explicitly.
+    int logical_request_count  = 0;
+    int physical_request_count = 0;
+    int logical_token_count    = 0;
+    int physical_token_count   = 0;
     torch::Tensor padding_offset;
     torch::Tensor combo_position_ids;
 

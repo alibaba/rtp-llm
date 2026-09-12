@@ -55,6 +55,110 @@ static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayo
     return tensor;
 }
 
+namespace {
+
+int64_t alignUp(int64_t value, int64_t alignment) {
+    RTP_LLM_CHECK_WITH_INFO(alignment > 0, "alignment must be positive, got %ld", alignment);
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+torch::Tensor appendFilledRows(const torch::Tensor& tensor, int64_t rows, int64_t value = 0) {
+    if (!tensor.defined() || rows == 0) {
+        return tensor;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() > 0, "cannot append rows to a scalar tensor");
+    auto padding_shape = tensor.sizes().vec();
+    padding_shape[0]   = rows;
+    auto padding       = torch::full(padding_shape, value, tensor.options());
+    return torch::cat({tensor, padding}, 0);
+}
+
+torch::Tensor appendTokenValues(const torch::Tensor& tensor,
+                                int64_t              source_tokens,
+                                int64_t              padding_tokens,
+                                int64_t              value = 0) {
+    if (!tensor.defined() || padding_tokens == 0) {
+        return tensor;
+    }
+    RTP_LLM_CHECK_WITH_INFO(source_tokens > 0 && tensor.numel() % source_tokens == 0,
+                            "token metadata cannot be padded: numel=%ld source_tokens=%ld",
+                            tensor.numel(),
+                            source_tokens);
+    const int64_t values_per_token = tensor.numel() / source_tokens;
+    return appendFilledRows(tensor.reshape({-1}), padding_tokens * values_per_token, value);
+}
+
+torch::Tensor appendBlockTableRows(const torch::Tensor& table, int64_t rows) {
+    if (!table.defined() || rows == 0) {
+        return table;
+    }
+    if (table.dim() == 2) {
+        return appendFilledRows(table, rows, 0);
+    }
+    RTP_LLM_CHECK_WITH_INFO(table.dim() == 3,
+                            "KV cache block table must be 2-D or 3-D, got dim=%ld",
+                            table.dim());
+    auto padding = torch::zeros({table.size(0), rows, table.size(2)}, table.options());
+    return torch::cat({table, padding}, 1);
+}
+
+struct TensorParallelPaddingPlan {
+    bool    prefill{false};
+    int64_t logical_requests{0};
+    int64_t physical_requests{0};
+    int64_t logical_tokens{0};
+    int64_t physical_tokens{0};
+    int64_t padding_requests{0};
+    int64_t padding_tokens{0};
+    int64_t dummy_request_tokens{0};
+};
+
+TensorParallelPaddingPlan
+buildTensorParallelPaddingPlan(const torch_ext::PyModelInputs& inputs, int64_t tp_size) {
+    const auto& attention = inputs.attention_inputs;
+    TensorParallelPaddingPlan plan;
+    plan.logical_requests = attention.input_lengths.defined() ? attention.input_lengths.numel() : 0;
+    plan.logical_tokens = inputs.input_ids.defined() && inputs.input_ids.numel() > 0 ?
+                              inputs.input_ids.numel() :
+                              (inputs.input_hiddens.defined() && inputs.input_hiddens.dim() > 0 ?
+                                   inputs.input_hiddens.size(0) :
+                                   0);
+    RTP_LLM_CHECK_WITH_INFO(
+        plan.logical_requests > 0 && plan.logical_tokens > 0,
+        "TP padding requires non-empty logical requests and tokens: requests=%ld tokens=%ld",
+        plan.logical_requests,
+        plan.logical_tokens);
+
+    plan.prefill = attention.is_prefill && !attention.is_target_verify;
+    if (plan.prefill) {
+        plan.physical_tokens      = alignUp(plan.logical_tokens, tp_size);
+        plan.padding_tokens       = plan.physical_tokens - plan.logical_tokens;
+        plan.padding_requests     = plan.padding_tokens > 0 ? 1 : 0;
+        plan.physical_requests    = plan.logical_requests + plan.padding_requests;
+        plan.dummy_request_tokens = plan.padding_tokens;
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(
+            plan.logical_tokens % plan.logical_requests == 0,
+            "decode-like TP padding requires a fixed token width: requests=%ld tokens=%ld",
+            plan.logical_requests,
+            plan.logical_tokens);
+        const int64_t tokens_per_request = plan.logical_tokens / plan.logical_requests;
+        const int64_t request_alignment  = tp_size / std::gcd(tp_size, tokens_per_request);
+        plan.physical_requests           = alignUp(plan.logical_requests, request_alignment);
+        plan.padding_requests            = plan.physical_requests - plan.logical_requests;
+        plan.dummy_request_tokens        = tokens_per_request;
+        plan.padding_tokens              = plan.padding_requests * tokens_per_request;
+        plan.physical_tokens             = plan.logical_tokens + plan.padding_tokens;
+    }
+    RTP_LLM_CHECK_WITH_INFO(plan.physical_tokens % tp_size == 0,
+                            "TP physical token count %ld is not divisible by TP%ld",
+                            plan.physical_tokens,
+                            tp_size);
+    return plan;
+}
+
+}  // namespace
+
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
         return tensor;
@@ -424,6 +528,113 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     return py_attn_inputs;
+}
+
+void PyWrappedModel::padTensorParallelInputs(torch_ext::PyModelInputs& inputs) {
+    if (!sequence_parallel_padding_enabled_) {
+        return;
+    }
+
+    auto&      attention = inputs.attention_inputs;
+    const auto plan      = buildTensorParallelPaddingPlan(inputs, static_cast<int64_t>(device_props_.tp_size));
+
+    attention.logical_request_count  = plan.logical_requests;
+    attention.physical_request_count = plan.physical_requests;
+    attention.logical_token_count    = plan.logical_tokens;
+    attention.physical_token_count   = plan.physical_tokens;
+    attention.is_s_padded               = plan.physical_tokens > plan.logical_tokens;
+    if (plan.padding_tokens == 0) {
+        return;
+    }
+
+    inputs.input_ids     = appendFilledRows(inputs.input_ids, plan.padding_tokens, 0);
+    inputs.input_hiddens = appendFilledRows(inputs.input_hiddens, plan.padding_tokens, 0);
+    inputs.combo_position_ids =
+        appendTokenValues(inputs.combo_position_ids, plan.logical_tokens, plan.padding_tokens, 0);
+    inputs.attention_inputs.combo_position_ids    = inputs.combo_position_ids;
+    inputs.embedding_inputs.combo_tokens_type_ids = appendTokenValues(
+        inputs.embedding_inputs.combo_tokens_type_ids, plan.logical_tokens, plan.padding_tokens, 0);
+    // Dummy tokens use the regular text embedding path. They form independent
+    // requests and are removed before returning model outputs.
+    inputs.embedding_inputs.text_tokens_mask =
+        appendTokenValues(inputs.embedding_inputs.text_tokens_mask, plan.logical_tokens, plan.padding_tokens, 1);
+    inputs.bert_embedding_inputs.combo_position_ids = appendTokenValues(
+        inputs.bert_embedding_inputs.combo_position_ids, plan.logical_tokens, plan.padding_tokens, 0);
+    inputs.bert_embedding_inputs.combo_tokens_type_ids = appendTokenValues(
+        inputs.bert_embedding_inputs.combo_tokens_type_ids, plan.logical_tokens, plan.padding_tokens, 0);
+
+    attention.input_lengths =
+        appendFilledRows(attention.input_lengths, plan.padding_requests, plan.dummy_request_tokens);
+    attention.input_lengths_host =
+        appendFilledRows(attention.input_lengths_host, plan.padding_requests, plan.dummy_request_tokens);
+    if (plan.prefill || attention.is_target_verify) {
+        attention.prefix_lengths      = appendFilledRows(attention.prefix_lengths, plan.padding_requests, 0);
+        attention.prefix_lengths_host = appendFilledRows(attention.prefix_lengths_host, plan.padding_requests, 0);
+    } else {
+        attention.sequence_lengths      = appendFilledRows(attention.sequence_lengths, plan.padding_requests, 0);
+        attention.sequence_lengths_host = appendFilledRows(attention.sequence_lengths_host, plan.padding_requests, 0);
+    }
+    attention.sequence_lengths_plus_1_d =
+        appendFilledRows(attention.sequence_lengths_plus_1_d, plan.padding_requests, 1);
+
+    attention.kv_cache_kernel_block_id_device =
+        appendBlockTableRows(attention.kv_cache_kernel_block_id_device, plan.padding_requests);
+    attention.kv_cache_kernel_block_id_host =
+        appendBlockTableRows(attention.kv_cache_kernel_block_id_host, plan.padding_requests);
+    attention.kv_cache_block_id_device =
+        appendBlockTableRows(attention.kv_cache_block_id_device, plan.padding_requests);
+    attention.kv_cache_block_id_host = appendBlockTableRows(attention.kv_cache_block_id_host, plan.padding_requests);
+    for (auto& table : attention.kv_cache_kernel_block_id_device_by_group) {
+        table = appendBlockTableRows(table, plan.padding_requests);
+    }
+    for (auto& table : attention.kv_cache_kernel_block_id_host_by_group) {
+        table = appendBlockTableRows(table, plan.padding_requests);
+    }
+    for (auto& table : attention.kv_cache_block_id_host_by_group) {
+        table = appendBlockTableRows(table, plan.padding_requests);
+    }
+
+    const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+    if (attention.is_prefill) {
+        attention.total_tokens   = plan.physical_tokens;
+        attention.cu_seqlens     = torch::empty({plan.physical_requests + 1}, cuda_i32);
+        attention.cu_kv_seqlens  = torch::empty({plan.physical_requests + 1}, cuda_i32);
+        attention.padding_offset = torch::empty({plan.physical_tokens}, cuda_i32);
+#if USING_CUDA
+        invokeBuildAttentionInputMetadata(attention.input_lengths,
+                                          attention.prefix_lengths,
+                                          attention.cu_seqlens,
+                                          attention.cu_kv_seqlens,
+                                          attention.padding_offset,
+                                          c10::cuda::getCurrentCUDAStream().stream());
+#else
+        RTP_LLM_FAIL("device attention input metadata requires CUDA");
+#endif
+        if (attention.input_lengths_host.defined()) {
+            const auto pinned_i32     = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+            attention.cu_seqlens_host = torch::empty({plan.physical_requests + 1}, pinned_i32);
+            auto* cu_host             = attention.cu_seqlens_host.data_ptr<int32_t>();
+            auto* lengths_host        = attention.input_lengths_host.data_ptr<int32_t>();
+            cu_host[0]                = 0;
+            for (int64_t i = 0; i < plan.physical_requests; ++i) {
+                cu_host[i + 1] = cu_host[i] + lengths_host[i];
+            }
+            buffer_holder_.hold_host(attention.cu_seqlens_host);
+        }
+    } else {
+        attention.cu_seqlens          = torch::zeros({plan.physical_requests + 1}, cuda_i32);
+        attention.cu_kv_seqlens       = torch::zeros({plan.physical_requests + 1}, cuda_i32);
+        attention.decode_cu_seqlens_d = torch::arange(0, plan.physical_requests + 1, 1, cuda_i32);
+    }
+
+    RTP_LLM_LOG_DEBUG("tensor-parallel boundary padding: prefill=%d target_verify=%d "
+                      "requests=%ld/%ld tokens=%ld/%ld",
+                      plan.prefill,
+                      attention.is_target_verify,
+                      plan.logical_requests,
+                      plan.physical_requests,
+                      plan.logical_tokens,
+                      plan.physical_tokens);
 }
 
 static void calculatePaddingOffsetDeviceAware(torch_ext::PyAttentionInputs& py_attn_inputs) {
@@ -1103,6 +1314,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
+            // Eager Prefill and non-graph Decode are padded exactly once at
+            // the C++/Python model boundary. CUDA graph replay performs the
+            // equivalent padding into its fixed-address capture buffers.
+            padTensorParallelInputs(py_model_inputs);
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");

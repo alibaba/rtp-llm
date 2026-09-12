@@ -285,6 +285,12 @@ def pad_ktp_decode_inputs(inputs, plan: KtpStepPlan, *, ktp_rank: int) -> None:
     attention.is_s_padded = physical != local_real_batch
 
     local_real_tokens = local_real_batch * token_width
+    # Projection-KTP and attention TP are mutually exclusive. Publish the
+    # local real work and the common KTP execution shape directly.
+    attention.logical_request_count = local_real_batch
+    attention.physical_request_count = physical
+    attention.logical_token_count = local_real_tokens
+    attention.physical_token_count = physical_tokens
     mask = torch.zeros(physical_tokens, dtype=torch.int32, device=device)
     mask[:local_real_tokens] = 1
     inputs.ktp_valid_row_mask = mask

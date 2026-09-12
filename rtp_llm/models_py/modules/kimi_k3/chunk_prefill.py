@@ -48,6 +48,22 @@ class KimiK3ChunkRound:
         return sum(item.new_length for item in self.slices)
 
 
+def logical_chunk_round(
+    round_plan: KimiK3ChunkRound,
+    logical_request_count: int,
+) -> KimiK3ChunkRound:
+    """Return the real-request prefix of a physically padded Prefill round."""
+
+    logical_slices = tuple(
+        item
+        for item in round_plan.slices
+        if int(item.original_batch_idx) < logical_request_count
+    )
+    if len(logical_slices) == len(round_plan.slices):
+        return round_plan
+    return KimiK3ChunkRound(logical_slices)
+
+
 @dataclass(frozen=True)
 class KimiK3ChunkRdmaPublishStep:
     """One original-batch publication frontier update."""
@@ -707,6 +723,12 @@ def build_chunk_attention_inputs(
     sequence_lengths = [item.absolute_end for item in round_plan.slices]
     batch_indices = [item.original_batch_idx for item in round_plan.slices]
     total_tokens = sum(lengths)
+    outer_physical_requests = int(attention_inputs.input_lengths_host.numel())
+    logical_request_count = int(
+        getattr(attention_inputs, "logical_request_count", 0)
+        or outer_physical_requests
+    )
+    logical_round = logical_chunk_round(round_plan, logical_request_count)
     chunk = copy.copy(attention_inputs)
     cu_seqlens = [0]
     cu_kv_seqlens = [0]
@@ -740,6 +762,17 @@ def build_chunk_attention_inputs(
     )
     chunk.total_tokens = int(total_tokens)
     chunk.context_total_kv_length = int(sum(sequence_lengths))
+    # Internal chunk rounds must not inherit the outer forward's counts. The
+    # final round may contain a real-request prefix followed by the dummy
+    # request appended at the model boundary for TP divisibility.
+    chunk.logical_request_count = len(logical_round.slices)
+    chunk.physical_request_count = len(round_plan.slices)
+    chunk.logical_token_count = int(logical_round.token_count)
+    chunk.physical_token_count = int(total_tokens)
+    chunk.is_s_padded = (
+        chunk.logical_request_count != chunk.physical_request_count
+        or chunk.logical_token_count != chunk.physical_token_count
+    )
     chunk.is_prefill = True
     chunk.is_cuda_graph = False
     chunk.cache_store_inputs = None
@@ -891,6 +924,7 @@ __all__ = [
     "host_lengths",
     "kda_materialized_block_maps",
     "kda_round_state_mapping",
+    "logical_chunk_round",
     "plan_kimi_k3_chunk_rounds",
     "prepare_round_fmha",
     "validate_whole_chunk_prefill",

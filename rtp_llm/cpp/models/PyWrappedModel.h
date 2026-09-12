@@ -10,6 +10,7 @@
 #include <string>
 #include <atomic>
 #include <memory>
+#include <numeric>
 #include <utility>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -142,6 +143,7 @@ private:
     torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    void padTensorParallelInputs(torch_ext::PyModelInputs& inputs);
     void setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs);
     GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,
                                           const GptModelInputs& inputs,
@@ -216,6 +218,7 @@ private:
     bool                               use_spec_decoding_{false};
     bool                               enable_device_perf_{false};
     bool                               check_nan_{false};
+    bool                               sequence_parallel_padding_enabled_{false};
     std::shared_ptr<ModelInputsLogger> model_inputs_logger_;
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
@@ -254,6 +257,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan),
     model_inputs_logger_(std::move(model_inputs_logger)) {
+    RTP_LLM_CHECK_WITH_INFO(
+        ktp_size_ <= 1 || params.parallelism_config.tp_size == 1,
+        "Tensor parallelism and Projection-KTP cannot be enabled together: tp_size=%ld ktp_size=%ld",
+        params.parallelism_config.tp_size,
+        ktp_size_);
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
@@ -343,20 +351,43 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
 
         init_resources.kv_cache = kv_cache;
     }
+    // Resolve the generic model capability before sizing initialization
+    // workspaces. Decode graph buckets may grow after TP alignment.
+    py_model_ = py_instance;
+    if (py::hasattr(py_model_, "requires_sequence_parallel_padding")) {
+        sequence_parallel_padding_enabled_ =
+            py_model_.attr("requires_sequence_parallel_padding").cast<bool>()
+            && params.parallelism_config.tp_size > 1;
+    }
+
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
     init_resources.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
     init_resources.max_decode_graph_batch_size = params.concurrency_config.concurrency_limit;
     if (enable_cuda_graph_ && !params.hw_kernel_config.decode_capture_batch_sizes.empty()) {
-        init_resources.max_decode_graph_batch_size =
+        auto max_graph_batch =
             *std::max_element(params.hw_kernel_config.decode_capture_batch_sizes.begin(),
                               params.hw_kernel_config.decode_capture_batch_sizes.end());
+        if (sequence_parallel_padding_enabled_) {
+            const int tp = static_cast<int>(params.parallelism_config.tp_size);
+            const int token_width =
+                params.sp_config.type != SP_TYPE_NONE
+                        && params.sp_config.gen_num_per_cycle > 0
+                        && !params.model_id && !is_prefill_cuda_graph_mode ?
+                    params.sp_config.gen_num_per_cycle + 1 :
+                    1;
+            const int request_alignment = tp / std::gcd(tp, token_width);
+            max_graph_batch =
+                ((max_graph_batch + request_alignment - 1) / request_alignment)
+                * request_alignment;
+        }
+        init_resources.max_decode_graph_batch_size = max_graph_batch;
     }
 
     py::object py_init_result;
-    // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_                 = py_instance;
+    // py_model_ is initialized before workspace sizing so it remains the
+    // fallback when CUDA graph cannot run.
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -399,6 +430,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.sequence_parallel_size = sequence_parallel_padding_enabled_ ?
+                                                  static_cast<int>(params.parallelism_config.tp_size) :
+                                                  1;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
