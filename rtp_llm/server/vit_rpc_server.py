@@ -1,6 +1,8 @@
+import hashlib
 import logging
 import threading
 import time
+from array import array
 from concurrent import futures
 
 import grpc
@@ -17,7 +19,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MMRdmaDescPB,
     MultimodalInputsPB,
-    MultimodalOutputPB,
     MultimodalOutputsPB,
     WorkerStatusPB,
 )
@@ -34,6 +35,7 @@ from rtp_llm.ops import (
     get_multimodal_feature_hash,
 )
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.server.vit_token_id_cache import MMTokenIdCache
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.utils.multimodal_util import MMUrlType, url_data_cache_, vit_emb_cache_
@@ -116,6 +118,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self._status_version = 0
         self.rdma_encoder = rdma_encoder
         config = getattr(mm_process_engine, "vit_config", None)
+        self._token_id_cache = MMTokenIdCache(
+            getattr(config, "vit_token_cache_item_num", 10000),
+            getattr(config, "vit_token_cache_time_window_ms", 30 * 60 * 1000),
+        )
         self.require_rdma = getattr(config, "mm_transport_mode", "grpc") == "rdma"
         self.max_requests = (
             getattr(config, "vit_max_concurrent_requests", 32)
@@ -156,6 +162,68 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         # ViT's feature LRU is not the LLM KV cache advertised to FlexLB.
         return CacheStatusPB()
 
+    def _embed(self, urls, types, tensors, configs, deadline, cancelled):
+        res = self.engine.submit(
+            urls,
+            types,
+            tensors=tensors,
+            preprocess_configs=configs,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if len(res.embeddings) != len(urls):
+            raise ValueError("ViT returned an unexpected image count")
+        model_config = self.engine.model.model_config
+        for embedding in res.embeddings:
+            if (
+                embedding.dim() != 2
+                or embedding.size(0) <= 0
+                or embedding.size(1) != model_config.hidden_size
+                or embedding.dtype != model_config.compute_dtype
+            ):
+                raise ValueError("ViT returned an invalid embedding shape or dtype")
+        return res
+
+    def _metadata_output(
+        self, request, urls, types, tensors, configs, deadline, cancelled
+    ):
+        self.engine._check_request(deadline, cancelled)
+        # Retain only digests: data URLs and tensor payloads can be large.
+        keys = [
+            hashlib.sha256(item.SerializeToString(deterministic=True)).digest()
+            for item in request.multimodal_inputs
+        ]
+        token_ids = [self._token_id_cache.get(key) for key in keys]
+        missing = [i for i, ids in enumerate(token_ids) if ids is None]
+        res = MMEmbeddingRes([])
+        if missing:
+            res = self._embed(
+                [urls[i] for i in missing],
+                [types[i] for i in missing],
+                [tensors[i] for i in missing],
+                [configs[i] for i in missing],
+                deadline,
+                cancelled,
+            )
+            self.engine._check_request(deadline, cancelled)
+            computed = trans_output(res, metadata_only=True)
+            self.engine._check_request(deadline, cancelled)
+            for i, item in zip(missing, computed.multimodal_outputs):
+                # A compact CPU copy owns no embedding or RDMA slot references.
+                token_ids[i] = array("i", item.token_ids)
+        if (
+            sum(len(ids) for ids in token_ids)
+            >= self.engine.model.model_config.max_seq_len
+        ):
+            raise ValueError("ViT output exceeds the model sequence length")
+        self.engine._check_request(deadline, cancelled)
+        for i in missing:
+            self._token_id_cache.put(keys[i], token_ids[i])
+        output = MultimodalOutputsPB()
+        for ids in token_ids:
+            output.multimodal_outputs.add(token_ids=ids)
+        return output, res, len(keys) - len(missing), len(missing)
+
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         cancelled = threading.Event()
         if not context.add_callback(cancelled.set):
@@ -179,32 +247,29 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         returned = False
         try:
             urls, types, tensors, configs = trans_input(multimodal_inputs)
-            res: MMEmbeddingRes = self.engine.submit(
-                urls,
-                types,
-                tensors=tensors,
-                preprocess_configs=configs,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-            if len(res.embeddings) != len(urls):
-                raise ValueError("ViT returned an unexpected image count")
-            model_config = self.engine.model.model_config
-            for embedding in res.embeddings:
-                if (
-                    embedding.dim() != 2
-                    or embedding.size(0) <= 0
-                    or embedding.size(1) != model_config.hidden_size
-                    or embedding.dtype != model_config.compute_dtype
-                ):
-                    raise ValueError("ViT returned an invalid embedding shape or dtype")
-            self.engine._check_request(deadline, cancelled)
-            output = trans_output(
-                res,
-                multimodal_inputs.metadata_only,
-                self.rdma_encoder if multimodal_inputs.support_rdma else None,
-                require_rdma=self.require_rdma,
-            )
+            token_cache_hits = token_cache_misses = 0
+            if multimodal_inputs.metadata_only:
+                output, res, token_cache_hits, token_cache_misses = (
+                    self._metadata_output(
+                        multimodal_inputs,
+                        urls,
+                        types,
+                        tensors,
+                        configs,
+                        deadline,
+                        cancelled,
+                    )
+                )
+            else:
+                res = self._embed(urls, types, tensors, configs, deadline, cancelled)
+                self.engine._check_request(deadline, cancelled)
+                output = trans_output(
+                    res,
+                    rdma_encoder=(
+                        self.rdma_encoder if multimodal_inputs.support_rdma else None
+                    ),
+                    require_rdma=self.require_rdma,
+                )
             self.engine._check_request(deadline, cancelled)
             context.set_trailing_metadata(
                 (
@@ -213,10 +278,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 )
             )
             logging.info(
-                "ViT RPC completed: metadata_only=%s images=%d max_gpu_batch_images=%d",
+                "ViT RPC completed: metadata_only=%s images=%d max_gpu_batch_images=%d "
+                "token_cache_hits=%d token_cache_misses=%d",
                 multimodal_inputs.metadata_only,
-                len(res.embeddings),
+                len(urls),
                 res.max_batch_size,
+                token_cache_hits,
+                token_cache_misses,
             )
             returned = True
             return output
