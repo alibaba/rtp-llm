@@ -12,7 +12,8 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3MtpWeight, KimiK3Weight
-from rtp_llm.ops import HybridAttentionType, KvCacheDataType
+from rtp_llm.ops import HybridAttentionType, KvCacheDataType, QuantAlgo
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 _MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV = (
     "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES"
@@ -73,6 +74,24 @@ class KimiK3ModelConfig(ModelConfig):
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]
     ) -> None:
+        is_mtp = self.model_type == "kimi_k3_mtp"
+        is_target = self.model_type == "kimi_k3"
+        if is_mtp:
+            if (
+                not self.config_dtype
+                or WEIGHT_TYPE.from_str(self.config_dtype) != WEIGHT_TYPE.BF16
+            ):
+                raise ValueError(
+                    "K3 MTP requires checkpoint-native BF16 compute, got "
+                    f"{self.config_dtype!r}"
+                )
+            # The process-wide activation/cache settings belong to the target.
+            # Reset our own cache state even on repeated initialization; never
+            # change the shared KVCacheConfig or the process environment.
+            kv_cache_config = None
+            act_type = None
+            self.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+            self.quant_algo = QuantAlgo()
         super().init_precision_config(kv_cache_config, act_type)
         if self.compute_dtype != torch.bfloat16:
             raise ValueError(
@@ -86,13 +105,13 @@ class KimiK3ModelConfig(ModelConfig):
             raise ValueError(
                 "KIMI_K3_ATTENTION_QUANTIZATION must be none or fp8_per_block"
             )
-        # EAGLE3 retains BF16; target and full-MLA MTP share the FP8 policy.
-        enabled = method == "fp8_per_block" and "eagle3" not in self.model_type
+        # Online attention quantization is a target-only K3 policy.
+        enabled = method == "fp8_per_block" and is_target
         self.k3_attention_quant_config = Fp8BlockWiseQuantConfig() if enabled else None
         mla_fp8 = os.environ.get("KIMI_K3_MLA_FP8", "0").strip()
         if mla_fp8 not in ("0", "1"):
             raise ValueError("KIMI_K3_MLA_FP8 must be 0 or 1")
-        self.attn_config.mla_fp8_compute = mla_fp8 == "1" and "eagle3" not in self.model_type
+        self.attn_config.mla_fp8_compute = mla_fp8 == "1" and is_target
         if self.attn_config.mla_fp8_compute:
             if not self.attn_config.use_mla or self.attn_config.is_sparse:
                 raise ValueError("K3 FP8 MLA requires dense MLA")
@@ -111,6 +130,18 @@ class KimiK3ModelConfig(ModelConfig):
             raise ValueError(
                 "Kimi K3 does not support runtime weight quantization; its "
                 "checkpoint-native MXFP4 experts are loaded by the K3 weight path"
+            )
+        logging.info(
+            "K3 precision: model=%s compute=%s attention_quantization=%s "
+            "mla_fp8_compute=%s kv_cache_dtype=%s",
+            self.model_type, self.compute_dtype,
+            "fp8_per_block" if enabled else "none",
+            self.attn_config.mla_fp8_compute, self.attn_config.kv_cache_dtype,
+        )
+        if is_mtp:
+            logging.info(
+                "K3 MTP experts: checkpoint-native MXFP4; "
+                "existing MegaMoE FP8 activation compute"
             )
 
 

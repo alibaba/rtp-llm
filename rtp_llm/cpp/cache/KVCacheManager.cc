@@ -326,7 +326,8 @@ bool KVCacheManager::setKVBlockValue(int                  block_index,
                                      const torch::Tensor& k_buffer,
                                      const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.cache_specs[0];
+    const size_t group_id = config_.layer_to_group_id.empty() ? 0 : config_.layer_to_group_id.at(layer_id);
+    const auto& spec      = config_.cache_specs.at(group_id);
     size_t expected_k_bytes = spec->k_block_size_bytes();
     size_t expected_v_bytes = spec->v_block_size_bytes();
     size_t src_k_bytes      = k_buffer.nbytes();
