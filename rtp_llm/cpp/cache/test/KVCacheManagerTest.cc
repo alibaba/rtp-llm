@@ -1747,5 +1747,234 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
+
+
+// ===== GPU prefix-tree manager wiring =====
+//
+// Production prefill deployments set ENABLE_GPU_PREFIX_TREE=1 together with
+// ENABLE_MEMORY_CACHE=1, ENABLE_PREFIX_TREE_MEMORY_CACHE=1 and
+// ENABLE_INDEPENDENT_GROUP_EVICTION=1 (exact env parse coverage lives in
+// rtp_llm/server/server_args/test/kv_cache_env_candidate_test.py).
+// KVCacheManager::init must forward the GPU prefix-tree flag into
+// SharedBlockCache (KVCacheManager.cc:247) and register the DSv4 INDEPENDENT
+// state groups (KVCacheManager.cc:275-276). The SharedBlockCache standalone
+// tests default prefix_tree_enabled_ to true, so only this manager-level
+// wiring coverage can detect a false environment flag.
+
+static KVCacheConfig makeRolloutCandidateKVCacheConfig() {
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_gpu_prefix_tree            = true;  // ENABLE_GPU_PREFIX_TREE=1
+    kv_cache_config.enable_memory_cache               = true;  // ENABLE_MEMORY_CACHE=1
+    kv_cache_config.enable_prefix_tree_memory_cache   = true;  // ENABLE_PREFIX_TREE_MEMORY_CACHE=1
+    kv_cache_config.enable_independent_group_eviction = true;  // ENABLE_INDEPENDENT_GROUP_EVICTION=1
+    // The real memory connector only starts when reuse_cache is also enabled
+    // (KVCacheConnectorCoordinator::init); the shared-cache wiring under test
+    // happens before that and must not depend on it.
+    kv_cache_config.reuse_cache = false;
+    return kv_cache_config;
+}
+
+TEST_F(KVCacheManagerTest, DSV4RolloutCandidateWiresGpuPrefixTreeAndIndependentGroups) {
+    auto config  = makeCompactDSV4ManagerConfig(/*block_num=*/16);
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, makeRolloutCandidateKVCacheConfig());
+    ASSERT_TRUE(manager->init());
+
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    auto shared_cache = allocator->sharedBlockCache();
+    ASSERT_NE(shared_cache, nullptr);
+
+    // GPU prefix tree is wired through the manager, not left at the
+    // SharedBlockCache constructor default.
+    EXPECT_TRUE(shared_cache->prefixTreeEnabled());
+
+    // The DSv4 state groups carry CacheEvictPolicy::INDEPENDENT and must be
+    // registered for state-only eviction.
+    const auto independent_ids = allocator->independentEvictionGroupIds();
+    EXPECT_FALSE(independent_ids.empty());
+    for (int gid : independent_ids) {
+        const auto& tag = config.tagForGroup(static_cast<size_t>(gid));
+        // The DSv4 eligible INDEPENDENT groups are the SWA/fixed-tail pools
+        // (swa_kv plus the state pools); FULL paged pools never qualify.
+        EXPECT_NE(config.typeForGroup(static_cast<size_t>(gid)), CacheGroupType::FULL)
+            << "INDEPENDENT group " << gid << " tag=" << tag << " must not be a FULL paged pool";
+        EXPECT_EQ(config.policyForGroup(static_cast<size_t>(gid)).evict_policy, CacheEvictPolicy::INDEPENDENT)
+            << "group " << gid << " tag=" << tag;
+    }
+    // Every INDEPENDENT-policy group is registered exactly once.
+    int independent_groups = 0;
+    for (int gid = 0; gid < config.groupNums(); ++gid) {
+        if (config.policyForGroup(static_cast<size_t>(gid)).evict_policy == CacheEvictPolicy::INDEPENDENT) {
+            ++independent_groups;
+        }
+    }
+    EXPECT_EQ(independent_ids.size(), static_cast<size_t>(independent_groups));
+}
+
+TEST_F(KVCacheManagerTest, DSV4GpuPrefixTreeDisabledBlocksIndependentEvictionPath) {
+    // Negative control: ENABLE_GPU_PREFIX_TREE=0 must leave the shared cache
+    // prefix tree disabled even when every canonical dependency flag is on;
+    // SharedBlockCache::selectAndEvictForGroup requires prefix_tree_enabled_
+    // for the state-only path (SharedBlockCache.cc:252), so this configuration
+    // degrades to whole-chain eviction.
+    auto config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
+    auto kv     = makeRolloutCandidateKVCacheConfig();
+    kv.enable_gpu_prefix_tree = false;  // ENABLE_GPU_PREFIX_TREE=0
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, kv);
+    ASSERT_TRUE(manager->init());
+
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    auto shared_cache = allocator->sharedBlockCache();
+    ASSERT_NE(shared_cache, nullptr);
+    EXPECT_FALSE(shared_cache->prefixTreeEnabled());
+    // The INDEPENDENT groups are still reported by the allocator, but the
+    // eviction gate stays closed without the prefix tree.
+    EXPECT_FALSE(allocator->independentEvictionGroupIds().empty());
+}
+
+TEST_F(KVCacheManagerTest, DSV4StatePoolPressureEvictsStateOnlyAndKeepsCompressed) {
+    // State pool pressure with the full-feature flag wiring: the state-only
+    // independent eviction must free state-group blocks while the compressed
+    // (FULL-group) blocks for the same keys survive with unchanged block ids
+    // and payloads.
+    // FULL (compressed) pools stay loose via the global block num while the
+    // four SWA/state pools get small explicit capacities, so only the state
+    // groups come under pressure with two cached prefixes and the state-only
+    // proof stays isolated from whole-chain evictions on FULL groups
+    // (finalizeBlockNums honors explicit per-group capacities).
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    KVCacheConfig     create_kv_config;
+    create_kv_config.test_block_num = /*full_block_num=*/16;
+    auto mc = makeDSV4ManagerFlashModelConfig();
+    for (const std::string& tag : {"swa_kv", "indexer_state", "csa_state", "hca_state"}) {
+        setDsv4ExplicitPoolBlocks(mc, tag, /*state_block_num=*/8);
+    }
+    runtime_config.max_generate_batch_size                      = 1;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+    auto config  = CacheConfigCreator::createConfig(mc, pc, runtime_config, create_kv_config);
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, makeRolloutCandidateKVCacheConfig());
+    ASSERT_TRUE(manager->init());
+
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    auto shared_cache = allocator->sharedBlockCache();
+    ASSERT_NE(shared_cache, nullptr);
+    ASSERT_TRUE(shared_cache->prefixTreeEnabled());
+
+    const auto state_gids = allocator->independentEvictionGroupIds();
+    const auto full_gids  = dsv4GroupIdsByType(config, CacheGroupType::FULL);
+    ASSERT_FALSE(state_gids.empty());
+    ASSERT_FALSE(full_gids.empty());
+    // resolve a (layer, group) pair whose layer actually owns the group, so
+    // convertIndexToAddr works for the payload checks. swa_kv is the only
+    // layer-0 pool in this layout; FULL pools live on ratio-4/128 layers.
+    const auto layer_groups = config.layerGroupIdsSnapshot();
+    int full_layer = -1, full_gid = -1;
+    for (int layer = 0; layer < static_cast<int>(layer_groups.size()) && full_gid < 0; ++layer) {
+        for (int gid : layer_groups[static_cast<size_t>(layer)]) {
+            if (std::find(full_gids.begin(), full_gids.end(), gid) != full_gids.end()) {
+                full_layer = layer;
+                full_gid   = gid;
+                break;
+            }
+        }
+    }
+    ASSERT_GE(full_layer, 0) << "no layer owns a FULL group";
+    const int state_gid = state_gids.front();
+    const int spb       = static_cast<int>(config.seq_size_per_block);
+    const int seq_len   = 3 * spb;
+
+    auto makeTokens = [&](int offset) {
+        auto input_ids      = torch::arange(offset, offset + seq_len, torch::kInt32);
+        auto gi             = std::make_shared<GenerateInput>();
+        gi->input_ids       = input_ids;
+        gi->generate_config = std::make_shared<GenerateConfig>();
+        auto cti            = std::make_shared<CompleteTokenIds>(1, 1, /*max_seq_len=*/10 * spb, spb);
+        cti->init(gi);
+        cti->setSeqLength(seq_len);
+        return cti;
+    };
+
+    // Seed a payload pattern on the FULL (compressed) group of request A so
+    // survival can be checked byte-for-byte, not only by block id.
+    const uint8_t pattern = 0xA7;
+
+    // Two cached prefixes fill the small state pools.
+    std::vector<CacheKeyType>            seeded_keys;
+    std::vector<std::pair<CacheKeyType, BlockIdxType>> compressed_before;
+    for (int offset : {0, 10000}) {
+        auto       res    = makeDSV4BatchResource(config);
+        auto       tokens = makeTokens(offset);
+        MallocInfo malloc_info{res, tokens};
+        malloc_info.reuse_cache         = true;
+        malloc_info.enable_device_cache = false;
+        ASSERT_TRUE(manager->malloc(malloc_info).success);
+        manager->insertIntoCache(InsertInfo{res, tokens, /*is_resident=*/false});
+        manager->free(FreeInfo{res, tokens});
+        for (const auto& key : res->cacheKeys(0)) {
+            seeded_keys.push_back(key);
+            if (offset == 0) {
+                const auto block = shared_cache->matchGroup(key, full_gid);
+                ASSERT_FALSE(isNullBlockIdx(block)) << "seeded compressed block missing for key " << key;
+                compressed_before.emplace_back(key, block);
+            }
+        }
+    }
+    ASSERT_FALSE(seeded_keys.empty());
+    ASSERT_FALSE(compressed_before.empty());
+    for (const auto& [key, block] : compressed_before) {
+        writeDsv4RegionPattern(manager, static_cast<int>(block), full_layer, full_gid, /*bytes=*/64, pattern);
+    }
+
+    // SWA/state allocation is tail-sparse: only tail and linear-step positions
+    // hold state blocks. Track which seeded keys actually have one; only those
+    // can become state-only eviction victims.
+    std::vector<CacheKeyType> keys_with_state;
+    for (const auto& key : seeded_keys) {
+        const auto state_block = shared_cache->matchGroup(key, state_gid);
+        if (!isNullBlockIdx(state_block)) {
+            keys_with_state.push_back(key);
+        }
+    }
+    EXPECT_FALSE(keys_with_state.empty()) << "no seeded key holds a state block";
+
+    // Third request: the state pools are exhausted, so ensureFreeBlocks
+    // triggers evictAndFreeForGroup on each state group — the state-only
+    // independent path gated by prefix_tree_enabled_.
+    auto       res_c    = makeDSV4BatchResource(config);
+    auto       tokens_c = makeTokens(/*offset=*/20000);
+    MallocInfo malloc_c{res_c, tokens_c};
+    malloc_c.reuse_cache         = true;
+    malloc_c.enable_device_cache = false;
+    ASSERT_TRUE(manager->malloc(malloc_c).success)
+        << "allocation must succeed via state-only eviction (state capacity reclaimed)";
+
+    // State-only eviction proof: at least one key that held a state block lost
+    // it while its compressed block survived with the same id and payload.
+    int state_only_victims = 0;
+    for (const auto& [key, expected_block] : compressed_before) {
+        const auto state_block  = shared_cache->matchGroup(key, state_gid);
+        const auto actual_block = shared_cache->matchGroup(key, full_gid);
+        const bool had_state    = std::find(keys_with_state.begin(), keys_with_state.end(), key) != keys_with_state.end();
+        if (had_state && isNullBlockIdx(state_block)) {
+            ++state_only_victims;
+            ASSERT_FALSE(isNullBlockIdx(actual_block))
+                << "state-only eviction must not drop the compressed block for key " << key;
+            EXPECT_EQ(actual_block, expected_block) << "compressed block id changed for key " << key;
+            assertDsv4RegionPatternEq(manager, static_cast<int>(actual_block), full_layer, full_gid,
+                                      /*bytes=*/64, pattern);
+        }
+    }
+    EXPECT_GE(state_only_victims, 1) << "no state-only eviction observed under state pool pressure";
+
+    manager->free(FreeInfo{res_c, tokens_c});
+    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/100);
+    if (evicted) {
+        manager->blockCacheFree(evicted);
+    }
+}
+
 }  // namespace test
 }  // namespace rtp_llm

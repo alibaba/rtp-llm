@@ -2,6 +2,7 @@
 
 #include <csignal>
 #include <chrono>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -3855,6 +3856,202 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_IncompletePoolTracksCompletePool
     // BlockPool reserves block 0 in each pool, while initBlockPool sizes the
     // incomplete pool from the complete pool's configured block_num.
     EXPECT_EQ(incomplete, (complete + 1) * static_cast<size_t>(linear_step - 1) - 1);
+}
+
+
+
+
+// ===== Prefix-tree host connector state pressure coverage =====
+//
+// Full-feature production flag combination (ENABLE_PREFIX_TREE_MEMORY_CACHE=1,
+// ENABLE_INDEPENDENT_GROUP_EVICTION=1, ENABLE_MEMORY_CACHE_DISK=1) on the
+// typed DSv4 layout: exhausting the state/SWA backing while compressed
+// backing is present must evict state items only through
+// allocateOnePrefixBacking, first from MEMORY and then, when no MEMORY state
+// item is eligible, from DISK. Retained compressed blocks must stay matchable
+// with unchanged references.
+
+TEST_F(KVCacheMemoryConnectorTest, allocateOnePrefixBacking_StatePressureEvictsMemoryStateOnly) {
+    auto        cfg = createDsv4TypedConnectorConfig();
+    DiskTempDir disk0;
+    auto        kv_cfg                              = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    kv_cfg.memory_cache_size_mb                     = 1;
+    kv_cfg.enable_prefix_tree_memory_cache          = true;  // ENABLE_PREFIX_TREE_MEMORY_CACHE=1
+    kv_cfg.enable_independent_group_eviction        = true;  // ENABLE_INDEPENDENT_GROUP_EVICTION=1
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
+
+    const auto state_pool     = conn->state_swa_pool_;
+    const auto compressed_pool = conn->compressed_pool_;
+    ASSERT_NE(state_pool, nullptr);
+    ASSERT_NE(compressed_pool, nullptr);
+
+    // Seed a chain 1 -> 2 -> 3 with compressed and state items in MEMORY.
+    const std::vector<CacheKeyType> keys = {1, 2, 3};
+    std::map<CacheKeyType, BlockIdxType> compressed_blocks;
+    for (auto key : keys) {
+        BlockDependency dep;
+        if (key != 1) {
+            dep.has_parent = true;
+            dep.parent_key = key - 1;
+            dep.ordinal    = static_cast<uint32_t>(key - 1);
+        } else {
+            dep.ordinal = 0;
+        }
+        {
+            auto blocks = compressed_pool->malloc(1);
+            ASSERT_EQ(blocks.size(), 1u);
+            PrefixTreeMemoryBlockCache::CacheItem item;
+            item.cache_key    = key;
+            item.kind         = CacheBlockKind::COMPRESSED_KV;
+            item.backing_type = CacheBackingType::MEMORY;
+            item.block_index  = blocks[0];
+            item.disk_slot    = -1;
+            item.block_size   = conn->prefixKindBlockSize(CacheBlockKind::COMPRESSED_KV, {});
+            item.is_resident  = false;
+            ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(key, dep, item).first);
+            conn->referencePrefixCacheBacking(item);
+            compressed_pool->requestFree(blocks);
+            compressed_blocks[key] = blocks[0];
+        }
+        {
+            auto blocks = state_pool->malloc(1);
+            ASSERT_EQ(blocks.size(), 1u);
+            PrefixTreeMemoryBlockCache::CacheItem item;
+            item.cache_key    = key;
+            item.kind         = CacheBlockKind::STATE_SWA_KV;
+            item.backing_type = CacheBackingType::MEMORY;
+            item.block_index  = blocks[0];
+            item.disk_slot    = -1;
+            item.block_size   = conn->prefixKindBlockSize(CacheBlockKind::STATE_SWA_KV, {});
+            item.is_resident  = false;
+            ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(key, dep, item).first);
+            conn->referencePrefixCacheBacking(item);
+            state_pool->requestFree(blocks);
+        }
+    }
+
+    // Exhaust both the MEMORY and DISK state backings so allocation must evict.
+    const auto state_free = state_pool->freeBlocksNum();
+    auto       held_state = state_pool->malloc(static_cast<int>(state_free));
+    ASSERT_EQ(held_state.size(), state_free);
+    const auto state_disk = conn->diskPoolFor(CacheBlockKind::STATE_SWA_KV);
+    ASSERT_NE(state_disk, nullptr);
+    std::vector<int32_t> held_disk_slots;
+    while (auto slot = state_disk->malloc()) {
+        held_disk_slots.push_back(*slot);
+    }
+    ASSERT_FALSE(held_disk_slots.empty());
+
+    KVCacheMemoryConnector::CopyInfoPerKey copy_info;
+    copy_info.cache_key  = 4;
+    copy_info.kind       = CacheBlockKind::STATE_SWA_KV;
+    copy_info.block_size = conn->prefixKindBlockSize(CacheBlockKind::STATE_SWA_KV, {});
+    ASSERT_TRUE(conn->allocateOnePrefixBacking(copy_info));
+    EXPECT_EQ(copy_info.backing_type, CacheBackingType::MEMORY);
+    EXPECT_FALSE(isNullBlockIdx(copy_info.mem_block));
+
+    // State-only eviction: exactly one key lost its MEMORY state item while
+    // every compressed item (and every other state item) survived.
+    int state_victims = 0;
+    for (auto key : keys) {
+        const auto state_item = conn->prefix_block_cache_->match(key, CacheBlockKind::STATE_SWA_KV);
+        if (!state_item.found) {
+            ++state_victims;
+        }
+    }
+    EXPECT_EQ(state_victims, 1);
+    for (const auto& [key, block] : compressed_blocks) {
+        const auto compressed_item = conn->prefix_block_cache_->match(key, CacheBlockKind::COMPRESSED_KV);
+        EXPECT_TRUE(compressed_item.found) << "compressed item lost for key " << key;
+    }
+
+    conn->releasePrefixRequestBacking(copy_info);
+    state_pool->requestFree(held_state);
+    for (auto slot : held_disk_slots) {
+        state_disk->requestFree(slot);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, allocateOnePrefixBacking_StatePressureFallsBackToDiskStateEviction) {
+    auto        cfg = createDsv4TypedConnectorConfig();
+    DiskTempDir disk0;
+    auto        kv_cfg                              = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    kv_cfg.memory_cache_size_mb                     = 1;
+    kv_cfg.enable_prefix_tree_memory_cache          = true;  // ENABLE_PREFIX_TREE_MEMORY_CACHE=1
+    kv_cfg.enable_independent_group_eviction        = true;  // ENABLE_INDEPENDENT_GROUP_EVICTION=1
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
+
+    const auto state_pool  = conn->state_swa_pool_;
+    const auto state_disk  = conn->diskPoolFor(CacheBlockKind::STATE_SWA_KV);
+    ASSERT_NE(state_pool, nullptr);
+    ASSERT_NE(state_disk, nullptr);
+
+    // Seed state items ONLY on DISK: no MEMORY state item is eligible, so the
+    // MEMORY state-only eviction returns empty and the DISK fallback runs.
+    const std::vector<CacheKeyType> keys = {11, 12};
+    for (auto key : keys) {
+        const auto slot = state_disk->malloc();
+        ASSERT_TRUE(slot.has_value());
+        PrefixTreeMemoryBlockCache::CacheItem item;
+        item.cache_key    = key;
+        item.kind         = CacheBlockKind::STATE_SWA_KV;
+        item.backing_type = CacheBackingType::DISK;
+        item.block_index  = NULL_BLOCK_IDX;
+        item.disk_slot    = *slot;
+        item.block_size   = state_disk->blockSizeBytes();
+        item.is_resident  = false;
+        BlockDependency dep;
+        if (key != 11) {
+            dep.has_parent = true;
+            dep.parent_key = key - 1;
+            dep.ordinal    = static_cast<uint32_t>(key - 11);
+        } else {
+            dep.ordinal = 0;
+        }
+        ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(key, dep, item).first);
+        conn->referencePrefixCacheBacking(item);
+        state_disk->requestFree(*slot);
+    }
+
+    // Exhaust both state backings.
+    const auto state_free = state_pool->freeBlocksNum();
+    auto       held_state = state_pool->malloc(static_cast<int>(state_free));
+    ASSERT_EQ(held_state.size(), state_free);
+    std::vector<int32_t> held_disk_slots;
+    while (auto slot = state_disk->malloc()) {
+        held_disk_slots.push_back(*slot);
+    }
+    ASSERT_GE(held_disk_slots.size(), 2u);
+
+    KVCacheMemoryConnector::CopyInfoPerKey copy_info;
+    copy_info.cache_key  = 13;
+    copy_info.kind       = CacheBlockKind::STATE_SWA_KV;
+    copy_info.block_size = state_disk->blockSizeBytes();
+    ASSERT_TRUE(conn->allocateOnePrefixBacking(copy_info));
+
+    // The DISK state-only fallback evicted exactly one DISK state item.
+    int disk_state_victims = 0;
+    for (auto key : keys) {
+        const auto state_item = conn->prefix_block_cache_->match(key, CacheBlockKind::STATE_SWA_KV);
+        if (!state_item.found) {
+            ++disk_state_victims;
+        }
+    }
+    EXPECT_EQ(disk_state_victims, 1);
+
+    conn->releasePrefixRequestBacking(copy_info);
+    state_pool->requestFree(held_state);
+    for (auto slot : held_disk_slots) {
+        state_disk->requestFree(slot);
+    }
 }
 
 }  // namespace rtp_llm::test

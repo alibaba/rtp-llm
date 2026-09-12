@@ -13,3 +13,17 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'},
 )
+py_test(
+    name = "kv_cache_env_candidate_test",
+    srcs = ["kv_cache_env_candidate_test.py"],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        "//rtp_llm/server:server",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:testlib",
+        "//rtp_llm:utils",
+    ],
+    exec_properties = {'gpu': 'A10'},
+)
