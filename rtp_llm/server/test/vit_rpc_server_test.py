@@ -1,5 +1,6 @@
 import threading
 import unittest
+from array import array
 from types import SimpleNamespace
 from unittest import mock
 
@@ -23,6 +24,7 @@ from rtp_llm.server.vit_rpc_server import (
     _create_rpc_server,
     trans_output,
 )
+from rtp_llm.server.vit_token_id_cache import MMTokenIdCache
 from rtp_llm.utils.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 
 
@@ -60,6 +62,37 @@ class FakeRdmaEncoder:
 
 
 class VitRpcServerTest(unittest.TestCase):
+    def test_token_cache_expiration_refresh_capacity_and_disabled_mode(self):
+        with mock.patch(
+            "rtp_llm.server.vit_token_id_cache.time.monotonic", return_value=0.0
+        ) as clock:
+            cache = MMTokenIdCache(max_items=2, time_window_ms=1000)
+            cache.put(b"a", array("i", [1, -2]))
+            cache.put(b"b", array("i", [3]))
+            clock.return_value = 0.75
+            self.assertEqual(cache.get(b"a"), array("i", [1, -2]))
+            clock.return_value = 1.25
+            self.assertEqual(cache.get(b"a"), array("i", [1, -2]))
+            self.assertIsNone(cache.get(b"b"))
+            clock.return_value = 2.5
+            self.assertIsNone(cache.get(b"a"))
+
+            # Capacity eviction happens while every item is still within its TTL.
+            cache = MMTokenIdCache(max_items=2, time_window_ms=10000)
+            cache.put(b"a", array("i", [1]))
+            cache.put(b"b", array("i", [2]))
+            cache.put(b"a", array("i", [4]))
+            self.assertEqual(cache.get(b"b"), array("i", [2]))
+            self.assertEqual(cache.get(b"a"), array("i", [4]))
+            cache.put(b"c", array("i", [3]))
+            self.assertIsNone(cache.get(b"b"))
+            self.assertEqual(cache.get(b"a"), array("i", [4]))
+            self.assertEqual(cache.get(b"c"), array("i", [3]))
+            for max_items, window in ((0, 10000), (2, 0)):
+                disabled = MMTokenIdCache(max_items=max_items, time_window_ms=window)
+                disabled.put(b"a", array("i", [1]))
+                self.assertIsNone(disabled.get(b"a"))
+
     def test_positionless_images_roundtrip_without_synthetic_positions(self):
         result = MMEmbeddingRes([torch.ones((2, 4)), torch.zeros((3, 4))])
         output = trans_output(result)
@@ -186,6 +219,199 @@ class VitRpcServerTest(unittest.TestCase):
             list(output.token_ids), get_multimodal_feature_hash(features).tolist()
         )
         self.assertEqual(server._active, 0)
+
+        expected = list(output.token_ids)
+        features.fill_(777)
+        server.engine.submit = mock.Mock(
+            side_effect=AssertionError("ID hit must not preprocess or run the engine")
+        )
+        with mock.patch(
+            "rtp_llm.server.vit_rpc_server.get_multimodal_feature_hash",
+            side_effect=AssertionError("ID hit must not read/hash an embedding"),
+        ):
+            context = Context()
+            cached = server.RemoteMultimodalEmbedding(request, context)
+        self.assertEqual(list(cached.multimodal_outputs[0].token_ids), expected)
+        self.assertFalse(cached.multimodal_outputs[0].HasField("multimodal_embedding"))
+        self.assertEqual(
+            context.metadata, {"vit-max-batch-images": "0", "vit-gpu-forwards": "0"}
+        )
+        server.engine.submit.assert_not_called()
+
+    def test_mixed_metadata_only_computes_missing_images_and_preserves_order(self):
+        server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))
+        first = self.request()
+        first.metadata_only = True
+        with mock.patch(
+            "rtp_llm.server.vit_rpc_server.get_multimodal_feature_hash",
+            side_effect=[torch.tensor([11, 12]), torch.tensor([21, 22, 23])],
+        ) as feature_hash:
+            server.RemoteMultimodalEmbedding(first, Context())
+            server.engine.submit = mock.Mock(
+                return_value=MMEmbeddingRes(
+                    [torch.zeros((3, 4))], max_batch_size=4, gpu_forwards=1
+                )
+            )
+            mixed = MultimodalInputsPB(
+                metadata_only=True,
+                multimodal_inputs=[
+                    first.multimodal_inputs[0],
+                    MultimodalInputPB(multimodal_url="missing"),
+                    first.multimodal_inputs[0],
+                ],
+            )
+            context = Context()
+            output = server.RemoteMultimodalEmbedding(mixed, context)
+        server.engine.submit.assert_called_once()
+        self.assertEqual(server.engine.submit.call_args.args[0], ["missing"])
+        self.assertEqual(feature_hash.call_count, 2)
+        self.assertEqual(
+            [list(item.token_ids) for item in output.multimodal_outputs],
+            [[11, 12], [21, 22, 23], [11, 12]],
+        )
+        self.assertEqual(
+            context.metadata, {"vit-max-batch-images": "4", "vit-gpu-forwards": "1"}
+        )
+
+    def test_cached_metadata_still_checks_total_length_and_deadline(self):
+        server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))
+        request = self.request()
+        request.metadata_only = True
+        server.RemoteMultimodalEmbedding(request, Context())
+        server.engine.submit = mock.Mock(
+            side_effect=AssertionError("cached image must not be recomputed")
+        )
+        server.engine.model.model_config.max_seq_len = 3
+        repeated = MultimodalInputsPB(
+            metadata_only=True,
+            multimodal_inputs=[
+                request.multimodal_inputs[0],
+                request.multimodal_inputs[0],
+            ],
+        )
+        context = Context()
+        with self.assertRaisesRegex(Aborted, "sequence length"):
+            server.RemoteMultimodalEmbedding(repeated, context)
+        self.assertEqual(context.code, grpc.StatusCode.INVALID_ARGUMENT)
+        expired = Context()
+        expired.time_remaining = lambda: 0
+        with self.assertRaises(Aborted):
+            server.RemoteMultimodalEmbedding(request, expired)
+        self.assertEqual(expired.code, grpc.StatusCode.DEADLINE_EXCEEDED)
+        server.engine.submit.assert_not_called()
+        self.assertEqual(server._active, 0)
+
+    def test_metadata_cache_separates_phase_and_type_for_the_same_url(self):
+        server = self.server(MMEmbeddingRes([torch.ones((2, 4))]))
+        server.engine.submit = mock.Mock(
+            return_value=MMEmbeddingRes([torch.ones((2, 4))])
+        )
+        first = MultimodalInputPB(multimodal_url="image", multimodal_type=1)
+        first.mm_preprocess_config.image_block_start_mod4 = 0
+        phase = MultimodalInputPB()
+        phase.CopyFrom(first)
+        phase.mm_preprocess_config.image_block_start_mod4 = 1
+        kind = MultimodalInputPB()
+        kind.CopyFrom(first)
+        kind.multimodal_type = 0
+        with mock.patch(
+            "rtp_llm.server.vit_rpc_server.get_multimodal_feature_hash",
+            side_effect=[
+                torch.tensor([1, 2]),
+                torch.tensor([3, 4]),
+                torch.tensor([5, 6]),
+            ],
+        ):
+            for item in (first, phase, kind):
+                server.RemoteMultimodalEmbedding(
+                    MultimodalInputsPB(metadata_only=True, multimodal_inputs=[item]),
+                    Context(),
+                )
+        self.assertEqual(server.engine.submit.call_count, 3)
+        server.engine.submit.side_effect = AssertionError(
+            "all three variants should hit"
+        )
+        for item, ids in ((kind, [5, 6]), (phase, [3, 4]), (first, [1, 2])):
+            result = server.RemoteMultimodalEmbedding(
+                MultimodalInputsPB(metadata_only=True, multimodal_inputs=[item]),
+                Context(),
+            )
+            self.assertEqual(list(result.multimodal_outputs[0].token_ids), ids)
+
+    def test_failed_metadata_does_not_cache_partial_ids(self):
+        request = MultimodalInputsPB(
+            metadata_only=True,
+            multimodal_inputs=[
+                MultimodalInputPB(multimodal_url="first"),
+                MultimodalInputPB(multimodal_url="second"),
+            ],
+        )
+        valid = MMEmbeddingRes([torch.ones((2, 4)), torch.zeros((2, 4))])
+        for failure in ("submit", "shape", "hash"):
+            with self.subTest(failure=failure):
+                server = self.server(valid)
+                server.engine.submit = mock.Mock(return_value=valid)
+                if failure == "submit":
+                    server.engine.submit.side_effect = RuntimeError("submit failed")
+                if failure == "shape":
+                    server.engine.submit.return_value = MMEmbeddingRes(
+                        [torch.ones((2, 4)), torch.zeros((2, 3))]
+                    )
+                with mock.patch(
+                    "rtp_llm.server.vit_rpc_server.get_multimodal_feature_hash",
+                    side_effect=[torch.tensor([1, 2]), RuntimeError("hash failed")],
+                ):
+                    with self.assertRaises(Aborted):
+                        server.RemoteMultimodalEmbedding(request, Context())
+                server.engine.submit.side_effect = None
+                server.engine.submit.return_value = valid
+                with mock.patch(
+                    "rtp_llm.server.vit_rpc_server.get_multimodal_feature_hash",
+                    side_effect=[torch.tensor([1, 2]), torch.tensor([3, 4])],
+                ):
+                    output = server.RemoteMultimodalEmbedding(request, Context())
+                self.assertEqual(server.engine.submit.call_count, 2)
+                self.assertEqual(
+                    server.engine.submit.call_args.args[0], ["first", "second"]
+                )
+                self.assertEqual(
+                    [list(item.token_ids) for item in output.multimodal_outputs],
+                    [[1, 2], [3, 4]],
+                )
+                self.assertEqual(server._active, 0)
+
+    def test_feature_rpc_ignores_cached_ids_and_still_exports_rdma(self):
+        result = MMEmbeddingRes([torch.ones((2, 4))])
+        server = self.server(result)
+        request = self.request()
+        request.metadata_only = True
+        server.RemoteMultimodalEmbedding(request, Context())
+        server.engine.submit = mock.Mock(return_value=result)
+        server.rdma_encoder = FakeRdmaEncoder(
+            [MMRdmaDescPB(handle="fresh-features").SerializeToString()]
+        )
+        server.require_rdma = True
+        request.metadata_only = False
+        request.support_rdma = True
+        with mock.patch.object(
+            server._token_id_cache,
+            "get",
+            side_effect=AssertionError("feature RPC cannot read ID cache"),
+        ), mock.patch.object(
+            server._token_id_cache,
+            "put",
+            side_effect=AssertionError("feature RPC cannot write ID cache"),
+        ), mock.patch(
+            "rtp_llm.server.vit_rpc_server.get_multimodal_feature_hash",
+            side_effect=AssertionError("feature RPC cannot substitute IDs"),
+        ):
+            output = server.RemoteMultimodalEmbedding(request, Context())
+        server.engine.submit.assert_called_once()
+        self.assertEqual(server.rdma_encoder.exports, 1)
+        self.assertEqual(
+            output.multimodal_outputs[0].output_rdma.handle, "fresh-features"
+        )
+        self.assertFalse(output.multimodal_outputs[0].HasField("multimodal_embedding"))
 
     def test_rdma_opt_in_falls_back_per_image_and_releases_explicitly(self):
         descriptor = MMRdmaDescPB(handle="first").SerializeToString()

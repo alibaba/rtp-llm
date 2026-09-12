@@ -239,6 +239,8 @@ class VitConfig:
         self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
         self.mm_cache_item_num: int = 10
+        self.vit_token_cache_item_num: int = 10000
+        self.vit_token_cache_time_window_ms: int = 30 * 60 * 1000
         self.url_cache_item_num: int = 100
         self.vit_batch_wait_ms: int = 5
         self.vit_max_batch_images: int = 8
@@ -266,6 +268,8 @@ class VitConfig:
             f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
+            f"vit_token_cache_item_num: {self.vit_token_cache_item_num}\n"
+            f"vit_token_cache_time_window_ms: {self.vit_token_cache_time_window_ms}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"vit_batch_wait_ms: {self.vit_batch_wait_ms}\n"
             f"vit_max_batch_images: {self.vit_max_batch_images}\n"

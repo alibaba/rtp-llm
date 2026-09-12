@@ -63,6 +63,16 @@ def init_vit_group_args(parser, vit_config):
             32,
             "Maximum in-flight requests per ViT worker",
         ),
+        (
+            "vit_token_cache_item_num",
+            10000,
+            "Maximum images in the independent CPU token-ID cache; 0 disables it",
+        ),
+        (
+            "vit_token_cache_time_window_ms",
+            30 * 60 * 1000,
+            "Token-ID cache idle expiration in milliseconds; 0 disables it",
+        ),
     ):
         vit_group.add_argument(
             "--" + name,
