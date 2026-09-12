@@ -86,7 +86,8 @@ class WhaleModeConfigurationTest {
         assertNotNull(bundle.discoveryFile);
         assertTrue(bundle.autoFetch);
         assertEquals(240, bundle.nPrefill + bundle.nDecode);
-        assertEquals("10.1.2.3", JavaMockEngineCluster.declaredHost(bundle, 239));
+        assertEquals(JavaMockEngineCluster.derivedLoopbackIp(239), JavaMockEngineCluster.declaredHost(bundle, 239));
+        assertNotEquals(JavaMockEngineCluster.declaredHost(bundle, 0), JavaMockEngineCluster.declaredHost(bundle, 239));
     }
 
     @Test

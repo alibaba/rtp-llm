@@ -9,7 +9,7 @@
 性能文件不修改输入或输出长度；现有 `FLEXLB_CONFIG` 优先传给 master 与 mock，避免两份估算配置漂移。
 
 master 通过本地 discovery 文件发现各引擎，不依赖 P/D VIP。
-mock 使用 Pod IP 和独立端口公布地址，同 Pod P→D 仍使用现有 RPC 协议。
+控制端口使用 Pod IP；引擎 RPC 使用独立 loopback IP 和端口，保证 master 的 engineIp 指标不互相覆盖。同 Pod P→D 仍使用现有 RPC 协议。
 框架自动接续，不等待客户端 Fetch；启动任何对端失败时 supervisor 会关闭另一 JVM。
 
 指标保留真实 Pod 的 `hippo_role` 和 `container_ip`，用 `engine`、`engine_port`、`dp_rank` 区分逻辑引擎。

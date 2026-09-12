@@ -337,6 +337,7 @@ public final class JavaMockEngineCluster {
         service.setAutoFetch(config.autoFetch);
         service.setWhaleRemote(config.whale);
         service.whaleBundle = config.whaleBundle;
+        service.whalePodIp = config.host;
         service.setFetchAttachTimeoutMs(config.fetchAttachTimeoutMs);
         services.put(grpcPort, service);
         try {
@@ -524,7 +525,7 @@ public final class JavaMockEngineCluster {
      * remote eval hosts.
      */
     static String declaredHost(Config config, int engineIndex) {
-        if (config.whale) return config.host;
+        if (config.whale && !config.whaleBundle) return config.host;
         return config.uniqueEngineIps ? derivedLoopbackIp(engineIndex) : config.host;
     }
 
@@ -582,6 +583,7 @@ public final class JavaMockEngineCluster {
     static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         private volatile boolean whaleRemote;
         private boolean whaleBundle;
+        private String whalePodIp;
         private final Map<Long, Object> remoteDecodeLeaseOwners = new ConcurrentHashMap<>();
         private final Map<Long, Runnable> remoteDecodeStops = new ConcurrentHashMap<>();
         private final Map<String, io.grpc.ManagedChannel> remoteChannels = new ConcurrentHashMap<>();
@@ -5472,12 +5474,13 @@ public final class JavaMockEngineCluster {
         long getCrashEpoch() { return crashEpoch.get(); }
         boolean isStopped() { return stopped; }
         Map<String, String> whaleMetricTags() {
-            Map<String, String> tags = WhaleMockMonitor.engineTags(System.getenv(), host);
+            Map<String, String> tags = WhaleMockMonitor.engineTags(System.getenv(), whaleBundle ? whalePodIp : host);
             if (whaleBundle) {
                 // One physical Pod, distinct logical engines. Preserve the real
                 // container address and role; never impersonate a separate Pod.
                 tags.put("dp_rank", Integer.toString(grpcPort));
                 tags.put("engine_port", Integer.toString(grpcPort));
+                tags.put("engine_ip", host);
             }
             tags.putAll(Map.of("engine", engineName, "role", roleType.name(),
                     "generation", processGeneration, "backend", "mock"));

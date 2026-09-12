@@ -54,13 +54,13 @@ def run():
         children.append(p)
         return p
 
-    def ready(port, process):
+    def ready(port, process, host="127.0.0.1"):
         deadline = time.monotonic() + cfg["startup_timeout_s"]
         while time.monotonic() < deadline and not stopping:
             if process.poll() is not None:
                 raise RuntimeError("JVM exited before ready")
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                with socket.create_connection((host, port), timeout=1):
                     return
             except OSError:
                 time.sleep(0.2)
@@ -68,8 +68,8 @@ def run():
 
     try:
         env = os.environ.copy()
-        # Use a real Pod address: all endpoints are reachable for diagnostics,
-        # while the master discovers them from its local file.
+        # The control API uses the real Pod address; engine RPCs use unique
+        # loopbacks inside this Pod to preserve master engineIp metric identity.
         pod_ip = os.environ.get("POD_IP") or socket.gethostbyname(socket.gethostname())
         if pod_ip.startswith("127.") or pod_ip == "0.0.0.0":
             raise ValueError("bundle requires an advertised Pod IP")
@@ -115,7 +115,7 @@ def run():
             ],
             env,
         )
-        ready(mock_port - 1, mock)
+        ready(mock_port - 1, mock, pod_ip)
         env.update(json.loads((runtime / "endpoints.json").read_text())["env"])
         env.update(
             FLEXLB_CONFIG=raw,
