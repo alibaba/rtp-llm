@@ -8,7 +8,6 @@ Snapshots stay in memory and retain every required region together.
 from dataclasses import dataclass, fields, replace
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.attention import (
     V41AttentionCache,
     V41AttentionContext,
@@ -612,6 +611,11 @@ class V41PrefillExecutor:
         self.progress = PrefillProgress(start, start, start)
         self.next_extend = 0
         self.tail = None
+        self.history_rows = (
+            None
+            if restored is None
+            else _copy_rows(restored.history_rows, slice(-3, None))
+        )
         self.protected = restored
         self.observations = []
         self.canonical = None
@@ -727,6 +731,20 @@ class V41PrefillExecutor:
         output = aux_map = checkpoint = None
         draft_rows = None
         try:
+            history = _copy_rows(rows, slice(-3, None))
+            if self.history_rows is not None and history.token_ids.numel() < 3:
+                history = V41ModelRows(
+                    *(
+                        torch.cat(
+                            (
+                                getattr(self.history_rows, f.name),
+                                getattr(history, f.name),
+                            ),
+                            dim=0,
+                        )[-3:].clone()
+                        for f in fields(V41ModelRows)
+                    )
+                )
             l20 = self.target.prefill_encoder(
                 rows,
                 context,
@@ -772,7 +790,7 @@ class V41PrefillExecutor:
                         self.cache,
                         end=extend.checkpoint_end,
                         replay_floor=extend.replay_floor,
-                        history_rows=_copy_rows(l20.rows, slice(-SWA_WINDOW, None)),
+                        history_rows=history,
                     )
                     if self.canonical is not None:
                         checkpoint = replace(
@@ -790,6 +808,7 @@ class V41PrefillExecutor:
                     extend.encoder_rows.end, self.plan.protected_checkpoint_end
                 )
             self.progress = progress
+            self.history_rows = history
             self.next_extend += 1
             self.observations.append(
                 {

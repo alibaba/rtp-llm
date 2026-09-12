@@ -71,13 +71,17 @@ def _setup_jit_cache(remote_jit_dir: str, local_rank: int, jit_cache_ready):
         if not compatible:
             logging.warning("JIT remote cache disabled: incomplete scope or directory")
             return None
-        with restore_lock(Path(jit.LOCAL_JIT_DIR)):
-            manager_out, commit_lock, cancel = None, threading.Lock(), threading.Event()
+        manager_out, commit_lock, cancel = None, threading.Lock(), threading.Event()
 
-            def _worker():
-                nonlocal manager_out
-                manager = None
-                try:
+        def _worker():
+            nonlocal manager_out
+            manager = None
+            try:
+                # Lock contention shares the restore deadline. A cancelled
+                # worker may acquire the lock later, but must never adopt a tree.
+                with restore_lock(Path(jit.LOCAL_JIT_DIR)):
+                    if cancel.is_set():
+                        return
                     remote_root = jit.resolve_remote_root(remote_jit_dir)
                     if not remote_root or cancel.is_set():
                         return
@@ -87,25 +91,24 @@ def _setup_jit_cache(remote_jit_dir: str, local_rank: int, jit_cache_ready):
                         if not cancel.is_set():
                             manager_out = manager
                             manager = None
-                except Exception:
-                    logging.exception(
-                        "JIT cache setup failed; continuing without remote cache"
-                    )
+            except Exception:
+                logging.exception(
+                    "JIT cache setup failed; continuing without remote cache"
+                )
+            finally:
                 if manager is not None:
                     manager.stop()
 
-            worker = threading.Thread(
-                target=_worker, name="jit-cache-setup", daemon=True
-            )
-            worker.start()
-            worker.join(JIT_CACHE_SETUP_TIMEOUT_S)
-            with commit_lock:
-                if worker.is_alive():
-                    cancel.set()
-                    logging.warning(
-                        "JIT cache setup timed out; continuing without remote cache"
-                    )
-                return manager_out
+        worker = threading.Thread(target=_worker, name="jit-cache-setup", daemon=True)
+        worker.start()
+        worker.join(JIT_CACHE_SETUP_TIMEOUT_S)
+        with commit_lock:
+            if worker.is_alive():
+                cancel.set()
+                logging.warning(
+                    "JIT cache setup timed out; continuing without remote cache"
+                )
+            return manager_out
     except Exception:
         logging.exception("JIT cache setup failed; continuing without remote cache")
         return None

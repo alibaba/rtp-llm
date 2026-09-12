@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41._compact_reader_triton import (
     compact_attention_kernel,
     gather_compact_kernel,
@@ -88,9 +87,7 @@ def _separate_outputs(outputs, inputs):
         for tensor in retained:
             begin, end = bounds(tensor)
             if first < end and begin < last:
-                raise ValueError(
-                    "reader output buffers must not alias inputs or each other"
-                )
+                raise ValueError("output buffers must not alias inputs or each other")
         retained.append(output)
 
 

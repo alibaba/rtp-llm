@@ -12,10 +12,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41._compact_writer_triton import encode_compact_kernel
 from rtp_llm.models_py.modules.dsv41.cache_layout import ENCODINGS, CacheRegion
-from rtp_llm.models_py.modules.dsv41.compact_reader import CompactPages, is_supported
+from rtp_llm.models_py.modules.dsv41.compact_reader import (
+    CompactPages,
+    _separate_outputs,
+    is_supported,
+)
 
 MAX_ENCODE_BYTES = 64 * 1024 * 1024
 _FORMAT_IDS = {CacheRegion.SWA: 0, CacheRegion.GLOBAL: 1, CacheRegion.INDEX_K: 2}
@@ -105,6 +108,7 @@ def encode_compact(
             "encoded output must be contiguous CUDA uint8 [rows, row_bytes]"
         )
     status = _status_buffer(values, status)
+    _separate_outputs((output, status), (values,))
     if values.shape[0]:
         encode_compact_kernel[(values.shape[0],)](
             values,
@@ -151,6 +155,7 @@ def write_compact(
         raise ValueError("slot mapping must be contiguous CUDA int32/int64 [rows]")
     encoding = ENCODINGS[pages.region]
     status = _status_buffer(values, status)
+    _separate_outputs((pages.data, status), (values, slot_mapping))
     if values.shape[0]:
         encode_compact_kernel[(values.shape[0],)](
             values,

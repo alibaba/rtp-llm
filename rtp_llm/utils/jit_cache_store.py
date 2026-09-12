@@ -14,7 +14,6 @@ from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 
 import zstandard as zstd
-
 from rtp_llm.utils.jit_cache_deep_gemm import (
     SNAPSHOT_MANIFEST,
     deepjit_checksums,
@@ -212,7 +211,9 @@ class RemoteSnapshotStore:
         if ready.exists() or (cancel and cancel.is_set()):
             return False
         if _tree_is_warm(target):
-            ready.touch()  # claim: built by a peer that never ran restore
+            with commit:
+                if not (cancel and cancel.is_set()):
+                    ready.touch()  # claim: built by a peer that never ran restore
             return False
 
         snapshots = self._snapshots()
@@ -228,6 +229,11 @@ class RemoteSnapshotStore:
                     continue
                 with commit:
                     if cancel and cancel.is_set():
+                        return False
+                    if _tree_is_warm(target):
+                        # A caller may have exhausted its restore wait and
+                        # compiled locally while the archive was being read.
+                        ready.touch()
                         return False
                     shutil.rmtree(target, ignore_errors=True)
                     os.rename(staging, target)

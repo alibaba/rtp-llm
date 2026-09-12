@@ -46,6 +46,18 @@ py_test(
 )
 
 py_test(
+    name = "jit_cache_startup_deadline_test",
+    srcs = ["jit_cache_startup_deadline_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:sdk",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",
