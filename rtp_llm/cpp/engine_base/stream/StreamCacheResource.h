@@ -38,14 +38,14 @@ public:
     bool         asyncLoadCache();
     bool         loadCacheDone();
 
-    // swap all linear groups rhs and lhs
-    void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
+    // Commit accepted speculative states using each LINEAR group's token span.
+    void updateLinearBlocks(int32_t batch_id, int cur_cached_len, int nxt_cached_len);
 
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
-    int curBlocksNum() const;
-    int mallocFailedTimes() const;
+    int  curBlocksNum() const;
+    int  mallocFailedTimes() const;
     bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;

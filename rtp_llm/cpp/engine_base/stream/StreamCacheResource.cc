@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
+#include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
@@ -10,6 +11,7 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include <limits>
 #include <thread>
 #include <torch/extension.h>
 
@@ -764,16 +766,47 @@ void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>
     }
 }
 
-void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs) {
-    if (rhs == lhs) {
-        return;
-    }
-
-    auto type_list = resource_context_.cache_manager->cacheConfig().group_types;
-
-    for (size_t i = 0; i < type_list.size(); i++) {
-        if (type_list[i] == CacheGroupType::LINEAR) {
-            batch_kv_cache_resource_->swapBlocks(batch_id, i, rhs, lhs);
+void StreamCacheResource::updateLinearBlocks(int32_t batch_id, int cur_cached_len, int nxt_cached_len) {
+    const auto& config = resource_context_.cache_manager->cacheConfig();
+    for (size_t gid = 0; gid < config.group_types.size(); ++gid) {
+        if (config.group_types[gid] != CacheGroupType::LINEAR) {
+            continue;
+        }
+        // The allocator and KDA kernels index LINEAR slots by their group
+        // span, which can be wider than a physical FULL-cache page under Page-RR.
+        const auto span = config.cache_specs.at(gid)->seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(span > 0 && span <= std::numeric_limits<int32_t>::max(),
+                                "invalid LINEAR group %zu token span %u",
+                                gid,
+                                span);
+        const auto [cached_src, cached_dst] = getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, span);
+        const auto [final_src, final_dst]   = getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, span);
+        const auto block_num                = batch_kv_cache_resource_->blocks(batch_id, gid).size();
+        auto       valid_swap               = [block_num](int src, int dst) {
+            return src == dst
+                   || (src >= 0 && dst >= 0 && static_cast<size_t>(src) < block_num
+                       && static_cast<size_t>(dst) < block_num);
+        };
+        // Validate both swaps before changing this group. Missing reserve slots
+        // are a broken allocation contract, not padding that may be ignored.
+        RTP_LLM_CHECK_WITH_INFO(valid_swap(cached_src, cached_dst) && valid_swap(final_src, final_dst),
+                                "stream [%s] LINEAR group %zu span %u table size %zu cannot commit %d -> %d: "
+                                "swaps (%d,%d), (%d,%d)",
+                                stream_->streamLogTag().c_str(),
+                                gid,
+                                span,
+                                block_num,
+                                cur_cached_len,
+                                nxt_cached_len,
+                                cached_src,
+                                cached_dst,
+                                final_src,
+                                final_dst);
+        if (cached_src != cached_dst) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, gid, cached_src, cached_dst);
+        }
+        if (final_src != final_dst) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, gid, final_src, final_dst);
         }
     }
 }

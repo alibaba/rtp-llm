@@ -447,7 +447,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.trace_ids.push_back(stream->traceId());
             if (use_normal_device_state) {
-                const auto&             state = stream->getNormalAsyncDeviceState();
+                const auto& state = stream->getNormalAsyncDeviceState();
                 // Standalone states are already [1]; batched fallback returns
                 // a [1] view. Avoid another reshape per stream: at BS128 each
                 // reshape creates an additional ATen view in the gather trace.
@@ -494,10 +494,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     if (use_normal_device_state) {
-        auto combo_tokens_gpu = can_reuse_batched_state ?
-                                    shared_batched_tokens_gpu :
-                                    (normal_combo_tokens_gpu.size() == 1 ? normal_combo_tokens_gpu.front() :
-                                                                           torch::cat(normal_combo_tokens_gpu, 0));
+        auto combo_tokens_gpu          = can_reuse_batched_state ?
+                                             shared_batched_tokens_gpu :
+                                             (normal_combo_tokens_gpu.size() == 1 ? normal_combo_tokens_gpu.front() :
+                                                                                    torch::cat(normal_combo_tokens_gpu, 0));
         auto next_sequence_lengths_gpu = can_reuse_batched_state ? shared_batched_next_seq_lens_gpu :
                                                                    (normal_sequence_lengths_gpu.size() == 1 ?
                                                                         normal_sequence_lengths_gpu.front() :
@@ -534,8 +534,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         // in separate batches, so this scalar describes the entire context
         // batch and can be consumed directly by Python model implementations.
         model_input.force_disable_sp_run = model_input.force_disable_sp_run || stream->forceDisableSpRun();
-        auto  current_batch_size           = stream->currentBatchSize();
-        auto& kv_cache                     = *stream->kvCachePtr();
+        auto  current_batch_size         = stream->currentBatchSize();
+        auto& kv_cache                   = *stream->kvCachePtr();
         if (config_.enable_detail_log) {
             if (!skip_linear_cache_groups) {
                 RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
@@ -726,8 +726,8 @@ NormalModelInputGatherer::gatherMtpLinearKvCacheKernelBlockId(const StreamGroups
     patch_before_slices.reserve(total_batch_size);
     patch_after_slices.reserve(total_batch_size);
     patch_valid_slices.reserve(total_batch_size);
-    const auto dummy_positions    = torch::full({1, patch_width}, -1, cuda_i32);
-    const auto dummy_source_slots = torch::full({1, patch_width}, -1, cuda_i32);
+    const auto dummy_positions    = torch::full({1, group_num, patch_width}, -1, cuda_i32);
+    const auto dummy_source_slots = torch::full({1, group_num, patch_width}, -1, cuda_i32);
     const auto dummy_values       = torch::full({1, group_num, patch_width}, -1, cuda_i32);
     const auto dummy_valid        = torch::zeros({1, group_num}, cuda_i32);
 
@@ -763,10 +763,10 @@ NormalModelInputGatherer::gatherMtpLinearKvCacheKernelBlockId(const StreamGroups
                 const bool  valid_device_state =
                     snapshot.batch_size == 1 && patch.positions_gpu.defined() && patch.positions_gpu.is_cuda()
                     && patch.positions_gpu.scalar_type() == torch::kInt32 && patch.positions_gpu.is_contiguous()
-                    && patch.positions_gpu.dim() == 2 && patch.positions_gpu.size(0) == 1
-                    && patch.positions_gpu.size(1) == patch_width && patch.source_slots_gpu.defined()
-                    && patch.source_slots_gpu.is_cuda() && patch.source_slots_gpu.scalar_type() == torch::kInt32
-                    && patch.source_slots_gpu.is_contiguous()
+                    && patch.positions_gpu.dim() == 3 && patch.positions_gpu.size(0) == 1
+                    && patch.positions_gpu.size(1) == group_num && patch.positions_gpu.size(2) == patch_width
+                    && patch.source_slots_gpu.defined() && patch.source_slots_gpu.is_cuda()
+                    && patch.source_slots_gpu.scalar_type() == torch::kInt32 && patch.source_slots_gpu.is_contiguous()
                     && patch.source_slots_gpu.sizes() == patch.positions_gpu.sizes()
                     && patch.before_values_gpu.defined() && patch.before_values_gpu.is_cuda()
                     && patch.before_values_gpu.scalar_type() == torch::kInt32 && patch.before_values_gpu.is_contiguous()
