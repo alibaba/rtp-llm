@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include <numeric>
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
@@ -6,7 +7,12 @@ void CudaGraphRunner::replayDecode(int bs) {
 }
 
 std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
-    const int alignment = std::max(sequence_parallel_size_, 1);
+    const int tp_size = std::max(sequence_parallel_size_, 1);
+    const int token_width = std::max(num_tokens_per_bs_, 1);
+    // Capture is keyed by request count, while TP collectives shard token
+    // rows. Align request buckets only as much as needed for
+    // (batch * token_width) to be divisible by TP.
+    const int alignment = tp_size / std::gcd(tp_size, token_width);
     auto normalize = [alignment](std::vector<int> sizes) {
         for (int& size : sizes) {
             RTP_LLM_CHECK_WITH_INFO(size > 0, "decode capture batch size must be positive, got %d", size);
@@ -20,8 +26,12 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     // If decode_capture_batch_sizes_ is provided from Python, use it directly
     if (!decode_capture_batch_sizes_.empty()) {
         auto capture_bs = normalize(decode_capture_batch_sizes_);
-        RTP_LLM_LOG_INFO("Using %zu physical Decode capture batch sizes aligned to SP%d",
-                         capture_bs.size(), alignment);
+        RTP_LLM_LOG_INFO("Using %zu physical Decode capture batch sizes aligned to "
+                         "request multiple %d (TP%d, tokens/request=%d)",
+                         capture_bs.size(),
+                         alignment,
+                         tp_size,
+                         token_width);
         return capture_bs;
     }
 

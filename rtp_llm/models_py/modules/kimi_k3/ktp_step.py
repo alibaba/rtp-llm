@@ -285,6 +285,16 @@ def pad_ktp_decode_inputs(inputs, plan: KtpStepPlan, *, ktp_rank: int) -> None:
     attention.is_s_padded = physical != local_real_batch
 
     local_real_tokens = local_real_batch * token_width
+    # Publish the request-domain transition independently of any later TP
+    # token alignment. Projection-KTP currently runs with attention TP1, but
+    # keeping both stages explicit makes a future DP/KTP + TP topology
+    # composable instead of inferring logical counts from padded tensors.
+    attention.logical_request_count = local_real_batch
+    attention.coordinated_request_count = physical
+    attention.physical_request_count = physical
+    attention.logical_token_count = local_real_tokens
+    attention.coordinated_token_count = physical_tokens
+    attention.physical_token_count = physical_tokens
     mask = torch.zeros(physical_tokens, dtype=torch.int32, device=device)
     mask[:local_real_tokens] = 1
     inputs.ktp_valid_row_mask = mask

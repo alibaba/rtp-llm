@@ -286,7 +286,7 @@ class KimiK3KDA(nn.Module):
             projected_fused = all_gather_gemm(
                 hidden_states,
                 [self.kda_fused_w],
-                logical_m=sp_layout.physical_tokens,
+                logical_m=sp_layout.tokens.physical_tokens,
             )[0]
         else:
             projected_fused = (
@@ -427,7 +427,7 @@ class KimiK3KDA(nn.Module):
         if sequence_parallel and (
             self.attn_tp_size <= 1
             or not hidden_states.is_cuda
-            or int(hidden_states.shape[0]) != sp_layout.local_tokens
+            or int(hidden_states.shape[0]) != sp_layout.tokens.local_tokens
         ):
             raise ValueError(
                 "K3 Sequence Parallel requires a CUDA physical token shard "

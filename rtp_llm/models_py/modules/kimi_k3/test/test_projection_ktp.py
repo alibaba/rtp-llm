@@ -236,6 +236,12 @@ class KtpStepPlanTest(unittest.TestCase):
         self.assertEqual(attention.cu_seqlens.tolist(), [0, 4, 8])
         self.assertEqual(attention.cu_kv_seqlens.tolist(), [0, 11, 15])
         self.assertEqual(attention.total_tokens, 8)
+        self.assertEqual(attention.logical_request_count, 1)
+        self.assertEqual(attention.coordinated_request_count, 2)
+        self.assertEqual(attention.physical_request_count, 2)
+        self.assertEqual(attention.logical_token_count, 4)
+        self.assertEqual(attention.coordinated_token_count, 8)
+        self.assertEqual(attention.physical_token_count, 8)
         self.assertEqual(
             inputs.ktp_valid_row_mask.tolist(),
             [1, 1, 1, 1, 0, 0, 0, 0],

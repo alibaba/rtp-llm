@@ -390,12 +390,16 @@ struct PyAttentionInputs {
     torch::Tensor decode_cu_seqlens_host;
     int           context_total_kv_length = 0;
     int           total_tokens            = 0;
-    // Sequence-parallel model-boundary layout. Zero means legacy callers did
-    // not publish an explicit logical/physical split.
-    int logical_request_count  = 0;
-    int physical_request_count = 0;
-    int logical_token_count    = 0;
-    int physical_token_count   = 0;
+    // Parallel model-boundary layout.  DP/KTP coordination owns the
+    // logical-to-coordinated request transition; TP padding owns the
+    // coordinated-to-physical token transition. Zero means a legacy caller
+    // did not publish that stage explicitly.
+    int logical_request_count     = 0;
+    int coordinated_request_count = 0;
+    int physical_request_count    = 0;
+    int logical_token_count       = 0;
+    int coordinated_token_count   = 0;
+    int physical_token_count      = 0;
     torch::Tensor padding_offset;
     torch::Tensor combo_position_ids;
 

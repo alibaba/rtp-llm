@@ -29,9 +29,11 @@ def _sp_layout(logical_tokens: int, world_size: int, rank: int):
     return sequence_parallel.sequence_parallel_layout(
         mode="prefill",
         logical_requests=1,
-        physical_requests=1,
+        coordinated_requests=1,
+        physical_requests=1 + int(physical_tokens > logical_tokens),
         tokens_per_request=0,
         logical_tokens=logical_tokens,
+        coordinated_tokens=logical_tokens,
         physical_tokens=physical_tokens,
         world_size=world_size,
         rank=rank,
@@ -496,9 +498,9 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
                 for tp_rank in range(tp_size):
                     layout = _sp_layout(logical_tokens, tp_size, tp_rank)
                     shards.append(
-                        sequence_parallel.shard_physical_tokens(padded, layout)
+                        sequence_parallel.local_physical_token_view(padded, layout)
                     )
-                    valid_tokens += layout.local_valid_tokens
+                    valid_tokens += layout.tokens.local_valid_tokens
 
                 gathered = torch.cat(shards)
                 self.assertEqual(valid_tokens, logical_tokens)
@@ -896,7 +898,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             attn_meta=attn_meta,
         )
 
-        self.assertEqual(layout.local_valid_tokens, 1)
+        self.assertEqual(layout.tokens.local_valid_tokens, 1)
         self.assertEqual(layer.mlp.valid_token_count, 1)
         self.assertTrue(layer.mlp.sequence_parallel)
         torch.testing.assert_close(output.hidden_states, hidden, rtol=0, atol=0)
