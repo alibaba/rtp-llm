@@ -152,6 +152,18 @@ msgid "PREFILL ✅ <br>  DECODE✅"
 msgstr ""
 
 #: ../../backend/attention_backend.md
+msgid "**FA4**"
+msgstr ""
+
+#: ../../backend/attention_backend.md
+msgid "NV SM90 ✅<br> AMD ❌"
+msgstr ""
+
+#: ../../backend/attention_backend.md
+msgid "--enable_fa4_spec_decode"
+msgstr ""
+
+#: ../../backend/attention_backend.md
 msgid "**XQA**"
 msgstr ""
 
@@ -177,4 +189,12 @@ msgstr ""
 
 #: ../../backend/attention_backend.md
 msgid "**AiterPA**"
+msgstr ""
+
+#: ../../backend/attention_backend.md:19
+msgid ""
+"FA4 only serves speculative decoding target verify and draft prefill, and "
+"additionally requires BF16 activations with a non-quantized KV cache. Its "
+"kernel is only packaged in the CUDA 12.9 x86 build; other builds fall back "
+"to the FlashInfer/TRT prefill backends automatically."
 msgstr ""

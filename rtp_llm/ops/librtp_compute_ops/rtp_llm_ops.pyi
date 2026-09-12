@@ -2,30 +2,30 @@
 rtp llm custom ops
 """
 from __future__ import annotations
-
-import typing
-
 import librtp_compute_ops
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
-
-
+__all__: list[str] = ['FakeBalanceExpertOp', 'FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'dsv4_persistent_topk', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'persistent_topk', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'topk_v3', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
+class FakeBalanceExpertOp:
+    def __init__(self, expert_num: int, moe_k: int, dp_rank: int, dp_size: int, ep_size: int) -> None:
+        ...
+    def forward(self, expert_ids: torch.Tensor, expert_scales: torch.Tensor) -> None:
+        ...
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
     def __init__(self) -> None:
         ...
-    def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
-        """
-        Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)
-        """
     def fill_decode_cuda_graph_params(self, sequence_lengths_plus_1_d: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int) -> None:
         """
         Update FlashInfer decode metadata on device during CUDA graph replay
         """
+    def fill_params(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
+        """
+        Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)
+        """
     def fill_params_mha_device(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
         """
-        Fill MHA attention metadata directly from device-resident inputs.
+        MHA-only device-resident planner — fills decode_page_indptr_d / paged_kv_last_page_len_d / page_indice_d via a single CUDA kernel, leaving MLA-only fields untouched
         """
     @property
     def batch_indice_d(self) -> torch.Tensor:
@@ -132,8 +132,6 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
         """
         Slot mapping for KV cache
         """
-
-
 class GroupTopKOp:
     def __init__(self) -> None:
         ...
@@ -148,7 +146,24 @@ class SparseMlaParams(FlashInferMlaAttnParams):
     schedule_metadata: torch.Tensor
     def __init__(self) -> None:
         ...
+    def fill_cp_plan_params(self, padding_mask: torch.Tensor, kv_restore_indices: torch.Tensor, q0_idx: list[int], q1_idx: list[int], cp_rank: int, local_tokens: int, actual_input_lengths: torch.Tensor, prefix_lengths: torch.Tensor) -> None:
+        ...
     def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
+        ...
+    @property
+    def cp_cu_kv_seqlens_global(self) -> torch.Tensor:
+        ...
+    @property
+    def cp_kv_restore_unpad_indices(self) -> torch.Tensor:
+        ...
+    @property
+    def cp_total_global_ids(self) -> torch.Tensor:
+        ...
+    @property
+    def cp_total_kv_len(self) -> int:
+        ...
+    @property
+    def cp_total_local_ids(self) -> torch.Tensor:
         ...
     @property
     def expanded_seq_lens(self) -> torch.Tensor:
@@ -162,45 +177,10 @@ class SparseMlaParams(FlashInferMlaAttnParams):
     @property
     def topk_indices_offset(self) -> torch.Tensor:
         ...
-
-    def fill_cp_plan_params(
-        self,
-        padding_mask: torch.Tensor,
-        kv_restore_indices: torch.Tensor,
-        q0_idx: list[int],
-        q1_idx: list[int],
-        cp_rank: int,
-        local_tokens: int,
-        actual_input_lengths: torch.Tensor,
-        prefix_lengths: torch.Tensor,
-    ) -> None:
-        ...
-
-    @property
-    def cp_kv_restore_unpad_indices(self) -> torch.Tensor:
-        ...
-
-    @property
-    def cp_total_global_ids(self) -> torch.Tensor:
-        ...
-
-    @property
-    def cp_total_local_ids(self) -> torch.Tensor:
-        ...
-
-    @property
-    def cp_cu_kv_seqlens_global(self) -> torch.Tensor:
-        ...
-
-    @property
-    def cp_total_kv_len(self) -> int:
-        ...
-
-
 class XQAAttnOp:
     def __init__(self, attn_configs: libth_transformer_config.AttentionConfigs) -> None:
         ...
-    def forward(self, input: torch.Tensor, kv_cache: librtp_compute_ops.KVCache | None, params: XQAParams) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, kv_cache: librtp_compute_ops.LayerKVCache | None, params: XQAParams) -> torch.Tensor:
         ...
     def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> librtp_compute_ops.ParamsBase:
         ...
@@ -208,7 +188,6 @@ class XQAAttnOp:
         ...
     def update(self, params: XQAParams, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> None:
         ...
-
     def update_kv_cache_offset(self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor) -> None:
         ...
 class XQAParams(librtp_compute_ops.ParamsBase):
@@ -235,6 +214,10 @@ def cp_gather_indexer_k_quant_cache(kv_cache: torch.Tensor, dst_k: torch.Tensor,
     """
     Gather indexer K quantized cache kernel
     """
+def cublas_gemm_bf16_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """
+    cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output
+    """
 def cuda_graph_copy_large2small(input_tensor: torch.Tensor, output_tensor: torch.Tensor, batch_size: torch.Tensor, max_batch_size: int, max_seq_len: int, input_lengths: torch.Tensor, hidden_size: int, cu_seq_len: torch.Tensor) -> None:
     """
     CUDA Graph copy kernel: Large to Small tensor copy
@@ -243,8 +226,6 @@ def cuda_graph_copy_small2large(input_tensor: torch.Tensor, output_tensor: torch
     """
     CUDA Graph copy kernel: Small to Large tensor copy
     """
-def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor, b_tensors: torch.Tensor, a_scales: torch.Tensor, b_scales: torch.Tensor, expert_offsets: torch.Tensor, problem_sizes: torch.Tensor, a_strides: torch.Tensor, b_strides: torch.Tensor, c_strides: torch.Tensor, per_act_token: bool, per_out_ch: bool, profile: bool = False, m_tile: int = 0, n_tile: int = 0, k_tile: int = 0, cluster_m: int = 0, cluster_n: int = 0, cluster_k: int = 0, swap_ab: bool = False) -> None:
-    ...
 def cutlass_scaled_fp4_mm(out: torch.Tensor, a: torch.Tensor, b: torch.Tensor, a_sf: torch.Tensor, b_sf: torch.Tensor, alpha: torch.Tensor) -> None:
     ...
 def debug_kernel(data: torch.Tensor, start_row: int, start_col: int, m: int, n: int, row_len: int, info_id: int) -> None:
@@ -254,6 +235,10 @@ def debug_kernel(data: torch.Tensor, start_row: int, start_col: int, m: int, n: 
 def dispose_communicator(comm_ptr: int) -> None:
     """
     Dispose UbCommunicator with python address and release resources
+    """
+def dsv4_persistent_topk(logits: torch.Tensor, lengths: torch.Tensor, output: torch.Tensor, workspace: torch.Tensor, k: int, max_seq_len: int) -> None:
+    """
+    DSv4 persistent radix-select TopK (K∈{512,1024,2048})
     """
 def dsv4_top_k_per_row_prefill(logits: torch.Tensor, row_starts: torch.Tensor, row_ends: torch.Tensor, indices_out: torch.Tensor, num_rows: int, stride0: int, stride1: int, top_k: int, force_radix_sort: bool = False) -> None:
     """
@@ -279,8 +264,10 @@ def fast_topk_v2(score: torch.Tensor, indices: torch.Tensor, lengths: torch.Tens
     """
     Fast TopK v2 kernel
     """
-def fast_topk_v2_variable(score: torch.Tensor, indices: torch.Tensor, lengths: torch.Tensor, row_starts: torch.Tensor | None = None, top_k: int = 2048) -> None:
-    ...
+def fast_topk_v2_variable(score: torch.Tensor, indices: torch.Tensor, lengths: torch.Tensor, row_starts: torch.Tensor | None, top_k: int) -> None:
+    """
+    Fast TopK v2 kernel with selectable TopK
+    """
 def fill_mla_params(t_prefill_lengths: torch.Tensor, t_sequence_lengths: torch.Tensor, t_input_lengths: torch.Tensor, t_kv_cache_block_id_host: torch.Tensor, seq_size_per_block: int) -> FlashInferMlaAttnParams:
     ...
 def fused_add_layernorm(input: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor, weight: torch.Tensor, beta: torch.Tensor, eps: float) -> None:
@@ -295,14 +282,6 @@ def fused_qk_rmsnorm(IO: torch.Tensor, q_gamma: torch.Tensor, k_gamma: torch.Ten
     """
     Fused QK RMSNorm kernel
     """
-def fused_qk_rmsnorm_v2(IO: torch.Tensor, q_gamma: torch.Tensor, k_gamma: torch.Tensor, layernorm_eps: float, q_group_num: int, k_group_num: int, m: int, n: int, norm_size: int) -> None:
-    """
-    Fused QK RMSNorm V2 (warp-per-head wave64 single-pass, ROCm)
-    """
-def get_cutlass_batched_moe_mm_data(expert_offsets: torch.Tensor, problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor, expert_num_tokens: torch.Tensor, num_local_experts: int, padded_m: int, n: int, k: int, problem_1_swap_ab: bool, problem_2_swap_ab: bool) -> None:
-    ...
-def get_cutlass_moe_mm_without_permute_info(topk_ids: torch.Tensor, expert_offsets: torch.Tensor, problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor, num_experts: int, n: int, k: int, problem_1_swap_ab: bool, problem_2_swap_ab: bool, blockscale_offsets: torch.Tensor | None = None) -> None:
-    ...
 def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor, slot_mapping: torch.Tensor, quant_block_size: int, scale_fmt: str) -> None:
     """
     Indexer K quantization and cache kernel
@@ -327,10 +306,6 @@ def moe_pre_reorder(input: torch.Tensor, topk_ids: torch.Tensor, token_expert_in
     """
     moe ep permute kernel
     """
-def moe_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor, token_expert_indices: torch.Tensor, gating_output: torch.Tensor) -> None:
-    """
-    MoE Topk Softmax kernel
-    """
 def open_ipc_handle(mem_handle: torch.Tensor) -> int:
     """
     Open IPC memory handle to access shared buffer from another process
@@ -351,8 +326,10 @@ def per_token_group_quant_int8(input: torch.Tensor, output_q: torch.Tensor, outp
     """
 def per_token_quant_fp8(input: torch.Tensor, output_q: torch.Tensor, output_s: torch.Tensor) -> None:
     ...
-def cublas_gemm_bf16_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """BF16 x BF16 GEMM with FP32 accumulation and FP32 output."""
+def persistent_topk(logits: torch.Tensor, lengths: torch.Tensor, output: torch.Tensor, workspace: torch.Tensor, k: int, max_seq_len: int) -> None:
+    """
+    Persistent TopK kernel
+    """
 def prepare_sparse_mla_params(attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> SparseMlaParams:
     ...
 def register_buffer_to_communicator(comm_ptr: int, buffer_ptrs: list[int]) -> int:
@@ -377,6 +354,10 @@ def silu_and_mul(output: torch.Tensor, input: torch.Tensor, cuda_stream: int = 0
     """
 def silu_and_mul_scaled_fp4_experts_quant(output: torch.Tensor, output_scale: torch.Tensor, input: torch.Tensor, input_global_scale: torch.Tensor, mask: torch.Tensor, use_silu_and_mul: bool) -> None:
     ...
+def topk_v3(logits: torch.Tensor, lengths: torch.Tensor, output: torch.Tensor, workspace: torch.Tensor, k: int, max_seq_len: int) -> None:
+    """
+    DeepSeek V4 decode indexer exact SGLang radix-select TopK
+    """
 def trt_fp8_quantize_128(input: torch.Tensor, col_major_scale: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize BF16 weight matrix to FP8 format using 128-element block processing
@@ -397,25 +378,3 @@ def userbuffers_send(tensor: torch.Tensor, handler: int, srcoffset: int, dstoffs
     """
     Send data via user buffers to peer
     """
-class TrtllmArFusionHandle:
-    """
-    RAII handle for TRT-LLM AllReduce Fusion workspace.
-    Manages IPC shared memory, barrier flags, data buffers, and CUDA Graph capture.
-    """
-    def __init__(self, device_id: int, rank: int, world_size: int, max_size_in_bytes: int, comm_ptrs_buf_len: int) -> None: ...
-    def get_barrier_handle(self) -> torch.Tensor: ...
-    def get_data_handle(self) -> torch.Tensor: ...
-    def open_barrier_handles(self, handles: list[torch.Tensor]) -> None: ...
-    def open_data_handles(self, handles: list[torch.Tensor]) -> None: ...
-    def capture_clear(self) -> None: ...
-    def get_captured_handles(self) -> list[torch.Tensor]: ...
-    def get_captured_offsets(self) -> torch.Tensor: ...
-    def open_captured_handles(self, handles: list[torch.Tensor], offsets: list[int], ptr_idx: int) -> None: ...
-    def allreduce_rms(self, allreduce_in: torch.Tensor, residual_in: torch.Tensor, rms_gamma: torch.Tensor, residual_out: torch.Tensor, norm_out: torch.Tensor, scale_out: torch.Tensor, eps: float, quant_type: int) -> None:
-        """
-        AllReduce + Residual Add + RMSNorm fusion kernel
-        """
-    def allreduce(self, allreduce_in: torch.Tensor, allreduce_out: torch.Tensor) -> None:
-        """
-        AllReduce kernel
-        """

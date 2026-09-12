@@ -213,6 +213,18 @@ msgid "Disables FlashInfer native Hybrid Prefill implementation."
 msgstr ""
 
 #: ../../backend/server_arguments.md
+msgid "`--enable_fa4_spec_decode`"
+msgstr ""
+
+#: ../../backend/server_arguments.md
+msgid ""
+"Enables the FA4 attention backend for speculative decoding target verify "
+"and draft prefill. Requires SM90, BF16, and a non-quantized KV cache; the "
+"kernel is only packaged in the CUDA 12.9 x86 build. Set to False to fall "
+"back to the FlashInfer/TRT prefill path."
+msgstr ""
+
+#: ../../backend/server_arguments.md
 msgid "`--enable_xqa`"
 msgstr ""
 

@@ -11,7 +11,7 @@ from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     build_qwen35_dense_ffn_weights,
     plus_one,
 )
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecType, RopeStyle
+from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 
 
@@ -88,7 +88,6 @@ class Qwen35DenseMTPWeight(Qwen35MoeMTPWeight):
 
 class Qwen3NextMTPMixin:
     _mtp_moe_layer_index = (0,)
-    _mtp_use_base_rope = False
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -101,10 +100,6 @@ class Qwen3NextMTPMixin:
         config.moe_layer_index = list(cls._mtp_moe_layer_index)
         config.num_layers = 1
         config.is_mtp = True
-        if cls._mtp_use_base_rope:
-            # Draft MTP consumes text tokens only. Plain RoPE keeps the
-            # PyFlashinfer prefill CUDA graph implementation eligible.
-            config.attn_config.rope_config.style = RopeStyle.Base
         return config
 
     @classmethod
@@ -141,8 +136,6 @@ class Qwen3NextMTP(Qwen3NextMTPMixin, Qwen3Next):
 
 
 class Qwen35MoeMTP(Qwen3NextMTPMixin, Qwen35Moe):
-    _mtp_use_base_rope = True
-
     @staticmethod
     def get_weight_cls():
         return Qwen35MoeMTPWeight
@@ -150,7 +143,6 @@ class Qwen35MoeMTP(Qwen3NextMTPMixin, Qwen35Moe):
 
 class Qwen35DenseMTP(Qwen3NextMTPMixin, Qwen35Dense):
     _mtp_moe_layer_index = ()
-    _mtp_use_base_rope = True
 
     @staticmethod
     def get_weight_cls():

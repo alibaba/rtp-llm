@@ -82,10 +82,10 @@ void CudaGraphRunner::capturePrefill() {
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        // HC-shaped MTP draft prefill keeps its output at fixed graph capacity.
+        // HC-shaped speculative draft prefill keeps its output at fixed graph capacity.
         // Other paths produce the real flattened seq_len and must keep their
         // metadata shapes aligned.
-        if (!usesFixedCapacityMtpDraftPrefillCudaGraph()) {
+        if (!usesFixedCapacitySpecDraftPrefillCudaGraph()) {
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
                 graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
         }
@@ -98,14 +98,20 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // MTP draft prefill: capture at multiples of num_tokens_per_bs_
-    if (isMtpDraftPrefillCudaGraph()) {
+    // Speculative draft prefill: capture at multiples of num_tokens_per_bs_
+    if (isSpecDraftPrefillCudaGraph()) {
+        // The buckets below are multiples of num_tokens_per_bs_, which is a dense
+        // speculative row only at anchor + sp_steps_ proposals.
+        RTP_LLM_CHECK_WITH_INFO(num_tokens_per_bs_ == sp_steps_ + 1,
+                                "spec draft prefill: num_tokens_per_bs_ %d must equal sp_steps_ %d + 1",
+                                num_tokens_per_bs_,
+                                sp_steps_);
         std::vector<int> result;
         for (int i = 1; i <= max_bs_; ++i) {
             result.push_back(i * num_tokens_per_bs_);
         }
         RTP_LLM_LOG_INFO(
-            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
+            "Speculative draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
             num_tokens_per_bs_,
             result.size(),
             max_bs_,

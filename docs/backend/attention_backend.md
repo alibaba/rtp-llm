@@ -11,10 +11,15 @@
 | **PAGED_OPEN_SOURCE** | ✅                | ❌                 | ❌      | ❌                 | NV ✅<br> AMD ❌        | --enable_paged_open_source_fmha | PREFILL ✅ <br>  DECODE❌  |
 | **CKFMHA**            | ❌                | ❌                 | ✅      | ✅                 | NV ❌<br> AMD ✅        | None                            | PREFILL ✅ <br>  DECODE❌  |
 | **FLASHINFER_NATIVE** | ✅                | ✅                 | ✅      | ✅                 | NV ✅<br> AMD ✅        | --disable_flashinfer_native<br>--disable_flashinfer_hybrid_prefill | PREFILL ✅ <br>  DECODE✅  |
+| **FA4**               | ✅                | ✅                 | ❌      | ❌                 | NV SM90 ✅<br> AMD ❌   | --enable_fa4_spec_decode        | PREFILL ✅ <br>  DECODE❌  |
 | **XQA**               | ✅                | ❌                 | ❌      | ❌                 | NV Hopper ✅<br> AMD ❌ | --enable_xqa                    | PREFILL ❌ <br>  DECODE✅  |
 | **FlashMLA**          | ✅                | ✅                 | ✅      | ❌                 | NV Hopper ✅<br> AMD ❌ | None                            | PREFILL ❌ <br>  DECODE✅  |
 | **MMHA**              | ✅                | ❌                 | ❌      | ❌                 | NV ✅<br> AMD ✅        | None                            | PREFILL ❌ <br>  DECODE✅  |
 | **AiterPA**           | ✅                | ❌                 | ❌      | ❌                 | NV ❌<br> AMD ✅        | None                            | PREFILL ❌ <br>  DECODE✅  |
+
+FA4 only serves speculative decoding target verify and draft prefill, and additionally requires
+BF16 activations with a non-quantized KV cache. Its kernel is only packaged in the CUDA 12.9 x86
+build; other builds fall back to the FlashInfer/TRT prefill backends automatically.
 
 ## ROCm KV-cache V layout and PA flag combinations
 

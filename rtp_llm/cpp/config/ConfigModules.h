@@ -143,6 +143,7 @@ struct FMHAConfig {
     bool enable_paged_open_source_fmha       = true;
     bool disable_flashinfer_native           = false;
     bool disable_flashinfer_hybrid_prefill   = true;
+    bool enable_fa4_spec_decode              = true;
     bool enable_xqa                          = true;
     bool use_aiter_pa                        = true;
     bool use_asm_pa                          = true;

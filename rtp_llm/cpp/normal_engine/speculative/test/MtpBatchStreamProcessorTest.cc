@@ -98,7 +98,7 @@ public:
             query->generate_config->in_think_mode       = true;
             query->generate_config->max_thinking_tokens = 1024;
         }
-        query->generate_config->num_return_sequences  = num_return_sequences;
+        query->generate_config->num_return_sequences = num_return_sequences;
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         if (!end_think_token_ids.empty()) {
@@ -293,10 +293,10 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     // exactly the way MtpExecutor::buildSpecLogitsVerifyInline wires it.
     SpecLogitsVerifyRunner             runner;
     SpecLogitsVerifyRunner::LaunchTask task;
-    task.total_streams   = 1;
-    task.propose_step    = static_cast<int>(sp_config.gen_num_per_cycle);
-    task.vocab_size      = model_config.vocab_size;
-    task.draft_tokens    = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+    task.total_streams = 1;
+    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
+    task.vocab_size    = model_config.vocab_size;
+    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
     for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
         ASSERT_NE(processor_ptr, nullptr);
         ASSERT_EQ(processor_ptr->mtpCapability().mode, MtpProcessorMode::SPEC_VERIFY);
@@ -425,6 +425,61 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeRejectsOutOfRangeAcceptLen) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 4;
+
+    ResourceContext resource_context;
+    resource_context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                                        /*block_num=*/10,
+                                                                        /*tokens_per_block=*/2,
+                                                                        rtp_llm::TYPE_INT8,
+                                                                        /*local_head_num_kv=*/128,
+                                                                        /*size_per_head=*/256));
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+
+    MergedOutput draft_prefill_output;
+    draft_prefill_output.model_output.all_hidden_states =
+        torch::tensor({0.2f, 0.02f, 0.3f, 0.03f, 0.4f, 0.04f, 0.5f, 0.05f, 0.6f, 0.06f, 1.3f, 0.13f}, torch::kFloat32)
+            .reshape({6, 2});
+    draft_prefill_output.sampler_output.token_ids = torch::tensor({0L, 3L}, torch::kInt64).reshape({2, 1});
+    draft_prefill_output.sampler_output.all_probs =
+        torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    // gen_num_per_cycle = 4, so the accepted length must land in [1, 5].
+    auto makeSpecOutput = [](int32_t first_accept_len) {
+        speculative::SpeculativeSamplerOutput output;
+        output.accept_len_cpu    = torch::tensor({first_accept_len, 1}, torch::kInt32);
+        output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
+        output.accept_len        = output.accept_len_cpu.to(torch::kCUDA);
+        output.accept_tokens     = output.accept_tokens_cpu.to(torch::kCUDA);
+        return output;
+    };
+
+    auto below_range = makeSpecOutput(0);
+    EXPECT_THROW((void)processor.dispatchDecode(stream_groups, below_range, draft_prefill_output), std::exception);
+
+    auto above_range = makeSpecOutput(6);
+    EXPECT_THROW((void)processor.dispatchDecode(stream_groups, above_range, draft_prefill_output), std::exception);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
@@ -576,7 +631,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDeviceState) {
-    setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1", 1);
+    autil::EnvGuard             device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1");
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -673,7 +728,6 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     vector<int> expect_input_lengths = {2, 2};
     EXPECT_TRUE(model_input.input_lengths.is_cuda());
     EXPECT_EQ(expect_input_lengths, toVec<int>(model_input.input_lengths));
-    unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
@@ -1042,9 +1096,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
               toVec<int>(model_input.combo_position_ids));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
-    unsetenv("RTP_LLM_STREAM_ASYNC");
-    unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDenseLayout) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1087,77 +1139,41 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
 
     auto& model_input            = model_input_status.value();
     model_input.is_target_verify = true;
+    model_input.input_lengths    = torch::full({2}, 3, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len_cpu    = torch::tensor({3, 1}, torch::kInt32);
-    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32);
-    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
-    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
-
-    torch::Tensor hidden_states_d_t;
+    spec_decode_output.accept_len    = torch::tensor({3, 1}, torch::kInt32).to(torch::kCUDA);
+    spec_decode_output.accept_tokens = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32).to(torch::kCUDA);
 
     GptModelOutputs model_output;
     model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f}, torch::kFloat32)
-            .reshape({6, 2});
+            .reshape({6, 2})
+            .to(torch::kCUDA);
 
-    processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
+    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, 2, holder);
 
+    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
     auto        combo_tokens        = model_input.combo_tokens.cpu();
-    vector<int> expect_combo_tokens = {2, 3, 1, 2};
+    vector<int> expect_combo_tokens = {2, 3, 1, 2, 0, 0};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 
-    auto        input_lengths        = model_input.input_lengths;
-    vector<int> expect_input_lengths = {3, 1};
+    auto        input_lengths        = model_input.input_lengths.cpu();
+    vector<int> expect_input_lengths = {3, 3};
     EXPECT_EQ(expect_input_lengths, toVec<int>(input_lengths));
 
     auto        lm_output_indexes        = model_input.lm_output_indexes.cpu();
     vector<int> expect_lm_output_indexes = {2, 3};
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
+    EXPECT_TRUE(model_input.last_hidden_states.is_cuda());
     auto          last_hidden_states        = model_input.last_hidden_states;
-    vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f};
+    vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states));
     EXPECT_FALSE(model_input.is_target_verify);
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDenseDeviceState) {
-    setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1", 1);
-    ModelConfig                 model_config;
-    PDSepConfig                 pd_sep_config;
-    ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config = makeProcessorCacheConfig();
-    SpeculativeExecutionConfig  sp_config;
-    model_config.num_layers     = 1;
-    sp_config.gen_num_per_cycle = 2;
-
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    GptModelInputs                        model_input;
-    speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len    = torch::tensor({3, 1}, torch::kInt32).to(torch::kCUDA);
-    spec_decode_output.accept_tokens = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32).to(torch::kCUDA);
-    GptModelOutputs model_output;
-    model_output.all_hidden_states =
-        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f}, torch::kFloat32)
-            .reshape({6, 2})
-            .to(torch::kCUDA);
-    torch::Tensor hidden_states_d_t;
-    TensorHolder  holder;
-
-    processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
-
-    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
-    EXPECT_EQ((vector<int>{2, 3, 1, 2, 0, 0}), toVec<int>(model_input.combo_tokens));
-    EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
-    EXPECT_EQ((vector<int>{2, 3}), toVec<int>(model_input.lm_output_indexes));
-    EXPECT_EQ(6, model_input.last_hidden_states.size(0));
-    unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
-}
-
-TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsComboPositionIds) {
+TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputKeepsDenseComboPositionIds) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1212,8 +1228,6 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
     spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
     spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
-    torch::Tensor hidden_states_d_t;
-
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::tensor({0.1f,
                                                     0.2f,
@@ -1236,12 +1250,11 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
                                                    torch::kFloat32)
                                          .reshape({9, 2});
 
-    processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 3, hidden_states_d_t, holder);
+    processor.updateDecodePostDraftModelInput(model_input, model_output, spec_decode_output, 3, holder);
 
-    auto        combo_position_ids        = model_input.combo_position_ids;
-    vector<int> expect_combo_position_ids = {10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 70, 71, 72};
-    EXPECT_EQ(expect_combo_position_ids, toVec<int>(combo_position_ids));
+    EXPECT_EQ((vector<int>{10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51,
+                           52, 60, 61, 62, 70, 71, 72, 80, 81, 82, 90, 91, 92}),
+              toVec<int>(model_input.combo_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodeDraftModelInputAdvancesComboPositionIds) {
@@ -1363,7 +1376,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDeviceState) {
-    setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1", 1);
+    autil::EnvGuard device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1");
 
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
@@ -1429,8 +1442,6 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDevic
     vector<float> expect_all_probs = {0.9, 0.8, 0.7, 0.6, 0.4, 0.3, 0.2, 0.1};
     EXPECT_TRUE(sampler_output.all_probs.is_cuda());
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
-
-    unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
 }
 
 TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
