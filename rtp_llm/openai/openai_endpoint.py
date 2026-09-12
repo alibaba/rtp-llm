@@ -21,7 +21,11 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
+from rtp_llm.config.response_format import (
+    ResponseFormat,
+    normalize_think_tag,
+    prompt_ends_with_think_anchor,
+)
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -187,6 +191,7 @@ class OpenaiEndpoint(object):
         config: GenerateConfig,
         renderer: CustomChatRenderer,
         input_ids: Optional[List[int]],
+        request: Optional[ChatCompletionRequest] = None,
     ) -> Optional[ReasoningFormat]:
         if config.thinking_mode not in (
             ThinkingMode.ENABLED,
@@ -195,17 +200,37 @@ class OpenaiEndpoint(object):
             return None
 
         base_format = renderer.get_reasoning_format()
-        if config.thinking_mode == ThinkingMode.ENABLED:
-            return base_format
         think_start_tag = normalize_think_tag(self.generate_env_config.think_start_tag)
         begin_ids = config.begin_think_token_ids or self.tokenizer.encode(
             think_start_tag, add_special_tokens=False
         )
+        # ADAPTIVE keeps the token-level comparison: it decides from the first
+        # generated token, so it has to agree with what the decoder sees.
         prompt_has_begin = bool(
             begin_ids
             and input_ids is not None
             and input_ids[-len(begin_ids) :] == begin_ids
         )
+        if config.thinking_mode == ThinkingMode.ENABLED:
+            # 固定 ENABLED 按设计不要求模型自己吐 begin 标记（R1 风格模型无锚点也能
+            # think），所以这里只告警不拦截。模板未注入锚点通常意味着 think 被开在了
+            # 不支持 think 的模型上，模型可能永远吐不出结束标记。
+            #
+            # 用字符串锚点判定而非上面的 token 比较：DeepSeek 模板追加的是裸
+            # `<think>`，而 begin_ids 由 `<think>\n` 编码而来，token 比较会失配并
+            # 对一个配置正确的请求发出误导性告警。
+            anchored = prompt_has_begin
+            if request is not None and request.prompt_has_think_anchor() is not None:
+                anchored = request.prompt_has_think_anchor()
+            if not anchored:
+                logging.warning(
+                    "thinking_mode=ENABLED but the rendered prompt does not end with "
+                    "the think start tag %r, so the model may never emit the think end "
+                    "tag. Pass enable_thinking=false in chat_template_kwargs, or use a "
+                    "template that injects the anchor.",
+                    think_start_tag,
+                )
+            return base_format
         if config.thinking_mode == ThinkingMode.ADAPTIVE and prompt_has_begin:
             config.thinking_mode = ThinkingMode.ENABLED
             config.in_think_mode = True
@@ -352,7 +377,7 @@ class OpenaiEndpoint(object):
                 else config.thinking_mode == ThinkingMode.ENABLED
             ),
             reasoning_format=self._reasoning_format_for_prompt(
-                config, renderer, input_ids
+                config, renderer, input_ids, request
             ),
         )
         if request.debug_info:
@@ -633,6 +658,15 @@ class OpenaiEndpoint(object):
         if prepopulate_str != "":
             rendered_input.rendered_prompt += prepopulate_str
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
+        # Record the anchor once, after prepopulation: a prefill appended behind
+        # the anchor means the model is no longer starting from a think block.
+        # The response path reads this instead of rendering the prompt again.
+        chat_request.set_prompt_has_think_anchor(
+            prompt_ends_with_think_anchor(
+                rendered_input.rendered_prompt,
+                normalize_think_tag(self.generate_env_config.think_start_tag),
+            )
+        )
         return rendered_input
 
     def chat_completion(

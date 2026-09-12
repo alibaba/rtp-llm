@@ -3,7 +3,9 @@ import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
+from unittest.mock import Mock, patch
 
+import torch
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -15,7 +17,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.response_format import ResponseFormat
+from rtp_llm.config.response_format import ResponseFormat, prompt_ends_with_think_anchor
 from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
     restore_final_constraint,
@@ -32,6 +34,8 @@ from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 
 class GenerateConfigTest(TestCase):
@@ -881,6 +885,68 @@ class OpenaiGenerateConfigTest(TestCase):
         reasoning_tag = config.structural_tag["format"]["elements"][0]
         self.assertEqual(reasoning_tag["begin"], "")
         self.assertEqual(config.begin_think_token_ids, [])
+
+    def test_enabled_thinking_without_anchor_warns(self):
+        """固定 ENABLED 不要求模型自吐 begin 标记，模板又没注入锚点时只告警不拦截：
+        此时模型可能永远吐不出结束标记（案例二的结构性隐患）。"""
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            config = self._generate_config_with_stop_word(enable_thinking=True)
+
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in mock_logging.warning.call_args_list
+                    if "does not end with the think start tag" in str(call)
+                ]
+            ),
+            1,
+        )
+
+    def test_enabled_thinking_with_anchor_does_not_warn(self):
+        begin_ids = self.tokenizer.encode("<think>\n", add_special_tokens=False)
+        with patch("rtp_llm.openai.openai_endpoint.logging") as mock_logging:
+            self._generate_config_with_stop_word(
+                enable_thinking=True, input_ids=[1, 2, *begin_ids]
+            )
+
+        self.assertFalse(
+            any(
+                "does not end with the think start tag" in str(call)
+                for call in mock_logging.warning.call_args_list
+            )
+        )
+
+    def test_adaptive_thinking_requires_begin_token_ids(self):
+        """ADAPTIVE 靠 begin 标记探测思考是否开始；begin 标记为空意味着模型没有
+        任何合法路径结束思考，必须在 validate 阶段拒绝（案例二的结构性隐患）。"""
+        config = GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=100,
+            end_think_token_ids=[102],
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            config.validate()
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+        self.assertIn("begin_think_token_ids must be non-empty", ctx.exception.message)
+
+    def test_thinking_not_adaptive_tolerates_empty_begin_token_ids(self):
+        # ENABLED 不依赖 begin 标记（R1 风格模型无锚点也能 think），不得被误伤；
+        # 填好 begin 标记的 ADAPTIVE 配置应通过。
+        GenerateConfig(
+            thinking_mode=ThinkingMode.ENABLED,
+            max_thinking_tokens=100,
+            end_think_token_ids=[102],
+        ).validate()
+        GenerateConfig(
+            thinking_mode=ThinkingMode.ADAPTIVE,
+            max_thinking_tokens=100,
+            end_think_token_ids=[102],
+            begin_think_token_ids=[7],
+        ).validate()
 
     def test_invalid_chat_template_thinking_mode_is_rejected(self):
         for value in ("auto", "Adaptive", True, 1, None):
@@ -1750,6 +1816,144 @@ class RawUpdateAndGrammarConflictTest(TestCase):
             {"format": {"type": "regex", "pattern": "a"}},
         )
         self.assertEqual(remain, {"stranger": 1})
+
+
+class MaxThinkingTokensClampTest(TestCase):
+    """max_thinking_tokens 必须落在可生成预算内，C++ 侧的强制收尾兜底才可达。
+
+    C++ 只有在已生成 token 数 >= max_thinking_tokens 时才会强制写入 think 结束
+    标记；预算超过 max_seq_len - prompt_length 时该兜底永远不成立，模型会被
+    think 语法约束卡住直到撞上序列上限（案例二）。
+    """
+
+    def setUp(self):
+        self.visitor = Mock()
+        self.visitor.max_seq_len = 100
+        self.visitor._validate_input = BackendRPCServerVisitor._validate_input.__get__(
+            self.visitor
+        )
+
+    def _make_input(
+        self,
+        prompt_length=40,
+        max_new_tokens=36000,
+        max_thinking_tokens=32000,
+        end_think_token_ids=None,
+    ):
+        return GenerateInput(
+            request_id=0,
+            token_ids=torch.zeros(1, prompt_length, dtype=torch.int),
+            mm_inputs=[],
+            generate_config=GenerateConfig(
+                max_new_tokens=max_new_tokens,
+                max_thinking_tokens=max_thinking_tokens,
+                end_think_token_ids=(
+                    [] if end_think_token_ids is None else end_think_token_ids
+                ),
+            ),
+        )
+
+    def test_budget_beyond_room_is_clamped_to_generatable_tokens(self):
+        # room = max_seq_len - prompt_length = 60，生成上限取 min(room, max_new_tokens)。
+        generate_input = self._make_input()
+        with patch("rtp_llm.server.backend_rpc_server_visitor.logging") as mock_logging:
+            self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 60)
+        self.assertTrue(
+            any(
+                "exceeds generatable tokens" in str(call)
+                for call in mock_logging.warning.call_args_list
+            )
+        )
+
+    def test_budget_within_room_is_untouched(self):
+        generate_input = self._make_input(max_new_tokens=50, max_thinking_tokens=30)
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 30)
+
+    def test_cap_is_room_when_request_asks_for_more(self):
+        # max_new_tokens=80 大于 room=60 时，上限是 room 而不是请求值。
+        generate_input = self._make_input(max_new_tokens=80, max_thinking_tokens=75)
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 60)
+
+    def test_zero_budget_keeps_thinking_disabled(self):
+        generate_input = self._make_input(max_new_tokens=80, max_thinking_tokens=0)
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 0)
+
+    def test_clamp_reserves_room_for_the_think_end_tag(self):
+        """收敛值必须给结束标记留出长度。
+
+        兜底是逐 token 强制写入结束标记的，收敛到恰好等于可生成空间会让强制收尾
+        落在最后一步、标记写不完，think 块照旧闭合不了——那样这个 clamp 等于没做。
+        """
+        generate_input = self._make_input(end_think_token_ids=[101, 102, 103])
+        self.visitor._validate_input(generate_input)
+
+        # room = 60，结束标记 3 个 token，故上限为 57。
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 57)
+
+    def test_budget_exactly_at_room_is_pulled_back_for_the_end_tag(self):
+        generate_input = self._make_input(
+            max_new_tokens=60, max_thinking_tokens=60, end_think_token_ids=[101]
+        )
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 59)
+
+    def test_clamp_stays_positive_when_the_end_tag_exceeds_the_room(self):
+        # 余量比结束标记还短时不能收敛出 0：0 在 C++ 侧等于关闭 think 处理器。
+        generate_input = self._make_input(
+            prompt_length=98, max_new_tokens=80, end_think_token_ids=[1, 2, 3, 4, 5]
+        )
+        self.visitor._validate_input(generate_input)
+
+        self.assertEqual(generate_input.generate_config.max_thinking_tokens, 1)
+
+
+class ThinkAnchorPredicateTest(TestCase):
+    """endpoint 与 renderer 必须共用同一个锚点判据。
+
+    两边曾各有一套：endpoint 按 token 比较（`input_ids[-n:] == begin_ids`），
+    renderer 按字符串比较且容忍尾部换行。DeepSeek 模板追加的是裸 `<think>`，而
+    begin_ids 由 `<think>\\n` 编码而来，两套判据会对同一个 prompt 得出相反结论。
+    """
+
+    def test_trailing_newline_differences_are_tolerated_both_ways(self):
+        for tag, prompt_tail in (
+            ("<think>\n", "<think>"),
+            ("<think>", "<think>\n"),
+            ("<think>\n", "<think>\n"),
+            ("<think>", "<think>"),
+        ):
+            with self.subTest(tag=tag, tail=prompt_tail):
+                self.assertTrue(
+                    prompt_ends_with_think_anchor(f"user hi\n{prompt_tail}", tag)
+                )
+
+    def test_closed_empty_block_is_not_an_anchor(self):
+        # 对照 B：显式 enable_thinking=false 时模板注入的是闭合空块。
+        self.assertFalse(
+            prompt_ends_with_think_anchor(
+                "user hi\n<think>\n\n</think>\n\n", "<think>\n"
+            )
+        )
+
+    def test_prompt_without_anchor_is_not_anchored(self):
+        self.assertFalse(
+            prompt_ends_with_think_anchor("user hi\nassistant\n", "<think>")
+        )
+
+    def test_empty_tag_never_anchors(self):
+        # think_start_tag 配成空串（或只有换行）时不能把任意 prompt 判成锚定。
+        for tag in ("", "\n", "\n\n"):
+            with self.subTest(tag=tag):
+                self.assertFalse(prompt_ends_with_think_anchor("anything", tag))
 
 
 if __name__ == "__main__":

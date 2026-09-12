@@ -16,6 +16,21 @@ def normalize_think_tag(value: str) -> str:
     return value.replace(r"\n", "\n")
 
 
+def prompt_ends_with_think_anchor(rendered_prompt: str, think_start_tag: str) -> bool:
+    """Whether the template injected the think start anchor at the end of the prompt.
+
+    Trailing newlines differ per family: Qwen templates end with `<think>\\n`
+    while DeepSeek appends a bare `<think>`, and THINK_START_TAG holds a single
+    value. Comparing with trailing newlines stripped keeps one predicate usable
+    for every family, and keeps the endpoint and the renderers from disagreeing
+    about whether a given prompt is anchored.
+    """
+    anchor = think_start_tag.rstrip("\n")
+    if not anchor:
+        return False
+    return rendered_prompt.rstrip("\n").endswith(anchor)
+
+
 class ResponseFormatJSONSchema(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 

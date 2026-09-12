@@ -2,7 +2,7 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
@@ -201,6 +201,19 @@ class ChatCompletionRequest(BaseModel):
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     enable_thinking: Optional[bool] = None
+
+    # Resolved by the endpoint once the prompt is rendered, so the response path
+    # can tell whether the template injected a think anchor without rendering a
+    # second time. PrivateAttr keeps it out of the request schema: this is server
+    # state, not something a client may assert.
+    _prompt_has_think_anchor: Optional[bool] = PrivateAttr(default=None)
+
+    def set_prompt_has_think_anchor(self, anchored: bool) -> None:
+        self._prompt_has_think_anchor = anchored
+
+    def prompt_has_think_anchor(self) -> Optional[bool]:
+        """None means no code path has inspected the rendered prompt yet."""
+        return self._prompt_has_think_anchor
 
     @model_validator(mode="before")
     @classmethod
