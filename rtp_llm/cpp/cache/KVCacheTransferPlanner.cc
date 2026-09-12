@@ -129,12 +129,14 @@ std::vector<CacheStoreBlockPair> buildIncrementalCacheStoreBlockPlan(size_t     
         throw std::invalid_argument("incremental cache-store range is outside the logical block table");
     }
 
-    if (group_type == CacheGroupType::LINEAR) {
+    if (group_type == CacheGroupType::LINEAR || group_type == CacheGroupType::SWA) {
+        // Publish retained checkpoints/tail pages at the terminal chunk. The
+        // SWA tail can include a page preceding this chunk's begin_block.
         if (!publish_range.terminal) {
             return {};
         }
         if (publish_range.end_block != total_logical_blocks) {
-            throw std::invalid_argument("terminal LINEAR publication must reach the final logical block");
+            throw std::invalid_argument("terminal non-FULL publication must reach the final logical block");
         }
         return buildCacheStoreBlockPlan(total_logical_blocks,
                                         reuse_block_size,
@@ -145,7 +147,7 @@ std::vector<CacheStoreBlockPair> buildIncrementalCacheStoreBlockPlan(size_t     
                                         virtual_block_cache_layout);
     }
     if (group_type != CacheGroupType::FULL) {
-        throw std::invalid_argument("incremental cache-store only supports FULL and LINEAR groups");
+        throw std::invalid_argument("incremental cache-store has an unsupported cache group");
     }
 
     auto plan = buildCacheStoreBlockPlan(

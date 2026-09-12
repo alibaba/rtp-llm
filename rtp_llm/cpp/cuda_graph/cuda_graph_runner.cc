@@ -517,8 +517,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             }
         }
 
-        // Hybrid cache no longer has per-group host mirrors; singular host
-        // block id remains group 0 for legacy CPU consumers.
+        // The singular host table mirrors the model's planner group: target
+        // FULL group 0, or the draft group selected by PyWrappedModel.
 
         // Reset unused host-side batch portions to prevent stale data (prefill only).
         // prefix_lengths/input_lengths are CUDA tensors and are reset by the fused
@@ -635,10 +635,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         // keeps the existing owner-local output trimming contract.
         const bool keep_ktp_target_verify_rows =
             inputs.ktp_common_physical_batch > 0 && inputs.attention_inputs.is_target_verify;
-        const int64_t output_rows = keep_ktp_target_verify_rows ?
-                                        state.seq_len_sum :
-                                        (inputs.ktp_common_physical_batch > 0 ? inputs.ktp_local_real_batch :
-                                                                              state.seq_len_sum);
+        const int64_t output_rows =
+            keep_ktp_target_verify_rows ?
+                state.seq_len_sum :
+                (inputs.ktp_common_physical_batch > 0 ? inputs.ktp_local_real_batch : state.seq_len_sum);
         RTP_LLM_CHECK_WITH_INFO(output_rows >= 0 && output_rows <= state.seq_len_sum,
                                 "invalid Projection-KTP output rows: local_real_batch=%ld physical_rows=%d",
                                 output_rows,
@@ -677,9 +677,9 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
 }
 
 bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state) {
-    int cuda_graph_bs = inputs.ktp_common_physical_batch > 0 ?
-                            static_cast<int>(inputs.ktp_common_physical_batch) :
-                            static_cast<int>(inputs.attention_inputs.input_lengths.size(0));
+    int cuda_graph_bs        = inputs.ktp_common_physical_batch > 0 ?
+                                   static_cast<int>(inputs.ktp_common_physical_batch) :
+                                   static_cast<int>(inputs.attention_inputs.input_lengths.size(0));
     state.current_batch_size = cuda_graph_bs;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
     if (capture_range_.empty()) {
@@ -745,8 +745,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
                 return false;
             }
             // Replay-time attention planning cannot grow the captured context.
-            return targetVerifyMetadataFitsCapture(
-                inputs, state.current_batch_size, max_seq_len_, num_tokens_per_bs_);
+            return targetVerifyMetadataFitsCapture(inputs, state.current_batch_size, max_seq_len_, num_tokens_per_bs_);
         }
         return false;
     }
@@ -806,11 +805,11 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_target_verify    = is_target_verify_;
     inputs.attention_inputs.is_mtp_draft_update = is_mtp_draft_update_;
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
-    inputs.attention_inputs.total_tokens     = max_bs * num_tokens_per_bs;
-    inputs.ktp_valid_row_mask = torch::ones({int(max_num_token_)}, options_cuda_int32_);
+    inputs.attention_inputs.is_prefill          = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.total_tokens        = max_bs * num_tokens_per_bs;
+    inputs.ktp_valid_row_mask                   = torch::ones({int(max_num_token_)}, options_cuda_int32_);
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -1120,8 +1119,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 if (py::isinstance<py::tuple>(py_outputs_obj)) {
                     auto tuple = py_outputs_obj.cast<py::tuple>();
-                    RTP_LLM_CHECK_WITH_INFO(tuple.size() == 1,
-                                            "target-verify hidden tuple must contain one tensor");
+                    RTP_LLM_CHECK_WITH_INFO(tuple.size() == 1, "target-verify hidden tuple must contain one tensor");
                     outputs.hidden_states = tuple[0].cast<torch::Tensor>();
                 } else {
                     outputs = py_outputs_obj.cast<PyModelOutputs>();
@@ -1160,18 +1158,18 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_prefill          = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.is_target_verify    = is_target_verify_;
     inputs.attention_inputs.is_mtp_draft_update = is_mtp_draft_update_;
-    inputs.attention_inputs.is_cuda_graph    = true;
-    inputs.attention_inputs.total_tokens     = seq_len_or_tokens;
-    inputs.ktp_local_real_batch              = seq_len_or_tokens;
-    inputs.ktp_common_physical_batch         = batch_size;
-    inputs.ktp_use_cuda_graph                = true;
-    inputs.ktp_all_idle                      = false;
+    inputs.attention_inputs.is_cuda_graph       = true;
+    inputs.attention_inputs.total_tokens        = seq_len_or_tokens;
+    inputs.ktp_local_real_batch                 = seq_len_or_tokens;
+    inputs.ktp_common_physical_batch            = batch_size;
+    inputs.ktp_use_cuda_graph                   = true;
+    inputs.ktp_all_idle                         = false;
     if (capture_mem_hold_.py_model_inputs_.ktp_valid_row_mask.defined()) {
-        inputs.ktp_valid_row_mask = capture_mem_hold_.py_model_inputs_.ktp_valid_row_mask.slice(
-            0, 0, seq_len_or_tokens);
+        inputs.ktp_valid_row_mask =
+            capture_mem_hold_.py_model_inputs_.ktp_valid_row_mask.slice(0, 0, seq_len_or_tokens);
     }
     // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and
     // is_prefill_cuda_graph_mode_) must keep input_ids / input_hiddens at

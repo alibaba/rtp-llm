@@ -289,6 +289,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                                        config_.group_types[static_cast<size_t>(gid)] :
                                        CacheGroupType::FULL;
         const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, common_seq_len);
+        if (malloc_info.linear_prefix_load_tokens > 0 && containsGroupId(linear_group_ids_, gid)) {
+            // PD loads only the terminal prefix state. Keep historical slots
+            // NULL, preserving any genuinely reused checkpoint already owned.
+            // The incremental phase allocates the load destination and reserve.
+            const int prefix_slots =
+                kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(malloc_info.linear_prefix_load_tokens, 0);
+            block_ids_0.resize(std::max(block_ids_0.blocksNum(), static_cast<size_t>(prefix_slots - 1)));
+            continue;
+        }
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                 block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
@@ -737,7 +746,6 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
     const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
     const bool  reuse_enabled      = malloc_info.reuse_cache;
-    const int   reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
 
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
@@ -747,8 +755,20 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
                                           CacheGroupType::FULL;
         const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
-        const auto need             = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        // Reused table lengths are already expressed in each group's slots;
+        // compact LINEAR and replicated FULL groups can have different spans.
+        int  reuse_blocks_len    = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
+        bool group_reuse_enabled = reuse_enabled;
+        if (malloc_info.linear_prefix_load_tokens > 0 && containsGroupId(linear_group_ids_, gid)) {
+            const int prefix_slots =
+                kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(malloc_info.linear_prefix_load_tokens, 0);
+            reuse_blocks_len = std::max(reuse_blocks_len, prefix_slots - 1);
+            // These slots are intentionally unallocated even when cache reuse
+            // is disabled; count only the load destination and future slots.
+            group_reuse_enabled = true;
+        }
+        const auto need = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
+            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, group_reuse_enabled);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }

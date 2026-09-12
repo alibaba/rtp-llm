@@ -6,9 +6,10 @@ cc_library(
     srcs = [
         "cuda_graph_test_runner.cc",
     ],
-    copts = copts(),
+    copts = copts() + ["-fno-access-control"],
     deps = [
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),

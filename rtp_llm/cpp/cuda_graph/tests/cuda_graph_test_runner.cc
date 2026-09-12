@@ -3,10 +3,30 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
 namespace rtp_llm {
+
+// Exercise the production C++ -> Python table binding without model weights.
+torch_ext::PyAttentionInputs
+bindModelCacheInputs(py::object py_instance, torch_ext::PyAttentionInputs attention, int64_t model_id) {
+    GptModelDescription description{};
+    description.attention_conf.use_mla = true;
+    description.data_type              = DataType::TYPE_FP16;
+    GptModelInitParams params{Weights{}, description, std::nullopt};
+    params.model_id                           = model_id;
+    params.hw_kernel_config.enable_cuda_graph = false;
+    PyWrappedModel model(params, std::move(py_instance));
+    GptModelInputs inputs;
+    inputs.kv_cache_kernel_block_id      = torch::stack(attention.kv_cache_kernel_block_id_device_by_group);
+    inputs.kv_cache_kernel_block_id_host = torch::stack(attention.kv_cache_kernel_block_id_host_by_group);
+    inputs.kv_cache_layer_to_group       = attention.kv_cache_layer_to_group;
+    inputs.kv_cache_layer_to_group_host  = attention.kv_cache_layer_to_group_host;
+    model.setupKVCacheForAttentionInputs(attention, inputs);
+    return attention;
+}
 
 // Single wrapper for both prefill and decode tests; init_prefill / init_decode
 // build GraphParams and call CudaGraphRunner factory methods.
@@ -47,7 +67,9 @@ public:
                      std::vector<int> decode_capture_batch_sizes,
                      int64_t          num_tokens_per_bs,
                      bool             is_target_verify,
-                     int64_t          max_context_batch_size) {
+                     int64_t          max_context_batch_size,
+                     std::vector<int> kv_cache_layer_to_group,
+                     int64_t          kv_cache_group_num) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -61,8 +83,8 @@ public:
         params.model_data_type              = c10::ScalarType::Half;
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
-        params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
-        params.kv_cache_group_num           = 0;
+        params.kv_cache_layer_to_group      = std::move(kv_cache_layer_to_group);
+        params.kv_cache_group_num           = static_cast<int>(kv_cache_group_num);
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -103,6 +125,7 @@ private:
 
 PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
     using namespace rtp_llm;
+    m.def("bind_model_cache_inputs", &bindModelCacheInputs);
     py::class_<CudaGraphTestRunner>(m, "CudaGraphRunner")
         .def(py::init<>())
         .def("init_prefill",
@@ -122,9 +145,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("num_tokens_per_bs") = 1,
-             py::arg("is_target_verify") = false,
-             py::arg("max_context_batch_size") = 128)
+             py::arg("num_tokens_per_bs")       = 1,
+             py::arg("is_target_verify")        = false,
+             py::arg("max_context_batch_size")  = 128,
+             py::arg("kv_cache_layer_to_group") = std::vector<int>{},
+             py::arg("kv_cache_group_num")      = 0)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
