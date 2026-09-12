@@ -10,7 +10,7 @@ from PIL import Image
 from tokenizers import Tokenizer
 
 from rtp_llm.config.dsv41_config import V41Config
-from rtp_llm.config.exceptions import FtRuntimeException
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
@@ -191,6 +191,31 @@ class V41ImageRendererTest(TestCase):
         )
         with self.assertRaisesRegex(FtRuntimeException, "fixed by the model config"):
             self.renderer.prepare_v41_inputs(request)
+
+    def test_invalid_image_bytes_are_request_errors(self):
+        png = base64.b64decode(data_url((1, 2, 3)).split(",", 1)[1])
+        for payload in (b"not an image", png[:40]):
+            with self.subTest(payload=payload):
+                url = "data:image/png;base64," + base64.b64encode(payload).decode()
+                request = ChatCompletionRequest.model_validate(
+                    {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image_url", "image_url": {"url": url}}
+                                ],
+                            }
+                        ]
+                    }
+                )
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "image payload"
+                ) as raised:
+                    self.renderer.prepare_v41_inputs(request)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.INVALID_PARAMS
+                )
 
 
 if __name__ == "__main__":

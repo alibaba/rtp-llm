@@ -280,6 +280,26 @@ class EndpointStreamTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertRegex(calls[0]["id"], r"^call_[a-f0-9]{32}_0$")
 
+    async def test_usage_matches_recipe_without_invented_reasoning_token_counts(self):
+        # Fixed recipe 8cadfede CompletionUsage reports total completion IDs;
+        # response/schema.rs leaves completion_tokens_details unset.
+        for text in ("reason</think>answer", "unfinished reasoning", "</think>answer"):
+            for streaming in (True, False):
+                for size in (1, 7, 1000):
+                    with self.subTest(text=text, streaming=streaming, size=size):
+                        final, _, _, _ = await self._render(
+                            text,
+                            request(stream=streaming, thinking={"type": "enabled"}),
+                            chunk_size=size,
+                        )
+                        self.assertIsNone(final.usage.completion_tokens_details)
+                        self.assertEqual(final.usage.completion_tokens, len(text) + 1)
+                        self.assertEqual(final.usage.total_tokens, len(text) + 6)
+                        self.assertEqual(final.usage.prompt_tokens, 5)
+                        self.assertEqual(
+                            final.usage.prompt_tokens_details.cached_tokens, 2
+                        )
+
     async def test_length_keeps_partial_content_and_usage(self):
         final, content, _, _ = await self._render(
             "short", request(stream=True), max_tokens=5, eos=False

@@ -374,8 +374,11 @@ def prepare_vl_inputs(
             token_types.append(TEXT)
             continue
         data = load_image_bytes(next(records), url_loader=url_loader)
-        with Image.open(io.BytesIO(data)) as image:
-            patches, vit_h, vit_w, llm_h, llm_w = preprocess_image(image, config)
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                patches, vit_h, vit_w, llm_h, llm_w = preprocess_image(image, config)
+        except (OSError, Image.DecompressionBombError) as error:
+            raise ValueError("invalid or damaged V4.1 image payload") from error
         types = image_token_types(llm_h, llm_w)
         image_inputs.append(
             V41ImageInput(

@@ -467,6 +467,18 @@ class SharedEngramLookup:
                 raise ValueError(
                     "Engram output must be contiguous BF16 with shape indices+[256]"
                 )
+            if out.numel():
+                output_start = out.data_ptr()
+                output_end = output_start + out.numel() * out.element_size()
+                for tensor in (indices, valid_mask):
+                    if tensor is None or not tensor.numel():
+                        continue
+                    start = tensor.data_ptr()
+                    end = start + tensor.numel() * tensor.element_size()
+                    if output_start < end and start < output_end:
+                        raise ValueError(
+                            "Engram output must not overlap indices or validity mask"
+                        )
             in_bounds = (indices >= 0) & (indices < rows)
             if valid_mask is not None:
                 in_bounds = in_bounds | ~valid_mask

@@ -162,6 +162,18 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
         options = self._recipe_request(request)
         return [V41StreamStatus(request, options) for _ in range(n)]
 
+    def _split_reasoning_text_and_content(self, item, think_status):
+        if isinstance(item.output_str, DeltaMessage):
+            return item.output_str
+        return super()._split_reasoning_text_and_content(item, think_status)
+
+    async def _generate_stream_response(self, items, think_status_list):
+        response = await super()._generate_stream_response(items, think_status_list)
+        # Recipe's CompletionUsage has no reasoning-token breakdown. Retokenizing
+        # parsed deltas cannot recover counts of the original generated IDs.
+        response.usage.completion_tokens_details = None
+        return response
+
     async def render_response_stream(self, output_generator, request, generate_config):
         try:
             async for response in super().render_response_stream(
@@ -260,7 +272,11 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
             reason = status.finish_reason
             reason = reason.value if reason is not None else None
             status.finish_reason = FinisheReason(status.parser.finish_reason(reason))
-        return await super()._generate_final(buffer_list, request, think_status_list)
+        response = await super()._generate_final(
+            buffer_list, request, think_status_list
+        )
+        response.usage.completion_tokens_details = None
+        return response
 
 
 register_renderer("deepseek_v41", DeepseekV41Renderer)

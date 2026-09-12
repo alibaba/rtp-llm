@@ -193,6 +193,55 @@ class HostSharedCudaTest(TestCase):
                 graph.replay()
         self.assertTrue(self.store.remove_if_unused(shared.manifest["identity"]))
 
+    def test_output_alias_is_rejected_before_eager_or_graph_writes(self):
+        device = self.devices[0]
+        shared = self.store.open_or_publish("c" * 40, self.slices)
+        with self.cuda_module.SharedEngramLookup(shared, device=device) as lookup:
+            lookup.warmup()
+            for alias in ("indices", "mask"):
+                for capture in (False, True):
+                    with self.subTest(alias=alias, capture=capture):
+                        out = torch.zeros((8, 256), device=device, dtype=torch.bfloat16)
+                        ids = torch.arange(8, device=device, dtype=torch.int64)
+                        valid = torch.ones(8, device=device, dtype=torch.bool)
+                        if alias == "indices":
+                            ids = out.view(torch.int64).flatten()[1:9]
+                            ids.copy_(torch.arange(8, device=device))
+                        else:
+                            valid = out.view(torch.bool).flatten()[1:9]
+                            valid.fill_(True)
+                        before = out.view(torch.uint8).clone()
+                        torch.cuda.synchronize(device)
+                        if capture:
+                            graph = lookup.graph()
+                            with self.assertRaisesRegex(ValueError, "overlap"):
+                                with graph.capture(torch.cuda.Stream(device=device)):
+                                    lookup.lookup(1, ids, valid_mask=valid, out=out)
+                            graph.close()
+                        else:
+                            with self.assertRaisesRegex(ValueError, "overlap"):
+                                lookup.lookup(1, ids, valid_mask=valid, out=out)
+                        torch.cuda.synchronize(device)
+                        torch.testing.assert_close(out.view(torch.uint8), before)
+
+    def test_disjoint_views_share_storage_without_aliasing(self):
+        device = self.devices[0]
+        shared = self.store.open_or_publish("d" * 40, self.slices)
+        with self.cuda_module.SharedEngramLookup(shared, device=device) as lookup:
+            storage = torch.empty(8 * (512 + 8 + 1), device=device, dtype=torch.uint8)
+            out = storage[:4096].view(torch.bfloat16).reshape(8, 256)
+            ids = storage[4096:4160].view(torch.int64)
+            valid = storage[4160:].view(torch.bool)
+            ids.copy_(torch.arange(8, device=device))
+            valid.fill_(True)
+            expected = cpu_lookup_reference(shared, 14, ids)
+            lookup.lookup(14, ids, valid_mask=valid, out=out)
+            torch.testing.assert_close(
+                out.cpu(), expected, rtol=0, atol=0, equal_nan=True
+            )
+            torch.testing.assert_close(ids.cpu(), torch.arange(8))
+            self.assertTrue(valid.all().item())
+
 
 if __name__ == "__main__":
     main()
