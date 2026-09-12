@@ -1,6 +1,19 @@
 """Explicit adapters for the legacy and DeepJIT-backed DeepGEMM Mega APIs."""
 
+import importlib.metadata
 import inspect
+import re
+
+
+def deep_gemm_uses_deepjit(version: str | None = None) -> bool:
+    """Inspect wheel metadata without fixing a device or constructing the JIT."""
+    if version is None:
+        try:
+            version = importlib.metadata.version("deep_gemm")
+        except importlib.metadata.PackageNotFoundError:
+            return False
+    parsed = re.match(r"(\d+)\.(\d+)", version)
+    return parsed is not None and tuple(map(int, parsed.groups())) >= (2, 8)
 
 
 def mega_moe_uses_shared32(deep_gemm) -> bool:

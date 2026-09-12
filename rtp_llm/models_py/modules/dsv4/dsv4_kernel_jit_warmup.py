@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import shlex
 import time
 from functools import lru_cache, partial
 from importlib import import_module
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
-
+from rtp_llm.utils.deep_gemm_compat import deep_gemm_uses_deepjit
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 _DENSE_GEMM_FALLBACK_M_GRID = [
@@ -110,9 +112,7 @@ def _compute_state_ring_entries(
 def _batch_block_warmup_sizes(
     max_batch_size: int, *, max_supported_batch: int
 ) -> tuple[int, ...]:
-    max_supported_batch = min(
-        max(int(max_batch_size), 1), int(max_supported_batch)
-    )
+    max_supported_batch = min(max(int(max_batch_size), 1), int(max_supported_batch))
     max_batch_block = 1 << (max_supported_batch - 1).bit_length()
     sizes = []
     batch_block = 1
@@ -210,9 +210,7 @@ def warmup_cp_metadata_jit(
     t0 = time.time()
     batch_sizes = _cp_batch_block_warmup_sizes(max_batch_size)
     swa_slot_batch_sizes = (
-        _swa_slot_batch_block_warmup_sizes(max_batch_size)
-        if swa_slot_enabled
-        else ()
+        _swa_slot_batch_block_warmup_sizes(max_batch_size) if swa_slot_enabled else ()
     )
     for batch_size in batch_sizes:
         lengths_host = (2,) * batch_size
@@ -265,18 +263,14 @@ def warmup_cp_metadata_jit(
             dtype=torch.bfloat16,
             device=device,
         )
-        pool_cache = torch.zeros(
-            (2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device
-        )
+        pool_cache = torch.zeros((2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device)
         pool_block_table = torch.zeros(
             (batch_size, 1), dtype=torch.int32, device=device
         )
         pool_padded_lens = torch.full(
             (batch_size,), 2, dtype=torch.int32, device=device
         )
-        pool_actual_lens = torch.ones(
-            batch_size, dtype=torch.int32, device=device
-        )
+        pool_actual_lens = torch.ones(batch_size, dtype=torch.int32, device=device)
         pool_local_flat = torch.empty(
             (2 * batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
         )
@@ -312,6 +306,7 @@ def warmup_cp_metadata_jit(
             dtype=torch.int64,
             device=device,
         )
+
         def _launch() -> None:
             nonlocal restore, positions, forward_metadata, pool_restore
             nonlocal pool_direct_gather
@@ -429,9 +424,7 @@ def warmup_cp_metadata_jit(
             dtype=torch.int32,
             device=device,
         )
-        swa_slot_prefixes = torch.zeros(
-            batch_size, dtype=torch.int32, device=device
-        )
+        swa_slot_prefixes = torch.zeros(batch_size, dtype=torch.int32, device=device)
 
         def _launch_swa_slot() -> None:
             compute_swa_slot_in_flat_from_cu(
@@ -597,6 +590,15 @@ def _dist_barrier() -> None:
 
 
 def _deepgemm_cache_dir() -> str:
+    if deep_gemm_uses_deepjit():
+        for env_name in ("DG_JIT_CACHE_DIR", "DJ_JIT_CACHE_DIR"):
+            value = os.environ.get(env_name)
+            if value is not None:
+                paths = value.split(":")
+                if not all(paths):
+                    raise ValueError("DeepJIT cache path list contains an empty path")
+                return paths[0]
+        return os.path.join(os.path.expanduser("~"), ".dj")
     for env_name in ("DG_JIT_CACHE_DIR", "DEEP_GEMM_CACHE_DIR"):
         value = os.environ.get(env_name)
         if value:
@@ -639,7 +641,27 @@ def _run_deepgemm_warmup_launches_serialized(label: str, launch_fn: Any) -> None
 
 
 def _is_deepgemm_nvcc_compile_error(error: BaseException) -> bool:
-    return "NVCC compilation failed" in str(error)
+    for current in _iter_exception_chain(error):
+        message = str(current)
+        if "NVCC compilation failed" in message:
+            return True
+        matched = re.search(r"command failed with exit code \d+:\n([^\n]+)", message)
+        if matched is None:
+            continue
+        try:
+            command = shlex.split(matched.group(1))
+        except ValueError:
+            continue
+        if (
+            command
+            and os.path.basename(command[0]) == "nvcc"
+            and any(
+                flag in command for flag in ("-c", "--compile", "-cubin", "--cubin")
+            )
+            and any(argument.endswith(".cu") for argument in command[1:])
+        ):
+            return True
+    return False
 
 
 def _is_tilelang_transient_nvcc_compile_error(error: BaseException) -> bool:
@@ -1594,6 +1616,7 @@ def _sm100_dense_layout_signature(
     kind: str,
     num_sms: int,
     num_groups: int = 1,
+    uses_deepjit: bool = False,
 ) -> tuple[int, ...]:
     """Mirror the M-dependent part of DeepGEMM SM100 dense layout selection.
 
@@ -1653,7 +1676,8 @@ def _sm100_dense_layout_signature(
                         sf_block_n = _align(block_n, 128)
                         tmem_sf_cols = sf_block_m // 32 + sf_block_n // 32
                         umma_n = block_m if swap_ab else block_n
-                        if 2 * umma_n + tmem_sf_cols > 512:
+                        tmem_accumulators = 1 if uses_deepjit else 2
+                        if tmem_accumulators * umma_n + tmem_sf_cols > 512:
                             continue
 
                         # RTP warmup tensors are K-major for A and B.  DeepGEMM
@@ -1766,6 +1790,7 @@ def _generate_dense_gemm_warmup_m_grid(
     kind: str,
     num_sms: int,
     num_groups: int = 1,
+    uses_deepjit: bool = False,
 ) -> tuple[int, ...]:
     reps_by_signature: dict[tuple[int, ...], int] = {}
     for m_value in _candidate_dense_gemm_m_values(
@@ -1781,6 +1806,7 @@ def _generate_dense_gemm_warmup_m_grid(
             kind=kind,
             num_sms=num_sms,
             num_groups=num_groups,
+            uses_deepjit=uses_deepjit,
         )
         reps_by_signature.setdefault(signature, m_value)
     return tuple(sorted(reps_by_signature.values()))
@@ -1881,6 +1907,7 @@ def warmup_dense_gemm_jit(
 
     num_sms = _get_deep_gemm_num_sms(device)
     shape_keys = tuple(sorted(shapes.keys()))
+    uses_deepjit = deep_gemm_uses_deepjit()
     m_grids = {
         key: _generate_dense_gemm_warmup_m_grid(
             max_m=int(max_m),
@@ -1888,6 +1915,7 @@ def warmup_dense_gemm_jit(
             k_value=int(key[2]),
             kind=str(key[0]),
             num_sms=num_sms,
+            uses_deepjit=uses_deepjit,
         )
         for key in shape_keys
     }
@@ -1963,6 +1991,7 @@ def warmup_batched_fp8_einsum_jit(
 
     num_sms = _get_deep_gemm_num_sms(device)
     shape_keys = tuple(sorted(shapes.keys()))
+    uses_deepjit = deep_gemm_uses_deepjit()
     m_grids = {
         key: _generate_dense_gemm_warmup_m_grid(
             max_m=int(max_m),
@@ -1971,6 +2000,7 @@ def warmup_batched_fp8_einsum_jit(
             kind="fp8_batched",
             num_sms=num_sms,
             num_groups=int(key[0]),
+            uses_deepjit=uses_deepjit,
         )
         for key in shape_keys
     }
@@ -2347,13 +2377,9 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
     slot_indices = torch.tensor([0, -1], dtype=torch.long, device=device)
     out = dequantize_slots_to_bf16(full_view, slot_indices)
     if direct_scatter_enabled:
-        slot_mapping = torch.tensor(
-            [[0, 1], [1, -1]], dtype=torch.long, device=device
-        )
+        slot_mapping = torch.tensor([[0, 1], [1, -1]], dtype=torch.long, device=device)
         gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
-        workspace = torch.empty(
-            (2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device
-        )
+        workspace = torch.empty((2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device)
         direct_scatter = try_dequantize_and_gather_k_cache_slots_to_workspace(
             out=workspace,
             k_cache=full_view,

@@ -8,6 +8,8 @@ import re
 from contextlib import suppress
 from pathlib import Path
 
+from rtp_llm.utils.deep_gemm_compat import deep_gemm_uses_deepjit
+
 BUILD_MANIFEST = "deep_gemm/rtp_build_manifest.json"
 ENTRY_FORMAT = "deepjit-v1"
 SNAPSHOT_MANIFEST = ".jit_deep_gemm_checksums.json"
@@ -45,8 +47,7 @@ def deep_gemm_build_scope(runtime_scope: str | None) -> str | None:
     except importlib.metadata.PackageNotFoundError:
         return None
     path = Path(distribution.locate_file(BUILD_MANIFEST))
-    version = re.match(r"(\d+)\.(\d+)", distribution.version)
-    uses_deepjit = version is not None and tuple(map(int, version.groups())) >= (2, 8)
+    uses_deepjit = deep_gemm_uses_deepjit(distribution.version)
     if not uses_deepjit and not path.exists():
         return None
     try:

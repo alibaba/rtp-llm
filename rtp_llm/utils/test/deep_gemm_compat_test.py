@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
-
 from rtp_llm.utils import deep_gemm_compat as compat
 
 
@@ -44,6 +43,28 @@ def legacy_buffer(group, use_fp8_dispatch=True, **kwargs):
 
 
 class DeepGemmCompatTest(unittest.TestCase):
+    def test_deepjit_version_detection_does_not_initialize_the_runtime(self):
+        for version, expected in (
+            ("2.6.1+cu132", False),
+            ("2.7.0", False),
+            ("2.8.0+66081d4.dsv41", True),
+            ("2.10.0", True),
+            ("local", False),
+        ):
+            with self.subTest(version=version):
+                self.assertEqual(compat.deep_gemm_uses_deepjit(version), expected)
+        with mock.patch.object(
+            compat.importlib.metadata, "version", return_value="2.8.0"
+        ) as version:
+            self.assertTrue(compat.deep_gemm_uses_deepjit())
+            version.assert_called_once_with("deep_gemm")
+        with mock.patch.object(
+            compat.importlib.metadata,
+            "version",
+            side_effect=compat.importlib.metadata.PackageNotFoundError,
+        ):
+            self.assertFalse(compat.deep_gemm_uses_deepjit())
+
     def module(self, modern=True):
         return SimpleNamespace(
             fp8_fp4_mega_moe=modern_mega if modern else legacy_mega,

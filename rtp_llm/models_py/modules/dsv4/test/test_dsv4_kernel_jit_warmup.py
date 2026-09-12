@@ -53,8 +53,8 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _run_tilelang_warmup_launch_with_retry,
     _run_triton_warmup_launch_with_retry,
     _sm100_dense_layout_signature,
-    _swa_slot_batch_block_warmup_sizes,
     _state_ring_entries_warmup_values,
+    _swa_slot_batch_block_warmup_sizes,
     _warmup_fused_kv_compress_norm_rope_insert,
     resolve_cp_metadata_warmup_max_batch_size,
     resolve_dense_gemm_warmup_max_m,
@@ -80,6 +80,107 @@ def _module_type(name, attrs):
 
 
 class Dsv4KernelJitWarmupTest(unittest.TestCase):
+    def test_cache_lock_follows_actual_deepjit_write_root(self):
+        for uses_deepjit, environment, expected in (
+            (
+                True,
+                {"DG_JIT_CACHE_DIR": "/write:/read", "DJ_JIT_CACHE_DIR": "/other"},
+                "/write",
+            ),
+            (True, {"DJ_JIT_CACHE_DIR": "/dj:/readonly"}, "/dj"),
+            (True, {"DEEP_GEMM_CACHE_DIR": "/old"}, os.path.expanduser("~/.dj")),
+            (False, {"DEEP_GEMM_CACHE_DIR": "/old"}, "/old"),
+            (False, {"DG_JIT_CACHE_DIR": "/dg", "DEEP_GEMM_CACHE_DIR": "/old"}, "/dg"),
+            (False, {}, os.path.expanduser("~/.deep_gemm/cache")),
+        ):
+            with self.subTest(
+                modern=uses_deepjit, environment=environment
+            ), mock.patch.object(
+                warmup_module, "deep_gemm_uses_deepjit", return_value=uses_deepjit
+            ), mock.patch.dict(
+                os.environ, environment, clear=True
+            ):
+                self.assertEqual(warmup_module._deepgemm_cache_dir(), expected)
+        for path in ("", ":/readonly", "/write:", "/write::/readonly"):
+            with self.subTest(path=path), mock.patch.object(
+                warmup_module, "deep_gemm_uses_deepjit", return_value=True
+            ), mock.patch.dict(os.environ, {"DG_JIT_CACHE_DIR": path}, clear=True):
+                with self.assertRaisesRegex(ValueError, "empty path"):
+                    warmup_module._deepgemm_cache_dir()
+
+    def test_nvcc_retry_recognizes_deepjit_compilation_errors_only(self):
+        for command, expected in (
+            (
+                "/usr/local/cuda/bin/nvcc --cubin /tmp/kernel.cu -o /tmp/kernel.cubin",
+                True,
+            ),
+            ("nvcc -c kernel.cu -o kernel.o", True),
+            ("nvcc --version", False),
+            ("g++ -c kernel.cc", False),
+            ("echo nvcc --cubin kernel.cu", False),
+        ):
+            error = RuntimeError(
+                f"command failed with exit code 1:\n{command}\ncompiler output"
+            )
+            wrapper = RuntimeError("warmup wrapper")
+            wrapper.__cause__ = error
+            with self.subTest(command=command):
+                self.assertEqual(
+                    warmup_module._is_deepgemm_nvcc_compile_error(wrapper), expected
+                )
+        self.assertTrue(
+            warmup_module._is_deepgemm_nvcc_compile_error(
+                RuntimeError("NVCC compilation failed")
+            )
+        )
+        self.assertFalse(
+            warmup_module._is_deepgemm_nvcc_compile_error(
+                RuntimeError("invalid GEMM shape")
+            )
+        )
+
+    def test_deepjit_dense_grid_includes_new_tmem_layouts(self):
+        for kind, n_value, groups, cases in (
+            ("fp8", 4096, 1, (961, 2161)),
+            ("fp8", 5120, 1, (769, 1681, 2641)),
+            ("fp8_batched", 1024, 8, (481, 2161)),
+        ):
+            arguments = dict(
+                n_value=n_value, k_value=4096, kind=kind, num_sms=148, num_groups=groups
+            )
+            grid = _generate_dense_gemm_warmup_m_grid(
+                max_m=4096, uses_deepjit=True, **arguments
+            )
+            signatures = {
+                _sm100_dense_layout_signature(m_value=m, uses_deepjit=True, **arguments)
+                for m in grid
+            }
+            for m in cases:
+                with self.subTest(kind=kind, n=n_value, m=m):
+                    self.assertIn(
+                        _sm100_dense_layout_signature(
+                            m_value=m, uses_deepjit=True, **arguments
+                        ),
+                        signatures,
+                    )
+        self.assertEqual(
+            _sm100_dense_layout_signature(
+                m_value=961,
+                n_value=4096,
+                k_value=4096,
+                kind="fp8",
+                num_sms=148,
+                uses_deepjit=True,
+            )[:6],
+            (0, 128, 256, 128, 2, 1),
+        )
+        self.assertNotEqual(
+            _sm100_dense_layout_signature(
+                m_value=961, n_value=4096, k_value=4096, kind="fp8", num_sms=148
+            )[:6],
+            (0, 128, 256, 128, 2, 1),
+        )
+
     def test_public_jit_warmup_entrypoints_skip_when_model_warmup_disabled(self):
         with mock.patch.object(
             warmup_module, "model_warm_up_enabled", return_value=False
@@ -1402,9 +1503,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 device=pool_3d.device,
             )
 
-        def fake_direct_scatter(
-            *, out, k_cache, slot_mapping, gather_lens, offset
-        ):
+        def fake_direct_scatter(*, out, k_cache, slot_mapping, gather_lens, offset):
             direct_calls.append(
                 (
                     tuple(k_cache.shape),

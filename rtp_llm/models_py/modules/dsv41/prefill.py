@@ -146,10 +146,17 @@ class V41L20Tail:
         else:
             start = max(start, context.start)
 
-        # clone() is intentional: a contiguous slice can still own a whole chunk.
+        keep = context.end - start
+        new_keep = min(count, keep)
+        old_keep = keep - new_keep
+
         def join(old, new):
-            values = new if old is None else torch.cat((old, new), dim=0)
-            return values[-(context.end - start) :].clone()
+            # Slice before allocating: the encoder chunk can be much larger
+            # than the tail. A slice alone would retain its entire backing.
+            new = new[-new_keep:]
+            if old_keep == 0:
+                return new.clone()
+            return torch.cat((old[-old_keep:], new), dim=0)
 
         rows = V41ModelRows(
             *(

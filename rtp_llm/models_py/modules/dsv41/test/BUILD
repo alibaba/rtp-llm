@@ -96,6 +96,12 @@ py_test(
 )
 
 py_test(
+    name = "test_l20_tail_storage",
+    srcs = ["test_l20_tail_storage.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
     name = "test_prefill",
     srcs = ["test_prefill.py", "test_attention.py", "test_transformer.py", "fixture.py", "official_compressor.py", "test_compact_writer.py"],
     deps = [
