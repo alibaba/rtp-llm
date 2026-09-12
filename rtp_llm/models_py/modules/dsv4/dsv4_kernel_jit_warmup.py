@@ -652,6 +652,9 @@ def _is_deepgemm_nvcc_compile_error(error: BaseException) -> bool:
             command = shlex.split(matched.group(1))
         except ValueError:
             continue
+        # DeepJIT compiles from its private entry directory.
+        if len(command) >= 4 and command[0] == "cd" and command[2] == "&&":
+            command = command[3:]
         if (
             command
             and os.path.basename(command[0]) == "nvcc"

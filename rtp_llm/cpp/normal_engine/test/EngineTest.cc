@@ -1,6 +1,7 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 #include <cstdlib>
+#include <future>
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -21,6 +22,21 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, testStopWhilePaused) {
+    auto engine = createMockEngine(CustomConfig{});
+    engine->pause();
+    auto pending = std::async(std::launch::async, [&engine] { return engine->step(); });
+    EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    ASSERT_TRUE(engine->stop().ok());
+    const auto stopped = pending.wait_for(std::chrono::seconds(5));
+    if (stopped != std::future_status::ready) {
+        engine->pause_ = false;
+    }
+    EXPECT_EQ(stopped, std::future_status::ready);
+    EXPECT_TRUE(pending.get().ok());
+    EXPECT_FALSE(engine->running_.load());
+}
 
 TEST_F(NormalEngineTest, testInt8KVCache) {
     CustomConfig config;

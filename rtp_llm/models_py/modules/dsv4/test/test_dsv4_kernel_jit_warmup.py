@@ -139,6 +139,24 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             )
         )
 
+    def test_nvcc_retry_recognizes_deepjit_private_compile_directory(self):
+        for command, expected in (
+            ("cd /tmp/entry && /cuda/bin/nvcc kernel.cu --cubin 2>&1", True),
+            ("cd '/tmp/entry with spaces' && nvcc --compile kernel.cu", True),
+            ("cd /tmp/entry && nvcc --version 2>&1", False),
+            ("cd /tmp/entry && echo nvcc --cubin kernel.cu", False),
+            ("cd /tmp/entry && g++ -c kernel.cu", False),
+            ("cd /tmp/entry ; nvcc --cubin kernel.cu", False),
+            ("cd /tmp/entry && python post_hook.py kernel.cubin", False),
+        ):
+            with self.subTest(command=command):
+                error = RuntimeError(
+                    f"command failed with exit code 7:\n{command}\ncompiler output"
+                )
+                self.assertEqual(
+                    warmup_module._is_deepgemm_nvcc_compile_error(error), expected
+                )
+
     def test_deepjit_dense_grid_includes_new_tmem_layouts(self):
         for kind, n_value, groups, cases in (
             ("fp8", 4096, 1, (961, 2161)),

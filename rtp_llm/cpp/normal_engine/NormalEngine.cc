@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -493,6 +494,7 @@ absl::Status NormalEngine::startLoop() {
         RTP_LLM_LOG_INFO("init system prompt done");
     }
     RTP_LLM_LOG_INFO("start normal engine loop");
+    stop_requested_ = false;
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
     return absl::OkStatus();
@@ -500,7 +502,10 @@ absl::Status NormalEngine::startLoop() {
 
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
+    stop_requested_ = true;
+    if (parallelism_config.dp_size <= 1 || ffn_disaggregate_config.enable_ffn_disaggregate) {
+        running_ = false;
+    }
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     return absl::OkStatus();
@@ -510,6 +515,9 @@ void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     cudaPreRun(getDeviceId());
+    if (parallelism_config.dp_size > 1 && !ffn_disaggregate_config.enable_ffn_disaggregate) {
+        stop_control_ = torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    }
     while (running_) {
         auto status = step();
         if (!status.ok()) {
@@ -558,7 +566,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
 absl::Status NormalEngine::step() {
     try {
         RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-        while (pause_) {
+        while (pause_ && !stop_requested_) {
             // wait 50ms if system paused.
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
@@ -570,6 +578,19 @@ absl::Status NormalEngine::step() {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
                 CHECK_AND_ASSIGN(streams, scheduler_->schedule());
             }
+        }
+
+        if (stop_control_.defined()) {
+            // DP ranks must finish the same collective step before any rank exits.
+            stop_control_.fill_(stop_requested_.load() ? 1 : 0);
+            const auto stopped = execAllReduce({stop_control_, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
+            if (stopped.item<int32_t>() != 0) {
+                running_ = false;
+                return absl::OkStatus();
+            }
+        }
+
+        if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
             if (parallelism_config.dp_size > 1) {
                 RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
                 mayAddFakeStream(streams);
