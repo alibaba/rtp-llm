@@ -362,12 +362,14 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
 size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
 
-    auto evict_result = selectAndEvict(min_blocks);
+    size_t freed = evictDsv41AndFree(-1, min_blocks);
+    if (freed >= min_blocks)
+        return freed;
+    auto evict_result = selectAndEvict(min_blocks - freed);
     if (evict_result.evicted_keys.empty()) {
-        return 0;
+        return freed;
     }
 
-    size_t freed = 0;
     for (size_t i = 0; i < evict_result.evicted_keys.size(); ++i) {
         const auto  cache_key = evict_result.evicted_keys[i];
         const auto& slots     = evict_result.evicted_slots.at(cache_key);
@@ -385,15 +387,20 @@ size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
 size_t SharedBlockCache::evictAndFreeForGroup(int group_id, size_t min_blocks, EvictResult* evict_result_out) {
     RTP_LLM_PROFILE_FUNCTION();
 
-    auto evict_result = selectAndEvictForGroup(group_id, min_blocks);
+    size_t freed = hasDsv41Checkpoints() ? evictDsv41AndFree(group_id, min_blocks) : 0;
+    if (freed >= min_blocks) {
+        if (evict_result_out)
+            *evict_result_out = {};
+        return freed;
+    }
+    auto evict_result = selectAndEvictForGroup(group_id, min_blocks - freed);
     if (evict_result.evicted_keys.empty()) {
         if (evict_result_out) {
             *evict_result_out = std::move(evict_result);
         }
-        return 0;
+        return freed;
     }
 
-    size_t freed = 0;
     for (size_t i = 0; i < evict_result.evicted_keys.size(); ++i) {
         const auto  cache_key = evict_result.evicted_keys[i];
         const auto& slots     = evict_result.evicted_slots.at(cache_key);

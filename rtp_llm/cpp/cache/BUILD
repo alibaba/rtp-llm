@@ -68,6 +68,7 @@ cc_library(
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
         "SharedBlockCache.cc",
+        "DSV41SharedBlockCache.cc",
     ],
     hdrs = [
         "BlockCache.h",
@@ -183,6 +184,7 @@ cc_library(
     srcs = [
         "HybridKVCacheAllocator.cc",
         "HybridPoolKVCacheAllocator.cc",
+        "DSV41GpuCacheAllocator.cc",
         "HybridTypeKVCacheAllocator.cc",
         "KVCacheAllocator.cc",
         "SingleTypeKVCacheAllocator.cc",
@@ -205,16 +207,23 @@ cc_library(
 )
 
 cc_library(
+    name = "dsv41_checkpoint_state",
+    hdrs = ["DSV41CacheState.h", "DSV41GpuCheckpointCache.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "batch_kv_cache_resource",
     srcs = ["KVCacheResource.cc"],
     hdrs = [
         "BatchKVCacheResource.h",
-        "DSV41CacheState.h",
         "KVCacheResource.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":dsv41_checkpoint_state",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cache:cache_group_type",
     ],

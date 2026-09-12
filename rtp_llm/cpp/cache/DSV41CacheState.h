@@ -162,6 +162,7 @@ public:
         bool                                                  finished{false};
         bool                                                  cancelled{false};
         bool                                                  published{false};
+        bool                                                  gpu_published{false};
         std::optional<DSV41CheckpointMetadata>                completed;
         std::vector<std::shared_ptr<DSV41CheckpointSnapshot>> snapshots;
     };
@@ -252,7 +253,7 @@ public:
     }
     void cancel() {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_.published) {
+        if (state_.published || state_.gpu_published) {
             throw std::logic_error("V4.1 cannot cancel a successfully published request");
         }
         state_.cancelled = true;
@@ -270,6 +271,17 @@ public:
             return false;
         state_.snapshots.clear();
         state_.published = true;
+        return true;
+    }
+    bool publishGpuCheckpoint(const std::function<bool(const View&)>& publish) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!state_.finished || state_.cancelled)
+            return false;
+        if (state_.gpu_published)
+            return true;
+        if (!publish(state_))
+            return false;
+        state_.gpu_published = true;
         return true;
     }
 

@@ -67,6 +67,8 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/cache:block_pool",
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",

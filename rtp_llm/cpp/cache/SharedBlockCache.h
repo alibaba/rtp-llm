@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/DSV41GpuCheckpointCache.h"
 
 namespace rtp_llm {
 
@@ -105,6 +106,15 @@ public:
     bool    prefixTreeEnabled() const;
     void    setStateBlockIndependentEviction(bool enabled, const std::vector<int>& state_group_ids);
 
+    bool                           putDsv41Checkpoint(const DSV41GpuCheckpointData& checkpoint, bool is_resident);
+    DSV41GpuCheckpointCache::Lease matchDsv41Checkpoint(const DSV41CacheIdentity& identity,
+                                                        const CacheKeysType&      keys,
+                                                        size_t                    reuse_unit,
+                                                        size_t                    limit);
+    bool                           hasDsv41Checkpoints() const;
+    DSV41GpuCheckpointCache::Lease leaseDsv41CheckpointForTransfer();
+    void                           commitDsv41CheckpointTransfer(const DSV41GpuCheckpointCache::Lease& lease);
+
 private:
     static const size_t kCacheMaxCapacity = 10000000;
 
@@ -164,8 +174,10 @@ private:
     bool hasFlatItemLocked(CacheKeyType cache_key) const;
     bool isFlatItemResidentLocked(CacheKeyType cache_key) const;
     bool isStateEvictionGroupLocked(int group_id) const;
+    size_t evictDsv41AndFree(int group_id, size_t min_blocks);
 
-    LRUCacheType       lru_cache_;
+    LRUCacheType            lru_cache_;
+    DSV41GpuCheckpointCache dsv41_cache_;
     mutable std::mutex mu_;
     int64_t            version_{0};
     bool               prefix_tree_enabled_{true};

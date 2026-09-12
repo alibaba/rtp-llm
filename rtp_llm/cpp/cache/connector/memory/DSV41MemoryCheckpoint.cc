@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 namespace {
@@ -286,6 +287,42 @@ bool KVCacheMemoryConnector::stageDsv41Checkpoint(const std::shared_ptr<KVCacheR
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::dsv41Write(const std::shared_ptr<KVCacheResource>& resource) {
     if (!resource->dsv41CacheState())
         throw std::logic_error("V4.1 memory write requires typed checkpoint state");
+    if (resource->isDsv41GpuTransfer()) {
+        const auto& lease = resource->dsv41GpuLease();
+        if (!lease)
+            return std::make_shared<DSV41CompletedContext>(false);
+        const auto& data = lease->data;
+        try {
+            data.validateProducer(resource->dsv41CacheState()->view());
+            if (data.keys != resource->cacheKeys())
+                return std::make_shared<DSV41CompletedContext>(false);
+            for (size_t group = 0; group < data.blocks.size(); ++group) {
+                const auto& ids = resource->blocks(group);
+                if (ids.size() != data.keys.size())
+                    return std::make_shared<DSV41CompletedContext>(false);
+                if (group < 4 ? ids != data.blocks[group] : ids.back() != data.blocks[group].front())
+                    return std::make_shared<DSV41CompletedContext>(false);
+            }
+            // The GPU entry owns immutable completed pages. Stage them into a
+            // separate CPU transaction; backend publication flags are independent.
+            auto staged = std::make_shared<KVCacheResource>(*resource);
+            staged->setDsv41GpuLease({});
+            auto state = std::make_shared<DSV41CacheState>(data.metadata.identity);
+            state->advanceEncoder(data.metadata.materialized_end);
+            state->completeDecoder(data.metadata, data.reuse_unit);
+            staged->setDsv41CacheState(state);
+            if (!stageDsv41Checkpoint(staged, [] { runtimeSyncAndCheck(); }))
+                return std::make_shared<DSV41CompletedContext>(false);
+            state->finish(data.metadata.materialized_end);
+            auto result = dsv41Write(staged);
+            if (result->success())
+                resource->completeDsv41GpuTransfer();
+            return result;
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("V4.1 GPU to memory checkpoint transfer failed: %s", error.what());
+            return std::make_shared<DSV41CompletedContext>(false);
+        }
+    }
     const bool success = resource->dsv41CacheState()->publishSnapshots([this](const DSV41CacheState::View& view) {
         if (view.snapshots.empty())
             return view.protected_prefix_end == 0;

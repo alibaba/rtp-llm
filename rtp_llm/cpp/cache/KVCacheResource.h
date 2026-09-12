@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/DSV41GpuCheckpointCache.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -89,6 +91,32 @@ public:
     const std::shared_ptr<DSV41CacheState>& dsv41CacheState() const {
         return dsv41_cache_state_;
     }
+    void setDsv41GpuLease(DSV41GpuCheckpointCache::Lease lease, bool restore_pending = false) {
+        dsv41_gpu_lease_           = std::move(lease);
+        dsv41_gpu_restore_pending_ = restore_pending;
+        dsv41_gpu_transfer_commit_ = {};
+    }
+    const DSV41GpuCheckpointCache::Lease& dsv41GpuLease() const {
+        return dsv41_gpu_lease_;
+    }
+    bool dsv41GpuRestorePending() const {
+        return dsv41_gpu_restore_pending_;
+    }
+    void completeDsv41GpuRestore() {
+        dsv41_gpu_restore_pending_ = false;
+    }
+    void setDsv41GpuTransferCommit(std::function<void()> commit) {
+        dsv41_gpu_transfer_commit_ = std::move(commit);
+    }
+    bool isDsv41GpuTransfer() const {
+        return static_cast<bool>(dsv41_gpu_transfer_commit_);
+    }
+    void completeDsv41GpuTransfer() {
+        if (!dsv41_gpu_transfer_commit_)
+            throw std::logic_error("V4.1 GPU transfer has no pending commit");
+        dsv41_gpu_transfer_commit_();
+        dsv41_gpu_transfer_commit_ = {};
+    }
 
     void initGroups(int                                  group_num,
                     int                                  layer_num,
@@ -167,6 +195,9 @@ public:
 
 private:
     std::shared_ptr<DSV41CacheState> dsv41_cache_state_;
+    DSV41GpuCheckpointCache::Lease   dsv41_gpu_lease_;
+    bool                             dsv41_gpu_restore_pending_{false};
+    std::function<void()>            dsv41_gpu_transfer_commit_;
     // layer_id -> block_indices
     LayerBlockIds layer_block_ids;
     // layer_id -> region_name -> block_indices

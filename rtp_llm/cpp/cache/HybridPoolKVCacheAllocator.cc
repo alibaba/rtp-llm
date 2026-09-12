@@ -472,6 +472,8 @@ size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
 }
 
 BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
+    if (config_.dsv41_cache_layout_version != 0)
+        return min_blocks_to_free ? leaseDsv41ForMemoryTransfer() : nullptr;
     if (min_blocks_to_free == 0 || !shared_block_cache_) {
         return nullptr;
     }
@@ -543,6 +545,11 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
 
 void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
     if (!batch_kv_cache_resource) {
+        return;
+    }
+    if (config_.dsv41_cache_layout_version != 0) {
+        for (int batch = 0; batch < batch_kv_cache_resource->batchSize(); ++batch)
+            batch_kv_cache_resource->cacheResource(batch).setDsv41GpuLease({});
         return;
     }
     for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {

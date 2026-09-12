@@ -16,6 +16,8 @@ public:
                                int64_t                            reserve_block_ratio = 0,
                                RoleType                           role_type           = RoleType::PDFUSION);
 
+    void insertIntoCache(const InsertInfo& insert_info) override;
+
     BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const override;
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;
     std::vector<BlockInfo>
@@ -54,6 +56,15 @@ public:
 
 private:
     bool doInit() override;
+    int                     reuseCache(const CacheKeysType&                 cache_keys,
+                                       BatchKVCacheResource&                resource,
+                                       const std::shared_ptr<CPSlotMapper>& mapper) override;
+    MallocResult            initMallocForCommonLen(const MallocInfo& malloc_info) override;
+    MallocResult            incrMalloc(const MallocInfo& malloc_info) override;
+    DSV41CacheIdentity      dsv41Identity(const DSV41CacheIdentity& identity) const;
+    size_t                  dsv41ReuseUnit() const;
+    bool                    cloneDsv41FixedBacking(KVCacheResource& resource);
+    BatchKVCacheResourcePtr leaseDsv41ForMemoryTransfer();
 
     MallocStatus
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;

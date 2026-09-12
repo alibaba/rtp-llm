@@ -67,12 +67,17 @@ MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
 }
 
 void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    if (block_indices.empty()) {
-        return;
+    BlockIndicesType valid;
+    valid.reserve(block_indices.size());
+    for (auto block : block_indices) {
+        if (!isNullBlockIdx(block)) {
+            valid.push_back(block);
+        }
     }
-
-    block_pool_->requestFree(block_indices);
-    RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
+    if (!valid.empty()) {
+        block_pool_->requestFree(valid);
+    }
+    RTP_LLM_LOG_DEBUG("Freed %zu blocks", valid.size());
 }
 
 void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
