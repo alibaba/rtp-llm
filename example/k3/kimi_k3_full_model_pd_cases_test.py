@@ -13,6 +13,7 @@ from example.k3.kimi_k3_full_model_pd_cases import (
     SmokeFailure,
     main,
     numbered_answer_pattern,
+    parse_args,
 )
 
 
@@ -187,6 +188,41 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(SmokeFailure, "failed after 2 attempts"):
                 runner.prewarm_rdma_pool()
+
+    def test_tp_only_owner_count_must_be_explicit_and_match(self) -> None:
+        argv = ["cases", "--base-url", "http://prefill:30188",
+                "--decode-health-url", "http://decode:31188/health",
+                "--output", "/tmp/unused-cases.json", "--namespace", "unit",
+                "--decode-role-addr", "decode:31188:31189"]
+        with mock.patch("sys.argv", argv + ["--decode-dp-size", "1"]):
+            self.assertEqual(parse_args().decode_dp_size, 1)
+        for suffix in ([], ["--decode-dp-size", "2"], ["--decode-dp-size", "0"]):
+            with mock.patch("sys.argv", argv + suffix), mock.patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    parse_args()
+
+    def test_single_decode_owner_preserves_all_cases_and_concurrency(self) -> None:
+        args = make_args()
+        args.decode_role_addrs = args.decode_role_addrs[:1]
+        args.rdma_prewarm_attempts = 1
+        runner = Runner(args)
+        stages = {}
+        with (
+            mock.patch.object(runner, "health"),
+            mock.patch.object(runner, "request_cases", return_value=[]) as requests,
+            mock.patch.object(runner, "run_stage", side_effect=lambda name, cases, **kw: stages.update({name: cases})),
+            mock.patch.object(runner, "run_long_prefix_case"),
+            mock.patch("time.sleep"),
+        ):
+            runner.run_all()
+        self.assertEqual(len(requests.call_args.args[0]), args.batch_size)
+        self.assertTrue(all(case.decode_owner_rank == 0 for case in requests.call_args.args[0]))
+        self.assertIn("single_owner_concurrent_batch", stages)
+        self.assertEqual(len(stages["single_owner_concurrent_batch"]), 10)
+        self.assertEqual(len(stages["cuda_graph_bucket_8"]), 8)
+        self.assertTrue(all(case.decode_owner_rank == 0 for cases in stages.values() for case in cases))
+        for name in ("batch_all_miss", "batch_all_hit", "whole_chunk_batch_miss", "whole_chunk_batch_hit", "multimodal_mtp_chunk_prefill_miss"):
+            self.assertIn(name, stages)
 
     def test_all_suite_defines_dedicated_semantic_and_mtp_budgets(self) -> None:
         runner = Runner(make_args())

@@ -20,6 +20,8 @@ for name in (
         setattr(compute_ops, name, UnavailableGpuBackend)
 suite = unittest.defaultTestLoader.loadTestsFromNames(
     [
+        "rtp_llm.test.kimi_k3_mla_workspace_config_test",
+        "rtp_llm.models_py.modules.hybrid.test.kimi_k3_fp8_weight_test",
         "rtp_llm.models_py.modules.hybrid.test.kimi_k3_mtp_contract_test",
         "rtp_llm.models_py.modules.hybrid.test.kimi_k3_mtp_chunk_prefill_unit_test",
     ]

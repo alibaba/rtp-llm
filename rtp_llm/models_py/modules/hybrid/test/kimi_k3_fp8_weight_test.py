@@ -251,7 +251,7 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
                     result[W.mla_vc], local[:, 128:].transpose(1, 2), rtol=0, atol=0
                 )
 
-    def test_attention_config_enables_mtp_but_not_eagle3_or_global_quantization(self):
+    def test_attention_config_enables_only_target(self):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
@@ -259,6 +259,7 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
             config = KimiK3ModelConfig()
             config.model_type = model_type
             config.data_type = "bf16"
+            config.config_dtype = "bfloat16"
             config.attn_config.use_mla = True
             config.quant_config = None
             with patch.dict(
@@ -274,14 +275,14 @@ class KimiK3Fp8WeightTest(unittest.TestCase):
                     config.init_precision_config(None, None)
             self.assertIsNone(config.quant_config)
             self.assertEqual(
-                config.attn_config.mla_fp8_compute, "eagle3" not in model_type
+                config.attn_config.mla_fp8_compute, model_type == "kimi_k3"
             )
-            if "eagle3" not in model_type:
+            if model_type == "kimi_k3":
                 from rtp_llm.ops import KvCacheDataType
 
                 self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
             self.assertEqual(
-                config.k3_attention_quant_config is not None, "eagle3" not in model_type
+                config.k3_attention_quant_config is not None, model_type == "kimi_k3"
             )
 
     def test_native_moe_cannot_enter_attention_policy(self):
