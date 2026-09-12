@@ -153,7 +153,7 @@ public final class JavaMockEngineCluster {
                 if (whaleMonitor != null) service.schedulerMetricReporter =
                         values -> whaleMonitor.reportScheduler(values, service.whaleMetricTags());
             }
-            if (!config.whale) writeDiscoveryFiles(config);
+            if (!config.whale || config.whaleBundle) writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
             // domain→hosts mapping consumed by LocalServiceDiscovery on the master,
             // kept in sync by /add_engine + /remove_engine at runtime.
@@ -336,6 +336,7 @@ public final class JavaMockEngineCluster {
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         service.setAutoFetch(config.autoFetch);
         service.setWhaleRemote(config.whale);
+        service.whaleBundle = config.whaleBundle;
         service.setFetchAttachTimeoutMs(config.fetchAttachTimeoutMs);
         services.put(grpcPort, service);
         try {
@@ -580,6 +581,7 @@ public final class JavaMockEngineCluster {
 
     static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         private volatile boolean whaleRemote;
+        private boolean whaleBundle;
         private final Map<Long, Object> remoteDecodeLeaseOwners = new ConcurrentHashMap<>();
         private final Map<Long, Runnable> remoteDecodeStops = new ConcurrentHashMap<>();
         private final Map<String, io.grpc.ManagedChannel> remoteChannels = new ConcurrentHashMap<>();
@@ -5471,6 +5473,12 @@ public final class JavaMockEngineCluster {
         boolean isStopped() { return stopped; }
         Map<String, String> whaleMetricTags() {
             Map<String, String> tags = WhaleMockMonitor.engineTags(System.getenv(), host);
+            if (whaleBundle) {
+                // One physical Pod, distinct logical engines. Preserve the real
+                // container address and role; never impersonate a separate Pod.
+                tags.put("dp_rank", Integer.toString(grpcPort));
+                tags.put("engine_port", Integer.toString(grpcPort));
+            }
             tags.putAll(Map.of("engine", engineName, "role", roleType.name(),
                     "generation", processGeneration, "backend", "mock"));
             return tags;
@@ -6366,6 +6374,7 @@ public final class JavaMockEngineCluster {
 
     static final class Config {
         boolean whale = false;
+        boolean whaleBundle = false;
         boolean kmonitor = false;
         // Package-private for direct assertions in ClusterConfigParamTest.
         int nPrefill = 2;
@@ -6458,6 +6467,7 @@ public final class JavaMockEngineCluster {
                     case "--host" -> config.host = value;
                     case "--bind-host" -> config.bindHost = value;
                     case "--whale" -> config.whale = parseBooleanFlag(value, key);
+                    case "--whale-bundle" -> config.whaleBundle = parseBooleanFlag(value, key);
                     case "--kmonitor" -> config.kmonitor = parseBooleanFlag(value, key);
                     case "--prefill-domain" -> config.prefillDomain = value;
                     case "--decode-domain" -> config.decodeDomain = value;
@@ -6490,20 +6500,23 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException(
                         "--endpoint-file, --performance, and --master-config are required");
             }
+            if (config.whaleBundle && !config.whale) {
+                throw new IllegalArgumentException("--whale-bundle requires --whale true");
+            }
             if (config.whale) {
-                if (config.nPrefill + config.nDecode != 1
+                if ((!config.whaleBundle && config.nPrefill + config.nDecode != 1)
                         || config.host.equals("127.0.0.1") || config.host.equals("0.0.0.0")
                         || config.host.isBlank()) {
                     throw new IllegalArgumentException("Whale requires exactly one engine and an advertised Pod IP");
                 }
-                if (config.discoveryFile != null) {
+                if (config.discoveryFile != null && !config.whaleBundle) {
                     throw new IllegalArgumentException("Whale uses platform discovery, not --discovery-file");
                 }
             }
             if (config.kmonitor && !config.whale) {
                 throw new IllegalArgumentException("--kmonitor requires --whale true");
             }
-            if (config.discoveryFile == null && !config.whale) {
+            if (config.discoveryFile == null && (!config.whale || config.whaleBundle)) {
                 config.discoveryFile = Path.of(config.endpointFile).toAbsolutePath()
                         .resolveSibling("discovery.json").toString();
             }

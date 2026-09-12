@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Optional
 
@@ -773,6 +774,13 @@ async def iter_real_model_stream_infer(
         # ``phase2_triggered`` blocks the second entry. Tracking only one
         # boolean keeps the guard cheap on the hot path.
         phase2_triggered = False
+        if os.environ.get("RTP_LLM_MOCK_SCHEDULE_ONLY") == "1":
+            from rtp_llm.flexlb.tools.whale_mock.schedule_only import acknowledge
+
+            response = await acknowledge(backend_visitor, generate_input, request)
+            stats = (0, False, LLMFinishReason.STREAMING, len(input_ids_list), 0, ())
+            yield (response, stats) if yield_access_stats else response
+            return
         stream = await backend_visitor.enqueue(generate_input)
         async for go in stream:
             chunk_idx += 1

@@ -12,12 +12,19 @@ import java.util.HashMap;
 /** Optional internal adapter; no private class is linked by the open-source runtime. */
 final class WhaleMockMonitor implements AutoCloseable {
     private final FlexMonitor monitor;
-    private final Map<String, Long> previous = new HashMap<>();
+    private static final class EngineSample {
+        final Map<String, Long> previous = new HashMap<>();
+        boolean schedulerReported;
+        long sampledAt = System.nanoTime();
+    }
+    private final Map<Map<String, String>, EngineSample> samples = new HashMap<>();
+
+    private EngineSample state(Map<String, String> labels) {
+        return samples.computeIfAbsent(Map.copyOf(labels), ignored -> new EngineSample());
+    }
     private final java.util.Set<String> registered = new java.util.HashSet<>();
     private static final java.util.Set<String> STEP_METRICS = java.util.Set.of(
             "rtp_llm_running_stream_size", "rtp_llm_context_batch_size", "rtp_llm_generate_batch_size");
-    private boolean schedulerReported;
-    private long sampledAt = System.nanoTime();
 
     static WhaleMockMonitor create() {
         try {
@@ -56,15 +63,16 @@ final class WhaleMockMonitor implements AutoCloseable {
             if (registered.add(entry.getKey())) monitor.register(entry.getKey(), FlexMetricType.GAUGE);
             monitor.report(entry.getKey(), tags, entry.getValue().doubleValue());
         }
-        schedulerReported = true;
+        state(labels).schedulerReported = true;
     }
 
     synchronized void sample(Map<String, Number> metrics, Map<String, String> labels, long now) {
-        double seconds = Math.max(1e-9, (now - sampledAt) / 1e9);
-        sampledAt = now;
+        EngineSample sample = state(labels);
+        double seconds = Math.max(1e-9, (now - sample.sampledAt) / 1e9);
+        sample.sampledAt = now;
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
-        boolean hadSchedulerSteps = schedulerReported;
-        schedulerReported = false;
+        boolean hadSchedulerSteps = sample.schedulerReported;
+        sample.schedulerReported = false;
         metrics.forEach((name, value) -> {
             // Preserve execution-round samples. A periodic zero between two
             // short P batches must not dilute them. With no rounds this period,
@@ -79,9 +87,9 @@ final class WhaleMockMonitor implements AutoCloseable {
                 default -> null;
             };
             if (rate != null) {
-                Long before = previous.put(name, value.longValue());
+                Long before = sample.previous.put(name, value.longValue());
                 if (registered.add(rate)) monitor.register(rate, FlexMetricType.GAUGE);
-                double tps = Math.max(0, value.longValue() - (before == null ? 0 : before)) / seconds;
+                double tps = before == null ? 0 : Math.max(0, value.longValue() - before) / seconds;
                 monitor.report(rate, tags, tps);
                 String wall = switch (name) {
                     case "mock_context_compute_tokens_total" -> "rtp_llm_context_wall_tps";

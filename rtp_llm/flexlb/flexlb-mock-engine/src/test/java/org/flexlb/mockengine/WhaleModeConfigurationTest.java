@@ -78,6 +78,43 @@ class WhaleModeConfigurationTest {
     }
 
     @Test
+    void bundleIsExplicitAndRetainsFileDiscoveryForAllLogicalEngines() {
+        assertThrows(IllegalArgumentException.class, () -> config("--whale-bundle", "true"));
+        var bundle = config("--whale", "true", "--whale-bundle", "true",
+                "--host", "10.1.2.3", "--n-prefill", "48", "--n-decode", "192",
+                "--auto-fetch", "true", "--kmonitor", "true");
+        assertNotNull(bundle.discoveryFile);
+        assertTrue(bundle.autoFetch);
+        assertEquals(240, bundle.nPrefill + bundle.nDecode);
+        assertEquals("10.1.2.3", JavaMockEngineCluster.declaredHost(bundle, 239));
+    }
+
+    @Test
+    void bundledEnginesNeverShareCounterDeltaOrSamplingClock() {
+        List<Double> rates = new ArrayList<>();
+        var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("report") && args.length == 3
+                            && args[0].equals("rtp_llm_generate_tps"))
+                        rates.add(((Number) args[2]).doubleValue());
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink);
+        var a = java.util.Map.of("engine", "decode-0");
+        var b = java.util.Map.of("engine", "decode-1");
+        long now = System.nanoTime();
+        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 100L), a, now);
+        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 800L), b, now);
+        rates.clear();
+        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 300L), a, now + 2_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 1400L), b, now + 2_000_000_000L);
+        assertEquals(List.of(100.0, 300.0), rates);
+        monitor.sample(java.util.Map.of("mock_generate_tokens_total", 300L), a, now + 3_000_000_000L);
+        assertEquals(0.0, rates.get(2));
+    }
+
+    @Test
     void internalProfileCreatesUsableMonitorAndOpenProfileFailsExplicitly() throws Exception {
         try {
             Class.forName("org.flexlb.monitor.FlexMonitorFactory");

@@ -1,0 +1,25 @@
+# Opt-in Whale deployment only. One master and one mock JVM share a CPU Pod.
+# All logical engines retain independent cache, queue and lifecycle state.
+profile: single-batch
+prefill: 48
+decode: 192
+mock_port_offset: 50
+master_heap: 8g
+mock_heap: 16g
+startup_timeout_s: 180
+shutdown_timeout_s: 30
+kmonitor: true
+event_loop_threads: 32
+completion_threads: 32
+performance: performance.json
+block_size: 1024
+prefill_kv_pool_blocks: 11042
+decode_kv_pool_blocks: 27686
+observation:
+  requests: 100
+  qps: 5
+  input_tokens: 2048
+  output_tokens: 16
+  window_s: 1
+  request_timeout_s: 30
+  drain_timeout_s: 120
