@@ -1542,9 +1542,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
             maybePrintModelInput(model_input, "prefill target model");
-            int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
-            model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-            model_output                        = std::move(model_->forward(model_input));
+            int64_t start_time_us                    = autil::TimeUtility::currentTimeInMicroSeconds();
+            model_input.kv_cache_layer_to_group      = target_kv_cache_layer_to_group;
+            model_input.kv_cache_layer_to_group_host = target_kv_cache_layer_to_group;
+            model_output                             = std::move(model_->forward(model_input));
             model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
 
@@ -1870,8 +1871,9 @@ absl::Status MtpExecutor::decodeStepTargetOnly(const std::list<GenerateStreamPtr
     if (model_input.kv_cache_update_mapping.defined()) {
         cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
     }
-    model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-    model_output                        = std::move(model_->forward(model_input));
+    model_input.kv_cache_layer_to_group      = target_kv_cache_layer_to_group;
+    model_input.kv_cache_layer_to_group_host = target_kv_cache_layer_to_group;
+    model_output                             = std::move(model_->forward(model_input));
 
     if (!isTpRank0() || warm_up_ || streams.empty()) {
         cudaSyncAndCheck();
@@ -2054,7 +2056,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
     if (propose_step_ > 1) {
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+        model_input.kv_cache_layer_to_group      = draft_kv_cache_layer_to_group;
+        model_input.kv_cache_layer_to_group_host = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
@@ -2301,10 +2304,11 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     }
     const auto& cache_cfg = cache_manager_->cacheConfig();
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
-    auto model_input_copy                    = model_input;
-    model_input_copy.kv_block_stride_bytes   = cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes   = cache_cfg.kv_scale_stride_bytes;
-    model_input_copy.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+    auto model_input_copy                         = model_input;
+    model_input_copy.kv_block_stride_bytes        = cache_cfg.kv_block_stride_bytes;
+    model_input_copy.kv_scale_stride_bytes        = cache_cfg.kv_scale_stride_bytes;
+    model_input_copy.kv_cache_layer_to_group      = target_kv_cache_layer_to_group;
+    model_input_copy.kv_cache_layer_to_group_host = target_kv_cache_layer_to_group;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -2394,9 +2398,10 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     auto* prefill_model                  = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy               = model_input;
     model_input_copy.is_mtp_draft_update = true;
-    model_input_copy.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-    model_input_copy.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    model_input_copy.kv_block_stride_bytes        = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input_copy.kv_scale_stride_bytes        = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input_copy.kv_cache_layer_to_group      = draft_kv_cache_layer_to_group;
+    model_input_copy.kv_cache_layer_to_group_host = draft_kv_cache_layer_to_group;
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
@@ -2412,8 +2417,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
-    model_input.is_target_verify        = true;
-    model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+    model_input.is_target_verify             = true;
+    model_input.kv_cache_layer_to_group      = target_kv_cache_layer_to_group;
+    model_input.kv_cache_layer_to_group_host = target_kv_cache_layer_to_group;
     RTP_LLM_LOG_DEBUG(
         "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
         model_input.input_lengths.size(0),
@@ -2621,9 +2627,10 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
             buffer_holder_.hold_host(model_input.prefix_lengths_host_for_log);
         }
     }
-    model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    model_input.kv_block_stride_bytes        = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes        = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input.kv_cache_layer_to_group      = draft_kv_cache_layer_to_group;
+    model_input.kv_cache_layer_to_group_host = draft_kv_cache_layer_to_group;
 }
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {

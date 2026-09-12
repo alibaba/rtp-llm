@@ -7,7 +7,13 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import DenseMLP, Embedding, LinearFactory, MlaAttention, RMSNorm
+from rtp_llm.models_py.modules import (
+    DenseMLP,
+    Embedding,
+    LinearFactory,
+    MlaAttention,
+    RMSNorm,
+)
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
 )
@@ -35,6 +41,7 @@ class _GatedEagle3MLA(MlaAttention):
             layernorm_eps=config.layernorm_eps,
             quant_config=config.quant_config,
         )
+
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -159,6 +166,11 @@ class KimiK3Eagle3Model(GptModelBase):
         return self.multimodal_embedding_injector(
             embedding, shifted_features, shifted_locs
         )
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        # Planner metadata is materialized before forward, including capture.
+        select_block_map_for_layer(inputs.attention_inputs, 0)
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Optional[Any] = None):
         if inputs.input_hiddens is None:
