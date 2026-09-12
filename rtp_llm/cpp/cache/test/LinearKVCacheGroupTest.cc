@@ -111,6 +111,24 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndRes
     EXPECT_EQ(need.extra_blocks, 2);
 }
 
+TEST_F(LinearKVCacheGroupTest, GetNeedBlocksExcludesUncomputedReusedPrefixSlots) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/8);
+    LinearKVCacheGroup group({}, spec, block_pool, /*group_id=*/0, /*linear_step=*/1);
+    ASSERT_TRUE(group.init());
+
+    const auto need = group.getNeedBlocks(/*common_seq_len=*/17,
+                                          /*seq_len=*/25,
+                                          /*reserve_step=*/2,
+                                          /*reuse_blocks_len=*/2,
+                                          true);
+    // The checkpoint at slot 1 is reused. Only suffix slots 2, 3 and
+    // speculative slot 4 need allocation; slot 0 cannot be recomputed.
+    EXPECT_EQ(need.common_blocks, 1);
+    EXPECT_EQ(need.extra_blocks, 2);
+}
+
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
@@ -177,7 +195,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     EXPECT_EQ(block_pool->freeBlocksNum(), 6u);
 }
 
-TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
+TEST_F(LinearKVCacheGroupTest, MallocPreservesHistoricalNullBeforeCurrentConvReadSlot) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
@@ -193,15 +211,21 @@ TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
     blocks.assign(BlockIndicesType{allocated[0], NULL_BLOCK_IDX, allocated[1]});
     const size_t free_before = block_pool->freeBlocksNum();
 
-    // seq_len=12 => seq_slots=3. Position 1 is tail-1 and is the read slot
-    // for sequence_length=13, so it must be materialized even though no new
-    // slots are appended.
+    // Decode reads (sequence_length - 2) / 4: both lengths 12 and 13
+    // read slot 2, not historical slot 1. Allocating slot 1 cannot restore
+    // its uncomputed state and would make it look like a valid checkpoint.
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/12, /*enable_reuse_cache=*/false));
 
     ASSERT_EQ(blocks.blocksNum(), 3u);
     EXPECT_EQ(blocks.blocks()[0], allocated[0]);
-    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
     EXPECT_EQ(blocks.blocks()[2], allocated[1]);
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before);
+
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/13, /*enable_reuse_cache=*/true));
+    EXPECT_EQ(blocks.blocks()[(13 - 2) / 4], allocated[1]);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before - 1);
 }
 

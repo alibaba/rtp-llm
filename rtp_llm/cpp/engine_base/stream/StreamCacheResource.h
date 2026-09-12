@@ -38,6 +38,12 @@ public:
     bool         asyncLoadCache();
     bool         loadCacheDone();
 
+    // Mark a terminal-state-only PD destination before first allocation.
+    // Generic P2P full-history transfers must not set this intent.
+    void setLinearPrefixLoadTokens(int prefix_tokens) {
+        linear_prefix_load_tokens_ = prefix_tokens;
+    }
+
     // Commit accepted speculative states using each LINEAR group's token span.
     void updateLinearBlocks(int32_t batch_id, int cur_cached_len, int nxt_cached_len);
 
@@ -152,6 +158,7 @@ private:
     /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
     /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
     std::atomic<bool> load_cache_once_{false};
+    int               linear_prefix_load_tokens_ = 0;
 };
 
 }  // namespace rtp_llm

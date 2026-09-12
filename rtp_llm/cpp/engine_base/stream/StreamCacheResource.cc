@@ -308,7 +308,8 @@ void StreamCacheResource::releaseResource() {
                       pd_kvcache_ref_.get());
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
-    resource_released_ = true;
+    resource_released_         = true;
+    linear_prefix_load_tokens_ = 0;
     load_cache_once_.store(false, std::memory_order_release);
 }
 
@@ -388,6 +389,10 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
+    if (is_first_malloc) {
+        malloc_info.linear_prefix_load_tokens = linear_prefix_load_tokens_;
+    }
+
     if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_device_cache = false;
@@ -404,6 +409,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         malloc_failed_times_++;
         return absl::InternalError("malloc failed");
     }
+    linear_prefix_load_tokens_ = 0;
 
     if (result.reuse_len > 0) {
         stream_->setReuseLength(result.reuse_len);
