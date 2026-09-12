@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from ci_gate.common import GateError, is_true
+from ci_gate.common import GateError, _lower_headers, is_true
 from ci_gate.ci_service import collect_status_tokens, parse_ci_status
 from ci_gate.review import (
     _check_issue_comments_qualified,
@@ -18,6 +18,8 @@ from ci_gate.review import (
 )
 from ci_gate.ci import pre_check_status, trigger_ci, wait_status
 from ci_gate.merge import check_merge_conflicts, trigger_merge, wait_merge
+from ci_gate.github import is_rate_limited
+from ci_gate.rerun import DEDUPE_MARKER, rerun_pr_build
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +792,470 @@ class TestWaitMerge(unittest.TestCase):
         mock_request.return_value = {"status": {"success": False}}
         with self.assertRaises(GateError):
             wait_merge(self._args())
+
+
+class TestIsRateLimited(unittest.TestCase):
+    """A permission denial must never be retried as throttling."""
+
+    def test_permission_denial_is_not_rate_limiting(self):
+        body = {"message": "Resource not accessible by integration"}
+        self.assertFalse(is_rate_limited(403, {}, body))
+
+    def test_permission_denial_wins_over_exhausted_quota_header(self):
+        """The short-circuit has to come first, or the fork bug comes back."""
+        body = {"message": "Resource not accessible by integration"}
+        headers = {"x-ratelimit-remaining": "0"}
+        self.assertFalse(is_rate_limited(403, headers, body))
+
+    def test_429_is_rate_limiting(self):
+        self.assertTrue(is_rate_limited(429, {}, {"message": "slow down"}))
+
+    def test_exhausted_quota_header_is_rate_limiting(self):
+        self.assertTrue(is_rate_limited(403, {"x-ratelimit-remaining": "0"}, {}))
+
+    def test_retry_after_header_is_rate_limiting(self):
+        self.assertTrue(is_rate_limited(403, {"retry-after": "60"}, {}))
+
+    def test_rate_limit_prose_is_rate_limiting(self):
+        body = {"message": "API rate limit exceeded for installation"}
+        self.assertTrue(is_rate_limited(403, {}, body))
+
+    def test_secondary_and_content_limits_are_rate_limiting(self):
+        self.assertTrue(is_rate_limited(
+            403, {}, {"message": "You have exceeded a secondary rate limit"}))
+        self.assertTrue(is_rate_limited(
+            403, {}, {"message": "were submitted too quickly"}))
+
+    def test_reset_header_alone_is_not_rate_limiting(self):
+        """x-ratelimit-reset rides on every response and is always in future."""
+        headers = {"x-ratelimit-reset": "99999999999",
+                   "x-ratelimit-remaining": "4999"}
+        self.assertFalse(is_rate_limited(403, headers, {"message": "Forbidden"}))
+
+    def test_none_body_does_not_raise(self):
+        self.assertFalse(is_rate_limited(403, {}, None))
+        self.assertTrue(is_rate_limited(429, {}, None))
+
+    def test_other_statuses_are_not_rate_limiting(self):
+        self.assertFalse(is_rate_limited(500, {}, {"message": "boom"}))
+
+    def test_abuse_detection_is_rate_limiting(self):
+        """Carries neither "rate limit" nor "submitted too quickly"."""
+        body = {"message": "You have triggered an abuse detection mechanism. "
+                           "Please retry your request again later."}
+        self.assertTrue(is_rate_limited(403, {}, body))
+
+    def test_fine_grained_token_denial_is_permanent(self):
+        """Recommended fix #1 in the workflow header may switch token types."""
+        body = {"message": "Resource not accessible by personal access token"}
+        self.assertFalse(is_rate_limited(403, {}, body))
+
+    def test_zero_retry_after_is_not_rate_limiting(self):
+        self.assertFalse(is_rate_limited(403, {"retry-after": "0"}, {"message": "no"}))
+
+
+class TestLowerHeaders(unittest.TestCase):
+    """Header names are case-insensitive on the wire; dict lookups are not."""
+
+    def test_server_casing_is_normalized(self):
+        headers = _lower_headers({"X-RateLimit-Remaining": "0",
+                                  "Retry-After": "60"})
+        self.assertEqual(headers["x-ratelimit-remaining"], "0")
+        self.assertEqual(headers["retry-after"], "60")
+
+    def test_normalized_headers_reach_the_classifier(self):
+        """Without normalization every lookup would silently miss."""
+        headers = _lower_headers({"X-RateLimit-Remaining": "0"})
+        self.assertTrue(is_rate_limited(403, headers, {"message": "Forbidden"}))
+
+    def test_empty_and_none_are_safe(self):
+        self.assertEqual(_lower_headers(None), {})
+        self.assertEqual(_lower_headers({}), {})
+
+    def test_email_message_headers_are_supported(self):
+        """The real source is email.message.Message from urllib."""
+        import email.message
+
+        message = email.message.Message()
+        message["X-RateLimit-Remaining"] = "0"
+        self.assertEqual(_lower_headers(message)["x-ratelimit-remaining"], "0")
+
+
+class TestRerunPrBuild(unittest.TestCase):
+    """rerun.py had no coverage at all; these pin old and new behaviour."""
+
+    def _args(self, **overrides):
+        defaults = {
+            "repository": "alibaba/rtp-llm",
+            "pr_number": "1285",
+            "head_sha": "42941eb7" + "0" * 32,
+            "workflow_file": "CI-request-trigger.yml",
+            "github_token": "token",
+            "max_retries": 3,
+            "retry_backoff": 2.0,
+        }
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    @staticmethod
+    def _run(**overrides):
+        run = {
+            "id": 31458188287,
+            "status": "completed",
+            "conclusion": "failure",
+            "head_repository": {"full_name": "alibaba/rtp-llm"},
+        }
+        run.update(overrides)
+        return run
+
+    # ---------------- baseline: pre-existing branches ----------------
+
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_no_run_posts_comment_and_returns_0(self, mock_runs, mock_comment):
+        mock_runs.return_value = []
+        mock_comment.return_value = (201, {}, {})
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+        self.assertEqual(mock_comment.call_count, 1)
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_active_run_is_left_alone(self, mock_runs, mock_rerun):
+        mock_runs.return_value = [self._run(status="in_progress", conclusion=None)]
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+        mock_rerun.assert_not_called()
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_successful_run_is_left_alone(self, mock_runs, mock_rerun):
+        mock_runs.return_value = [self._run(conclusion="success")]
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+        mock_rerun.assert_not_called()
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_rerun_triggered_returns_0(self, mock_runs, mock_rerun):
+        mock_runs.return_value = [self._run()]
+        mock_rerun.return_value = (201, {}, {})
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+        self.assertEqual(mock_rerun.call_count, 1)
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_conflict_409_returns_0(self, mock_runs, mock_rerun):
+        mock_runs.return_value = [self._run()]
+        mock_rerun.return_value = (409, {"message": "already running"}, {})
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_expired_422_posts_comment_and_returns_0(self, mock_runs, mock_rerun,
+                                                     mock_comment):
+        mock_runs.return_value = [self._run()]
+        mock_rerun.return_value = (422, {"message": "too old"}, {})
+        mock_comment.return_value = (201, {}, {})
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+        self.assertEqual(mock_comment.call_count, 1)
+
+    # ---------------- new: action_required needs approval, not rerun ----------
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_action_required_conclusion_skips_rerun(self, mock_runs, mock_rerun,
+                                                    mock_comment, mock_pages):
+        """It arrives as a conclusion with status=completed, not as a status."""
+        mock_runs.return_value = [self._run(
+            status="completed", conclusion="action_required",
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_pages.return_value = []
+        mock_comment.return_value = (201, {}, {})
+
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+        mock_rerun.assert_not_called()
+        body = mock_comment.call_args[0][2]
+        self.assertIn("Approve and run workflows", body)
+        self.assertIn("Vinkle-hzt/rtp-llm", body)
+        self.assertIn("Do NOT push an empty commit", body)
+
+    # ---------------- new: permission 403 is not throttling ----------------
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_fork_permission_403_explains_and_returns_0(self, mock_runs, mock_rerun,
+                                                        mock_comment, mock_pages):
+        mock_runs.return_value = [self._run(
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = []
+        mock_comment.return_value = (201, {}, {})
+
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+        self.assertEqual(mock_rerun.call_count, 1,
+                         "a permission denial must not be retried")
+        body = mock_comment.call_args[0][2]
+        self.assertIn("belongs to a fork", body)
+        self.assertIn("Vinkle-hzt/rtp-llm", body)
+        self.assertIn("Do NOT push an empty commit", body)
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_same_repo_permission_403_keeps_reapprove_hint(self, mock_runs, mock_rerun,
+                                                           mock_comment, mock_pages):
+        mock_runs.return_value = [self._run()]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = []
+        mock_comment.return_value = (201, {}, {})
+
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+        body = mock_comment.call_args[0][2]
+        self.assertNotIn("belongs to a fork", body)
+        self.assertIn("lgtm ready to ci", body)
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_deleted_fork_head_repository_gets_fork_wording(self, mock_runs, mock_rerun,
+                                                            mock_comment, mock_pages):
+        """A null head_repository means the fork was deleted, not that it is ours."""
+        mock_runs.return_value = [self._run(head_repository=None)]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = []
+        mock_comment.return_value = (201, {}, {})
+
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+        self.assertIn("belongs to a fork", mock_comment.call_args[0][2])
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_action_required_status_arm(self, mock_runs, mock_rerun,
+                                       mock_comment, mock_pages):
+        mock_runs.return_value = [self._run(
+            status="action_required", conclusion=None,
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_pages.return_value = []
+        mock_comment.return_value = (201, {}, {})
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+        mock_rerun.assert_not_called()
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_same_repo_action_required_does_not_claim_a_fork(
+            self, mock_runs, mock_rerun, mock_comment, mock_pages):
+        """An environment gate can hold a same-repo run at action_required."""
+        mock_runs.return_value = [self._run(conclusion="action_required")]
+        mock_pages.return_value = []
+        mock_comment.return_value = (201, {}, {})
+
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+        body = mock_comment.call_args[0][2]
+        self.assertNotIn("from a fork", body)
+        self.assertIn("action_required", body)
+
+    # ---------------- new: real throttling still retries ----------------
+
+    @patch("ci_gate.rerun.time.sleep")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_real_rate_limit_retries_then_fails_hard(self, mock_runs, mock_rerun,
+                                                     mock_sleep):
+        mock_runs.return_value = [self._run()]
+        mock_rerun.return_value = (
+            403, {"message": "API rate limit exceeded"},
+            {"x-ratelimit-remaining": "0"})
+        with self.assertRaises(GateError) as ctx:
+            rerun_pr_build(self._args())
+        self.assertEqual(ctx.exception.exit_code, 2)
+        self.assertEqual(mock_rerun.call_count, 3)
+
+    @patch("ci_gate.rerun.time.sleep")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_rate_limit_then_success(self, mock_runs, mock_rerun, mock_sleep):
+        mock_runs.return_value = [self._run()]
+        mock_rerun.side_effect = [
+            (429, {"message": "slow down"}, {}),
+            (201, {}, {}),
+        ]
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+        self.assertEqual(mock_rerun.call_count, 2)
+
+    # ---------------- new: comment dedupe ----------------
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_existing_marker_suppresses_duplicate_comment(self, mock_runs, mock_rerun,
+                                                          mock_comment, mock_pages):
+        args = self._args()
+        mock_runs.return_value = [self._run(
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = [
+            {"body": DEDUPE_MARKER % (args.head_sha, "forbidden")
+                     + "\n\nearlier explanation"},
+        ]
+        self.assertEqual(rerun_pr_build(args), 0)
+        mock_comment.assert_not_called()
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_marker_ignores_run_id_so_a_new_run_does_not_repost(
+            self, mock_runs, mock_rerun, mock_comment, mock_pages):
+        """Same SHA and reason, new run id: a run-scoped key would have spammed."""
+        args = self._args()
+        mock_runs.return_value = [self._run(
+            id=99999999999, head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = [
+            {"body": DEDUPE_MARKER % (args.head_sha, "forbidden")
+                     + "\n\nfrom run 31458188287"},
+        ]
+        self.assertEqual(rerun_pr_build(args), 0)
+        mock_comment.assert_not_called()
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_marker_for_another_sha_does_not_suppress(self, mock_runs, mock_rerun,
+                                                      mock_comment, mock_pages):
+        """The suppression half alone would pass with a constant marker."""
+        mock_runs.return_value = [self._run(
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = [
+            {"body": DEDUPE_MARKER % ("f" * 40, "forbidden") + "\n\nold head"},
+        ]
+        mock_comment.return_value = (201, {}, {})
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+        self.assertEqual(mock_comment.call_count, 1)
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_approval_marker_does_not_suppress_the_forbidden_comment(
+            self, mock_runs, mock_rerun, mock_comment, mock_pages):
+        """The real sequence: approval advice first, then a rerun denial.
+
+        A SHA-only key would leave the PR showing stale advice to approve a run
+        that has already been approved and run.
+        """
+        args = self._args()
+        mock_runs.return_value = [self._run(
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = [
+            {"body": DEDUPE_MARKER % (args.head_sha, "approval")
+                     + "\n\nclick Approve and run workflows"},
+        ]
+        mock_comment.return_value = (201, {}, {})
+
+        self.assertEqual(rerun_pr_build(args), 0)
+
+        self.assertEqual(mock_comment.call_count, 1)
+        self.assertIn("belongs to a fork", mock_comment.call_args[0][2])
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_dedupe_read_failure_does_not_escalate_to_exit_2(
+            self, mock_runs, mock_rerun, mock_comment, mock_pages):
+        """github_get_pages raises GateError(2) on any non-200."""
+        mock_runs.return_value = [self._run(
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.side_effect = GateError("::error::boom", 2)
+        mock_comment.return_value = (201, {}, {})
+
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+        self.assertEqual(mock_comment.call_count, 1)
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_dedupe_read_raising_bare_oserror_does_not_escalate(
+            self, mock_runs, mock_rerun, mock_comment, mock_pages):
+        """urllib lets socket.timeout and BadStatusLine through unwrapped."""
+        mock_runs.return_value = [self._run(
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.side_effect = OSError("connection reset")
+        mock_comment.return_value = (201, {}, {})
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_comment_post_failure_warns_but_returns_0(self, mock_runs, mock_rerun,
+                                                      mock_comment, mock_pages):
+        mock_runs.return_value = [self._run(
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = []
+        mock_comment.return_value = (403, {"message": "denied"}, {})
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+    @patch("ci_gate.rerun.github_get_pages")
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_comment_post_raising_does_not_escalate(self, mock_runs, mock_rerun,
+                                                    mock_comment, mock_pages):
+        """One network blip while posting must not become exit 2."""
+        mock_runs.return_value = [self._run(
+            head_repository={"full_name": "Vinkle-hzt/rtp-llm"})]
+        mock_rerun.return_value = (
+            403, {"message": "Resource not accessible by integration"}, {})
+        mock_pages.return_value = []
+        mock_comment.side_effect = GateError("::error::Network error", 2)
+        self.assertEqual(rerun_pr_build(self._args()), 0)
+
+    # ---------------- unexpected statuses still fail hard ----------------
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    def test_unexpected_status_raises_exit_2(self, mock_runs, mock_rerun):
+        mock_runs.return_value = [self._run()]
+        mock_rerun.return_value = (500, {"message": "server error"}, {})
+        with self.assertRaises(GateError) as ctx:
+            rerun_pr_build(self._args())
+        self.assertEqual(ctx.exception.exit_code, 2)
+        self.assertEqual(mock_rerun.call_count, 1)
 
 
 if __name__ == "__main__":
