@@ -9,20 +9,50 @@ Both PD endpoints must select the same mode, checkpoint revision and cache layou
 | MTP | mtp | kimi_k3_mtp | Output AttnRes, before final RMSNorm (H) | Independent FULL MLA |
 
 For MTP, set `SP_CHECKPOINT_PATH` to the local data-disk draft-only checkpoint,
-`LOAD_METHOD=fastsafetensors`, `SP_ACT_TYPE=BF16` and `GEN_NUM_PER_CIRCLE=3`.
+`LOAD_METHOD=fastsafetensors` and `GEN_NUM_PER_CIRCLE=3`.
 The target uses its separate `CHECKPOINT_PATH`. All shards referenced by the draft index form one
 MTP layer; no checkpoint merge is needed. Candidate count does not replicate
 the MTP module or its cache. The single nextn layer starts at the draft config’s `num_hidden_layers`
 (93 in the delivered checkpoint); runtime local layer 0 maps to the global cache layer after target.
 
-The two-host smoke defaults to attention weight FP8
-(`KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block`) and dense MLA FP8
-(`KIMI_K3_MLA_FP8=1`) for both target and MTP. MLA uses ordinary E4M3 cache
-with matching fixed scales on both endpoints; KDA recurrent state retains its
-native representation. MoE experts retain checkpoint-native MXFP4. BF16 remains
-the activation/output and embedding/head dtype, so `SP_ACT_TYPE=BF16` does not
-disable the attention FP8 paths. EAGLE3 retains its separate precision policy.
-Set the two FP8 switches to `none` and `0` for a BF16 attention comparison.
+The two-host smoke defaults to target attention weight FP8
+(`KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block`) and target dense MLA FP8
+(`KIMI_K3_MLA_FP8=1`). These switches apply only to `kimi_k3`.
+K3 MTP attention projections, MLA compute and cache always use the draft
+checkpoint's native BF16 dtype. Global `FP8_KV_CACHE`,
+`BLOCKWISE_USE_FP8_KV_CACHE`, `INT8_KV_CACHE` and target `ACT_TYPE` do not
+change MTP precision. No extra MTP precision switch is required; unsupported
+draft dtypes and runtime `SP_QUANTIZATION` fail during initialization.
+
+This is attention/cache precision isolation. Checkpoint-native MXFP4 experts
+and the existing MegaMoE internal FP8 activation compute are unchanged.
+Embedding, shared head and recurrent hidden retain their BF16 contract.
+EAGLE3 retains its existing precision policy.
+
+The three physical pools are target FP8 MLA, target native KDA, and draft BF16
+MLA. At 128 tokens per block, an MTP MLA layer stores `128 * 576 * 2 = 147456`
+bytes, twice its previous FP8 payload. The cache creator includes this draft
+spec in its allocation budget; disabling FP8 does not guarantee lower peak
+memory because BF16 expanded attention workspace remains.
+
+Upgrade or roll back Prefill and Decode together and recreate both caches.
+Old FP8 MTP cache data cannot be reused with the BF16 draft. Keep target FP8
+and Decode CUDA Graph enabled:
+
+```bash
+SP_TYPE=mtp
+SP_MODEL_TYPE=kimi_k3_mtp
+GEN_NUM_PER_CIRCLE=3
+KIMI_K3_ATTENTION_QUANTIZATION=fp8_per_block
+KIMI_K3_MLA_FP8=1
+LOAD_METHOD=fastsafetensors
+# Decode:
+ENABLE_CUDA_GRAPH=1
+```
+
+Native attention isolation requires an image containing the precision-isolation
+change; see [its validation record](kimi_k3_mtp_native_precision_validation.md)
+for the exact source revision and remaining validation.
 
 The reference is vLLM **v0.28.0**, commit
 `2cf0a6915ce544dc493a0990f2ea38d81601128a`. References below are relative to that
@@ -63,11 +93,13 @@ cache-store/RDMA path; proposal tokens, probabilities and recurrent H use the
 existing RPC tensors. MTP reuses this protocol; the upstream FP8 path also
 checks MLA format and fixed scales when allocating PD cache.
 
-Both endpoints default to TP8EP8. Set `KIMI_K3_TP_SIZE` and
-`KIMI_K3_EP_SIZE` together to change the local topology; the current MegaMoE
-path requires TP=EP=world size, and Prefill CP remains unsupported.
-Only TP8EP8 has passed the full-model GPU smoke. Lower TP sizes may not fit
-the full checkpoint in the available device memory.
+The two-host smoke uses Prefill TP8EP8 and Decode TP1/DP8/KTP8/EP8.
+Projection-KTP belongs to the target; the MTP draft keeps KTP1 and receives
+DP-local tokens, with experts distributed over EP8. Baseline `9a5acff` includes
+this MTP topology support. Prefill CP remains unsupported. The standalone
+launcher also accepts legacy TP/EP configurations; those runs do not validate
+the DP8/KTP8 smoke topology. Full-model acceptance of the new native-attention
+precision contract is tracked separately from the older TP8EP8 results below.
 The smoke forwards `GEN_NUM_PER_CIRCLE` (default 3) without changing the
 number of recurrent modules.
 For multimodal requests the target still injects visual embeddings. MTP uses
@@ -79,8 +111,11 @@ unchanged. This corrects the earlier plan to copy EAGLE3 visual injection.
 Set `PREFILL_SMOKE_ARTIFACT_ROOT` and `DECODE_SMOKE_ARTIFACT_ROOT` when the
 endpoints use different local data disks; each overrides the common
 `SMOKE_ARTIFACT_ROOT` for its own role.
-The two-host smoke driver forwards SP_TYPE/SP_MODEL_TYPE; without them it keeps
-the EAGLE3 default. Run four-layer flow before the full 93-layer all suite.
+The two-host smoke defaults to MTP. The driver explicitly sends `SP_TYPE=mtp`
+and `SP_MODEL_TYPE=kimi_k3_mtp` to both roles when they are unset; direct role
+startup uses the same default. The examples specify both values explicitly.
+EAGLE3 requires an explicit `SP_TYPE=eagle3` and its own checkpoint; mismatched
+model types are rejected. Run four-layer flow before the full 93-layer all suite.
 For the four-layer `SMOKE_SUITE=flow` fixture, set `SMOKE_CHUNK_TOKENS=4096`:
 its approximately 5K-token prompt must cross the actual runtime chunk boundary.
 Keep `SMOKE_CHUNK_TOKENS=65536` for the full 93-layer `SMOKE_SUITE=all` suite.
@@ -89,8 +124,8 @@ threshold; a request that never reaches a second chunk does not pass flow.
 
 ## Validation status
 
-After rebasing onto `origin/feat/k3_dev@b0ee8c10a`, the full 93-layer
-FP8 + TP8EP8 + Decode CUDA Graph + MTP smoke passed on 106 (Prefill) and
+The following result predates native MTP attention isolation. After rebasing onto `origin/feat/k3_dev@b0ee8c10a`, the full 93-layer
+target-and-MTP FP8 + TP8EP8 + Decode CUDA Graph + MTP smoke passed on 106 (Prefill) and
 142 (Decode), at runtime commit `0986ea1fc`. All 31 cases passed. The MTP
 chunk case crossed the 65,536-token boundary with a 90,135-token input and
 63 accepted draft tokens; long-prefix hits reused 90,112 tokens. Both remote

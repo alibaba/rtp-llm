@@ -8,14 +8,15 @@
 # accuracy/cache acceptance run. The flow suite is only a four-layer RDMA
 # connectivity and multi-round preflight; it is not a substitute for all.
 #
+#    SP_TYPE=mtp SP_MODEL_TYPE=kimi_k3_mtp \
 #    PREFILL_SSH_TARGET=L20-dev-112 \
 #    DECODE_SSH_TARGET=L20-dev-113 \
 #    PREFILL_REPO_ROOT=/data3/user/RTP-LLM/github-opensource \
 #    DECODE_REPO_ROOT=/data0/user/RTP-LLM/github-opensource \
 #    PREFILL_CHECKPOINT_PATH=/data3/user/Kimi-K3 \
 #    DECODE_CHECKPOINT_PATH=/data0/user/Kimi-K3 \
-#    PREFILL_SP_CHECKPOINT_PATH=/data3/user/Kimi-K3-Eagle3 \
-#    DECODE_SP_CHECKPOINT_PATH=/data0/user/Kimi-K3-Eagle3 \
+#    PREFILL_SP_CHECKPOINT_PATH=/data3/user/Kimi-K3-MTP \
+#    DECODE_SP_CHECKPOINT_PATH=/data0/user/Kimi-K3-MTP \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -27,7 +28,9 @@
 # endpoint before starting Prefill, matching the controller driver:
 #
 # 1. Start the Decode role:
-#    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
+#    SP_TYPE=mtp SP_MODEL_TYPE=kimi_k3_mtp \
+#    CHECKPOINT_PATH=/ssd/5/kimi-k3 \
+#    SP_CHECKPOINT_PATH=/ssd/5/kimi-k3-mtp \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -36,7 +39,9 @@
 #
 # 2. Start Prefill with the same endpoints and run ID (it waits for both the
 #    Decode model and Decode result listener to become ready):
-#    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
+#    SP_TYPE=mtp SP_MODEL_TYPE=kimi_k3_mtp \
+#    CHECKPOINT_PATH=/ssd/5/kimi-k3 \
+#    SP_CHECKPOINT_PATH=/ssd/5/kimi-k3-mtp \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -57,7 +62,7 @@
 # process group.
 # The full-model profile enables the selected K3 draft mode on both roles. The
 # role-local draft checkpoint is mandatory; there is no non-MTP fallback.
-# The target model uses Projection-KTP while the Eagle3 draft remains KTP1.
+# The target model uses Projection-KTP while the selected draft remains KTP1.
 # Both ordinary Decode and Target Verify participate in synchronized graph waves.
 
 set -Eeuo pipefail
@@ -72,8 +77,9 @@ die() {
 usage() {
     cat >&2 <<'EOF'
 Usage (run inside lhc_GPU as the normal user):
+  SP_TYPE=mtp SP_MODEL_TYPE=kimi_k3_mtp \
   CHECKPOINT_PATH=/local/path/to/Kimi-K3 \
-  SP_CHECKPOINT_PATH=/local/path/to/Kimi-K3-Eagle3 \
+  SP_CHECKPOINT_PATH=/local/path/to/Kimi-K3-MTP \
   PREFILL_ENDPOINT=prefill-host:27188 \
   DECODE_ENDPOINT=decode-host:28188 \
   SMOKE_RUN_ID=my-run \
@@ -83,17 +89,18 @@ The two roles may start concurrently. Prefill waits for both the Decode model
 and result channel. The default result channel is DECODE host at DECODE port +
 100; override SMOKE_RESULT_ENDPOINT on both hosts when that port is unavailable.
 
-Weight FP8 and MLA FP8 are enabled by default. Set attention quantization to
-none and MLA FP8 to 0 for BF16; use the same precision and scales on both roles.
-EAGLE3 remains the default draft; SP_TYPE=mtp selects independent K3 MTP.
+Target weight FP8 and MLA FP8 are enabled by default. K3 MTP attention/cache
+remain native BF16. Use the same precision configuration and scales on both roles.
+K3 MTP is the default: SP_TYPE=mtp and SP_MODEL_TYPE=kimi_k3_mtp.
+EAGLE3 requires explicit SP_TYPE=eagle3 and a matching draft checkpoint.
 See example/k3/FP8_MLA.md for FP8 examples.
 The all suite also seeds a ~600k-token conversation, then appends a retrieval
 question. It checks the answer, PD metadata and a historical prefix larger than
 one expanded-KV budget. This correctness case runs by default without profiling;
 its request, token IDs and results are saved under prefill/long-prefix/.
 The Projection-KTP profile uses Prefill TP8/EP8 plus Decode DP8/KTP8/EP8.
-The target model uses KTP8; Eagle3 remains KTP1. KTP with MTP is rejected by
-the model topology validator, while the legacy KTP1 MTP path remains available.
+Both EAGLE3 and MTP use this Projection-KTP profile: target KTP8, draft KTP1,
+with Decode CUDA Graph enabled. MTP attention and cache remain native BF16.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -191,7 +198,7 @@ role="${1,,}"
 : "${DECODE_ENDPOINT:?DECODE_ENDPOINT is required}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:?CHECKPOINT_PATH is required}"
 SMOKE_RUN_ID="${SMOKE_RUN_ID:-manual}"
-smoke_sp_type="${SP_TYPE:-eagle3}"
+smoke_sp_type="${SP_TYPE:-mtp}"
 case "${smoke_sp_type}" in
     eagle3) smoke_sp_model_type=kimi_k3_mla_swa_eagle3 ;;
     mtp) smoke_sp_model_type=kimi_k3_mtp ;;
@@ -326,6 +333,8 @@ smoke_tp_size="${TP_SIZE:-${KIMI_K3_TP_SIZE:-8}}"
 smoke_ep_size="${EP_SIZE:-${KIMI_K3_EP_SIZE:-${smoke_tp_size}}}"
 [[ "${smoke_tp_size}" =~ ^[1-9][0-9]*$ && "${smoke_ep_size}" == "${smoke_tp_size}" ]] \
     || die "this K3 MegaMoE smoke requires positive TP == EP"
+smoke_decode_topology=dp8_ktp8_ep8
+smoke_decode_dp_size=8
 smoke_proposal_tokens="${GEN_NUM_PER_CIRCLE:-3}"
 [[ "${smoke_proposal_tokens}" =~ ^[1-9][0-9]*$ ]] \
     || die "GEN_NUM_PER_CIRCLE must be positive"
@@ -564,11 +573,11 @@ pathlib.Path(output).write_text(
 PY
 }
 
-verify_projection_ktp_decode_log() {
+verify_decode_graph_log() {
     [[ "${role}" == "decode" ]] || return 0
     local engine_log="${role_dir}/runtime/work/${role}/logs/engine.log"
     local rank_log_dir="${role_dir}/runtime/logs/${role}"
-    local evidence_file="${role_dir}/projection-ktp-evidence.txt"
+    local evidence_file="${role_dir}/decode-graph-evidence.txt"
     local rank_logs=("${rank_log_dir}"/main_*.log)
     if [[ ! -e "${rank_logs[0]}" ]]; then
         rank_logs=()
@@ -604,6 +613,11 @@ verify_fp8_log() {
         || die "${role} logs have no K3 FP8 weight execution evidence"
     grep -Eh "K3 MLA FP8: dense_e4m3_v1" "${logs[@]}" | sed -n '1,5p' >>"${evidence_file}" \
         || die "${role} logs have no MLA FP8 runtime evidence"
+    if [[ "${smoke_sp_type}" == mtp ]]; then
+        grep -Eh 'K3 precision: model=kimi_k3_mtp compute=torch.bfloat16 attention_quantization=none mla_fp8_compute=False kv_cache_dtype=KvCacheDataType.BASE' "${logs[@]}" \
+            | sed -n '1,8p' >>"${evidence_file}" \
+            || die "${role} logs have no native MTP attention/cache precision evidence"
+    fi
 }
 
 verify_role_environment() {
@@ -851,7 +865,7 @@ apply_validated_decode_profile() {
     # Exercise several arbitrary public graph buckets; the coordinator chooses
     # one common key from the DP-local maximum batch.
     export DECODE_CAPTURE_CONFIG=1,2,4,8
-    export KIMI_K3_DECODE_TOPOLOGY=dp8_ktp8_ep8
+    export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
@@ -868,8 +882,9 @@ fi
 
 echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
+echo "[${role}] sp_type=${smoke_sp_type} sp_model_type=${smoke_sp_model_type}"
 echo "[${role}] draft_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
-echo "[${role}] projection_ktp=dp8_ktp8_ep8 target_ktp=8 draft_ktp=1"
+echo "[${role}] decode_topology=${smoke_decode_topology} decode_dp=${smoke_decode_dp_size} draft_ktp=1"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
@@ -948,7 +963,7 @@ PY
     # loading. Decode has processed the Prefill suite once PASS arrives.
     verify_fp8_log
     verify_rdma_selected_devices
-    verify_projection_ktp_decode_log
+    verify_decode_graph_log
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
     keep_cluster_after_success
     exit 0
@@ -985,7 +1000,7 @@ decode_role_addrs=()
 if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
     IFS=',' read -r -a decode_role_addrs <<<"${SMOKE_DECODE_ROLE_ADDRS}"
 else
-    for ((rank = 0; rank < 8; ++rank)); do
+    for ((rank = 0; rank < smoke_decode_dp_size; ++rank)); do
         rank_http_port="$((decode_port + rank * 9))"
         rank_grpc_port="$((rank_http_port + 1))"
         decode_role_addrs+=(
@@ -993,8 +1008,8 @@ else
         )
     done
 fi
-[[ "${#decode_role_addrs[@]}" -eq 8 ]] \
-    || die "DP8 formal smoke requires exactly 8 ordered Decode role addresses"
+[[ "${#decode_role_addrs[@]}" -eq "${smoke_decode_dp_size}" ]] \
+    || die "formal smoke requires ${smoke_decode_dp_size} ordered Decode role addresses"
 decode_role_addr_args=()
 for addr in "${decode_role_addrs[@]}"; do
     [[ "${addr}" =~ ^[^:]+:[1-9][0-9]*:[1-9][0-9]*$ ]] \
@@ -1006,6 +1021,7 @@ python3 -u "${case_runner}" \
     --base-url "http://127.0.0.1:${prefill_port}" \
     --decode-health-url "http://${decode_host}:${decode_port}/health" \
     "${decode_role_addr_args[@]}" \
+    --decode-dp-size "${smoke_decode_dp_size}" \
     --output "${accuracy_file}" \
     --suite "${smoke_suite}" \
     --namespace "${SMOKE_RUN_ID}" \
