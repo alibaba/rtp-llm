@@ -190,6 +190,11 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             expert_count,
         )
         del s2_raw
+
+        # The MTP shared-expert path has the same large layout-transform peak
+        # as the regular MegaMoE path. Release inactive allocator segments
+        # before and after DeepGEMM's contiguous interleave buffers.
+        torch.cuda.empty_cache()
         (self._mega_l1_w, self._mega_l1_sf), (
             self._mega_l2_w,
             self._mega_l2_sf,
@@ -199,6 +204,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             activation="situ",
         )
         del w13, s13, w2, s2
+        torch.cuda.empty_cache()
 
         shared_l1 = self.weights.pop(K3W.MOE_SHARED_GATE_UP)
         shared_down_storage = self.weights.pop(K3W.MOE_SHARED_DOWN)

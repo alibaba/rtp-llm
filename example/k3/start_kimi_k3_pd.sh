@@ -64,6 +64,7 @@ Model and cache (normally change these together on both roles):
   MAX_SEQ_LEN                            defaults to 16384
   MAX_BATCH_TOKENS_SIZE                  optional token admission limit
   KV_CACHE_MEM_MB                        defaults: Prefill 43000, Decode 46000;
+                                         <=0 selects automatic GPU KV budgeting
   SEQ_SIZE_PER_BLOCK                     defaults to 4096
   KERNEL_SEQ_SIZE_PER_BLOCK              defaults to 128
   REUSE_CACHE                            defaults to 0
@@ -277,6 +278,8 @@ else
 fi
 
 kv_cache_mem_mb="${KV_CACHE_MEM_MB:-${default_kv_cache_mem_mb}}"
+[[ "${kv_cache_mem_mb}" =~ ^-?[0-9]+$ ]] \
+    || die "KV_CACHE_MEM_MB must be an integer (<=0 selects automatic budgeting), got ${kv_cache_mem_mb}"
 enable_cuda_graph_debug_mode="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
 
 # ---------------------------------------------------------------------------
@@ -332,7 +335,6 @@ if [[ "${enable_cuda_graph_debug_mode}" == "1" && "${enable_cuda_graph}" != "1" 
 fi
 for integer_name in \
     max_seq_len \
-    kv_cache_mem_mb \
     seq_size_per_block \
     kernel_seq_size_per_block \
     concurrency_limit \
@@ -605,7 +607,7 @@ server_args=(
     --kernel_seq_size_per_block "${kernel_seq_size_per_block}"
     --kv_cache_mem_mb "${kv_cache_mem_mb}"
     --int8_kv_cache 0
-    --fp8_kv_cache 0
+    --fp8_kv_cache "${FP8_KV_CACHE:-0}"
     --linear_step "${linear_step}"
     --kimi_k3_kda_pool_blocks "${kimi_k3_kda_pool_blocks}"
     --ssm_state_dtype fp32

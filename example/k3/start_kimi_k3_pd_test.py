@@ -4,6 +4,7 @@ import socket
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from typing import Optional
 
 
@@ -99,6 +100,23 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
 
     def _dry_run(self, role: str, topology: str, **kwargs) -> str:
         return self._run(role, topology, **kwargs).stdout
+
+    def test_default_and_explicit_kv_budgets_reach_both_roles(self):
+        for role, default in (("prefill", "43000"), ("decode", "46000")):
+            with mock.patch.dict(os.environ):
+                os.environ.pop("KV_CACHE_MEM_MB", None)
+                output = self.run_dry_run(role)
+                self.assertIn(f"--kv_cache_mem_mb {default}", output)
+            for value in ("-1", "0", "24000"):
+                with self.subTest(role=role, value=value):
+                    output = self.run_dry_run(role, KV_CACHE_MEM_MB=value)
+                    self.assertIn(f"--kv_cache_mem_mb {value}", output)
+
+    def test_invalid_kv_budget_is_rejected_before_launch(self):
+        for value in ("auto", "1.5"):
+            result = self._run("decode", check=False, env_overrides={"KV_CACHE_MEM_MB": value})
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn("command:", result.stdout)
 
     def test_configurable_parallelism_reaches_launcher(self):
         for tp in (1, 2, 4, 8, 16):
