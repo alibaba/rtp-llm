@@ -30,7 +30,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBa
 from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
     QuantizedActivation,
 )
-from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _TEST_TMPDIR = os.environ.get("TEST_TMPDIR")
@@ -126,6 +126,106 @@ class FlashMlaCanonicalPrefixQuantizedActivationTest(TestCase):
 
 
 class FlashMlaDensePrefillConfigForwardingTest(TestCase):
+    def test_swa_maps_both_pages_on_each_rank_while_full_keeps_page_owners(self):
+        configs = AttentionConfigs()
+        configs.head_num = 8
+        configs.kv_lora_rank = 512
+        configs.rope_head_dim = 64
+        configs.nope_head_dim = configs.v_head_dim = 128
+        configs.kernel_tokens_per_block = 128
+        configs.use_mla = True
+        positions = torch.tensor([0, 127, 128, 255], dtype=torch.int64)
+        inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=None,
+            kv_cache_kernel_block_id_device=torch.tensor([[11, 22]]),
+        )
+        for shards in (8, 16):
+            for rank in range(shards):
+                for sliding_window in (0, 128):
+                    for fp8_compute in (False, True):
+                        with self.subTest(
+                            shards=shards,
+                            rank=rank,
+                            window=sliding_window,
+                            fp8=fp8_compute,
+                        ):
+                            parallel = ParallelismConfig()
+                            parallel.tp_size, parallel.tp_rank = shards, rank
+                            parallel.prefill_cp_config.kv_cache_sharded = True
+                            configs.sliding_window = sliding_window
+                            configs.kv_cache_dtype = (
+                                KvCacheDataType.FP8
+                                if fp8_compute
+                                else KvCacheDataType.BASE
+                            )
+                            configs.mla_fp8_compute = fp8_compute
+                            configs.mla_fp8_q_scale = 0.5
+                            configs.mla_fp8_kv_scale = 0.25
+                            backend_args = {}
+
+                            def backend(*args, **kwargs):
+                                backend_args.update(kwargs)
+                                return SimpleNamespace()
+
+                            # The kernel backend and CUDA-only scalar allocation
+                            # are external; wrapper construction and mapping stay real.
+                            with (
+                                patch.object(
+                                    flashmla_dense_prefill,
+                                    "MlaFlashMLAPrefillOp",
+                                    backend,
+                                ),
+                                patch.object(
+                                    MlaFlashMLAPrefillImpl,
+                                    "create_params",
+                                    return_value=None,
+                                ),
+                                patch("torch.full", return_value=torch.tensor(0.25)),
+                            ):
+                                impl = MlaFlashMLAPrefillImpl(
+                                    configs,
+                                    inputs,
+                                    [],
+                                    torch.empty(0),
+                                    parallelism_config=parallel,
+                                )
+                            impl.fmha_params = SimpleNamespace(
+                                positions_d=positions,
+                                batch_indice_d=torch.zeros_like(positions),
+                            )
+                            with (
+                                patch("torch.cuda.current_stream", return_value=None),
+                                patch.object(
+                                    torch.Tensor, "record_stream", return_value=None
+                                ),
+                            ):
+                                slots = impl._device_slot_mapping()
+                            expected = [1408, 1535, 2816, 2943]
+                            if sliding_window == 0:
+                                expected = (
+                                    [1408, 1535, -1, -1]
+                                    if rank == 0
+                                    else (
+                                        [-1, -1, 1408, 1535]
+                                        if rank == 1
+                                        else [-1, -1, -1, -1]
+                                    )
+                                )
+                            self.assertEqual(slots.tolist(), expected)
+                            self.assertEqual(
+                                backend_args["external_prefix_cache"],
+                                sliding_window == 0,
+                            )
+                            self.assertEqual(backend_args["fp8_compute"], fp8_compute)
+                            self.assertEqual(backend_args["q_scale"], 0.5)
+                            self.assertEqual(backend_args["kv_scale"], 0.25)
+                            self.assertEqual(
+                                impl.kv_cache_write_op.kv_cache_type,
+                                "fp8" if fp8_compute else "auto",
+                            )
+                            self.assertTrue(parallel.kv_page_rr_enabled())
+
     def test_wrapper_forwards_expanded_kv_budget(self) -> None:
         configs = AttentionConfigs()
         configs.head_num = 96

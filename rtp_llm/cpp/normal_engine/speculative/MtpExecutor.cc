@@ -1112,16 +1112,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         linear_group_token_spans_ = torch::tensor(group_spans, torch::kInt32).to(torch::kCUDA);
         target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
         draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
-        if (propose_params->sp_type == SP_TYPE_EAGLE3) {
-            // EAGLE-3's runtime layer is dense MLA even when its checkpoint
-            // reuses a target config whose layer 0 is linear attention. The
-            // cache accessor uses this type to expose a physical MLA block as
-            // kernel pages. Keeping the inherited LINEAR type leaves the raw
-            // physical view in place while FlashMLA indexes kernel-page ids.
-            std::fill(draft_cache_layer_layout.layer_group_types.begin(),
-                      draft_cache_layer_layout.layer_group_types.end(),
-                      CacheGroupType::FULL);
-        }
     }
 
     // CacheConfig is the single source of truth for tokens_per_block /
