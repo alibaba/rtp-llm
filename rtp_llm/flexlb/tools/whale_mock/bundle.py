@@ -37,6 +37,16 @@ def run():
             cfg["profile"], jvm_heap=cfg["master_heap"], raw_config=raw
         )
     )
+    performance_path = (cfg_path.parent / cfg["performance"]).resolve()
+    eos_json = os.environ.get("MOCK_EOS_CONFIG_JSON")
+    if eos_json is not None:
+        performance = json.loads(performance_path.read_text())
+        eos = json.loads(eos_json)
+        if not isinstance(eos, dict):
+            raise ValueError("MOCK_EOS_CONFIG_JSON must be a JSON object")
+        performance.setdefault("decode", {})["eos"] = eos
+        performance_path = runtime / "performance.json"
+        performance_path.write_text(json.dumps(performance))
     children, logs = [], []
     stopping = False
 
@@ -101,7 +111,7 @@ def run():
                 "--discovery-file",
                 str(runtime / "discovery.json"),
                 "--performance",
-                str((cfg_path.parent / cfg["performance"]).resolve()),
+                str(performance_path),
                 "--master-config",
                 str(runtime / "master-config.json"),
                 "--block-size",

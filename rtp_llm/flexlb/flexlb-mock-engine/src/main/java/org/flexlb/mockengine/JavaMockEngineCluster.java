@@ -6104,6 +6104,9 @@ public final class JavaMockEngineCluster {
             // reads exactly its own window; /snapshot sees the in-progress
             // window too). hit_tokens_total is cumulative cache-reuse
             // accounting (the cache_saved_tokens source).
+            snap.put("context_compute_tokens_total", lifetimeContextComputeTokens.sum());
+            snap.put("context_tokens_total", lifetimeContextTokens.sum());
+            snap.put("generate_tokens_total", lifetimeGenerateTokens.sum());
             snap.put("context_tps",
                     lastWindowContextCompute.get() + contextComputeTokens.get());
             snap.put("context_tps_with_cache",

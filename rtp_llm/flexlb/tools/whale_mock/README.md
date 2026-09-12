@@ -25,3 +25,31 @@ master 通过本地 discovery 文件发现各引擎，不依赖 P/D VIP。
 未完成真实复制流量验证之前，不宣称成功率或性能已对齐。
 
 Bundle jars use the explicit Maven profile `opensource,!internal,whale-bundle`: KMonitor is included, while engine discovery remains local to the Pod. VipServer is intentionally absent from these test jars; the default internal profile is unchanged.
+
+
+### 可选的提前 EOS 模型（默认关闭）
+
+真实引擎把 `max_new_tokens` 当上限，在 `min_new_tokens` 后允许 EOS；
+`ignore_eos=true` 禁止 EOS。测试 mock 可在 performance JSON 中配置：
+
+```json
+{"decode":{"eos":{"enabled":true,"distribution":"geometric","mean_tokens":1024,"seed":20260912}}}
+```
+
+Whale bundle 也可通过 `MOCK_EOS_CONFIG_JSON` 传入上述 `eos` 对象。
+不设置或 `enabled=false` 完整保留旧行为；仓库默认配置不启用。
+启动时生成运行目录下的 performance.json，不修改原始流量及 master 可见参数。
+
+这是常量 EOS 概率模型：允许 EOS 后，每 token 的结束概率为 `1/mean_tokens`。
+默认最小长度为 1 时，未被请求上限截断的平均长度是 `mean_tokens`；
+较大的 min_new_tokens 会推迟分布起点。请求 ID 和 seed 决定采样，P/D 与重试一致，
+不会随并发或执行步数重新抽样。显式 replay output_len 优先，启用模型时仍遵守请求上下限。
+完成沿用现有 decode 正常收尾路径，释放 KV/执行位，无需 Fetch。
+
+示例 1024 是暂定模拟参数，**没有当前生产输出分布校准，不代表生产均值**。
+此模型对齐结束约束，不模拟语言内容、真实 token EOS、stop words 或 beam search。
+真实分布不是几何分布时，应使用真实 replay output_len 或重新校准模型，不能靠调短长度证明生产吞吐。
+
+验证使用实际 D 完成计数及 `mock_generate_tokens_total` 增量，输入侧用
+`mock_context_tokens_total` / `mock_context_compute_tokens_total`；这些累计计数不受抓取窗口重置影响。
+前端 schedule acknowledgement 仍不是推理完成，不能当端到端成功率。

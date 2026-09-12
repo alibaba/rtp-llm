@@ -147,6 +147,7 @@ final class MockPerformanceModel {
             + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
 
     private volatile int blockSize;
+    private MockEosModel eosModel;
     private final double sleepScale;
     private final double prefillScale;
     // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
@@ -262,6 +263,7 @@ final class MockPerformanceModel {
                 prefillFormula, List.copyOf(decodePoints), stepBaseMs, stepPerRunningMs,
                 tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
         // Explicit overrides installed before startup are part of that engine's initial settings.
+        copy.eosModel = eosModel;
         copy.overrideFixedPrefillMs = overrideFixedPrefillMs;
         copy.overrideDecodeStepMs = overrideDecodeStepMs;
         copy.overrideDecodeScale = overrideDecodeScale;
@@ -344,13 +346,15 @@ final class MockPerformanceModel {
                     + "': decode.reserve_step must be >= 0 (got " + decodeReserveStep + ")");
         }
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
-        return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
+        MockPerformanceModel model = new MockPerformanceModel(blockSize, sleepScale, prefillScale,
                 prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax,
                 maxBatchTokens, maxBatchRequests, formula,
                 List.copyOf(points), stepBaseMs, stepPerRunningMs, tokensPerStep,
                 decodeReserveStep,
                 decode.path("scale").asDouble(1.0),
                 reportQueuedAsKvAllocated, jitterPct);
+        model.eosModel = MockEosModel.load(decode.path("eos"));
+        return model;
     }
 
     /**
@@ -398,6 +402,7 @@ final class MockPerformanceModel {
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
         int inputLen = input.getTokenIdsCount();
         int outputLen = Math.max(1, input.getGenerateConfig().getMaxNewTokens());
+        boolean explicitOutputLength = false;
         List<Long> blockKeys = new ArrayList<>();
         String uniqueKey = input.getGenerateConfig().getUniqueKey();
         if (uniqueKey.startsWith("flexlb_eval:")) {
@@ -408,6 +413,7 @@ final class MockPerformanceModel {
                 JsonNode meta = MAPPER.readTree(uniqueKey);
                 inputLen = meta.path("input_len").asInt(inputLen);
                 outputLen = meta.path("output_len").asInt(outputLen);
+                explicitOutputLength = meta.has("output_len");
                 for (JsonNode key : meta.path("block_cache_keys")) {
                     blockKeys.add(key.bigIntegerValue().longValue());
                 }
@@ -424,7 +430,8 @@ final class MockPerformanceModel {
         int hitBlocks = cache.prefixHitBlocks(blockKeys);
         long hitTokens = (long) hitBlocks * blockSize;
         hitTokens = Math.min(hitTokens, inputLen);
-        return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys),
+        outputLen = eosModel.outputLength(input, Math.max(1, outputLen), explicitOutputLength);
+        return new RequestShape(input, inputLen, outputLen, List.copyOf(blockKeys),
                 hitTokens, hitBlocks);
     }
 

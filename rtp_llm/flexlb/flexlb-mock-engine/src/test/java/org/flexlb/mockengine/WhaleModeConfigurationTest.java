@@ -93,6 +93,16 @@ class WhaleModeConfigurationTest {
     @Test
     @org.junit.jupiter.api.Timeout(15)
     void bundleCompletesWithoutFetchWithOneSharedNetworkWorker() throws Exception {
+        assertBundleCompletion(false);
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(15)
+    void eosCompletesHugeOutputCapAndReleasesBothPoolsWithoutFetch() throws Exception {
+        assertBundleCompletion(true);
+    }
+
+    private void assertBundleCompletion(boolean eos) throws Exception {
         var cfg = config("--whale", "true", "--whale-bundle", "true", "--auto-fetch", "true",
                 "--host", "10.1.2.3", "--n-prefill", "1", "--n-decode", "1");
         Path perf = directory.resolve("bundle-perf.json");
@@ -100,6 +110,13 @@ class WhaleModeConfigurationTest {
         Files.writeString(perf, "{\"block_size\":1024,\"sleep_scale\":1,\"jitter_pct\":0,"
                 + "\"prefill\":{\"scale\":1},\"decode\":{\"scale\":1,\"tokens_per_step\":1,"
                 + "\"step_ms_by_batch\":[[1,2]]}}");
+        if (eos) {
+            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            var tree = mapper.readTree(perf.toFile());
+            ((com.fasterxml.jackson.databind.node.ObjectNode) tree.get("decode")).set("eos",
+                    mapper.readTree("{\"enabled\":true,\"distribution\":\"geometric\",\"mean_tokens\":1,\"seed\":42}"));
+            mapper.writeValue(perf.toFile(), tree);
+        }
         MockMasterConfig.writeWithPrefillExpression(master, "2");
         var model = MockPerformanceModel.load(perf.toString(), master.toString());
         var boss = new io.netty.channel.nio.NioEventLoopGroup(1);
@@ -119,7 +136,7 @@ class WhaleModeConfigurationTest {
             var input = org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
                     .setRequestId(42).addTokenIds(123)
                     .setGenerateConfig(org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB.newBuilder()
-                            .setMaxNewTokens(8)
+                            .setMaxNewTokens(eos ? 393216 : 8).setMinNewTokens(8)
                             .addRoleAddrs(org.flexlb.engine.grpc.EngineRpcService.RoleAddrPB.newBuilder()
                                     .setRole(org.flexlb.engine.grpc.EngineRpcService.RoleAddrPB.RoleType.DECODE)
                                     .setRoleStr("DECODE").setIp(d.getHost()).setGrpcPort(port + 1)));
@@ -138,6 +155,13 @@ class WhaleModeConfigurationTest {
             assertEquals(0, d.getCancelledCount());
             assertEquals(0, d.getRunningCount());
             assertEquals(8, d.whaleMetrics().get("mock_generate_tokens_total").longValue());
+            long releaseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while ((p.getActiveKvTokens() != 0 || d.getActiveKvTokens() != 0)
+                    && System.nanoTime() < releaseDeadline) Thread.sleep(10);
+            assertEquals(0, p.getActiveKvTokens(), "P connector lease released");
+            assertEquals(0, d.getActiveKvTokens(), "EOS releases D KV through normal completion");
+            assertEquals(0, d.getInflightCount());
+            assertTrue(p.whaleMetrics().get("mock_context_tokens_total").longValue() > 0);
             assertFalse(p.isWhaleRemote());
             assertFalse(d.isWhaleRemote());
         } finally {
