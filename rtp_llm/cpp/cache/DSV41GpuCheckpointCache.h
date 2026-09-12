@@ -168,8 +168,15 @@ public:
             throw std::invalid_argument("V4.1 GPU transfer requires its matched backing");
         std::lock_guard<std::mutex> lock(mutex_);
         auto                        found = entries_.find({lease->data.metadata.identity, lease->data.keys.back()});
-        if (found != entries_.end() && found->second.snapshot == lease)
-            entries_.erase(found);
+        if (found == entries_.end() || found->second.snapshot != lease)
+            return;
+        // Residency can be promoted while the destination copy is in flight.
+        for (const auto& [key, entry] : entries_) {
+            if (entry.resident && key.identity == lease->data.metadata.identity
+                && entry.snapshot->data.keys.front() == lease->data.keys.front())
+                return;
+        }
+        entries_.erase(found);
     }
 
     size_t size() const {

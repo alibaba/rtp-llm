@@ -158,6 +158,64 @@ TEST(DSV41GpuCheckpointCacheTest, StaleNMetadataCannotPublishTLiveRings) {
     EXPECT_THROW(data.validateProducer(state.view()), std::invalid_argument);
 }
 
+TEST(DSV41GpuCheckpointCacheTest, TransferCommitPreservesResidencyPromotedDuringCopy) {
+    Counter                 refs;
+    DSV41GpuCheckpointCache cache;
+    const auto              data = checkpoint();
+    ASSERT_TRUE(cache.publish(data, refs.retain()));
+    auto transfer = cache.leaseOldestForTransfer();
+    ASSERT_TRUE(transfer);
+    ASSERT_TRUE(cache.publish(data, refs.retain(), true));
+    cache.commitTransfer(transfer);
+    EXPECT_TRUE(cache.match(data.metadata.identity, data.keys, 128, 1));
+    EXPECT_EQ(cache.size(), 1);
+    EXPECT_EQ(refs.acquired, 1);
+    transfer.reset();
+    EXPECT_EQ(refs.held, 1);
+    EXPECT_FALSE(cache.leaseOldestForTransfer());
+    EXPECT_TRUE(cache.takeOldestJointEvictable().empty());
+}
+
+TEST(DSV41GpuCheckpointCacheTest, TransferCommitPreservesTreeWithNewResidentCheckpoint) {
+    Counter                 refs;
+    DSV41GpuCheckpointCache cache;
+    const auto              first = checkpoint();
+    const auto              third = checkpoint(3);
+    ASSERT_TRUE(cache.publish(first, refs.retain()));
+    auto transfer = cache.leaseOldestForTransfer();
+    ASSERT_TRUE(transfer);
+    ASSERT_TRUE(cache.publish(third, refs.retain(), true));
+    cache.commitTransfer(transfer);
+    EXPECT_TRUE(cache.match(first.metadata.identity, first.keys, 128, 1));
+    EXPECT_TRUE(cache.match(third.metadata.identity, third.keys, 128, 3));
+    EXPECT_EQ(cache.size(), 2);
+    transfer.reset();
+    EXPECT_EQ(refs.held, 2);
+    EXPECT_FALSE(cache.leaseOldestForTransfer());
+    EXPECT_TRUE(cache.takeOldestJointEvictable().empty());
+}
+
+TEST(DSV41GpuCheckpointCacheTest, OtherModeOrPrefixResidencyDoesNotBlockTransferCommit) {
+    for (bool other_mode : {false, true}) {
+        Counter                 refs;
+        DSV41GpuCheckpointCache cache;
+        const auto              data = checkpoint();
+        auto other = checkpoint(1, other_mode ? DSV41ReplayMode::BOUNDED_CHECKPOINT_V1 : DSV41ReplayMode::FULL);
+        if (!other_mode)
+            other.keys.front() = 999;
+        ASSERT_TRUE(cache.publish(data, refs.retain()));
+        auto transfer = cache.leaseOldestForTransfer();
+        ASSERT_TRUE(transfer);
+        ASSERT_TRUE(cache.publish(other, refs.retain(), true));
+        cache.commitTransfer(transfer);
+        EXPECT_FALSE(cache.match(data.metadata.identity, data.keys, 128, 1));
+        EXPECT_TRUE(cache.match(other.metadata.identity, other.keys, 128, 1));
+        EXPECT_EQ(cache.size(), 1);
+        transfer.reset();
+        EXPECT_EQ(refs.held, 1);
+    }
+}
+
 TEST(DSV41GpuCheckpointCacheTest, CpuAndGpuPublicationDoNotConsumeEachOthersBacking) {
     auto            data = checkpoint();
     DSV41CacheState state(data.metadata.identity);
