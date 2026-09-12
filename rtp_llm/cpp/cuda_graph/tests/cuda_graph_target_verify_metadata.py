@@ -811,9 +811,9 @@ class CudaGraphTargetVerifyMetadataTest(unittest.TestCase):
         )
         expected_device_metadata = (
             [4] * 8,
-            [126, 255] + [380] * 6,
-            [126, 255] + [379] * 6,
-            [127, 256] + [381] * 6,
+            [126, 255] + [0] * 6,
+            [126, 255] + [0] * 6,
+            [127, 256] + [1] * 6,
         )
         for actual, expected in zip(
             model.replay_device_metadata[-1], expected_device_metadata

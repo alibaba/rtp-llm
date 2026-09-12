@@ -48,6 +48,22 @@ class KimiK3ChunkRound:
         return sum(item.new_length for item in self.slices)
 
 
+def logical_chunk_round(
+    round_plan: KimiK3ChunkRound,
+    logical_request_count: int,
+) -> KimiK3ChunkRound:
+    """Return the real-request prefix of a physically padded Prefill round."""
+
+    logical_slices = tuple(
+        item
+        for item in round_plan.slices
+        if int(item.original_batch_idx) < logical_request_count
+    )
+    if len(logical_slices) == len(round_plan.slices):
+        return round_plan
+    return KimiK3ChunkRound(logical_slices)
+
+
 @dataclass(frozen=True)
 class KimiK3ChunkRdmaPublishStep:
     """One original-batch publication frontier update."""
@@ -556,10 +572,51 @@ def _select_group_batch_rows(
     values: Sequence[torch.Tensor],
     host_indices: torch.Tensor,
     device_indices: torch.Tensor,
+    *,
+    padding_rows: int = 0,
 ) -> list[torch.Tensor]:
     return [
-        _select_batch_rows(value, host_indices, device_indices) for value in values
+        _append_batch_rows(
+            _select_batch_rows(value, host_indices, device_indices),
+            padding_rows,
+        )
+        for value in values
     ]
+
+
+def _append_batch_rows(
+    value: Optional[torch.Tensor],
+    rows: int,
+    *,
+    batch_dim: int = 0,
+    fill_value: int = 0,
+) -> Optional[torch.Tensor]:
+    if value is None or not value.numel() or rows == 0:
+        return value
+    if rows < 0 or batch_dim < 0 or batch_dim >= value.ndim:
+        raise ValueError(
+            "whole-model K3 padding requires non-negative rows and a valid "
+            f"batch dimension: rows={rows} shape={tuple(value.shape)} "
+            f"batch_dim={batch_dim}"
+        )
+    padding_shape = list(value.shape)
+    padding_shape[batch_dim] = rows
+    padding = value.new_full(padding_shape, fill_value)
+    return torch.cat((value, padding), dim=batch_dim)
+
+
+def _block_table_batch_dim(value: Optional[torch.Tensor]) -> int:
+    return 1 if value is not None and value.ndim == 3 else 0
+
+
+def _round_padding_tokens(logical_tokens: int, tp_size: int) -> int:
+    if logical_tokens <= 0:
+        raise ValueError(
+            "whole-model K3 chunk round requires at least one logical token"
+        )
+    if tp_size <= 0:
+        raise ValueError(f"attention TP size must be positive, got {tp_size}")
+    return (-logical_tokens) % tp_size
 
 
 def _host_and_device_tensor(
@@ -587,6 +644,9 @@ def _slice_token_aligned_tensor(
     input_ids: torch.Tensor,
     round_plan: KimiK3ChunkRound,
     name: str,
+    *,
+    padding_tokens: int = 0,
+    padding_value: int = 0,
 ) -> Optional[torch.Tensor]:
     if value is None or not value.numel():
         return value
@@ -595,12 +655,17 @@ def _slice_token_aligned_tensor(
             f"whole-model K3 Prefill requires token-aligned {name}: "
             f"shape={tuple(value.shape)} tokens={input_ids.numel()}"
         )
-    return torch.cat(
+    sliced = torch.cat(
         [
             value.narrow(0, item.source_start, item.new_length)
             for item in round_plan.slices
         ],
         dim=0,
+    )
+    return _append_batch_rows(
+        sliced,
+        padding_tokens,
+        fill_value=padding_value,
     )
 
 
@@ -699,14 +764,31 @@ def build_chunk_attention_inputs(
     *,
     round_plan: KimiK3ChunkRound,
     device: torch.device,
+    tp_size: int = 1,
 ) -> PyAttentionInputs:
     """Rebuild packed attention and block-table metadata for one round."""
 
-    lengths = [item.new_length for item in round_plan.slices]
-    prefixes = [item.absolute_start for item in round_plan.slices]
-    sequence_lengths = [item.absolute_end for item in round_plan.slices]
-    batch_indices = [item.original_batch_idx for item in round_plan.slices]
-    total_tokens = sum(lengths)
+    outer_physical_requests = int(attention_inputs.input_lengths_host.numel())
+    logical_request_count = int(
+        getattr(attention_inputs, "logical_request_count", 0)
+        or outer_physical_requests
+    )
+    logical_round = logical_chunk_round(round_plan, logical_request_count)
+    logical_tokens = int(logical_round.token_count)
+    padding_tokens = _round_padding_tokens(logical_tokens, tp_size)
+    padding_requests = int(padding_tokens > 0)
+    lengths = [item.new_length for item in logical_round.slices]
+    prefixes = [item.absolute_start for item in logical_round.slices]
+    sequence_lengths = [item.absolute_end for item in logical_round.slices]
+    batch_indices = [item.original_batch_idx for item in logical_round.slices]
+    if padding_requests:
+        # Every internal round is an independent model forward. Rebuild one
+        # tail dummy request for that round instead of inheriting the outer
+        # forward's dummy, whose length only aligns the whole packed batch.
+        lengths.append(padding_tokens)
+        prefixes.append(0)
+        sequence_lengths.append(padding_tokens)
+    total_tokens = logical_tokens + padding_tokens
     chunk = copy.copy(attention_inputs)
     cu_seqlens = [0]
     cu_kv_seqlens = [0]
@@ -740,6 +822,16 @@ def build_chunk_attention_inputs(
     )
     chunk.total_tokens = int(total_tokens)
     chunk.context_total_kv_length = int(sum(sequence_lengths))
+    # Internal chunk rounds must not inherit the outer forward's layout. A
+    # round can have a different TP remainder from the complete packed batch.
+    chunk.logical_request_count = len(logical_round.slices)
+    chunk.physical_request_count = len(logical_round.slices) + padding_requests
+    chunk.logical_token_count = logical_tokens
+    chunk.physical_token_count = int(total_tokens)
+    chunk.is_s_padded = (
+        chunk.logical_request_count != chunk.physical_request_count
+        or chunk.logical_token_count != chunk.physical_token_count
+    )
     chunk.is_prefill = True
     chunk.is_cuda_graph = False
     chunk.cache_store_inputs = None
@@ -749,21 +841,21 @@ def build_chunk_attention_inputs(
     )
     for name in (
         "kv_cache_block_id_host",
+        "kv_cache_block_id_device",
         "kv_cache_kernel_block_id_host",
         "kv_cache_kernel_block_id_device",
     ):
         value = getattr(attention_inputs, name)
-        batch_dim = (
-            1
-            if name == "kv_cache_block_id_host"
-            and value is not None
-            and value.ndim == 3
-            else 0
-        )
+        batch_dim = _block_table_batch_dim(value)
         selected = _select_batch_rows(
             value,
             host_batch_indices,
             device_batch_indices,
+            batch_dim=batch_dim,
+        )
+        selected = _append_batch_rows(
+            selected,
+            padding_requests,
             batch_dim=batch_dim,
         )
         if selected is not None:
@@ -772,16 +864,19 @@ def build_chunk_attention_inputs(
         attention_inputs.kv_cache_block_id_host_by_group,
         host_batch_indices,
         device_batch_indices,
+        padding_rows=padding_requests,
     )
     chunk.kv_cache_kernel_block_id_host_by_group = _select_group_batch_rows(
         attention_inputs.kv_cache_kernel_block_id_host_by_group,
         host_batch_indices,
         device_batch_indices,
+        padding_rows=padding_requests,
     )
     chunk.kv_cache_kernel_block_id_device_by_group = _select_group_batch_rows(
         attention_inputs.kv_cache_kernel_block_id_device_by_group,
         host_batch_indices,
         device_batch_indices,
+        padding_rows=padding_requests,
     )
     return chunk
 
@@ -794,23 +889,33 @@ def build_chunk_model_inputs(
     multimodal_inputs: Optional[PyMultimodalInputs] = None,
     embedding_inputs: Optional[PyEmbeddingInputs] = None,
     force_disable_sp_run: bool = False,
+    tp_size: int = 1,
 ) -> PyModelInputs:
+    outer_physical_requests = int(attention_inputs.input_lengths_host.numel())
+    logical_request_count = int(
+        getattr(attention_inputs, "logical_request_count", 0)
+        or outer_physical_requests
+    )
+    logical_round = logical_chunk_round(round_plan, logical_request_count)
+    padding_tokens = _round_padding_tokens(logical_round.token_count, tp_size)
     chunk = PyModelInputs()
-    chunk.input_ids = torch.cat(
+    logical_input_ids = torch.cat(
         [
             input_ids.narrow(0, item.source_start, item.new_length)
-            for item in round_plan.slices
+            for item in logical_round.slices
         ],
         dim=0,
     )
+    chunk.input_ids = _append_batch_rows(logical_input_ids, padding_tokens)
     chunk.attention_inputs = build_chunk_attention_inputs(
         attention_inputs,
         round_plan=round_plan,
         device=input_ids.device,
+        tp_size=tp_size,
     )
     chunk.multimodal_inputs = _build_chunk_multimodal_inputs(
         multimodal_inputs,
-        round_plan,
+        logical_round,
         host_lengths(attention_inputs.input_lengths_host, "input_lengths_host"),
         device=input_ids.device,
     )
@@ -819,16 +924,19 @@ def build_chunk_model_inputs(
         combo_tokens_type_ids = _slice_token_aligned_tensor(
             getattr(embedding_inputs, "combo_tokens_type_ids", None),
             input_ids,
-            round_plan,
+            logical_round,
             "combo_tokens_type_ids",
+            padding_tokens=padding_tokens,
         )
         if combo_tokens_type_ids is not None:
             chunk.embedding_inputs.combo_tokens_type_ids = combo_tokens_type_ids
         text_tokens_mask = _slice_token_aligned_tensor(
             getattr(embedding_inputs, "text_tokens_mask", None),
             input_ids,
-            round_plan,
+            logical_round,
             "text_tokens_mask",
+            padding_tokens=padding_tokens,
+            padding_value=1,
         )
         if text_tokens_mask is not None:
             chunk.embedding_inputs.text_tokens_mask = text_tokens_mask
@@ -870,13 +978,17 @@ def kda_materialized_block_maps(
 
 def kda_round_state_mapping(
     round_plan: Optional[KimiK3ChunkRound],
+    *,
+    padding_original_batch_idx: Optional[int] = None,
 ) -> tuple[Optional[list[int]], Optional[list[bool]]]:
     if round_plan is None:
         return None, None
-    return (
-        [item.original_batch_idx for item in round_plan.slices],
-        [item.processed_length > 0 for item in round_plan.slices],
-    )
+    active_indices = [item.original_batch_idx for item in round_plan.slices]
+    continuation_mask = [item.processed_length > 0 for item in round_plan.slices]
+    if padding_original_batch_idx is not None:
+        active_indices.append(padding_original_batch_idx)
+        continuation_mask.append(False)
+    return active_indices, continuation_mask
 
 
 __all__ = [
@@ -891,6 +1003,7 @@ __all__ = [
     "host_lengths",
     "kda_materialized_block_maps",
     "kda_round_state_mapping",
+    "logical_chunk_round",
     "plan_kimi_k3_chunk_rounds",
     "prepare_round_fmha",
     "validate_whole_chunk_prefill",

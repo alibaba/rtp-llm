@@ -1,3 +1,5 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
 py_test(
     name = "fused_all_gather_matmul_unit_test",
     srcs = ["fused_all_gather_matmul_unit_test.py"],
@@ -56,4 +58,13 @@ py_test(
    env = {"GPU_COUNT": "4"},
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
+)
+
+py_test(
+    name = "sequence_parallel_test",
+    srcs = ["sequence_parallel_test.py"],
+    deps = [
+        "//rtp_llm/models_py/distributed:sequence_parallel",
+        "//rtp_llm:testlib",
+    ],
 )

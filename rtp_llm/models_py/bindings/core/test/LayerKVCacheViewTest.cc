@@ -90,5 +90,47 @@ TEST(LayerKVCacheViewTest, DefaultLinearReplayViewRetainsPhysicalGroupSpanAndSha
     EXPECT_FALSE(cache.getLayerCache(1).linear_replay.has_value());
 }
 
+TEST(LinearReplayInputsTest, PaddingPreservesLogicalOwnersAndMasksEveryDummyRow) {
+    auto backing = rtp_llm::LinearReplayInputs::allocate(7, 3, torch::kCPU);
+    int64_t value = 11;
+    for (auto* tensor : backing.tensors()) {
+        tensor->fill_(tensor->scalar_type() == torch::kInt64 ? (int64_t{1} << 40) + value : value);
+        ++value;
+    }
+    // Narrowed group tables have a non-contiguous outer stride.
+    auto source = backing.slice(1, 3);
+    ASSERT_FALSE(source.active_block_ids.is_contiguous());
+    auto originals = source.tensors();
+    for (const int64_t physical : {3, 4, 8}) {
+        auto padded = source.padToBatch(physical);
+        auto fields = padded.tensors();
+        EXPECT_EQ(physical * 4 / padded.slot_ids.numel(), 4);
+        for (size_t i = 0; i < fields.size(); ++i) {
+            const auto& original = *originals[i];
+            const auto& actual = *fields[i];
+            const auto dim = original.dim() - 1;
+            EXPECT_EQ(actual.size(dim), physical);
+            EXPECT_EQ(actual.scalar_type(), original.scalar_type());
+            EXPECT_EQ(actual.device(), original.device());
+            EXPECT_TRUE(torch::equal(actual.narrow(dim, 0, 3), original));
+            if (physical == 3) {
+                EXPECT_EQ(actual.data_ptr(), original.data_ptr());
+            } else {
+                const int64_t fill = i == 0 || i == 2 || i == 8 ? -1 : 0;
+                const auto tail = actual.narrow(dim, 3, physical - 3);
+                EXPECT_TRUE(torch::equal(tail, torch::full_like(tail, fill)));
+                // Neither padding nor a later graph wave may mutate logical metadata.
+                EXPECT_NE(actual.data_ptr(), original.data_ptr());
+            }
+            EXPECT_EQ(original.size(dim), 3);
+            EXPECT_EQ(original.data_ptr(), source.tensors()[i]->data_ptr());
+        }
+    }
+    EXPECT_THROW(source.padToBatch(2), c10::Error);
+    auto malformed = source;
+    malformed.history_epochs = torch::zeros({2}, torch::kInt64);
+    EXPECT_THROW(malformed.padToBatch(4), c10::Error);
+}
+
 }  // namespace
 }  // namespace torch_ext

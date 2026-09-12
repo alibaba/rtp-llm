@@ -74,6 +74,8 @@ def build_mla_page_rr_slot_mapping(
     page_tokens: int,
     shard_size: int,
     shard_rank: int,
+    *,
+    valid_token_count: Optional[int] = None,
 ) -> torch.Tensor:
     """Build owner-only MLA cache slots for a page-round-robin shard.
 
@@ -83,8 +85,11 @@ def build_mla_page_rr_slot_mapping(
     existing MLA cache-write kernel treats as a no-op.
 
     The returned tensor is int64 because that is the cache-write kernel ABI.
-    Runtime value checks use device-side asynchronous assertions so the valid
-    CUDA path does not introduce host synchronization.
+    ``valid_token_count`` excludes a contiguous physical-padding tail before
+    validating owner pages. Those rows map directly to ``-1`` and therefore
+    never require an allocated cache block. Runtime value checks use
+    device-side asynchronous assertions so the valid CUDA path does not
+    introduce host synchronization.
     """
 
     _validate_geometry(page_tokens, shard_size, shard_rank)
@@ -96,17 +101,39 @@ def build_mla_page_rr_slot_mapping(
     if positions_i64.numel() == 0:
         return skipped
 
-    torch._assert_async(torch.all(positions_i64 >= 0), "positions must be non-negative")
+    token_count = int(positions_i64.numel())
+    if valid_token_count is None:
+        valid_token_count = token_count
+    if not isinstance(valid_token_count, Integral):
+        raise TypeError("valid_token_count must be an integer")
+    valid_token_count = int(valid_token_count)
+    if not 0 <= valid_token_count <= token_count:
+        raise ValueError(
+            "valid_token_count must be within the slot-mapping extent: "
+            f"valid={valid_token_count}, tokens={token_count}"
+        )
+    valid_rows = torch.arange(
+        token_count, device=positions.device, dtype=torch.int64
+    ) < valid_token_count
+
+    torch._assert_async(
+        torch.all((~valid_rows) | (positions_i64 >= 0)),
+        "positions must be non-negative",
+    )
 
     request_count = int(local_block_table.shape[0])
     if request_count == 0:
-        raise RuntimeError("batch index out of range for an empty local block table")
+        if valid_token_count:
+            raise RuntimeError("batch index out of range for an empty local block table")
+        return skipped
     batch_in_range = (batch_indices_i64 >= 0) & (batch_indices_i64 < request_count)
-    torch._assert_async(torch.all(batch_in_range), "batch index out of range")
+    torch._assert_async(
+        torch.all((~valid_rows) | batch_in_range), "batch index out of range"
+    )
     safe_batch_indices = torch.clamp(batch_indices_i64, 0, request_count - 1)
 
     global_pages = torch.div(positions_i64, page_tokens, rounding_mode="floor")
-    owner_rows = torch.remainder(global_pages, shard_size) == shard_rank
+    owner_rows = valid_rows & (torch.remainder(global_pages, shard_size) == shard_rank)
     local_pages = torch.div(global_pages, shard_size, rounding_mode="floor")
 
     table_width = int(local_block_table.shape[1])
@@ -282,6 +309,8 @@ class MlaPageRRCacheAdapter:
         positions: torch.Tensor,
         batch_indices: torch.Tensor,
         local_block_table: torch.Tensor,
+        *,
+        valid_token_count: Optional[int] = None,
     ) -> torch.Tensor:
         """Return owner-only physical slots; non-owner rows map to ``-1``."""
 
@@ -292,6 +321,7 @@ class MlaPageRRCacheAdapter:
             self.page_tokens,
             self.shard_size,
             self.shard_rank,
+            valid_token_count=valid_token_count,
         )
 
     def validate_block_table_capacity(

@@ -200,6 +200,27 @@ class MlaPageRRSlotMappingTest(unittest.TestCase):
                         1,
                     )
 
+    def test_physical_padding_tail_skips_reserved_block_zero(self) -> None:
+        actual = build_mla_page_rr_slot_mapping(
+            torch.tensor([0, 1, 0, 1], dtype=torch.int32),
+            torch.tensor([0, 0, 1, 1], dtype=torch.int32),
+            torch.tensor([[17], [0]], dtype=torch.int32),
+            self.PAGE_TOKENS,
+            self.SHARD_SIZE,
+            0,
+            valid_token_count=2,
+        )
+
+        torch.testing.assert_close(
+            actual,
+            torch.tensor(
+                [17 * self.PAGE_TOKENS, 17 * self.PAGE_TOKENS + 1, -1, -1],
+                dtype=torch.int64,
+            ),
+            rtol=0,
+            atol=0,
+        )
+
     def test_owner_page_requires_sufficient_table_width(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "block table width"):
             build_mla_page_rr_slot_mapping(

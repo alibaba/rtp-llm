@@ -39,6 +39,28 @@ struct LinearReplayInputs {
         return result;
     }
 
+    LinearReplayInputs padToBatch(int64_t physical_batch) const {
+        const int64_t logical_batch = slot_ids.numel();
+        TORCH_CHECK(physical_batch >= logical_batch, "cannot shrink LINEAR replay request rows");
+        auto result = *this;
+        for (auto* tensor : result.tensors()) {
+            TORCH_CHECK(tensor->defined() && (tensor->dim() == 1 || tensor->dim() == 2),
+                        "LINEAR replay metadata must have one or two dimensions");
+            const int64_t dim = tensor->dim() - 1;
+            TORCH_CHECK(tensor->size(dim) == logical_batch, "LINEAR replay request counts disagree");
+            if (physical_batch == logical_batch) {
+                continue;
+            }
+            const int64_t fill = tensor == &result.slot_ids || tensor == &result.active_block_ids
+                                         || tensor == &result.state_read_block_ids ? -1 : 0;
+            auto shape = tensor->sizes().vec();
+            shape[dim] = physical_batch - logical_batch;
+            *tensor = torch::cat({*tensor, torch::full(shape, fill, tensor->options())}, dim);
+        }
+        // Keep the original logical views for finalize and request bookkeeping.
+        return result;
+    }
+
     static LinearReplayInputs allocate(int64_t batch, int64_t groups, torch::Device device = torch::kCUDA) {
         LinearReplayInputs result;
         const auto         i32          = torch::TensorOptions().dtype(torch::kInt32).device(device);

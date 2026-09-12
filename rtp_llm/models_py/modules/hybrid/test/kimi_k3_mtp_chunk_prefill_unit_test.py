@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkRound,
     KimiK3ChunkSlice,
     build_chunk_model_inputs,
+    kda_round_state_mapping,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import KimiKDACurrentStateRegistry
 from rtp_llm.ops.compute_ops import CacheGroupType, PyAttentionInputs
@@ -17,7 +18,7 @@ from rtp_llm.ops.compute_ops import CacheGroupType, PyAttentionInputs
 
 class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
     @staticmethod
-    def _model(*, ep_size: int = 1):
+    def _model(*, ep_size: int = 1, tp_size: int = 1):
         model = KimiK3Model.__new__(KimiK3Model)
         nn.Module.__init__(model)
         object.__setattr__(model, "_is_decode_role", False)
@@ -40,7 +41,7 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
             model,
             "parallelism_config",
             SimpleNamespace(
-                get_attn_tp_size=lambda: 1,
+                get_attn_tp_size=lambda: tp_size,
                 kv_page_rr_enabled=lambda: False,
                 ep_size=ep_size,
             ),
@@ -118,6 +119,94 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
             ),
             force_disable_sp_run=False,
         )
+
+    def test_chunk_round_recomputes_logical_and_physical_padding_counts(self):
+        inputs = self._inputs(8, [5, 3], [0, 0])
+        inputs.attention_inputs.logical_request_count = 1
+        inputs.attention_inputs.physical_request_count = 2
+        inputs.attention_inputs.logical_token_count = 5
+        inputs.attention_inputs.physical_token_count = 8
+        inputs.attention_inputs.kv_cache_block_id_host = torch.tensor(
+            [[[11, 12], [21, 22]]], dtype=torch.int32
+        )
+        inputs.attention_inputs.kv_cache_kernel_block_id_host = torch.tensor(
+            [[31, 32], [41, 42]], dtype=torch.int32
+        )
+        inputs.attention_inputs.kv_cache_block_id_host_by_group = [
+            torch.tensor([[51, 52], [61, 62]], dtype=torch.int32)
+        ]
+        round_plan = KimiK3ChunkRound(
+            (
+                KimiK3ChunkSlice(0, 0, 5, 0, 0, 5, 0, 5, True),
+                KimiK3ChunkSlice(1, 5, 8, 0, 0, 3, 0, 3, True),
+            )
+        )
+
+        chunk = build_chunk_model_inputs(
+            inputs.input_ids,
+            inputs.attention_inputs,
+            round_plan=round_plan,
+            tp_size=8,
+        )
+
+        attention = chunk.attention_inputs
+        self.assertEqual(chunk.input_ids.tolist(), [0, 1, 2, 3, 4, 0, 0, 0])
+        self.assertEqual(attention.logical_request_count, 1)
+        self.assertEqual(attention.physical_request_count, 2)
+        self.assertEqual(attention.logical_token_count, 5)
+        self.assertEqual(attention.physical_token_count, 8)
+        self.assertTrue(attention.is_s_padded)
+        self.assertEqual(
+            attention.kv_cache_block_id_host.tolist(), [[[11, 12], [0, 0]]]
+        )
+        self.assertEqual(
+            attention.kv_cache_kernel_block_id_host.tolist(),
+            [[31, 32], [0, 0]],
+        )
+        self.assertEqual(
+            attention.kv_cache_block_id_host_by_group[0].tolist(),
+            [[51, 52], [0, 0]],
+        )
+
+    def test_chunk_round_adds_one_dummy_request_for_its_own_tp_remainder(self):
+        inputs = self._inputs(10, [6, 4], [0, 0])
+        inputs.attention_inputs.kv_cache_kernel_block_id_host = torch.tensor(
+            [[11, 12], [21, 22]], dtype=torch.int32
+        )
+        round_plan = KimiK3ChunkRound(
+            (
+                KimiK3ChunkSlice(0, 0, 5, 0, 0, 5, 0, 5, False),
+                KimiK3ChunkSlice(1, 6, 8, 0, 0, 2, 0, 2, False),
+            )
+        )
+
+        chunk = build_chunk_model_inputs(
+            inputs.input_ids,
+            inputs.attention_inputs,
+            round_plan=round_plan,
+            tp_size=8,
+        )
+
+        attention = chunk.attention_inputs
+        self.assertEqual(chunk.input_ids.tolist(), [0, 1, 2, 3, 4, 6, 7, 0])
+        self.assertEqual(attention.input_lengths_host.tolist(), [5, 2, 1])
+        self.assertEqual(attention.prefix_lengths_host.tolist(), [0, 0, 0])
+        self.assertEqual(attention.sequence_lengths_host.tolist(), [5, 2, 1])
+        self.assertEqual(attention.cu_seqlens_host.tolist(), [0, 5, 7, 8])
+        self.assertEqual(attention.logical_request_count, 2)
+        self.assertEqual(attention.physical_request_count, 3)
+        self.assertEqual(attention.logical_token_count, 7)
+        self.assertEqual(attention.physical_token_count, 8)
+        self.assertEqual(
+            attention.kv_cache_kernel_block_id_host.tolist(),
+            [[11, 12], [21, 22], [0, 0]],
+        )
+        active, continuing = kda_round_state_mapping(
+            round_plan,
+            padding_original_batch_idx=2,
+        )
+        self.assertEqual(active, [0, 1, 2])
+        self.assertEqual(continuing, [False, False, False])
 
     def test_chunk_inputs_slice_multimodal_rows_without_cross_request_leakage(
         self,
