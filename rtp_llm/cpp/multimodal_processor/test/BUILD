@@ -123,3 +123,21 @@ cc_test(
     # Assertions are CPU-only, but torch still requires libcuda.so.1 at load time.
     exec_properties = {'gpu':'A10'},
 )
+
+# The opt-in native adapter is tested independently from the transport so its
+# batching and rollback behavior cannot regress behind the default stub build.
+cc_test(
+    name = "mm_kvcm_native_client_test",
+    srcs = ["MMKvcmNativeClientTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_object_headers",
+        "//rtp_llm/cpp/multimodal_processor/transport/kvcm:mm_kvcm_client",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    target_compatible_with = select({
+        "//:using_kvcm_emb_storage": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

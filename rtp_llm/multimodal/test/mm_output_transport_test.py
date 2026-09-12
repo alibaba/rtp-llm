@@ -1,6 +1,7 @@
 import importlib
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 from unittest import TestCase, main
@@ -518,6 +519,7 @@ class KvcmOutputBackendTest(TestCase):
             (torch.tensor(1), "between 1 and 16 dimensions"),
             (torch.empty((1, 0)), "dimensions must all be positive"),
             (torch.ones((1, 1), dtype=torch.float64), "does not support tensor dtype"),
+            (torch.ones((1, 1), device="meta"), "does not support tensor device meta"),
         ]
         for tensor, expected_error in cases:
             with self.subTest(expected_error=expected_error):
@@ -595,16 +597,35 @@ class KvcmOutputBackendTest(TestCase):
     def test_constructor_rejects_invalid_limits_before_starting_gc(self):
         cases = [
             {"max_object_bytes": 0},
+            {"max_object_bytes": True},
+            {"max_object_bytes": 1.0},
+            {"max_object_bytes": 1024 * 1024 * 1024 + 1},
             {"max_object_bytes": 64, "max_receipt_bytes": 32},
+            {"max_receipt_bytes": False},
+            {"max_receipt_bytes": 1.0},
+            {"max_receipt_bytes": sys.maxsize + 1},
             {"object_gc_timeout_ms": 0},
+            {"object_gc_timeout_ms": True},
+            {"object_gc_timeout_ms": 1.0},
+            {"object_gc_timeout_ms": 1 << 63},
         ]
-        for overrides in cases:
-            with self.subTest(overrides=overrides):
-                config = _kvcm_config()
-                for name, value in overrides.items():
-                    setattr(config, name, value)
-                with self.assertRaisesRegex(ValueError, "invalid KVCM"):
-                    KvcmOutputBackend(self.writer, config)
+        with patch.object(threading.Thread, "start") as start:
+            for overrides in cases:
+                with self.subTest(overrides=overrides):
+                    config = _kvcm_config()
+                    for name, value in overrides.items():
+                        setattr(config, name, value)
+                    with self.assertRaises((TypeError, ValueError)):
+                        KvcmOutputBackend(self.writer, config)
+        start.assert_not_called()
+
+    def test_constructor_rejects_incomplete_writer_before_starting_gc(self):
+        with patch.object(threading.Thread, "start") as start:
+            for writer in (None, object(), SimpleNamespace(save=lambda *_: None)):
+                with self.subTest(writer=writer):
+                    with self.assertRaisesRegex(TypeError, "callable save and remove"):
+                        KvcmOutputBackend(writer, _kvcm_config())
+        start.assert_not_called()
 
     def test_create_uses_kvcm_python_client_and_maps_config(self):
         config = _kvcm_config()
@@ -681,7 +702,7 @@ class KvcmOutputBackendTest(TestCase):
                 "kv_cache_manager.client": client_module,
             },
         ), patch("rtp_llm.multimodal.transport.kvcm.backend.logging.warning") as logged:
-            with self.assertRaisesRegex(ValueError, "invalid KVCM"):
+            with self.assertRaisesRegex(ValueError, "max_receipt_bytes"):
                 KvcmOutputBackend.create(config)
 
         writer.close.assert_called_once_with()
@@ -1022,6 +1043,30 @@ class KvcmOutputBackendTest(TestCase):
         # failure or leaving a pending object in this unit test.
         self.writer.remove = lambda _keys: None
 
+    def test_empty_internal_cleanup_is_a_noop(self):
+        self.backend._remove_or_retry([], "empty retry")
+        self.backend._best_effort_remove([], "empty cleanup")
+
+        self.assertEqual(self.writer.removed, [])
+
+    def test_gc_wait_is_capped_for_large_valid_deadlines(self):
+        config = _kvcm_config()
+        config.object_gc_timeout_ms = (1 << 63) - 1
+        with patch.object(threading.Thread, "start"):
+            backend = KvcmOutputBackend(self.writer, config)
+        backend._pending["key"] = time.monotonic() + 10_000.0
+        observed_timeouts = []
+
+        def stop_after_wait(timeout=None):
+            observed_timeouts.append(timeout)
+            backend._closing = True
+
+        with patch.object(backend._condition, "wait", side_effect=stop_after_wait):
+            backend._gc_loop()
+        backend._closed = True
+
+        self.assertEqual(observed_timeouts, [kvcm_backend._MAX_GC_WAIT_SECONDS])
+
     def test_operation_accounting_detects_underflow_and_notifies_only_at_zero(self):
         with self.assertRaisesRegex(RuntimeError, "accounting underflow"):
             self.backend._end_operation()
@@ -1252,7 +1297,7 @@ class KvcmOutputBackendTest(TestCase):
                 ),
             ),
             (
-                "position_ids tensors must be on the same device",
+                "does not support position_ids device meta",
                 MMEmbeddingRes(
                     [_rows(1), _rows(1)],
                     position_ids=[
@@ -1273,6 +1318,12 @@ class KvcmOutputBackendTest(TestCase):
                 "does not support extra_input dtype",
                 MMEmbeddingRes(
                     [_rows(1)], extra_input=[torch.ones(1, dtype=torch.float64)]
+                ),
+            ),
+            (
+                "does not support extra_input device meta",
+                MMEmbeddingRes(
+                    [_rows(1)], extra_input=[torch.ones(1, device="meta")]
                 ),
             ),
         ]

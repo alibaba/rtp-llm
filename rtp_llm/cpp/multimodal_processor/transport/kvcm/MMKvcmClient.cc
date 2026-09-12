@@ -19,7 +19,9 @@ std::size_t nextMMKvcmBatchEnd(const std::vector<MMKvcmBuffer>& objects, std::si
 
 std::string
 validateMMKvcmObjects(const std::vector<MMKvcmBuffer>& objects, uint64_t max_object_bytes, uint64_t max_receipt_bytes) {
-    if (max_object_bytes == 0 || max_receipt_bytes < max_object_bytes) {
+    if (max_object_bytes == 0 || max_object_bytes > kMMKvcmMaxObjectBytes
+        || max_receipt_bytes < max_object_bytes
+        || max_receipt_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
         return "KVCM object byte limits are invalid";
     }
     if (objects.empty()) {
@@ -36,8 +38,10 @@ validateMMKvcmObjects(const std::vector<MMKvcmBuffer>& objects, uint64_t max_obj
         if (object.key.empty() || object.key.size() > kMMKvcmMaxKeyBytes || !keys.insert(object.key).second) {
             return "KVCM object keys must contain 1 to 512 bytes and be unique";
         }
+        const auto address = reinterpret_cast<std::uintptr_t>(object.data);
         if (object.data == nullptr || object.nbytes == 0 || object.nbytes > max_object_bytes
-            || object.nbytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+            || object.nbytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())
+            || object.nbytes > std::numeric_limits<std::uintptr_t>::max() - address) {
             return "KVCM object buffer has an invalid size or address";
         }
         if (object.nbytes > max_receipt_bytes - total_bytes) {

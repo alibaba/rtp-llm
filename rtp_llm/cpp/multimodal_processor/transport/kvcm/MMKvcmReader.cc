@@ -51,8 +51,8 @@ public:
         if (!released_ && !handles_.empty()) {
             try {
                 context_.control.release(context_.endpoint, handles_, context_.budget);
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING("synchronous KVCM object release threw: %s; object GC will reclaim it", e.what());
+            } catch (const std::exception&) {
+                RTP_LLM_LOG_WARNING("synchronous KVCM object release threw; object GC will reclaim it");
             } catch (...) {
                 RTP_LLM_LOG_WARNING("synchronous KVCM object release threw an unknown exception; "
                                     "object GC will reclaim it");
@@ -72,9 +72,8 @@ public:
             context_.control.releaseAsync(context_.endpoint, std::move(pending));
             handles_.clear();
             released_ = true;
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("asynchronous KVCM object release threw: %s; falling back to synchronous release",
-                                e.what());
+        } catch (const std::exception&) {
+            RTP_LLM_LOG_WARNING("asynchronous KVCM object release threw; falling back to synchronous release");
         } catch (...) {
             RTP_LLM_LOG_WARNING("asynchronous KVCM object release threw an unknown exception; "
                                 "falling back to synchronous release");
@@ -164,8 +163,11 @@ bool assembleMMKvcmOutput(const std::vector<torch::Tensor>& tensors,
         }
         *output = std::move(assembled);
         return true;
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("KVCM output materialization failed: %s", e.what());
+    } catch (const std::exception&) {
+        RTP_LLM_LOG_WARNING("KVCM output materialization threw");
+        return false;
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("KVCM output materialization threw an unknown exception");
         return false;
     }
 }
@@ -206,8 +208,8 @@ ConsumeResult MMKvcmReader::consume(const MultimodalOutputPB& receipt, DeliveryC
     std::string load_error;
     try {
         load_error = client_->load("rtp-mm-kvcm-load", objects, context.budget.remainingMs());
-    } catch (const std::exception& e) {
-        load_error = std::string("object client threw: ") + e.what();
+    } catch (const std::exception&) {
+        load_error = "object client threw an exception";
     } catch (...) {
         load_error = "object client threw an unknown exception";
     }
@@ -235,6 +237,11 @@ bool MMKvcmReader::validateAndAllocate(const MultimodalOutputPB&   receipt,
     if (tensors == nullptr || objects == nullptr || error == nullptr) {
         return false;
     }
+    // Give every failure path the same observable output state, including
+    // validation failures before allocation begins.
+    tensors->clear();
+    objects->clear();
+    error->clear();
     const size_t object_count = static_cast<size_t>(receipt.output_kvcm_objects_size());
     if (object_count == 0 || object_count > kMMKvcmMaxObjectsPerReceipt) {
         *error = "invalid object count";
@@ -249,7 +256,12 @@ bool MMKvcmReader::validateAndAllocate(const MultimodalOutputPB&   receipt,
         *error = "split_size count is outside the receipt limit";
         return false;
     }
-    if (validate_manifest_ && (config_.max_object_bytes <= 0 || config_.max_receipt_bytes < config_.max_object_bytes)) {
+    if (validate_manifest_
+        && (config_.max_object_bytes <= 0
+            || static_cast<uint64_t>(config_.max_object_bytes) > kMMKvcmMaxObjectBytes
+            || config_.max_receipt_bytes < config_.max_object_bytes
+            || static_cast<uint64_t>(config_.max_receipt_bytes)
+                   > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))) {
         *error = "reader byte limits are invalid";
         return false;
     }
@@ -405,8 +417,6 @@ bool MMKvcmReader::validateAndAllocate(const MultimodalOutputPB&   receipt,
         }
     }
 
-    tensors->clear();
-    objects->clear();
     tensors->reserve(allocations.size());
     objects->reserve(allocations.size());
     try {
@@ -418,10 +428,15 @@ bool MMKvcmReader::validateAndAllocate(const MultimodalOutputPB&   receipt,
             auto& tensor = tensors->back();
             objects->push_back({allocation.key, tensor.data_ptr(), allocation.nbytes, tensor.is_cuda()});
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         tensors->clear();
         objects->clear();
-        *error = std::string("tensor allocation failed: ") + e.what();
+        *error = "tensor allocation threw an exception";
+        return false;
+    } catch (...) {
+        tensors->clear();
+        objects->clear();
+        *error = "tensor allocation threw an unknown exception";
         return false;
     }
     return true;
@@ -456,8 +471,8 @@ void MMKvcmReader::discard(const MultimodalOutputPB& receipt, DeliveryContext& c
         RTP_LLM_LOG_WARNING("discarding %zu unusable KVCM object(s) from an unadvertised receipt", handles.size());
         try {
             context.control.release(context.endpoint, handles, context.budget);
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("discarding unusable KVCM objects failed: %s; object GC will reclaim them", e.what());
+        } catch (const std::exception&) {
+            RTP_LLM_LOG_WARNING("discarding unusable KVCM objects failed; object GC will reclaim them");
         } catch (...) {
             RTP_LLM_LOG_WARNING("discarding unusable KVCM objects failed with an unknown exception; "
                                 "object GC will reclaim them");

@@ -1,4 +1,5 @@
 import logging
+import sys
 import threading
 import time
 import uuid
@@ -18,12 +19,15 @@ from rtp_llm.multimodal.transport.base import MMOutputResult, MMTransportBackend
 
 TRANSPORT_KVCM = "kvcm"
 _REMOVE_RETRY_SECONDS = 1.0
+_MAX_GC_WAIT_SECONDS = 60.0
 # Must not exceed the shared gRPC control client's pending-release capacity.
 _MAX_OBJECTS_PER_RECEIPT = 1024
 _MAX_LOGICAL_VALUES_PER_RECEIPT = 16384
 _MAX_TENSOR_DIMENSIONS = 16
 _MAX_KVCM_KEY_BYTES = 512
 _PROTO_INT32_MAX = (1 << 31) - 1
+_PROTO_INT64_MAX = (1 << 63) - 1
+_KVCM_MAX_OBJECT_BYTES = 1024 * 1024 * 1024
 _DTYPE_TO_PROTO = {
     torch.float32: TensorDataTypePB.RDMA_TENSOR_FLOAT32,
     torch.int32: TensorDataTypePB.RDMA_TENSOR_INT32,
@@ -40,6 +44,14 @@ class _KvcmWriter(Protocol):
 
 def _tensor_nbytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * tensor.element_size()
+
+
+def _strict_positive_int(value, label: str, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"KVCM {label} must be an integer")
+    if not 0 < value <= maximum:
+        raise ValueError(f"KVCM {label} must be in [1, {maximum}]")
+    return value
 
 
 def _bounded_logical_values(values, label: str) -> list:
@@ -122,6 +134,8 @@ def _chunk_tensor(
         raise ValueError("KVCM cannot store an empty tensor")
     if tensor.dtype not in _DTYPE_TO_PROTO:
         raise ValueError(f"KVCM does not support tensor dtype {tensor.dtype}")
+    if tensor.device.type not in ("cpu", "cuda"):
+        raise ValueError(f"KVCM does not support tensor device {tensor.device.type}")
     rows = int(tensor.shape[0])
     chunk_count = _chunk_count(nbytes, rows, max_object_bytes)
     if chunk_count == 1:
@@ -139,17 +153,30 @@ class KvcmOutputBackend(MMTransportBackend):
     name = TRANSPORT_KVCM
 
     def __init__(self, writer: _KvcmWriter, kvcm_config, *, _owns_writer=False):
+        if not callable(getattr(writer, "save", None)) or not callable(
+            getattr(writer, "remove", None)
+        ):
+            raise TypeError("KVCM writer must provide callable save and remove methods")
         self._writer = writer
         self._owns_writer = _owns_writer
-        self._max_object_bytes = int(kvcm_config.max_object_bytes)
-        self._max_receipt_bytes = int(kvcm_config.max_receipt_bytes)
-        self._gc_timeout_seconds = int(kvcm_config.object_gc_timeout_ms) / 1000.0
-        if (
-            self._max_object_bytes <= 0
-            or self._max_receipt_bytes < self._max_object_bytes
-            or self._gc_timeout_seconds <= 0
-        ):
-            raise ValueError("invalid KVCM object, receipt or GC limit")
+        self._max_object_bytes = _strict_positive_int(
+            kvcm_config.max_object_bytes,
+            "max_object_bytes",
+            _KVCM_MAX_OBJECT_BYTES,
+        )
+        self._max_receipt_bytes = _strict_positive_int(
+            kvcm_config.max_receipt_bytes,
+            "max_receipt_bytes",
+            sys.maxsize,
+        )
+        gc_timeout_ms = _strict_positive_int(
+            kvcm_config.object_gc_timeout_ms,
+            "object_gc_timeout_ms",
+            _PROTO_INT64_MAX,
+        )
+        if self._max_receipt_bytes < self._max_object_bytes:
+            raise ValueError("KVCM max_receipt_bytes is smaller than max_object_bytes")
+        self._gc_timeout_seconds = gc_timeout_ms / 1000.0
         self._pending: Dict[str, float] = {}
         self._condition = threading.Condition()
         self._active_operations = 0
@@ -352,6 +379,10 @@ class KvcmOutputBackend(MMTransportBackend):
                     raise ValueError(
                         f"KVCM does not support position_ids dtype {position.dtype}"
                     )
+                if position.device.type not in ("cpu", "cuda"):
+                    raise ValueError(
+                        f"KVCM does not support position_ids device {position.device.type}"
+                    )
 
         if extras:
             if len(extras) != len(embeddings):
@@ -366,6 +397,10 @@ class KvcmOutputBackend(MMTransportBackend):
                 if extra.dtype not in _DTYPE_TO_PROTO:
                     raise ValueError(
                         f"KVCM does not support extra_input dtype {extra.dtype}"
+                    )
+                if extra.device.type not in ("cpu", "cuda"):
+                    raise ValueError(
+                        f"KVCM does not support extra_input device {extra.device.type}"
                     )
 
         # Reject impossible receipts before torch.concat() or chunk materialization
@@ -487,6 +522,8 @@ class KvcmOutputBackend(MMTransportBackend):
                 self._condition.notify_all()
 
     def _remove_or_retry(self, keys: Sequence[str], reason: str) -> None:
+        if not keys:
+            return
         with self._condition:
             if self._closed:
                 return
@@ -513,6 +550,8 @@ class KvcmOutputBackend(MMTransportBackend):
                     self._condition.notify_all()
 
     def _best_effort_remove(self, keys: Sequence[str], reason: str) -> None:
+        if not keys:
+            return
         try:
             self._writer.remove(list(keys))
         except Exception as error:  # noqa: BLE001 - shutdown must complete
@@ -547,7 +586,12 @@ class KvcmOutputBackend(MMTransportBackend):
                 now = time.monotonic()
                 deadline = min(self._pending.values())
                 if deadline > now:
-                    self._condition.wait(timeout=deadline - now)
+                    # threading.Condition delegates to a platform timed wait,
+                    # whose accepted timeout is much smaller than int64 ms on
+                    # some systems. Wake periodically for huge valid leases.
+                    self._condition.wait(
+                        timeout=min(deadline - now, _MAX_GC_WAIT_SECONDS)
+                    )
                     continue
                 expired = [
                     key

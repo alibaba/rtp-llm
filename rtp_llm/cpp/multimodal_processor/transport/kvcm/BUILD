@@ -9,7 +9,10 @@ cc_library(
         "//:using_kvcm_emb_storage": ["MMKvcmClientKvcm.cc"],
         "//conditions:default": ["MMKvcmClientStub.cc"],
     }),
-    hdrs = ["MMKvcmClient.h"],
+    hdrs = ["MMKvcmClient.h"] + select({
+        "//:using_kvcm_emb_storage": ["MMKvcmClientKvcm.h"],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [

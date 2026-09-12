@@ -600,6 +600,15 @@ TEST(MMKvcmTransportTest, rejectsConfiguredObjectAndReceiptByteLimitViolationsBe
     }
     {
         Harness h;
+        h.config.max_object_bytes = static_cast<int64_t>(kMMKvcmMaxObjectBytes + 1);
+        h.config.max_receipt_bytes = h.config.max_object_bytes;
+        h.reader                   = std::make_unique<MMKvcmReader>(h.client, h.config, -1);
+        const auto result         = h.consume(validReceipt());
+        EXPECT_FALSE(result.succeeded());
+        EXPECT_EQ(h.client->load_calls, 0u);
+    }
+    {
+        Harness h;
         h.config.max_object_bytes = 47;
         h.reader                  = std::make_unique<MMKvcmReader>(h.client, h.config, -1);
         const auto result         = h.consume(validReceipt());
@@ -699,6 +708,7 @@ TEST(MMKvcmTransportTest, providerExceptionsBecomeFailuresAndReleaseSynchronousl
         EXPECT_EQ(h.client->load_calls, 1u);
         EXPECT_EQ(h.control.synchronous_releases.size(), 1u);
         EXPECT_TRUE(h.control.asynchronous_releases.empty());
+        EXPECT_EQ(result.error().ToString().find("injected object-client exception"), std::string::npos);
     }
 }
 
@@ -805,6 +815,10 @@ TEST(MMKvcmTransportTest, validatesCompleteClientObjectBatchBeforeProviderIo) {
          [](std::vector<MMKvcmBuffer>* objects) { objects->front().key = std::string(kMMKvcmMaxKeyBytes + 1, 'k'); }},
         {"duplicate key", [](std::vector<MMKvcmBuffer>* objects) { objects->back().key = objects->front().key; }},
         {"null address", [](std::vector<MMKvcmBuffer>* objects) { objects->front().data = nullptr; }},
+        {"overflowing address range",
+         [](std::vector<MMKvcmBuffer>* objects) {
+             objects->front().data = reinterpret_cast<void*>(std::numeric_limits<std::uintptr_t>::max());
+         }},
         {"zero size", [](std::vector<MMKvcmBuffer>* objects) { objects->front().nbytes = 0; }},
         {"object over configured limit", [](std::vector<MMKvcmBuffer>* objects) { objects->front().nbytes = 2; }},
     };
@@ -823,6 +837,7 @@ TEST(MMKvcmTransportTest, validatesCompleteClientObjectBatchBeforeProviderIo) {
     EXPECT_FALSE(validateMMKvcmObjects(two_objects, 3, 4).empty());
     EXPECT_FALSE(validateMMKvcmObjects(two_objects, 0, 5).empty());
     EXPECT_FALSE(validateMMKvcmObjects(two_objects, 3, 2).empty());
+    EXPECT_FALSE(validateMMKvcmObjects(two_objects, kMMKvcmMaxObjectBytes + 1, kMMKvcmMaxObjectBytes + 1).empty());
 }
 
 TEST(MMKvcmTransportTest, batchesByBothItemCountAndTotalBytes) {

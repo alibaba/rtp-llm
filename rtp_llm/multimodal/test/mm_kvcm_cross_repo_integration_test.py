@@ -432,7 +432,11 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
     def test_rtp_receipt_round_trip_release_and_gc(self):
         _require_kvcm_dependencies()
 
-        from kv_cache_manager.client import KvMetaObjectClient, KvMetaObjectClientError
+        from kv_cache_manager.client import (
+            KV_META_OBJECT_API_VERSION,
+            KvMetaObjectClient,
+            KvMetaObjectClientError,
+        )
         from kv_cache_manager.client.pybind import kvcm_py_client
 
         try:
@@ -451,6 +455,11 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                 and path.endswith((".so", ".pyd"))
                 for path in wheel_files
             )
+        )
+        self.assertEqual(KV_META_OBJECT_API_VERSION, 1)
+        self.assertEqual(
+            kvcm_py_client.KV_META_OBJECT_API_VERSION,
+            KV_META_OBJECT_API_VERSION,
         )
 
         with tempfile.TemporaryDirectory(prefix="rtp-kvmeta-it-") as directory:
