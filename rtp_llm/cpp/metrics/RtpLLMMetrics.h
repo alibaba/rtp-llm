@@ -589,7 +589,7 @@ public:
     }
 
     ~MetricsLoopReporter() {
-        stop_ = true;
+        stop_.store(true, std::memory_order_release);
         if (metrics_reporter_thread_.joinable()) {
             metrics_reporter_thread_.join();
         }
@@ -655,7 +655,7 @@ private:
     }
 
     void reportLoop() {
-        while (metrics_reporter_ && !stop_) {
+        while (metrics_reporter_ && !stop_.load(std::memory_order_acquire)) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (collector_.hasMetrics()) {
@@ -686,7 +686,7 @@ private:
 
 private:
     std::mutex                   mutex_;
-    bool                         stop_ = false;
+    std::atomic_bool             stop_{false};
     CollectType                  collector_;
     int                          active_count_ = 0;
     int                          interval_ms_  = 1000;

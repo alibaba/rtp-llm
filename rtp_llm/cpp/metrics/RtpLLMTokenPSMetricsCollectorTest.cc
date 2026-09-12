@@ -3,9 +3,44 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <chrono>
 #include <map>
+#include <thread>
 
 namespace rtp_llm {
+
+namespace {
+std::atomic<size_t> reported_windows{0};
+
+class ObservedTokenPSMetrics: public RtpLLMTokenPSMetrics {
+public:
+    void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
+        RtpLLMTokenPSMetrics::report(tags, collector);
+        reported_windows.fetch_add(1, std::memory_order_release);
+    }
+};
+}  // namespace
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, JoinsLiveReporterBeforeReleasingItsOwner) {
+    for (int iteration = 0; iteration < 16; ++iteration) {
+        const auto                               before = reported_windows.load(std::memory_order_acquire);
+        std::weak_ptr<kmonitor::MetricsReporter> owner;
+        {
+            kmonitor::MetricsTags tags;
+            auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+            owner                          = reporter;
+            MetricsLoopReporter<ObservedTokenPSMetrics, RtpLLMTokenPSMetricsCollector> loop(reporter, 1);
+            reporter.reset();
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (reported_windows.load(std::memory_order_acquire) == before
+                   && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            ASSERT_GT(reported_windows.load(std::memory_order_acquire), before);
+        }
+        EXPECT_TRUE(owner.expired());
+    }
+}
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
     RtpLLMTokenPSMetricsCollector collector;
