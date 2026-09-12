@@ -23,3 +23,5 @@ master 通过本地 discovery 文件发现各引擎，不依赖 P/D VIP。
 调度确认不代表推理完成。现有复制流量的 gRPC 入口通过显式 `RTP_LLM_MOCK_SCHEDULE_ONLY=1` 开关调用测试侧的 schedule_only.py；返回带 schedule_accepted=true、inference_completed=false 的确认帧，不输出 token 或推理完成标志。未开启时走原推理路径。
 当前 max_new_tokens 被模拟器视为实际输出长度，缺少 EOS 模型；超大上限请求仍可能长期占用资源。
 未完成真实复制流量验证之前，不宣称成功率或性能已对齐。
+
+Bundle jars use the explicit Maven profile `opensource,!internal,whale-bundle`: KMonitor is included, while engine discovery remains local to the Pod. VipServer is intentionally absent from these test jars; the default internal profile is unchanged.
