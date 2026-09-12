@@ -6,6 +6,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Float8_e4m3fn.h>
 #include <cmath>
+#include <type_traits>
 
 namespace rtp_llm {
 
@@ -68,9 +69,20 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
 
     const int32_t num_vec_elems = group_size / vec_size;
 
+    // Each of the 16 lanes strides by 16 over num_vec_elems. When num_vec_elems
+    // <= 16 (the common case: bf16 + group_size=128 -> 16 vecs, 1 per lane), the
+    // single loaded vector can be cached in registers and reused in the quantize
+    // pass, eliminating a second HBM read of the activations. For larger groups
+    // we fall back to re-loading.
+    const bool                  can_cache = (num_vec_elems <= 16);
+    rtp_llm::vec_t<T, vec_size> cached_vec;
+
     for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
         rtp_llm::vec_t<T, vec_size> input_vec;
         input_vec.cast_load(group_input + i * vec_size);
+        if (can_cache) {
+            cached_vec = input_vec;
+        }
 
 #pragma unroll
         for (uint32_t j = 0; j < vec_size; ++j) {
@@ -101,13 +113,29 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
 
     for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
         rtp_llm::vec_t<T, vec_size> input_vec;
-        input_vec.cast_load(group_input + i * vec_size);
+        if (can_cache) {
+            input_vec = cached_vec;
+        } else {
+            input_vec.cast_load(group_input + i * vec_size);
+        }
 
+        if constexpr (std::is_same_v<DST_DTYPE, __nv_fp8_e4m3>) {
+            // Build the 8 fp8 outputs into a vector and emit a single packed store.
+            rtp_llm::vec_t<DST_DTYPE, vec_size> out_vec;
 #pragma unroll
-        for (uint32_t j = 0; j < vec_size; ++j) {
-            float val                      = static_cast<float>(input_vec[j]);
-            float q_val                    = fminf(fmaxf(val / y_s, min_8bit), max_8bit);
-            group_output[i * vec_size + j] = DST_DTYPE(q_val);
+            for (uint32_t j = 0; j < vec_size; ++j) {
+                float val   = static_cast<float>(input_vec[j]);
+                float q_val = fminf(fmaxf(val / y_s, min_8bit), max_8bit);
+                out_vec[j]  = DST_DTYPE(q_val);
+            }
+            out_vec.store(group_output + i * vec_size);
+        } else {
+#pragma unroll
+            for (uint32_t j = 0; j < vec_size; ++j) {
+                float val                      = static_cast<float>(input_vec[j]);
+                float q_val                    = fminf(fmaxf(val / y_s, min_8bit), max_8bit);
+                group_output[i * vec_size + j] = DST_DTYPE(q_val);
+            }
         }
     }
 }

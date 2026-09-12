@@ -391,8 +391,9 @@ def per_block_cast_to_fp8(
     x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
     sf = x_amax / 448.0
-    sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
-    x_scaled = (x_view * (1.0 / sf)).to(torch.float8_e4m3fn)
+    if use_ue8m0:
+        sf = ceil_to_ue8m0(sf)
+    x_scaled = (x_view * (1.0 / sf)).clamp(fp8_min, fp8_max).to(fp8_dtype)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
         x_view.size(0), x_view.size(2)
     )
@@ -403,14 +404,19 @@ def quant_weight_ue8m0(
     weight_block_size: List[int],
 ):
     assert weight_block_size == [128, 128]
-    assert (
-        weight_dequant.dtype == torch.bfloat16
+    assert weight_dequant.dtype in (
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
     ), f"{weight_dequant.dtype=} {weight_dequant.shape=}"
 
     *batch_dims, n, k = weight_dequant.shape
 
     weight_dequant_flat = weight_dequant.view((-1, k))
-    out_w_flat, out_s_flat = per_block_cast_to_fp8(weight_dequant_flat, use_ue8m0=True)
+    out_w_flat, out_s_flat = per_block_cast_to_fp8(
+        weight_dequant_flat,
+        use_ue8m0=True,
+    )
 
     out_w = out_w_flat.view((*batch_dims, n, k))
     out_s = out_s_flat.view(
@@ -422,6 +428,18 @@ def quant_weight_ue8m0(
     )
 
     return out_w, out_s
+
+
+def pack_weight_scale_ue8m0(
+    weight_scale: torch.Tensor, weight_rows: int
+) -> torch.Tensor:
+    """Pack split-local UE8M0 block scales into DeepGEMM's TMA layout."""
+    if weight_scale.dtype != torch.float32 or weight_scale.dim() != 2:
+        raise ValueError(
+            "UE8M0 block scales must be a 2D float32 tensor before packing, "
+            f"got shape={tuple(weight_scale.shape)}, dtype={weight_scale.dtype}"
+        )
+    return _transform_scale_ue8m0(weight_scale, mn=weight_rows)
 
 
 def requant_weight_ue8m0(

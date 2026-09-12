@@ -1,12 +1,22 @@
+import os
 import random
 from typing import Dict, Optional
 from unittest import SkipTest, TestCase, main, skipIf
+from unittest.mock import patch
 
 import torch
+
+_deep_gemm_test_cache = os.path.join(
+    os.environ.get("TEST_TMPDIR", os.getcwd()), "deep_gemm"
+)
+os.makedirs(_deep_gemm_test_cache, exist_ok=True)
+os.environ["DG_JIT_CACHE_DIR"] = _deep_gemm_test_cache
 
 device = torch.device("cuda")
 
 import deep_gemm
+
+from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
 
 
 def check_cuda_version() -> bool:
@@ -115,6 +125,30 @@ class MockKVCache:
             dtype=torch.bfloat16,
             device=device,
         ).to(torch.float8_e4m3fn)
+
+
+class PagedMqaContextLensContractTest(TestCase):
+    def test_legacy_deepgemm_keeps_1d_decode_shape(self) -> None:
+        context_lens = torch.tensor([7, 11], dtype=torch.int32)
+        with patch.object(
+            deepgemm_wrapper, "has_deep_gemm_mk_alignment", return_value=False
+        ):
+            actual = deepgemm_wrapper.normalize_paged_mqa_context_lens(context_lens)
+        self.assertIs(actual, context_lens)
+        self.assertEqual(actual.dim(), 1)
+
+    @skipIf(not check_cuda_version(), SKIP_REASON)
+    def test_deepgemm_25_accepts_2d_decode_shape(self) -> None:
+        if not torch.cuda.is_available():
+            raise SkipTest("CUDA is not available")
+        context_lens = torch.tensor([7, 11], dtype=torch.int32, device=device)
+        actual = deepgemm_wrapper.normalize_paged_mqa_context_lens(context_lens)
+        self.assertEqual(tuple(actual.shape), (2, 1))
+        self.assertIs(deepgemm_wrapper.normalize_paged_mqa_context_lens(actual), actual)
+        metadata = deep_gemm.get_paged_mqa_logits_metadata(
+            actual, 64, deep_gemm.get_num_sms()
+        )
+        self.assertTrue(metadata.is_cuda)
 
 
 @skipIf(not CUDA_VERSION_OK, SKIP_REASON)
@@ -329,7 +363,7 @@ class IndexerTest(TestCase):
             attn_inputs, config.attn_config.tokens_per_block
         )
         fmha_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
+            fmha_params.kvlen_d.view(-1, 1),
             config.attn_config.tokens_per_block,
             deep_gemm.get_num_sms(),
         )

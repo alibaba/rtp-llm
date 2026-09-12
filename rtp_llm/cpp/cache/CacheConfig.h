@@ -65,6 +65,13 @@ public:
         return topology().groupById(gid).kernel_seq_size_per_block;
     }
 
+    // A zero kernel block size is the public sentinel for using the physical
+    // KV-cache block size. Keep that compatibility at consumers which require
+    // an explicit size (for example CUDA Graph initialization).
+    size_t effectiveKernelSeqSizePerBlock() const {
+        return kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
+    }
+
     size_t kernelBlocksPerKvBlockForGroup(size_t gid) const {
         const auto group_seq    = seqSizePerBlockForGroup(gid);
         const auto group_kernel = kernelSeqSizePerBlockForGroup(gid);

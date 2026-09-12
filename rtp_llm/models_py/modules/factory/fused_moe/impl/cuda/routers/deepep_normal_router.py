@@ -48,6 +48,9 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
         checker.check(not resolver.use_low_latency(config))
+        # DeepEP normal dispatch has dynamic output shapes and cannot be
+        # captured safely as part of a complete MoE CUDA Graph.
+        checker.check(not config.enable_cuda_graph)
         checker.check(DeepEPWrapper.supported())
 
     def __init__(
@@ -155,9 +158,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 expert_x_scale = expert_x_scale[:, 0].contiguous()
         else:
             if use_fp8:
-                raise ValueError(
-                    "FP8 DeepEP dispatch must return (activation, scale)"
-                )
+                raise ValueError("FP8 DeepEP dispatch must return (activation, scale)")
             expert_x = output
 
         expert_num_tokens = torch.tensor(
