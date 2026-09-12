@@ -65,6 +65,7 @@ class DeepSeekV41VisionEmbedding(nn.Module):
         """Bind the framework-installed vision tensors without duplicate allocation."""
         with torch.device("meta"):
             model = cls(config, device="meta")
+        model.requires_grad_(False)
         expected = model.state_dict()
         state = {}
         device = None

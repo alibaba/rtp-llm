@@ -200,6 +200,37 @@ class V41VisionEmbeddingTest(TestCase):
                     self.assertEqual(torch.count_nonzero(result[:5]).item(), 0)
                     self.assertEqual(torch.count_nonzero(result[-3:]).item(), 0)
 
+    def test_inference_weights_bind_outside_inference_mode_without_copy(self):
+        with torch.inference_mode():
+            installed = {
+                "v41." + name: value.clone()
+                for name, value in self.adapter.state_dict().items()
+            }
+        self.assertFalse(torch.is_inference_mode_enabled())
+        self.assertTrue(all(torch.is_inference(value) for value in installed.values()))
+        config = V41Config.from_path(Path(os.environ["DSV41_MODEL_PATH"]))
+        bound = DeepSeekV41VisionEmbedding.from_model_weights(config, installed)
+        self.assertTrue(all(not value.requires_grad for value in bound.parameters()))
+        for name, value in bound.state_dict().items():
+            self.assertEqual(value.data_ptr(), installed["v41." + name].data_ptr())
+            self.assertEqual(value.dtype, installed["v41." + name].dtype)
+        image = V41ImageInput(
+            0,
+            torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16),
+            3,
+            6,
+            image_token_types(1, 2),
+            "",
+            bound.processor_config.identity,
+        )
+        with sdpa_kernel(SDPBackend.MATH):
+            torch.testing.assert_close(
+                bound.encode_image(image),
+                self.adapter.encode_image(image),
+                rtol=0,
+                atol=0,
+            )
+
     def test_norm_dtype_and_three_delimiters(self):
         names = set(self.adapter.state_dict())
         self.assertEqual(
