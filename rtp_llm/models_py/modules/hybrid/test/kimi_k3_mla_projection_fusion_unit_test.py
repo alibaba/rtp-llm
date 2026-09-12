@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -10,6 +11,7 @@ from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 from rtp_llm.models.kimi_k3.kimi_k3_weight import _merge_mla_input_projections
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3MLA
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
+from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
 from rtp_llm.utils.model_weight import W
 
 
@@ -36,10 +38,12 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         module.value_dim = 4
         module.attn_tp_size = 1
         module.attn_tp_rank = 0
+        module.parallel_mode = KimiK3ParallelMode.TP_SP
         module.use_output_gate = True
         module._mla_backend = "kernel"
-        module._sp_prefill_input_is_sharded = False
-        module._sp_prefill_layout_for_forward = None
+        module._sp_layout_for_forward = SimpleNamespace(
+            tokens=SimpleNamespace(physical_tokens=7)
+        )
         projection = _CountingProjection(torch.randn(5, 14))
         module.fused_qkv_a_proj = projection
         module._packed_qkv_gate_w = projection.weight
@@ -70,10 +74,11 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         module, projection = self._projection_module()
         hidden_states = torch.randn(7, 5)
 
-        qkv_a, output_gate = module._project_qkv_a_input(hidden_states)
         expected = torch.mm(hidden_states, projection.weight)
+        module._projected_qkv_a_for_forward = [expected]
+        qkv_a, output_gate = module._project_qkv_a_input(hidden_states)
 
-        self.assertEqual(projection.calls, 1)
+        self.assertEqual(projection.calls, 0)
         torch.testing.assert_close(qkv_a, expected[:, :6], rtol=0, atol=0)
         torch.testing.assert_close(output_gate, expected[:, 6:], rtol=0, atol=0)
 

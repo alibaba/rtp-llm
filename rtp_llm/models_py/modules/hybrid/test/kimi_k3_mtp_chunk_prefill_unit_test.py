@@ -119,6 +119,32 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
             force_disable_sp_run=False,
         )
 
+    def test_chunk_round_recomputes_logical_and_physical_padding_counts(self):
+        inputs = self._inputs(8, [5, 3], [0, 0])
+        inputs.attention_inputs.logical_request_count = 1
+        inputs.attention_inputs.physical_request_count = 2
+        inputs.attention_inputs.logical_token_count = 5
+        inputs.attention_inputs.physical_token_count = 8
+        round_plan = KimiK3ChunkRound(
+            (
+                KimiK3ChunkSlice(0, 0, 5, 0, 0, 5, 0, 5, True),
+                KimiK3ChunkSlice(1, 5, 8, 0, 0, 3, 0, 3, True),
+            )
+        )
+
+        chunk = build_chunk_model_inputs(
+            inputs.input_ids,
+            inputs.attention_inputs,
+            round_plan=round_plan,
+        )
+
+        attention = chunk.attention_inputs
+        self.assertEqual(attention.logical_request_count, 1)
+        self.assertEqual(attention.physical_request_count, 2)
+        self.assertEqual(attention.logical_token_count, 5)
+        self.assertEqual(attention.physical_token_count, 8)
+        self.assertTrue(attention.is_s_padded)
+
     def test_chunk_inputs_slice_multimodal_rows_without_cross_request_leakage(
         self,
     ) -> None:
