@@ -972,6 +972,8 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
 
                 begin = time.time()
                 last_aux = None
+                last_output = None
+                output_token_ids = []
                 chunk_count = 0
                 logging.info(
                     "DSV4 startup grpc warmup request begin, "
@@ -986,38 +988,52 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                 )
                 async for outputs in client.enqueue(generate_input):
                     chunk_count += 1
-                    if outputs.generate_outputs:
-                        last_aux = outputs.generate_outputs[0].aux_info
-                if last_aux is not None:
-                    logging.info(
-                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
-                        "chunks=%d, input_len=%s, "
-                        "reuse_len=%s, output_len=%s, cost=%.2fs",
-                        addr,
-                        request_id,
-                        token_len,
-                        request_token_len,
-                        max_new_tokens,
-                        chunk_count,
-                        getattr(last_aux, "input_len", None),
-                        getattr(last_aux, "reuse_len", None),
-                        getattr(last_aux, "output_len", None),
-                        time.time() - begin,
+                    if len(outputs.generate_outputs) != 1:
+                        raise RuntimeError(
+                            f"startup warmup request {request_id} at {addr} returned "
+                            f"{len(outputs.generate_outputs)} sequences; expected one"
+                        )
+                    last_output = outputs.generate_outputs[0]
+                    last_aux = last_output.aux_info
+                    if last_output.output_ids is not None:
+                        output_token_ids.extend(
+                            last_output.output_ids.reshape(-1).tolist()
+                        )
+                if (
+                    last_output is None
+                    or not last_output.finished
+                    or last_aux is None
+                    or last_aux.input_len != request_token_len
+                    or last_aux.output_len != max_new_tokens
+                    or len(output_token_ids) != max_new_tokens
+                ):
+                    raise RuntimeError(
+                        f"startup warmup request {request_id} at {addr} returned "
+                        f"empty or incomplete output: chunks={chunk_count}, "
+                        f"finished={getattr(last_output, 'finished', False)}, "
+                        f"input_len={getattr(last_aux, 'input_len', None)} "
+                        f"(expected {request_token_len}), "
+                        f"output_len={getattr(last_aux, 'output_len', None)}, "
+                        f"output_ids={output_token_ids} (expected {max_new_tokens} tokens)"
                     )
-                else:
-                    logging.info(
-                        "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
-                        "chunks=%d, aux_info=None, cost=%.2fs",
-                        addr,
-                        request_id,
-                        token_len,
-                        request_token_len,
-                        max_new_tokens,
-                        chunk_count,
-                        time.time() - begin,
-                    )
+                logging.info(
+                    "DSV4 startup grpc warmup request finished, addr=%s, request_id=%d, "
+                    "target_token_len=%d, request_token_len=%d, max_new_tokens=%d, "
+                    "chunks=%d, input_len=%s, reuse_len=%s, output_len=%s, "
+                    "output_ids=%s, finished=%s, cost=%.2fs",
+                    addr,
+                    request_id,
+                    token_len,
+                    request_token_len,
+                    max_new_tokens,
+                    chunk_count,
+                    last_aux.input_len,
+                    last_aux.reuse_len,
+                    last_aux.output_len,
+                    output_token_ids,
+                    last_output.finished,
+                    time.time() - begin,
+                )
         finally:
             try:
                 await client.close()

@@ -622,6 +622,34 @@ TEST_F(GenerateStreamTest, testSpeculativeMaxLengthUsesGreaterConfiguredAndAsync
     EXPECT_EQ(stream->maxTokenNum(), 2041);
 }
 
+TEST_F(GenerateStreamTest, speculativeBoundaryReturnsFirstTokenBeforeCompletion) {
+    for (const int reserve : {4, 7, 9}) {
+        SCOPED_TRACE(reserve);
+        auto builder = GenerateStreamBuilder();
+        auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(
+            builder.createContextStream(std::vector<int>(2048 - reserve, 1)));
+        stream->generate_input_->generate_config->max_new_tokens = 1;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        stream->setReserveStep(reserve);
+
+        updateOneToken(stream, 42);
+        auto output = stream->nextOutput(1);
+        ASSERT_TRUE(output.ok()) << output.status().ToString();
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        const auto& result = output.value().generate_outputs.front();
+        ASSERT_EQ(result.output_ids.numel(), 1);
+        EXPECT_EQ(result.output_ids.item<int32_t>(), 42);
+        EXPECT_TRUE(result.finished);
+        EXPECT_EQ(result.aux_info.input_len, 2048 - reserve);
+        EXPECT_EQ(result.aux_info.output_len, 1);
+        EXPECT_EQ(stream->reserveStep(), reserve);
+        EXPECT_LE(stream->seqLength(), 2048);
+        auto done = stream->nextOutput(1);
+        ASSERT_FALSE(done.ok());
+        EXPECT_EQ(done.status().code(), ErrorCode::FINISHED);
+    }
+}
+
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that
 // captured epoch N must not clear state that step N+1 already published
 // under epoch N+1.

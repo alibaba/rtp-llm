@@ -882,7 +882,11 @@ size_t GenerateStream::maxTokenNum() const {
         reserve_tokens = std::max(reserve_tokens, sp_reserve_tokens);
     }
 
-    const auto max_token_num_by_seq_len  = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;
+    const auto reserved_seq_limit = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;
+    // The prefill sample needs no subsequent speculative round. Do not discard
+    // that final token when an admitted prompt already reaches the reserve limit.
+    const auto first_token_limit = std::min(static_cast<size_t>(max_seq_len_), static_cast<size_t>(inputLength()) + 1);
+    const auto max_token_num_by_seq_len  = std::max(reserved_seq_limit, first_token_limit);
     const auto max_token_num_by_generate = static_cast<size_t>(generate_input_->generate_config->max_new_tokens)
                                            + static_cast<size_t>(generate_input_->inputLength());
     return std::min(max_token_num_by_seq_len, max_token_num_by_generate);
