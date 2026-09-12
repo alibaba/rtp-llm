@@ -42,6 +42,44 @@ void appendObject(const MMKvcmBuffer&             object,
     buffers->push_back(std::move(block));
 }
 
+struct ServiceBatch {
+    std::vector<std::string>       keys;
+    std::vector<uint64_t>          sizes;
+    kv_cache_manager::BlockBuffers buffers;
+};
+
+std::string prepareObjectBatches(const std::vector<MMKvcmBuffer>& objects, std::vector<ServiceBatch>* batches) {
+    batches->clear();
+    batches->reserve((objects.size() + kMMKvcmMaxBatchItems - 1) / kMMKvcmMaxBatchItems);
+    for (size_t begin = 0; begin < objects.size();) {
+        const size_t end = nextMMKvcmBatchEnd(objects, begin);
+        if (end == begin) {
+            return "KVCM object batch cannot fit within service limits";
+        }
+        ServiceBatch batch;
+        batch.keys.reserve(end - begin);
+        batch.sizes.reserve(end - begin);
+        batch.buffers.reserve(end - begin);
+        for (size_t i = begin; i < end; ++i) {
+            appendObject(objects[i], &batch.keys, &batch.sizes, &batch.buffers);
+        }
+        batches->push_back(std::move(batch));
+        begin = end;
+    }
+    return {};
+}
+
+void prepareKeyBatches(const std::vector<std::string>& keys, std::vector<ServiceBatch>* batches) {
+    batches->clear();
+    batches->reserve((keys.size() + kMMKvcmMaxBatchItems - 1) / kMMKvcmMaxBatchItems);
+    for (size_t begin = 0; begin < keys.size(); begin += kMMKvcmMaxBatchItems) {
+        const size_t end = std::min(begin + kMMKvcmMaxBatchItems, keys.size());
+        ServiceBatch batch;
+        batch.keys.assign(keys.begin() + begin, keys.begin() + end);
+        batches->push_back(std::move(batch));
+    }
+}
+
 class MMKvcmClientImpl final: public MMKvcmClient {
 public:
     MMKvcmClientImpl(std::unique_ptr<kv_cache_manager::KvMetaObjectClient> client,
@@ -50,37 +88,58 @@ public:
         client_(std::move(client)), max_object_bytes_(max_object_bytes), max_receipt_bytes_(max_receipt_bytes) {}
 
     std::string save(const std::string& trace_id, const std::vector<MMKvcmBuffer>& objects) override {
+        try {
+            return saveImpl(trace_id, objects);
+        } catch (...) {
+            // The adapter is called across RTP worker boundaries whose callers
+            // expect an error string, not a C++ exception. Provider-controlled
+            // details must not escape into logs or RPC responses.
+            return exceptionText("save");
+        }
+    }
+
+    std::string
+    load(const std::string& trace_id, const std::vector<MMKvcmBuffer>& objects, int64_t timeout_ms) override {
+        try {
+            return loadImpl(trace_id, objects, timeout_ms);
+        } catch (...) {
+            return exceptionText("load");
+        }
+    }
+
+    std::string remove(const std::string& trace_id, const std::vector<std::string>& keys) override {
+        try {
+            return removeImpl(trace_id, keys);
+        } catch (...) {
+            return exceptionText("remove");
+        }
+    }
+
+private:
+    std::string saveImpl(const std::string& trace_id, const std::vector<MMKvcmBuffer>& objects) {
         if (const auto error = validateMMKvcmObjects(objects, max_object_bytes_, max_receipt_bytes_); !error.empty()) {
             return error;
         }
+        // Prepare every key/size/iovec batch and both trace strings before the
+        // first mutation. A later allocation or conversion failure can no
+        // longer strand a prefix committed by an earlier service batch.
+        std::vector<ServiceBatch> batches;
+        if (const auto error = prepareObjectBatches(objects, &batches); !error.empty()) {
+            return error;
+        }
+        const std::string                 save_trace            = trace_id + ":save";
+        const std::string                 rollback_remove_trace = trace_id + ":rollback:remove";
         std::lock_guard<std::timed_mutex> lock(mutex_);
-        for (size_t begin = 0; begin < objects.size();) {
-            const size_t                   end = nextMMKvcmBatchEnd(objects, begin);
-            if (end == begin) {
-                return "KVCM save batch cannot fit within service limits";
-            }
-            std::vector<std::string>       keys;
-            std::vector<uint64_t>          sizes;
-            kv_cache_manager::BlockBuffers buffers;
-            keys.reserve(end - begin);
-            sizes.reserve(end - begin);
-            buffers.reserve(end - begin);
-            for (size_t i = begin; i < end; ++i) {
-                appendObject(objects[i], &keys, &sizes, &buffers);
-            }
+        for (size_t batch_index = 0; batch_index < batches.size(); ++batch_index) {
+            const auto&                       batch = batches[batch_index];
             kv_cache_manager::ClientErrorCode code;
             try {
-                code = client_->SaveObjects(trace_id + ":save", keys, sizes, buffers);
+                code = client_->SaveObjects(save_trace, batch.keys, batch.sizes, batch.buffers);
             } catch (...) {
                 // The native call may have committed any part of this batch
                 // before throwing. UUID object keys make the full admitted
                 // prefix safe to remove.
-                std::vector<std::string> rollback_keys;
-                rollback_keys.reserve(end);
-                for (size_t i = 0; i < end; ++i) {
-                    rollback_keys.push_back(objects[i].key);
-                }
-                const auto rollback = removeUnlocked(trace_id + ":rollback", rollback_keys);
+                const auto rollback = removeBatchesUnlocked(rollback_remove_trace, batches, batch_index + 1);
                 auto       error    = exceptionText("save");
                 if (!rollback.empty()) {
                     error += "; rollback outcome is uncertain: " + rollback;
@@ -91,25 +150,18 @@ public:
                 // RTP generates fresh UUID keys for every receipt, so removing
                 // prior batches and uncertain writes cannot delete an existing
                 // application object.
-                std::vector<std::string> rollback_keys;
-                rollback_keys.reserve(end);
-                for (size_t i = 0; i < end; ++i) {
-                    rollback_keys.push_back(objects[i].key);
-                }
-                const auto rollback = removeUnlocked(trace_id + ":rollback", rollback_keys);
+                const auto rollback = removeBatchesUnlocked(rollback_remove_trace, batches, batch_index + 1);
                 auto       error    = errorText("save", code);
                 if (!rollback.empty()) {
                     error += "; rollback outcome is uncertain: " + rollback;
                 }
                 return error;
             }
-            begin = end;
         }
         return {};
     }
 
-    std::string
-    load(const std::string& trace_id, const std::vector<MMKvcmBuffer>& objects, int64_t timeout_ms) override {
+    std::string loadImpl(const std::string& trace_id, const std::vector<MMKvcmBuffer>& objects, int64_t timeout_ms) {
         if (const auto error = validateMMKvcmObjects(objects, max_object_bytes_, max_receipt_bytes_); !error.empty()) {
             return error;
         }
@@ -122,30 +174,22 @@ public:
                 .count();
         const auto deadline = timeout_ms >= max_timeout_ms ? std::chrono::steady_clock::time_point::max()
                                                            : now + std::chrono::milliseconds(timeout_ms);
+        std::vector<ServiceBatch> batches;
+        if (const auto error = prepareObjectBatches(objects, &batches); !error.empty()) {
+            return error;
+        }
+        const std::string                  load_trace = trace_id + ":load";
         std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);
         if (!lock.try_lock_until(deadline)) {
             return "KVCM load request deadline expired waiting for the object client";
         }
-        for (size_t begin = 0; begin < objects.size();) {
+        for (const auto& batch : batches) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 return "KVCM load request deadline expired between object batches";
             }
-            const size_t                   end = nextMMKvcmBatchEnd(objects, begin);
-            if (end == begin) {
-                return "KVCM load batch cannot fit within service limits";
-            }
-            std::vector<std::string>       keys;
-            std::vector<uint64_t>          sizes;
-            kv_cache_manager::BlockBuffers buffers;
-            keys.reserve(end - begin);
-            sizes.reserve(end - begin);
-            buffers.reserve(end - begin);
-            for (size_t i = begin; i < end; ++i) {
-                appendObject(objects[i], &keys, &sizes, &buffers);
-            }
             kv_cache_manager::ClientErrorCode code;
             try {
-                code = client_->LoadObjects(trace_id + ":load", keys, sizes, buffers);
+                code = client_->LoadObjects(load_trace, batch.keys, batch.sizes, batch.buffers);
             } catch (...) {
                 return exceptionText("load");
             }
@@ -155,12 +199,11 @@ public:
             if (std::chrono::steady_clock::now() >= deadline) {
                 return "KVCM load request deadline expired during an object batch";
             }
-            begin = end;
         }
         return {};
     }
 
-    std::string remove(const std::string& trace_id, const std::vector<std::string>& keys) override {
+    std::string removeImpl(const std::string& trace_id, const std::vector<std::string>& keys) {
         if (keys.empty()) {
             return {};
         }
@@ -174,31 +217,38 @@ public:
                 return "KVCM remove keys must contain 1 to 512 bytes and be unique";
             }
         }
+        std::vector<ServiceBatch> batches;
+        prepareKeyBatches(keys, &batches);
+        const std::string                 remove_trace = trace_id + ":remove";
         std::lock_guard<std::timed_mutex> lock(mutex_);
-        return removeUnlocked(trace_id, keys);
+        return removeBatchesUnlocked(remove_trace, batches, batches.size());
     }
 
-private:
-    std::string removeUnlocked(const std::string& trace_id, const std::vector<std::string>& keys) {
-        std::string first_error;
-        for (size_t begin = 0; begin < keys.size(); begin += kMMKvcmMaxBatchItems) {
+    std::string removeBatchesUnlocked(const std::string&               remove_trace,
+                                      const std::vector<ServiceBatch>& batches,
+                                      size_t                           batch_count) {
+        bool                              saw_exception = false;
+        kv_cache_manager::ClientErrorCode first_code    = kv_cache_manager::ER_OK;
+        for (size_t batch_index = 0; batch_index < batch_count; ++batch_index) {
             try {
-                const size_t                   end = std::min(begin + kMMKvcmMaxBatchItems, keys.size());
-                const std::vector<std::string> batch(keys.begin() + begin, keys.begin() + end);
-                const auto                     code = client_->Remove(trace_id + ":remove", batch);
-                if (code != kv_cache_manager::ER_OK && first_error.empty()) {
-                    first_error = errorText("remove", code);
+                const auto code = client_->Remove(remove_trace, batches[batch_index].keys);
+                if (code != kv_cache_manager::ER_OK && first_code == kv_cache_manager::ER_OK && !saw_exception) {
+                    first_code = code;
                 }
             } catch (...) {
                 // Batches are disjoint UUID keys. Continue cleanup after one
-                // provider exception and report the first failure without
-                // exposing provider-controlled exception text.
-                if (first_error.empty()) {
-                    first_error = exceptionText("remove");
+                // provider exception. Defer all error-string construction
+                // until every batch has been attempted so formatting failure
+                // cannot strand the remaining committed prefix.
+                if (first_code == kv_cache_manager::ER_OK) {
+                    saw_exception = true;
                 }
             }
         }
-        return first_error;
+        if (first_code != kv_cache_manager::ER_OK) {
+            return errorText("remove", first_code);
+        }
+        return saw_exception ? exceptionText("remove") : std::string{};
     }
 
     std::unique_ptr<kv_cache_manager::KvMetaObjectClient> client_;

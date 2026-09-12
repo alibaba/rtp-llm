@@ -79,14 +79,21 @@ std::string validateMMKvcmConfig(const MMKvcmConfig& config) {
     }
     if (config.call_timeout_ms == 0 || config.call_timeout_ms > 600000 || config.write_timeout_seconds <= 0
         || config.write_timeout_seconds > kMMKvcmMaxWriteTimeoutSecs || config.object_gc_timeout_ms <= 0
-        || config.max_object_bytes <= 0 || config.max_receipt_bytes <= 0) {
-        return "KVCM timeouts and byte limits are outside their valid ranges";
+        || config.max_object_bytes <= 0 || config.max_receipt_bytes <= 0 || config.max_pending_objects <= 0
+        || config.max_pending_bytes <= 0) {
+        return "KVCM timeouts and capacity limits are outside their valid ranges";
     }
     if (static_cast<uint64_t>(config.max_object_bytes) > kMMKvcmMaxObjectBytes) {
         return "KVCM max_object_bytes exceeds the KVMeta service limit";
     }
     if (static_cast<uint64_t>(config.max_receipt_bytes) > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
         return "KVCM max_receipt_bytes exceeds the local address space";
+    }
+    if (static_cast<uint64_t>(config.max_pending_objects) > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        return "KVCM max_pending_objects exceeds the local address space";
+    }
+    if (static_cast<uint64_t>(config.max_pending_bytes) > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        return "KVCM max_pending_bytes exceeds the local address space";
     }
     if (config.max_receipt_bytes < config.max_object_bytes) {
         return "KVCM max_receipt_bytes is smaller than max_object_bytes";

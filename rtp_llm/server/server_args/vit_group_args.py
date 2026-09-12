@@ -466,6 +466,22 @@ def init_vit_group_args(parser, vit_config):
         help="LLM 侧单个 KVCM receipt 的总载荷上限",
     )
     vit_group.add_argument(
+        "--mm_kvcm_max_pending_objects",
+        env_name="MM_KVCM_MAX_PENDING_OBJECTS",
+        bind_to=(kvcm_config, "max_pending_objects"),
+        type=_positive_int,
+        default=64 * 1024,
+        help="ViT 侧所有未回收 KVCM EMB objects 的总数量上限；达到后在写存储前快速失败",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_max_pending_bytes",
+        env_name="MM_KVCM_MAX_PENDING_BYTES",
+        bind_to=(kvcm_config, "max_pending_bytes"),
+        type=_positive_int,
+        default=64 * 1024 * 1024 * 1024,
+        help="ViT 侧所有未回收 KVCM EMB objects 的总字节上限；达到后在写存储前快速失败",
+    )
+    vit_group.add_argument(
         "--gpu_batch_wait_ms",
         env_name="VIT_GPU_BATCH_WAIT_MS",
         bind_to=(vit_config, "gpu_batch_wait_ms"),

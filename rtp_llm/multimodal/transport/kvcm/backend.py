@@ -36,6 +36,14 @@ _DTYPE_TO_PROTO = {
 }
 
 
+def _safe_warning(message: str, *args) -> None:
+    """Keep best-effort cleanup/accounting alive if a log handler is faulty."""
+    try:
+        logging.warning(message, *args)
+    except Exception:  # noqa: BLE001 - logging must never break cleanup
+        pass
+
+
 class _KvcmWriter(Protocol):
     def save(self, keys: Sequence[str], tensors: Sequence[torch.Tensor]) -> None: ...
 
@@ -169,6 +177,16 @@ class KvcmOutputBackend(MMTransportBackend):
             "max_receipt_bytes",
             sys.maxsize,
         )
+        self._max_pending_objects = _strict_positive_int(
+            kvcm_config.max_pending_objects,
+            "max_pending_objects",
+            sys.maxsize,
+        )
+        self._max_pending_bytes = _strict_positive_int(
+            kvcm_config.max_pending_bytes,
+            "max_pending_bytes",
+            sys.maxsize,
+        )
         gc_timeout_ms = _strict_positive_int(
             kvcm_config.object_gc_timeout_ms,
             "object_gc_timeout_ms",
@@ -178,6 +196,13 @@ class KvcmOutputBackend(MMTransportBackend):
             raise ValueError("KVCM max_receipt_bytes is smaller than max_object_bytes")
         self._gc_timeout_seconds = gc_timeout_ms / 1000.0
         self._pending: Dict[str, float] = {}
+        self._pending_sizes: Dict[str, int] = {}
+        self._pending_bytes = 0
+        # Keys remain in _pending while a save/remove is in flight. This makes
+        # capacity accounting conservative and prevents a failed remove from
+        # racing a new admission into capacity that has not actually been
+        # reclaimed yet.
+        self._inflight = set()
         self._condition = threading.Condition()
         self._active_operations = 0
         self._closing = False
@@ -224,7 +249,7 @@ class KvcmOutputBackend(MMTransportBackend):
             try:
                 writer.close()
             except Exception as close_error:  # noqa: BLE001 - preserve root cause
-                logging.warning(
+                _safe_warning(
                     "[VIT] KVCM writer initialization rollback failed "
                     "(exception_type=%s)",
                     type(close_error).__name__,
@@ -259,7 +284,8 @@ class KvcmOutputBackend(MMTransportBackend):
                 objects.append((chunk, role, logical_index))
         if not objects:
             raise RuntimeError("KVCM transport produced no exact-size objects")
-        total_bytes = sum(_tensor_nbytes(tensor) for tensor, _, _ in objects)
+        object_sizes = [_tensor_nbytes(tensor) for tensor, _, _ in objects]
+        total_bytes = sum(object_sizes)
         if total_bytes > self._max_receipt_bytes:
             raise RuntimeError(
                 f"KVCM output size {total_bytes} exceeds max_receipt_bytes "
@@ -268,6 +294,11 @@ class KvcmOutputBackend(MMTransportBackend):
         keys = [f"rtp-mm-{uuid.uuid4().hex}" for _ in objects]
         object_tensors = [tensor for tensor, _, _ in objects]
         _synchronize_cuda_tensors(object_tensors)
+        # Insert all cleanup/accounting state before the first storage
+        # mutation. If Python allocation fails here, no KVCM object exists;
+        # after this point every exception path has a preallocated cleanup
+        # record and cannot silently escape the aggregate pending limits.
+        self._admit(keys, object_sizes)
         try:
             self._writer.save(keys, object_tensors)
         except Exception:
@@ -275,14 +306,15 @@ class KvcmOutputBackend(MMTransportBackend):
             # before a later prefix failed.  KVMeta V1 has no object TTL, so a
             # failed rollback must enter the same retry queue as normal lease
             # cleanup instead of being abandoned after one best-effort call.
-            self._remove_or_retry(keys, "save rollback")
+            self._cleanup_claimed(keys, "save rollback")
             raise
 
         try:
             receipt = MultimodalOutputPB(split_size=split_size)
             role_bytes: Dict[int, int] = {}
-            for key, (tensor, role, logical_index) in zip(keys, objects):
-                nbytes = _tensor_nbytes(tensor)
+            for key, nbytes, (tensor, role, logical_index) in zip(
+                keys, object_sizes, objects
+            ):
                 obj = receipt.output_kvcm_objects.add(
                     key=key,
                     value_size=nbytes,
@@ -301,12 +333,12 @@ class KvcmOutputBackend(MMTransportBackend):
                 payload_pos_bytes=role_bytes.get(MMRdmaSlotPB.POS_ID, 0),
                 payload_extra_bytes=role_bytes.get(MMRdmaSlotPB.EXTRA_INPUT, 0),
             )
-            self._track(keys)
+            self._publish(keys)
         except Exception:
             # The values are already committed at this point.  Keep retrying
             # removal if receipt construction/publication cannot complete;
             # otherwise no consumer exists that can release these objects.
-            self._remove_or_retry(keys, "receipt rollback")
+            self._cleanup_claimed(keys, "receipt rollback")
             raise
 
         return result
@@ -427,6 +459,10 @@ class KvcmOutputBackend(MMTransportBackend):
                 f"KVCM output requires {object_count} objects, exceeding receipt limit "
                 f"{_MAX_OBJECTS_PER_RECEIPT}"
             )
+        # Avoid another potentially large concat/chunk allocation when an
+        # outage has already filled the pending ledger. Admission below still
+        # rechecks atomically after materialization to close concurrent races.
+        self._check_pending_capacity(object_count, total_bytes)
 
         embedding = torch.concat(embeddings).contiguous()
         output: List[Tuple[torch.Tensor, int, int]] = [
@@ -450,13 +486,73 @@ class KvcmOutputBackend(MMTransportBackend):
                 )
         return output, split_size
 
-    def _track(self, keys: Sequence[str]) -> None:
+    def _ensure_pending_capacity_locked(
+        self, object_count: int, total_bytes: int
+    ) -> None:
+        if self._closing or self._closed:
+            raise RuntimeError("KVCM output backend is closed")
+        if object_count > self._max_pending_objects - len(self._pending):
+            raise RuntimeError(
+                "KVCM pending object capacity exceeded "
+                f"(limit={self._max_pending_objects})"
+            )
+        if total_bytes > self._max_pending_bytes - self._pending_bytes:
+            raise RuntimeError(
+                "KVCM pending byte capacity exceeded "
+                f"(limit={self._max_pending_bytes})"
+            )
+
+    def _check_pending_capacity(self, object_count: int, total_bytes: int) -> None:
+        with self._condition:
+            self._ensure_pending_capacity_locked(object_count, total_bytes)
+
+    def _admit(self, keys: Sequence[str], sizes: Sequence[int]) -> None:
+        if len(keys) != len(sizes) or not keys:
+            raise RuntimeError(
+                "KVCM pending admission received invalid object metadata"
+            )
+        if len(set(keys)) != len(keys):
+            raise RuntimeError("KVCM generated duplicate object keys")
+        total_bytes = sum(sizes)
+        if any(size <= 0 for size in sizes):
+            raise RuntimeError("KVCM pending admission received an invalid object size")
+
+        with self._condition:
+            self._ensure_pending_capacity_locked(len(keys), total_bytes)
+            if any(key in self._pending for key in keys):
+                raise RuntimeError("KVCM generated an object key that is still pending")
+
+            # Python integer arithmetic can allocate. Compute the replacement
+            # value before mutating any maps so even MemoryError leaves a fully
+            # empty admission and no storage cleanup obligation.
+            next_pending_bytes = self._pending_bytes + total_bytes
+            try:
+                for key, size in zip(keys, sizes):
+                    self._pending[key] = float("inf")
+                    self._pending_sizes[key] = size
+                    self._inflight.add(key)
+            except Exception:
+                # Every mutation above is local and precedes storage I/O, so a
+                # complete rollback is both possible and required.
+                for key in keys:
+                    self._pending.pop(key, None)
+                    self._pending_sizes.pop(key, None)
+                    self._inflight.discard(key)
+                raise
+            self._pending_bytes = next_pending_bytes
+
+    def _publish(self, keys: Sequence[str]) -> None:
         deadline = time.monotonic() + self._gc_timeout_seconds
         with self._condition:
             if self._closing or self._closed:
                 raise RuntimeError("KVCM output backend is closed")
+            if any(
+                key not in self._pending or key not in self._inflight for key in keys
+            ):
+                raise RuntimeError("KVCM pending object accounting is inconsistent")
             for key in keys:
                 self._pending[key] = deadline
+                self._inflight.discard(key)
             self._condition.notify_all()
 
     def release(self, handles: List[str]) -> None:
@@ -467,15 +563,15 @@ class KvcmOutputBackend(MMTransportBackend):
             # Reject it explicitly so a malformed caller cannot accidentally
             # release one-character keys now or after a key-format change.
             if isinstance(handles, (str, bytes)):
-                logging.warning("[VIT] ignoring scalar KVCM release handle")
+                _safe_warning("[VIT] ignoring scalar KVCM release handle")
                 return
             try:
                 snapshot = list(islice(iter(handles), _MAX_OBJECTS_PER_RECEIPT + 1))
             except TypeError:
-                logging.warning("[VIT] ignoring non-iterable KVCM release handles")
+                _safe_warning("[VIT] ignoring non-iterable KVCM release handles")
                 return
             if len(snapshot) > _MAX_OBJECTS_PER_RECEIPT:
-                logging.warning(
+                _safe_warning(
                     "[VIT] ignoring KVCM release handles beyond the %d-object limit; "
                     "object GC will reclaim them",
                     _MAX_OBJECTS_PER_RECEIPT,
@@ -494,11 +590,15 @@ class KvcmOutputBackend(MMTransportBackend):
                     seen.add(handle)
                     requested.append(handle)
             with self._condition:
-                owned = [handle for handle in requested if handle in self._pending]
-                for handle in owned:
-                    self._pending.pop(handle, None)
+                owned = self._claim_owned_locked(requested)
             if owned:
-                self._remove_or_retry(owned, "release")
+                self._cleanup_claimed(owned, "release")
+        except Exception as error:  # noqa: BLE001 - release is best effort
+            _safe_warning(
+                "[VIT] KVCM release handling failed; object GC will retry "
+                "eligible objects (exception_type=%s)",
+                type(error).__name__,
+            )
         finally:
             self._end_operation()
 
@@ -521,7 +621,49 @@ class KvcmOutputBackend(MMTransportBackend):
             if self._active_operations == 0:
                 self._condition.notify_all()
 
-    def _remove_or_retry(self, keys: Sequence[str], reason: str) -> None:
+    def _claim_owned_locked(self, keys: Sequence[str]) -> List[str]:
+        owned = [
+            key for key in keys if key in self._pending and key not in self._inflight
+        ]
+        try:
+            for key in owned:
+                self._inflight.add(key)
+        except Exception:
+            for key in owned:
+                self._inflight.discard(key)
+            raise
+        return owned
+
+    def _drop_claimed_locked(self, keys: Sequence[str]) -> None:
+        # Complete every allocation/arithmetic operation before mutating the
+        # maps. On failure the caller can conservatively retry the idempotent
+        # Remove without leaving a partially released local ledger.
+        released_bytes = sum(
+            self._pending_sizes[key] for key in keys if key in self._pending
+        )
+        if released_bytes > self._pending_bytes:
+            raise RuntimeError("KVCM pending byte accounting underflow")
+        next_pending_bytes = self._pending_bytes - released_bytes
+        for key in keys:
+            if key in self._pending:
+                self._pending.pop(key)
+                self._pending_sizes.pop(key)
+            self._inflight.discard(key)
+        self._pending_bytes = next_pending_bytes
+        self._condition.notify_all()
+
+    def _schedule_retry_locked(self, keys: Sequence[str]) -> None:
+        # GC lifetime and retry cadence are independent. Tying retries to a
+        # very small (misconfigured) object TTL can otherwise spin and flood
+        # logs while storage is down.
+        retry_at = time.monotonic() + _REMOVE_RETRY_SECONDS
+        for key in keys:
+            if key in self._pending:
+                self._pending[key] = retry_at
+                self._inflight.discard(key)
+        self._condition.notify_all()
+
+    def _cleanup_claimed(self, keys: Sequence[str], reason: str) -> None:
         if not keys:
             return
         with self._condition:
@@ -530,24 +672,52 @@ class KvcmOutputBackend(MMTransportBackend):
         try:
             self._writer.remove(list(keys))
         except Exception as error:  # noqa: BLE001 - retrying GC is the backstop
+            # Publish retry state before logging. A custom logging handler is
+            # external code and must not be able to strand claimed objects.
+            with self._condition:
+                if not self._closed:
+                    self._schedule_retry_locked(keys)
             # Native errors may contain endpoints, keys or provider details.
             # Keep failure logs actionable without copying those values.
-            logging.warning(
+            _safe_warning(
                 "[VIT] KVCM %s failed; scheduling retry "
                 "(object_count=%d, exception_type=%s)",
                 reason,
                 len(keys),
                 type(error).__name__,
             )
+            return
+
+        try:
+            with self._condition:
+                self._drop_claimed_locked(keys)
+        except Exception as error:  # noqa: BLE001 - preserve conservative ownership
+            # Remote Remove succeeded, but local bookkeeping did not. Keep the
+            # full capacity charge and retry the idempotent UUID-key removal;
+            # under-counting would admit unbounded work after local corruption.
             with self._condition:
                 if not self._closed:
-                    # GC lifetime and retry cadence are independent. Tying
-                    # retries to a very small (misconfigured) object TTL can
-                    # otherwise spin and flood logs while storage is down.
-                    retry_at = time.monotonic() + _REMOVE_RETRY_SECONDS
-                    for key in keys:
-                        self._pending[key] = retry_at
-                    self._condition.notify_all()
+                    self._schedule_retry_locked(keys)
+            _safe_warning(
+                "[VIT] KVCM %s accounting finalization failed; scheduling retry "
+                "(object_count=%d, exception_type=%s)",
+                reason,
+                len(keys),
+                type(error).__name__,
+            )
+
+    # Retain a small internal compatibility wrapper for callers/tests that
+    # request cleanup of already-pending objects. New mutation paths admit and
+    # claim their keys before calling _cleanup_claimed().
+    def _remove_or_retry(self, keys: Sequence[str], reason: str) -> None:
+        if not keys:
+            return
+        with self._condition:
+            if self._closed:
+                return
+            owned = self._claim_owned_locked(keys)
+        if owned:
+            self._cleanup_claimed(owned, reason)
 
     def _best_effort_remove(self, keys: Sequence[str], reason: str) -> None:
         if not keys:
@@ -555,7 +725,7 @@ class KvcmOutputBackend(MMTransportBackend):
         try:
             self._writer.remove(list(keys))
         except Exception as error:  # noqa: BLE001 - shutdown must complete
-            logging.warning(
+            _safe_warning(
                 "[VIT] KVCM %s failed; objects require later namespace cleanup "
                 "(object_count=%d, exception_type=%s)",
                 reason,
@@ -571,44 +741,67 @@ class KvcmOutputBackend(MMTransportBackend):
             if callable(close):
                 close()
         except Exception as error:  # noqa: BLE001 - shutdown must complete
-            logging.warning(
+            _safe_warning(
                 "[VIT] KVCM writer close failed (exception_type=%s)",
                 type(error).__name__,
             )
 
     def _gc_loop(self) -> None:
         while True:
-            with self._condition:
-                while not self._closing and not self._closed and not self._pending:
-                    self._condition.wait()
-                if self._closing or self._closed:
-                    return
-                now = time.monotonic()
-                deadline = min(self._pending.values())
-                if deadline > now:
-                    # threading.Condition delegates to a platform timed wait,
-                    # whose accepted timeout is much smaller than int64 ms on
-                    # some systems. Wake periodically for huge valid leases.
-                    self._condition.wait(
-                        timeout=min(deadline - now, _MAX_GC_WAIT_SECONDS)
-                    )
-                    continue
-                expired = [
-                    key
-                    for key, expires_at in self._pending.items()
-                    if expires_at <= now
-                ]
-                for key in expired:
-                    self._pending.pop(key, None)
-                # close() waits for this attempt before taking its final
-                # snapshot. A failed removal can therefore be requeued before
-                # the worker exits, rather than disappearing in a pop/close
-                # race.
-                self._active_operations += 1
             try:
-                self._remove_or_retry(expired, "expiry cleanup")
-            finally:
-                self._end_operation()
+                if self._gc_once():
+                    return
+            except Exception as error:  # noqa: BLE001 - keep the backstop alive
+                # One unexpected bookkeeping/runtime error must not silently
+                # kill the only cleanup worker. Do not include keys or native
+                # exception text in this process-level failure log.
+                _safe_warning(
+                    "[VIT] KVCM object GC iteration failed; retrying "
+                    "(exception_type=%s)",
+                    type(error).__name__,
+                )
+                with self._condition:
+                    if self._closing or self._closed:
+                        return
+                    self._condition.wait(timeout=_REMOVE_RETRY_SECONDS)
+
+    def _gc_once(self) -> bool:
+        with self._condition:
+            while (
+                not self._closing
+                and not self._closed
+                and len(self._inflight) == len(self._pending)
+            ):
+                self._condition.wait()
+            if self._closing or self._closed:
+                return True
+            now = time.monotonic()
+            deadline = min(
+                expires_at
+                for key, expires_at in self._pending.items()
+                if key not in self._inflight
+            )
+            if deadline > now:
+                # threading.Condition delegates to a platform timed wait,
+                # whose accepted timeout is much smaller than int64 ms on
+                # some systems. Wake periodically for huge valid leases.
+                self._condition.wait(timeout=min(deadline - now, _MAX_GC_WAIT_SECONDS))
+                return False
+            expired = [
+                key
+                for key, expires_at in self._pending.items()
+                if key not in self._inflight and expires_at <= now
+            ]
+            expired = self._claim_owned_locked(expired)
+            # close() waits for this attempt before taking its final snapshot.
+            # A failed removal can therefore be requeued before the worker
+            # exits, rather than disappearing in a claim/close race.
+            self._active_operations += 1
+        try:
+            self._cleanup_claimed(expired, "expiry cleanup")
+        finally:
+            self._end_operation()
+        return False
 
     def close(self) -> None:
         with self._condition:
@@ -624,6 +817,9 @@ class KvcmOutputBackend(MMTransportBackend):
                 self._condition.wait()
             remaining = list(self._pending)
             self._pending.clear()
+            self._pending_sizes.clear()
+            self._pending_bytes = 0
+            self._inflight.clear()
         try:
             self._gc_thread.join()
             if remaining:

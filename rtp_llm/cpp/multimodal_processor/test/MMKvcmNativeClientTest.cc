@@ -1,6 +1,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -22,11 +23,16 @@ namespace {
 class FakeNativeObjectClient final: public kv_cache_manager::KvMetaObjectClient {
 public:
     kv_cache_manager::ClientErrorCode SaveObjects(const std::string&,
-                                                   const std::vector<std::string>&   keys,
-                                                   const std::vector<std::uint64_t>&,
-                                                   const kv_cache_manager::BlockBuffers&) override {
+                                                  const std::vector<std::string>&       keys,
+                                                  const std::vector<std::uint64_t>&     sizes,
+                                                  const kv_cache_manager::BlockBuffers& buffers) override {
         const auto call = save_batches.size();
         save_batches.push_back(keys);
+        save_sizes.push_back(sizes);
+        save_buffers.push_back(buffers);
+        if (save_hook) {
+            save_hook(call);
+        }
         if (block_save) {
             std::unique_lock<std::mutex> lock(gate_mutex);
             save_entered = true;
@@ -72,13 +78,17 @@ public:
     bool   save_entered      = false;
     bool   allow_save        = false;
 
+    std::function<void(size_t)> save_hook;
+
     std::mutex              gate_mutex;
     std::condition_variable gate_condition;
 
-    std::vector<std::vector<std::string>> save_batches;
-    std::vector<std::vector<std::string>> load_batches;
-    std::vector<std::vector<std::string>> remove_batches;
-    std::vector<std::string>              remove_traces;
+    std::vector<std::vector<std::string>>       save_batches;
+    std::vector<std::vector<std::uint64_t>>     save_sizes;
+    std::vector<kv_cache_manager::BlockBuffers> save_buffers;
+    std::vector<std::vector<std::string>>       load_batches;
+    std::vector<std::vector<std::string>>       remove_batches;
+    std::vector<std::string>                    remove_traces;
 };
 
 struct ObjectBatch {
@@ -133,6 +143,36 @@ TEST(MMKvcmNativeClientTest, saveUsesServiceBatches) {
     EXPECT_EQ(adapter.native->save_batches[0].size(), kMMKvcmMaxBatchItems);
     EXPECT_EQ(adapter.native->save_batches[1].size(), 1u);
     EXPECT_TRUE(adapter.native->remove_batches.empty());
+}
+
+TEST(MMKvcmNativeClientTest, savePreparesEveryBatchBeforeTheFirstProviderMutation) {
+    NativeAdapter adapter;
+    ObjectBatch   batch(kMMKvcmMaxBatchItems + 1);
+    adapter.native->save_hook = [&batch](size_t call) {
+        if (call == 0) {
+            // Model a caller/provider side effect while the first batch is in
+            // flight. The adapter must already own a stable plan for every
+            // later batch; otherwise an exception during later preparation
+            // could strand the committed prefix.
+            batch.objects.back().key     = "mutated-after-first-io";
+            batch.objects.back().nbytes  = 2;
+            batch.objects.back().data    = nullptr;
+            batch.objects.back().is_cuda = true;
+        }
+    };
+
+    EXPECT_TRUE(adapter.client->save("trace", batch.objects).empty());
+
+    ASSERT_EQ(adapter.native->save_batches.size(), 2u);
+    ASSERT_EQ(adapter.native->save_batches[1].size(), 1u);
+    EXPECT_EQ(adapter.native->save_batches[1][0], "object-64");
+    ASSERT_EQ(adapter.native->save_sizes[1].size(), 1u);
+    EXPECT_EQ(adapter.native->save_sizes[1][0], 1u);
+    ASSERT_EQ(adapter.native->save_buffers[1].size(), 1u);
+    ASSERT_EQ(adapter.native->save_buffers[1][0].iovs.size(), 1u);
+    EXPECT_EQ(adapter.native->save_buffers[1][0].iovs[0].base, &batch.storage.back());
+    EXPECT_EQ(adapter.native->save_buffers[1][0].iovs[0].size, 1u);
+    EXPECT_EQ(adapter.native->save_buffers[1][0].iovs[0].type, kv_cache_manager::MemoryType::CPU);
 }
 
 TEST(MMKvcmNativeClientTest, saveExceptionRollsBackTheEntireAdmittedPrefix) {

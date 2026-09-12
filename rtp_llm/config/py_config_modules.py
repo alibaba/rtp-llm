@@ -332,6 +332,11 @@ class MMKvcmConfig:
         self.object_gc_timeout_ms: int = DEFAULT_MM_TIMEOUT_MS + 60 * 1000
         self.max_object_bytes: int = 1024 * 1024 * 1024
         self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
+        # Bound producer-side cleanup ownership across all receipts. Admission
+        # is fail-fast and occurs before KVCM mutation, so storage outages or
+        # lost release RPCs cannot grow process memory without limit.
+        self.max_pending_objects: int = 64 * 1024
+        self.max_pending_bytes: int = 64 * 1024 * 1024 * 1024
 
 
 class MMControlConfig:
@@ -475,6 +480,8 @@ class VitConfig:
             f"mm_kvcm_object_gc_timeout_ms: {kvcm.object_gc_timeout_ms}\n"
             f"mm_kvcm_max_object_bytes: {kvcm.max_object_bytes}\n"
             f"mm_kvcm_max_receipt_bytes: {kvcm.max_receipt_bytes}\n"
+            f"mm_kvcm_max_pending_objects: {kvcm.max_pending_objects}\n"
+            f"mm_kvcm_max_pending_bytes: {kvcm.max_pending_bytes}\n"
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
             f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
             f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"

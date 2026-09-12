@@ -235,11 +235,17 @@ release handle 会被过滤，不能借 control RPC 删除任意 KVCM 对象。
 
 ### 8.2 正常 release 与失败重试
 
-LLM 通过既有 control RPC 将 handles 路由到产生 receipt 的 ViT endpoint。ViT 从 `_pending` 移除 owned keys 后
-调用 KVCM Remove；失败则以固定 1 秒节奏重新加入 cleanup queue。retry cadence 与 object GC timeout 解耦，
-避免错误配置的短 GC timeout 形成忙循环。receipt key 是本次 transfer 新生成且不会复用的 UUID key，因此同一
-exact key 的 cleanup 重放不会命中新一代业务对象。失败日志只记录内部 reason、object count 和异常类型，不输出
-handle、endpoint 或 native provider 错误原文。
+LLM 通过既有 control RPC 将 handles 路由到产生 receipt 的 ViT endpoint。ViT 在 Remove 成功前始终让 owned key
+留在 `_pending` 计账中，并用 in-flight 标记阻止 release/GC 重复删除；Remove 失败则清除 in-flight 标记并把 deadline
+改为固定 1 秒后的重试时间。这样清理尚未确认成功的容量不会被新 transfer 抢占。retry cadence 与 object GC timeout
+解耦，避免错误配置的短 GC timeout 形成忙循环。receipt key 是本次 transfer 新生成且不会复用的 UUID key，因此
+同一 exact key 的 cleanup 重放不会命中新一代业务对象。失败日志只记录内部 reason、object count 和异常类型，
+不输出 handle、endpoint 或 native provider 错误原文。
+
+producer 在第一次 KVCM mutation 前，把本 receipt 的全部 key/size 原子加入本地 pending 账本；正在 Save 的对象也
+计入总量。`MM_KVCM_MAX_PENDING_OBJECTS` 和 `MM_KVCM_MAX_PENDING_BYTES` 任一达到上限时，新 transfer 在写存储
+前快速失败，不等待 GC，也不影响默认 gRPC transport。Save、receipt 构造或 Remove 失败都沿用同一份预建账本，
+避免异常路径再分配 cleanup metadata 后失败。
 
 `GrpcMMControlClient` 的异步 release 队列按 `(endpoint, handle)` 去重，进程级最多保留 1024 个待发送 handle；
 单个合法 receipt 因此能装入一个原本为空的队列，但多个并发 receipt 仍可能让队列满。队列拒绝、RPC 失败或进程
@@ -247,6 +253,8 @@ handle、endpoint 或 native provider 错误原文。
 
 请求经过多 worker ViT proxy 时，`MMOutputProxyRouter` 保存 `handle -> worker` 路由，TTL 为对应 object GC
 时间再加 5 秒安全余量。相同 handle 若被不同 worker 同时声明，路由会 fail closed，不会把 release 发给任一方。
+单次 release 最多处理 1024 个 handle，超出部分保留原 route 并由重试或 worker GC 收敛；unknown/expired/collision
+按原因聚合计数和脱敏告警，避免恶意输入造成全量复制、逐 key 日志放大或泄露 endpoint/handle。
 
 ### 8.3 Deadline GC
 
@@ -289,6 +297,8 @@ reclaimer 等运维兜底，不能只依赖进程内 GC。
 | KVCM `user_data` | 64 KiB |
 | write timeout | 最大 1800 秒 |
 | metadata call timeout | 最大 600000 ms |
+| producer 全局 pending objects | 默认 65536，按部署容量配置为正整数 |
+| producer 全局 pending bytes | 默认 64 GiB，按部署容量配置为正整数 |
 
 1024 object 上限与共享 control client 的 pending-release capacity 对齐，使一个合法 receipt 在空队列中一定能够
 进入异步 release。
@@ -310,6 +320,8 @@ ViT 与 LLM 进程必须使用相同 KVCM 身份和 transfer 配置：
 | `MM_KVCM_OBJECT_GC_TIMEOUT_MS` | `180000` | ViT 未收到 release 的兜底回收时间 |
 | `MM_KVCM_MAX_OBJECT_BYTES` | `1 GiB` | 单物理 object 上限 |
 | `MM_KVCM_MAX_RECEIPT_BYTES` | `8 GiB` | 单 receipt 总 tensor bytes 上限 |
+| `MM_KVCM_MAX_PENDING_OBJECTS` | `65536` | ViT 进程未确认回收的 object 总数上限 |
+| `MM_KVCM_MAX_PENDING_BYTES` | `64 GiB` | ViT 进程未确认回收的 object 总字节上限 |
 | `MM_RDMA_RELEASE_TIMEOUT_MS` | `1000` | 历史命名；实际是所有 external transport 共用的 release RPC deadline |
 
 transfer JSON 必须：
@@ -381,8 +393,8 @@ ViT writer 和 LLM reader，否则可能在一端写入后被另一端按不同�
 
 | 测试 | 覆盖范围 |
 |---|---|
-| `mm_output_transport_test.py` | 使用 fake writer 覆盖 Python producer 的 receipt、切片、rollback、release、GC、shutdown races、post-close retry、日志脱敏和输入上限；另覆盖 factory → packaged-client contract → output metrics → release/close 组合链路，以及默认 gRPC 不导入 KVCM/RDMA 可选模块的主链路隔离 |
-| `MMKvcmTransportTest` | C++ reader、manifest/reassembly、真实分片字节与 receipt 顺序、deadline/release 失败，以及 client 配置、对象和分批边界 |
+| `mm_output_transport_test.py` | 使用 fake writer 覆盖 Python producer 的 receipt、切片、rollback、release、GC、shutdown races、in-flight/全局 pending 容量、post-close retry、日志脱敏和输入上限；另覆盖 factory → packaged-client contract → output metrics → release/close 组合链路，以及默认 gRPC 不导入 KVCM/RDMA 可选模块的主链路隔离 |
+| `MMKvcmTransportTest` / `MMKvcmNativeClientTest` | C++ reader、manifest/reassembly、真实分片字节与 receipt 顺序、deadline/release 失败、client 配置、对象和分批边界，以及首个 provider mutation 前完整预构建所有 service batches |
 | `mm_kvcm_cross_repo_integration_test.py` | RTP transport config/factory → `MMOutputTransport` → KVCM wheel object client → 真实 KVCM service → proxy-routed release/GC；校验变长 payload 字节，并等待全部 listener/KVMeta recovery ready、检查停机日志无非预期 ERROR/FATAL/Sanitizer |
 
 跨仓测试执行生产 factory、`KvcmOutputBackend.create`、`MMOutputTransport`、proxy release router 和 KVCM Python

@@ -769,6 +769,10 @@ class ServerArgsSetTest(TestCase):
                 "1048576",
                 "--mm_kvcm_max_receipt_bytes",
                 "8388608",
+                "--mm_kvcm_max_pending_objects",
+                "4096",
+                "--mm_kvcm_max_pending_bytes",
+                "67108864",
             ]
         )
 
@@ -786,6 +790,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(transport.kvcm.object_gc_timeout_ms, 240_000)
         self.assertEqual(transport.kvcm.max_object_bytes, 1_048_576)
         self.assertEqual(transport.kvcm.max_receipt_bytes, 8_388_608)
+        self.assertEqual(transport.kvcm.max_pending_objects, 4_096)
+        self.assertEqual(transport.kvcm.max_pending_bytes, 67_108_864)
 
     def test_kvcm_transport_vit_args_reject_invalid_values(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -802,6 +808,8 @@ class ServerArgsSetTest(TestCase):
             ("--mm_kvcm_object_gc_timeout_ms", "0"),
             ("--mm_kvcm_max_object_bytes", "0"),
             ("--mm_kvcm_max_receipt_bytes", "not-an-integer"),
+            ("--mm_kvcm_max_pending_objects", "0"),
+            ("--mm_kvcm_max_pending_bytes", "-1"),
         )
         for flag, value in invalid_arguments:
             with self.subTest(flag=flag, value=value):

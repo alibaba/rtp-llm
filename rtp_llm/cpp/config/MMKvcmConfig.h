@@ -39,6 +39,8 @@ struct MMKvcmConfig {
     int64_t object_gc_timeout_ms = 180 * 1000;
     int64_t max_object_bytes     = 1024LL * 1024 * 1024;
     int64_t max_receipt_bytes    = 8LL * 1024 * 1024 * 1024;
+    int64_t max_pending_objects  = 64LL * 1024;
+    int64_t max_pending_bytes    = 64LL * 1024 * 1024 * 1024;
 };
 
 }  // namespace rtp_llm

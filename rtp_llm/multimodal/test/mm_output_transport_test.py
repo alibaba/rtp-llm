@@ -294,10 +294,17 @@ class _FakeKvcmWriter:
         self.remove_event.set()
 
 
-def _kvcm_config(max_object_bytes=32, max_receipt_bytes=1024):
+def _kvcm_config(
+    max_object_bytes=32,
+    max_receipt_bytes=1024,
+    max_pending_objects=64 * 1024,
+    max_pending_bytes=64 * 1024 * 1024 * 1024,
+):
     config = MMTransportConfig().kvcm
     config.max_object_bytes = max_object_bytes
     config.max_receipt_bytes = max_receipt_bytes
+    config.max_pending_objects = max_pending_objects
+    config.max_pending_bytes = max_pending_bytes
     config.object_gc_timeout_ms = 60 * 1000
     return config
 
@@ -467,6 +474,209 @@ class KvcmOutputBackendTest(TestCase):
         finally:
             backend.close()
 
+    def test_pending_capacity_is_released_only_after_storage_cleanup(self):
+        backend = KvcmOutputBackend(
+            self.writer,
+            _kvcm_config(max_pending_objects=1, max_pending_bytes=16),
+        )
+        try:
+            first = backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+            first_key = first.receipt.output_kvcm_objects[0].key
+            self.assertEqual(backend._pending_bytes, 16)
+
+            with patch.object(
+                torch,
+                "concat",
+                side_effect=AssertionError("capacity check ran after concat"),
+            ), self.assertRaisesRegex(RuntimeError, "pending object capacity"):
+                backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True),
+                    MMEmbeddingRes([_rows(1, offset=20.0)]),
+                )
+            self.assertEqual(len(self.writer.saved), 1)
+
+            backend.release([first_key])
+            self.assertEqual(backend._pending_bytes, 0)
+            second = backend.transfer(
+                MultimodalInputsPB(support_kvcm=True),
+                MMEmbeddingRes([_rows(1, offset=40.0)]),
+            )
+            self.assertEqual(len(second.receipt.output_kvcm_objects), 1)
+            self.assertEqual(len(self.writer.saved), 2)
+        finally:
+            backend.close()
+
+    def test_pending_byte_capacity_rejects_before_storage_mutation(self):
+        backend = KvcmOutputBackend(
+            self.writer,
+            _kvcm_config(max_pending_objects=8, max_pending_bytes=31),
+        )
+        try:
+            backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+            with self.assertRaisesRegex(RuntimeError, "pending byte capacity"):
+                backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+                )
+            self.assertEqual(len(self.writer.saved), 1)
+            self.assertEqual(backend._pending_bytes, 16)
+        finally:
+            backend.close()
+
+    def test_inflight_save_consumes_capacity_before_provider_io(self):
+        save_entered = threading.Event()
+        allow_save = threading.Event()
+
+        class BlockingWriter(_FakeKvcmWriter):
+            def save(self, keys, tensors):
+                self.saved.append((list(keys), list(tensors)))
+                save_entered.set()
+                allow_save.wait(timeout=5.0)
+
+        writer = BlockingWriter()
+        backend = KvcmOutputBackend(
+            writer,
+            _kvcm_config(max_pending_objects=1, max_pending_bytes=16),
+        )
+        errors = []
+        first = threading.Thread(
+            target=lambda: self._record_transfer_error(backend, errors)
+        )
+        try:
+            first.start()
+            self.assertTrue(save_entered.wait(timeout=1.0))
+            with self.assertRaisesRegex(RuntimeError, "pending object capacity"):
+                backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+                )
+            self.assertEqual(len(writer.saved), 1)
+            self.assertEqual(backend._pending_bytes, 16)
+        finally:
+            allow_save.set()
+            first.join(timeout=1.0)
+            backend.close()
+        self.assertFalse(first.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_pending_bookkeeping_failure_precedes_storage_mutation(self):
+        class FailingSizeMap(dict):
+            def __setitem__(self, _key, _value):
+                raise MemoryError("injected bookkeeping allocation failure")
+
+        self.backend._pending_sizes = FailingSizeMap()
+
+        with self.assertRaisesRegex(MemoryError, "bookkeeping allocation failure"):
+            self.backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+
+        self.assertEqual(self.writer.saved, [])
+        self.assertEqual(self.backend._pending, {})
+        self.assertEqual(self.backend._pending_bytes, 0)
+        self.assertEqual(self.backend._inflight, set())
+
+    def test_pending_byte_counter_failure_precedes_bookkeeping_and_storage(self):
+        class FailingPendingBytes(int):
+            def __add__(self, _other):
+                raise MemoryError("injected pending-byte counter failure")
+
+        self.backend._pending_bytes = FailingPendingBytes(0)
+
+        with self.assertRaisesRegex(MemoryError, "pending-byte counter failure"):
+            self.backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+
+        self.assertEqual(self.writer.saved, [])
+        self.assertEqual(self.backend._pending, {})
+        self.assertEqual(self.backend._pending_sizes, {})
+        self.assertEqual(self.backend._inflight, set())
+
+    def test_failed_remove_retains_capacity_until_cleanup_is_confirmed(self):
+        writer = _FakeKvcmWriter()
+        backend = KvcmOutputBackend(
+            writer,
+            _kvcm_config(max_pending_objects=1, max_pending_bytes=16),
+        )
+        try:
+            result = backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+            key = result.receipt.output_kvcm_objects[0].key
+
+            def fail_remove(_keys):
+                raise RuntimeError("temporary cleanup failure")
+
+            writer.remove = fail_remove
+            backend.release([key])
+            self.assertIn(key, backend._pending)
+            self.assertEqual(backend._pending_bytes, 16)
+            with self.assertRaisesRegex(RuntimeError, "pending object capacity"):
+                backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+                )
+            self.assertEqual(len(writer.saved), 1)
+
+            writer.remove = _FakeKvcmWriter.remove.__get__(writer)
+            backend._remove_or_retry([key], "test retry")
+            self.assertNotIn(key, backend._pending)
+            self.assertEqual(backend._pending_bytes, 0)
+        finally:
+            backend.close()
+
+    def test_faulty_log_handler_cannot_strand_a_failed_remove_claim(self):
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+        original_remove = self.writer.remove
+
+        def fail_remove(_keys):
+            raise RuntimeError("provider-secret")
+
+        self.writer.remove = fail_remove
+
+        with patch(
+            "rtp_llm.multimodal.transport.kvcm.backend.logging.warning",
+            side_effect=RuntimeError("logging-secret"),
+        ):
+            self.backend.release([key])
+
+        self.assertIn(key, self.backend._pending)
+        self.assertNotIn(key, self.backend._inflight)
+        self.assertEqual(self.backend._pending_bytes, 16)
+        self.writer.remove = original_remove
+        self.backend.release([key])
+
+    def test_local_cleanup_accounting_failure_keeps_capacity_retriable(self):
+        class FailingPendingBytes(int):
+            def __sub__(self, _other):
+                raise MemoryError("injected cleanup counter failure")
+
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+        self.backend._pending_bytes = FailingPendingBytes(16)
+
+        self.backend.release([key])
+
+        self.assertEqual(self.writer.removed, [[key]])
+        self.assertIn(key, self.backend._pending)
+        self.assertIn(key, self.backend._pending_sizes)
+        self.assertNotIn(key, self.backend._inflight)
+        self.assertEqual(self.backend._pending_bytes, 16)
+
+        self.backend._pending_bytes = 16
+        self.backend._remove_or_retry([key], "accounting retry")
+        self.assertEqual(self.writer.removed, [[key], [key]])
+        self.assertEqual(self.backend._pending, {})
+        self.assertEqual(self.backend._pending_sizes, {})
+        self.assertEqual(self.backend._pending_bytes, 0)
+
     def test_async_release_object_capacity_boundary_is_accepted(self):
         backend = KvcmOutputBackend(
             self.writer,
@@ -604,6 +814,14 @@ class KvcmOutputBackendTest(TestCase):
             {"max_receipt_bytes": False},
             {"max_receipt_bytes": 1.0},
             {"max_receipt_bytes": sys.maxsize + 1},
+            {"max_pending_objects": 0},
+            {"max_pending_objects": True},
+            {"max_pending_objects": 1.0},
+            {"max_pending_objects": sys.maxsize + 1},
+            {"max_pending_bytes": 0},
+            {"max_pending_bytes": False},
+            {"max_pending_bytes": 1.0},
+            {"max_pending_bytes": sys.maxsize + 1},
             {"object_gc_timeout_ms": 0},
             {"object_gc_timeout_ms": True},
             {"object_gc_timeout_ms": 1.0},
@@ -1055,6 +1273,8 @@ class KvcmOutputBackendTest(TestCase):
         with patch.object(threading.Thread, "start"):
             backend = KvcmOutputBackend(self.writer, config)
         backend._pending["key"] = time.monotonic() + 10_000.0
+        backend._pending_sizes["key"] = 1
+        backend._pending_bytes = 1
         observed_timeouts = []
 
         def stop_after_wait(timeout=None):
@@ -1066,6 +1286,27 @@ class KvcmOutputBackendTest(TestCase):
         backend._closed = True
 
         self.assertEqual(observed_timeouts, [kvcm_backend._MAX_GC_WAIT_SECONDS])
+
+    def test_gc_loop_contains_unexpected_iteration_failure_and_retries(self):
+        with patch.object(threading.Thread, "start"):
+            backend = KvcmOutputBackend(self.writer, _kvcm_config())
+        try:
+            with patch.object(
+                backend,
+                "_gc_once",
+                side_effect=[RuntimeError("provider-secret"), True],
+            ) as gc_once, patch.object(backend._condition, "wait") as wait, patch(
+                "rtp_llm.multimodal.transport.kvcm.backend.logging.warning"
+            ) as logged:
+                backend._gc_loop()
+
+            self.assertEqual(gc_once.call_count, 2)
+            wait.assert_called_once_with(timeout=kvcm_backend._REMOVE_RETRY_SECONDS)
+            logged.assert_called_once()
+            self.assertIn("RuntimeError", repr(logged.call_args))
+            self.assertNotIn("provider-secret", repr(logged.call_args))
+        finally:
+            backend._closed = True
 
     def test_operation_accounting_detects_underflow_and_notifies_only_at_zero(self):
         with self.assertRaisesRegex(RuntimeError, "accounting underflow"):

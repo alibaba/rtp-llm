@@ -32,6 +32,7 @@ from rtp_llm.multimodal.mm_scheduler import (
 from rtp_llm.multimodal.transport.proxy_router import (
     _MAX_KVCM_KEY_BYTES,
     _MAX_KVCM_OBJECTS_PER_RECEIPT,
+    _MAX_RELEASE_HANDLES,
     MMOutputProxyRouter,
 )
 from rtp_llm.server.vit_proxy_server import (
@@ -1307,6 +1308,121 @@ class MMOutputProxyRouterTest(TestCase):
         request = stub.ReleaseRdmaLease.call_args.args[0]
         self.assertEqual(list(request.lease_id), ["handle"])
         self.assertEqual(stub.ReleaseRdmaLease.call_count, 1)
+
+    @patch("rtp_llm.multimodal.transport.proxy_router.kmonitor.report")
+    def test_release_snapshot_is_bounded_and_tail_routes_remain_retriable(self, report):
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        router = MMOutputProxyRouter(connection_pool)
+        handles = [f"handle-{index}" for index in range(_MAX_RELEASE_HANDLES + 2)]
+        for handle in handles:
+            router.record_receipt("worker", _kvcm_receipt(handle))
+
+        router.release(ReleaseLeasePB(lease_id=handles), FakeContext([1.0]))
+
+        forwarded = stub.ReleaseRdmaLease.call_args.args[0]
+        self.assertEqual(list(forwarded.lease_id), handles[:_MAX_RELEASE_HANDLES])
+        self.assertNotIn(handles[0], router._handle_routes)
+        self.assertIn(handles[-2], router._handle_routes)
+        self.assertIn(handles[-1], router._handle_routes)
+        reasons = {
+            call.args[2].get("reason"): call.args[1]
+            for call in report.call_args_list
+            if len(call.args) > 2
+        }
+        self.assertEqual(reasons.get("release_handle_limit"), 2)
+
+    @patch("rtp_llm.multimodal.transport.proxy_router.kmonitor.report")
+    def test_unroutable_release_logs_are_aggregated_and_sanitized(self, report):
+        router = MMOutputProxyRouter(MagicMock())
+        handles = [f"secret-handle-{index}" for index in range(100)]
+
+        with patch(
+            "rtp_llm.multimodal.transport.proxy_router.logging.warning"
+        ) as logged:
+            router.release(ReleaseLeasePB(lease_id=handles), FakeContext([1.0]))
+
+        logged.assert_called_once()
+        self.assertIn("100", repr(logged.call_args))
+        self.assertNotIn(handles[0], repr(logged.call_args))
+        matching = [
+            call
+            for call in report.call_args_list
+            if len(call.args) > 2
+            and call.args[2].get("reason") == "release_handle_unknown"
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].args[1], len(handles))
+
+    @patch("rtp_llm.multimodal.transport.proxy_router.kmonitor.report")
+    def test_collision_and_provider_failure_logs_omit_handles_and_endpoints(
+        self, _report
+    ):
+        connection_pool = MagicMock()
+        connection_pool.get_stub.side_effect = RuntimeError("provider-secret")
+        router = MMOutputProxyRouter(connection_pool)
+        collision = _kvcm_receipt("secret-collision-handle")
+
+        with patch(
+            "rtp_llm.multimodal.transport.proxy_router.logging.warning"
+        ) as logged:
+            router.record_receipt("secret-worker-a", collision)
+            router.record_receipt("secret-worker-b", collision)
+            router.record_receipt("secret-worker-a", _kvcm_receipt("secret-live"))
+            router.release(ReleaseLeasePB(lease_id=["secret-live"]), FakeContext([1.0]))
+
+        log_data = repr(logged.call_args_list)
+        self.assertNotIn("secret-collision-handle", log_data)
+        self.assertNotIn("secret-live", log_data)
+        self.assertNotIn("secret-worker-a", log_data)
+        self.assertNotIn("secret-worker-b", log_data)
+        self.assertNotIn("provider-secret", log_data)
+        self.assertIn("RuntimeError", log_data)
+        self.assertIn("secret-live", router._handle_routes)
+
+    def test_observability_failures_do_not_block_a_valid_release(self):
+        class FaultyContext:
+            def time_remaining(self):
+                raise RuntimeError("context-secret")
+
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        router = MMOutputProxyRouter(connection_pool)
+        router.record_receipt("worker", _kvcm_receipt("live-handle"))
+
+        with patch(
+            "rtp_llm.multimodal.transport.proxy_router.logging.warning",
+            side_effect=RuntimeError("logging-secret"),
+        ), patch(
+            "rtp_llm.multimodal.transport.proxy_router.kmonitor.report",
+            side_effect=RuntimeError("metrics-secret"),
+        ):
+            router.release(
+                ReleaseLeasePB(lease_id=["unknown-handle", "live-handle"]),
+                FaultyContext(),
+            )
+
+        forwarded = stub.ReleaseRdmaLease.call_args.args[0]
+        self.assertEqual(list(forwarded.lease_id), ["live-handle"])
+        self.assertNotIn("live-handle", router._handle_routes)
+
+    def test_logging_failure_does_not_strand_a_failed_provider_route(self):
+        connection_pool = MagicMock()
+        connection_pool.get_stub.side_effect = RuntimeError("provider-secret")
+        router = MMOutputProxyRouter(connection_pool)
+        router.record_receipt("worker", _kvcm_receipt("retriable-handle"))
+
+        with patch(
+            "rtp_llm.multimodal.transport.proxy_router.logging.warning",
+            side_effect=RuntimeError("logging-secret"),
+        ):
+            router.release(
+                ReleaseLeasePB(lease_id=["retriable-handle"]), FakeContext([1.0])
+            )
+
+        self.assertIn("retriable-handle", router._handle_routes)
 
     def test_concurrent_release_atomically_claims_route(self):
         entered = threading.Event()

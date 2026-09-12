@@ -2,7 +2,7 @@ import logging
 import numbers
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from itertools import islice
 from typing import Optional
 
@@ -21,7 +21,15 @@ HANDLE_ROUTE_GC_SAFETY_SECONDS = 5.0
 # control client's pending-release capacity.
 _MAX_KVCM_OBJECTS_PER_RECEIPT = 1024
 _MAX_KVCM_KEY_BYTES = 512
-_LOGGER = logging.getLogger(__name__)
+_MAX_RELEASE_HANDLES = 1024
+
+
+def _safe_warning(message: str, *args) -> None:
+    """Keep route ownership transitions independent of logging handlers."""
+    try:
+        logging.warning(message, *args)
+    except Exception:  # noqa: BLE001 - observability must not break cleanup
+        pass
 
 
 def _context_deadline_seconds(context, max_timeout_seconds: float) -> Optional[float]:
@@ -30,7 +38,10 @@ def _context_deadline_seconds(context, max_timeout_seconds: float) -> Optional[f
         try:
             remaining = context.time_remaining()
         except Exception as error:  # noqa: BLE001 - a missing deadline is valid
-            logging.warning("Failed to read gRPC context time remaining: %s", error)
+            _safe_warning(
+                "Failed to read gRPC context time remaining (exception_type=%s)",
+                type(error).__name__,
+            )
     if not isinstance(remaining, numbers.Real):
         remaining = None
     if remaining is not None and remaining <= 0:
@@ -92,13 +103,13 @@ class MMOutputProxyRouter:
             len(receipt.output_kvcm_objects) - _MAX_KVCM_OBJECTS_PER_RECEIPT,
         )
         if invalid_kvcm_keys:
-            _LOGGER.warning(
+            _safe_warning(
                 "Ignoring %d invalid KVCM receipt key(s); worker GC will reclaim them",
                 invalid_kvcm_keys,
             )
             self._report_error("kvcm_route_invalid_key", invalid_kvcm_keys)
         if overflow_count:
-            _LOGGER.warning(
+            _safe_warning(
                 "Ignoring %d KVCM receipt object(s) beyond the route limit; "
                 "worker GC will reclaim them",
                 overflow_count,
@@ -119,7 +130,7 @@ class MMOutputProxyRouter:
             return
 
         now = time.monotonic()
-        collisions = []
+        collision_count = 0
         with self._lock:
             if now - self._last_cleanup >= HANDLE_ROUTE_CLEANUP_INTERVAL_SECONDS:
                 self._sweep_locked(now)
@@ -138,56 +149,65 @@ class MMOutputProxyRouter:
                 if existing is not None and existing[0] != worker_address:
                     self._handle_routes.pop(handle, None)
                     self._handle_collisions[handle] = now
-                    collisions.append((handle, existing[0], worker_address))
+                    collision_count += 1
                     continue
                 self._handle_routes[handle] = (worker_address, now, generation)
 
-        for handle, old_worker, new_worker in collisions:
-            logging.warning(
-                "Multimodal transport handle %s was issued by both %s and %s; route poisoned",
-                handle,
-                old_worker,
-                new_worker,
+        if collision_count:
+            _safe_warning(
+                "%d multimodal transport handle collision(s) across workers; "
+                "ambiguous routes were poisoned",
+                collision_count,
             )
-            self._report_error("rdma_handle_collision")
+            self._report_error("rdma_handle_collision", collision_count)
 
     def release(self, request: ReleaseLeasePB, context) -> None:
         handles_by_worker: dict[str, list[str]] = defaultdict(list)
         selected_routes: dict[str, tuple[str, float, int]] = {}
-        skipped_routes: list[tuple[str, str]] = []
+        skipped_routes = Counter()
+        release_handles = list(islice(request.lease_id, _MAX_RELEASE_HANDLES))
+        overflow_count = max(0, len(request.lease_id) - _MAX_RELEASE_HANDLES)
+        if overflow_count:
+            _safe_warning(
+                "Ignoring %d multimodal release handle(s) beyond the control limit; "
+                "worker GC will reclaim them",
+                overflow_count,
+            )
+            self._report_error("release_handle_limit", overflow_count)
         now = time.monotonic()
         with self._lock:
-            for handle in dict.fromkeys(request.lease_id):
+            for handle in dict.fromkeys(release_handles):
                 if self._handle_collisions.pop(handle, None) is not None:
                     self._handle_generations.pop(handle, None)
-                    skipped_routes.append((handle, "release_handle_collision"))
+                    skipped_routes["release_handle_collision"] += 1
                     continue
                 route = self._handle_routes.pop(handle, None)
                 if route is None:
-                    skipped_routes.append((handle, "release_handle_unknown"))
+                    skipped_routes["release_handle_unknown"] += 1
                     continue
                 if now - route[1] > self._route_ttl_seconds:
                     if self._handle_generations.get(handle) == route[2]:
                         self._handle_generations.pop(handle, None)
-                    skipped_routes.append((handle, "release_handle_expired"))
+                    skipped_routes["release_handle_expired"] += 1
                     continue
                 handles_by_worker[route[0]].append(handle)
                 selected_routes[handle] = route
             if now - self._last_cleanup >= HANDLE_ROUTE_CLEANUP_INTERVAL_SECONDS:
                 self._sweep_locked(now)
 
-        for handle, reason in skipped_routes:
-            logging.warning(
-                "Cannot route multimodal transport handle %s (%s); worker GC will reclaim it",
-                handle,
+        for reason, count in skipped_routes.items():
+            _safe_warning(
+                "Cannot route %d multimodal transport handle(s) (%s); "
+                "worker GC will reclaim them",
+                count,
                 reason,
             )
-            self._report_error(reason)
+            self._report_error(reason, count)
 
         deadline = _context_deadline_seconds(context, self._release_timeout_seconds)
         if deadline is None and handles_by_worker:
             skipped_count = sum(len(handles) for handles in handles_by_worker.values())
-            logging.warning(
+            _safe_warning(
                 "Multimodal release deadline exhausted; skipping %d handles",
                 skipped_count,
             )
@@ -208,7 +228,7 @@ class MMOutputProxyRouter:
                         len(group_handles)
                         for _, group_handles in release_groups[group_index:]
                     )
-                    logging.warning(
+                    _safe_warning(
                         "Multimodal release deadline exhausted; "
                         "skipping remaining %d handles",
                         skipped_count,
@@ -229,11 +249,12 @@ class MMOutputProxyRouter:
                 stub = self._connection_pool.get_stub(worker_address)
                 stub.ReleaseRdmaLease(ReleaseLeasePB(lease_id=handles), timeout=timeout)
                 self._complete_claims(handles, selected_routes)
-            except Exception:  # noqa: BLE001 - worker GC is the backstop
-                logging.exception(
-                    "Failed to release multimodal handles on VIT worker %s; "
-                    "worker GC will reclaim them",
-                    worker_address,
+            except Exception as error:  # noqa: BLE001 - worker GC is the backstop
+                _safe_warning(
+                    "Failed to release %d multimodal handle(s) on a VIT worker; "
+                    "worker GC will reclaim them (exception_type=%s)",
+                    len(handles),
+                    type(error).__name__,
                 )
                 self._restore_claims(
                     {handle: selected_routes[handle] for handle in handles}
@@ -275,8 +296,14 @@ class MMOutputProxyRouter:
 
     @staticmethod
     def _report_error(reason: str, value: int = 1) -> None:
-        kmonitor.report(
-            AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
-            value,
-            {"source": "vit_proxy", "reason": reason},
-        )
+        try:
+            kmonitor.report(
+                AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
+                value,
+                {"source": "vit_proxy", "reason": reason},
+            )
+        except Exception as error:  # noqa: BLE001 - metrics are best effort
+            _safe_warning(
+                "Failed to report multimodal proxy metric (exception_type=%s)",
+                type(error).__name__,
+            )

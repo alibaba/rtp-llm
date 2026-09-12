@@ -41,6 +41,8 @@ inline MMKvcmConfig extractMMKvcmConfig(const py::object& kvcm_config) {
     cfg.object_gc_timeout_ms   = kvcm_config.attr("object_gc_timeout_ms").cast<int64_t>();
     cfg.max_object_bytes       = kvcm_config.attr("max_object_bytes").cast<int64_t>();
     cfg.max_receipt_bytes      = kvcm_config.attr("max_receipt_bytes").cast<int64_t>();
+    cfg.max_pending_objects    = kvcm_config.attr("max_pending_objects").cast<int64_t>();
+    cfg.max_pending_bytes      = kvcm_config.attr("max_pending_bytes").cast<int64_t>();
     return cfg;
 }
 

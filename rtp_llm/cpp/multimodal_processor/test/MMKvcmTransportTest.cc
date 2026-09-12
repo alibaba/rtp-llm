@@ -785,6 +785,8 @@ TEST(MMKvcmTransportTest, validatesServiceLimitsBeforeClientCreation) {
         {"excessive max object",
          [](MMKvcmConfig* value) { value->max_object_bytes = static_cast<int64_t>(kMMKvcmMaxObjectBytes + 1); }},
         {"zero max receipt", [](MMKvcmConfig* value) { value->max_receipt_bytes = 0; }},
+        {"zero max pending objects", [](MMKvcmConfig* value) { value->max_pending_objects = 0; }},
+        {"zero max pending bytes", [](MMKvcmConfig* value) { value->max_pending_bytes = 0; }},
         {"receipt smaller than object",
          [](MMKvcmConfig* value) { value->max_receipt_bytes = value->max_object_bytes - 1; }},
     };
