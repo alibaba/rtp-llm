@@ -1262,6 +1262,11 @@ public final class JavaMockEngineCluster {
             this.performance = performance.forEngine();
             this.cache = new MockLruBlockCache(totalBlocks);
             this.responseExecutor = Executors.newCachedThreadPool(r -> {
+                // Whale keeps a Fetch waiter for each in-flight request. Under
+                // replicated traffic those waits must not consume native threads.
+                if (whaleRemote) {
+                    return Thread.ofVirtual().name("mock-response-poller-" + grpcPort).unstarted(r);
+                }
                 Thread thread = new Thread(r, "mock-response-poller-" + grpcPort);
                 thread.setDaemon(true);
                 return thread;

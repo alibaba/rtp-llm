@@ -75,6 +75,8 @@ class WhaleRemotePrefillTest {
         assertEquals(8, stream.frames.stream().mapToLong(frame ->
                 frame.getFlattenOutput().getOutputIds().getShape(2)).sum(),
                 "frontend concatenation must produce exactly max_new_tokens");
+        assertTrue(stream.virtualThreads.stream().allMatch(Boolean::booleanValue),
+                "Whale response waits must not occupy native threads");
         assertTtftStrictlyBeforeE2e(stream);
     }
 
@@ -120,6 +122,8 @@ class WhaleRemotePrefillTest {
                 "generate_stream must stream every generated token, got " + stream.frames.size());
         assertFalseFrame(stream.frames.get(0), "frame 0 must be the prefill first-token frame");
         assertTrueFrame(stream.frames.get(7), "last frame must be terminal");
+        assertTrue(stream.virtualThreads.stream().allMatch(Boolean::booleanValue),
+                "Whale response waits must not occupy native threads");
         assertTtftStrictlyBeforeE2e(stream);
     }
 
@@ -294,6 +298,7 @@ class WhaleRemotePrefillTest {
 
     private record CollectedStream(List<EngineRpcService.GenerateOutputsPB> frames,
                                    List<Long> frameNanos,
+                                   List<Boolean> virtualThreads,
                                    AtomicReference<Throwable> error) {
     }
 
@@ -301,6 +306,7 @@ class WhaleRemotePrefillTest {
                                            long awaitMs) throws InterruptedException {
         List<EngineRpcService.GenerateOutputsPB> frames = new CopyOnWriteArrayList<>();
         List<Long> frameNanos = new CopyOnWriteArrayList<>();
+        List<Boolean> virtualThreads = new CopyOnWriteArrayList<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch terminal = new CountDownLatch(1);
         invoke.accept(new StreamObserver<>() {
@@ -308,6 +314,7 @@ class WhaleRemotePrefillTest {
             public void onNext(EngineRpcService.GenerateOutputsPB value) {
                 frames.add(value);
                 frameNanos.add(System.nanoTime());
+                virtualThreads.add(Thread.currentThread().isVirtual());
             }
 
             @Override
@@ -323,7 +330,8 @@ class WhaleRemotePrefillTest {
         });
         assertTrue(terminal.await(awaitMs, TimeUnit.MILLISECONDS),
                 "stream must terminate (completed or error) within " + awaitMs + "ms");
-        return new CollectedStream(new ArrayList<>(frames), new ArrayList<>(frameNanos), error);
+        return new CollectedStream(new ArrayList<>(frames), new ArrayList<>(frameNanos),
+                new ArrayList<>(virtualThreads), error);
     }
 
     private static CollectedStream fetch(JavaMockEngineCluster.FastRpcService service,
