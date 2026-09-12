@@ -746,6 +746,28 @@ class KvcmOutputBackendTest(TestCase):
 
         self.assertEqual(self.writer.removed, [[key]])
 
+    def test_releasing_one_receipt_keeps_neighboring_receipt_live(self):
+        first = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        second = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True),
+            MMEmbeddingRes([_rows(3, offset=100.0)]),
+        )
+        first_keys = [obj.key for obj in first.receipt.output_kvcm_objects]
+        second_keys = [obj.key for obj in second.receipt.output_kvcm_objects]
+
+        self.assertTrue(set(first_keys).isdisjoint(second_keys))
+        self.backend.release(first_keys)
+
+        self.assertEqual(self.writer.removed, [first_keys])
+        self.assertFalse(set(first_keys) & set(self.backend._pending))
+        self.assertEqual(set(self.backend._pending), set(second_keys))
+
+        self.backend.release(second_keys)
+        self.assertEqual(self.writer.removed, [first_keys, second_keys])
+        self.assertEqual(self.backend._pending, {})
+
     def test_release_rejects_a_scalar_string(self):
         result = self.backend.transfer(
             MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])

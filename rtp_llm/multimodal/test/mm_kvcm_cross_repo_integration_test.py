@@ -18,6 +18,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from importlib import metadata
 from pathlib import Path
 from unittest import TestCase, main, skipUnless
 
@@ -431,8 +432,26 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
     def test_rtp_receipt_round_trip_release_and_gc(self):
         _require_kvcm_dependencies()
 
-        from kv_cache_manager.client import KvMetaObjectClientError
+        from kv_cache_manager.client import KvMetaObjectClient, KvMetaObjectClientError
         from kv_cache_manager.client.pybind import kvcm_py_client
+
+        try:
+            wheel_distribution = metadata.distribution("kvcm_py_client")
+        except metadata.PackageNotFoundError as error:
+            raise RuntimeError(
+                "the cross-repo test requires an installed kvcm_py_client wheel"
+            ) from error
+        wheel_files = {
+            str(path).replace("\\", "/") for path in (wheel_distribution.files or [])
+        }
+        self.assertIn("kv_cache_manager/client/kv_meta_object_client.py", wheel_files)
+        self.assertTrue(
+            any(
+                path.startswith("kv_cache_manager/client/pybind/kvcm_py_client")
+                and path.endswith((".so", ".pyd"))
+                for path in wheel_files
+            )
+        )
 
         with tempfile.TemporaryDirectory(prefix="rtp-kvmeta-it-") as directory:
             tmp_path = Path(directory)
@@ -457,6 +476,7 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                     transport = create_mm_output_transport(transport_config)
                     backend = transport._backend
                     store = backend._writer
+                    self.assertIsInstance(store, KvMetaObjectClient)
 
                     embeddings = [
                         torch.arange(12, dtype=torch.float32).reshape(3, 4),
@@ -521,22 +541,73 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                             )
                         )
 
+                    # A wrong expected size must fail in metadata validation,
+                    # before the data plane can overwrite the caller's buffer.
+                    wrong_size_destination = torch.full(
+                        (1, 4), -123.0, dtype=torch.float32
+                    )
+                    wrong_size_snapshot = wrong_size_destination.clone()
+                    with self.assertRaises(KvMetaObjectClientError) as mismatch:
+                        store.load_tensors(
+                            [objects[0].key],
+                            [wrong_size_destination],
+                            trace_id="rtp-kvmeta-it-load-size-mismatch",
+                        )
+                    self.assertEqual(
+                        mismatch.exception.code,
+                        kvcm_py_client.ClientErrorCode.ER_SERVICE_SIZE_MISMATCH,
+                    )
+                    self.assertTrue(
+                        torch.equal(wrong_size_destination, wrong_size_snapshot)
+                    )
+
+                    # Keep a second receipt live while releasing the first.
+                    # This verifies that RTP's UUID handles and proxy routing
+                    # cannot accidentally remove a neighboring request.
+                    second_embeddings = [
+                        torch.tensor([[1.5, 2.5]], dtype=torch.float16),
+                        torch.tensor([[3.5, 4.5], [5.5, 6.5]], dtype=torch.float16),
+                    ]
+                    second_receipt = transport.transfer(
+                        MultimodalInputsPB(support_kvcm=True),
+                        MMEmbeddingRes(second_embeddings),
+                    )
+                    second_objects, second_loaded = _load_receipt_tensors(
+                        store, second_receipt
+                    )
+                    self.assertEqual(list(second_receipt.split_size), [1, 2])
+                    self.assertEqual([obj.value_size for obj in second_objects], [12])
+                    self.assertTrue(
+                        torch.equal(
+                            _reassemble_role(
+                                second_objects,
+                                second_loaded,
+                                MMRdmaSlotPB.EMBEDDING,
+                            ),
+                            torch.cat(second_embeddings),
+                        )
+                    )
+                    first_keys = [obj.key for obj in objects]
+                    second_keys = [obj.key for obj in second_objects]
+                    self.assertTrue(set(first_keys).isdisjoint(second_keys))
+
                     released_key = objects[0].key
                     worker_address = "vit-worker.integration:0"
                     connection_pool = _LocalConnectionPool(worker_address, transport)
                     router = MMOutputProxyRouter(connection_pool, transport_config)
                     router.record_receipt(worker_address, receipt)
+                    router.record_receipt(worker_address, second_receipt)
                     router.release(
-                        ReleaseLeasePB(lease_id=[obj.key for obj in objects]),
+                        ReleaseLeasePB(lease_id=first_keys),
                         _ReleaseContext(),
                     )
                     self.assertEqual(len(connection_pool.stub.calls), 1)
                     forwarded_keys, forwarded_timeout = connection_pool.stub.calls[0]
-                    self.assertEqual(forwarded_keys, [obj.key for obj in objects])
+                    self.assertEqual(forwarded_keys, first_keys)
                     self.assertGreater(forwarded_timeout, 0)
                     self.assertLessEqual(forwarded_timeout, 3.0)
-                    self.assertEqual(router._handle_routes, {})
-                    self.assertEqual(backend._pending, {})
+                    self.assertEqual(set(router._handle_routes), set(second_keys))
+                    self.assertEqual(set(backend._pending), set(second_keys))
                     with self.assertRaises(KvMetaObjectClientError) as missing:
                         store.load_tensors(
                             [released_key],
@@ -545,6 +616,34 @@ class MMKvcmCrossRepoIntegrationTest(TestCase):
                         )
                     self.assertEqual(
                         missing.exception.code,
+                        kvcm_py_client.ClientErrorCode.ER_SERVICE_NOT_FOUND,
+                    )
+                    still_live_objects, still_live = _load_receipt_tensors(
+                        store, second_receipt
+                    )
+                    self.assertEqual(
+                        [obj.key for obj in still_live_objects], second_keys
+                    )
+                    self.assertTrue(
+                        torch.equal(still_live[0], torch.cat(second_embeddings))
+                    )
+
+                    router.release(
+                        ReleaseLeasePB(lease_id=second_keys),
+                        _ReleaseContext(),
+                    )
+                    self.assertEqual(len(connection_pool.stub.calls), 2)
+                    self.assertEqual(connection_pool.stub.calls[1][0], second_keys)
+                    self.assertEqual(router._handle_routes, {})
+                    self.assertEqual(backend._pending, {})
+                    with self.assertRaises(KvMetaObjectClientError) as second_missing:
+                        store.load_tensors(
+                            second_keys,
+                            [torch.empty_like(second_loaded[0])],
+                            trace_id="rtp-kvmeta-it-second-load-after-release",
+                        )
+                    self.assertEqual(
+                        second_missing.exception.code,
                         kvcm_py_client.ClientErrorCode.ER_SERVICE_NOT_FOUND,
                     )
 
