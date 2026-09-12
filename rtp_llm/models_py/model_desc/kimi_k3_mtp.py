@@ -5,14 +5,36 @@ from typing import Optional
 import torch
 from torch import nn
 
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather_trim,
+    get_process_group,
+)
+from rtp_llm.models_py.distributed.sequence_parallel import (
+    SequenceParallelLayout,
+    local_physical_token_view,
+    sequence_parallel_layout_from_attention_inputs,
+)
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.kimi_k3 import resolve_kimi_k3_moe_strategy
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm
+from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import (
+    all_gather_gemm,
+    configure_all_gather_gemm,
+)
+from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
+    configure_gemm_reduce_scatter,
+    gemm_reduce_scatter,
+)
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
-from rtp_llm.models_py.modules.kimi_k3.utils import sequence_offsets
+from rtp_llm.models_py.modules.kimi_k3.utils import (
+    collective_gemm_workspace_global_tokens,
+    prefill_chunk_tokens,
+    sequence_offsets,
+)
 from rtp_llm.ops.compute_ops import PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -59,6 +81,7 @@ def mtp_positions(inputs):
 class KimiK3MtpLayer(nn.Module):
     def __init__(self, config, parallelism, weights, moe_strategy):
         super().__init__()
+        self.attn_tp_size = int(parallelism.get_attn_tp_size())
         self.enorm = RMSNorm(weights["kimi_k3.mtp.enorm"], config.layernorm_eps)
         self.hnorm = RMSNorm(weights["kimi_k3.mtp.hnorm"], config.layernorm_eps)
         self.eh_proj = LinearFactory.create_linear_from_weights(
@@ -75,8 +98,24 @@ class KimiK3MtpLayer(nn.Module):
         )
         self.moe = moe_cls(config, parallelism, weights, 0)
 
+    @staticmethod
+    def _local_projection(x, weight):
+        return (
+            weight(x)
+            if not isinstance(weight, torch.Tensor)
+            else torch.matmul(x, weight)
+        )
+
     def forward(
-        self, embedding, previous_h, positions, fmha_impl, kv_cache, attention_inputs
+        self,
+        embedding,
+        previous_h,
+        positions,
+        fmha_impl,
+        kv_cache,
+        attention_inputs,
+        *,
+        sp_layout: SequenceParallelLayout,
     ):
         embedding = torch.where(positions.reshape(-1, 1) == 0, 0, embedding)
         x = self.eh_proj(
@@ -84,13 +123,51 @@ class KimiK3MtpLayer(nn.Module):
                 (self.enorm(embedding), self.hnorm(previous_h.contiguous())), dim=-1
             )
         )
-        a = x + self.attention(
-            self.input_norm(x), fmha_impl, kv_cache, attention_inputs=attention_inputs
+        normalized = self.input_norm(x)
+        projection_weights = self.attention.tp_input_projection_weights()
+        projected_qkv_a = (
+            [
+                self._local_projection(normalized, weight)
+                for weight in projection_weights
+            ]
+            if self.attn_tp_size == 1
+            else all_gather_gemm(
+                normalized,
+                projection_weights,
+                logical_m=sp_layout.tokens.physical_tokens,
+            )
         )
-        return a + self.moe(self.post_norm(a))
+        attention_projection_input = self.attention(
+            normalized,
+            fmha_impl,
+            kv_cache,
+            attention_inputs=attention_inputs,
+            sp_layout=sp_layout,
+            projected_qkv_a=projected_qkv_a,
+        )
+        output_weight = self.attention.output_projection_weight()
+        attention_output = (
+            self._local_projection(attention_projection_input, output_weight)
+            if self.attn_tp_size == 1
+            else gemm_reduce_scatter(
+                attention_projection_input,
+                output_weight,
+                get_process_group(Group.TP),
+                pad_rows=False,
+            )
+        )
+        a = x + attention_output
+        local_valid_tokens = (
+            sp_layout.tokens.local_valid_tokens
+            if sp_layout.tokens.local_valid_tokens < sp_layout.tokens.local_tokens
+            else None
+        )
+        return a + self.moe(self.post_norm(a), valid_token_count=local_valid_tokens)
 
 
 class KimiK3MtpModel(GptModelBase):
+    requires_sequence_parallel_padding = True
+
     def __init__(
         self,
         model_config,
@@ -132,6 +209,8 @@ class KimiK3MtpModel(GptModelBase):
         self._decode_role = False
         self._recurrent: Optional[torch.Tensor] = None
         self._recurrent_valid_tokens = 0
+        self._all_gather_gemm_configured = False
+        self._gemm_reduce_scatter_configured = False
 
     def initialize(self, init_resource):
         super().initialize(init_resource)
@@ -145,6 +224,34 @@ class KimiK3MtpModel(GptModelBase):
             self._recurrent = self.embedding.weight.new_empty(
                 capacity, self.hidden_size
             )
+        tp_size = int(self.parallelism_config.get_attn_tp_size())
+        if self._decode_role:
+            max_global_tokens = capacity
+        else:
+            max_global_tokens = collective_gemm_workspace_global_tokens(
+                int(self.config.max_seq_len),
+                int(init_resource.max_context_batch_size),
+                prefill_chunk_tokens(),
+            )
+        max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
+        max_physical_tokens = max_local_tokens * tp_size
+        if tp_size > 1 and not self._all_gather_gemm_configured:
+            configure_all_gather_gemm(
+                get_process_group(Group.TP),
+                self.embedding.weight.device,
+                max_m=max_physical_tokens,
+                k=self.hidden_size,
+                dtype=self.embedding.weight.dtype,
+            )
+            self._all_gather_gemm_configured = True
+        if tp_size > 1 and not self._gemm_reduce_scatter_configured:
+            configure_gemm_reduce_scatter(
+                get_process_group(Group.TP),
+                self.embedding.weight.device,
+                max_m=max_physical_tokens,
+                n=self.hidden_size,
+            )
+            self._gemm_reduce_scatter_configured = True
         return True
 
     def _embed_shifted_tokens(self, inputs):
@@ -200,8 +307,20 @@ class KimiK3MtpModel(GptModelBase):
             raise ValueError(
                 "K3 MTP requires one pre-norm hidden state of width H per token"
             )
-        positions = mtp_positions(inputs)
-        embedding = self._embed_shifted_tokens(inputs)
+        attention_inputs = inputs.attention_inputs
+        tp_size = int(self.parallelism_config.get_attn_tp_size())
+        tp_rank = int(self.parallelism_config.get_attn_tp_rank())
+        sp_layout = sequence_parallel_layout_from_attention_inputs(
+            attention_inputs,
+            physical_tokens=int(inputs.input_ids.numel()),
+            world_size=tp_size,
+            rank=tp_rank,
+        )
+        positions = local_physical_token_view(mtp_positions(inputs), sp_layout)
+        embedding = local_physical_token_view(
+            self._embed_shifted_tokens(inputs), sp_layout
+        )
+        previous_h = local_physical_token_view(previous_h, sp_layout)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         select_block_map_for_layer(inputs.attention_inputs, 0)
@@ -211,8 +330,10 @@ class KimiK3MtpModel(GptModelBase):
             positions,
             fmha_impl,
             self.kv_cache.get_layer_cache(0) if self.kv_cache else None,
-            inputs.attention_inputs,
+            attention_inputs,
+            sp_layout=sp_layout,
         )
+        h = all_gather_trim(h, sp_layout.tokens.logical_tokens, group=Group.TP)
         if self._decode_role:
             if self._recurrent is None or h.size(0) > self._recurrent.size(0):
                 raise ValueError(
