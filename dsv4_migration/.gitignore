@@ -1,0 +1,13 @@
+# Keep reproducible measurements; leave startup attempts and server output local.
+results/*
+!results/cache-probe*.json
+!results/comparison/
+!results/comparison-sweet/
+!results/vanilla-128k-12g-final/
+!results/offload-128k-12g-final/
+!results/offload-128k-12g-sweet/
+!results/offload-128k-byte-validation/
+!results/offload-128k-forced-cpu/
+!results/vanilla-128k-calibration-v2/
+!results/vanilla-128k-12g-b32/
+results/**/server/

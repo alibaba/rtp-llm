@@ -597,6 +597,12 @@ class DeepSeekV4(DeepSeekV2):
         kv_cache_config: KVCacheConfig | None,
     ) -> None:
         """Declare the seven-pool DSV4 cache topology after runtime config parsing."""
+        from rtp_llm.models_py.modules.dsv4.offload_config import CsaOffloadConfig
+
+        csa_offload = CsaOffloadConfig.from_env()
+        if csa_offload is not None and kv_cache_config is not None:
+            if kv_cache_config.reuse_cache:
+                raise ValueError("CSA offload currently requires --reuse_cache false")
         if model_config.kv_cache_spec_descs:
             return
 
@@ -634,6 +640,7 @@ class DeepSeekV4(DeepSeekV2):
             fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(
                 kv_cache_config
             ),
+            csa_offload_blocks=csa_offload.logical_blocks if csa_offload else 0,
         )
 
         fixed_pool_blocks = _dsv4_pool_blocks(

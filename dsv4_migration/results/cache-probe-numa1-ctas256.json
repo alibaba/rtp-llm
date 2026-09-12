@@ -1,0 +1,128 @@
+[
+  {
+    "batch": 1,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 0,
+    "counts_resident_hot_miss": [
+      0,
+      1024,
+      0
+    ],
+    "cache_only_graph_ms": 0.02050368070602417,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 1,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 128,
+    "counts_resident_hot_miss": [
+      0,
+      896,
+      128
+    ],
+    "cache_only_graph_ms": 0.027065598964691163,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 1,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 1024,
+    "counts_resident_hot_miss": [
+      0,
+      0,
+      1024
+    ],
+    "cache_only_graph_ms": 0.04053055763244629,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 16,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 0,
+    "counts_resident_hot_miss": [
+      0,
+      16384,
+      0
+    ],
+    "cache_only_graph_ms": 0.024565761089324952,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 16,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 128,
+    "counts_resident_hot_miss": [
+      0,
+      14336,
+      2048
+    ],
+    "cache_only_graph_ms": 0.058193597793579105,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 16,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 1024,
+    "counts_resident_hot_miss": [
+      0,
+      0,
+      16384
+    ],
+    "cache_only_graph_ms": 0.26341344833374025,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 64,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 0,
+    "counts_resident_hot_miss": [
+      0,
+      65536,
+      0
+    ],
+    "cache_only_graph_ms": 0.0225382399559021,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 64,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 128,
+    "counts_resident_hot_miss": [
+      0,
+      57344,
+      8192
+    ],
+    "cache_only_graph_ms": 0.14500831604003905,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 64,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "fetch_ctas": 256,
+    "changed_entries_per_request": 1024,
+    "counts_resident_hot_miss": [
+      0,
+      0,
+      65536
+    ],
+    "cache_only_graph_ms": 0.9500364685058593,
+    "graph_includes_synthetic_index_update": true
+  }
+]

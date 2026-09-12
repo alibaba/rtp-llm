@@ -2299,6 +2299,29 @@ class AttentionFP8(nn.Module):
             bsz=bsz,
             q_len=q_len,
         )
+        prepared_compressed = None
+        csa_offload = getattr(self, "csa_offload", None)
+        if csa_offload is not None:
+            if q_len != 1:
+                raise ValueError("CSA offload currently supports single-token decode")
+            from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+                translate_local_to_global_slots,
+            )
+
+            selected = attn_metadata.topk_buffer_compressed[:bsz].reshape(bsz, -1)
+            global_slots = translate_local_to_global_slots(
+                attn_metadata.req_id_per_token[:bsz],
+                attn_metadata.pool_block_tables[CSA_KV][:bsz],
+                selected,
+                entries_per_block=self._pool_entries_per_block(CSA_KV),
+                tokens_per_block_for_block_table=int(
+                    attn_metadata.paged_pool_tokens_per_block[CSA_KV]
+                )
+                // self.compress_ratio,
+            )
+            prepared_compressed = csa_offload.prefetch(
+                global_slots, csa_compressor_meta.kv_slots
+            )
         # Main CSA compressor emits boundary compressed-K into
         # CSA_KV / CSA_STATE (required by the dual-pool paged read).
         self.compressor.forward_decode_vectorized(
@@ -2309,6 +2332,8 @@ class AttentionFP8(nn.Module):
         )
         # CSA cmp_local_raw = indexer's raw indices (the +win offset is
         # added later inside the epilogue's translate path).
+        if csa_offload is not None:
+            csa_offload.validate_selection(bsz)
         cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz]
         return self._forward_decode_compressed(
             qkv.q,
@@ -2317,6 +2342,7 @@ class AttentionFP8(nn.Module):
             q_len,
             attn_metadata,
             cmp_attn_type=CSA_KV,
+            prepared_compressed=prepared_compressed,
         )
 
     def _forward_decode_hca(
@@ -2374,6 +2400,7 @@ class AttentionFP8(nn.Module):
         q_len: int,
         attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
         cmp_attn_type: str,
+        prepared_compressed: Optional[tuple] = None,
     ) -> torch.Tensor:
         """Shared CSA/HCA epilogue: translate pool-local → global slots
         for both SWA and compressed pools, then one dual-pool FlashMLA
@@ -2424,7 +2451,10 @@ class AttentionFP8(nn.Module):
         # identical across HCA layers); CSA layers must translate per-
         # layer because ``topk_buffer_compressed`` is populated by the
         # per-layer indexer.
-        if self.indexer is None and attn_metadata.hca_cmp_global_slots is not None:
+        if prepared_compressed is not None:
+            cmp_pool_3d, prepared_indices = prepared_compressed
+            cmp_global = prepared_indices.reshape(T, K_cmp)
+        elif self.indexer is None and attn_metadata.hca_cmp_global_slots is not None:
             cmp_global = attn_metadata.hca_cmp_global_slots[:T]
         else:
             cmp_tokens_per_block = int(
@@ -3599,7 +3629,7 @@ class AttentionFP8(nn.Module):
         assert (
             qkv.q is not None
         ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+        from rtp_llm.models_py.modules.dsv4.flash_mla_compat import flash_mla_sparse_fwd
 
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
@@ -5450,7 +5480,7 @@ class AttentionFP8(nn.Module):
             int(freqs_cis.shape[0]) == s_q
         ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+        from rtp_llm.models_py.modules.dsv4.flash_mla_compat import flash_mla_sparse_fwd
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         if out is None:

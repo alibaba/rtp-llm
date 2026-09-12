@@ -1,0 +1,476 @@
+{
+  "scheme": "vanilla",
+  "batch": 16,
+  "rows": [
+    {
+      "row": 0,
+      "started": 4549125.480594029,
+      "finished_at": 4549129.631243056,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 1,
+      "started": 4549125.48357021,
+      "finished_at": 4549129.640682885,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 2,
+      "started": 4549125.487830341,
+      "finished_at": 4549129.644265333,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 3,
+      "started": 4549125.490664208,
+      "finished_at": 4549129.635995979,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 4,
+      "started": 4549125.495149232,
+      "finished_at": 4549129.650928427,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 5,
+      "started": 4549125.497610682,
+      "finished_at": 4549129.647779966,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 6,
+      "started": 4549125.500046989,
+      "finished_at": 4549129.654354707,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 7,
+      "started": 4549125.503776396,
+      "finished_at": 4549129.657683355,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 8,
+      "started": 4549125.507552526,
+      "finished_at": 4549129.660571351,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 9,
+      "started": 4549125.512062217,
+      "finished_at": 4549129.664113288,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 10,
+      "started": 4549125.516690933,
+      "finished_at": 4549129.671016255,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 11,
+      "started": 4549125.520362401,
+      "finished_at": 4549129.677291473,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 12,
+      "started": 4549125.524459246,
+      "finished_at": 4549129.667423842,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 13,
+      "started": 4549125.527339542,
+      "finished_at": 4549129.68051166,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 14,
+      "started": 4549125.531549457,
+      "finished_at": 4549129.673946351,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    },
+    {
+      "row": 15,
+      "started": 4549125.535485842,
+      "finished_at": 4549129.683446098,
+      "arrivals": [],
+      "output_ids": [],
+      "aux_info": {
+        "input_len": 131072,
+        "output_len": 0,
+        "step_output_len": 0,
+        "reuse_len": 0
+      },
+      "error": "RuntimeError({'error_code': 602, 'error_code_str': '602_MALLOC_ERROR', 'message': 'fixed cohort exceeds KV capacity', 'aux_info': {'input_len': 131072, 'output_len': 0, 'step_output_len': 0, 'reuse_len': 0}})",
+      "instrumentation_errors": [],
+      "error_payload": {
+        "error_code": 602,
+        "error_code_str": "602_MALLOC_ERROR",
+        "message": "fixed cohort exceeds KV capacity",
+        "aux_info": {
+          "input_len": 131072,
+          "output_len": 0,
+          "step_output_len": 0,
+          "reuse_len": 0
+        }
+      },
+      "expected_input_tokens": 131072
+    }
+  ],
+  "context_tokens": [
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072,
+    131072
+  ],
+  "requests_attempted": 16,
+  "requests_completed": 0,
+  "requests_failed": 16,
+  "request_failure_rate": 1.0,
+  "fixed_cohort_capacity_rejected": true,
+  "actual_decode_batches": [],
+  "graph_replay_evidence": [],
+  "prefill_calls": 0,
+  "elapsed_seconds_including_prefill": 4.204672337509692,
+  "gpu_peak_mib": [
+    267894.375,
+    270030.375,
+    270086.375,
+    268104.375
+  ],
+  "slo_ms": 100,
+  "capacity_evidence": [
+    "[2026-09-11 22:40:36.110896] [WARN] [123677:127951] [RANK 0][215.78.178.108][./rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h:173][void rtp_llm::BatchDecodeScheduler::evaluateWaitingStreams()] BENCH_CAPACITY_REJECT batch=16 request=3545039731571621913"
+  ],
+  "status": "request_failure"
+}

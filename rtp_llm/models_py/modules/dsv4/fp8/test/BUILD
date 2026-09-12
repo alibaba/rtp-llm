@@ -11,6 +11,10 @@ _DSV4_FP8_TEST_DEPS = [
 
 # Numerical kernels and the associated metadata/pool boundary regressions.
 _GPU_TESTS = [
+    "test_flash_mla_tp4",
+    "test_csa_cache",
+    "test_csa_offload_config",
+    "test_kv_offload",
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
     "test_compressor_forward_flat_input",
@@ -73,6 +77,7 @@ _CONTRACT_TESTS = [
     dsv4_py_test(
         name = name,
         deps = _DSV4_FP8_TEST_DEPS,
+        data = ["test_compressor_fp8_per_token.py"] if name == "test_csa_cache" else [],
         gpu_count = 2 if name == "test_topk_v3" else 1,
         tags = ["multi_device"] if name == "test_topk_v3" else [],
         # Do not let the local integer-arithmetic assertion hide a skipped

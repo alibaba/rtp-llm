@@ -8,6 +8,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <cstdlib>
+#include <cstring>
 
 namespace rtp_llm {
 
@@ -34,6 +36,8 @@ public:
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
         dp_rank_          = dp_rank;
+        const char* real_prefill = std::getenv("RTP_BENCH_REAL_PREFILL");
+        real_prefill_ = real_prefill != nullptr && std::strcmp(real_prefill, "1") == 0;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -94,6 +98,7 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
+        std::lock_guard<std::mutex> lock(lock_);
         batch_size_ = config.batch_size_;
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
@@ -157,7 +162,23 @@ public:
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
                 // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
-                while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
+                while (stream->getStatus() != StreamState::FINISHED) {
+                    const auto previous = stream->getStatus();
+                    const auto next = stream->moveToNext();
+                    if (next == StreamState::RUNNING) {
+                        break;
+                    }
+                    if (real_prefill_ && previous == StreamState::WAITING && next == StreamState::WAITING) {
+                        // A fixed cohort cannot reclaim KV while admitting its last member.
+                        RTP_LLM_LOG_WARNING("BENCH_CAPACITY_REJECT batch=%u request=%ld",
+                                            batch_size_, stream->streamId());
+                        for (auto& member : new_streams) {
+                            member->reportError(ErrorCode::MALLOC_FAILED, "fixed cohort exceeds KV capacity");
+                            member->moveToNext();
+                            waiting_streams_.remove(member);
+                        }
+                        return;
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             }
@@ -172,6 +193,9 @@ public:
     }
 
     void initRunningStreams() {
+        if (real_prefill_) {
+            return;
+        }
         // set kvcache block
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
             (*it)->setPerfTest(true);
@@ -210,6 +234,19 @@ public:
             }
         }
 
+        if (real_prefill_) {
+            for (const auto& stream : running_streams_) {
+                if (stream->isContextStream()) {
+                    RTP_LLM_LOG_INFO("BENCH_PREFILL request=%ld held_batch=%zu",
+                                     stream->streamId(), running_streams_.size());
+                    return std::list<GenerateStreamPtr>{stream};
+                }
+            }
+            if (!running_streams_.empty()) {
+                RTP_LLM_LOG_INFO("BENCH_DECODE step=%u actual_batch=%zu",
+                                 current_step_++, running_streams_.size());
+            }
+        }
         return running_streams_;
     }
 
@@ -241,6 +278,7 @@ private:
     uint32_t                     batch_size_;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
+    bool                         real_prefill_ = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;

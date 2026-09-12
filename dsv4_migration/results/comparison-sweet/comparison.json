@@ -1,0 +1,163 @@
+{
+  "baseline": "dsv4_migration/results/vanilla-128k-12g-final",
+  "offload": "dsv4_migration/results/offload-128k-12g-sweet",
+  "thresholds_ms": {
+    "45_ms": 45.0,
+    "baseline_plus_10pct": 32.25343757585506,
+    "baseline_plus_20pct": 35.185568264569156
+  },
+  "reference_batch": 16,
+  "reference_tpot_ms": 29.321306887140963,
+  "rows": [
+    {
+      "scheme": "vanilla",
+      "batch": 1,
+      "status": "completed",
+      "tpot_ms": 18.484147622075398,
+      "decode_tokens_per_second": 54.100411901369576,
+      "request_failure_rate": 0.0,
+      "fixed_cohort_capacity_rejected": false,
+      "gpu_peak_mib": [
+        269282.375,
+        269632.375,
+        269598.375,
+        269872.375
+      ],
+      "graph_replay_verified": true,
+      "goodput": {
+        "45_ms": 54.100411901369576,
+        "baseline_plus_10pct": 54.100411901369576,
+        "baseline_plus_20pct": 54.100411901369576
+      }
+    },
+    {
+      "scheme": "vanilla",
+      "batch": 8,
+      "status": "completed",
+      "tpot_ms": 24.05305317915918,
+      "decode_tokens_per_second": 331.86049842543156,
+      "request_failure_rate": 0.0,
+      "fixed_cohort_capacity_rejected": false,
+      "gpu_peak_mib": [
+        269302.375,
+        269632.375,
+        269598.375,
+        269872.375
+      ],
+      "graph_replay_verified": true,
+      "goodput": {
+        "45_ms": 331.86049842543156,
+        "baseline_plus_10pct": 331.86049842543156,
+        "baseline_plus_20pct": 331.86049842543156
+      }
+    },
+    {
+      "scheme": "vanilla",
+      "batch": 16,
+      "status": "completed",
+      "tpot_ms": 29.321306887140963,
+      "decode_tokens_per_second": 545.1755084965662,
+      "request_failure_rate": 0.0,
+      "fixed_cohort_capacity_rejected": false,
+      "gpu_peak_mib": [
+        269302.375,
+        269632.375,
+        269598.375,
+        269872.375
+      ],
+      "graph_replay_verified": true,
+      "goodput": {
+        "45_ms": 545.1755084965662,
+        "baseline_plus_10pct": 545.1755084965662,
+        "baseline_plus_20pct": 545.1755084965662
+      }
+    },
+    {
+      "scheme": "vanilla",
+      "batch": 24,
+      "status": "request_failure",
+      "tpot_ms": null,
+      "decode_tokens_per_second": 0,
+      "request_failure_rate": 1.0,
+      "fixed_cohort_capacity_rejected": true,
+      "gpu_peak_mib": [
+        269302.375,
+        269632.375,
+        269598.375,
+        269872.375
+      ],
+      "graph_replay_verified": false,
+      "goodput": {
+        "45_ms": 0.0,
+        "baseline_plus_10pct": 0.0,
+        "baseline_plus_20pct": 0.0
+      }
+    },
+    {
+      "scheme": "vanilla",
+      "batch": 32,
+      "status": "request_failure",
+      "tpot_ms": null,
+      "decode_tokens_per_second": 0,
+      "request_failure_rate": 1.0,
+      "fixed_cohort_capacity_rejected": true,
+      "gpu_peak_mib": [
+        269302.375,
+        269632.375,
+        269598.375,
+        269872.375
+      ],
+      "graph_replay_verified": false,
+      "goodput": {
+        "45_ms": 0.0,
+        "baseline_plus_10pct": 0.0,
+        "baseline_plus_20pct": 0.0
+      }
+    },
+    {
+      "scheme": "offload",
+      "batch": 18,
+      "status": "completed",
+      "tpot_ms": 30.819941796734284,
+      "decode_tokens_per_second": 583.4898411790575,
+      "request_failure_rate": 0.0,
+      "fixed_cohort_capacity_rejected": false,
+      "gpu_peak_mib": [
+        269344.375,
+        269386.375,
+        267728.375,
+        269656.375
+      ],
+      "graph_replay_verified": true,
+      "goodput": {
+        "45_ms": 583.4898411790575,
+        "baseline_plus_10pct": 583.4898411790575,
+        "baseline_plus_20pct": 583.4898411790575
+      }
+    },
+    {
+      "scheme": "offload",
+      "batch": 20,
+      "status": "completed",
+      "tpot_ms": 32.36091225153359,
+      "decode_tokens_per_second": 616.0256563928122,
+      "request_failure_rate": 0.0,
+      "fixed_cohort_capacity_rejected": false,
+      "gpu_peak_mib": [
+        269344.375,
+        269386.375,
+        267728.375,
+        269656.375
+      ],
+      "graph_replay_verified": true,
+      "goodput": {
+        "45_ms": 616.0256563928122,
+        "baseline_plus_10pct": 184.80769691784363,
+        "baseline_plus_20pct": 616.0256563928122
+      }
+    }
+  ],
+  "output_parity": [],
+  "repeat_baseline": null,
+  "repeat_baseline_output_parity": []
+}

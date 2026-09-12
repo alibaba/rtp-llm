@@ -285,7 +285,7 @@ def get_or_build_sched_meta(
     inside the graph so it re-runs (with fresh ``topk_length`` values) on every
     replay. See ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
     """
-    from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+    from rtp_llm.models_py.modules.dsv4.flash_mla_compat import get_mla_metadata
 
     capturing = False
     try:
@@ -366,9 +366,7 @@ def _resolve_paged_pool_tokens_per_block(
         raise ValueError("paged_pool_tokens_per_block is required for paged pools")
     for tag in entries_by_pool:
         if tag not in tokens_by_pool:
-            raise ValueError(
-                "paged_pool_tokens_per_block missing tag=%s" % (tag,)
-            )
+            raise ValueError("paged_pool_tokens_per_block missing tag=%s" % (tag,))
         tokens_per_block = int(tokens_by_pool[tag])
         if tokens_per_block <= 0:
             raise ValueError(

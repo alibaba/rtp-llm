@@ -1,0 +1,119 @@
+[
+  {
+    "batch": 1,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 0,
+    "counts_resident_hot_miss": [
+      0,
+      1024,
+      0
+    ],
+    "cache_only_graph_ms": 0.02049056053161621,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 1,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 128,
+    "counts_resident_hot_miss": [
+      0,
+      896,
+      128
+    ],
+    "cache_only_graph_ms": 0.031006720066070557,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 1,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 1024,
+    "counts_resident_hot_miss": [
+      0,
+      0,
+      1024
+    ],
+    "cache_only_graph_ms": 0.06644735813140869,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 16,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 0,
+    "counts_resident_hot_miss": [
+      0,
+      16384,
+      0
+    ],
+    "cache_only_graph_ms": 0.024094719886779786,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 16,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 128,
+    "counts_resident_hot_miss": [
+      0,
+      14336,
+      2048
+    ],
+    "cache_only_graph_ms": 0.10431296348571778,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 16,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 1024,
+    "counts_resident_hot_miss": [
+      0,
+      0,
+      16384
+    ],
+    "cache_only_graph_ms": 0.5973382568359376,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 64,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 0,
+    "counts_resident_hot_miss": [
+      0,
+      65536,
+      0
+    ],
+    "cache_only_graph_ms": 0.022548160552978515,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 64,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 128,
+    "counts_resident_hot_miss": [
+      0,
+      57344,
+      8192
+    ],
+    "cache_only_graph_ms": 0.32723934173583985,
+    "graph_includes_synthetic_index_update": true
+  },
+  {
+    "batch": 64,
+    "topk": 1024,
+    "private_hot_entries": 2048,
+    "changed_entries_per_request": 1024,
+    "counts_resident_hot_miss": [
+      0,
+      0,
+      65536
+    ],
+    "cache_only_graph_ms": 2.1972889709472656,
+    "graph_includes_synthetic_index_update": true
+  }
+]

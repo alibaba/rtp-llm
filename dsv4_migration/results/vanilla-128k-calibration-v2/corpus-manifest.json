@@ -1,0 +1,9 @@
+[
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 8,
+    "original_input_tokens": 257138,
+    "prompt_sha256": "1712cb82df2f24731210dc5f7226a5b31bca33c7ad059c1711155e58b7787c14"
+  }
+]

@@ -1,0 +1,114 @@
+[
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 8,
+    "original_input_tokens": 257138,
+    "prompt_sha256": "1712cb82df2f24731210dc5f7226a5b31bca33c7ad059c1711155e58b7787c14"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 17,
+    "original_input_tokens": 176549,
+    "prompt_sha256": "3f85a7da361b8eae5a5b7543e4153a0250ecd811cb570dc204f64756465858be"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 33,
+    "original_input_tokens": 134923,
+    "prompt_sha256": "518aa21ec76c26ec493378333f0fcda4a55cfd2cab099b47d02a8daf5fb47680"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 44,
+    "original_input_tokens": 141636,
+    "prompt_sha256": "14fef5f21c7fcf177146916c96454accb260181bbf857075e7f4daa473a5958b"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 55,
+    "original_input_tokens": 143655,
+    "prompt_sha256": "d96d109dac32ec9b1689f5821e654239deaa177a2b6e8063910875ae92007d01"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 61,
+    "original_input_tokens": 152995,
+    "prompt_sha256": "4028558efebeeeaf4add126e77a65d17fb346b2fa406e27616fc3b3a24d0a26a"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 77,
+    "original_input_tokens": 264089,
+    "prompt_sha256": "69a78265c22035b40389a6e7f754281126fecb6dbf266a1a1904f6906ceb4002"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 80,
+    "original_input_tokens": 304782,
+    "prompt_sha256": "65b25f815585592a0e446aac444034470ed9e65e700b3281ee756dd3e572aba6"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 122,
+    "original_input_tokens": 427039,
+    "prompt_sha256": "e2a36f4a855b50f9598f77a1f2241bfde4b7ccdfcea576370cdac82735102395"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 144,
+    "original_input_tokens": 259758,
+    "prompt_sha256": "9d54f19f5f7c2729853b15edb7386dda90f0664544b256f1b69def982b60a003"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 151,
+    "original_input_tokens": 146418,
+    "prompt_sha256": "a44e7cb76aaebde0fb058600c05d26ba0615057bbc0336d0f126f578b61ead1f"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 182,
+    "original_input_tokens": 139494,
+    "prompt_sha256": "29113538d7663a0532340ccd2f76a19d005dbb4a48436f7736f71fb549050457"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 196,
+    "original_input_tokens": 218543,
+    "prompt_sha256": "cdbe85c5ade01f410e0bd4d5ee701d603ab8872211e0d28aba6054f39b07aa74"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 207,
+    "original_input_tokens": 315747,
+    "prompt_sha256": "818b4586c64ac85ce64ff747a01d3222e07281e7af7580b06cb177b1a7363913"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 216,
+    "original_input_tokens": 409481,
+    "prompt_sha256": "6be0a5cb875ba9d369e0cd0f798d8aa4f66aec8ecbee30e0f47de3fae6b9d7a1"
+  },
+  {
+    "input_tokens": 131072,
+    "source_file": "/home/admin/dataset/dsv4-pro-trace-outlen-100k/000_004k/part-00000.json",
+    "source_row": 248,
+    "original_input_tokens": 152959,
+    "prompt_sha256": "195b022454003c97e66bdf4c20698253b80194ca7403504465a4df0006bcf90b"
+  }
+]

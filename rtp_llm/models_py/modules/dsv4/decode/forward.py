@@ -315,6 +315,13 @@ def forward_layers(
     B = attn_metadata.batch_size
     q_len = attn_metadata.q_len_per_req
     input_ids = input_ids.reshape(-1)
+    csa_offload = getattr(v4, "csa_offload", None)
+    if csa_offload is not None:
+        if q_len != 1:
+            raise ValueError("CSA offload does not support speculative decode")
+        csa_offload.register(
+            attn_metadata.pool_block_tables[CSA_KV][:B], attn_metadata.start_pos[:B]
+        )
 
     _rt_on = _rt.ENABLED
     if _rt_on:

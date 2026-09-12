@@ -929,6 +929,9 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
                 state_tokens_per_block=self._state_tokens_per_block,
             )
+        csa_offload = getattr(self, "csa_offload", None)
+        if csa_offload is not None:
+            csa_offload.mirror_writes(meta.kv_slots)
 
     # ----------------------------------------------------------------------
     # Overlap orchestration: split-phase prefill (start / finish).

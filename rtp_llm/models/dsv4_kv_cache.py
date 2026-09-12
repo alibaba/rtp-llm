@@ -223,6 +223,7 @@ def build_dsv4_kv_cache_spec_descs(
     head_dim: int,
     indexer_head_dim: int,
     fixed_pool_use_host_memory: bool = False,
+    csa_offload_blocks: int = 0,
 ) -> list[list[KVCacheSpecDesc]]:
     """Build the per-layer DSv4 desc lists.
 
@@ -243,9 +244,15 @@ def build_dsv4_kv_cache_spec_descs(
         fixed_pool_use_host_memory: place the four fixed pools
             (``indexer_state`` / ``csa_state`` / ``hca_state`` / ``swa_kv``) in
             pinned host memory and take them off the paged HBM budget.
+        csa_offload_blocks: positive values allocate the authoritative CSA KV
+            pool on pinned CPU memory. Indexer KV and HCA stay on the GPU.
     """
     if layer_num <= 0:
         raise ValueError(f"dsv4 kv cache descs require layer_num > 0, got {layer_num}")
+    if csa_offload_blocks < 0 or (csa_offload_blocks and not fp8_kv):
+        raise ValueError("CSA offload requires FP8 KV and a positive block count")
+    if csa_offload_blocks and fixed_pool_use_host_memory:
+        raise ValueError("CSA offload keeps SWA and compressor state on the GPU")
 
     kv_entry_elems = DSV4_FP8_KV_ENTRY_BYTES if fp8_kv else head_dim * 2
     indexer_entry_elems = (
@@ -301,6 +308,10 @@ def build_dsv4_kv_cache_spec_descs(
     if fixed_pool_use_host_memory:
         for desc in (indexer_state, csa_state, hca_state, swa_kv):
             _use_host_pinned_memory(desc)
+
+    if csa_offload_blocks:
+        _use_host_pinned_memory(csa_kv)
+        apply_dsv4_explicit_pool_blocks([[csa_kv]], CSA_KV_TAG, csa_offload_blocks)
 
     ratios = list(layer_compress_ratios)
     layer_descs: list[list[KVCacheSpecDesc]] = []

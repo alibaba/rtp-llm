@@ -135,7 +135,9 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_idxs: Optional[torch.Tensor] = None,
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        from flash_mla import flash_mla_with_kvcache  # type: ignore[import-not-found]
+        from rtp_llm.models_py.modules.dsv4.flash_mla_compat import (
+            flash_mla_with_kvcache,
+        )
 
         B, q_len, H, D = q.shape
         # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``

@@ -506,7 +506,27 @@ class DeepSeekV4Model(GptModelBase):
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
-            return self._initialize_impl(init_resource)
+            result = self._initialize_impl(init_resource)
+            from rtp_llm.models_py.modules.dsv4.offload_config import CsaOffloadConfig
+
+            if CsaOffloadConfig.from_env() is not None and self.kv_cache is not None:
+                if (
+                    self._prefill_cp_size != 1
+                    or init_resource.is_speculative
+                    or init_resource.is_decode_role
+                    or self.parallelism_config.role_type != RoleType.PDFUSION
+                ):
+                    raise ValueError(
+                        "CSA offload currently requires CP1, no PD and no MTP"
+                    )
+                from rtp_llm.models_py.modules.dsv4.fp8.csa_cache import (
+                    initialize_csa_offload,
+                )
+
+                initialize_csa_offload(
+                    self.v4, self.kv_cache, self._max_generate_batch_size
+                )
+            return result
         except BaseException as e:
             import traceback
 
@@ -632,7 +652,7 @@ class DeepSeekV4Model(GptModelBase):
         # lifetime. CP gather/restore region is sized only when CP is active.
         cp_size = int(self._prefill_cp_size)
         q_rows = int(self._resolve_prefill_q_token_capacity())
-        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
+        q_dim = int(self.v4.layers[0].attn.n_heads) * int(self._v4_args.head_dim)
         if cp_size > 1:
             full_rows = q_rows * cp_size
             main_w, idx_w = self._resolve_prefill_ws_gather_widths()
@@ -736,6 +756,15 @@ class DeepSeekV4Model(GptModelBase):
                 self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
+        if self.v4.embed.weight.shape[-1] != self._v4_args.dim:
+            from rtp_llm.models_py.modules.base.common.embedding import Embedding
+
+            local_dim = self.v4.embed.weight.shape[-1]
+            if local_dim * self._v4_args.tp_size != self._v4_args.dim:
+                raise ValueError("DSV4 embedding width does not match its TP partition")
+            self.v4.embed = Embedding(
+                self.config, self.parallelism_config, self.v4.embed.weight
+            )
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
 
@@ -840,7 +869,9 @@ class DeepSeekV4Model(GptModelBase):
                 )
 
             try:
-                from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+                from rtp_llm.models_py.modules.dsv4.flash_mla_compat import (
+                    flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
+                )
 
                 _swa_attn = self.v4.layers[0].attn
                 _H_swa = int(_swa_attn.n_heads)
@@ -1374,13 +1405,42 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
-            return forward_prefill(
+            csa_offload = getattr(self.v4, "csa_offload", None)
+            if csa_offload is not None:
+                from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+                    CSA_KV,
+                    as_attention_inputs_by_tag,
+                )
+
+                by_tag = as_attention_inputs_by_tag(
+                    inputs.attention_inputs, self.kv_cache
+                )
+                csa_offload.begin_prefill(
+                    by_tag[CSA_KV].kv_cache_kernel_block_id_device
+                )
+            measure_memory = os.environ.get("RTP_BENCH_REAL_PREFILL") == "1"
+            if measure_memory:
+                device = self.v4.embed.weight.device
+                allocated_before = torch.cuda.memory_allocated(device)
+                torch.cuda.reset_peak_memory_stats(device)
+            output = forward_prefill(
                 self.v4,
                 self.kv_cache,
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
             )
+            if measure_memory:
+                peak = torch.cuda.max_memory_allocated(device)
+                logging.info(
+                    "BENCH_REAL_PREFILL_MEMORY tokens=%d baseline_mib=%.1f "
+                    "peak_mib=%.1f runtime_mib=%.1f",
+                    inputs.input_ids.numel(),
+                    allocated_before / 1024**2,
+                    peak / 1024**2,
+                    (peak - allocated_before) / 1024**2,
+                )
+            return output
         else:
             return forward_decode(
                 self.v4,

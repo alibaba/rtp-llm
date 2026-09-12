@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 
 #include <numeric>
+#include "autil/EnvUtil.h"
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -16,6 +17,29 @@
 #endif
 
 namespace rtp_llm {
+
+namespace {
+size_t reserveCsaGpuCache(size_t budget, const ModelConfig& model_config) {
+    bool offloaded = false;
+    for (const auto& layer : model_config.kv_cache_spec_descs) {
+        for (const auto& desc : layer) {
+            offloaded |= desc.tag == "csa_kv" && desc.memory.has_value()
+                         && desc.memory->placement == CacheMemoryPlacement::HOST_PINNED;
+        }
+    }
+    if (!offloaded) {
+        return budget;
+    }
+    const auto mib = autil::EnvUtil::getEnv<int64_t>("DSV4_CSA_GPU_CACHE_MIB", 32768);
+    RTP_LLM_CHECK_WITH_INFO(mib > 0 && static_cast<uint64_t>(mib) < budget / (1024 * 1024),
+                            "CSA GPU cache reservation must be positive and smaller than total KV budget");
+    const auto reservation = static_cast<size_t>(mib) * 1024 * 1024;
+    RTP_LLM_LOG_INFO("DSV4 CSA KV budget: total=%zu MiB, Python resident/hot/metadata reserve=%ld MiB, "
+                     "native mandatory pools=%zu MiB", budget / 1024 / 1024, mib,
+                     (budget - reservation) / 1024 / 1024);
+    return budget - reservation;
+}
+}  // namespace
 
 // Helper function to update memory size if below minimum requirement
 void MemoryEvaluationHelper::updateMemoryIfNeeded(size_t& current_size, size_t min_required, const char* scenario) {
@@ -91,7 +115,7 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
     if (kv_cache_config.kv_cache_mem_mb > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
                          kv_cache_config.kv_cache_mem_mb);
-        return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
+        return reserveCsaGpuCache(kv_cache_config.kv_cache_mem_mb * 1024 * 1024, model_config);
     }
 
     size_t env_runtime_required_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
@@ -135,7 +159,7 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
 
     const auto kv_cache_mem_size = device_reserved_memory_bytes - runtime_required_bytes;
     RTP_LLM_LOG_INFO("cache config final decided kv cache memory size %ld MiB", kv_cache_mem_size / 1024 / 1024);
-    return kv_cache_mem_size;
+    return reserveCsaGpuCache(kv_cache_mem_size, model_config);
 }
 
 }  // namespace rtp_llm
